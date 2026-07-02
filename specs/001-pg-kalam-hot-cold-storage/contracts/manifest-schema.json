@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pg-kalam.dev/schemas/manifest-v1.json",
+  "title": "kalamdb-compatible manifest.json",
+  "description": "Cold storage manifest on object storage. Source of truth for Parquet segments and FILE subfolder state. pg-kalam MUST produce manifests readable by kalamdb tooling without conversion.",
+  "type": "object",
+  "required": ["version", "table", "segments", "files"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Manifest format version"
+    },
+    "table": {
+      "type": "string",
+      "description": "Logical table name"
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Storage namespace prefix"
+    },
+    "scope_id": {
+      "type": ["string", "null"],
+      "description": "Scope identifier for user-scoped tables; null for shared"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_seq": {
+      "type": "integer",
+      "description": "Highest _seq archived in cold segments"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "segments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/segment"
+      }
+    },
+    "files": {
+      "$ref": "#/$defs/filesState"
+    },
+    "vector_indexes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/vectorIndex"
+      },
+      "description": "Placeholder for kalamdb parity; out of MVP scope for pg-kalam"
+    }
+  },
+  "$defs": {
+    "segment": {
+      "type": "object",
+      "required": ["batch", "path", "min_seq", "max_seq", "row_count", "schema_version"],
+      "properties": {
+        "batch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "path": {
+          "type": "string",
+          "description": "Relative path e.g. batch-0.parquet"
+        },
+        "min_seq": {
+          "type": "integer"
+        },
+        "max_seq": {
+          "type": "integer"
+        },
+        "row_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "byte_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "schema_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "compression": {
+          "type": "string",
+          "enum": ["none", "snappy", "zstd"],
+          "default": "snappy"
+        },
+        "column_stats": {
+          "type": "object",
+          "description": "Per-column min/max keyed by column_id (kalamdb-compatible)",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "min": {},
+              "max": {}
+            }
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": ["committed", "in_progress", "tombstone"],
+          "default": "committed"
+        },
+        "checksum": {
+          "type": "string",
+          "description": "Optional content checksum"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "filesState": {
+      "type": "object",
+      "required": ["current_subfolder", "subfolder_count", "max_files_per_subfolder"],
+      "properties": {
+        "current_subfolder": {
+          "type": "string"
+        },
+        "subfolder_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_files_per_subfolder": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "total_files": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "vectorIndex": {
+      "type": "object",
+      "description": "kalamdb vector index placeholder",
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "dimensions": { "type": "integer" }
+      }
+    }
+  }
+}
