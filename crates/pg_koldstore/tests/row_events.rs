@@ -4,7 +4,7 @@ use pg_koldstore::sql::events;
 fn row_event_sql_contract_contains_insert_update_delete_revive_ops() {
     use koldstore_core::{CommitSeq, LogicalPk, PkColumn, RowOperation, SeqId};
 
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
+    let sql = include_str!("../sql/koldstore--0.1.0.sql");
     for op in ["insert", "update", "delete", "revive"] {
         assert!(sql.contains(op));
     }

@@ -156,7 +156,7 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
 
 #[test]
 fn sql_migration_creates_required_catalog_tables() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
+    let sql = include_str!("../sql/koldstore--0.1.0.sql");
 
     for needle in [
         "CREATE SCHEMA IF NOT EXISTS system",
@@ -174,7 +174,7 @@ fn sql_migration_creates_required_catalog_tables() {
 
 #[test]
 fn sql_migration_keeps_behavior_in_rust_pgrx_modules() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
+    let sql = include_str!("../sql/koldstore--0.1.0.sql");
 
     for forbidden in [
         "CREATE OR REPLACE FUNCTION",

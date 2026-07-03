@@ -89,6 +89,10 @@ path = "endurance.rs"
 name = "failure_injection"
 path = "failure_injection.rs"
 
+[[test]]
+name = "snowflake_concurrency"
+path = "snowflake_concurrency.rs"
+
 [dev-dependencies]
 anyhow.workspace = true
 koldstore-core.workspace = true

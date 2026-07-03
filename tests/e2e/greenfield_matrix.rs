@@ -13,7 +13,7 @@ fn greenfield_matrix_targets_postgresql_15_16_17() {
         .map(|target| target.version)
         .collect();
 
-    assert_eq!(versions, vec![15, 16, 17]);
+    assert_eq!(versions, common::expected_pg_versions());
 }
 
 #[test]
@@ -134,7 +134,7 @@ async fn run_greenfield_scenario(
 
     client
         .execute(
-            "SELECT koldstore.migrate_table($1::regclass, $2, 'local-minio', NULL, $3)",
+            "SELECT koldstore.migrate_table($1::text::regclass, $2, 'local-minio', NULL, $3)",
             &[&relation, &scenario.table_type, &scenario.scope_column],
         )
         .await?;
@@ -160,7 +160,7 @@ async fn run_greenfield_scenario(
     let system_column_names: &[&str] = &["_seq", "_commit_seq", "_deleted"];
     let system_columns = client
         .query_one(
-            "SELECT count(*) FROM pg_attribute WHERE attrelid = $1::regclass AND attname = ANY($2)",
+            "SELECT count(*) FROM pg_attribute WHERE attrelid = $1::text::regclass AND attname = ANY($2)",
             &[&relation, &system_column_names],
         )
         .await?

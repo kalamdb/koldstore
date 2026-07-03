@@ -24,7 +24,7 @@ mod koldstore {}
 
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 pgrx::extension_sql_file!(
-    "../../../sql/koldstore--0.1.0.sql",
+    "../sql/koldstore--0.1.0.sql",
     name = "koldstore_catalog",
     bootstrap
 );

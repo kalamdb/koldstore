@@ -4,23 +4,31 @@ Benchmarks compare a plain PostgreSQL heap table with an equivalent **koldstore-
 
 ## Prerequisites
 
-- PostgreSQL 15+ with the `koldstore` extension installed
-- Object storage for cold tiers (local filesystem or MinIO via `tests/docker-compose.yml`)
-- A connection string, e.g. `postgresql://postgres:postgres@localhost:5515/postgres`
+- Local pgrx PostgreSQL with the `koldstore` extension installed
+- `pgbench` available on `PATH`
+- A connection string, e.g. `host=127.0.0.1 port=28816 user=$USER dbname=postgres`
 
 ```bash
-docker compose -f tests/docker-compose.yml up -d
+cargo pgrx start pg16
+cargo pgrx install -p pg_koldstore --no-default-features --features pg16 \
+  --pg-config "$(cargo pgrx info pg-config 16)"
 ```
 
 ## Running
 
 ```bash
-export DATABASE_URL=postgresql://postgres:postgres@localhost:5515/postgres
+export DATABASE_URL="host=127.0.0.1 port=28816 user=$USER dbname=postgres"
 
-cargo run -p pg-koldstore-benchmarks -- --suite all
+cargo run -p pg-koldstore-benchmarks -- \
+  --rows 100000 \
+  --clients 16 \
+  --jobs 4 \
+  --seconds 30 \
+  --output-json target/pg-koldstore-bench.json \
+  --output-html target/pg-koldstore-bench.html
 ```
 
-Reports are emitted as JSON (and optionally HTML) with p50/p95/p99 latency, throughput, and pass/fail verdicts.
+The Rust runner creates heap and koldstore tables, migrates the koldstore table, writes custom `pgbench` scripts, parses per-transaction pgbench logs, and emits JSON/HTML with p50/p95/p99 latency, throughput, and pass/fail verdicts.
 
 ## Scenarios
 
@@ -45,15 +53,15 @@ CREATE TABLE bench.shared_items (
 );
 ```
 
-Load 1M rows into two identical tables: `bench.heap_shared_items` (heap) and `bench.koldstore_shared_items` (migrated + flushed so the majority of rows live in cold storage).
+Load rows into two identical tables: `bench.heap_items` (heap) and `bench.koldstore_items` (migrated). Use `--rows 1000000` for a 1M-row high-load run.
 
 **Queries measured**
 
 | Query | What it tests |
 |---|---|
 | `SELECT * FROM … WHERE id = $1` | PK point lookup (hot-only vs hot+cold merge) |
-| `SELECT count(*) FROM …` | Full-table aggregate over cold segments |
-| `SELECT * FROM … ORDER BY created_at DESC LIMIT 100` | Range scan with sort |
+| `UPDATE … WHERE id = $1` | Hot-row DML overhead |
+| `INSERT … ON CONFLICT DO NOTHING` | Hot insert throughput under contention |
 
 Each query runs against both tables. The report records select time (p50/p95/p99) and compares koldstore latency to the heap baseline.
 
@@ -119,7 +127,7 @@ Every scenario follows the same pattern:
 2. **Load** — insert the same deterministic dataset into both.
 3. **Cold tier** (koldstore only) — register storage, migrate, flush until the target cold/hot ratio is reached.
 4. **Warm-up** — discard the first N iterations.
-5. **Measure** — run each query M times; record latency percentiles and ops/s.
+5. **Measure** — run each query through `pgbench`; record latency percentiles and ops/s.
 6. **Report** — emit side-by-side results with overhead ratio `koldstore / heap`.
 
 ```
@@ -144,7 +152,7 @@ Every scenario follows the same pattern:
 | — | Shared 1M SELECT | document overhead; no hard gate yet |
 | — | User scoped SELECT | document overhead; no hard gate yet |
 
-Hot DML scenarios (`hot_insert_vs_heap`, `hot_update_vs_heap`, `hot_delete_vs_heap`) and cold-pruning checks live in the Rust runner alongside these table-size benchmarks. See `src/suite.rs` for the full scenario list.
+Hot DML scenarios (`hot_insert_vs_heap`, `hot_update_vs_heap`) and hot PK select workloads run through `pgbench`. Cold-pruning checks remain modeled in Rust until the cold merge scan path is fully wired into live PostgreSQL execution.
 
 ## Output
 
@@ -155,16 +163,16 @@ Example report fragment:
   "suite": "pg-koldstore",
   "results": [
     {
-      "name": "shared_1m_pk_select_heap",
-      "row_count": 1000000,
+      "name": "hot_update_vs_heap_heap",
+      "row_count": 100000,
       "p50_ms": 0.12,
       "p95_ms": 0.31,
       "p99_ms": 0.58,
       "passed": true
     },
     {
-      "name": "shared_1m_pk_select_koldstore",
-      "row_count": 1000000,
+      "name": "hot_update_vs_heap_koldstore",
+      "row_count": 100000,
       "p50_ms": 0.15,
       "p95_ms": 0.38,
       "p99_ms": 0.72,

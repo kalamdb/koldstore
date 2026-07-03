@@ -24,6 +24,10 @@ RUN cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
 WORKDIR /build
 COPY . .
 
+ENV CARGO_BUILD_JOBS=1 \
+    CARGO_PROFILE_RELEASE_LTO=false \
+    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+
 RUN cargo pgrx init --pg"${PG_MAJOR}" "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" \
     && cargo pgrx package \
       -p pg_koldstore \

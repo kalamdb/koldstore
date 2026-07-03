@@ -15,7 +15,7 @@
 **Purpose**: Create the Rust/pgrx workspace, PostgreSQL extension skeleton, test harnesses, and tooling needed by all stories.
 
 - [X] T001 Create the root Rust workspace with pgrx, Arrow, Parquet, object_store, serde, tracing, criterion, tokio, and test dependencies in `/Users/jamal/git/pg-kalam/Cargo.toml`
-- [X] T002 Create extension metadata and base SQL migration files in `/Users/jamal/git/pg-kalam/koldstore.control` and `/Users/jamal/git/pg-kalam/sql/koldstore--0.1.0.sql`
+- [X] T002 Create extension metadata and base SQL migration files in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/koldstore.control` and `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
 - [X] T003 [P] Create the pure shared-types crate skeleton in `/Users/jamal/git/pg-kalam/crates/koldstore-core/Cargo.toml` and `/Users/jamal/git/pg-kalam/crates/koldstore-core/src/lib.rs`
 - [X] T004 [P] Create the manifest crate skeleton in `/Users/jamal/git/pg-kalam/crates/koldstore-manifest/Cargo.toml` and `/Users/jamal/git/pg-kalam/crates/koldstore-manifest/src/lib.rs`
 - [X] T005 [P] Create the object-store crate skeleton in `/Users/jamal/git/pg-kalam/crates/koldstore-storage/Cargo.toml` and `/Users/jamal/git/pg-kalam/crates/koldstore-storage/src/lib.rs`
@@ -52,7 +52,7 @@
 - [X] T027 [P] Implement object-store backend factory and shared/user path templates for filesystem, S3, GCS, and Azure in `/Users/jamal/git/pg-kalam/crates/koldstore-storage/src/backend.rs`
 - [X] T028 [P] Implement backend-safe conditional put/copy/delete helpers without assuming atomic rename in `/Users/jamal/git/pg-kalam/crates/koldstore-storage/src/publish.rs`
 - [X] T029 Implement `_PG_init`, extension version SQL, schema creation, hook registration shell, and extension lifecycle checks in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/lib.rs`
-- [X] T030 Implement SQL catalog DDL for `koldstore.storage`, `system.schemas`, `koldstore.manifest`, `system.jobs`, `koldstore.cold_segments`, `koldstore.cold_pk_hints`, and `koldstore.row_events` in `/Users/jamal/git/pg-kalam/sql/koldstore--0.1.0.sql`
+- [X] T030 Implement SQL catalog DDL for `koldstore.storage`, `system.schemas`, `koldstore.manifest`, `system.jobs`, `koldstore.cold_segments`, `koldstore.cold_pk_hints`, and `koldstore.row_events` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
 - [X] T031 Implement pgrx GUC definitions for `koldstore.user_id`, `koldstore.enable_merge_scan`, `koldstore.internal_system_write`, and `koldstore.internal_flush_cleanup` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/guc.rs`
 - [X] T032 Implement privilege checks that prevent application roles from setting internal GUCs or reading storage credentials in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/security/privileges.rs`
 - [X] T033 Implement PostgreSQL advisory-lock-backed transaction commit-order allocation for `_commit_seq` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/hooks/xact.rs`
@@ -305,7 +305,7 @@
 - [X] T152 [US8] Implement changelog cursor and retention-gap logic in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/changelog.rs`
 - [X] T153 [US8] Implement `koldstore.changes_since(table_name regclass, since_commit_seq bigint, limit_rows integer)` SQL function in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/events.rs`
 - [X] T154 [US8] Implement row-event retention configuration, purge job, and oldest retained commit sequence tracking in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/events.rs`
-- [X] T155 [US8] Add `koldstore.row_events` indexes and retention metadata DDL in `/Users/jamal/git/pg-kalam/sql/koldstore--0.1.0.sql`
+- [X] T155 [US8] Add `koldstore.row_events` indexes and retention metadata DDL in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
 
 **Checkpoint**: User Story 8 is independently functional and testable.
 

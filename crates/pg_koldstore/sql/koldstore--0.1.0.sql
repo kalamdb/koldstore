@@ -13,7 +13,7 @@ CREATE TYPE koldstore.managed_table_info AS (
   table_type text,
   storage_id uuid,
   schema_version integer,
-  scope_column name
+  scope_column text
 );
 
 CREATE TYPE koldstore.dml_result AS (

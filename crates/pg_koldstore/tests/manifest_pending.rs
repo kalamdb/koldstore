@@ -2,7 +2,7 @@
 fn sql_contains_pending_write_manifest_state_for_hot_dml() {
     use koldstore_core::{CommitSeq, SeqId};
 
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
+    let sql = include_str!("../sql/koldstore--0.1.0.sql");
     let effect = pg_koldstore::hooks::executor::plan_managed_insert_effect(
         SeqId::new(1).unwrap(),
         CommitSeq::new(1).unwrap(),

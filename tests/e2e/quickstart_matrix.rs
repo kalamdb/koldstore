@@ -8,7 +8,10 @@ fn quickstart_matrix_covers_all_documented_scenarios() {
 
     assert!(scenario_count >= 10);
     assert_eq!(
-        common::local_pg_matrix().map(|target| target.version),
-        [15, 16, 17]
+        common::local_pg_matrix()
+            .into_iter()
+            .map(|target| target.version)
+            .collect::<Vec<_>>(),
+        common::expected_pg_versions()
     );
 }

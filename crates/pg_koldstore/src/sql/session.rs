@@ -1,9 +1,8 @@
 //! Session SQL helpers.
 
-use std::sync::atomic::{AtomicI64, Ordering};
 use thiserror::Error;
 
-static NEXT_SEQ: AtomicI64 = AtomicI64::new(1);
+use super::snowflake;
 
 /// Public SQL function name used for Snowflake-style ids.
 pub const SNOWFLAKE_ID_FUNCTION: &str = "SNOWFLAKE_ID";
@@ -23,10 +22,10 @@ pub enum SessionSqlError {
 #[must_use]
 #[cfg_attr(
     any(feature = "pg15", feature = "pg16", feature = "pg17"),
-    pgrx::pg_extern(name = "SNOWFLAKE_ID")
+    pgrx::pg_extern(name = "snowflake_id")
 )]
 pub fn snowflake_id() -> i64 {
-    NEXT_SEQ.fetch_add(1, Ordering::SeqCst)
+    snowflake::next_id(snowflake_worker_id()).unwrap_or_else(raise_snowflake_error)
 }
 
 /// Returns the SQL default expression for application ids and `_seq`.
@@ -81,4 +80,58 @@ fn is_safe_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
         && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+#[cfg(feature = "pg_test")]
+const fn snowflake_worker_id() -> u16 {
+    0
+}
+
+#[cfg(all(not(feature = "pg_test"), feature = "pg17"))]
+fn snowflake_worker_id() -> u16 {
+    let proc_number = unsafe { pgrx::pg_sys::MyProcNumber };
+    normalize_postgres_worker_id(proc_number)
+}
+
+#[cfg(all(
+    not(feature = "pg_test"),
+    not(feature = "pg17"),
+    any(feature = "pg15", feature = "pg16")
+))]
+fn snowflake_worker_id() -> u16 {
+    let backend_id = unsafe { pgrx::pg_sys::MyBackendId };
+    normalize_postgres_worker_id(backend_id)
+}
+
+#[cfg(not(any(
+    feature = "pg15",
+    feature = "pg16",
+    feature = "pg17",
+    feature = "pg_test"
+)))]
+const fn snowflake_worker_id() -> u16 {
+    0
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn normalize_postgres_worker_id(worker_id: i32) -> u16 {
+    if worker_id <= 0 {
+        return 0;
+    }
+    let worker_id = u16::try_from(worker_id)
+        .unwrap_or_else(|_| pgrx::error!("PostgreSQL backend worker id {worker_id} is too large"));
+    if worker_id > 1023 {
+        pgrx::error!("PostgreSQL backend worker id {worker_id} exceeds Snowflake worker id limit");
+    }
+    worker_id
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn raise_snowflake_error(error: snowflake::SnowflakeError) -> i64 {
+    pgrx::error!("snowflake id generation failed: {error}")
+}
+
+#[cfg(not(any(feature = "pg15", feature = "pg16", feature = "pg17")))]
+fn raise_snowflake_error(error: snowflake::SnowflakeError) -> i64 {
+    panic!("snowflake id generation failed: {error}")
 }

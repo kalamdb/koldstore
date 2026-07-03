@@ -25,7 +25,7 @@ fn example_registration() -> StorageRegistration {
 
 #[test]
 fn sql_extension_exposes_storage_registration_and_redaction_contract() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
+    let sql = include_str!("../sql/koldstore--0.1.0.sql");
 
     for needle in [
         "CREATE TABLE IF NOT EXISTS koldstore.storage",

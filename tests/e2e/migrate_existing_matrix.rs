@@ -10,7 +10,7 @@ fn migrate_existing_matrix_targets_postgresql_15_16_17() {
         .map(|target| target.port)
         .collect();
 
-    assert_eq!(ports, vec![5515, 5516, 5517]);
+    assert_eq!(ports, common::expected_pg_ports());
 }
 
 #[test]
@@ -109,7 +109,7 @@ async fn run_existing_table_scenario(
 
     client
         .execute(
-            "SELECT koldstore.migrate_table($1::regclass, 'shared', 'local-minio', NULL, NULL)",
+            "SELECT koldstore.migrate_table($1::text::regclass, 'shared', 'local-minio', NULL, NULL)",
             &[&relation],
         )
         .await?;
@@ -126,7 +126,7 @@ async fn run_existing_table_scenario(
             SELECT array_agg(a.attname ORDER BY a.attnum)
             FROM pg_index i
             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-            WHERE i.indrelid = $1::regclass AND i.indisprimary
+            WHERE i.indrelid = $1::text::regclass AND i.indisprimary
             "#,
             &[&relation],
         )
@@ -136,7 +136,7 @@ async fn run_existing_table_scenario(
 
     let system_columns = client
         .query_one(
-            "SELECT count(*) FROM pg_attribute WHERE attrelid = $1::regclass AND attname = ANY($2)",
+            "SELECT count(*) FROM pg_attribute WHERE attrelid = $1::text::regclass AND attname = ANY($2)",
             &[&relation, &&["_seq", "_commit_seq", "_deleted"][..]],
         )
         .await?

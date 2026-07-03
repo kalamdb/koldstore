@@ -359,6 +359,167 @@ pub fn alter_storage_credentials_pg(name: &str, credentials: pgrx::JsonB) {
         .unwrap_or_else(|error| pgrx::error!("alter storage credentials failed: {error}"));
 }
 
+/// Migrates a heap table into pg-koldstore management from SQL.
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore")]
+pub fn migrate_table_pg(
+    table_name: pgrx::pg_sys::Oid,
+    table_type: &str,
+    storage_name: &str,
+    flush_policy: Option<&str>,
+    scope_column: Option<&str>,
+) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
+    migrate_table_pg_impl(
+        table_name,
+        table_type,
+        storage_name,
+        flush_policy,
+        scope_column,
+    )
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn migrate_table_pg_impl(
+    table_oid: pgrx::pg_sys::Oid,
+    table_type: &str,
+    storage_name: &str,
+    flush_policy: Option<&str>,
+    scope_column: Option<&str>,
+) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
+    let table_oid_u32 = table_oid.to_u32();
+    let relation = qualified_relation_name(table_oid_u32)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let table = crate::migrate::QualifiedTableName::parse(&relation)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let storage_id = storage_id_by_name(storage_name)
+        .unwrap_or_else(|| pgrx::error!("storage `{storage_name}` is not registered"));
+    let effective_scope_column = if table_type == "user" {
+        Some(
+            scope_column
+                .unwrap_or(crate::migrate::SYSTEM_SCOPE_COLUMN)
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    add_system_columns(&table, table_type == "user" && scope_column.is_none())
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    backfill_existing_rows(&table)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    register_minimal_schema(
+        table_oid_u32,
+        table_type,
+        storage_id,
+        effective_scope_column.as_deref(),
+        flush_policy,
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+
+    let mut tuple =
+        pgrx::heap_tuple::PgHeapTuple::new_composite_type("koldstore.managed_table_info")
+            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    tuple
+        .set_by_name("table_oid", pgrx::pg_sys::Oid::from(table_oid_u32))
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    tuple
+        .set_by_name("table_type", table_type)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    tuple
+        .set_by_name("storage_id", pgrx::Uuid::from_bytes(*storage_id.as_bytes()))
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    tuple
+        .set_by_name("schema_version", 1_i32)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    tuple
+        .set_by_name("scope_column", effective_scope_column.as_deref())
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    tuple
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn qualified_relation_name(table_oid: u32) -> Result<String, pgrx::spi::Error> {
+    pgrx::Spi::get_one_with_args::<String>(
+        "SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1::oid",
+        &[pgrx::datum::DatumWithOid::from(pgrx::pg_sys::Oid::from(
+            table_oid,
+        ))],
+    )
+    .map(|value| value.unwrap_or_else(|| pgrx::error!("table oid {table_oid} does not exist")))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn storage_id_by_name(name: &str) -> Option<Uuid> {
+    let id = pgrx::Spi::get_one_with_args::<pgrx::Uuid>(
+        "SELECT id FROM koldstore.storage WHERE name = $1",
+        &[pgrx::datum::DatumWithOid::from(name)],
+    )
+    .unwrap_or_else(|error| pgrx::error!("storage lookup failed: {error}"))?;
+    Some(Uuid::from_bytes(*id.as_bytes()))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn add_system_columns(
+    table: &crate::migrate::QualifiedTableName,
+    user_scoped_without_app_column: bool,
+) -> Result<(), pgrx::spi::Error> {
+    let plan =
+        crate::migrate::columns::plan_system_column_adds(table, user_scoped_without_app_column)
+            .unwrap_or_else(|error| pgrx::error!("{error}"));
+    pgrx::Spi::run(&plan.statement.sql)
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn backfill_existing_rows(
+    table: &crate::migrate::QualifiedTableName,
+) -> Result<(), pgrx::spi::Error> {
+    pgrx::Spi::run(&format!(
+        "UPDATE ONLY {} SET \
+         \"_seq\" = COALESCE(\"_seq\", SNOWFLAKE_ID()), \
+         \"_commit_seq\" = COALESCE(\"_commit_seq\", nextval('koldstore.global_commit_seq'::regclass)), \
+         \"_deleted\" = COALESCE(\"_deleted\", false) \
+         WHERE \"_seq\" IS NULL OR \"_commit_seq\" IS NULL OR \"_deleted\" IS NULL",
+        table.quoted()
+    ))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn register_minimal_schema(
+    table_oid: u32,
+    table_type: &str,
+    storage_id: Uuid,
+    scope_column: Option<&str>,
+    flush_policy: Option<&str>,
+) -> Result<(), pgrx::spi::Error> {
+    let options = flush_policy.map_or_else(
+        || serde_json::json!({}),
+        |policy| serde_json::json!({ "flush_policy": policy }),
+    );
+    pgrx::Spi::run_with_args(
+        "INSERT INTO system.schemas (
+            id, table_oid, version, active, table_type, columns, primary_key,
+            scope_column, indexed_columns, type_matrix, options, storage_id
+         )
+         VALUES (
+            gen_random_uuid(), $1, 1, true, $2, '[]'::jsonb, '[\"id\"]'::jsonb,
+            $3, '[]'::jsonb, '{}'::jsonb, $4::jsonb, $5
+         )
+         ON CONFLICT (table_oid, version) DO UPDATE
+         SET active = true,
+             table_type = EXCLUDED.table_type,
+             scope_column = EXCLUDED.scope_column,
+             options = EXCLUDED.options,
+             storage_id = EXCLUDED.storage_id",
+        &[
+            pgrx::datum::DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
+            pgrx::datum::DatumWithOid::from(table_type),
+            pgrx::datum::DatumWithOid::from(scope_column),
+            pgrx::datum::DatumWithOid::from(pgrx::JsonB(options)),
+            pgrx::datum::DatumWithOid::from(pgrx::Uuid::from_bytes(*storage_id.as_bytes())),
+        ],
+    )
+}
+
 /// Migration request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MigrateTableRequest {

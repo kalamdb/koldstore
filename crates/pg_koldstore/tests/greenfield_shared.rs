@@ -1,6 +1,6 @@
 #[test]
 fn sql_extension_exposes_shared_greenfield_migration_contract() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
+    let sql = include_str!("../sql/koldstore--0.1.0.sql");
     let spec = include_str!("../../../specs/001-pg-kalam-hot-cold-storage/spec.md");
 
     for needle in [

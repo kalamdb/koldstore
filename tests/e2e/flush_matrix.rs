@@ -8,7 +8,7 @@ fn flush_matrix_targets_postgresql_15_16_17() {
         .map(|target| target.version)
         .collect::<Vec<_>>();
 
-    assert_eq!(versions, vec![15, 16, 17]);
+    assert_eq!(versions, common::expected_pg_versions());
 }
 
 #[test]

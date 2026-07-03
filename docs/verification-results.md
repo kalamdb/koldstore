@@ -1,24 +1,31 @@
 # Verification Results
 
-Date: 2026-07-03
+Date: 2026-07-04
 
 ## Commands
 
 | Command | Result | Notes |
 | --- | --- | --- |
-| `cargo fmt --all` | PASS | Formatting completed with no changes required in the final run. |
-| `cargo clippy --workspace --all-targets --all-features` | PASS | Checks the default Rust path plus the PG16 pgrx feature path. |
-| `cargo test --workspace` | PASS | All workspace unit, integration, and doc tests passed. |
-| `cargo pgrx test` | PASS | Auto-detected `pg_koldstore`, selected default `pg16`, and used `/Users/jamal/.pgrx/16.13/pgrx-install/bin/pg_config`. |
-| `tests/e2e/run_pg_matrix.sh` | PASS | Docker Compose PG15, PG16, PG17, and MinIO services were running; the matrix test loop passed for all three PostgreSQL versions. |
-| `tests/memory/run_memory_checks.sh` | PASS | Rust tests passed. Valgrind and heaptrack sub-passes were skipped because the binaries are not installed. |
-| `cargo run -p pg-koldstore-benchmarks -- --suite all` | PASS | Benchmark runner emitted the scaffold JSON report for the full suite. |
+| `cargo fmt --all` | PASS | Formatting completed successfully. |
+| `cargo clippy --workspace --all-targets --all-features` | BLOCKED | pgrx rejects enabling `pg15`, `pg16`, and `pg17` together: "Multiple `pg$VERSION` features found." |
+| `cargo clippy --workspace --all-targets --no-default-features` | PASS | Valid non-pgrx workspace clippy path. |
+| `cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg16` | PASS | Valid PG16 pgrx feature clippy path. |
+| `cargo test --workspace --no-default-features` | PASS | Workspace unit, integration, and doc tests passed; pgrx-backed ignored tests remain covered by the local E2E runner. |
+| `tests/e2e/run_pg_matrix.sh` | PASS | Uses local pgrx PostgreSQL 16, installs `koldstore`, recreates `koldstore_pgrx_e2e`, and runs E2E tests with ignored pgrx tests included. No Docker dependency. |
+| `cargo pgrx test --no-default-features --features pg16` | BLOCKED | Fails during native test-binary linking with unresolved PostgreSQL server symbols from normal Rust integration tests under pg16 feature builds. |
+| `cargo run -p pg-koldstore-benchmarks -- --rows 1000 --clients 2 --jobs 2 --seconds 1 --output-json target/pg-koldstore-bench.json --output-html target/pg-koldstore-bench.html` | PASS | Runs real `pgbench` workloads, parses per-transaction logs, and writes JSON/HTML reports. |
 
 ## Residual Notes
 
-The current implementation is a contract-complete scaffold for the spec: it
-defines the workspace, SQL API, metadata models, pgrx shell, object/manifest
-helpers, tests, E2E runners, benchmark surfaces, and documentation. Native
-PostgreSQL hook behavior, Custom Scan execution, and real object-store Parquet
-I/O are represented by compile-checked scaffolds and contract tests rather than
-production executor code.
+The default E2E loop is now local pgrx rather than Docker. Docker-specific
+validation remains under `docker/`.
+
+`SNOWFLAKE_ID()` now uses a Snowflake-style timestamp/worker/sequence layout.
+Runtime PostgreSQL builds derive the worker id from the active PostgreSQL
+backend identity; `pg_test` builds use worker 0 to avoid linking PostgreSQL
+backend globals into native Rust test binaries.
+
+Benchmarks are no longer scaffold-only. The Rust runner prepares real heap and
+koldstore tables, delegates load generation to PostgreSQL `pgbench`, parses
+`--log` transaction latency files, and emits JSON/HTML reports with p50/p95/p99
+latency and throughput.
