@@ -1,0 +1,23 @@
+[package]
+name = "koldstore-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+koldstore-core.workspace = true
+object_store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url = "2"
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
+

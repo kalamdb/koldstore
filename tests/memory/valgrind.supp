@@ -1,0 +1,21 @@
+{
+   pgrx-postgres-runtime-loader
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:*dlopen*
+}
+{
+   arrow-parquet-global-cache
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*libarrow*
+}
+{
+   object-store-tls-roots
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*rustls*
+}

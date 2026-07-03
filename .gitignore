@@ -1,0 +1,34 @@
+target/
+debug/
+release/
+*.rs.bk
+*.rlib
+*.prof*
+
+# PostgreSQL/pgrx local state
+.pgrx/
+pgdata*/
+*.control.tmp
+
+# Test and benchmark output
+coverage/
+criterion/
+benchmarks/results/
+tests/tmp/
+*.profraw
+*.profdata
+
+# Logs and local environment
+*.log
+*.log.*
+.env
+.env.*
+
+# OS/editor
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
+

@@ -1,0 +1,13 @@
+target/
+.git/
+Dockerfile*
+.dockerignore
+*.log*
+.env
+.env.*
+coverage/
+criterion/
+.pgrx/
+pgdata*/
+tests/tmp/
+

@@ -1,313 +1,246 @@
-# Data Model: pg-kalam Hot/Cold Storage
+# Data Model: pg-koldstore Hot/Cold Storage
 
-**Branch**: `001-pg-kalam-hot-cold-storage`  
-**Date**: 2026-07-02
+**Branch**: `001-pg-koldstore-hot-cold-storage`
+**Date**: 2026-07-03
 
 ## Overview
 
-pg-kalam models each managed table as a **logical append-versioned relation**:
+pg-koldstore models a managed table as:
 
 ```text
-Logical Row (default SELECT) = resolve_by_pk( hot ∪ cold ); winner = max(_seq); hide if _deleted
-Change-feed (realtime)       = all appended rows ordered by _seq; tombstones visible as delete events
+logical current row = winner_by_pk(one hot heap row, newest cold row); hide if tombstone
+change feed        = koldstore.row_events ordered by _commit_seq
 ```
 
-Hot data lives in the PostgreSQL heap. Cold data lives in immutable Parquet segments on object storage. Metadata in PostgreSQL catalogs bridges snapshots, flush scheduling, and segment visibility.
-
----
+The PostgreSQL heap is the hot store and keeps at most one row per logical primary key. Cold storage is immutable Parquet on object storage. PostgreSQL catalog tables hold the metadata needed to make external objects visible safely.
 
 ## Entity Relationship
 
 ```text
-kalam.storage ──registers──► StorageRegistration
-system.schemas ──defines──► ManagedTableDefinition
-ManagedTableDefinition ──binds──► StorageRegistration
-ManagedTableDefinition ──has──► ManifestCache (kalam.manifest)
-ManagedTableDefinition ──produces──► ColdSegment (pg_kalam.cold_segments)
-ManagedTableDefinition ──schedules──► BackgroundJob (system.jobs)
-ManagedTable ──contains──► LogicalRow (hot and/or cold versions)
-ManagedTable ──may have──► FileReference (FILE column type)
+koldstore.storage
+  -> system.schemas
+  -> koldstore.manifest
+  -> koldstore.cold_segments
+  -> koldstore.cold_pk_hints
+  -> koldstore.row_events
+
+managed app table
+  -> one hot row per PK
+  -> optional hot tombstone per PK when cold may contain an older row
 ```
 
----
-
-## 1. Managed Table (Application-Facing)
-
-### Shared table
+## Managed Table
 
 | Attribute | Type | Rules |
 |-----------|------|-------|
-| `table_oid` | `oid` | PostgreSQL relation OID after migration |
-| `table_type` | `enum` | `shared` |
-| `primary_key` | column set | Required at migration; used for merge and flush dedup |
-| `_seq` | `bigint` | System column; monotonic version id (snowflake-style) |
-| `_deleted` | `boolean` | System column; soft-delete / tombstone flag |
-| `flush_policy` | `text` | Optional: `rows:N`, `interval:seconds`, or combined |
-| `schema_version` | `int` | Current version in `system.schemas` |
-| `storage_id` | `uuid` | FK to `kalam.storage` |
-| `access_level` | `text` | Role/policy configuration for shared tables |
+| `table_oid` | `oid` | PostgreSQL heap relation. |
+| `table_type` | `text` | `shared` or `user`. |
+| `primary_key` | column set | Required; preserved as the heap primary key. |
+| `_seq` | `bigint` | Row/effect version id. |
+| `_commit_seq` | `bigint` | Commit-order watermark. |
+| `_deleted` | `boolean` | Tombstone mask for older cold rows. |
+| `scope_column` | `name` | Required for user tables; app column or `_user_id`. |
+| `flush_policy` | `text` | Optional; no policy means hot-only. |
+| `storage_id` | `uuid` | References `koldstore.storage`. |
+| `schema_version` | `int` | Current schema registry version. |
 
-### User-scoped table
+Validation:
 
-Same as shared, plus:
+- Migration is rejected without a primary key.
+- Migration preserves the primary key; it does not change it to `(pk, _seq)`.
+- User-scoped tables fail closed when `koldstore.user_id` is unset.
+- Tables with native FKs and flush enabled are rejected by default unless the operator explicitly accepts hot-only FK semantics.
 
-| Attribute | Type | Rules |
-|-----------|------|-------|
-| `table_type` | `enum` | `user_scoped` |
-| `scope_column` | `name` | Default `user_id`; extensible to `tenant_id`, etc. |
-| `session_scope` | session GUC | Required before any query/DML; fail closed if unset |
+## Hot Row
 
-**State**: A table is `hot_only` (no flush policy), `active` (hot+cold), or `migrating`.
+Represents the current hot overlay for one PK.
 
-**Validation**:
+| Field | Meaning |
+|-------|---------|
+| App PK columns | Logical identity and native heap primary key. |
+| App columns | Current hot values or tombstone payload defaults. |
+| `_seq` | New value on insert/update/delete/revive. |
+| `_commit_seq` | Allocated under the transaction-scoped pg-koldstore commit-order lock and committed with the row. |
+| `_deleted` | `false` for live overlay; `true` for tombstone. |
 
-- Migration rejected without primary key
-- User-scoped INSERT without scope → rejected
-- Only KalamMergeScan may read managed tables (planner enforced)
+Rules:
 
----
+- Exactly zero or one hot heap row per PK.
+- If `_deleted = true`, the row masks older cold rows and is hidden from default SELECT.
+- Hot tombstones are retained only while a cold segment may contain an older row for that PK.
 
-## 2. Logical Row Version
+## Cold Row
 
-Represents one version of a business row (hot or cold).
+Cold rows live in Parquet segments and are immutable.
 
-| Field | Type | Source | Notes |
-|-------|------|--------|-------|
-| PK columns | app types | heap/Parquet | Merge key |
-| `_seq` | `bigint` | both | Winner selection |
-| `_deleted` | `boolean` | both | Tombstone suppresses older versions |
-| App columns | per schema | both | Older segments may omit new columns → NULL |
-| `schema_version` | `int` | cold segment metadata | Column evolution |
-| `location` | `enum` | derived | `hot`, `cold`, or `both` (during overlap) |
+| Field | Meaning |
+|-------|---------|
+| App PK columns | Merge key. |
+| App columns | Values at flush time. |
+| `_seq` | Version id at flush time. |
+| `_commit_seq` | Commit watermark of the flushed hot row. |
+| `_deleted` | Usually false; retained cold tombstones only if event retention policy requires them. |
+| `schema_version` | Segment schema version. |
 
-**Merge rules (default application read)**:
+Cold rows are never directly updated. Compaction writes replacement segments and swaps manifest suffixes.
 
-1. Group by primary key
-2. Keep version with highest `_seq`
-3. If winner has `_deleted = true`, row hidden from default SELECT
-4. Hot version beats cold at equal `_seq` (should not occur if seq monotonic per table)
+## Merge Rules
 
-**Change-feed rules (realtime readiness)**:
+Default SELECT:
 
-1. Return all version rows with `_seq > watermark` in monotonic order
-2. Include tombstones (`_deleted = true`) as delete events — do not collapse away
-3. Every INSERT/UPDATE/DELETE appends a new row with a new `_seq` (never in-place)
+1. Use the hot row when it exists and is newer than the cold winner.
+2. Otherwise use the newest cold row by `_seq` / `_commit_seq`.
+3. If the winner is `_deleted = true`, return no logical row.
+4. Apply mutable app-column predicates after the winner is chosen.
 
-**Delete on cold-only row**: Append hot tombstone via `kalam.delete()` with new `_seq`; visible in change-feed, hidden in default PK merge.
+Change feed:
 
-**State transitions**:
+1. Read `koldstore.row_events`.
+2. Filter by `commit_seq > since_commit_seq`.
+3. Return events ordered by `commit_seq`.
+4. Return a gap error if events have expired.
 
-```text
-INSERT → hot version (new _seq)
-UPDATE → new hot version (append, not in-place)
-DELETE → hot tombstone version (_deleted=true)
-FLUSH → cold Parquet version written; hot data removed per retention
-```
+## Storage Registration (`koldstore.storage`)
 
----
-
-## 3. Storage Registration (`kalam.storage`)
-
-| Column | Type | Constraints |
-|--------|------|-------------|
-| `id` | `uuid` | PK |
-| `name` | `text` | UNIQUE, NOT NULL |
-| `storage_type` | `text` | `filesystem`, `s3`, `gcs`, `azure` |
-| `base_path` | `text` | NOT NULL |
-| `credentials` | `jsonb` | Encrypted/restricted; admin-only |
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK. |
+| `name` | `text` | Unique. |
+| `storage_type` | `text` | `filesystem`, `s3`, `gcs`, `azure`. |
+| `base_path` | `text` | Object-store prefix. |
+| `credentials` | `jsonb` | Admin-only, encrypted/restricted. |
 | `config` | `jsonb` | Endpoint, region, path-style, etc. |
-| `shared_path_template` | `text` | e.g. `{namespace}/{tableName}/` |
-| `user_path_template` | `text` | e.g. `{namespace}/{tableName}/{scopeId}/` |
-| `created_at` | `timestamptz` | |
-| `updated_at` | `timestamptz` | |
+| `shared_path_template` | `text` | Shared table path. |
+| `user_path_template` | `text` | Scoped table path. |
 
-**Validation**: Credential rotation updates row; existing cold artifacts unchanged.
+Credential rotation changes future access only; existing object paths are not rewritten.
 
----
+## Schema Registry (`system.schemas`)
 
-## 4. Table Schema Registry (`system.schemas`)
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | `uuid` | PK. |
+| `table_oid` | `oid` | Managed heap relation. |
+| `version` | `int` | Monotonic. |
+| `table_type` | `text` | `shared` or `user`. |
+| `columns` | `jsonb` | App and system columns. |
+| `primary_key` | `jsonb` | Preserved app PK columns. |
+| `scope_column` | `name` | Nullable for shared tables. |
+| `indexed_columns` | `jsonb` | Source for cold stats/bloom decisions. |
+| `type_matrix` | `jsonb` | Supported type/coercion metadata. |
+| `options` | `jsonb` | Flush, compression, retention, FK policy. |
+| `storage_id` | `uuid` | References `koldstore.storage`. |
 
-| Column | Type | Constraints |
-|--------|------|-------------|
-| `id` | `uuid` | PK |
-| `table_oid` | `oid` | NOT NULL |
-| `version` | `int` | Monotonic per table |
-| `table_type` | `text` | `shared` \| `user_scoped` |
-| `columns` | `jsonb` | Name, type, nullable, system flag |
-| `indexed_columns` | `jsonb` | Columns with PG indexes → Parquet bloom filters |
-| `stats_columns` | `jsonb` | Columns with min/max in manifest (PK + `_seq` + indexed) |
-| `primary_key` | `jsonb` | Column list |
-| `options` | `jsonb` | flush_policy, compression, retention_hours |
-| `storage_id` | `uuid` | FK |
-| `access_level` | `text` | nullable |
-| `scope_column` | `text` | nullable |
-| `created_at` | `timestamptz` | |
+`ALTER TABLE` on a managed table increments schema version through event-trigger support.
 
-**Validation**: New schema version on column add; Parquet segments carry `schema_version`.
+## Manifest Cache (`koldstore.manifest`)
 
----
+Local cache and scheduler state; object-store `manifest.json` remains the cold source of truth.
 
-## 5. Manifest Cache (`kalam.manifest`)
+| Column | Type | Notes |
+|--------|------|-------|
+| `table_oid` | `oid` | Managed table. |
+| `scope_key` | `text` | Null for shared. |
+| `manifest_path` | `text` | Object path. |
+| `etag` / `generation` | `text` | Backend-specific identity. |
+| `sync_state` | `text` | `in_sync`, `pending_write`, `syncing`, `stale`, `error`. |
+| `segment_count` | `int` | Denormalized. |
+| `max_seq` | `bigint` | Highest segment `_seq`. |
+| `max_commit_seq` | `bigint` | Highest segment `_commit_seq`. |
+| `last_error` | `text` | Nullable. |
 
-Local cache; **not** source of truth over object-store `manifest.json`.
+Normal DML only marks `pending_write`; it does not rewrite object-store manifests.
 
-| Column | Type | Constraints |
-|--------|------|-------------|
-| `id` | `uuid` | PK |
-| `table_oid` | `oid` | NOT NULL |
-| `scope_key` | `text` | NULL for shared; scope id for user-scoped |
-| `manifest_path` | `text` | Object store path |
-| `etag` | `text` | Last known |
-| `sync_state` | `text` | `in_sync`, `pending_write`, `syncing`, `stale`, `error` |
-| `last_refreshed_at` | `timestamptz` | |
-| `last_error` | `text` | nullable |
-| `segment_count` | `int` | denormalized |
-| `max_seq` | `bigint` | denormalized |
+## Cold Segment (`koldstore.cold_segments`)
 
-**State transitions**:
+| Column | Type | Notes |
+|--------|------|-------|
+| `segment_id` | `uuid` | PK. |
+| `table_oid` | `oid` | Managed table. |
+| `scope_key` | `text` | Nullable. |
+| `object_path` | `text` | Final Parquet object path. |
+| `batch_number` | `int` | Flush sequence. |
+| `min_seq` / `max_seq` | `bigint` | Segment version bounds. |
+| `min_commit_seq` / `max_commit_seq` | `bigint` | Segment commit bounds. |
+| `row_count` | `bigint` | Segment rows. |
+| `byte_size` | `bigint` | Object size. |
+| `schema_version` | `int` | Segment schema. |
+| `column_stats` | `jsonb` | PK, `_seq`, `_commit_seq`, indexed/immutable columns. |
+| `status` | `text` | `pending`, `active`, `compacted`, `deleted`. |
+| `manifest_etag` | `text` | Manifest identity that published this segment. |
+| `created_xid` | `xid` | PostgreSQL catalog visibility aid. |
+| `created_lsn` | `pg_lsn` | Recovery/debugging. |
 
-```text
-DML on table → pending_write
-Flush start → syncing
-Flush commit + manifest update → in_sync
-Manifest/object mismatch → stale
-Flush failure → error (hot data intact)
-```
+KoldstoreMergeScan includes only active segment rows visible to the current snapshot.
 
----
+## Cold PK Hints (`koldstore.cold_pk_hints`)
 
-## 6. Cold Segment (`pg_kalam.cold_segments`)
+Local metadata used to avoid object-store reads on DML.
 
-PostgreSQL-side segment registry for MVCC visibility and pruning.
+| Column | Type | Notes |
+|--------|------|-------|
+| `table_oid` | `oid` | Managed table. |
+| `scope_key` | `text` | Nullable. |
+| `pk_hash` | `bytea` | Hash of logical PK. |
+| `segment_id` | `uuid` | Candidate segment. |
+| `hint_kind` | `text` | `exact`, `bloom`, `range`. |
+| `latest_seq` | `bigint` | Best known cold seq. |
+| `latest_commit_seq` | `bigint` | Best known cold commit seq. |
 
-| Column | Type | Constraints |
-|--------|------|-------------|
-| `segment_id` | `uuid` | PK |
-| `table_oid` | `oid` | NOT NULL |
-| `scope_key` | `text` | nullable |
-| `object_path` | `text` | NOT NULL |
-| `batch_number` | `int` | NOT NULL |
-| `min_seq` | `bigint` | NOT NULL |
-| `max_seq` | `bigint` | NOT NULL |
-| `row_count` | `bigint` | |
-| `byte_size` | `bigint` | |
-| `schema_version` | `int` | NOT NULL |
-| `compression` | `text` | `none`, `snappy`, `zstd` |
-| `created_lsn` | `pg_lsn` | |
-| `created_xid` | `xid` | |
-| `commit_seq` | `bigint` | kalam commit ordering |
-| `status` | `text` | `pending`, `active`, `deleting`, `deleted` |
-| `manifest_etag` | `text` | |
-| `created_at` | `timestamptz` | |
+Exact hints can preserve rowcount semantics for cold-only DELETE. Bloom/range hints are may-contain and can only drive idempotent explicit tombstone APIs.
 
-**Visibility rule**: KalamMergeScan includes segment iff `status = 'active'` and segment commit is visible to current snapshot.
+## Row Events (`koldstore.row_events`)
 
-**Pruning rule**: Skip segment when query bounds on `_seq` (or time-derived bounds) do not intersect `[min_seq, max_seq]`.
+Append-only event log for `changes_since`.
 
----
+| Column | Type | Notes |
+|--------|------|-------|
+| `table_oid` | `oid` | Managed table. |
+| `scope_key` | `text` | Nullable. |
+| `pk_hash` | `bytea` | PK hash. |
+| `pk_json` | `jsonb` | PK values. |
+| `op` | `text` | `insert`, `update`, `delete`, `revive`. |
+| `seq` | `bigint` | Row/effect id. |
+| `commit_seq` | `bigint` | Commit-order cursor. |
+| `deleted` | `boolean` | Delete/tombstone flag. |
+| `row_image_json` | `jsonb` | Optional payload per retention/projection policy. |
+| `txid` | `xid8` | Source transaction. |
+| `created_at` | `timestamptz` | Event write time. |
 
-## 7. Background Job (`system.jobs`)
+## Object-Store Manifest (`manifest.json`)
 
-| Column | Type | Constraints |
-|--------|------|-------------|
-| `id` | `uuid` | PK |
-| `job_type` | `text` | `flush`, `compact`, `cleanup`, `backup`, `restore` |
-| `status` | `text` | `pending`, `running`, `completed`, `failed`, `cancelled` |
-| `table_oid` | `oid` | nullable |
-| `scope_key` | `text` | nullable |
-| `parameters` | `jsonb` | Policy, batch size, paths |
-| `idempotency_key` | `text` | UNIQUE per active job |
-| `attempts` | `int` | default 0 |
-| `max_attempts` | `int` | |
-| `error_trace` | `text` | nullable |
-| `started_at` | `timestamptz` | |
-| `completed_at` | `timestamptz` | |
-| `created_at` | `timestamptz` | |
+Object-store source of truth for committed cold artifacts. Required segment metadata includes:
 
----
+- path
+- row count and byte size
+- schema version
+- `_seq` min/max
+- `_commit_seq` min/max
+- column stats
+- bloom/filter metadata references
+- checksum
 
-## 8. PK Registry (`pg_kalam.pk_registry`) — Optional MVP
+The manifest is the visibility boundary for object-store files. Temp files and unmanifested final files are recovery garbage.
 
-For flush deduplication and conflict detection (not global UNIQUE constraint replacement).
-
-| Column | Type | Constraints |
-|--------|------|-------------|
-| `table_oid` | `oid` | PK (composite) |
-| `pk_hash` | `bytea` | PK (composite) |
-| `latest_seq` | `bigint` | |
-| `deleted` | `boolean` | |
-| `updated_at` | `timestamptz` | |
-
----
-
-## 9. FILE Reference (Column Type)
-
-Stored in-row as `jsonb`; blob in object storage.
-
-| Field | Type | Required |
-|-------|------|----------|
-| `id` | `uuid` | yes |
-| `subfolder` | `text` | yes |
-| `name` | `text` | yes |
-| `size` | `bigint` | yes |
-| `mime` | `text` | yes |
-| `checksum` | `text` | yes |
-| `shard` | `int` | optional |
-
-**Path routing**: Shared table → `{namespace}/{tableName}/files/{subfolder}/`; user-scoped → includes `{scopeId}/`.
-
-**Manifest `files` state**: Tracks subfolder rotation and counts (kalamdb-compatible).
-
----
-
-## 10. Object-Store Manifest (`manifest.json`)
-
-Source of truth on object storage. Structure matches kalamdb (see `contracts/manifest-schema.json`).
-
-Key arrays:
-
-- `segments[]`: Parquet batch metadata (`batch`, `path`, `min_seq`, `max_seq`, `row_count`, `schema_version`, compression)
-- `files{}`: subfolder rotation state for FILE columns
-- `vector_indexes[]`: placeholder for future; out of MVP scope
-
----
-
-## 11. Parquet Segment File
+## Parquet Segment
 
 | Property | Value |
 |----------|-------|
-| Naming | `batch-{N}.parquet` |
-| Write pattern | temp file → atomic rename |
-| Sort order | By `_seq` ascending |
-| Columns | PK + `_seq` + `_deleted` + app columns per `schema_version` |
-| Bloom filters | PK columns only (row_count ≥ 1024, FPP 0.01) — kalamdb `parquet/writer.rs` |
-| Column stats | PK + `_seq` min/max in manifest `column_stats` |
-| Immutability | Segments never updated in place; compaction rewrites post-MVP |
-
----
-
-## Catalog Schema Namespace
-
-| Schema | Purpose |
-|--------|---------|
-| `kalam` | `storage`, `manifest` |
-| `system` | `schemas`, `jobs` |
-| `pg_kalam` | `cold_segments`, `pk_registry`, internal config |
-
-Extension creates schemas on `CREATE EXTENSION pg_kalam`. DDL event trigger records `ALTER TABLE` on managed tables and increments `system.schemas.version`.
-
-**DROP TABLE**: Removes catalog rows and object-storage prefix for the table.
-
----
+| Naming | `batch-N.parquet` or compaction-specific name. |
+| Publish | Backend-safe temp/final write; no portable atomic rename assumption. |
+| Columns | PK, `_seq`, `_commit_seq`, `_deleted`, app columns for schema version. |
+| Sort | `_seq` or PK/_seq depending on flush policy; metadata must record ordering. |
+| Bloom | PK columns when supported and row count justifies it. |
+| Stats | PK, `_seq`, `_commit_seq`, indexed/immutable columns. |
 
 ## Index Recommendations
 
-| Table | Index | Purpose |
-|-------|-------|---------|
-| `pg_kalam.cold_segments` | `(table_oid, scope_key, status)` | Segment lookup for merge scan |
-| `pg_kalam.cold_segments` | `(table_oid, min_seq, max_seq)` | Pruning |
-| `kalam.manifest` | `(table_oid, scope_key)` | Flush discovery |
-| `system.jobs` | `(status, job_type)` | Worker polling |
-| `pg_kalam.pk_registry` | `(table_oid, pk_hash)` | Flush dedup |
-
-Managed application tables: index on `(pk..., _seq DESC)` on hot heap recommended for hot path performance.
+| Relation | Index |
+|----------|-------|
+| app table | existing primary key preserved. |
+| app table | optional hot filter indexes based on workload. |
+| `koldstore.cold_segments` | `(table_oid, scope_key, status)`. |
+| `koldstore.cold_segments` | `(table_oid, min_commit_seq, max_commit_seq)`. |
+| `koldstore.cold_pk_hints` | `(table_oid, scope_key, pk_hash)`. |
+| `koldstore.row_events` | `(table_oid, scope_key, commit_seq)`. |
+| `koldstore.manifest` | `(table_oid, scope_key)`. |

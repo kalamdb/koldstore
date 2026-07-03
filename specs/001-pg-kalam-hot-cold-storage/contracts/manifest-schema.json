@@ -1,27 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://pg-kalam.dev/schemas/manifest-v1.json",
+  "$id": "https://pg-koldstore.dev/schemas/manifest-v1.json",
   "title": "kalamdb-compatible manifest.json",
-  "description": "Cold storage manifest on object storage. Source of truth for Parquet segments and FILE subfolder state. pg-kalam MUST produce manifests readable by kalamdb tooling without conversion.",
+  "description": "Cold storage manifest on object storage. This is the visibility boundary for committed Parquet segments and FILE state. Temporary or final objects not referenced here are not visible to queries.",
   "type": "object",
   "required": ["version", "table", "segments", "files"],
   "properties": {
     "version": {
       "type": "integer",
-      "minimum": 1,
-      "description": "Manifest format version"
+      "minimum": 1
     },
     "table": {
-      "type": "string",
-      "description": "Logical table name"
+      "type": "string"
     },
     "namespace": {
-      "type": "string",
-      "description": "Storage namespace prefix"
+      "type": "string"
     },
     "scope_id": {
       "type": ["string", "null"],
-      "description": "Scope identifier for user-scoped tables; null for shared"
+      "description": "Scope identifier for user-scoped tables; null for shared tables"
     },
     "schema_version": {
       "type": "integer",
@@ -29,11 +26,18 @@
     },
     "max_seq": {
       "type": "integer",
-      "description": "Highest _seq archived in cold segments"
+      "description": "Highest _seq archived in committed cold segments"
+    },
+    "max_commit_seq": {
+      "type": "integer",
+      "description": "Highest _commit_seq archived in committed cold segments"
     },
     "updated_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "publish": {
+      "$ref": "#/$defs/publishState"
     },
     "segments": {
       "type": "array",
@@ -49,13 +53,32 @@
       "items": {
         "$ref": "#/$defs/vectorIndex"
       },
-      "description": "Placeholder for kalamdb parity; out of MVP scope for pg-kalam"
+      "description": "Placeholder for kalamdb parity; out of MVP scope for pg-koldstore"
     }
   },
   "$defs": {
+    "publishState": {
+      "type": "object",
+      "description": "Backend-specific manifest identity and publish metadata. Do not assume atomic object-store rename.",
+      "properties": {
+        "generation": { "type": "string" },
+        "etag": { "type": "string" },
+        "backend": { "type": "string" },
+        "writer_id": { "type": "string" }
+      }
+    },
     "segment": {
       "type": "object",
-      "required": ["batch", "path", "min_seq", "max_seq", "row_count", "schema_version"],
+      "required": [
+        "batch",
+        "path",
+        "min_seq",
+        "max_seq",
+        "min_commit_seq",
+        "max_commit_seq",
+        "row_count",
+        "schema_version"
+      ],
       "properties": {
         "batch": {
           "type": "integer",
@@ -63,12 +86,22 @@
         },
         "path": {
           "type": "string",
-          "description": "Relative path e.g. batch-0.parquet"
+          "description": "Relative path, for example batch-0.parquet"
+        },
+        "temp_path": {
+          "type": "string",
+          "description": "Optional temp path retained only for diagnostics/recovery"
         },
         "min_seq": {
           "type": "integer"
         },
         "max_seq": {
+          "type": "integer"
+        },
+        "min_commit_seq": {
+          "type": "integer"
+        },
+        "max_commit_seq": {
           "type": "integer"
         },
         "row_count": {
@@ -90,7 +123,7 @@
         },
         "column_stats": {
           "type": "object",
-          "description": "Per-column min/max keyed by column_id (kalamdb-compatible)",
+          "description": "Per-column min/max keyed by column id or stable column name. Must include PK, _seq, _commit_seq, and configured indexed/immutable columns when supported.",
           "additionalProperties": {
             "type": "object",
             "properties": {
@@ -99,18 +132,40 @@
             }
           }
         },
+        "pk_filter": {
+          "$ref": "#/$defs/pkFilter"
+        },
         "status": {
           "type": "string",
-          "enum": ["committed", "in_progress", "tombstone"],
+          "enum": ["committed", "compacted", "deleted"],
           "default": "committed"
         },
         "checksum": {
-          "type": "string",
-          "description": "Optional content checksum"
+          "type": "string"
+        },
+        "etag": {
+          "type": "string"
         },
         "created_at": {
           "type": "string",
           "format": "date-time"
+        }
+      }
+    },
+    "pkFilter": {
+      "type": "object",
+      "description": "Optional local or Parquet-backed primary-key may-contain metadata.",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["none", "exact", "bloom", "range"]
+        },
+        "column_ids": {
+          "type": "array",
+          "items": { "type": "integer" }
+        },
+        "false_positive_rate": {
+          "type": "number"
         }
       }
     },

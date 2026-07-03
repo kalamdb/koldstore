@@ -1,0 +1,58 @@
+services:
+  postgres15:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: koldstore
+    ports:
+      - "5515:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d koldstore"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres16:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: koldstore
+    ports:
+      - "5516:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d koldstore"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgres17:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: koldstore
+    ports:
+      - "5517:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d koldstore"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+

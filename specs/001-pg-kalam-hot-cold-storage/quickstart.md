@@ -1,84 +1,82 @@
-# Quickstart: Validate pg-kalam Hot/Cold Storage
+# Quickstart: Validate pg-koldstore Hot/Cold Storage
 
-**Branch**: `001-pg-kalam-hot-cold-storage`  
-**Purpose**: Runnable validation scenarios proving end-to-end behavior. Implementation details belong in `tasks.md`.
+**Branch**: `001-pg-koldstore-hot-cold-storage`
+**Purpose**: Runnable validation scenarios for the corrected MVP architecture.
 
-**References**:
+## References
 
-- [data-model.md](./data-model.md) — entities and merge rules
-- [contracts/sql-api.md](./contracts/sql-api.md) — SQL surface
-- [contracts/kalam-merge-scan.md](./contracts/kalam-merge-scan.md) — scan behavior
-- [contracts/manifest-schema.json](./contracts/manifest-schema.json) — cold manifest format
-
----
+- [data-model.md](./data-model.md)
+- [contracts/sql-api.md](./contracts/sql-api.md)
+- [contracts/koldstore-merge-scan.md](./contracts/koldstore-merge-scan.md)
+- [contracts/dml-rewrite.md](./contracts/dml-rewrite.md)
+- [contracts/test-plan.md](./contracts/test-plan.md)
 
 ## Prerequisites
 
-- PostgreSQL 15+ (16+ recommended)
-- Rust toolchain (for building extension via pgrx)
-- Docker (for MinIO integration tests)
-- `pg_kalam` extension built and installed
+- PostgreSQL 15+.
+- `koldstore` extension built and installed.
+- MinIO or another object-store-compatible test backend.
+- For built-in flush worker testing: `shared_preload_libraries = 'koldstore'` and PostgreSQL restarted.
 
 ```bash
-# From repo root (after implementation exists)
 cargo pgrx install --release
-```
-
----
-
-## Environment Setup
-
-### 1. Start PostgreSQL + MinIO
-
-```bash
 docker compose -f tests/docker-compose.yml up -d
 ```
 
-Expected: PostgreSQL on `localhost:5432`, MinIO on `localhost:9000`.
-
-### 2. Create extension and storage
+## Setup
 
 ```sql
-CREATE EXTENSION pg_kalam;
+CREATE EXTENSION koldstore;
 
-SELECT kalam.register_storage(
+SELECT koldstore.register_storage(
   'local-minio',
   's3',
-  's3://kalam-test/',
+  's3://koldstore-test/',
   '{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}'::jsonb,
   '{"endpoint":"http://localhost:9000","region":"us-east-1","path_style":true}'::jsonb
 );
 ```
 
-**Expected**: Returns UUID; row visible in `kalam.storage` (credentials restricted).
-
----
-
-## Scenario 0: Create Kalam Table (P1 — primary path)
+## Scenario 1: Greenfield Table Management (P1)
 
 ```sql
+CREATE SCHEMA IF NOT EXISTS app;
+
 CREATE TABLE app.shared_items (
-  id BIGINT PRIMARY KEY DEFAULT SNOWFLAKE_ID(),
-  title TEXT NOT NULL,
-  value INTEGER,
-  created_at TIMESTAMP DEFAULT NOW()
-) USING kalamdb WITH (
-  type = 'shared',
-  flush_policy = 'rows:1000,interval:60',
-  storage_id = 'local-minio'
+  id bigint PRIMARY KEY DEFAULT SNOWFLAKE_ID(),
+  title text NOT NULL,
+  value integer,
+  created_at timestamptz DEFAULT now()
 );
 
+SELECT koldstore.migrate_table(
+  table_name => 'app.shared_items',
+  table_type => 'shared',
+  storage_name => 'local-minio',
+  flush_policy => 'rows:1000,interval:60'
+);
+
+-- Expected shape:
+-- (table_oid, table_type, storage_id, schema_version, scope_column)
+-- table_type = shared, schema_version = 1, scope_column IS NULL
+
 INSERT INTO app.shared_items (title, value) VALUES ('hello', 1);
-SELECT kalam_version();
+
+SELECT id, title, _seq, _commit_seq, _deleted
+FROM app.shared_items;
 ```
 
-**Verify**: `_seq`/`_deleted` present; row readable; extension version returned.
+Expected:
 
----
+- `_seq`, `_commit_seq`, `_deleted` exist.
+- Primary key is still `id`, not `(id, _seq)`.
+- One row exists for the inserted PK.
 
-## Scenario 1: Migrate Existing Table (P1)
+## Scenario 2: Migrate Existing Table (P1)
 
 ```sql
+CREATE SCHEMA IF NOT EXISTS chat;
+
 CREATE TABLE chat.messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   body text NOT NULL,
@@ -87,90 +85,136 @@ CREATE TABLE chat.messages (
 
 INSERT INTO chat.messages (body) VALUES ('hello'), ('world');
 
-SELECT kalam.migrate_table(
-  'chat.messages',
-  'shared',
-  'local-minio',
-  NULL  -- hot-only initially
+SELECT koldstore.migrate_table(
+  table_name => 'chat.messages',
+  table_type => 'shared',
+  storage_name => 'local-minio',
+  flush_policy => NULL
 );
-```
 
-**Verify**:
-
-```sql
 \d chat.messages
--- Must show _seq, _deleted columns
-
-SELECT id, body, _seq, _deleted FROM chat.messages;
--- 2 rows, _deleted = false, distinct _seq values
 ```
 
----
+Expected:
 
-## Scenario 2: KalamMergeScan Active (P2)
+- Primary key remains on `id`.
+- `_seq`, `_commit_seq`, and `_deleted` are present.
+- `SELECT count(*) FROM chat.messages` returns 2.
+
+## Scenario 3: KoldstoreMergeScan Active (P1)
 
 ```sql
 EXPLAIN (VERBOSE, COSTS OFF)
 SELECT * FROM chat.messages WHERE id = (SELECT id FROM chat.messages LIMIT 1);
 ```
 
-**Expected**:
+Expected:
 
-- Plan contains `Custom Scan (KalamMergeScan)` on `chat.messages`
-- No standalone `Seq Scan` on `chat.messages` as the only access path
+- Plan contains `Custom Scan (KoldstoreMergeScan)`.
+- There is no standalone heap-only path as the final managed-table scan.
 
----
-
-## Scenario 3: Flush to Cold + Merged Query (P1/P2)
+## Scenario 4: Hot DML Keeps One Row Per PK (P1)
 
 ```sql
-SELECT kalam.set_flush_policy('chat.messages', 'rows:2');
-
--- Insert until >2 hot rows
-INSERT INTO chat.messages (body) SELECT 'msg-' || g FROM generate_series(1, 5) g;
-
--- Trigger flush (or wait for background worker)
-SELECT kalam.flush_table('chat.messages');
-
--- Poll job
-SELECT status, error_trace FROM system.jobs ORDER BY created_at DESC LIMIT 1;
--- Expected: completed
-
-SELECT sync_state FROM kalam.manifest WHERE table_oid = 'chat.messages'::regclass::oid;
--- Expected: in_sync
-```
-
-**Verify cold artifacts** (MinIO console or `mc ls`):
-
-- `kalam-test/chat.messages/manifest.json`
-- `kalam-test/chat.messages/batch-*.parquet`
-
-**Verify merged read**:
-
-```sql
-SELECT count(*) FROM chat.messages;
--- Expected: total logical rows (hot + cold), excluding tombstones
-
-SELECT kalam.table_status('chat.messages');
--- cold_segment_count > 0
-```
-
----
-
-## Scenario 4: Version Resolution (P2)
-
-```sql
--- Pick a row, note id
 WITH r AS (SELECT id FROM chat.messages LIMIT 1)
-UPDATE chat.messages SET body = 'updated-hot' WHERE id = (SELECT id FROM r);
+UPDATE chat.messages
+SET body = 'updated-hot'
+WHERE id = (SELECT id FROM r);
 
-SELECT body FROM chat.messages WHERE id = (SELECT id FROM r LIMIT 1);
--- Expected: 'updated-hot' (hot _seq wins over older cold version)
+WITH r AS (SELECT id FROM chat.messages LIMIT 1)
+SELECT id, count(*)
+FROM chat.messages
+WHERE id = (SELECT id FROM r)
+GROUP BY id;
 ```
 
----
+Expected:
 
-## Scenario 5: User-Scoped Security (P2)
+- Count is 1 for the PK.
+- `_seq` and `_commit_seq` advanced.
+- No duplicate hot rows exist for the PK.
+
+## Scenario 5: Flush to Cold + Merged Query (P1/P2)
+
+```sql
+SELECT koldstore.set_flush_policy('chat.messages', 'rows:2');
+
+INSERT INTO chat.messages (body)
+SELECT 'msg-' || g FROM generate_series(1, 5) g;
+
+SELECT koldstore.flush_table('chat.messages', force => true);
+
+SELECT status, error_trace
+FROM system.jobs
+ORDER BY created_at DESC
+LIMIT 1;
+
+SELECT sync_state
+FROM koldstore.manifest
+WHERE table_oid = 'chat.messages'::regclass::oid;
+
+SELECT count(*) FROM chat.messages;
+SELECT * FROM koldstore.table_status('chat.messages');
+```
+
+Expected:
+
+- Flush job completed.
+- Manifest sync state is `in_sync`.
+- Object store contains `manifest.json` and `batch-*.parquet`.
+- Logical row count matches expected current rows.
+
+## Scenario 6: Tombstone Only When Cold May Contain PK (P2)
+
+```sql
+-- Choose a row that was flushed and has no live hot row.
+SELECT koldstore.delete_row(
+  'chat.messages',
+  pk => '{"id":"<cold-only-uuid>"}'::jsonb
+);
+
+SELECT *
+FROM chat.messages
+WHERE id = '<cold-only-uuid>';
+
+SELECT commit_seq, op, deleted, pk
+FROM koldstore.changes_since('chat.messages', 0)
+WHERE pk @> '{"id":"<cold-only-uuid>"}'::jsonb
+ORDER BY commit_seq DESC
+LIMIT 1;
+```
+
+Expected:
+
+- Default SELECT returns 0 rows for that PK.
+- Change feed shows a delete event ordered by `_commit_seq`.
+- No Parquet scan is required on the default delete path if local PK hint is sufficient.
+
+## Scenario 7: Cold-Only Update Requires Hydration (P2)
+
+```sql
+-- Standard SQL cold-only UPDATE is not transparent in MVP.
+UPDATE chat.messages
+SET body = 'should-not-update-cold'
+WHERE id = '<cold-only-uuid>';
+
+SELECT koldstore.hydrate_pk(
+  'chat.messages',
+  '{"id":"<cold-only-uuid>"}'::jsonb
+);
+
+UPDATE chat.messages
+SET body = 'updated-after-hydrate'
+WHERE id = '<cold-only-uuid>';
+```
+
+Expected:
+
+- The first UPDATE affects 0 rows unless the row is already hot.
+- Hydration brings exactly one row to hot storage.
+- The second UPDATE succeeds and keeps one hot row for the PK.
+
+## Scenario 8: User-Scoped Security (P2)
 
 ```sql
 CREATE TABLE app.notes (
@@ -179,164 +223,90 @@ CREATE TABLE app.notes (
   content text
 );
 
-SELECT kalam.migrate_table('app.notes', 'user_scoped', 'local-minio', NULL, 'user_id');
+SELECT koldstore.migrate_table(
+  'app.notes',
+  'user',
+  'local-minio',
+  NULL,
+  'user_id'
+);
 
-INSERT INTO app.notes (user_id, content) VALUES
-  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'user A note'),
-  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'user B note');
-```
-
-**Missing scope → error**:
-
-```sql
 SELECT * FROM app.notes;
--- ERROR: kalam scope not set
-```
+-- ERROR: koldstore.user_id is not set
 
-**Wrong scope → no rows / denied**:
+SET koldstore.user_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 
-```sql
-SET kalam.user_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-SELECT kalam_user_id();
-SELECT content FROM app.notes;
--- 1 row: user A note only
-```
-
-**Cross-scope write denied** (with RLS):
-
-```sql
 INSERT INTO app.notes (user_id, content)
-VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'attack');
+VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'user A note');
+
+INSERT INTO app.notes (user_id, content)
+VALUES ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'user B note');
 -- ERROR or policy violation
 ```
 
----
+Expected:
 
-## Scenario 6: Cold-Only Update via kalam.update (P2)
+- Missing scope fails closed.
+- Cross-scope write is denied.
 
-After flush removes a row from hot heap:
-
-```sql
-SELECT kalam.delete('chat.messages', '{"id": "<cold-only-uuid>"}'::jsonb);
--- Returns tombstone _seq
-
-SELECT * FROM chat.messages WHERE id = '<cold-only-uuid>';
--- 0 rows (tombstone wins)
-```
-
----
-
-## Scenario 7: Operability (P3)
+## Scenario 9: Demigration Rehydrates (P2)
 
 ```sql
-SELECT * FROM kalam.backup_manifest('chat.messages');
-SELECT * FROM kalam.validate_cold_storage('chat.messages');
-```
-
-**Expected**: All segments `checksum_ok = true`, `manifest_ok = true`.
-
----
-
-## Scenario 8: FILE Column (P3)
-
-```sql
-CREATE TABLE docs.files (
-  id uuid PRIMARY KEY,
-  payload kalam.file
+SELECT koldstore.demigrate_table(
+  'chat.messages',
+  rehydrate => true,
+  drop_cold => false
 );
 
-SELECT kalam.migrate_table('docs.files', 'shared', 'local-minio');
-
--- After file_upload implemented:
--- SELECT kalam.file_upload('docs.files', 'payload', 'test.txt', 'text/plain', 'hello'::bytea);
+EXPLAIN (COSTS OFF) SELECT * FROM chat.messages;
+DELETE FROM chat.messages WHERE id = '<some-id>';
 ```
 
-**Expected**: Blob in object storage; JSON reference in row; manifest `files` state updated.
+Expected:
 
----
+- Plan no longer contains `KoldstoreMergeScan`.
+- Table contains current logical rows from hot+cold at demigration time.
+- DELETE is normal physical PostgreSQL DML.
+- Cold artifacts remain unless `drop_cold => true`.
+
+## Scenario 10: COPY and Export (P2)
+
+```sql
+COPY (SELECT * FROM app.shared_items) TO STDOUT WITH CSV HEADER;
+
+SELECT koldstore_exec('EXPORT TABLE app.shared_items');
+```
+
+Expected:
+
+- `COPY (SELECT ...)` uses merged logical SELECT.
+- `koldstore_exec EXPORT` includes Parquet and manifest artifacts.
 
 ## Automated Test Commands
 
 ```bash
-# Rust unit tests
 cargo test
-
-# PostgreSQL regression (after tests/sql/ exists)
 cargo pgrx test
-
-# Integration suite
 ./tests/integration/run.sh
 ```
-
-**CI gate**: All scenarios 0–5 and 9 must pass before MVP release.
-
----
-
-## Scenario 9: Cold Delete Tombstone (P2)
-
-```sql
--- After flush, row exists only in cold
-SELECT kalam.delete('chat.messages', '{"id": "<cold-only-id>"}'::jsonb);
-SELECT * FROM chat.messages WHERE id = '<cold-only-id>';
--- 0 rows (tombstone overrides cold version)
-```
-
----
-
-## Scenario 10: Export/Import via kalam_exec (P2)
-
-```sql
-SELECT kalam_exec('EXPORT TABLE app.shared_items');
--- import into new table per kalamdb transfer format
-```
-
----
-
-## Scenario 11: DROP TABLE cleans storage (P2)
-
-```sql
-DROP TABLE app.shared_items;
--- manifest + Parquet prefix removed from object store
-```
-
----
 
 ## Failure Indicators
 
 | Symptom | Likely cause |
 |---------|--------------|
-| Seq Scan on managed table | Planner hook not removing vanilla paths |
-| Missing cold rows | Segment visibility MVCC bug or manifest not synced |
-| Cross-tenant data visible | RLS not applied on cold DataFusion path |
-| Flush stuck in `error` | Object store credentials or network |
-| Duplicate PK in query results | Merge resolver bug |
-| Cold delete still visible in default SELECT | Tombstone not winning PK merge |
-| Delete missing from change-feed | Tombstone filtered incorrectly in changelog mode |
-
----
-
-## Scenario 12: Change-feed includes deletes (P2)
-
-```sql
-INSERT INTO app.shared_items (title) VALUES ('item-1');
-UPDATE app.shared_items SET title = 'item-1-upd' WHERE title = 'item-1';
-DELETE FROM app.shared_items WHERE title = 'item-1-upd';
-
--- Default view: row gone
-SELECT count(*) FROM app.shared_items WHERE title LIKE 'item-1%';
--- 0
-
--- Change-feed: tombstone visible
-SELECT _seq, _deleted, title FROM kalam.changes_since('app.shared_items', 0);
--- 3 rows: insert (_deleted=false), update (_deleted=false), delete (_deleted=true)
-```
-
----
+| `USING koldstore` appears in tests | Stale table-AM assumption. |
+| Duplicate hot PK rows | DML hook or migration PK bug. |
+| Change feed ordered by `_seq` | Incorrect cursor; should use `_commit_seq`. |
+| Cold object read during hot UPDATE | DML path violates performance contract. |
+| Mutable app filter pushed before merge | Predicate safety bug. |
+| Missing cold rows | Segment visibility or manifest sync bug. |
+| Cross-scope data visible | RLS/scope enforcement bug. |
+| Demigrated table missing cold-only rows | Rehydrate path bug. |
 
 ## Out of Scope for This Quickstart
 
-- Transparent UPDATE/DELETE on cold-only rows via standard SQL
-- Parquet compaction
-- Vector index cold paths
-- Multi-node replica flush (primary only)
-- Full realtime subscription transport (change-feed `_seq` visibility is in scope)
+- Custom table access method.
+- Full DataFusion cold engine.
+- Transparent standard SQL UPDATE of cold-only rows.
+- Global hot+cold FK/UNIQUE enforcement.
+- Vector indexes and stream tables.

@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "table": "items",
+  "namespace": "app",
+  "scope_id": null,
+  "schema_version": 1,
+  "max_seq": 10,
+  "max_commit_seq": 20,
+  "updated_at": "2026-07-03T00:00:00Z",
+  "publish": {
+    "generation": "1",
+    "etag": "golden-etag",
+    "backend": "filesystem",
+    "writer_id": "golden"
+  },
+  "segments": [
+    {
+      "batch": 0,
+      "path": "batch-0.parquet",
+      "temp_path": null,
+      "min_seq": 1,
+      "max_seq": 10,
+      "min_commit_seq": 11,
+      "max_commit_seq": 20,
+      "row_count": 10,
+      "byte_size": 4096,
+      "schema_version": 1,
+      "pk_filter": {
+        "kind": "exact",
+        "column_ids": [0],
+        "false_positive_rate": null
+      },
+      "status": "committed",
+      "checksum": "sha256:golden",
+      "etag": "segment-etag",
+      "created_at": "2026-07-03T00:00:00Z"
+    }
+  ],
+  "files": {
+    "current_subfolder": "files-0",
+    "subfolder_count": 0,
+    "max_files_per_subfolder": 10000,
+    "total_files": 0
+  }
+}
+

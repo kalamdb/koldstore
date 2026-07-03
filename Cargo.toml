@@ -1,0 +1,73 @@
+[workspace]
+members = [
+    "crates/koldstore-core",
+    "crates/koldstore-manifest",
+    "crates/koldstore-storage",
+    "crates/koldstore-parquet",
+    "crates/koldstore-merge",
+    "crates/koldstore-catalog",
+    "crates/pg_koldstore",
+    "benchmarks",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/pg-koldstore/pg-kalam"
+rust-version = "1.80"
+
+[workspace.dependencies]
+koldstore-core = { path = "crates/koldstore-core" }
+koldstore-manifest = { path = "crates/koldstore-manifest" }
+koldstore-storage = { path = "crates/koldstore-storage" }
+koldstore-parquet = { path = "crates/koldstore-parquet" }
+koldstore-merge = { path = "crates/koldstore-merge" }
+koldstore-catalog = { path = "crates/koldstore-catalog" }
+
+anyhow = "1"
+arrow = { version = "53", default-features = false, features = ["ipc"] }
+async-trait = "0.1"
+base64 = "0.22"
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+futures-util = "0.3"
+hex = "0.4"
+object_store = { version = "0.11", features = ["aws", "azure", "gcp"] }
+parquet = { version = "53", features = ["async", "object_store"] }
+pgrx = { version = "0.18.0", default-features = false }
+postgres-types = "0.2"
+proptest = "1"
+rand = "0.8"
+schemars = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "fs"] }
+tokio-postgres = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+correctness = "deny"
+suspicious = "warn"
+complexity = "warn"
+perf = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+debug = true
+strip = false

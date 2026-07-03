@@ -1,4 +1,4 @@
-# Specification Quality Checklist: pg-kalam Hot/Cold Storage Extension
+# Specification Quality Checklist: koldstore Hot/Cold Storage Extension
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning  
 **Created**: 2026-07-02  
@@ -31,12 +31,21 @@
 
 ## Validation Notes
 
-**Iteration 1 (2026-07-02)**: All checklist items pass.
+**Iteration 1 (2026-07-02)**: Initial checklist items pass.
 
 - PostgreSQL and object storage references are domain requirements (the product is a database extension), not implementation stack choices (pgrx/Rust/crate names intentionally omitted).
 - kalamdb compatibility is specified as artifact/format interoperability—a business requirement for existing kalam deployments.
 - Modular decomposition (FR-034) describes testability boundaries, not code structure.
-- Out-of-scope section explicitly excludes RocksDB, DataFusion, and Raft per user input.
+- Out-of-scope section explicitly excludes RocksDB, Raft, custom table access method, `CREATE TABLE ... USING koldstore`, and full DataFusion dependency in MVP.
+
+**Iteration 2 (2026-07-03)**: Architecture corrections applied after PostgreSQL extension review.
+
+- Greenfield and existing tables use normal `CREATE TABLE` plus `koldstore.migrate_table`.
+- Hot heap keeps one row per primary key; app primary key is preserved.
+- `_commit_seq` is the external change-feed cursor; `_seq` is not a commit-order guarantee.
+- Cold path uses direct Arrow/Parquet/object_store reader in MVP.
+- Cold-only UPDATE requires explicit hydrate/update API; standard SQL cold-only UPDATE is out of MVP.
+- Demigration rehydrates current hot+cold data by default.
 
 ## Notes
 

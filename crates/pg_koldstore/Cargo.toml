@@ -1,0 +1,38 @@
+[package]
+name = "pg_koldstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = ["pg16"]
+pg15 = []
+pg16 = ["dep:pgrx", "pgrx/pg16"]
+pg17 = []
+pg_test = []
+
+[dependencies]
+chrono.workspace = true
+koldstore-catalog.workspace = true
+koldstore-core.workspace = true
+koldstore-manifest.workspace = true
+koldstore-merge.workspace = true
+koldstore-parquet.workspace = true
+koldstore-storage.workspace = true
+pgrx = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[lints]
+workspace = true
