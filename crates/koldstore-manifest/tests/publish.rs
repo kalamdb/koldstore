@@ -24,6 +24,7 @@ fn publish_plan_uses_temp_final_then_manifest_visibility_boundary() {
                 temp: plan.temp_path.clone(),
                 final_path: plan.final_path.clone(),
             },
+            PublishAction::ValidateFinal(plan.final_path.clone()),
             PublishAction::DeleteTemp(plan.temp_path.clone()),
             PublishAction::PutManifest(plan.manifest_path.clone()),
         ]

@@ -1,7 +1,6 @@
 #[test]
 fn spec_edge_cases_have_regression_coverage_markers() {
     let spec = include_str!("../../../specs/001-pg-kalam-hot-cold-storage/spec.md");
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
 
     for edge_case in [
         "Migrating without a primary key",
@@ -23,17 +22,22 @@ fn spec_edge_cases_have_regression_coverage_markers() {
         assert!(spec.contains(edge_case), "missing edge case: {edge_case}");
     }
 
-    for implementation_marker in [
-        "managed tables require a PRIMARY KEY",
-        "unsupported PostgreSQL type",
-        "FK constraints are hot-only",
-        "standard SQL cold-only UPDATE affects 0 rows in MVP",
-        "archive-detach mode",
-        "EXPORT TABLE",
-    ] {
-        assert!(
-            sql.contains(implementation_marker),
-            "missing implementation marker: {implementation_marker}"
-        );
-    }
+    assert!(!pg_koldstore::migrate::constraints::primary_key_shape_supported(&[]));
+    assert!(!pg_koldstore::migrate::constraints::type_supported("bytea"));
+    assert!(!pg_koldstore::migrate::constraints::fk_policy_allowed(
+        true, true, false
+    ));
+    assert_eq!(
+        pg_koldstore::migrate::rehydrate::DemigrateOptions {
+            rehydrate: false,
+            drop_cold: false,
+            drop_system_columns: false,
+        }
+        .mode(),
+        pg_koldstore::migrate::rehydrate::DemigrationMode::ArchiveDetach
+    );
+    assert!(matches!(
+        pg_koldstore::sql::ops::classify_command("EXPORT TABLE app.items"),
+        Some(pg_koldstore::sql::ops::OpsCommand::ExportTable { .. })
+    ));
 }

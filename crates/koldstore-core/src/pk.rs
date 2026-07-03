@@ -141,11 +141,26 @@ impl LogicalPk {
 }
 
 /// Stable SHA-256 hash of a logical primary key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StablePkHash(String);
 
 impl StablePkHash {
+    /// Creates a stable PK hash from an existing non-empty digest string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the hash is empty or whitespace-only.
+    pub fn from_hex(value: impl AsRef<str>) -> Result<Self> {
+        let trimmed = value.as_ref().trim();
+        if trimmed.is_empty() {
+            return Err(KoldstoreError::InvalidPrimaryKey(
+                "primary-key hash cannot be empty".to_string(),
+            ));
+        }
+        Ok(Self(trimmed.to_string()))
+    }
+
     /// Computes the stable hex hash for a logical PK.
     #[must_use]
     pub fn compute(pk: &LogicalPk) -> Self {

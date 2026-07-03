@@ -8,6 +8,9 @@ members = [
     "crates/koldstore-catalog",
     "crates/pg_koldstore",
     "benchmarks",
+    "tests/e2e",
+    "tests/memory",
+    "tests/compat",
 ]
 resolver = "2"
 
@@ -16,7 +19,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/pg-koldstore/pg-kalam"
-rust-version = "1.80"
+rust-version = "1.96"
 
 [workspace.dependencies]
 koldstore-core = { path = "crates/koldstore-core" }
@@ -27,26 +30,26 @@ koldstore-merge = { path = "crates/koldstore-merge" }
 koldstore-catalog = { path = "crates/koldstore-catalog" }
 
 anyhow = "1"
-arrow = { version = "53", default-features = false, features = ["ipc"] }
+arrow = { version = "59.0.0", default-features = false, features = ["ipc"] }
 async-trait = "0.1"
 base64 = "0.22"
 bytes = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-criterion = { version = "0.5", features = ["html_reports"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
+criterion = { version = "0.8.2", features = ["html_reports"] }
 futures-util = "0.3"
 hex = "0.4"
-object_store = { version = "0.11", features = ["aws", "azure", "gcp"] }
-parquet = { version = "53", features = ["async", "object_store"] }
-pgrx = { version = "0.18.0", default-features = false }
+object_store = { version = "0.14.0", features = ["aws", "azure", "gcp"] }
+parquet = { version = "59.0.0", features = ["async", "object_store"] }
+pgrx = { version = "0.19.1", default-features = false }
 postgres-types = "0.2"
 proptest = "1"
-rand = "0.8"
-schemars = "0.8"
+rand = "0.10.2"
+schemars = "1.2.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-sha2 = "0.10"
+sha2 = "0.11.0"
 tempfile = "3"
-thiserror = "1"
+thiserror = "2.0.18"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "fs"] }
 tokio-postgres = "0.7"
 tracing = "0.1"

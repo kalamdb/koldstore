@@ -7,5 +7,6 @@ fn security_hardening_contract_covers_credentials_gucs_rls_and_sql_safety() {
     assert!(sql.contains("REVOKE ALL ON koldstore.storage FROM PUBLIC"));
     assert!(privileges.contains("internal_system_write"));
     assert!(rls.contains("fail closed") || rls.contains("fail-closed"));
-    assert!(sql.contains("format('ALTER TABLE %s"));
+    assert!(!sql.contains("EXECUTE format"));
+    assert!(!sql.contains("TO PROGRAM"));
 }

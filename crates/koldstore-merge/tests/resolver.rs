@@ -44,8 +44,35 @@ fn resolver_selects_newest_row_per_pk_and_hot_wins_exact_tie() {
     );
 
     assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].source, koldstore_merge::RowSource::Hot);
+    assert_eq!(rows[0].seq.get(), 10);
+    assert_eq!(rows[0].commit_seq.get(), 10);
     assert_eq!(rows[0].row_image, json!({"id": 1, "body": "hot"}));
+    assert_eq!(rows[1].source, koldstore_merge::RowSource::Hot);
+    assert_eq!(rows[1].seq.get(), 5);
     assert_eq!(rows[1].row_image, json!({"id": 2, "body": "hot-2"}));
+}
+
+#[test]
+fn resolver_emits_at_most_one_visible_winner_per_pk() {
+    let rows = resolve_rows(
+        &[hot(1, 12, 12, false, "hot"), hot(2, 1, 1, false, "hot-2")],
+        &[
+            cold(1, 10, 10, false, "old-1"),
+            cold(1, 11, 11, false, "newer-cold-1"),
+            cold(2, 2, 2, false, "cold-2"),
+        ],
+    );
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.pk_json.clone())
+            .collect::<Vec<_>>(),
+        vec![json!({"id": 1}), json!({"id": 2})]
+    );
+    assert_eq!(rows[0].row_image, json!({"id": 1, "body": "hot"}));
+    assert_eq!(rows[1].row_image, json!({"id": 2, "body": "cold-2"}));
 }
 
 #[test]

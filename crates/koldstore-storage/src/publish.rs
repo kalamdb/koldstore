@@ -23,6 +23,7 @@ impl ConditionalPut {
 pub enum PublishAction {
     PutTemp(String),
     CopyTempToFinal { temp: String, final_path: String },
+    ValidateFinal(String),
     DeleteTemp(String),
     PutManifest(String),
     Rename { from: String, to: String },
@@ -41,6 +42,7 @@ pub fn backend_safe_publish_actions(
             temp: temp_path.to_string(),
             final_path: final_path.to_string(),
         },
+        PublishAction::ValidateFinal(final_path.to_string()),
         PublishAction::DeleteTemp(temp_path.to_string()),
         PublishAction::PutManifest(manifest_path.to_string()),
     ]

@@ -6,6 +6,6 @@ pub mod resolver;
 pub mod tombstone;
 
 pub use changelog::{changes_since, ChangeCursor, ChangeGap};
-pub use quals::{classify_predicates, ClassifiedPredicates};
+pub use quals::{build_pruning_plan, classify_predicates, ClassifiedPredicates, PruningPlan};
 pub use resolver::{resolve_rows, ResolvedRow, RowSource};
 pub use tombstone::{tombstone_required, TombstoneDecision};

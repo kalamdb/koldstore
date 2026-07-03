@@ -1,7 +1,22 @@
 #[test]
 fn migration_sql_rejects_tables_without_primary_key() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
+    assert!(!pg_koldstore::migrate::constraints::primary_key_shape_supported(&[]));
+    assert!(!pg_koldstore::migrate::constraints::primary_key_shape_supported(&[""]));
+    assert!(pg_koldstore::migrate::constraints::primary_key_shape_supported(&["id"]));
+}
 
-    assert!(sql.contains("managed tables require a PRIMARY KEY"));
-    assert!(sql.contains("idx.indisprimary"));
+#[test]
+fn migration_validation_requires_named_primary_key_columns() {
+    let mut input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    input.primary_key.clear();
+    assert!(input.validate().is_err());
+
+    input.primary_key = vec![" ".to_string()];
+    assert!(input.validate().is_err());
+
+    input.primary_key = vec!["missing".to_string()];
+    assert!(input.validate().is_err());
+
+    input.primary_key = vec!["id".to_string()];
+    assert_eq!(input.validate().unwrap().primary_key, vec!["id"]);
 }

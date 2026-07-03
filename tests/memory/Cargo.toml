@@ -1,0 +1,17 @@
+[package]
+name = "koldstore-memory-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[test]]
+name = "merge_scan_leak"
+path = "merge_scan_leak.rs"
+
+[[test]]
+name = "allocation_growth"
+path = "allocation_growth.rs"
+
+[lints]
+workspace = true

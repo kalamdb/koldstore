@@ -1,5 +1,7 @@
 //! Parquet footer summaries.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Min/max stats for one column.
@@ -25,6 +27,27 @@ pub struct FooterSummary {
     pub row_groups: Vec<RowGroupStats>,
 }
 
+/// Segment-level metadata extracted from a written Parquet footer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SegmentFooterMetadata {
+    /// Minimum `_seq`.
+    pub min_seq: i64,
+    /// Maximum `_seq`.
+    pub max_seq: i64,
+    /// Minimum `_commit_seq`.
+    pub min_commit_seq: i64,
+    /// Maximum `_commit_seq`.
+    pub max_commit_seq: i64,
+    /// Segment row count.
+    pub row_count: u64,
+    /// Final object byte size.
+    pub byte_size: u64,
+    /// Schema version written into the segment.
+    pub schema_version: u32,
+    /// Column stats used for manifest and local pruning metadata.
+    pub column_stats: BTreeMap<String, ColumnStats>,
+}
+
 impl FooterSummary {
     /// Returns segment-level sequence and commit bounds from row groups.
     #[must_use]
@@ -42,5 +65,30 @@ impl FooterSummary {
             .filter_map(|rg| rg.max_commit_seq)
             .max()?;
         Some((min_seq, max_seq, min_commit_seq, max_commit_seq))
+    }
+}
+
+impl SegmentFooterMetadata {
+    /// Extracts segment metadata from footer row-group stats.
+    #[must_use]
+    pub fn from_footer(
+        footer: &FooterSummary,
+        row_count: u64,
+        byte_size: u64,
+        schema_version: u32,
+        column_stats: Vec<(String, ColumnStats)>,
+    ) -> Option<Self> {
+        let (min_seq, max_seq, min_commit_seq, max_commit_seq) = footer.segment_bounds()?;
+
+        Some(Self {
+            min_seq,
+            max_seq,
+            min_commit_seq,
+            max_commit_seq,
+            row_count,
+            byte_size,
+            schema_version,
+            column_stats: column_stats.into_iter().collect(),
+        })
     }
 }

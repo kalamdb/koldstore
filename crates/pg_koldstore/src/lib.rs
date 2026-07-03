@@ -14,18 +14,33 @@ pub mod sql;
 /// Extension version exposed by SQL.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 ::pgrx::pg_module_magic!();
+
+/// Extension-owned SQL schema for pgrx-generated functions.
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[pgrx::pg_schema]
+mod koldstore {}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+pgrx::extension_sql_file!(
+    "../../../sql/koldstore--0.1.0.sql",
+    name = "koldstore_catalog",
+    bootstrap
+);
 
 /// Returns the extension version.
 #[must_use]
-#[cfg_attr(feature = "pg16", pgrx::pg_extern(name = "koldstore_version"))]
+#[cfg_attr(
+    any(feature = "pg15", feature = "pg16", feature = "pg17"),
+    pgrx::pg_extern(name = "koldstore_version")
+)]
 pub fn koldstore_version() -> &'static str {
     VERSION
 }
 
 /// Initializes extension hooks when loaded by PostgreSQL.
-#[cfg(feature = "pg16")]
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 #[no_mangle]
 pub extern "C" fn _PG_init() {
     observability::init_tracing();

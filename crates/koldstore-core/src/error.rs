@@ -46,6 +46,15 @@ pub enum KoldstoreError {
     #[error("unsupported table kind: {0}")]
     UnsupportedTableKind(String),
 
+    /// A SQL identifier-like value was invalid.
+    #[error("invalid {kind}: {value}")]
+    InvalidIdentifier {
+        /// Identifier kind.
+        kind: &'static str,
+        /// Rejected value.
+        value: String,
+    },
+
     /// A primary-key definition or value set is invalid.
     #[error("invalid primary key: {0}")]
     InvalidPrimaryKey(String),

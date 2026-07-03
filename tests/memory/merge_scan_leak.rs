@@ -10,8 +10,12 @@ fn merge_scan_leak_probe_detects_retained_growth() {
         allocator_bytes: Some(128),
     };
     let after = memory_probe::MemorySnapshot::empty();
-    let allocation = memory_probe::PeakAllocation { before, peak, after };
+    let allocation = memory_probe::PeakAllocation {
+        before,
+        peak,
+        after,
+    };
 
     assert_eq!(allocation.retained_growth_bytes(), 0);
+    assert!(memory_probe::repeated_scan_releases_resources([allocation]));
 }
-

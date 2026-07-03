@@ -7,5 +7,8 @@ fn quickstart_matrix_covers_all_documented_scenarios() {
     let scenario_count = quickstart.matches("## Scenario ").count();
 
     assert!(scenario_count >= 10);
-    assert_eq!(common::local_pg_matrix().map(|target| target.version), [15, 16, 17]);
+    assert_eq!(
+        common::local_pg_matrix().map(|target| target.version),
+        [15, 16, 17]
+    );
 }

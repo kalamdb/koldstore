@@ -1,6 +1,6 @@
 use koldstore_core::{
     ColdRow, ColumnClass, CommitSeq, HotRow, LogicalPk, PkColumn, PkValue, Predicate,
-    PredicateClass, PredicateValue, RowOperation, SeqId, StablePkHash, TableKind,
+    PredicateClass, PredicateValue, RowOperation, SeqId, StablePkHash, TableKind, TableName,
 };
 use serde_json::json;
 
@@ -28,6 +28,20 @@ fn table_kind_parses_contract_names() {
     assert_eq!("shared".parse::<TableKind>().unwrap(), TableKind::Shared);
     assert_eq!("user".parse::<TableKind>().unwrap(), TableKind::User);
     assert!("table_am".parse::<TableKind>().is_err());
+}
+
+#[test]
+fn table_name_newtype_normalizes_and_rejects_unsafe_names() {
+    let table = TableName::parse(" app.items ").unwrap();
+    assert_eq!(table.as_str(), "app.items");
+    assert_eq!(table.schema(), Some("app"));
+    assert_eq!(table.relation(), "items");
+    assert_eq!(table.to_string(), "app.items");
+
+    assert!(TableName::parse("").is_err());
+    assert!(TableName::parse("app.items.extra").is_err());
+    assert!(TableName::parse("app.items;drop table app.items").is_err());
+    assert!(TableName::parse("not safe").is_err());
 }
 
 #[test]

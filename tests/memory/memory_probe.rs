@@ -52,3 +52,10 @@ impl PeakAllocation {
     }
 }
 
+/// Returns true when repeated scan probes release all resources by the final snapshot.
+#[must_use]
+pub fn repeated_scan_releases_resources<const N: usize>(allocations: [PeakAllocation; N]) -> bool {
+    allocations
+        .into_iter()
+        .all(|allocation| allocation.retained_growth_bytes() == 0)
+}

@@ -1,3 +1,4 @@
+use koldstore_core::{ScopeKey, TableKind};
 use pg_koldstore::security::scope;
 
 #[test]
@@ -7,4 +8,21 @@ fn missing_user_scope_fails_closed() {
         scope::require_user_scope(Some(" user-a ")).unwrap(),
         "user-a"
     );
+}
+
+#[test]
+fn planner_requires_scope_before_user_table_read() {
+    assert_eq!(
+        pg_koldstore::hooks::planner::plan_scope_key_for_read(TableKind::Shared, None).unwrap(),
+        None
+    );
+
+    let missing =
+        pg_koldstore::hooks::planner::plan_scope_key_for_read(TableKind::User, None).unwrap_err();
+    assert_eq!(missing.to_string(), "koldstore.user_id is not set");
+
+    let planned =
+        pg_koldstore::hooks::planner::plan_scope_key_for_read(TableKind::User, Some(" user-a "))
+            .unwrap();
+    assert_eq!(planned, Some(ScopeKey::new("user-a").unwrap()));
 }

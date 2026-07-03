@@ -41,6 +41,7 @@ fn backend_safe_publish_actions_never_use_rename() {
                 temp: "scope/.tmp/writer/batch-0.parquet.tmp".to_string(),
                 final_path: "scope/batch-0.parquet".to_string(),
             },
+            PublishAction::ValidateFinal("scope/batch-0.parquet".to_string()),
             PublishAction::DeleteTemp("scope/.tmp/writer/batch-0.parquet.tmp".to_string()),
             PublishAction::PutManifest("scope/manifest.json".to_string()),
         ]

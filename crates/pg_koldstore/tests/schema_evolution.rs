@@ -4,6 +4,7 @@ fn schema_evolution_contract_covers_add_column_and_type_rejection() {
     let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
 
     assert!(spec.contains("schema"));
-    assert!(sql.contains("unsupported PostgreSQL type"));
     assert!(sql.contains("schema_version"));
+    assert!(!pg_koldstore::migrate::constraints::type_supported("bytea"));
+    assert!(pg_koldstore::migrate::constraints::type_supported("jsonb"));
 }

@@ -2,5 +2,6 @@ comment = 'pg-koldstore hot/cold storage extension'
 default_version = '0.1.0'
 module_pathname = '$libdir/pg_koldstore'
 relocatable = false
-schema = koldstore
+superuser = true
+trusted = false
 

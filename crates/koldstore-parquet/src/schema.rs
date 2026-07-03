@@ -40,6 +40,24 @@ impl PgColumn {
         }
     }
 
+    /// Creates a column from PostgreSQL catalog type text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::UnsupportedType`] when the type is outside the
+    /// pg-koldstore MVP Arrow/Parquet support matrix.
+    pub fn from_catalog(
+        name: impl Into<String>,
+        type_name: &str,
+        nullable: bool,
+    ) -> Result<Self, SchemaError> {
+        Ok(Self::new(
+            name,
+            PgType::from_postgres_name(type_name)?,
+            nullable,
+        ))
+    }
+
     /// Converts this column to an Arrow field.
     #[must_use]
     pub fn to_arrow_field(&self) -> Field {
@@ -48,6 +66,28 @@ impl PgColumn {
 }
 
 impl PgType {
+    /// Parses PostgreSQL catalog type names and common aliases.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaError::UnsupportedType`] for unsupported or blank types.
+    pub fn from_postgres_name(type_name: &str) -> Result<Self, SchemaError> {
+        let normalized = normalize_type_name(type_name);
+        match normalized.as_str() {
+            "bool" | "boolean" => Ok(Self::Bool),
+            "int2" | "smallint" => Ok(Self::Int2),
+            "int4" | "integer" => Ok(Self::Int4),
+            "int8" | "bigint" => Ok(Self::Int8),
+            "float4" | "real" => Ok(Self::Float4),
+            "float8" | "double precision" => Ok(Self::Float8),
+            "text" | "varchar" | "character varying" => Ok(Self::Text),
+            "uuid" => Ok(Self::Uuid),
+            "jsonb" => Ok(Self::Jsonb),
+            "timestamptz" | "timestamp with time zone" => Ok(Self::Timestamptz),
+            _ => Err(SchemaError::UnsupportedType(normalized)),
+        }
+    }
+
     /// Returns the Arrow type for this supported PostgreSQL type.
     #[must_use]
     pub const fn arrow_type(&self) -> DataType {
@@ -112,4 +152,13 @@ pub fn build_arrow_schema(columns: &[PgColumn]) -> Result<Schema, SchemaError> {
     fields.push(SystemColumn::CommitSeq.field());
     fields.push(SystemColumn::Deleted.field());
     Ok(Schema::new(fields))
+}
+
+fn normalize_type_name(type_name: &str) -> String {
+    type_name
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }

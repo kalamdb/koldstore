@@ -1,6 +1,56 @@
 #[test]
 fn demigration_sql_deactivates_managed_metadata() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
-    assert!(sql.contains("SET active = false"));
-    assert!(sql.contains("demigration disables KoldstoreMergeScan"));
+    use pg_koldstore::migrate::rehydrate::{plan_catalog_deactivation, plan_flush_deactivation};
+
+    let catalog = plan_catalog_deactivation(42).unwrap();
+    let flush = plan_flush_deactivation(42).unwrap();
+
+    assert_eq!(
+        catalog.sql,
+        "UPDATE system.schemas SET active = false WHERE table_oid = $1 AND active = true"
+    );
+    assert_eq!(
+        flush.sql,
+        "UPDATE system.jobs SET status = 'cancelled', updated_at = now() WHERE table_oid = $1 AND status IN ('pending', 'running')"
+    );
+}
+
+#[test]
+fn migration_rollback_cleanup_removes_partial_catalog_rows_and_system_columns() {
+    use pg_koldstore::migrate::rollback::RollbackCleanup;
+    use pg_koldstore::migrate::QualifiedTableName;
+    use pg_koldstore::spi::SpiAccess;
+
+    let table = QualifiedTableName::parse("app.items").unwrap();
+    let cleanup = RollbackCleanup::for_table(
+        table,
+        42,
+        vec![
+            "_seq".to_string(),
+            "_commit_seq".to_string(),
+            "_deleted".to_string(),
+        ],
+    );
+
+    let plan = cleanup.plan().unwrap();
+
+    assert_eq!(plan.table_oid, 42);
+    assert!(plan
+        .statements
+        .iter()
+        .all(|statement| statement.access == SpiAccess::ReadWrite));
+    assert_eq!(
+        plan.statements
+            .iter()
+            .map(|statement| statement.sql.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "DELETE FROM koldstore.row_events WHERE table_oid = $1",
+            "DELETE FROM koldstore.cold_pk_hints WHERE table_oid = $1",
+            "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
+            "DELETE FROM koldstore.manifest WHERE table_oid = $1",
+            "DELETE FROM system.schemas WHERE table_oid = $1",
+            "ALTER TABLE ONLY \"app\".\"items\" DROP COLUMN IF EXISTS \"_seq\", DROP COLUMN IF EXISTS \"_commit_seq\", DROP COLUMN IF EXISTS \"_deleted\""
+        ]
+    );
 }

@@ -1,16 +1,38 @@
 #[test]
 fn migration_sql_rejects_unsupported_generated_and_expression_shapes() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
-
-    for needle in [
-        "unsupported PostgreSQL type",
-        "att.attgenerated <> ''",
-        "expression primary keys are not supported",
-        "key_position.attnum = 0",
-    ] {
-        assert!(
-            sql.contains(needle),
-            "missing migration validation fragment: {needle}"
-        );
+    for supported in ["boolean", "integer", "bigint", "text", "uuid", "jsonb"] {
+        assert!(pg_koldstore::migrate::constraints::type_supported(
+            supported
+        ));
     }
+    for unsupported in ["bytea", "inet", "numeric", "geometry"] {
+        assert!(!pg_koldstore::migrate::constraints::type_supported(
+            unsupported
+        ));
+    }
+}
+
+#[test]
+fn migration_validation_rejects_unsupported_generated_and_expression_shapes() {
+    let mut input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    input
+        .columns
+        .push(pg_koldstore::migrate::constraints::ColumnDefinition::new(
+            "search", "tsvector", true,
+        ));
+    assert!(input.validate().is_err());
+
+    input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    input.columns[0].generated = true;
+    assert!(input.validate().is_err());
+
+    input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    input.expression_primary_key = true;
+    assert!(input.validate().is_err());
+
+    input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    input
+        .indexes
+        .push(pg_koldstore::migrate::constraints::IndexDefinition::expression("lower_title_idx"));
+    assert!(input.validate().is_err());
 }

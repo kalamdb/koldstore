@@ -34,7 +34,8 @@ async fn main() -> Result<()> {
     let _suite = suite::FULL_SUITE;
     let _verdicts = (
         verdict::hot_dml_within_threshold(1.0, 1.05),
-        verdict::pk_lookup_pruning_within_threshold(pruning.skipped_ratio()),
+        pruning.meets_pk_lookup_target()
+            && verdict::pk_lookup_pruning_within_threshold(pruning.skipped_ratio()),
     );
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())

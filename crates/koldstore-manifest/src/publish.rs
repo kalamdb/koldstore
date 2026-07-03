@@ -36,14 +36,10 @@ impl ManifestPublishPlan {
     /// Returns ordered publish actions. Manifest write is the visibility boundary.
     #[must_use]
     pub fn actions(&self) -> Vec<koldstore_storage::PublishAction> {
-        vec![
-            koldstore_storage::PublishAction::PutTemp(self.temp_path.clone()),
-            koldstore_storage::PublishAction::CopyTempToFinal {
-                temp: self.temp_path.clone(),
-                final_path: self.final_path.clone(),
-            },
-            koldstore_storage::PublishAction::DeleteTemp(self.temp_path.clone()),
-            koldstore_storage::PublishAction::PutManifest(self.manifest_path.clone()),
-        ]
+        koldstore_storage::backend_safe_publish_actions(
+            &self.temp_path,
+            &self.final_path,
+            &self.manifest_path,
+        )
     }
 }

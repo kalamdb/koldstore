@@ -35,7 +35,7 @@ pub fn changes_since(
         .filter(|event| event.commit_seq.get() > cursor.since_commit_seq)
         .cloned()
         .collect();
-    selected.sort_by_key(|event| event.commit_seq);
+    selected.sort_by_key(|event| (event.commit_seq, event.seq));
     selected.truncate(cursor.limit);
     Ok(selected)
 }

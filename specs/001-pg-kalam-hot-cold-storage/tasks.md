@@ -387,7 +387,7 @@
 - [X] T193 [P] Add developer architecture notes explaining differences from kalamdb RocksDB/Raft/DataFusion internals and why pg-koldstore uses heap plus Custom Scan in `/Users/jamal/git/pg-kalam/docs/architecture.md`
 - [X] T194 [P] Add performance profiling guide with tracing span names, benchmark commands, heap baseline comparison, and investigation workflow in `/Users/jamal/git/pg-kalam/docs/performance.md`
 - [X] T195 [P] Add release checklist covering build, install, extension upgrade SQL, PG 15/16/17 matrix, MinIO integration, benchmark thresholds, memory/leak gates, docs, and backup warnings in `/Users/jamal/git/pg-kalam/docs/release-checklist.md`
-- [X] T196 Run `cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features`, `cargo test --workspace`, `cargo pgrx test`, `tests/e2e/run_pg_matrix.sh`, `tests/memory/run_memory_checks.sh`, and `cargo run -p pg-koldstore-benchmarks -- --suite all` and record results in `/Users/jamal/git/pg-kalam/docs/verification-results.md`
+- [ ] T196 Run `cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features`, `cargo test --workspace`, `cargo pgrx test`, `tests/e2e/run_pg_matrix.sh`, `tests/memory/run_memory_checks.sh`, and `cargo run -p pg-koldstore-benchmarks -- --suite all` and record results in `/Users/jamal/git/pg-kalam/docs/verification-results.md`
 
 ---
 

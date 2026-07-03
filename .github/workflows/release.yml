@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [15, 16, 17]
+    env:
+      PG_VER: ${{ matrix.pg }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install PostgreSQL ${{ matrix.pg }}
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            postgresql-${PG_VER} \
+            postgresql-server-dev-${PG_VER}
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} /usr/lib/postgresql/${PG_VER}/bin/pg_config
+
+      - name: Package extension for PostgreSQL ${{ matrix.pg }}
+        run: |
+          cargo pgrx package \
+            -p pg_koldstore \
+            --no-default-features \
+            --features pg${PG_VER} \
+            --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
+
+      - name: Archive build artifacts
+        run: |
+          PKG_DIR="target/release/koldstore-pg${PG_VER}"
+          tar -czf "koldstore-pg${PG_VER}-linux-x86_64.tar.gz" -C "${PKG_DIR}" .
+
+      - name: Upload extension package
+        uses: actions/upload-artifact@v4
+        with:
+          name: koldstore-pg${{ matrix.pg }}-linux-x86_64
+          path: koldstore-pg${{ matrix.pg }}-linux-x86_64.tar.gz
+          retention-days: 90
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: koldstore-pg*
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true

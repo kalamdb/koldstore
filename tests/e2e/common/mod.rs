@@ -17,6 +17,7 @@ pub struct PgTarget {
 impl PgTarget {
     /// Builds a libpq connection string.
     #[must_use]
+    #[allow(dead_code)]
     pub fn connection_string(&self) -> String {
         format!(
             "host=127.0.0.1 port={} user=postgres password=postgres dbname=koldstore",
@@ -29,9 +30,18 @@ impl PgTarget {
 #[must_use]
 pub fn local_pg_matrix() -> [PgTarget; 3] {
     [
-        PgTarget { version: 15, port: 5515 },
-        PgTarget { version: 16, port: 5516 },
-        PgTarget { version: 17, port: 5517 },
+        PgTarget {
+            version: 15,
+            port: 5515,
+        },
+        PgTarget {
+            version: 16,
+            port: 5516,
+        },
+        PgTarget {
+            version: 17,
+            port: 5517,
+        },
     ]
 }
 
@@ -40,6 +50,7 @@ pub fn local_pg_matrix() -> [PgTarget; 3] {
 /// # Errors
 ///
 /// Returns an error when the target cannot be reached.
+#[allow(dead_code)]
 pub async fn connect(target: &PgTarget) -> Result<Client> {
     let (client, connection) = tokio_postgres::connect(&target.connection_string(), NoTls)
         .await
@@ -55,6 +66,7 @@ pub async fn connect(target: &PgTarget) -> Result<Client> {
 /// # Errors
 ///
 /// Returns an error if the target is not ready before the retry budget is exhausted.
+#[allow(dead_code)]
 pub async fn wait_for_postgres(target: &PgTarget) -> Result<Client> {
     let mut last_error = None;
     for _ in 0..30 {
@@ -63,9 +75,8 @@ pub async fn wait_for_postgres(target: &PgTarget) -> Result<Client> {
             Err(error) => {
                 last_error = Some(error);
                 tokio::time::sleep(Duration::from_secs(1)).await;
-            },
+            }
         }
     }
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("postgres did not become ready")))
 }
-

@@ -1,6 +1,28 @@
 #[test]
 fn sql_exposes_update_row_lookup_cold_api() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
-    assert!(sql.contains("CREATE OR REPLACE FUNCTION koldstore.update_row"));
-    assert!(sql.contains("lookup_cold boolean DEFAULT false"));
+    use koldstore_core::TableName;
+    use pg_koldstore::sql::dml::{plan_update_row, ColdUpdateOutcome};
+
+    let request = pg_koldstore::sql::dml::UpdateRowRequest {
+        table_name: TableName::parse("app.items").unwrap(),
+        pk_json: serde_json::json!({"id": 1}),
+        patch_json: serde_json::json!({"title": "new"}),
+        lookup_cold: true,
+    };
+
+    assert!(pg_koldstore::sql::dml::COLD_DML_FUNCTIONS.contains(&"koldstore.update_row"));
+    assert!(request.cold_lookup_allowed());
+
+    let without_lookup = pg_koldstore::sql::dml::UpdateRowRequest {
+        lookup_cold: false,
+        ..request.clone()
+    };
+    assert_eq!(
+        plan_update_row(&without_lookup, false, true),
+        ColdUpdateOutcome::NoOpColdLookupDisabled
+    );
+    assert_eq!(
+        plan_update_row(&request, false, true),
+        ColdUpdateOutcome::ColdLookupAndUpdate
+    );
 }

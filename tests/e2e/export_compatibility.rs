@@ -1,7 +1,8 @@
 #[test]
 fn export_contract_mentions_kalamdb_compatible_manifest_and_parquet() {
-    let sql = include_str!("../../sql/koldstore--0.1.0.sql");
+    let export = pg_koldstore::sql::ops::plan_koldstore_exec("EXPORT TABLE app.items").unwrap();
 
-    assert!(sql.contains("koldstore_exec('EXPORT TABLE ...')"));
-    assert!(sql.contains("kalamdb-compatible manifest and Parquet archive"));
+    assert_eq!(export.archive_manifest_path, "app/items/manifest.json");
+    assert!(export.statement.sql.contains("koldstore.manifest"));
+    assert!(export.statement.sql.contains("koldstore.cold_segments"));
 }

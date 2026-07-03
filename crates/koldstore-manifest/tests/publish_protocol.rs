@@ -9,6 +9,10 @@ fn publish_protocol_commits_manifest_after_final_object() {
 
     assert!(matches!(actions[0], PublishAction::PutTemp(_)));
     assert!(matches!(actions[1], PublishAction::CopyTempToFinal { .. }));
-    assert!(matches!(actions[2], PublishAction::DeleteTemp(_)));
-    assert!(matches!(actions[3], PublishAction::PutManifest(_)));
+    assert!(matches!(actions[2], PublishAction::ValidateFinal(_)));
+    assert!(matches!(actions[3], PublishAction::DeleteTemp(_)));
+    assert!(matches!(actions[4], PublishAction::PutManifest(_)));
+    assert!(actions
+        .iter()
+        .all(|action| !matches!(action, PublishAction::Rename { .. })));
 }

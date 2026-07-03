@@ -6,8 +6,8 @@ pub mod reader;
 pub mod schema;
 pub mod writer;
 
-pub use footer::{ColumnStats, FooterSummary, RowGroupStats};
+pub use footer::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
 pub use prune::{PruneDecision, RowGroupPruner};
-pub use reader::{ParquetReadOptions, RecordBatchFileStream};
+pub use reader::{ParquetReadOptions, ParquetReadRequest, RecordBatchFileStream};
 pub use schema::{build_arrow_schema, PgColumn, PgType, SchemaError, SystemColumn};
-pub use writer::{ParquetSegmentWriter, SegmentWritePlan, WriterOptions};
+pub use writer::{ParquetSegmentWriter, SegmentMetadataInput, SegmentWritePlan, WriterOptions};

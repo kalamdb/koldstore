@@ -1,6 +1,21 @@
 #[test]
 fn sql_exposes_hydrate_pk_api() {
-    let sql = include_str!("../../../sql/koldstore--0.1.0.sql");
-    assert!(sql.contains("CREATE OR REPLACE FUNCTION koldstore.hydrate_pk"));
-    assert!(sql.contains("lookup_cold"));
+    use koldstore_core::TableName;
+    use pg_koldstore::sql::dml::{plan_hydrate_pk, HydratePkRequest};
+
+    let contract =
+        include_str!("../../../specs/001-pg-kalam-hot-cold-storage/contracts/sql-api.md");
+    let request = HydratePkRequest {
+        table_name: TableName::parse("app.items").unwrap(),
+        pk_json: serde_json::json!({"id": 1}),
+    };
+
+    assert!(pg_koldstore::sql::dml::COLD_DML_FUNCTIONS.contains(&"koldstore.hydrate_pk"));
+    assert!(contract.contains("hydrate_pk"));
+    assert!(contract.contains("reads cold only for the requested PK"));
+
+    let result = plan_hydrate_pk(&request, true);
+    assert_eq!(result.affected_rows, 1);
+    assert!(result.cold_lookup_performed);
+    assert!(!result.tombstone_written);
 }

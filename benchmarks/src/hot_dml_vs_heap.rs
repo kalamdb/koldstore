@@ -24,3 +24,21 @@ impl HotDmlScenario {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::TableFlavor;
+
+    #[test]
+    fn default_hot_dml_scenario_compares_heap_and_managed_tables() {
+        let scenario = HotDmlScenario::default_tables();
+
+        assert_eq!(NAME, "hot_dml_vs_heap");
+        assert_eq!(scenario.heap.flavor, TableFlavor::Heap);
+        assert_eq!(scenario.managed.flavor, TableFlavor::Koldstore);
+        assert_ne!(scenario.heap.name, scenario.managed.name);
+        assert!(scenario.heap.create_table_sql().contains("PRIMARY KEY"));
+        assert!(scenario.managed.create_table_sql().contains("PRIMARY KEY"));
+    }
+}

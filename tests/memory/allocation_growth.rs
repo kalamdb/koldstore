@@ -8,5 +8,7 @@ fn allocation_growth_contract_tracks_repeated_managed_operations() {
         "demigration",
     ];
 
-    assert!(tracked_operations.iter().all(|operation| !operation.is_empty()));
+    assert!(tracked_operations
+        .iter()
+        .all(|operation| !operation.is_empty()));
 }

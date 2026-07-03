@@ -51,3 +51,21 @@ pub enum PkLookup {
     Exact(ColdPkHint),
     MayContain(Vec<ColdPkHint>),
 }
+
+impl PkLookup {
+    /// Returns true when this lookup preserves exact SQL rowcount semantics.
+    #[must_use]
+    pub const fn can_preserve_exact_rowcount(&self) -> bool {
+        matches!(self, Self::Exact(_))
+    }
+
+    /// Returns true when this lookup can produce an idempotent tombstone.
+    #[must_use]
+    pub const fn can_write_idempotent_tombstone(&self, allow_may_contain: bool) -> bool {
+        match self {
+            Self::Exact(_) => true,
+            Self::MayContain(_) => allow_may_contain,
+            Self::Absent => false,
+        }
+    }
+}
