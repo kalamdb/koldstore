@@ -2,14 +2,6 @@ name: benchmarks
 
 on:
   workflow_dispatch:
-  push:
-    branches: ["main"]
-    paths:
-      - "benchmarks/**"
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - ".github/workflows/benchmarks.yml"
 
 env:
   CARGO_TERM_COLOR: always

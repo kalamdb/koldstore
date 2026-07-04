@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PG_VERSION="${1:-${KOLDSTORE_E2E_PGVERSION:-16}}"
+PREPARE_ONLY="${KOLDSTORE_E2E_PREPARE_ONLY:-0}"
 PG_FEATURE="pg${PG_VERSION}"
 PG_PORT="${KOLDSTORE_E2E_PGPORT:-288${PG_VERSION}}"
 PG_HOST="${KOLDSTORE_E2E_PGHOST:-127.0.0.1}"
@@ -36,6 +37,13 @@ echo "recreating local E2E database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
   -c "CREATE EXTENSION IF NOT EXISTS koldstore;"
 
+server_version="$("$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -tAc "SHOW server_version")"
+if [[ ! "${server_version}" =~ ^${PG_VERSION} ]]; then
+  echo "error: expected PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT}, got '${server_version}'" >&2
+  exit 1
+fi
+echo "verified pgrx PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT} (${server_version})"
+
 export KOLDSTORE_E2E_PGVERSION="$PG_VERSION"
 export KOLDSTORE_E2E_PGHOST="$PG_HOST"
 export KOLDSTORE_E2E_PGPORT="$PG_PORT"
@@ -44,7 +52,12 @@ export KOLDSTORE_E2E_PGPASSWORD="$PG_PASSWORD"
 export KOLDSTORE_E2E_PGDATABASE="$PG_DATABASE"
 export KOLDSTORE_E2E_WAIT_FOR_STARTUP=1
 
-echo "running pg-koldstore E2E tests against local pgrx PostgreSQL ${PG_VERSION}"
+if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
+  echo "E2E PostgreSQL ${PG_VERSION} is ready (prepare-only; skipping cargo nextest)"
+  exit 0
+fi
+
+echo "running pg-koldstore E2E tests against pgrx PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT}"
 if ! command -v cargo-nextest >/dev/null 2>&1; then
   echo "error: required command not found: cargo-nextest" >&2
   exit 1

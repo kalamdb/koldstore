@@ -23,7 +23,8 @@ jobs:
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
       - run: cargo nextest run --workspace --no-default-features --exclude e2e
 
-  pgrx:
+  pgrx-e2e:
+    name: pgrx + E2E (PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -31,72 +32,19 @@ jobs:
         pg: [15, 16, 17, 18]
     env:
       PG_VER: ${{ matrix.pg }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install PostgreSQL ${{ matrix.pg }}
-        run: |
-          sudo apt-get update -y -qq
-          sudo apt-get install -y wget gnupg lsb-release
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-          sudo apt-get update -y -qq
-          sudo apt-get install -y \
-            build-essential \
-            libssl-dev \
-            pkg-config \
-            postgresql-${PG_VER} \
-            postgresql-server-dev-${PG_VER}
-
-      - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
-
-      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
-        run: cargo pgrx init --pg${PG_VER} /usr/lib/postgresql/${PG_VER}/bin/pg_config
-
-      - name: Compile pg_koldstore pgrx feature for PostgreSQL ${{ matrix.pg }}
-        run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER} -- -D warnings
-
-      - name: Install pg_koldstore into PostgreSQL ${{ matrix.pg }}
-        run: |
-          cargo pgrx install \
-            -p pg_koldstore \
-            --sudo \
-            --no-default-features \
-            --features pg${PG_VER} \
-            --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
-
-  e2e:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        pg: [15, 16, 17, 18]
-    env:
-      PG_VER: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGVERSION: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGPORT: ${{ format('288{0}', matrix.pg) }}
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-nextest --locked
-      - name: Start MinIO
-        run: |
-          docker run -d --name minio \
-            -p 9000:9000 \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data --console-address ":9001"
-          for attempt in {1..20}; do
-            if curl -fsS http://127.0.0.1:9000/minio/health/live >/dev/null; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker logs minio
-          exit 1
-      - name: Install PostgreSQL ${{ matrix.pg }}
+
+      - name: Install PostgreSQL ${{ matrix.pg }} development packages
         run: |
           sudo apt-get update -y -qq
           sudo apt-get install -y wget gnupg lsb-release
@@ -109,15 +57,24 @@ jobs:
             pkg-config \
             postgresql-${PG_VER} \
             postgresql-server-dev-${PG_VER}
+
       - name: Install cargo-pgrx
         run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
-        run: cargo pgrx init --pg${PG_VER} /usr/lib/postgresql/${PG_VER}/bin/pg_config
-      - name: Run pgrx E2E tests
-        run: scripts/run-pg-e2e.sh "${PG_VER}"
+        run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
+
+      - name: Compile pg_koldstore for PostgreSQL ${{ matrix.pg }}
+        run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER} -- -D warnings
+
+      - name: Start pgrx PostgreSQL ${{ matrix.pg }} and install koldstore
+        run: bash scripts/run-pg-e2e.sh "${PG_VER}"
         env:
+          KOLDSTORE_E2E_PREPARE_ONLY: "1"
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
-          PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+
+      - name: Run E2E tests (cargo nextest -p e2e) on PostgreSQL ${{ matrix.pg }}
+        run: cargo nextest run -p e2e --test-threads 1
 
   memory:
     runs-on: ubuntu-latest
@@ -126,29 +83,3 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
       - run: cargo install cargo-nextest --locked
       - run: tests/memory/run_memory_checks.sh
-
-  benchmarks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
-      - name: Install PostgreSQL 16
-        run: |
-          sudo apt-get update -y -qq
-          sudo apt-get install -y wget gnupg lsb-release
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-          sudo apt-get update -y -qq
-          sudo apt-get install -y \
-            build-essential \
-            libssl-dev \
-            pkg-config \
-            postgresql-16 \
-            postgresql-server-dev-16
-      - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
-      - name: Initialize pgrx for PostgreSQL 16
-        run: cargo pgrx init --pg16 /usr/lib/postgresql/16/bin/pg_config
-      - run: scripts/run-all-tests.sh --skip-fmt --skip-lint --skip-unit --skip-pgrx --skip-e2e --skip-memory
-        env:
-          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
