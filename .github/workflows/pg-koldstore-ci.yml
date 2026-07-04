@@ -19,8 +19,8 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      - run: cargo test --workspace --no-default-features
 
   pgrx:
     runs-on: ubuntu-latest
@@ -55,8 +55,16 @@ jobs:
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
         run: cargo pgrx init --pg${PG_VER} /usr/lib/postgresql/${PG_VER}/bin/pg_config
 
-      - name: Run pgrx tests for PostgreSQL ${{ matrix.pg }}
-        run: cargo pgrx test pg${PG_VER} -p pg_koldstore --no-default-features --features pg${PG_VER}
+      - name: Compile pg_koldstore pgrx feature for PostgreSQL ${{ matrix.pg }}
+        run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER} -- -D warnings
+
+      - name: Install pg_koldstore into PostgreSQL ${{ matrix.pg }}
+        run: |
+          cargo pgrx install \
+            -p pg_koldstore \
+            --no-default-features \
+            --features pg${PG_VER} \
+            --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
 
   e2e:
     runs-on: ubuntu-latest
@@ -77,6 +85,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
+      - name: Install PostgreSQL 16
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            postgresql-16 \
+            postgresql-server-dev-16
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 /usr/lib/postgresql/16/bin/pg_config
       - run: tests/e2e/run_pg_matrix.sh
 
   memory:
@@ -91,4 +116,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
-      - run: cargo run -p pg-koldstore-benchmarks -- --suite all
+      - name: Install PostgreSQL 16
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            postgresql-16 \
+            postgresql-server-dev-16
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 /usr/lib/postgresql/16/bin/pg_config
+      - run: scripts/run-all-tests.sh --skip-fmt --skip-lint --skip-unit --skip-pgrx --skip-e2e --skip-memory

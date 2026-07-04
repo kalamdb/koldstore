@@ -204,7 +204,7 @@ pub fn table_status_plan(
 ) -> Result<TableStatusPlan, OpsError> {
     let statement = SpiStatement::read(
         "table status",
-        "SELECT s.table_oid, m.sync_state AS manifest_state, COALESCE(m.segment_count, 0) AS cold_segment_count, COALESCE(j.pending_jobs, 0) AS pending_jobs, s.storage_id AS storage_binding, m.last_error FROM system.schemas s LEFT JOIN koldstore.manifest m ON m.table_oid = s.table_oid LEFT JOIN LATERAL (SELECT count(*) AS pending_jobs FROM system.jobs j WHERE j.table_oid = s.table_oid AND j.status IN ('pending', 'running')) j ON true WHERE s.table_oid = $1::regclass::oid AND ($2::text IS NULL OR m.scope_key = $2)",
+        "SELECT s.table_oid, m.sync_state AS manifest_state, COALESCE(m.segment_count, 0) AS cold_segment_count, COALESCE(j.pending_jobs, 0) AS pending_jobs, s.storage_id AS storage_binding, m.last_error FROM koldstore.schemas s LEFT JOIN koldstore.manifest m ON m.table_oid = s.table_oid AND ($2::text IS NULL OR m.scope_key = $2) LEFT JOIN LATERAL (SELECT count(*) AS pending_jobs FROM koldstore.jobs j WHERE j.table_oid = s.table_oid AND j.status IN ('pending', 'running') AND ($2::text IS NULL OR j.scope_key = $2)) j ON true WHERE s.table_oid = $1::regclass::oid",
     )
     .map_err(|error| OpsError::Spi(error.to_string()))?;
 
@@ -247,7 +247,7 @@ pub fn validate_cold_storage_plan(
 ) -> Result<ValidateColdStoragePlan, OpsError> {
     let statement = SpiStatement::read(
         "validate cold storage",
-        "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.column_stats, h.pk_hash FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid LEFT JOIN koldstore.cold_pk_hints h ON h.table_oid = cs.table_oid WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
+        "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.column_stats, h.pk_hash FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' LEFT JOIN koldstore.cold_pk_hints h ON h.table_oid = cs.table_oid AND h.scope_key = cs.scope_key AND h.segment_id = cs.segment_id WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
     )
     .map_err(|error| OpsError::Spi(error.to_string()))?;
 
@@ -268,7 +268,7 @@ pub fn recover_segments_plan(
 ) -> Result<RecoverSegmentsPlan, OpsError> {
     let statement = SpiStatement::write(
         "recover segments",
-        "INSERT INTO system.jobs (id, table_oid, job_type, status, attempts, error_trace) SELECT gen_random_uuid(), $1::regclass::oid, 'recover_segments', CASE WHEN $2::boolean THEN 'dry_run' ELSE 'pending' END, 0, NULL RETURNING id",
+        "INSERT INTO koldstore.jobs (id, table_oid, job_type, status, attempts, error_trace) SELECT gen_random_uuid(), $1::regclass::oid, 'recover_segments', CASE WHEN $2::boolean THEN 'dry_run' ELSE 'pending' END, 0, NULL RETURNING id",
     )
     .map_err(|error| OpsError::Spi(error.to_string()))?;
 
@@ -294,7 +294,7 @@ pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError>
                 format!("{}/manifest.json", table_name.as_str().replace('.', "/"));
             let statement = SpiStatement::read(
                 "export table archive",
-                "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid WHERE m.table_oid = $1::regclass::oid",
+                "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE m.table_oid = $1::regclass::oid",
             )
             .map_err(|error| OpsError::Spi(error.to_string()))?;
             Ok(KoldstoreExecPlan {

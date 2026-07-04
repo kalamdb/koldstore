@@ -496,7 +496,7 @@ fn register_minimal_schema(
         |policy| serde_json::json!({ "flush_policy": policy }),
     );
     pgrx::Spi::run_with_args(
-        "INSERT INTO system.schemas (
+        "INSERT INTO koldstore.schemas (
             id, table_oid, version, active, table_type, columns, primary_key,
             scope_column, indexed_columns, type_matrix, options, storage_id
          )
@@ -509,7 +509,8 @@ fn register_minimal_schema(
              table_type = EXCLUDED.table_type,
              scope_column = EXCLUDED.scope_column,
              options = EXCLUDED.options,
-             storage_id = EXCLUDED.storage_id",
+             storage_id = EXCLUDED.storage_id,
+             updated_at = now()",
         &[
             pgrx::datum::DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
             pgrx::datum::DatumWithOid::from(table_type),

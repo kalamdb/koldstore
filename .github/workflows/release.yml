@@ -1,84 +1,634 @@
-name: release
+name: Release
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create/use (example: v0.1.0)"
+        required: true
+        default: "v0.1.0"
+      platform_linux_x86_64:
+        description: "Build Linux x86_64 extension packages"
+        type: boolean
+        required: false
+        default: true
+      platform_linux_aarch64:
+        description: "Build Linux ARM64 extension packages"
+        type: boolean
+        required: false
+        default: true
+      platform_macos_aarch64:
+        description: "Build macOS ARM64 extension packages"
+        type: boolean
+        required: false
+        default: true
+      platform_windows_x86_64:
+        description: "Build Windows x86_64 extension packages"
+        type: boolean
+        required: false
+        default: true
+      run_pgrx_tests:
+        description: "Run pgrx compile/install and local E2E checks before packaging"
+        type: boolean
+        required: false
+        default: true
+      github_release:
+        description: "Publish GitHub Release"
+        type: boolean
+        required: false
+        default: false
+      pre_release:
+        description: "Mark GitHub Release as pre-release"
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.96.0"
   PGRX_VERSION: "0.19.1"
+  EXTENSION_CRATE: pg_koldstore
+  EXTENSION_NAME: koldstore
 
 jobs:
-  package:
-    runs-on: ubuntu-latest
+  read_version:
+    name: Read Release Inputs
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read and validate release tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.release_tag }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release_tag must look like v0.1.0 or v0.1.0-rc.1"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify workspace version matches release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKSPACE_VERSION="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          text = Path("Cargo.toml").read_text()
+          match = re.search(r"(?m)^\[workspace\.package\]\s*(?:\n[^\[]*)?^version\s*=\s*\"([^\"]+)\"", text)
+          if not match:
+              raise SystemExit("workspace.package.version not found")
+          print(match.group(1))
+          PY
+          )"
+          if [[ "$WORKSPACE_VERSION" != "${{ steps.version.outputs.version }}" ]]; then
+            echo "::error::release_tag ${{ steps.version.outputs.tag }} does not match workspace version ${WORKSPACE_VERSION}"
+            exit 1
+          fi
+
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    needs: read_version
+    outputs:
+      linux_matrix: ${{ steps.platforms.outputs.linux_matrix }}
+      macos_matrix: ${{ steps.platforms.outputs.macos_matrix }}
+      windows_matrix: ${{ steps.platforms.outputs.windows_matrix }}
+    steps:
+      - name: Validate selected platforms
+        id: platforms
+        shell: bash
+        run: |
+          set -euo pipefail
+          selected=0
+          [[ "${{ inputs.platform_linux_x86_64 }}" == "true" ]] && selected=$((selected + 1))
+          [[ "${{ inputs.platform_linux_aarch64 }}" == "true" ]] && selected=$((selected + 1))
+          [[ "${{ inputs.platform_macos_aarch64 }}" == "true" ]] && selected=$((selected + 1))
+          [[ "${{ inputs.platform_windows_x86_64 }}" == "true" ]] && selected=$((selected + 1))
+          if [[ "$selected" -eq 0 ]]; then
+            echo "::error::Select at least one platform."
+            exit 1
+          fi
+          echo "Selected platform groups: $selected"
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+
+          pg_versions = [15, 16, 17]
+          linux = []
+          if "${{ inputs.platform_linux_x86_64 }}" == "true":
+              linux.extend(
+                  {
+                      "pg": pg,
+                      "platform": "linux-x86_64",
+                      "runner": "ubuntu-24.04",
+                      "deb_arch": "amd64",
+                  }
+                  for pg in pg_versions
+              )
+          if "${{ inputs.platform_linux_aarch64 }}" == "true":
+              linux.extend(
+                  {
+                      "pg": pg,
+                      "platform": "linux-aarch64",
+                      "runner": "ubuntu-24.04-arm",
+                      "deb_arch": "arm64",
+                  }
+                  for pg in pg_versions
+              )
+          macos = [{"pg": pg} for pg in pg_versions] if "${{ inputs.platform_macos_aarch64 }}" == "true" else []
+          windows = [{"pg": pg} for pg in pg_versions] if "${{ inputs.platform_windows_x86_64 }}" == "true" else []
+
+          print(f"linux_matrix={json.dumps({'include': linux}, separators=(',', ':'))}")
+          print(f"macos_matrix={json.dumps({'include': macos}, separators=(',', ':'))}")
+          print(f"windows_matrix={json.dumps({'include': windows}, separators=(',', ':'))}")
+          PY
+
+  rust_checks:
+    name: Rust Checks
+    runs-on: ubuntu-24.04
+    needs: preflight
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt, clippy
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy without pgrx PostgreSQL feature conflicts
+        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+
+      - name: Unit and integration tests without pgrx PostgreSQL feature conflicts
+        run: cargo test --workspace --no-default-features
+
+  pgrx_tests:
+    name: "pgrx Checks · PG${{ matrix.pg }}"
+    runs-on: ubuntu-24.04
+    needs: rust_checks
+    if: ${{ inputs.run_pgrx_tests }}
     strategy:
       fail-fast: false
       matrix:
         pg: [15, 16, 17]
     env:
       PG_VER: ${{ matrix.pg }}
+      PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.96.0
-      - uses: Swatinem/rust-cache@v2
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Install PostgreSQL ${{ matrix.pg }}
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pgrx-tests-pg${{ matrix.pg }}
+          cache-on-failure: true
+
+      - name: Install PostgreSQL ${{ matrix.pg }} build dependencies
+        shell: bash
         run: |
-          sudo apt-get update -y -qq
-          sudo apt-get install -y wget gnupg lsb-release
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-          sudo apt-get update -y -qq
-          sudo apt-get install -y \
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
             build-essential \
+            clang \
+            libclang-dev \
+            libreadline-dev \
             libssl-dev \
             pkg-config \
             postgresql-${PG_VER} \
             postgresql-server-dev-${PG_VER}
 
       - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || ! cargo pgrx --version | grep -q "cargo-pgrx ${PGRX_VERSION}$"; then
+            cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
+          fi
+          cargo pgrx --version
 
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
-        run: cargo pgrx init --pg${PG_VER} /usr/lib/postgresql/${PG_VER}/bin/pg_config
+        run: cargo pgrx init --pg${PG_VER} "${PG_CONFIG}"
 
-      - name: Package extension for PostgreSQL ${{ matrix.pg }}
+      - name: Compile pg_koldstore pgrx feature for PostgreSQL ${{ matrix.pg }}
+        run: cargo clippy -p "${EXTENSION_CRATE}" --all-targets --no-default-features --features pg${PG_VER} -- -D warnings
+
+      - name: Install pg_koldstore into PostgreSQL ${{ matrix.pg }}
         run: |
-          cargo pgrx package \
-            -p pg_koldstore \
+          cargo pgrx install \
+            -p "${EXTENSION_CRATE}" \
             --no-default-features \
             --features pg${PG_VER} \
-            --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
+            --pg-config "${PG_CONFIG}"
 
-      - name: Archive build artifacts
+      - name: Run local pgrx E2E for PostgreSQL ${{ matrix.pg }}
+        env:
+          KOLDSTORE_E2E_PGVERSION: ${{ matrix.pg }}
+          KOLDSTORE_E2E_PGPORT: 288${{ matrix.pg }}
+          PGRX_PG_CONFIG: ${{ env.PG_CONFIG }}
+        run: tests/e2e/run_pg_matrix.sh
+
+  build_linux:
+    name: "Build · ${{ matrix.platform }} · PG${{ matrix.pg }}"
+    runs-on: ${{ matrix.runner }}
+    needs: [read_version, preflight, rust_checks, pgrx_tests]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        !failure() &&
+        needs.preflight.outputs.linux_matrix != '{"include":[]}'
+      }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.preflight.outputs.linux_matrix) }}
+    env:
+      PG_VER: ${{ matrix.pg }}
+      PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.platform }}-pg${{ matrix.pg }}
+          cache-on-failure: true
+
+      - name: Install PostgreSQL ${{ matrix.pg }} build dependencies
+        shell: bash
         run: |
-          PKG_DIR="target/release/koldstore-pg${PG_VER}"
-          tar -czf "koldstore-pg${PG_VER}-linux-x86_64.tar.gz" -C "${PKG_DIR}" .
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            libreadline-dev \
+            libssl-dev \
+            pkg-config \
+            postgresql-${PG_VER} \
+            postgresql-server-dev-${PG_VER}
 
-      - name: Upload extension package
+      - name: Install cargo-pgrx
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || ! cargo pgrx --version | grep -q "cargo-pgrx ${PGRX_VERSION}$"; then
+            cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
+          fi
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} "${PG_CONFIG}"
+
+      - name: Package extension
+        run: |
+          cargo pgrx package \
+            -p "${EXTENSION_CRATE}" \
+            --no-default-features \
+            --features pg${PG_VER} \
+            --pg-config "${PG_CONFIG}"
+
+      - name: Build release tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.read_version.outputs.version }}"
+          PKG="${EXTENSION_NAME}-${VERSION}-pg${PG_VER}-${{ matrix.platform }}"
+          DIST_DIR="dist/${VERSION}"
+          PKG_DIR="${DIST_DIR}/${PKG}"
+          mkdir -p "${PKG_DIR}"
+          cp -a "target/release/${EXTENSION_NAME}-pg${PG_VER}/." "${PKG_DIR}/"
+          cat > "${PKG_DIR}/install.sh" <<'INSTALL'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          PG_CONFIG="${1:-pg_config}"
+          LIBDIR="$("$PG_CONFIG" --pkglibdir)"
+          SHAREDIR="$("$PG_CONFIG" --sharedir)/extension"
+          LIB_SRC="$(find "$SCRIPT_DIR" -type f \( -name 'koldstore.so' -o -name 'koldstore.dylib' \) | head -n 1)"
+          test -n "$LIB_SRC"
+          install -m 0755 "$LIB_SRC" "$LIBDIR/$(basename "$LIB_SRC")"
+          install -m 0644 "$SCRIPT_DIR"/usr/share/postgresql/*/extension/koldstore.control "$SHAREDIR/"
+          install -m 0644 "$SCRIPT_DIR"/usr/share/postgresql/*/extension/koldstore--*.sql "$SHAREDIR/"
+          echo "Installed koldstore. Run: CREATE EXTENSION koldstore;"
+          INSTALL
+          chmod +x "${PKG_DIR}/install.sh"
+          (cd "${DIST_DIR}" && tar -czf "${PKG}.tar.gz" "${PKG}")
+          rm -rf "${PKG_DIR}"
+
+      - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: koldstore-pg${{ matrix.pg }}-linux-x86_64
-          path: koldstore-pg${{ matrix.pg }}-linux-x86_64.tar.gz
+          name: dist-${{ matrix.platform }}-pg${{ matrix.pg }}
+          path: dist/${{ needs.read_version.outputs.version }}/*.tar.gz
+          if-no-files-found: error
+          retention-days: 90
+
+  build_macos:
+    name: "Build · macos-aarch64 · PG${{ matrix.pg }}"
+    runs-on: macos-14
+    needs: [read_version, preflight, rust_checks, pgrx_tests]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        !failure() &&
+        needs.preflight.outputs.macos_matrix != '{"include":[]}'
+      }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.preflight.outputs.macos_matrix) }}
+    env:
+      PG_VER: ${{ matrix.pg }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-aarch64-pg${{ matrix.pg }}
+          cache-on-failure: true
+
+      - name: Install PostgreSQL and LLVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install llvm postgresql@${PG_VER}
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+          echo "LLVM_CONFIG_PATH=$(brew --prefix llvm)/bin/llvm-config" >> "$GITHUB_ENV"
+          echo "PG_CONFIG=$(brew --prefix postgresql@${PG_VER})/bin/pg_config" >> "$GITHUB_ENV"
+
+      - name: Install cargo-pgrx
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-pgrx >/dev/null 2>&1 || ! cargo pgrx --version | grep -q "cargo-pgrx ${PGRX_VERSION}$"; then
+            cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
+          fi
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} "${PG_CONFIG}"
+
+      - name: Package extension
+        run: |
+          cargo pgrx package \
+            -p "${EXTENSION_CRATE}" \
+            --no-default-features \
+            --features pg${PG_VER} \
+            --pg-config "${PG_CONFIG}"
+
+      - name: Build release tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.read_version.outputs.version }}"
+          PLATFORM="macos-aarch64"
+          PKG="${EXTENSION_NAME}-${VERSION}-pg${PG_VER}-${PLATFORM}"
+          DIST_DIR="dist/${VERSION}"
+          PKG_DIR="${DIST_DIR}/${PKG}"
+          mkdir -p "${PKG_DIR}"
+          cp -a "target/release/${EXTENSION_NAME}-pg${PG_VER}/." "${PKG_DIR}/"
+          cat > "${PKG_DIR}/install.sh" <<'INSTALL'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          PG_CONFIG="${1:-pg_config}"
+          LIBDIR="$("$PG_CONFIG" --pkglibdir)"
+          SHAREDIR="$("$PG_CONFIG" --sharedir)/extension"
+          LIB_SRC="$(find "$SCRIPT_DIR" -type f \( -name 'koldstore.dylib' -o -name 'koldstore.so' \) | head -n 1)"
+          test -n "$LIB_SRC"
+          install -m 0755 "$LIB_SRC" "$LIBDIR/$(basename "$LIB_SRC")"
+          install -m 0644 "$SCRIPT_DIR"/usr/share/postgresql/*/extension/koldstore.control "$SHAREDIR/"
+          install -m 0644 "$SCRIPT_DIR"/usr/share/postgresql/*/extension/koldstore--*.sql "$SHAREDIR/"
+          echo "Installed koldstore. Run: CREATE EXTENSION koldstore;"
+          INSTALL
+          chmod +x "${PKG_DIR}/install.sh"
+          (cd "${DIST_DIR}" && tar -czf "${PKG}.tar.gz" "${PKG}")
+          rm -rf "${PKG_DIR}"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-aarch64-pg${{ matrix.pg }}
+          path: dist/${{ needs.read_version.outputs.version }}/*.tar.gz
+          if-no-files-found: error
+          retention-days: 90
+
+  build_windows:
+    name: "Build · windows-x86_64 · PG${{ matrix.pg }}"
+    runs-on: windows-latest
+    needs: [read_version, preflight, rust_checks, pgrx_tests]
+    if: >-
+      ${{
+        always() &&
+        !cancelled() &&
+        !failure() &&
+        needs.preflight.outputs.windows_matrix != '{"include":[]}'
+      }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.preflight.outputs.windows_matrix) }}
+    env:
+      PG_VER: ${{ matrix.pg }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable Windows long paths
+        shell: bash
+        run: git config --global core.longpaths true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-windows-x86_64-pg${{ matrix.pg }}
+          cache-on-failure: true
+
+      - name: Install LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "16.0.6"
+
+      - name: Configure bindgen environment
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $libClangPath = Join-Path $env:LLVM_PATH "bin"
+          if (-not (Test-Path (Join-Path $libClangPath "libclang.dll"))) {
+            throw "libclang.dll not found under $libClangPath"
+          }
+          "LIBCLANG_PATH=$libClangPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install cargo-pgrx
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo install cargo-pgrx --version "${env:PGRX_VERSION}" --locked
+          cargo pgrx --version
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo pgrx init "--pg${env:PG_VER}" download
+          $pgConfig = cargo pgrx info pg-config $env:PG_VER
+          "PG_CONFIG=$pgConfig" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Package extension
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo pgrx package `
+            -p "${env:EXTENSION_CRATE}" `
+            --no-default-features `
+            --features "pg${env:PG_VER}" `
+            --pg-config "${env:PG_CONFIG}"
+
+      - name: Build release zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "${{ needs.read_version.outputs.version }}"
+          $platform = "windows-x86_64"
+          $pkg = "${env:EXTENSION_NAME}-$version-pg${env:PG_VER}-$platform"
+          $distDir = "dist/$version"
+          $pkgDir = "$distDir/$pkg"
+          New-Item -ItemType Directory -Force -Path $pkgDir | Out-Null
+          Copy-Item "target/release/${env:EXTENSION_NAME}-pg${env:PG_VER}/*" $pkgDir -Recurse
+          @'
+          param([string]$PgConfig = "pg_config")
+          $ErrorActionPreference = "Stop"
+          $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+          $LibDir = & $PgConfig --pkglibdir
+          $ShareDir = Join-Path (& $PgConfig --sharedir) "extension"
+          $Dll = Get-ChildItem -Path $ScriptDir -Recurse -Filter "koldstore.dll" | Select-Object -First 1
+          if (-not $Dll) { throw "koldstore.dll not found" }
+          Copy-Item $Dll.FullName (Join-Path $LibDir $Dll.Name) -Force
+          Copy-Item (Get-ChildItem -Path $ScriptDir -Recurse -Filter "koldstore.control" | Select-Object -First 1).FullName $ShareDir -Force
+          Get-ChildItem -Path $ScriptDir -Recurse -Filter "koldstore--*.sql" | ForEach-Object {
+            Copy-Item $_.FullName $ShareDir -Force
+          }
+          Write-Host "Installed koldstore. Run: CREATE EXTENSION koldstore;"
+          '@ | Set-Content -Path "$pkgDir/install.ps1" -Encoding UTF8
+          Compress-Archive -Path $pkgDir -DestinationPath "$distDir/$pkg.zip" -Force
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-windows-x86_64-pg${{ matrix.pg }}
+          path: dist/${{ needs.read_version.outputs.version }}/*.zip
+          if-no-files-found: error
           retention-days: 90
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: package
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    name: Publish GitHub Release
+    runs-on: ubuntu-24.04
+    needs:
+      - read_version
+      - pgrx_tests
+      - build_linux
+      - build_macos
+      - build_windows
+    if: >-
+      ${{
+        inputs.github_release &&
+        always() &&
+        !cancelled() &&
+        !failure()
+      }}
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
         with:
-          path: artifacts
-          pattern: koldstore-pg*
+          path: release-assets
+          pattern: dist-*
           merge-multiple: true
 
-      - name: Create GitHub release
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.read_version.outputs.version }}"
+          mkdir -p "dist/${VERSION}"
+          find release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} "dist/${VERSION}/" \;
+          cd "dist/${VERSION}"
+          shopt -s nullglob
+          assets=( *.tar.gz *.zip )
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "::error::No release artifacts found."
+            exit 1
+          fi
+          sha256sum "${assets[@]}" > SHA256SUMS
+          ls -lh
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          tag_name: ${{ needs.read_version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ inputs.pre_release }}
           generate_release_notes: true
+          files: |
+            dist/${{ needs.read_version.outputs.version }}/*.tar.gz
+            dist/${{ needs.read_version.outputs.version }}/*.zip
+            dist/${{ needs.read_version.outputs.version }}/SHA256SUMS
+          fail_on_unmatched_files: true

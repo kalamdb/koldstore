@@ -62,7 +62,7 @@ pub fn plan_drop_table_cleanup(
 ) -> Result<DropTableCleanupPlan, DropTableCleanupError> {
     let deactivate = SpiStatement::write(
         "drop table deactivate metadata",
-        "UPDATE system.schemas SET active = false WHERE table_oid = $1",
+        "UPDATE koldstore.schemas SET active = false WHERE table_oid = $1",
     )
     .map_err(|error| DropTableCleanupError::Spi(error.to_string()))?;
     let mut statements = vec![deactivate];
@@ -73,7 +73,7 @@ pub fn plan_drop_table_cleanup(
             statements.push(
                 SpiStatement::write(
                     "drop table queue artifact cleanup",
-                    "INSERT INTO system.jobs (id, table_oid, job_type, status, attempts, error_trace) VALUES (gen_random_uuid(), $1, 'drop_table_cleanup', 'pending', 0, NULL)",
+                    "INSERT INTO koldstore.jobs (id, table_oid, job_type, status, attempts, error_trace) VALUES (gen_random_uuid(), $1, 'drop_table_cleanup', 'pending', 0, NULL)",
                 )
                 .map_err(|error| DropTableCleanupError::Spi(error.to_string()))?,
             );
@@ -83,7 +83,7 @@ pub fn plan_drop_table_cleanup(
             statements.push(
                 SpiStatement::write(
                     "drop table record cleanup failure",
-                    "INSERT INTO system.jobs (id, table_oid, job_type, status, attempts, error_trace) VALUES (gen_random_uuid(), $1, 'drop_table_cleanup', 'error', 1, $2)",
+                    "INSERT INTO koldstore.jobs (id, table_oid, job_type, status, attempts, error_trace) VALUES (gen_random_uuid(), $1, 'drop_table_cleanup', 'error', 1, $2)",
                 )
                 .map_err(|error| DropTableCleanupError::Spi(error.to_string()))?,
             );

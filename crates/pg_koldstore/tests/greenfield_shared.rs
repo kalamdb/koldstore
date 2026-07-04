@@ -6,7 +6,7 @@ fn sql_extension_exposes_shared_greenfield_migration_contract() {
     for needle in [
         "CREATE TYPE koldstore.managed_table_info",
         "CREATE TABLE IF NOT EXISTS koldstore.storage",
-        "CREATE TABLE IF NOT EXISTS system.schemas",
+        "CREATE TABLE IF NOT EXISTS koldstore.schemas",
         "CREATE TABLE IF NOT EXISTS koldstore.manifest",
         "CREATE SEQUENCE IF NOT EXISTS koldstore.global_seq",
         "PRIMARY KEY",

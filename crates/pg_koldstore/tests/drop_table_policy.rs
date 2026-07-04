@@ -25,7 +25,7 @@ fn drop_table_cleanup_plan_records_retain_delete_and_failed_policies() {
     assert!(retain
         .statements
         .iter()
-        .any(|statement| statement.sql.contains("UPDATE system.schemas")));
+        .any(|statement| statement.sql.contains("UPDATE koldstore.schemas")));
 
     let delete =
         plan_drop_table_cleanup(table.clone(), 42, DropTableCleanupPolicy::Delete).unwrap();

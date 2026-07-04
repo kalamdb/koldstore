@@ -48,13 +48,14 @@ impl ScanState {
     #[must_use]
     pub fn begin(table_oid: u32, visible_segments: Vec<String>) -> Self {
         let cold_streams_open = !visible_segments.is_empty();
+        let object_store_handles = visible_segments.len();
         Self {
             table_oid,
             selected_row_groups: Vec::new(),
             snapshot_captured: true,
             cold_streams_open,
             resources: ScanResourceCounters {
-                object_store_handles: usize::from(cold_streams_open),
+                object_store_handles,
                 arrow_buffers: usize::from(cold_streams_open),
                 memory_context_bytes: 0,
             },
@@ -126,25 +127,19 @@ pub fn begin_merge_scan_with_plan(
     plan: &MergeScanPlan,
     cold_availability: ColdAvailability,
 ) -> Result<ScanState, MergeScanError> {
-    let matching_segment_hints = plan
+    let mut visible_segments = Vec::with_capacity(plan.segment_hints.len());
+    let mut selected_row_groups = Vec::new();
+    for hint in plan
         .segment_hints
         .iter()
         .filter(|hint| segment_matches_scope(plan.scope_key.as_ref(), hint.scope_key.as_ref()))
-        .collect::<Vec<_>>();
-    let visible_segments = matching_segment_hints
-        .iter()
-        .map(|hint| hint.object_path.clone())
-        .collect::<Vec<_>>();
+    {
+        visible_segments.push(hint.object_path.clone());
+        selected_row_groups.extend(hint.selected_row_groups.iter().copied());
+    }
+
     let mut state = begin_merge_scan(plan.table_oid, visible_segments, cold_availability)?;
-    state.selected_row_groups = matching_segment_hints
-        .iter()
-        .flat_map(|hint| hint.selected_row_groups.iter().copied())
-        .collect();
-    state.resources = ScanResourceCounters {
-        object_store_handles: state.visible_segments.len(),
-        arrow_buffers: usize::from(!state.visible_segments.is_empty()),
-        memory_context_bytes: 0,
-    };
+    state.selected_row_groups = selected_row_groups;
     Ok(state)
 }
 

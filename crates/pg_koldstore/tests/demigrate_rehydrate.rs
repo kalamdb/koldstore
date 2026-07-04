@@ -42,7 +42,7 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
     assert!(plan
         .statements
         .iter()
-        .any(|statement| statement.sql.contains("UPDATE system.schemas")));
+        .any(|statement| statement.sql.contains("UPDATE koldstore.schemas")));
 }
 
 #[test]

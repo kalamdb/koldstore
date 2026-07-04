@@ -4,8 +4,8 @@
 
 ```bash
 cargo fmt --all
-cargo check --workspace --all-targets
-cargo test --workspace
+cargo check --workspace --all-targets --no-default-features
+cargo test --workspace --no-default-features
 ```
 
 The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, or `pg17` feature when `cargo pgrx` is configured.
@@ -15,19 +15,18 @@ The extension crate is structured so pure Rust tests compile without a local Pos
 ```bash
 cargo install cargo-pgrx
 cargo pgrx init
-cargo pgrx test
-```
-
-The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema.
-
-## PostgreSQL Matrix and MinIO
-
-```bash
-docker compose -f tests/docker-compose.yml up -d
 tests/e2e/run_pg_matrix.sh
 ```
 
-The matrix exposes PostgreSQL on ports `5515`, `5516`, and `5517`, with MinIO on `9000`.
+The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the ignored real-PostgreSQL tests. Avoid direct `cargo pgrx test` for now because normal Rust integration tests link as native pg-feature test binaries and can fail on unresolved PostgreSQL server symbols.
+
+## Local pgrx PostgreSQL Matrix
+
+```bash
+tests/e2e/run_pg_matrix.sh
+```
+
+The default matrix target is pgrx-managed PostgreSQL 16 on port `28816`. Override with `KOLDSTORE_E2E_PGVERSION`, `KOLDSTORE_E2E_PGPORT`, or the other `KOLDSTORE_E2E_PG*` environment variables when needed.
 
 ## Benchmark Thresholds
 

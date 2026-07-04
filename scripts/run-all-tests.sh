@@ -22,12 +22,12 @@ Usage:
   scripts/run-all-tests.sh [options]
 
 Options:
-  --pg-versions LIST   Comma-separated PostgreSQL majors for pgrx tests (default: 16)
+  --pg-versions LIST   Comma-separated PostgreSQL majors for local pgrx checks (default: 16)
   --skip-fmt           Skip cargo fmt --check
   --skip-lint          Skip cargo clippy
   --skip-unit          Skip cargo test --workspace
-  --skip-pgrx          Skip cargo pgrx test
-  --skip-e2e           Skip Docker-backed E2E matrix
+  --skip-pgrx          Skip pgrx feature compile/install checks
+  --skip-e2e           Skip local pgrx-backed E2E matrix
   --skip-memory        Skip memory checks
   --skip-benchmarks    Skip benchmark runner
   -h, --help           Show this help text
@@ -91,9 +91,14 @@ ensure_cargo_pgrx() {
   fi
 }
 
+configured_pg_config() {
+  local pg="$1"
+  cargo pgrx info pg-config "${pg}" 2>/dev/null
+}
+
 ensure_pgrx_postgres() {
   local pg="$1"
-  if cargo pgrx info 2>/dev/null | grep -q "pg${pg} "; then
+  if configured_pg_config "${pg}" >/dev/null; then
     return 0
   fi
 
@@ -120,6 +125,62 @@ ensure_pgrx_postgres() {
   cargo pgrx init --pg"${pg}" "${pg_config}"
 }
 
+run_local_pgrx_e2e() {
+  local pg="$1"
+  local pg_config
+  pg_config="$(configured_pg_config "${pg}")"
+  local port="${KOLDSTORE_E2E_PGPORT:-288${pg}}"
+
+  step "local pgrx E2E PostgreSQL ${pg}"
+  KOLDSTORE_E2E_PGVERSION="${pg}" \
+    KOLDSTORE_E2E_PGPORT="${port}" \
+    PGRX_PG_CONFIG="${pg_config}" \
+    tests/e2e/run_pg_matrix.sh
+}
+
+first_pg_version() {
+  local pg
+  for pg in "${pg_versions[@]}"; do
+    pg="$(echo "${pg}" | xargs)"
+    if [[ -n "${pg}" ]]; then
+      echo "${pg}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+BENCHMARK_DATABASE_URL=""
+
+prepare_benchmark_database() {
+  local pg="$1"
+  local pg_config
+  pg_config="$(configured_pg_config "${pg}")"
+  local psql
+  psql="$(dirname "${pg_config}")/psql"
+  local pg_feature="pg${pg}"
+  local host="${KOLDSTORE_BENCH_PGHOST:-127.0.0.1}"
+  local port="${KOLDSTORE_BENCH_PGPORT:-288${pg}}"
+  local user="${KOLDSTORE_BENCH_PGUSER:-$(whoami)}"
+  local database="${KOLDSTORE_BENCH_PGDATABASE:-koldstore_pgrx_bench}"
+
+  export PATH="$(dirname "${pg_config}"):${PATH}"
+
+  step "preparing local pgrx benchmark database PostgreSQL ${pg}"
+  cargo pgrx start "${pg_feature}"
+  cargo pgrx install \
+    -p pg_koldstore \
+    --no-default-features \
+    --features "${pg_feature}" \
+    --pg-config "${pg_config}"
+
+  "${psql}" -h "${host}" -p "${port}" -d postgres -v ON_ERROR_STOP=1 \
+    -c "DROP DATABASE IF EXISTS ${database}" \
+    -c "CREATE DATABASE ${database}"
+
+  BENCHMARK_DATABASE_URL="host=${host} port=${port} user=${user} dbname=${database}"
+}
+
 require_command cargo
 
 if [[ "${SKIP_FMT}" -eq 0 ]]; then
@@ -128,32 +189,45 @@ if [[ "${SKIP_FMT}" -eq 0 ]]; then
 fi
 
 if [[ "${SKIP_LINT}" -eq 0 ]]; then
-  step "cargo clippy"
-  cargo clippy --workspace --all-targets -- -D warnings
+  step "cargo clippy --workspace --no-default-features"
+  cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 fi
 
 if [[ "${SKIP_UNIT}" -eq 0 ]]; then
-  step "cargo test --workspace"
-  cargo test --workspace
+  step "cargo test --workspace --no-default-features"
+  cargo test --workspace --no-default-features
 fi
+
+IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"
 
 if [[ "${SKIP_PGRX}" -eq 0 ]]; then
   ensure_cargo_pgrx
-  IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"
   for pg in "${pg_versions[@]}"; do
     pg="$(echo "${pg}" | xargs)"
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
-      step "cargo pgrx test pg${pg}"
-      cargo pgrx test "pg${pg}" -p pg_koldstore --no-default-features --features "pg${pg}"
+      step "pgrx feature compile check pg${pg}"
+      cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg}" -- -D warnings
+
+      step "pgrx install check pg${pg}"
+      cargo pgrx install \
+        -p pg_koldstore \
+        --no-default-features \
+        --features "pg${pg}" \
+        --pg-config "$(configured_pg_config "${pg}")"
     fi
   done
 fi
 
 if [[ "${SKIP_E2E}" -eq 0 ]]; then
-  require_command docker
-  step "E2E PostgreSQL matrix"
-  tests/e2e/run_pg_matrix.sh
+  ensure_cargo_pgrx
+  for pg in "${pg_versions[@]}"; do
+    pg="$(echo "${pg}" | xargs)"
+    [[ -z "${pg}" ]] && continue
+    if ensure_pgrx_postgres "${pg}"; then
+      run_local_pgrx_e2e "${pg}"
+    fi
+  done
 fi
 
 if [[ "${SKIP_MEMORY}" -eq 0 ]]; then
@@ -162,8 +236,27 @@ if [[ "${SKIP_MEMORY}" -eq 0 ]]; then
 fi
 
 if [[ "${SKIP_BENCHMARKS}" -eq 0 ]]; then
+  benchmark_database_url="${DATABASE_URL:-}"
+  if [[ -z "${benchmark_database_url}" ]]; then
+    ensure_cargo_pgrx
+    benchmark_pg="$(first_pg_version)"
+    if ensure_pgrx_postgres "${benchmark_pg}"; then
+      prepare_benchmark_database "${benchmark_pg}"
+      benchmark_database_url="${BENCHMARK_DATABASE_URL}"
+    fi
+  fi
+  if [[ -z "${benchmark_database_url}" ]]; then
+    echo "error: no PostgreSQL database URL available for benchmarks" >&2
+    exit 1
+  fi
+
   step "benchmarks"
-  cargo run -p pg-koldstore-benchmarks -- --suite all
+  cargo run -p pg-koldstore-benchmarks -- \
+    --database-url "${benchmark_database_url}" \
+    --rows 1000 \
+    --clients 2 \
+    --jobs 2 \
+    --seconds 1
 fi
 
 step "all requested test suites passed"

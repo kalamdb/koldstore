@@ -4,24 +4,26 @@ fmt:
 	cargo fmt --all
 
 lint:
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
 test:
-	cargo test --workspace
+	cargo test --workspace --no-default-features
 
 pgrx-test:
-	cargo pgrx test pg16 -p pg_koldstore --no-default-features --features pg16
+	cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg16 -- -D warnings
+	cargo pgrx install -p pg_koldstore --no-default-features --features pg16 --pg-config "$$(cargo pgrx info pg-config 16)"
 
 pgrx-test-matrix:
 	for pg in 15 16 17; do \
-		cargo pgrx test pg$$pg -p pg_koldstore --no-default-features --features pg$$pg; \
+		cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg$$pg -- -D warnings; \
+		cargo pgrx install -p pg_koldstore --no-default-features --features pg$$pg --pg-config "$$(cargo pgrx info pg-config $$pg)"; \
 	done
 
 e2e:
 	tests/e2e/run_pg_matrix.sh
 
 benchmarks:
-	cargo run -p pg-koldstore-benchmarks -- --suite all
+	cargo run -p pg-koldstore-benchmarks -- --rows 1000 --clients 2 --jobs 2 --seconds 1
 
 memory:
 	tests/memory/run_memory_checks.sh

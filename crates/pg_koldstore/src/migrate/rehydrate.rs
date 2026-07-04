@@ -204,7 +204,7 @@ pub fn plan_catalog_deactivation(table_oid: u32) -> Result<SpiStatement, Demigra
     let _ = table_oid;
     SpiStatement::write(
         "demigrate deactivate catalog metadata",
-        "UPDATE system.schemas SET active = false WHERE table_oid = $1 AND active = true",
+        "UPDATE koldstore.schemas SET active = false WHERE table_oid = $1 AND active = true",
     )
     .map_err(|error| DemigrationError::Spi(error.to_string()))
 }
@@ -218,7 +218,7 @@ pub fn plan_flush_deactivation(table_oid: u32) -> Result<SpiStatement, Demigrati
     let _ = table_oid;
     SpiStatement::write(
         "demigrate cancel flush jobs",
-        "UPDATE system.jobs SET status = 'cancelled', updated_at = now() WHERE table_oid = $1 AND status IN ('pending', 'running')",
+        "UPDATE koldstore.jobs SET status = 'cancelled', updated_at = now() WHERE table_oid = $1 AND status IN ('pending', 'running')",
     )
     .map_err(|error| DemigrationError::Spi(error.to_string()))
 }

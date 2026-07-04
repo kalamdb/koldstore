@@ -1,7 +1,7 @@
 use koldstore_core::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
 use pg_koldstore::merge_scan::exec::{
-    begin_merge_scan_with_plan, execute_merge_scan_with_filters, ColdAvailability, FilterPlan,
-    ScanResourceCounters,
+    begin_merge_scan, begin_merge_scan_with_plan, execute_merge_scan_with_filters,
+    ColdAvailability, FilterPlan, ScanResourceCounters,
 };
 use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint, SystemColumnAttnums};
 use serde_json::json;
@@ -111,6 +111,22 @@ fn begin_merge_scan_loads_metadata_prunes_segments_and_opens_cold_streams() {
     assert!(state.snapshot_captured);
     assert!(state.cold_streams_open);
     assert_eq!(state.resources.object_store_handles, 1);
+    assert_eq!(state.resources.arrow_buffers, 1);
+}
+
+#[test]
+fn direct_begin_merge_scan_tracks_each_cold_segment_handle() {
+    let state = begin_merge_scan(
+        42,
+        vec![
+            "app/items/batch-1.parquet".to_string(),
+            "app/items/batch-2.parquet".to_string(),
+        ],
+        ColdAvailability::Available,
+    )
+    .unwrap();
+
+    assert_eq!(state.resources.object_store_handles, 2);
     assert_eq!(state.resources.arrow_buffers, 1);
 }
 

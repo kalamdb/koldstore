@@ -113,7 +113,7 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
     );
 
     let select =
-        spi::SpiStatement::read("read active schema", "SELECT * FROM system.schemas").unwrap();
+        spi::SpiStatement::read("read active schema", "SELECT * FROM koldstore.schemas").unwrap();
     assert_eq!(select.access, spi::SpiAccess::ReadOnly);
     let insert = spi::SpiStatement::write(
         "insert row event",
@@ -159,16 +159,36 @@ fn sql_migration_creates_required_catalog_tables() {
     let sql = include_str!("../sql/koldstore--0.1.0.sql");
 
     for needle in [
-        "CREATE SCHEMA IF NOT EXISTS system",
         "CREATE TABLE IF NOT EXISTS koldstore.storage",
-        "CREATE TABLE IF NOT EXISTS system.schemas",
+        "CREATE TABLE IF NOT EXISTS koldstore.schemas",
         "CREATE TABLE IF NOT EXISTS koldstore.manifest",
-        "CREATE TABLE IF NOT EXISTS system.jobs",
+        "CREATE TABLE IF NOT EXISTS koldstore.jobs",
         "CREATE TABLE IF NOT EXISTS koldstore.cold_segments",
         "CREATE TABLE IF NOT EXISTS koldstore.cold_pk_hints",
         "CREATE TABLE IF NOT EXISTS koldstore.row_events",
+        "CREATE UNIQUE INDEX IF NOT EXISTS schemas_one_active_per_table_idx",
+        "CREATE INDEX IF NOT EXISTS manifest_dirty_idx",
+        "CREATE INDEX IF NOT EXISTS manifest_scope_lookup_idx",
+        "CREATE INDEX IF NOT EXISTS jobs_pending_idx",
+        "CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx",
+        "CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx",
     ] {
         assert!(sql.contains(needle), "missing SQL fragment: {needle}");
+    }
+
+    assert!(
+        !sql.contains("CREATE SCHEMA IF NOT EXISTS system"),
+        "extension catalog should use a single extension-owned schema"
+    );
+    assert!(
+        !sql.contains("system."),
+        "extension SQL should not create or reference the legacy system schema"
+    );
+    for duplicate_index in ["cold_pk_hints_lookup_idx", "row_events_commit_idx"] {
+        assert!(
+            !sql.contains(duplicate_index),
+            "primary key prefix already covers lookup pattern: {duplicate_index}"
+        );
     }
 }
 

@@ -42,6 +42,7 @@ fn operational_functions_build_parameterized_catalog_plans() {
     let status = pg_koldstore::sql::ops::table_status_plan(table.clone(), None).unwrap();
     assert_eq!(status.table_name.as_str(), "app.items");
     assert!(status.statement.sql.contains("koldstore.manifest"));
+    assert!(status.statement.sql.contains("j.scope_key = $2"));
     assert_eq!(status.statement.access, SpiAccess::ReadOnly);
 
     let backup = pg_koldstore::sql::ops::backup_manifest_plan(
@@ -55,10 +56,19 @@ fn operational_functions_build_parameterized_catalog_plans() {
     let validation =
         pg_koldstore::sql::ops::validate_cold_storage_plan(Some(table.clone())).unwrap();
     assert!(validation.statement.sql.contains("koldstore.cold_segments"));
+    assert!(validation
+        .statement
+        .sql
+        .contains("cs.scope_key = m.scope_key"));
+    assert!(validation.statement.sql.contains("cs.status = 'active'"));
+    assert!(validation
+        .statement
+        .sql
+        .contains("h.segment_id = cs.segment_id"));
 
     let recovery = pg_koldstore::sql::ops::recover_segments_plan(Some(table), false).unwrap();
     assert!(!recovery.request.dry_run);
-    assert!(recovery.statement.sql.contains("system.jobs"));
+    assert!(recovery.statement.sql.contains("koldstore.jobs"));
 }
 
 #[test]
@@ -73,6 +83,8 @@ fn sql_exposes_export_import_boundary() {
         }
     );
     assert!(export.statement.sql.contains("koldstore.manifest"));
+    assert!(export.statement.sql.contains("cs.scope_key = m.scope_key"));
+    assert!(export.statement.sql.contains("cs.status = 'active'"));
     assert!(export.archive_manifest_path.ends_with("manifest.json"));
 
     assert_eq!(

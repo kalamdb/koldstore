@@ -1,6 +1,26 @@
 #[test]
 fn migration_sql_rejects_unsupported_generated_and_expression_shapes() {
-    for supported in ["boolean", "integer", "bigint", "text", "uuid", "jsonb"] {
+    for supported in [
+        "bool",
+        "boolean",
+        "int2",
+        "smallint",
+        "int4",
+        "integer",
+        "int8",
+        "bigint",
+        "float4",
+        "real",
+        "float8",
+        "double precision",
+        "text",
+        "varchar",
+        "character varying",
+        "uuid",
+        "jsonb",
+        "timestamptz",
+        "timestamp with time zone",
+    ] {
         assert!(pg_koldstore::migrate::constraints::type_supported(
             supported
         ));

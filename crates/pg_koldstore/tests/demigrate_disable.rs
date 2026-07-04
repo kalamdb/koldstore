@@ -7,11 +7,11 @@ fn demigration_sql_deactivates_managed_metadata() {
 
     assert_eq!(
         catalog.sql,
-        "UPDATE system.schemas SET active = false WHERE table_oid = $1 AND active = true"
+        "UPDATE koldstore.schemas SET active = false WHERE table_oid = $1 AND active = true"
     );
     assert_eq!(
         flush.sql,
-        "UPDATE system.jobs SET status = 'cancelled', updated_at = now() WHERE table_oid = $1 AND status IN ('pending', 'running')"
+        "UPDATE koldstore.jobs SET status = 'cancelled', updated_at = now() WHERE table_oid = $1 AND status IN ('pending', 'running')"
     );
 }
 
@@ -49,7 +49,7 @@ fn migration_rollback_cleanup_removes_partial_catalog_rows_and_system_columns() 
             "DELETE FROM koldstore.cold_pk_hints WHERE table_oid = $1",
             "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1",
-            "DELETE FROM system.schemas WHERE table_oid = $1",
+            "DELETE FROM koldstore.schemas WHERE table_oid = $1",
             "ALTER TABLE ONLY \"app\".\"items\" DROP COLUMN IF EXISTS \"_seq\", DROP COLUMN IF EXISTS \"_commit_seq\", DROP COLUMN IF EXISTS \"_deleted\""
         ]
     );

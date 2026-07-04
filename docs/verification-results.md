@@ -12,8 +12,9 @@ Date: 2026-07-04
 | `cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg16` | PASS | Valid PG16 pgrx feature clippy path. |
 | `cargo test --workspace --no-default-features` | PASS | Workspace unit, integration, and doc tests passed; pgrx-backed ignored tests remain covered by the local E2E runner. |
 | `tests/e2e/run_pg_matrix.sh` | PASS | Uses local pgrx PostgreSQL 16, installs `koldstore`, recreates `koldstore_pgrx_e2e`, and runs E2E tests with ignored pgrx tests included. No Docker dependency. |
-| `cargo pgrx test --no-default-features --features pg16` | BLOCKED | Fails during native test-binary linking with unresolved PostgreSQL server symbols from normal Rust integration tests under pg16 feature builds. |
-| `cargo run -p pg-koldstore-benchmarks -- --rows 1000 --clients 2 --jobs 2 --seconds 1 --output-json target/pg-koldstore-bench.json --output-html target/pg-koldstore-bench.html` | PASS | Runs real `pgbench` workloads, parses per-transaction logs, and writes JSON/HTML reports. |
+| `cargo pgrx install -p pg_koldstore --no-default-features --features pg16 --pg-config "$(cargo pgrx info pg-config 16)"` | PASS | Valid local pgrx extension install path. Direct `cargo pgrx test` is intentionally avoided because native pg-feature test binaries can link unresolved PostgreSQL backend symbols outside the server. |
+| `cargo run -p pg-koldstore-benchmarks -- --database-url "host=127.0.0.1 port=28816 user=$USER dbname=koldstore_pgrx_bench" --rows 1000 --clients 2 --jobs 2 --seconds 1` | PASS | Runs real `pgbench` workloads against a fresh local pgrx benchmark database and reports p50/p95/p99 latency plus throughput. |
+| `scripts/run-all-tests.sh` | PASS | Full local verification passes with fmt, no-default-feature clippy/tests, pgrx feature compile/install, local pgrx E2E, memory checks, and benchmarks. |
 
 ## Residual Notes
 

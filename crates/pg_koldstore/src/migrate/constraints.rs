@@ -1,5 +1,6 @@
 //! Migration validation.
 
+use koldstore_parquet::PgType;
 use thiserror::Error;
 
 /// Returns true when the table has a primary-key shape pg-koldstore can manage.
@@ -325,17 +326,5 @@ pub const fn fk_policy_allowed(has_fk: bool, flush_enabled: bool, allow_fk_hot_o
 /// Returns whether a column type is supported by the MVP type matrix.
 #[must_use]
 pub fn type_supported(type_name: &str) -> bool {
-    matches!(
-        type_name,
-        "boolean"
-            | "smallint"
-            | "integer"
-            | "bigint"
-            | "real"
-            | "double precision"
-            | "text"
-            | "uuid"
-            | "jsonb"
-            | "timestamp with time zone"
-    )
+    PgType::from_postgres_name(type_name).is_ok()
 }

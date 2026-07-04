@@ -6,7 +6,7 @@ fn jobs_and_recovery_contract_covers_status_retries_and_idempotence() {
     )
     .unwrap();
 
-    assert!(recovery.statement.sql.contains("system.jobs"));
+    assert!(recovery.statement.sql.contains("koldstore.jobs"));
     assert!(recovery.statement.sql.contains("recover_segments"));
     assert!(recovery.statement.sql.contains("attempts"));
     assert!(recovery.statement.sql.contains("dry_run"));

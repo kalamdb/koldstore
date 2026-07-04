@@ -1,4 +1,4 @@
-use pg_koldstore::flush::{cleanup, worker};
+use pg_koldstore::flush::{cleanup, job, worker};
 
 #[test]
 fn hot_cleanup_waits_for_manifest_commit_and_retains_needed_tombstones() {
@@ -24,4 +24,10 @@ fn flush_worker_registration_documents_builtin_and_sql_fallback_boundaries() {
     assert!(modes.contains(&worker::FlushWorkerMode::BuiltInBackgroundWorker));
     assert!(modes.contains(&worker::FlushWorkerMode::SqlFunctionFallback));
     assert!(modes.contains(&worker::FlushWorkerMode::PgCronFallback));
+}
+
+#[test]
+fn zero_sized_flush_batch_does_not_request_another_scan() {
+    assert!(!job::should_continue_batch(0, 0));
+    assert!(!job::should_continue_batch(10, 0));
 }

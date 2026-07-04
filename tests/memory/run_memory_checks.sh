@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 echo "running Rust tests with sanitizer-friendly profile"
-RUSTFLAGS="${RUSTFLAGS:-}" cargo test --workspace
+RUSTFLAGS="${RUSTFLAGS:-}" cargo test --workspace --no-default-features
 
 if command -v valgrind >/dev/null 2>&1; then
   echo "valgrind is available; run targeted pgrx binaries when extension install is configured"

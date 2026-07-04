@@ -6,7 +6,6 @@
 -- functions can be generated.
 
 CREATE SCHEMA IF NOT EXISTS koldstore;
-CREATE SCHEMA IF NOT EXISTS system;
 
 CREATE TYPE koldstore.managed_table_info AS (
   table_oid oid,
@@ -44,7 +43,7 @@ CREATE TABLE IF NOT EXISTS koldstore.storage (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS system.schemas (
+CREATE TABLE IF NOT EXISTS koldstore.schemas (
   id uuid PRIMARY KEY,
   table_oid oid NOT NULL,
   version integer NOT NULL,
@@ -58,8 +57,13 @@ CREATE TABLE IF NOT EXISTS system.schemas (
   options jsonb NOT NULL DEFAULT '{}'::jsonb,
   storage_id uuid REFERENCES koldstore.storage(id),
   created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (table_oid, version)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS schemas_one_active_per_table_idx
+  ON koldstore.schemas (table_oid)
+  WHERE active;
 
 CREATE TABLE IF NOT EXISTS koldstore.manifest (
   table_oid oid NOT NULL,
@@ -76,22 +80,34 @@ CREATE TABLE IF NOT EXISTS koldstore.manifest (
   PRIMARY KEY (table_oid, scope_key)
 );
 
-CREATE TABLE IF NOT EXISTS system.jobs (
+CREATE INDEX IF NOT EXISTS manifest_dirty_idx
+  ON koldstore.manifest (sync_state, updated_at, table_oid, scope_key)
+  WHERE sync_state IN ('pending_write', 'stale', 'error');
+
+CREATE INDEX IF NOT EXISTS manifest_scope_lookup_idx
+  ON koldstore.manifest (scope_key, table_oid)
+  WHERE scope_key <> '';
+
+CREATE TABLE IF NOT EXISTS koldstore.jobs (
   id uuid PRIMARY KEY,
   table_oid oid,
-  scope_key text,
+  scope_key text NOT NULL DEFAULT '',
   job_type text NOT NULL,
-  status text NOT NULL,
+  status text NOT NULL CHECK (status IN ('pending', 'running', 'dry_run', 'completed', 'cancelled', 'error')),
   attempts integer NOT NULL DEFAULT 0,
   error_trace text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE INDEX IF NOT EXISTS jobs_pending_idx
+  ON koldstore.jobs (table_oid, scope_key, status, updated_at)
+  WHERE status IN ('pending', 'running');
+
 CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   segment_id uuid PRIMARY KEY,
   table_oid oid NOT NULL,
-  scope_key text,
+  scope_key text NOT NULL DEFAULT '',
   object_path text NOT NULL,
   batch_number integer NOT NULL,
   min_seq bigint NOT NULL,
@@ -109,29 +125,29 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS cold_segments_scope_status_idx
-  ON koldstore.cold_segments (table_oid, scope_key, status);
+CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx
+  ON koldstore.cold_segments (table_oid, scope_key, min_seq, max_seq)
+  INCLUDE (segment_id, object_path, min_commit_seq, max_commit_seq, row_count, byte_size, schema_version, manifest_etag)
+  WHERE status = 'active';
 
-CREATE INDEX IF NOT EXISTS cold_segments_commit_range_idx
-  ON koldstore.cold_segments (table_oid, min_commit_seq, max_commit_seq);
+CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx
+  ON koldstore.cold_segments (table_oid, scope_key, min_commit_seq, max_commit_seq)
+  WHERE status = 'active';
 
 CREATE TABLE IF NOT EXISTS koldstore.cold_pk_hints (
   table_oid oid NOT NULL,
-  scope_key text,
+  scope_key text NOT NULL DEFAULT '',
   pk_hash bytea NOT NULL,
-  segment_id uuid NOT NULL REFERENCES koldstore.cold_segments(segment_id),
+  segment_id uuid NOT NULL REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,
   hint_kind text NOT NULL CHECK (hint_kind IN ('exact', 'bloom', 'range')),
   latest_seq bigint NOT NULL,
   latest_commit_seq bigint NOT NULL,
   PRIMARY KEY (table_oid, scope_key, pk_hash, segment_id)
 );
 
-CREATE INDEX IF NOT EXISTS cold_pk_hints_lookup_idx
-  ON koldstore.cold_pk_hints (table_oid, scope_key, pk_hash);
-
 CREATE TABLE IF NOT EXISTS koldstore.row_events (
   table_oid oid NOT NULL,
-  scope_key text,
+  scope_key text NOT NULL DEFAULT '',
   pk_hash bytea NOT NULL,
   pk_json jsonb NOT NULL,
   op text NOT NULL CHECK (op IN ('insert', 'update', 'delete', 'revive')),
@@ -143,9 +159,6 @@ CREATE TABLE IF NOT EXISTS koldstore.row_events (
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (table_oid, scope_key, commit_seq, pk_hash)
 );
-
-CREATE INDEX IF NOT EXISTS row_events_commit_idx
-  ON koldstore.row_events (table_oid, scope_key, commit_seq);
 
 CREATE TABLE IF NOT EXISTS koldstore.row_event_retention (
   table_oid oid PRIMARY KEY,

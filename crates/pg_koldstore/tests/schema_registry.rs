@@ -99,7 +99,7 @@ fn schema_registry_plan_uses_parameterized_upsert_sql() {
 
     assert_eq!(plan.statement.operation, "register managed table schema");
     assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
-    assert!(plan.statement.sql.contains("INSERT INTO system.schemas"));
+    assert!(plan.statement.sql.contains("INSERT INTO koldstore.schemas"));
     assert!(plan
         .statement
         .sql

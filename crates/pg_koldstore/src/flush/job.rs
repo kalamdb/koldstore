@@ -1,6 +1,6 @@
 //! Flush job state transitions.
 
-use std::collections::BTreeMap;
+use std::collections::{btree_map::Entry, BTreeMap};
 
 use koldstore_core::{CommitSeq, Result, ScopeKey, SeqId, StablePkHash};
 use koldstore_parquet::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
@@ -132,14 +132,16 @@ impl FlushBatchInput {
         let scanned_rows = self.rows.len();
         let mut latest_by_pk = BTreeMap::<StablePkHash, HotRowCandidate>::new();
         for row in self.rows {
-            latest_by_pk
-                .entry(row.pk_hash.clone())
-                .and_modify(|existing| {
-                    if (row.seq, row.commit_seq) > (existing.seq, existing.commit_seq) {
-                        *existing = row.clone();
+            match latest_by_pk.entry(row.pk_hash.clone()) {
+                Entry::Vacant(entry) => {
+                    entry.insert(row);
+                }
+                Entry::Occupied(mut entry) => {
+                    if (row.seq, row.commit_seq) > (entry.get().seq, entry.get().commit_seq) {
+                        entry.insert(row);
                     }
-                })
-                .or_insert(row);
+                }
+            }
         }
         let rows = latest_by_pk.into_values().collect::<Vec<_>>();
         let live_rows = rows.iter().filter(|row| !row.deleted).count();
@@ -171,11 +173,21 @@ impl FlushBatchPlan {
     /// Builds a footer summary for live rows in this planned batch.
     #[must_use]
     pub fn footer_summary(&self) -> FooterSummary {
-        let live_rows = self.rows.iter().filter(|row| !row.deleted);
-        let min_seq = live_rows.clone().map(|row| row.seq.get()).min();
-        let max_seq = live_rows.clone().map(|row| row.seq.get()).max();
-        let min_commit_seq = live_rows.clone().map(|row| row.commit_seq.get()).min();
-        let max_commit_seq = live_rows.map(|row| row.commit_seq.get()).max();
+        let mut min_seq = None::<i64>;
+        let mut max_seq = None::<i64>;
+        let mut min_commit_seq = None::<i64>;
+        let mut max_commit_seq = None::<i64>;
+
+        for row in self.rows.iter().filter(|row| !row.deleted) {
+            let seq = row.seq.get();
+            let commit_seq = row.commit_seq.get();
+            min_seq = Some(min_seq.map_or(seq, |current| current.min(seq)));
+            max_seq = Some(max_seq.map_or(seq, |current| current.max(seq)));
+            min_commit_seq =
+                Some(min_commit_seq.map_or(commit_seq, |current| current.min(commit_seq)));
+            max_commit_seq =
+                Some(max_commit_seq.map_or(commit_seq, |current| current.max(commit_seq)));
+        }
 
         FooterSummary {
             row_groups: vec![RowGroupStats {
@@ -322,5 +334,5 @@ pub const fn successful_flush_state(remaining_hot_rows: bool) -> &'static str {
 /// Returns whether a bounded flush batch should continue.
 #[must_use]
 pub const fn should_continue_batch(scanned_rows: usize, batch_size: usize) -> bool {
-    scanned_rows >= batch_size
+    batch_size > 0 && scanned_rows >= batch_size
 }

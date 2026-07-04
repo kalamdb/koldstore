@@ -9,11 +9,11 @@ use koldstore_catalog::{SchemaColumn, TypeMatrix};
 
 /// Initial schema version for a managed table.
 pub const INITIAL_SCHEMA_VERSION: u32 = 1;
-/// Type matrix JSON schema version stored in `system.schemas`.
+/// Type matrix JSON schema version stored in `koldstore.schemas`.
 pub const TYPE_MATRIX_CAPTURE_VERSION: u32 = 1;
 
 const REGISTER_SCHEMA_SQL: &str = r#"
-INSERT INTO system.schemas AS s (
+INSERT INTO koldstore.schemas AS s (
     id,
     table_oid,
     version,
@@ -115,7 +115,7 @@ pub struct RegistrationMetadata {
     pub options: Value,
 }
 
-/// Prepared JSON metadata for `system.schemas`.
+/// Prepared JSON metadata for `koldstore.schemas`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRegistrationMetadata {
     /// Table oid.
@@ -140,7 +140,7 @@ pub struct PreparedRegistrationMetadata {
     pub storage_id: Uuid,
 }
 
-/// Planned `system.schemas` catalog insertion.
+/// Planned `koldstore.schemas` catalog insertion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SchemaRegistryPlan {
     /// Schema registry row id to bind as `$1`.
@@ -209,7 +209,7 @@ impl RegistrationMetadata {
         Ok(())
     }
 
-    /// Serializes registry metadata into the shape written to `system.schemas`.
+    /// Serializes registry metadata into the shape written to `koldstore.schemas`.
     ///
     /// # Errors
     ///

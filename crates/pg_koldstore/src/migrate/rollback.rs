@@ -93,7 +93,7 @@ impl RollbackCleanup {
             "DELETE FROM koldstore.cold_pk_hints WHERE table_oid = $1",
             "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1",
-            "DELETE FROM system.schemas WHERE table_oid = $1",
+            "DELETE FROM koldstore.schemas WHERE table_oid = $1",
         ] {
             statements.push(
                 SpiStatement::write("cleanup migration catalog rows", sql)
