@@ -179,6 +179,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install curl for rustup
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates curl
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -229,6 +232,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install curl for rustup
+        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -278,6 +284,9 @@ jobs:
           - { pg: 18, arch: arm64, distro: rocky9, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install curl for rustup
+        run: dnf -y install --allowerasing ca-certificates curl
 
       - uses: dtolnay/rust-toolchain@master
         with:
