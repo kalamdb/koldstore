@@ -503,6 +503,8 @@ fn migrate_table_pg_impl(
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     enqueue_backfill_job(&plan.backfill_job)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    run_existing_table_migration_inline(&plan)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
     managed_table_info_tuple(
         table_oid_u32,
@@ -802,6 +804,87 @@ fn enqueue_backfill_job(
             DatumWithOid::from(pgrx::JsonB(plan.payload.clone())),
         ],
     )
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn run_existing_table_migration_inline(
+    plan: &crate::migrate::ExistingTableMigrationPlan,
+) -> Result<(), pgrx::spi::Error> {
+    let table = plan.table.quoted();
+    let order_column = quote_ident(&plan.ordering.column);
+    pgrx::Spi::run(&format!(
+        r#"
+WITH candidate AS MATERIALIZED (
+    SELECT ctid, {order_column} AS migration_order_value
+    FROM ONLY {table}
+    WHERE "_seq" IS NULL
+    ORDER BY {order_column} ASC, ctid ASC
+),
+assigned AS MATERIALIZED (
+    SELECT
+        ctid,
+        nextval('koldstore.global_seq'::regclass) AS assigned_seq,
+        nextval('koldstore.global_commit_seq'::regclass) AS assigned_commit_seq
+    FROM candidate
+    ORDER BY migration_order_value ASC, ctid ASC
+)
+UPDATE ONLY {table} AS hot
+SET "_seq" = assigned.assigned_seq,
+    "_commit_seq" = assigned.assigned_commit_seq,
+    "_deleted" = false
+FROM assigned
+WHERE hot.ctid = assigned.ctid
+  AND hot."_seq" IS NULL
+"#
+    ))?;
+
+    pgrx::Spi::run(&format!(
+        r#"
+ALTER TABLE {table}
+    ALTER COLUMN "_seq" SET NOT NULL,
+    ALTER COLUMN "_commit_seq" SET NOT NULL,
+    ALTER COLUMN "_deleted" SET NOT NULL
+"#
+    ))?;
+
+    pgrx::Spi::run_with_args(
+        r#"
+UPDATE koldstore.schemas
+SET active = true,
+    options = jsonb_set(options, '{migration_status}', '"active"'::jsonb, true),
+    updated_at = now()
+WHERE table_oid = $1::oid
+"#,
+        &[pgrx::datum::DatumWithOid::from(pgrx::pg_sys::Oid::from(
+            plan.table_oid,
+        ))],
+    )?;
+    pgrx::Spi::run_with_args(
+        r#"
+UPDATE koldstore.jobs
+SET status = 'completed',
+    phase = 'finished',
+    rows_processed = (
+        SELECT count(*) FROM ONLY {table}
+        WHERE "_seq" IS NOT NULL
+    ),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_heartbeat_at = now(),
+    updated_at = now()
+WHERE id = $1::uuid
+"#
+        .replace("{table}", &table)
+        .as_str(),
+        &[pgrx::datum::DatumWithOid::from(pgrx::Uuid::from_bytes(
+            *plan.backfill_job.job_id.as_bytes(),
+        ))],
+    )
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 /// Migration request.

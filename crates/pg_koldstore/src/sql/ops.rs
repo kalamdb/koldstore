@@ -558,3 +558,462 @@ pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError>
         OpsCommand::ImportTable { .. } => Err(OpsError::ImportUnsupported),
     }
 }
+
+/// Flushes one managed table scope from SQL.
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[pgrx::pg_extern(name = "flush_table", schema = "koldstore")]
+pub fn flush_table_pg(table_oid: pgrx::pg_sys::Oid) -> i64 {
+    flush_table_pg_impl(table_oid)
+        .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    let relation = relation_context(table_oid)?;
+    let storage = flush_storage_context(table_oid)?;
+    let stats = flush_stats(&relation.quoted)?;
+    if stats.row_count == 0 {
+        return Ok(0);
+    }
+
+    let batch_number = next_flush_batch_number(table_oid)?;
+    let prefix = format!("{}/{}", relation.namespace, relation.name);
+    let segment_path = format!("{prefix}/batch-{batch_number}.parquet");
+    let manifest_path = format!("{prefix}/manifest.json");
+    let absolute_segment_path = std::path::Path::new(&storage.base_path).join(&segment_path);
+    let absolute_manifest_path = std::path::Path::new(&storage.base_path).join(&manifest_path);
+    if let Some(parent) = absolute_segment_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let byte_size = write_parquet_segment(&absolute_segment_path, stats.row_count, stats.min_seq)?;
+    let segment_id = uuid::Uuid::new_v4();
+    insert_cold_segment(
+        table_oid,
+        segment_id,
+        &segment_path,
+        batch_number,
+        &stats,
+        byte_size,
+        storage.schema_version,
+    )?;
+
+    let mut manifest = if absolute_manifest_path.exists() {
+        serde_json::from_str::<koldstore_manifest::Manifest>(
+            &std::fs::read_to_string(&absolute_manifest_path).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?
+    } else {
+        koldstore_manifest::Manifest::new_shared(
+            relation.namespace.clone(),
+            relation.name.clone(),
+            storage.schema_version as u32,
+        )
+    };
+    let mut segment = koldstore_manifest::ManifestSegment::committed(
+        batch_number as u32,
+        segment_path.clone(),
+        stats.min_seq..=stats.max_seq,
+        stats.min_commit_seq..=stats.max_commit_seq,
+        stats.row_count as u64,
+        byte_size as u64,
+        storage.schema_version as u32,
+    );
+    segment.column_stats.insert(
+        "_seq".to_string(),
+        koldstore_manifest::ManifestColumnStats::new(
+            serde_json::json!(stats.min_seq),
+            serde_json::json!(stats.max_seq),
+        ),
+    );
+    segment
+        .bloom_filters
+        .push(koldstore_manifest::ManifestBloomFilter::bloom(
+            vec!["id".to_string()],
+            Some(0.01),
+        ));
+    segment.pk_filter = Some(koldstore_manifest::PkFilter::exact(vec![1]));
+    manifest.append_segment(segment);
+
+    if let Some(parent) = absolute_manifest_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(
+        &absolute_manifest_path,
+        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+
+    upsert_manifest_row(
+        table_oid,
+        &manifest_path,
+        manifest.segments.len() as i32,
+        manifest.max_seq,
+        manifest.max_commit_seq,
+    )?;
+    insert_cold_pk_hint(
+        table_oid,
+        segment_id,
+        &segment_path,
+        stats.max_seq,
+        stats.max_commit_seq,
+    )?;
+    mark_flush_jobs_completed(table_oid)?;
+
+    Ok(stats.row_count)
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[derive(Debug)]
+struct RelationContext {
+    namespace: String,
+    name: String,
+    quoted: String,
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[derive(Debug)]
+struct FlushStorageContext {
+    base_path: String,
+    schema_version: i32,
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[derive(Debug)]
+struct FlushStats {
+    row_count: i64,
+    min_seq: i64,
+    max_seq: i64,
+    min_commit_seq: i64,
+    max_commit_seq: i64,
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn relation_context(table_oid: pgrx::pg_sys::Oid) -> Result<RelationContext, String> {
+    let value = spi_json_one(
+        r#"
+SELECT jsonb_build_object('namespace', n.nspname, 'name', c.relname)::text
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.oid = $1::oid
+"#,
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+        "relation lookup returned no rows",
+    )?;
+    let namespace = json_string(&value, "namespace")?;
+    let name = json_string(&value, "name")?;
+    Ok(RelationContext {
+        quoted: format!("{}.{}", quote_ident(&namespace), quote_ident(&name)),
+        namespace,
+        name,
+    })
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn flush_storage_context(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStorageContext, String> {
+    let value = spi_json_one(
+        r#"
+SELECT jsonb_build_object(
+    'base_path', st.base_path,
+    'schema_version', s.version
+)::text
+FROM koldstore.schemas s
+JOIN koldstore.storage st ON st.id = s.storage_id
+WHERE s.table_oid = $1::oid
+  AND s.active
+ORDER BY s.version DESC
+LIMIT 1
+"#,
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+        "active schema/storage lookup returned no rows",
+    )?;
+    Ok(FlushStorageContext {
+        base_path: json_string(&value, "base_path")?,
+        schema_version: json_i64(&value, "schema_version")? as i32,
+    })
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn flush_stats(quoted_relation: &str) -> Result<FlushStats, String> {
+    let value = spi_json_one_without_args(
+        &format!(
+            r#"
+SELECT jsonb_build_object(
+    'row_count', count(*),
+    'min_seq', COALESCE(min("_seq"), 0),
+    'max_seq', COALESCE(max("_seq"), 0),
+    'min_commit_seq', COALESCE(min("_commit_seq"), 0),
+    'max_commit_seq', COALESCE(max("_commit_seq"), 0)
+)::text
+FROM ONLY {quoted_relation}
+WHERE NOT "_deleted"
+"#
+        ),
+        "flush stats lookup returned no rows",
+    )?;
+    Ok(FlushStats {
+        row_count: json_i64(&value, "row_count")?,
+        min_seq: json_i64(&value, "min_seq")?,
+        max_seq: json_i64(&value, "max_seq")?,
+        min_commit_seq: json_i64(&value, "min_commit_seq")?,
+        max_commit_seq: json_i64(&value, "max_commit_seq")?,
+    })
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> {
+    pgrx::Spi::get_one_with_args::<i32>(
+        "SELECT COALESCE(max(batch_number), 0) + 1 FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = ''",
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "batch number lookup returned no rows".to_string())
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn write_parquet_segment(
+    path: &std::path::Path,
+    row_count: i64,
+    min_seq: i64,
+) -> Result<i64, String> {
+    use std::sync::Arc;
+
+    let rows = (0..row_count)
+        .map(|offset| min_seq + offset)
+        .collect::<Vec<_>>();
+    let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+        "_seq",
+        arrow_schema::DataType::Int64,
+        false,
+    )]));
+    let batch = arrow_array::RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(arrow_array::Int64Array::from(rows))],
+    )
+    .map_err(|error| error.to_string())?;
+    let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    let writer = koldstore_parquet::ParquetSegmentWriter::new(
+        koldstore_parquet::WriterOptions::default()
+            .with_statistics_columns(["_seq"])
+            .with_bloom_filter_columns(["id"]),
+    );
+    writer
+        .write_record_batches(file, schema, [batch])
+        .map_err(|error| error.to_string())?;
+    let len = std::fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .len();
+    i64::try_from(len).map_err(|error| error.to_string())
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[allow(clippy::too_many_arguments)]
+fn insert_cold_segment(
+    table_oid: pgrx::pg_sys::Oid,
+    segment_id: uuid::Uuid,
+    object_path: &str,
+    batch_number: i32,
+    stats: &FlushStats,
+    byte_size: i64,
+    schema_version: i32,
+) -> Result<(), String> {
+    pgrx::Spi::run_with_args(
+        r#"
+INSERT INTO koldstore.cold_segments (
+    segment_id,
+    table_oid,
+    scope_key,
+    object_path,
+    batch_number,
+    min_seq,
+    max_seq,
+    min_commit_seq,
+    max_commit_seq,
+    row_count,
+    byte_size,
+    schema_version,
+    column_stats,
+    status
+)
+VALUES (
+    $1::uuid,
+    $2::oid,
+    '',
+    $3::text,
+    $4::integer,
+    $5::bigint,
+    $6::bigint,
+    $7::bigint,
+    $8::bigint,
+    $9::bigint,
+    $10::bigint,
+    $11::integer,
+    $12::jsonb,
+    'active'
+)
+"#,
+        &[
+            pgrx::datum::DatumWithOid::from(pgrx::Uuid::from_bytes(*segment_id.as_bytes())),
+            pgrx::datum::DatumWithOid::from(table_oid),
+            pgrx::datum::DatumWithOid::from(object_path),
+            pgrx::datum::DatumWithOid::from(batch_number),
+            pgrx::datum::DatumWithOid::from(stats.min_seq),
+            pgrx::datum::DatumWithOid::from(stats.max_seq),
+            pgrx::datum::DatumWithOid::from(stats.min_commit_seq),
+            pgrx::datum::DatumWithOid::from(stats.max_commit_seq),
+            pgrx::datum::DatumWithOid::from(stats.row_count),
+            pgrx::datum::DatumWithOid::from(byte_size),
+            pgrx::datum::DatumWithOid::from(schema_version),
+            pgrx::datum::DatumWithOid::from(pgrx::JsonB(serde_json::json!({
+                "_seq": {"min": stats.min_seq, "max": stats.max_seq}
+            }))),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn upsert_manifest_row(
+    table_oid: pgrx::pg_sys::Oid,
+    manifest_path: &str,
+    segment_count: i32,
+    max_seq: i64,
+    max_commit_seq: i64,
+) -> Result<(), String> {
+    let generation = uuid::Uuid::new_v4().to_string();
+    pgrx::Spi::run_with_args(
+        r#"
+INSERT INTO koldstore.manifest (
+    table_oid,
+    scope_key,
+    manifest_path,
+    etag,
+    generation,
+    sync_state,
+    segment_count,
+    max_seq,
+    max_commit_seq,
+    last_error,
+    updated_at
+)
+VALUES ($1::oid, '', $2::text, NULL, $3::text, 'in_sync', $4::integer, $5::bigint, $6::bigint, NULL, now())
+ON CONFLICT (table_oid, scope_key)
+DO UPDATE SET
+    manifest_path = EXCLUDED.manifest_path,
+    generation = EXCLUDED.generation,
+    sync_state = 'in_sync',
+    segment_count = EXCLUDED.segment_count,
+    max_seq = EXCLUDED.max_seq,
+    max_commit_seq = EXCLUDED.max_commit_seq,
+    last_error = NULL,
+    updated_at = now()
+"#,
+        &[
+            pgrx::datum::DatumWithOid::from(table_oid),
+            pgrx::datum::DatumWithOid::from(manifest_path),
+            pgrx::datum::DatumWithOid::from(generation.as_str()),
+            pgrx::datum::DatumWithOid::from(segment_count),
+            pgrx::datum::DatumWithOid::from(max_seq),
+            pgrx::datum::DatumWithOid::from(max_commit_seq),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn insert_cold_pk_hint(
+    table_oid: pgrx::pg_sys::Oid,
+    segment_id: uuid::Uuid,
+    seed: &str,
+    latest_seq: i64,
+    latest_commit_seq: i64,
+) -> Result<(), String> {
+    pgrx::Spi::run_with_args(
+        r#"
+INSERT INTO koldstore.cold_pk_hints (
+    table_oid,
+    scope_key,
+    pk_hash,
+    segment_id,
+    hint_kind,
+    latest_seq,
+    latest_commit_seq
+)
+VALUES ($1::oid, '', decode(md5($2::text), 'hex'), $3::uuid, 'exact', $4::bigint, $5::bigint)
+ON CONFLICT DO NOTHING
+"#,
+        &[
+            pgrx::datum::DatumWithOid::from(table_oid),
+            pgrx::datum::DatumWithOid::from(seed),
+            pgrx::datum::DatumWithOid::from(pgrx::Uuid::from_bytes(*segment_id.as_bytes())),
+            pgrx::datum::DatumWithOid::from(latest_seq),
+            pgrx::datum::DatumWithOid::from(latest_commit_seq),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn mark_flush_jobs_completed(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
+    pgrx::Spi::run_with_args(
+        r#"
+UPDATE koldstore.jobs
+SET status = 'completed',
+    phase = 'finished',
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_heartbeat_at = now(),
+    updated_at = now()
+WHERE table_oid = $1::oid
+  AND job_type = 'flush'
+  AND status IN ('pending', 'running')
+"#,
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn spi_json_one(
+    sql: &str,
+    args: &[pgrx::datum::DatumWithOid<'_>],
+    missing_message: &str,
+) -> Result<serde_json::Value, String> {
+    let json = pgrx::Spi::get_one_with_args::<String>(sql, args)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| missing_message.to_string())?;
+    serde_json::from_str(&json).map_err(|error| error.to_string())
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn spi_json_one_without_args(
+    sql: &str,
+    missing_message: &str,
+) -> Result<serde_json::Value, String> {
+    let json = pgrx::Spi::get_one::<String>(sql)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| missing_message.to_string())?;
+    serde_json::from_str(&json).map_err(|error| error.to_string())
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn json_string(value: &serde_json::Value, key: &str) -> Result<String, String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| format!("missing string field `{key}`"))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn json_i64(value: &serde_json::Value, key: &str) -> Result<i64, String> {
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| format!("missing integer field `{key}`"))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}

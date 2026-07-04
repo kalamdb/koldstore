@@ -1,191 +1,163 @@
-# pg-koldstore benchmarks
+# pgKalam Benchmarks
 
-Benchmarks compare a plain PostgreSQL heap table with an equivalent **koldstore-managed** table. Each scenario runs the same workload twice — once on heap, once after `koldstore.migrate_table` — so results isolate koldstore overhead rather than schema or query differences.
+This directory contains the benchmark system for comparing plain PostgreSQL with pgKalam/pg-koldstore modes:
+
+- baseline PostgreSQL without the extension
+- extension hot-only mode
+- extension hot+cold setup
+- extension cold-only archive/read mode
+
+The primary benchmark path is real PostgreSQL behavior through SQL and `pgbench`. Criterion.rs benchmarks under `benchmarks/benches/` cover extension internals only.
 
 ## Prerequisites
 
-- Local pgrx PostgreSQL with the `koldstore` extension installed
-- `pgbench` available on `PATH`
-- A connection string, e.g. `host=127.0.0.1 port=28816 user=$USER dbname=postgres`
+- Rust stable
+- `cargo-pgrx` matching the repository pgrx version
+- `pgbench`
+
+`benchmarks/scripts/run.sh` starts pgrx-managed PostgreSQL 16 by default, installs the extension from this source tree, and recreates a dedicated benchmark database named `koldstore_pgrx_bench`.
+
+If pgrx is not initialized yet:
 
 ```bash
-cargo pgrx start pg16
-cargo pgrx install -p pg_koldstore --no-default-features --features pg16 \
-  --pg-config "$(cargo pgrx info pg-config 16)"
+cargo pgrx init
 ```
 
-## Running
+## Run Everything
+
+```bash
+./benchmarks/scripts/run.sh
+```
+
+`benchmarks/scripts/run.sh` starts pgrx PostgreSQL, installs `pg_koldstore`, verifies the connection, runs `CREATE EXTENSION IF NOT EXISTS koldstore`, checks `koldstore_version()`, then runs Criterion and `pgbench` for every configured PostgreSQL mode. It always generates the benchmark reports when it finishes, even if a mode fails and only partial raw data is available. Results are written to:
+
+- `benchmarks/results/summary.json`
+- `benchmarks/results/report.md`
+- `benchmarks/results/report.html`
+- `benchmarks/results/<version>-<UTC time>.html`
+- `target/criterion/report/`
+
+Useful knobs:
+
+```bash
+BENCH_ROWS=100000 BENCH_SECONDS=30 BENCH_MIXED_SECONDS=120 ./benchmarks/scripts/run.sh
+```
+
+For quick harness/debug runs that still generate the full report shape:
+
+```bash
+./benchmarks/scripts/run.sh --mini
+```
+
+Mini mode defaults to 5,000 rows, 1-second pgbench workloads, 3-second mixed workload, 2 clients/jobs, and skips Criterion. It is for validating benchmark plumbing and report generation, not publishable performance numbers.
+
+By default the runner compacts each mode after setup and before size snapshots:
+
+```bash
+KOLDSTORE_BENCH_COMPACT_AFTER_SETUP=0 ./benchmarks/scripts/run.sh
+```
+
+Leave compaction enabled for storage comparisons. It removes migration-backfill bloat with PostgreSQL `VACUUM FULL` and `REINDEX`, so size rows reflect the steady hot table/index footprint instead of temporary migration tombstones.
+
+Useful pgrx overrides:
+
+```bash
+KOLDSTORE_BENCH_PGVERSION=17 ./benchmarks/scripts/run.sh
+KOLDSTORE_BENCH_PGPORT=28817 ./benchmarks/scripts/run.sh
+KOLDSTORE_PGRX_INSTALL_SUDO=1 ./benchmarks/scripts/run.sh
+```
+
+To run against a PostgreSQL server that you started yourself:
 
 ```bash
 export DATABASE_URL="host=127.0.0.1 port=28816 user=$USER dbname=postgres"
-
-cargo run -p pg-koldstore-benchmarks -- \
-  --rows 100000 \
-  --clients 16 \
-  --jobs 4 \
-  --seconds 30 \
-  --output-json target/pg-koldstore-bench.json \
-  --output-html target/pg-koldstore-bench.html
+KOLDSTORE_BENCH_START_PGRX=0 ./benchmarks/scripts/run.sh
 ```
 
-The Rust runner creates heap and koldstore tables, migrates the koldstore table, writes custom `pgbench` scripts, parses per-transaction pgbench logs, and emits JSON/HTML with p50/p95/p99 latency, throughput, and pass/fail verdicts.
+## Run Only Criterion
 
-## Scenarios
-
-### 1. Shared table — 1 million rows
-
-Models app-wide data (audit logs, catalog history) where every query may scan the full table.
-
-| | Heap baseline | koldstore managed |
-|---|---|---|
-| Table type | plain `CREATE TABLE` | `table_type => 'shared'` |
-| Row count | **1,000,000** | **1,000,000** (same fixture) |
-| Cold layout | n/a | `{namespace}/{tableName}/` |
-
-**Fixture**
-
-```sql
-CREATE TABLE bench.shared_items (
-  id         bigint PRIMARY KEY,
-  body       text   NOT NULL,
-  value      bigint NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
+```bash
+cargo bench
+cargo bench -p pg-koldstore-benchmarks
 ```
 
-Load rows into two identical tables: `bench.heap_items` (heap) and `bench.koldstore_items` (migrated). Use `--rows 1000000` for a 1M-row high-load run.
+Criterion reports are generated under `target/criterion/report/`. These benchmarks cover manifest pruning, cold lookup/miss logic, footer parsing, flush candidate planning, serialization, deduplication, object path generation, policy evaluation, and query-mode decision logic.
 
-**Queries measured**
+## pgbench Modes
 
-| Query | What it tests |
-|---|---|
-| `SELECT * FROM … WHERE id = $1` | PK point lookup (hot-only vs hot+cold merge) |
-| `UPDATE … WHERE id = $1` | Hot-row DML overhead |
-| `INSERT … ON CONFLICT DO NOTHING` | Hot insert throughput under contention |
+The full runner executes all pgbench modes internally from the same script: baseline, extension hot-only, extension hot+cold, and extension cold-only. Each mode creates its own schema, loads the same 100,000-row `bench_events` table by default, applies the same indexes, compacts setup bloat, runs workload scripts, captures approximate system stats, captures table/index/cold sizes, and records representative `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` plans.
 
-Each query runs against both tables. The report records select time (p50/p95/p99) and compares koldstore latency to the heap baseline.
+## Workloads
 
-### 2. User table — scoped SELECT by user
+The pgbench suite includes at least these groups:
 
-Models multi-tenant data where queries filter on a scope column (e.g. `user_id`). Cold files fan out per user under `{namespace}/{tableName}/{scopeId}/`.
+- single hot query
+- batch hot query
+- hot+cold query
+- cold-only query
+- cold miss query
+- single insert
+- batch insert 100, 500, and 1000
+- single update
+- batch update
+- single delete
+- batch delete
+- mixed workload with 20 clients
 
-| | Heap baseline | koldstore managed |
-|---|---|---|
-| Table type | plain `CREATE TABLE` | `table_type => 'user'`, `scope_column => 'user_id'` |
-| Users | **x** (configurable, default 1,000) | **x** (same distribution) |
-| Rows per user | configurable (default 1,000) | configurable (default 1,000) |
-| Total rows | x × rows-per-user | x × rows-per-user |
+The mixed workload uses:
 
-**Fixture**
-
-```sql
-CREATE TABLE bench.user_events (
-  id         bigint PRIMARY KEY,
-  user_id    uuid   NOT NULL,
-  body       text   NOT NULL,
-  created_at timestamptz NOT NULL DEFAULT now()
-);
-
--- koldstore variant only:
-SELECT koldstore.migrate_table(
-  table_name   => 'bench.koldstore_user_events',
-  table_type   => 'user',
-  storage_name => 'local-minio',
-  flush_policy => 'rows:500,interval:60',
-  scope_column => 'user_id'
-);
+```bash
+pgbench -c 20 -j 4 -T 120 -f benchmarks/pgbench/mixed_20_clients.sql
 ```
 
-Seed **x** users with a skewed or uniform row distribution, flush so each user's cold prefix holds archived rows, then measure scoped SELECT time:
+## Interpreting Results
 
-```sql
-SET koldstore.user_id = '<target-user-uuid>';
+Use `report.md` or `report.html` for quick comparisons. The main table shows TPS by mode and p95 latency overhead for extension hot-only versus baseline.
 
-SELECT * FROM bench.koldstore_user_events
- WHERE user_id = '<target-user-uuid>'
- ORDER BY created_at DESC
- LIMIT 100;
+On macOS, open the latest HTML report with:
+
+```bash
+open benchmarks/results/report.html
 ```
 
-The heap baseline runs the same query without the GUC. This shows whether per-user cold layout keeps scoped reads competitive with a single heap table at scale.
+Each run also writes a timestamped copy such as `benchmarks/results/0.1.0-20260704T145900Z.html`.
 
-**Tuning x**
+`summary.json` includes more detail:
 
-| Users (x) | Use case |
-|---|---|
-| 100 | smoke / CI |
-| 1,000 | default local run |
-| 10,000+ | stress per-user cold prefix layout |
+- average, p50, p95, and p99 latency
+- transactions per second
+- estimated rows processed
+- hot table, hot index, extension metadata, and cold storage sizes
+- approximate PostgreSQL RSS and CPU time
+- plan file paths
+- failed, skipped, or not-applicable benchmark reasons
 
-Pass `--users <x>` (when wired) to override the default.
+Rows processed are estimates based on query `LIMIT` or batch size. Memory and CPU are approximate process measurements from `ps`/`pgrep`.
 
-## Comparison methodology
+## Comparing Baseline Vs Extension
 
-Every scenario follows the same pattern:
+For overhead, compare baseline TPS and p95 latency against extension hot-only first. That is the safest signal for normal application overhead.
 
-1. **Setup** — create identical schemas for heap and koldstore tables.
-2. **Load** — insert the same deterministic dataset into both.
-3. **Cold tier** (koldstore only) — register storage, migrate, flush until the target cold/hot ratio is reached.
-4. **Warm-up** — discard the first N iterations.
-5. **Measure** — run each query through `pgbench`; record latency percentiles and ops/s.
-6. **Report** — emit side-by-side results with overhead ratio `koldstore / heap`.
+For storage savings, compare baseline hot table/index size with extension hot+cold hot table/index size plus cold storage size. The report intentionally omits whole-database size because it includes unrelated PostgreSQL storage noise.
 
-```
-┌─────────────────────┐     ┌──────────────────────────┐
-│  bench.heap_*       │     │  bench.koldstore_*       │
-│  (plain heap)       │     │  (migrate + flush)       │
-└─────────┬───────────┘     └────────────┬─────────────┘
-          │                              │
-          └──────────┬───────────────────┘
-                     ▼
-            same queries, same row counts
-                     ▼
-           JSON / HTML benchmark report
-```
+## Known Limitations
 
-## Success criteria
+- Query benchmarks run in every mode. Cold-range query rows currently still come from the PostgreSQL heap because `flush_table` writes cold metadata/files but does not prune hot rows from the heap.
+- DML workloads are marked N/A in cold-only mode because that mode represents an archive/read-only tier.
+- GitHub Actions runners are noisy and shared. Treat CI numbers as trend checks and artifact generation checks, not absolute performance claims.
+- CPU and memory measurements are approximate and intended for coarse comparison only.
+- The report is static HTML by design so it can be uploaded as a GitHub Actions artifact or published with GitHub Pages.
 
-| ID | Scenario | Threshold |
-|---|---|---|
-| SC-002 | Hot DML (insert / update / delete on hot rows only) | koldstore ≤ 10% slower than heap |
-| SC-006 | PK lookup with cold data present | ≥ 90% of row groups pruned |
-| — | Shared 1M SELECT | document overhead; no hard gate yet |
-| — | User scoped SELECT | document overhead; no hard gate yet |
+## Recommended Local Process
 
-Hot DML scenarios (`hot_insert_vs_heap`, `hot_update_vs_heap`) and hot PK select workloads run through `pgbench`. Cold-pruning checks remain modeled in Rust until the cold merge scan path is fully wired into live PostgreSQL execution.
+Run benchmarks on an otherwise quiet machine, plugged into power, with a local PostgreSQL data directory on stable storage. Use longer durations than CI:
 
-## Output
-
-Example report fragment:
-
-```json
-{
-  "suite": "pg-koldstore",
-  "results": [
-    {
-      "name": "hot_update_vs_heap_heap",
-      "row_count": 100000,
-      "p50_ms": 0.12,
-      "p95_ms": 0.31,
-      "p99_ms": 0.58,
-      "passed": true
-    },
-    {
-      "name": "hot_update_vs_heap_koldstore",
-      "row_count": 100000,
-      "p50_ms": 0.15,
-      "p95_ms": 0.38,
-      "p99_ms": 0.72,
-      "passed": true
-    }
-  ]
-}
+```bash
+BENCH_ROWS=100000 BENCH_SECONDS=60 BENCH_MIXED_SECONDS=120 ./benchmarks/scripts/run.sh
 ```
 
-Overhead for a scenario: `koldstore.p50_ms / heap.p50_ms`.
+Run the same command at least three times and compare medians. Use CI artifacts to confirm the harness keeps working, not to publish absolute throughput claims.
 
-## Related docs
+## Layout Note
 
-- [Performance](../docs/performance.md) — tracing and investigation workflow
-- [Development](../docs/development.md) — local PostgreSQL matrix and MinIO setup
-- [README](../README.md) — shared vs user table semantics
+Cargo's default convention is a root `benches/` directory, but this repository keeps benchmark code under the `pg-koldstore-benchmarks` package. The Criterion files live in `benchmarks/benches/` and are wired through explicit `[[bench]]` entries in `benchmarks/Cargo.toml`, so all benchmark assets stay under `benchmarks/`.

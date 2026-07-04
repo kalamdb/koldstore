@@ -167,10 +167,13 @@ v0.1 only allows a small set of types: `boolean`, integer types, `real`, `double
 
 That's not because PostgreSQL can't store other types — it's because every type we support has to map cleanly to Arrow/Parquet, round-trip through flush and merge-scan, and have tests. `numeric`, `bytea`, arrays, `json` (non-`jsonb`), enums, ranges, geometry, and most extension types aren't wired up yet. We'll expand the matrix as we go; migration will reject unsupported columns up front rather than silently corrupting data.
 
-Other limits worth knowing:
+### Known limitations
 
 - FK constraints with flush enabled need `options.allow_fk_hot_only => true`; native FK checks only see hot rows
 - If a query needs cold data and object storage is down, you get an error — we don't fall back to hot-only results
+- Custom PostgreSQL indexes do not move to cold storage. When rows are flushed out of the heap, their entries disappear from PostgreSQL-owned indexes.
+- pgvector indexes are hot-only. HNSW and IVFFlat indexes only cover rows still resident in the PostgreSQL table; flushed vector values may live in cold files in future vector support, but they are not included in the live pgvector index.
+- ParadeDB/BM25 and other extension indexes follow the same rule: they index PostgreSQL-resident rows, not external Parquet cold files, unless Kalam builds a separate cold index for them.
 
 ---
 
@@ -205,6 +208,8 @@ Other limits worth knowing:
 **v0.2** — background flush worker, real `EXPORT TABLE`, harder failure recovery.
 
 **v0.3** — `IMPORT TABLE`, segment compaction, column-based cold storage policies (the `CREATE COLD STORAGE POLICY` idea above), more type coverage.
+
+**Future** — cold vector search with Kalam-managed segment indexes, likely using USearch as a custom vector index stored as sidecar files beside Parquet segments, for example `segment-0001.parquet` plus `segment-0001.usearch`.
 
 **v1.0** — production guidance, monitoring, backup/PITR docs, benchmarks.
 

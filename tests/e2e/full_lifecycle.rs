@@ -35,7 +35,6 @@ fn full_lifecycle_contract_covers_migrate_flush_merge_and_dml_checkpoints() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL matrix with pg-koldstore installed and filesystem storage enabled"]
 async fn full_lifecycle_migrates_flushes_merges_hot_and_cold_then_flushes_again() -> Result<()> {
     for target in common::local_pg_matrix() {
         let client = common::wait_for_postgres(&target).await?;

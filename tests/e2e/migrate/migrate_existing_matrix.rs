@@ -26,7 +26,6 @@ fn migrate_existing_matrix_covers_data_and_constraint_preservation() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 15/16/17 matrix with pg-koldstore installed"]
 async fn existing_table_migration_preserves_rows_and_shape_on_pg_matrix() -> Result<()> {
     for target in common::local_pg_matrix() {
         let client = common::wait_for_postgres(&target).await?;

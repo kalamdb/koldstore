@@ -6,7 +6,6 @@ use std::collections::HashSet;
 use anyhow::Result;
 
 #[tokio::test]
-#[ignore = "requires local pgrx PostgreSQL with pg-koldstore installed"]
 async fn snowflake_ids_are_unique_across_concurrent_backends() -> Result<()> {
     let target = common::local_pg_matrix()
         .into_iter()

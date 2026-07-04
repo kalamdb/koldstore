@@ -1,0 +1,103 @@
+name: benchmarks
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - "benchmarks/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/benchmarks.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+  PG_VER: "16"
+
+jobs:
+  benchmarks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install PostgreSQL and build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            postgresql-${PG_VER} \
+            postgresql-client-${PG_VER} \
+            postgresql-contrib-${PG_VER} \
+            postgresql-server-dev-${PG_VER}
+
+      - name: Start PostgreSQL
+        run: |
+          set -euo pipefail
+          sudo pg_ctlcluster ${PG_VER} main start
+          sudo -u postgres createuser -s runner || true
+          sudo -u postgres createdb runner || true
+          psql "host=/var/run/postgresql user=runner dbname=runner" -v ON_ERROR_STOP=1 -c "SELECT version();"
+
+      - name: Install cargo-pgrx
+        run: |
+          set -euo pipefail
+          cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL
+        run: |
+          set -euo pipefail
+          cargo pgrx init --pg${PG_VER} /usr/lib/postgresql/${PG_VER}/bin/pg_config
+
+      - name: Build extension
+        run: |
+          set -euo pipefail
+          cargo build -p pg_koldstore --no-default-features --features pg${PG_VER}
+
+      - name: Install extension into PostgreSQL
+        run: |
+          set -euo pipefail
+          cargo pgrx install \
+            -p pg_koldstore \
+            --sudo \
+            --no-default-features \
+            --features pg${PG_VER} \
+            --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
+
+      - name: Run Criterion and pgbench benchmarks
+        env:
+          DATABASE_URL: "host=/var/run/postgresql user=runner dbname=runner"
+          KOLDSTORE_BENCH_START_PGRX: "0"
+          BENCH_ROWS: "100000"
+          BENCH_SECONDS: "10"
+          BENCH_MIXED_SECONDS: "30"
+        run: |
+          set -euo pipefail
+          ./benchmarks/scripts/run.sh
+
+      - name: Upload Criterion HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-report
+          path: target/criterion/report
+          if-no-files-found: warn
+
+      - name: Upload pgbench benchmark reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgbench-benchmark-results
+          path: benchmarks/results
+          if-no-files-found: error

@@ -15,6 +15,36 @@ tokio.workspace = true
 tokio-postgres.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+koldstore-catalog.workspace = true
+koldstore-core.workspace = true
+koldstore-manifest.workspace = true
+koldstore-merge.workspace = true
+koldstore-parquet.workspace = true
+koldstore-storage.workspace = true
+pg_koldstore = { path = "../crates/pg_koldstore", default-features = false }
+
+[[bench]]
+name = "extension_manifest"
+path = "benches/extension_manifest.rs"
+harness = false
+
+[[bench]]
+name = "extension_flush"
+path = "benches/extension_flush.rs"
+harness = false
+
+[[bench]]
+name = "extension_cold_pruning"
+path = "benches/extension_cold_pruning.rs"
+harness = false
+
+[[bench]]
+name = "extension_serialization"
+path = "benches/extension_serialization.rs"
+harness = false
+
 [lints]
 workspace = true
 

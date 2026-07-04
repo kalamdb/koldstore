@@ -46,5 +46,4 @@ if ! command -v cargo-nextest >/dev/null 2>&1; then
   echo "error: required command not found: cargo-nextest" >&2
   exit 1
 fi
-cargo nextest run -p koldstore-e2e --run-ignored all --test-threads 1 -- \
-  --skip full_lifecycle_migrates_flushes_merges_hot_and_cold_then_flushes_again
+cargo nextest run -p koldstore-e2e --test-threads 1

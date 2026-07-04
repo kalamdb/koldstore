@@ -18,7 +18,7 @@ cargo pgrx init
 tests/e2e/run_pg_matrix.sh
 ```
 
-The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the ignored real-PostgreSQL tests. Avoid direct `cargo pgrx test` for now because normal Rust integration tests link as native pg-feature test binaries and can fail on unresolved PostgreSQL server symbols.
+The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. Avoid direct `cargo pgrx test` for now because normal Rust integration tests link as native pg-feature test binaries and can fail on unresolved PostgreSQL server symbols.
 
 ## Local pgrx PostgreSQL Matrix
 

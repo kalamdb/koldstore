@@ -33,7 +33,6 @@ fn greenfield_matrix_covers_shared_and_user_scoped_workflows() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL 15/16/17 matrix with pg-koldstore installed"]
 async fn greenfield_shared_and_user_scoped_tables_work_on_pg_matrix() -> Result<()> {
     for target in common::local_pg_matrix() {
         let client = common::wait_for_postgres(&target).await?;

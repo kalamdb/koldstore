@@ -28,7 +28,6 @@ fn storage_rotation_contract_keeps_existing_object_paths_stable() {
 }
 
 #[tokio::test]
-#[ignore = "requires PostgreSQL matrix with pg-koldstore installed"]
 async fn storage_rotation_and_session_functions_work_on_pg_matrix() -> Result<()> {
     for target in common::local_pg_matrix() {
         let client = common::wait_for_postgres(&target).await?;

@@ -16,6 +16,8 @@ pg17 = ["dep:pgrx", "pgrx/pg17"]
 pg_test = []
 
 [dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
 chrono.workspace = true
 koldstore-catalog.workspace = true
 koldstore-core.workspace = true
