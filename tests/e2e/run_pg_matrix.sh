@@ -18,7 +18,16 @@ echo "starting pgrx-managed PostgreSQL ${PG_VERSION}"
 cargo pgrx start "$PG_FEATURE"
 
 echo "installing koldstore into pgrx PostgreSQL ${PG_VERSION}"
-cargo pgrx install -p pg_koldstore --no-default-features --features "$PG_FEATURE" --pg-config "$PG_CONFIG"
+INSTALL_ARGS=(
+  -p pg_koldstore
+  --no-default-features
+  --features "$PG_FEATURE"
+  --pg-config "$PG_CONFIG"
+)
+if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then
+  INSTALL_ARGS+=(--sudo)
+fi
+cargo pgrx install "${INSTALL_ARGS[@]}"
 
 echo "recreating local E2E database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \

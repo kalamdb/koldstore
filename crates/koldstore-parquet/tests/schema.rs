@@ -1,4 +1,4 @@
-use arrow::datatypes::DataType;
+use arrow_schema::{DataType, TimeUnit};
 use koldstore_parquet::{build_arrow_schema, PgColumn, PgType, SchemaError, SystemColumn};
 
 #[test]
@@ -68,11 +68,11 @@ fn postgres_type_parser_supports_mvp_types_and_common_catalog_aliases() {
         ("jsonb", DataType::Utf8),
         (
             "timestamptz",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
         ),
         (
             "timestamp with time zone",
-            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            DataType::Timestamp(TimeUnit::Microsecond, None),
         ),
     ] {
         assert_eq!(

@@ -252,6 +252,7 @@ jobs:
         run: |
           cargo pgrx install \
             -p "${EXTENSION_CRATE}" \
+            --sudo \
             --no-default-features \
             --features pg${PG_VER} \
             --pg-config "${PG_CONFIG}"
@@ -260,6 +261,7 @@ jobs:
         env:
           KOLDSTORE_E2E_PGVERSION: ${{ matrix.pg }}
           KOLDSTORE_E2E_PGPORT: 288${{ matrix.pg }}
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
           PGRX_PG_CONFIG: ${{ env.PG_CONFIG }}
         run: tests/e2e/run_pg_matrix.sh
 

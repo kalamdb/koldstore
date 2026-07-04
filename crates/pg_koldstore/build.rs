@@ -1,4 +1,8 @@
 fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=native/custom_scan.c");
+    println!("cargo:rerun-if-changed=native/custom_scan.h");
+
     cc::Build::new()
         .file("native/custom_scan.c")
         .include("native")

@@ -62,6 +62,7 @@ jobs:
         run: |
           cargo pgrx install \
             -p pg_koldstore \
+            --sudo \
             --no-default-features \
             --features pg${PG_VER} \
             --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
@@ -103,6 +104,8 @@ jobs:
       - name: Initialize pgrx for PostgreSQL 16
         run: cargo pgrx init --pg16 /usr/lib/postgresql/16/bin/pg_config
       - run: tests/e2e/run_pg_matrix.sh
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
   memory:
     runs-on: ubuntu-latest
@@ -134,3 +137,5 @@ jobs:
       - name: Initialize pgrx for PostgreSQL 16
         run: cargo pgrx init --pg16 /usr/lib/postgresql/16/bin/pg_config
       - run: scripts/run-all-tests.sh --skip-fmt --skip-lint --skip-unit --skip-pgrx --skip-e2e --skip-memory
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"

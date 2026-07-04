@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow_schema::{DataType, Field, Schema, TimeUnit};
 
 /// Supported PostgreSQL type class.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +99,7 @@ impl PgType {
             Self::Float4 => DataType::Float32,
             Self::Float8 => DataType::Float64,
             Self::Text | Self::Uuid | Self::Jsonb => DataType::Utf8,
-            Self::Timestamptz => DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            Self::Timestamptz => DataType::Timestamp(TimeUnit::Microsecond, None),
         }
     }
 }

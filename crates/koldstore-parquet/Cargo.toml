@@ -6,19 +6,16 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-arrow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
 futures-util.workspace = true
 koldstore-core.workspace = true
-object_store.workspace = true
-parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

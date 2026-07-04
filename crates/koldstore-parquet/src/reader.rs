@@ -2,7 +2,7 @@
 
 use std::pin::Pin;
 
-use arrow::record_batch::RecordBatch;
+use arrow_array::RecordBatch;
 use koldstore_core::{CommitSeq, SeqId};
 
 /// Boxed record-batch stream.

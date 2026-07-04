@@ -125,6 +125,23 @@ ensure_pgrx_postgres() {
   cargo pgrx init --pg"${pg}" "${pg_config}"
 }
 
+cargo_pgrx_install_koldstore() {
+  local pg_feature="$1"
+  local pg_config="$2"
+  local install_args=(
+    -p pg_koldstore
+    --no-default-features
+    --features "${pg_feature}"
+    --pg-config "${pg_config}"
+  )
+
+  if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then
+    install_args+=(--sudo)
+  fi
+
+  cargo pgrx install "${install_args[@]}"
+}
+
 run_local_pgrx_e2e() {
   local pg="$1"
   local pg_config
@@ -168,11 +185,7 @@ prepare_benchmark_database() {
 
   step "preparing local pgrx benchmark database PostgreSQL ${pg}"
   cargo pgrx start "${pg_feature}"
-  cargo pgrx install \
-    -p pg_koldstore \
-    --no-default-features \
-    --features "${pg_feature}" \
-    --pg-config "${pg_config}"
+  cargo_pgrx_install_koldstore "${pg_feature}" "${pg_config}"
 
   "${psql}" -h "${host}" -p "${port}" -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS ${database}" \
@@ -210,11 +223,7 @@ if [[ "${SKIP_PGRX}" -eq 0 ]]; then
       cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg}" -- -D warnings
 
       step "pgrx install check pg${pg}"
-      cargo pgrx install \
-        -p pg_koldstore \
-        --no-default-features \
-        --features "pg${pg}" \
-        --pg-config "$(configured_pg_config "${pg}")"
+      cargo_pgrx_install_koldstore "pg${pg}" "$(configured_pg_config "${pg}")"
     fi
   done
 fi

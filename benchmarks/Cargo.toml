@@ -8,7 +8,6 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-criterion.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
