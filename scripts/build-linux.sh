@@ -157,16 +157,18 @@ install_rocky_deps() {
   local rpm_arch
   rpm_arch="$(rpm_arch_name "${ARCH}")"
   dnf -y install epel-release
+  dnf config-manager --set-enabled crb
   dnf -y install \
     "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-${rpm_arch}/pgdg-redhat-repo-latest.noarch.rpm"
   dnf -qy module disable postgresql || true
-  dnf -y install \
+  dnf -y install --allowerasing \
     curl \
     gcc \
     gcc-c++ \
     git \
     make \
     openssl-devel \
+    perl-IPC-Run \
     pkgconfig \
     redhat-rpm-config \
     rpm-build \

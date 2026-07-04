@@ -67,7 +67,7 @@ if (-not $SkipBuild) {
   cargo pgrx package `
     -p $ExtensionCrate `
     --no-default-features `
-    --features "pg$Pg" `
+    --features "pg$Pg,cshim" `
     --pg-config $PgConfig
 }
 
