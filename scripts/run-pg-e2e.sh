@@ -58,8 +58,8 @@ if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
 fi
 
 echo "running pg-koldstore E2E tests against pgrx PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT}"
-if ! command -v cargo-nextest >/dev/null 2>&1; then
-  echo "error: required command not found: cargo-nextest" >&2
+if ! cargo nextest --version >/dev/null 2>&1; then
+  echo "error: cargo-nextest is required; install with: cargo install cargo-nextest --locked" >&2
   exit 1
 fi
 cargo nextest run -p e2e --test-threads 1
