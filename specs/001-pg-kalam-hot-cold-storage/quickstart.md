@@ -19,7 +19,7 @@
 - For built-in flush worker testing: `shared_preload_libraries = 'koldstore'` and PostgreSQL restarted.
 
 ```bash
-cargo pgrx install --release
+cargo pgrx install --release -p pg_koldstore --no-default-features --features pg16 --pg-config "$(cargo pgrx info pg-config 16)"
 docker compose -f tests/docker-compose.yml up -d
 ```
 
@@ -286,9 +286,10 @@ Expected:
 
 ```bash
 cargo test
-cargo pgrx test
-./tests/integration/run.sh
+tests/e2e/run_pg_matrix.sh
 ```
+
+The E2E runner starts pgrx-managed PostgreSQL, installs `koldstore`, recreates the test database, then runs `cargo nextest run -p e2e --test-threads 1`. Select a PostgreSQL version with the first argument, for example `tests/e2e/run_pg_matrix.sh 17`, or with `KOLDSTORE_E2E_PGVERSION`.
 
 ## Failure Indicators
 

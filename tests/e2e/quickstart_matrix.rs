@@ -1,6 +1,8 @@
 #[path = "common/mod.rs"]
 mod common;
 
+use anyhow::Result;
+
 #[test]
 fn quickstart_matrix_covers_all_documented_scenarios() {
     let quickstart = include_str!("../../specs/001-pg-kalam-hot-cold-storage/quickstart.md");
@@ -14,4 +16,36 @@ fn quickstart_matrix_covers_all_documented_scenarios() {
             .collect::<Vec<_>>(),
         common::expected_pg_versions()
     );
+}
+
+#[tokio::test]
+async fn quickstart_managed_table_keeps_size_and_index_overhead_bounded() -> Result<()> {
+    for target in common::local_pg_matrix() {
+        let db = common::TestDb::start(target, "quickstart_matrix").await?;
+        let baseline = db
+            .create_indexed_items_table("quickstart_baseline", 2_000)
+            .await?;
+        let managed = db
+            .create_indexed_items_table("quickstart_managed", 2_000)
+            .await?;
+
+        let baseline_size = common::relation_size(&db.client, &baseline.relation).await?;
+        db.migrate_shared(&managed.relation, "id").await?;
+        let managed_size = common::relation_size(&db.client, &managed.relation).await?;
+
+        common::assertions::assert_system_column_size_overhead(baseline_size, managed_size, 2_000)?;
+        common::assertions::assert_no_duplicate_hot_pk(&db.client, &managed.relation, "id").await?;
+
+        let plan = common::explain_with_seqscan_disabled(
+            &db.client,
+            &format!(
+                "SELECT id, title FROM {} WHERE title = 'item-000777'",
+                managed.relation
+            ),
+        )
+        .await?;
+        common::assert_index_scan(&plan, &managed.title_index)?;
+    }
+
+    Ok(())
 }

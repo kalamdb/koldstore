@@ -4,6 +4,15 @@
 
 **Status: early development — not production ready.** The extension builds and the core design is in place, but we're still hardening flush recovery, export/import, and the background worker. Treat this as experimental until we ship a 1.0.
 
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.96%2B-orange.svg" alt="Rust 1.96+" /></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
+  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml"><img src="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kalamdb/pg-kalam/pg-koldstore-ci.yml?branch=main&amp;label=tests" alt="Tests" /></a>
+  <a href="https://github.com/kalamdb/pg-kalam/releases"><img src="https://img.shields.io/github/v/release/kalamdb/pg-kalam?display_name=tag&amp;label=extension" alt="Extension Version" /></a>
+  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/release.yml"><img src="https://github.com/kalamdb/pg-kalam/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
+</p>
+
 `pg-koldstore` is a PostgreSQL extension (`koldstore`) that lets you keep recent rows in the heap and push older ones to Parquet on object storage — S3 (including MinIO), GCS, Azure Blob, or a local path. You still query the same table name; reads go through a `KoldstoreMergeScan` custom scan that merges hot heap rows with cold segments.
 
 PostgreSQL stays in charge of transactions, locking, and permissions. Cold files follow a kalamdb-compatible manifest + Parquet layout so they can be read outside the database too.

@@ -3,6 +3,8 @@
 use anyhow::Result;
 use tokio_postgres::Client;
 
+use super::sql::RelationSize;
+
 /// Asserts no duplicate hot rows exist for a managed table primary key expression.
 ///
 /// # Errors
@@ -36,6 +38,43 @@ pub fn assert_no_object_store_reads(counter_value: i64) -> Result<()> {
     anyhow::ensure!(
         counter_value == 0,
         "expected no object-store reads on hot DML path, got {counter_value}"
+    );
+    Ok(())
+}
+
+/// Asserts pg-koldstore system columns do not create dramatic heap bloat.
+pub fn assert_system_column_size_overhead(
+    baseline: RelationSize,
+    managed: RelationSize,
+    rows: i64,
+) -> Result<()> {
+    let heap_overhead_per_row = managed.heap_overhead_per_row(baseline, rows);
+    anyhow::ensure!(
+        heap_overhead_per_row <= 160,
+        "expected system-column heap overhead <= 160 bytes/row, got {heap_overhead_per_row}; baseline={baseline:?}, managed={managed:?}"
+    );
+
+    let index_overhead_per_row =
+        managed.indexes_bytes.saturating_sub(baseline.indexes_bytes) / rows.max(1);
+    anyhow::ensure!(
+        index_overhead_per_row <= 96,
+        "expected index overhead <= 96 bytes/row, got {index_overhead_per_row}; baseline={baseline:?}, managed={managed:?}"
+    );
+
+    Ok(())
+}
+
+/// Asserts a catalog index plan is index-backed.
+pub fn assert_catalog_index_plan(plan: &str, index_name: &str) -> Result<()> {
+    anyhow::ensure!(
+        plan.contains(index_name),
+        "expected {index_name} in plan, got:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.contains("Index Scan")
+            || plan.contains("Index Only Scan")
+            || plan.contains("Bitmap Index Scan"),
+        "expected index-backed catalog plan, got:\n{plan}"
     );
     Ok(())
 }

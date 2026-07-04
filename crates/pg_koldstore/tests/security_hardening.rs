@@ -4,7 +4,9 @@ fn security_hardening_contract_covers_credentials_gucs_rls_and_sql_safety() {
     let privileges = include_str!("../src/security/privileges.rs");
     let rls = include_str!("../src/security/rls.rs");
 
-    assert!(sql.contains("REVOKE ALL ON koldstore.storage FROM PUBLIC"));
+    assert!(sql.contains("REVOKE ALL ON"));
+    assert!(sql.contains("koldstore.storage"));
+    assert!(sql.contains("FROM PUBLIC"));
     assert!(privileges.contains("internal_system_write"));
     assert!(rls.contains("fail closed") || rls.contains("fail-closed"));
     assert!(!sql.contains("EXECUTE format"));

@@ -523,6 +523,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "e2e"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "koldstore-core",
+ "koldstore-manifest",
+ "koldstore-parquet",
+ "koldstore-storage",
+ "parquet",
+ "pg_koldstore",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -986,22 +1002,6 @@ dependencies = [
  "sha2",
  "thiserror",
  "uuid",
-]
-
-[[package]]
-name = "koldstore-e2e"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "koldstore-core",
- "koldstore-manifest",
- "koldstore-parquet",
- "koldstore-storage",
- "parquet",
- "pg_koldstore",
- "serde_json",
- "tokio",
- "tokio-postgres",
 ]
 
 [[package]]

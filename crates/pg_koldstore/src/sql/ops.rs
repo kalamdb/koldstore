@@ -20,8 +20,10 @@ pub const TABLE_STATUS_FIELDS: &[&str] = &[
 /// SQL-callable flush API function names exposed through pgrx.
 pub const FLUSH_SQL_FUNCTIONS: &[&str] = &[
     "koldstore.set_flush_policy",
+    "koldstore.enqueue_flush_job",
     "koldstore.flush_table",
     "koldstore.flush_pending",
+    "koldstore.recover_segments",
 ];
 
 /// Operational maintenance command.
@@ -392,6 +394,108 @@ pub fn recover_segments_plan(
     })
 }
 
+/// Enqueues a flush job through the SQL API.
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[pgrx::pg_extern(name = "enqueue_flush_job", schema = "koldstore", security_definer)]
+pub fn enqueue_flush_job_pg(
+    table_oid: pgrx::pg_sys::Oid,
+    scope_key: Option<&str>,
+    force: bool,
+) -> i64 {
+    enqueue_flush_job_pg_impl(table_oid, scope_key, force)
+        .unwrap_or_else(|error| pgrx::error!("enqueue flush job failed: {error}"))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn enqueue_flush_job_pg_impl(
+    table_oid: pgrx::pg_sys::Oid,
+    scope_key: Option<&str>,
+    force: bool,
+) -> Result<i64, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let scope_key = scope_key
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map(ScopeKey::new)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+
+    let inserted = pgrx::Spi::get_one_with_args::<i64>(
+        r#"
+WITH inserted AS (
+    INSERT INTO koldstore.jobs (
+        id,
+        table_oid,
+        scope_key,
+        job_type,
+        status,
+        phase,
+        flush_seq_upper_bound,
+        payload
+    )
+    VALUES (
+        gen_random_uuid(),
+        $1::oid,
+        COALESCE($2::text, ''),
+        'flush',
+        'pending',
+        'pending',
+        NULL,
+        jsonb_build_object('force', $3::boolean)
+    )
+    ON CONFLICT (table_oid, scope_key)
+    WHERE job_type = 'flush' AND status IN ('pending', 'running')
+    DO NOTHING
+    RETURNING 1
+)
+SELECT count(*)::bigint FROM inserted
+"#,
+        &[
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(scope_key.as_ref().map(ScopeKey::as_str)),
+            DatumWithOid::from(force),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(inserted.unwrap_or(0))
+}
+
+/// Enqueues a segment recovery job through the SQL API.
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[pgrx::pg_extern(name = "recover_segments", schema = "koldstore", security_definer)]
+pub fn recover_segments_pg(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> i64 {
+    recover_segments_pg_impl(table_oid, dry_run)
+        .unwrap_or_else(|error| pgrx::error!("recover segments failed: {error}"))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Result<i64, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let inserted = pgrx::Spi::get_one_with_args::<i64>(
+        r#"
+WITH inserted AS (
+    INSERT INTO koldstore.jobs (
+        id, table_oid, job_type, status, attempts, error_trace
+    )
+    SELECT
+        gen_random_uuid(),
+        $1::oid,
+        'recover_segments',
+        CASE WHEN $2::boolean THEN 'dry_run' ELSE 'pending' END,
+        0,
+        NULL
+    RETURNING 1
+)
+SELECT count(*)::bigint FROM inserted
+"#,
+        &[DatumWithOid::from(table_oid), DatumWithOid::from(dry_run)],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(inserted.unwrap_or(0))
+}
+
 /// Plans a scalable flush-job claim using row-level locking and leases.
 ///
 /// # Errors
@@ -561,7 +665,7 @@ pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError>
 
 /// Flushes one managed table scope from SQL.
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
-#[pgrx::pg_extern(name = "flush_table", schema = "koldstore")]
+#[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
 pub fn flush_table_pg(table_oid: pgrx::pg_sys::Oid) -> i64 {
     flush_table_pg_impl(table_oid)
         .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))

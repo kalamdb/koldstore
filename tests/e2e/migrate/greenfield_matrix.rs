@@ -1,6 +1,3 @@
-#[allow(dead_code)]
-#[path = "../common/assertions.rs"]
-mod assertions;
 #[path = "../common/mod.rs"]
 mod common;
 
@@ -166,6 +163,6 @@ async fn run_greenfield_scenario(
         .get::<_, i64>(0);
     assert_eq!(system_columns, 3);
 
-    assertions::assert_no_duplicate_hot_pk(client, &relation, "id").await?;
+    common::assertions::assert_no_duplicate_hot_pk(client, &relation, "id").await?;
     Ok(())
 }

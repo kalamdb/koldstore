@@ -5,7 +5,7 @@
 ```bash
 cargo fmt --all
 cargo check --workspace --all-targets --no-default-features
-cargo nextest run --workspace --no-default-features --exclude koldstore-e2e
+cargo nextest run --workspace --no-default-features --exclude e2e
 ```
 
 The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, or `pg17` feature when `cargo pgrx` is configured.
@@ -27,6 +27,8 @@ tests/e2e/run_pg_matrix.sh
 ```
 
 The default matrix target is pgrx-managed PostgreSQL 16 on port `28816`. Override with `KOLDSTORE_E2E_PGVERSION`, `KOLDSTORE_E2E_PGPORT`, or the other `KOLDSTORE_E2E_PG*` environment variables when needed.
+
+After the runner prepares PostgreSQL and installs the extension, it executes `cargo nextest run -p e2e --test-threads 1`. To select another PostgreSQL version locally, pass it as the first argument, for example `tests/e2e/run_pg_matrix.sh 17`, or set `KOLDSTORE_E2E_PGVERSION=17`.
 
 ## Benchmark Thresholds
 

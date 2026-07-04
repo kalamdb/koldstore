@@ -9,7 +9,7 @@ repository.workspace = true
 crate-type = ["lib", "cdylib"]
 
 [features]
-default = ["pg16"]
+default = []
 pg15 = ["dep:pgrx", "pgrx/pg15"]
 pg16 = ["dep:pgrx", "pgrx/pg16"]
 pg17 = ["dep:pgrx", "pgrx/pg17"]

@@ -23,8 +23,10 @@ fn sql_exposes_operational_functions() {
 
     for function in [
         "koldstore.set_flush_policy",
+        "koldstore.enqueue_flush_job",
         "koldstore.flush_table",
         "koldstore.flush_pending",
+        "koldstore.recover_segments",
     ] {
         assert!(
             pg_koldstore::sql::ops::FLUSH_SQL_FUNCTIONS.contains(&function),

@@ -1,7 +1,7 @@
 use pg_koldstore::spi::SpiAccess;
 use pg_koldstore::sql::ddl::{
-    alter_storage_credentials_plan, StorageRegistration, DEFAULT_SHARED_PATH_TEMPLATE,
-    DEFAULT_USER_PATH_TEMPLATE,
+    alter_storage_credentials_plan, alter_storage_location_plan, StorageRegistration,
+    DEFAULT_SHARED_PATH_TEMPLATE, DEFAULT_USER_PATH_TEMPLATE,
 };
 use uuid::Uuid;
 
@@ -33,7 +33,10 @@ fn sql_extension_exposes_storage_registration_and_redaction_contract() {
         "credentials jsonb NOT NULL DEFAULT '{}'::jsonb",
         "shared_path_template text NOT NULL",
         "user_path_template text NOT NULL",
-        "REVOKE ALL ON koldstore.storage FROM PUBLIC",
+        "REVOKE ALL ON",
+        "koldstore.storage",
+        "koldstore.manifest",
+        "koldstore.cold_segments",
     ] {
         assert!(
             sql.contains(needle),
@@ -149,4 +152,28 @@ fn alter_storage_credentials_plan_updates_only_credentials() {
     assert!(!plan.statement.sql.contains("shared_path_template"));
     assert!(!plan.statement.sql.contains("user_path_template"));
     assert!(!plan.statement.sql.contains("new-secret"));
+}
+
+#[test]
+fn alter_storage_location_plan_updates_base_path_and_config() {
+    let config = serde_json::json!({"region": "us-east-1"});
+    let plan =
+        alter_storage_location_plan("local-minio", "s3://new-bucket", config.clone()).unwrap();
+
+    assert_eq!(plan.storage_name, "local-minio");
+    assert_eq!(plan.base_path, "s3://new-bucket");
+    assert_eq!(plan.config, config);
+    assert_eq!(plan.statement.operation, "alter storage location");
+    assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
+    assert!(plan.statement.sql.contains("UPDATE koldstore.storage"));
+    assert!(plan.statement.sql.contains("base_path = $2"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("config = COALESCE($3::jsonb, config)"));
+    assert!(plan.statement.sql.contains("RETURNING id"));
+    assert!(!plan.statement.sql.contains("s3://new-bucket"));
+
+    assert!(alter_storage_location_plan(" ", "s3://new-bucket", serde_json::json!({})).is_err());
+    assert!(alter_storage_location_plan("local-minio", " ", serde_json::json!({})).is_err());
 }

@@ -1,8 +1,16 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use anyhow::Result;
+use koldstore_core::TableName;
+use pg_koldstore::sql::dml::{
+    plan_delete_row, plan_hydrate_pk, plan_update_row, ColdUpdateOutcome, DeleteInputState,
+    DeleteRowRequest, HydratePkRequest, UpdateRowRequest,
+};
+use serde_json::json;
+
 #[test]
-fn cold_dml_matrix_targets_postgresql_15_16_17() {
+fn cold_dml_matrix_targets_active_pgrx_versions() {
     assert_eq!(
         common::local_pg_matrix()
             .into_iter()
@@ -13,18 +21,96 @@ fn cold_dml_matrix_targets_postgresql_15_16_17() {
 }
 
 #[test]
-fn cold_dml_matrix_covers_apis_row_events_and_no_default_object_store_reads() {
-    let required_assertions = [
-        "hydrate_pk_reads_one_cold_pk",
-        "update_row_lookup_cold_true_updates",
-        "delete_row_writes_tombstone_from_local_metadata",
-        "row_events_emitted",
-        "default_delete_uses_no_object_store_reads",
-    ];
+fn cold_dml_plans_cover_hydrate_update_delete_and_no_default_object_reads() {
+    let table_name = TableName::parse("app.items").unwrap();
+    let hydrate = plan_hydrate_pk(
+        &HydratePkRequest {
+            table_name: table_name.clone(),
+            pk_json: json!({"id": 1}),
+        },
+        true,
+    );
+    assert_eq!(hydrate.affected_rows, 1);
+    assert!(hydrate.cold_lookup_performed);
 
-    assert!(required_assertions.contains(&"hydrate_pk_reads_one_cold_pk"));
-    assert!(required_assertions.contains(&"update_row_lookup_cold_true_updates"));
-    assert!(required_assertions.contains(&"delete_row_writes_tombstone_from_local_metadata"));
-    assert!(required_assertions.contains(&"row_events_emitted"));
-    assert!(required_assertions.contains(&"default_delete_uses_no_object_store_reads"));
+    let update = UpdateRowRequest {
+        table_name: table_name.clone(),
+        pk_json: json!({"id": 1}),
+        patch_json: json!({"title": "updated"}),
+        lookup_cold: true,
+    };
+    assert_eq!(
+        plan_update_row(&update, false, true),
+        ColdUpdateOutcome::ColdLookupAndUpdate
+    );
+
+    let delete = plan_delete_row(
+        &DeleteRowRequest {
+            table_name,
+            pk_json: json!({"id": 1}),
+            allow_may_contain: true,
+        },
+        DeleteInputState::ColdExactLocalHint,
+    );
+    assert_eq!(delete.affected_rows, 1);
+    assert!(delete.tombstone_written);
+    common::assertions::assert_no_object_store_reads(delete.cold_lookup_performed as i64).unwrap();
+}
+
+#[tokio::test]
+async fn standard_hot_dml_on_managed_table_preserves_system_columns_on_pgrx() -> Result<()> {
+    for target in common::local_pg_matrix() {
+        let db = common::TestDb::start(target, "cold_dml_matrix").await?;
+        let table = db.create_indexed_items_table("dml_items", 20).await?;
+        db.migrate_shared(&table.relation, "id").await?;
+        db.flush_table(&table.relation).await?;
+
+        db.client
+            .batch_execute(&format!(
+                r#"
+                INSERT INTO {relation} (id, account_id, title, qty, category)
+                VALUES (1000, 7, 'inserted-hot', 7, 'hot');
+
+                UPDATE {relation}
+                SET qty = 77
+                WHERE id = 1;
+
+                DELETE FROM {relation}
+                WHERE id = 2;
+                "#,
+                relation = table.relation
+            ))
+            .await?;
+
+        let row = db
+            .client
+            .query_one(
+                &format!(
+                    r#"
+                    SELECT count(*)
+                    FROM {relation}
+                    WHERE "_seq" IS NOT NULL
+                      AND "_commit_seq" IS NOT NULL
+                      AND "_deleted" IS NOT NULL
+                    "#,
+                    relation = table.relation
+                ),
+                &[],
+            )
+            .await?;
+        assert_eq!(row.get::<_, i64>(0), 20);
+        common::assertions::assert_no_duplicate_hot_pk(&db.client, &table.relation, "id").await?;
+
+        let plan = common::explain_with_seqscan_disabled(
+            &db.client,
+            &format!(
+                "SELECT id FROM {} WHERE title = 'inserted-hot'",
+                table.relation
+            ),
+        )
+        .await?;
+        common::assert_index_scan(&plan, &table.title_index)?;
+    }
+
+    Ok(())
 }

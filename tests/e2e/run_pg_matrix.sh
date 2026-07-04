@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-PG_VERSION="${KOLDSTORE_E2E_PGVERSION:-16}"
+PG_VERSION="${1:-${KOLDSTORE_E2E_PGVERSION:-16}}"
 PG_FEATURE="pg${PG_VERSION}"
 PG_PORT="${KOLDSTORE_E2E_PGPORT:-288${PG_VERSION}}"
 PG_HOST="${KOLDSTORE_E2E_PGHOST:-127.0.0.1}"
@@ -46,4 +46,4 @@ if ! command -v cargo-nextest >/dev/null 2>&1; then
   echo "error: required command not found: cargo-nextest" >&2
   exit 1
 fi
-cargo nextest run -p koldstore-e2e --test-threads 1
+cargo nextest run -p e2e --test-threads 1

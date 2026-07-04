@@ -7,7 +7,7 @@ lint:
 	cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
 test:
-	cargo test --workspace --no-default-features
+	cargo test
 
 pgrx-test:
 	cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg16 -- -D warnings

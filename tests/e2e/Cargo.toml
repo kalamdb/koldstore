@@ -1,5 +1,5 @@
 [package]
-name = "koldstore-e2e"
+name = "e2e"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

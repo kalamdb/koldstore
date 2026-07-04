@@ -11,6 +11,17 @@ members = [
     "tests/e2e",
     "tests/memory",
 ]
+default-members = [
+    "crates/koldstore-core",
+    "crates/koldstore-manifest",
+    "crates/koldstore-storage",
+    "crates/koldstore-parquet",
+    "crates/koldstore-merge",
+    "crates/koldstore-catalog",
+    "crates/pg_koldstore",
+    "benchmarks",
+    "tests/memory",
+]
 resolver = "2"
 
 [workspace.package]

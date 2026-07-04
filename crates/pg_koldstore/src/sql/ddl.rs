@@ -56,6 +56,15 @@ SET credentials = $2,
 WHERE name = $1
 "#;
 
+const ALTER_STORAGE_LOCATION_SQL: &str = r#"
+UPDATE koldstore.storage
+SET base_path = $2,
+    config = COALESCE($3::jsonb, config),
+    updated_at = now()
+WHERE name = $1
+RETURNING id
+"#;
+
 /// Registers storage and returns its id.
 #[must_use]
 pub fn register_storage_name_only(_name: &str) -> Uuid {
@@ -125,6 +134,19 @@ pub struct AlterStorageCredentialsPlan {
     pub storage_name: String,
     /// New credentials to bind as parameter `$2`.
     pub credentials: serde_json::Value,
+    /// Parameterized catalog mutation statement.
+    pub statement: SpiStatement,
+}
+
+/// Planned storage location/configuration mutation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterStorageLocationPlan {
+    /// Storage name to bind as parameter `$1`.
+    pub storage_name: String,
+    /// New base path to bind as parameter `$2`.
+    pub base_path: String,
+    /// Optional config replacement to bind as parameter `$3`.
+    pub config: serde_json::Value,
     /// Parameterized catalog mutation statement.
     pub statement: SpiStatement,
 }
@@ -254,9 +276,40 @@ pub fn alter_storage_credentials_plan(
     })
 }
 
+/// Builds a storage location/configuration mutation plan.
+///
+/// # Errors
+///
+/// Returns an error when the storage name or base path is blank, or statement
+/// metadata cannot be prepared.
+pub fn alter_storage_location_plan(
+    name: &str,
+    base_path: &str,
+    config: serde_json::Value,
+) -> DdlResult<AlterStorageLocationPlan> {
+    let storage_name = name.trim();
+    if storage_name.is_empty() {
+        return Err(DdlError::BlankName);
+    }
+    let base_path = base_path.trim();
+    if base_path.is_empty() {
+        return Err(DdlError::BlankBasePath);
+    }
+
+    let statement = SpiStatement::write("alter storage location", ALTER_STORAGE_LOCATION_SQL)
+        .map_err(|error| DdlError::Spi(error.to_string()))?;
+
+    Ok(AlterStorageLocationPlan {
+        storage_name: storage_name.to_string(),
+        base_path: base_path.to_string(),
+        config,
+        statement,
+    })
+}
+
 /// Registers or updates a storage backend from SQL.
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
-#[pgrx::pg_extern(name = "register_storage", schema = "koldstore")]
+#[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg(
     name: &str,
     storage_type: &str,
@@ -279,7 +332,7 @@ pub fn register_storage_pg(
 
 /// Registers or updates a storage backend from SQL using default path templates.
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
-#[pgrx::pg_extern(name = "register_storage", schema = "koldstore")]
+#[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg_with_default_templates(
     name: &str,
     storage_type: &str,
@@ -344,7 +397,11 @@ fn register_storage_pg_impl(
 
 /// Rotates storage credentials from SQL without changing backend paths.
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
-#[pgrx::pg_extern(name = "alter_storage_credentials", schema = "koldstore")]
+#[pgrx::pg_extern(
+    name = "alter_storage_credentials",
+    schema = "koldstore",
+    security_definer
+)]
 pub fn alter_storage_credentials_pg(name: &str, credentials: pgrx::JsonB) {
     use pgrx::datum::DatumWithOid;
 
@@ -359,9 +416,32 @@ pub fn alter_storage_credentials_pg(name: &str, credentials: pgrx::JsonB) {
         .unwrap_or_else(|error| pgrx::error!("alter storage credentials failed: {error}"));
 }
 
+/// Alters storage location/configuration from SQL without direct catalog DML.
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[pgrx::pg_extern(
+    name = "alter_storage_location",
+    schema = "koldstore",
+    security_definer
+)]
+pub fn alter_storage_location_pg(name: &str, base_path: &str, config: pgrx::JsonB) -> pgrx::Uuid {
+    use pgrx::datum::DatumWithOid;
+
+    let plan = alter_storage_location_plan(name, base_path, config.0)
+        .unwrap_or_else(|error| pgrx::error!("{error}"));
+    let args = [
+        DatumWithOid::from(plan.storage_name.as_str()),
+        DatumWithOid::from(plan.base_path.as_str()),
+        DatumWithOid::from(pgrx::JsonB(plan.config)),
+    ];
+
+    pgrx::Spi::get_one_with_args::<pgrx::Uuid>(&plan.statement.sql, &args)
+        .unwrap_or_else(|error| pgrx::error!("alter storage location failed: {error}"))
+        .unwrap_or_else(|| pgrx::error!("storage `{}` does not exist", plan.storage_name))
+}
+
 /// Migrates a heap table into pg-koldstore management from SQL.
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
-#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore")]
+#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore", security_definer)]
 pub fn migrate_table_pg(
     table_name: pgrx::pg_sys::Oid,
     table_type: &str,
@@ -381,7 +461,7 @@ pub fn migrate_table_pg(
 
 /// Migrates a heap table and supplies an explicit oldest-to-newest order column.
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
-#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore")]
+#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore", security_definer)]
 pub fn migrate_table_pg_with_order(
     table_name: pgrx::pg_sys::Oid,
     table_type: &str,
@@ -927,6 +1007,99 @@ impl DemigrateTableRequest {
             drop_system_columns: self.drop_system_columns.unwrap_or(false),
         }
     }
+}
+
+/// Demigrates a managed table through the SQL API.
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[pgrx::pg_extern(name = "demigrate_table", schema = "koldstore", security_definer)]
+pub fn demigrate_table_pg(
+    table_name: pgrx::pg_sys::Oid,
+    rehydrate: Option<bool>,
+    drop_cold: Option<bool>,
+    drop_system_columns: Option<bool>,
+) -> i64 {
+    let options = DemigrateTableRequest {
+        table_name: String::new(),
+        rehydrate,
+        drop_cold,
+        drop_system_columns,
+    }
+    .options();
+    demigrate_table_pg_impl(table_name, options)
+        .unwrap_or_else(|error| pgrx::error!("demigrate table failed: {error}"))
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+fn demigrate_table_pg_impl(
+    table_oid: pgrx::pg_sys::Oid,
+    options: DemigrateOptions,
+) -> Result<i64, String> {
+    use pgrx::datum::DatumWithOid;
+
+    if options.drop_cold && !options.rehydrate {
+        return Err("drop_cold requires rehydrate => true".to_string());
+    }
+
+    let table_oid_u32 = table_oid.to_u32();
+    let relation = qualified_relation_name(table_oid_u32).map_err(|error| error.to_string())?;
+    let table =
+        crate::migrate::QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
+
+    pgrx::Spi::run_with_args(
+        "SELECT pg_advisory_xact_lock($1)",
+        &[DatumWithOid::from(
+            crate::migrate::lock::MIGRATION_LOCK_NAMESPACE ^ i64::from(table_oid_u32),
+        )],
+    )
+    .map_err(|error| error.to_string())?;
+    pgrx::Spi::run(&format!(
+        "LOCK TABLE ONLY {} IN ACCESS EXCLUSIVE MODE",
+        table.quoted()
+    ))
+    .map_err(|error| error.to_string())?;
+
+    if options.rehydrate {
+        let temp_table = format!("pg_koldstore_demigrate_{table_oid_u32}");
+        pgrx::Spi::run(&format!(
+            "CREATE TEMP TABLE {temp_table} AS SELECT * FROM {} WHERE COALESCE(_deleted, false) = false",
+            table.quoted()
+        ))
+        .map_err(|error| error.to_string())?;
+        pgrx::Spi::run(&format!("TRUNCATE TABLE ONLY {}", table.quoted()))
+            .map_err(|error| error.to_string())?;
+        pgrx::Spi::run(&format!(
+            "INSERT INTO {} SELECT * FROM {temp_table}",
+            table.quoted()
+        ))
+        .map_err(|error| error.to_string())?;
+    }
+
+    let deactivated = pgrx::Spi::get_one_with_args::<i64>(
+        "WITH deactivated AS (
+            UPDATE koldstore.schemas
+            SET active = false
+            WHERE table_oid = $1 AND active = true
+            RETURNING 1
+         )
+         SELECT count(*)::bigint FROM deactivated",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?;
+    pgrx::Spi::run_with_args(
+        "UPDATE koldstore.jobs SET status = 'cancelled', updated_at = now() WHERE table_oid = $1 AND status IN ('pending', 'running')",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?;
+
+    if options.drop_system_columns {
+        pgrx::Spi::run(&format!(
+            "ALTER TABLE ONLY {} DROP COLUMN IF EXISTS \"_seq\", DROP COLUMN IF EXISTS \"_commit_seq\", DROP COLUMN IF EXISTS \"_deleted\"",
+            table.quoted()
+        ))
+        .map_err(|error| error.to_string())?;
+    }
+
+    Ok(deactivated.unwrap_or(0))
 }
 
 impl MigrateTableRequest {

@@ -1,3 +1,7 @@
+#[path = "../common/mod.rs"]
+mod common;
+
+use anyhow::Result;
 use koldstore_core::{ScopeKey, SeqId};
 use pg_koldstore::merge_scan::exec::{begin_merge_scan_with_plan, ColdAvailability};
 use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
@@ -33,4 +37,48 @@ fn user_scope_cold_pruning_filters_segments_before_stream_open() {
     );
     assert_eq!(state.selected_row_groups, vec![0]);
     assert_eq!(state.resources.object_store_handles, 1);
+}
+
+#[tokio::test]
+async fn user_scope_cold_segment_lookup_uses_scope_seq_index_on_pgrx() -> Result<()> {
+    for target in common::local_pg_matrix() {
+        let db = common::TestDb::start(target, "user_scope_cold_pruning").await?;
+        let table = db.create_user_notes_table("scope_notes").await?;
+        db.migrate_user_scoped(&table.relation, "user_id").await?;
+
+        let plan = common::explain_with_seqscan_disabled(
+            &db.client,
+            &format!(
+                r#"
+                SELECT object_path
+                FROM koldstore.cold_segments
+                WHERE table_oid = '{}'::regclass::oid
+                  AND scope_key = 'user-a'
+                  AND status = 'active'
+                  AND min_seq <= 5
+                  AND max_seq >= 5
+                "#,
+                table.relation
+            ),
+        )
+        .await?;
+        common::assertions::assert_catalog_index_plan(&plan, "cold_segments_active_scope_seq_idx")?;
+
+        let rows = db
+            .client
+            .query(
+                r#"
+                SELECT object_path
+                FROM koldstore.cold_segments
+                WHERE table_oid = $1::text::regclass::oid
+                  AND scope_key = 'user-a'
+                  AND status = 'active'
+                "#,
+                &[&table.relation],
+            )
+            .await?;
+        assert_eq!(rows.len(), 0);
+    }
+
+    Ok(())
 }

@@ -6,6 +6,7 @@
 -- functions can be generated.
 
 CREATE SCHEMA IF NOT EXISTS koldstore;
+GRANT USAGE ON SCHEMA koldstore TO PUBLIC;
 
 CREATE TYPE koldstore.managed_table_info AS (
   table_oid oid,
@@ -206,4 +207,13 @@ CREATE TABLE IF NOT EXISTS koldstore.row_event_retention (
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_seq AS bigint;
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_commit_seq AS bigint;
 
-REVOKE ALL ON koldstore.storage FROM PUBLIC;
+REVOKE ALL ON
+  koldstore.storage,
+  koldstore.schemas,
+  koldstore.manifest,
+  koldstore.jobs,
+  koldstore.cold_segments,
+  koldstore.cold_pk_hints,
+  koldstore.row_events,
+  koldstore.row_event_retention
+FROM PUBLIC;
