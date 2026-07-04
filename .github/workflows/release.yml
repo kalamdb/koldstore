@@ -175,6 +175,9 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -182,7 +185,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
       - name: Unit and integration tests without pgrx PostgreSQL feature conflicts
-        run: cargo test --workspace --no-default-features
+        run: cargo nextest run --workspace --no-default-features --exclude koldstore-e2e
 
   pgrx_tests:
     name: "pgrx Checks · PG${{ matrix.pg }}"

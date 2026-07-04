@@ -1,18 +1,27 @@
 #[test]
-fn migration_sql_backfills_existing_rows_and_preserves_primary_key() {
-    let plan = pg_koldstore::migrate::backfill::BackfillPlan::new("app.items");
-    let sql = plan.sql();
+fn migration_sql_backfills_existing_rows_in_ordered_batches() {
+    use pg_koldstore::migrate::jobs::{backfill_batch_plan, MigrationBatchSize};
+    use pg_koldstore::migrate::order::{MigrationOrdering, OrderingSource};
+    use pg_koldstore::migrate::QualifiedTableName;
 
-    for needle in [
-        "UPDATE app.items SET _seq = COALESCE(_seq, SNOWFLAKE_ID())",
-        "_commit_seq = COALESCE(_commit_seq, nextval('koldstore.global_commit_seq'::regclass))",
-        "_deleted = COALESCE(_deleted, false)",
-    ] {
-        assert!(
-            sql.contains(needle),
-            "missing existing migration fragment: {needle}"
-        );
-    }
+    let plan = backfill_batch_plan(
+        &QualifiedTableName::parse("app.items").unwrap(),
+        MigrationOrdering {
+            column: "id".to_string(),
+            source: OrderingSource::AutoIncrementPrimaryKey,
+            ascending_oldest_first: true,
+        },
+        MigrationBatchSize::new(10_000).unwrap(),
+    )
+    .unwrap();
+
+    assert!(plan.statement.sql.contains("LIMIT $1"));
+    assert!(plan.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
+    assert!(plan.statement.sql.contains("ORDER BY \"id\" ASC, ctid ASC"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("nextval('koldstore.global_seq'::regclass) AS assigned_seq"));
 }
 
 #[test]
@@ -46,35 +55,32 @@ fn migration_validation_preserves_existing_table_shape() {
 }
 
 #[test]
-fn existing_row_backfill_plan_locks_and_updates_only_missing_system_values() {
-    use pg_koldstore::migrate::backfill::plan_existing_row_backfill;
+fn existing_row_backfill_plan_uses_skip_locked_batches_not_table_wide_update() {
+    use pg_koldstore::migrate::jobs::{backfill_batch_plan, MigrationBatchSize};
+    use pg_koldstore::migrate::order::{MigrationOrdering, OrderingSource};
     use pg_koldstore::migrate::QualifiedTableName;
     use pg_koldstore::spi::SpiAccess;
 
     let table = QualifiedTableName::parse("app.items").unwrap();
-    let plan = plan_existing_row_backfill(&table, 42).unwrap();
+    let plan = backfill_batch_plan(
+        &table,
+        MigrationOrdering {
+            column: "id".to_string(),
+            source: OrderingSource::AutoIncrementPrimaryKey,
+            ascending_oldest_first: true,
+        },
+        MigrationBatchSize::new(1_000).unwrap(),
+    )
+    .unwrap();
 
-    assert_eq!(plan.table_oid, 42);
-    assert_eq!(plan.statements.len(), 2);
+    assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
+    assert!(plan.statement.sql.contains("UPDATE ONLY \"app\".\"items\""));
     assert!(plan
-        .statements
-        .iter()
-        .all(|statement| statement.access == SpiAccess::ReadWrite));
-    assert_eq!(
-        plan.statements[0].sql,
-        "SELECT pg_advisory_xact_lock($1, $2)"
-    );
-    assert!(plan.statements[1]
+        .statement
         .sql
-        .contains("UPDATE ONLY \"app\".\"items\""));
-    assert!(plan.statements[1]
-        .sql
-        .contains("\"_seq\" = COALESCE(\"_seq\", SNOWFLAKE_ID())"));
-    assert!(plan.statements[1].sql.contains(
-        "\"_commit_seq\" = COALESCE(\"_commit_seq\", nextval('koldstore.global_commit_seq'::regclass))"
-    ));
-    assert!(plan.statements[1]
-        .sql
-        .contains("\"_deleted\" = COALESCE(\"_deleted\", false)"));
-    assert!(plan.statements[1].sql.contains("WHERE \"_seq\" IS NULL"));
+        .contains("WITH candidate AS MATERIALIZED"));
+    assert!(plan.statement.sql.contains("LIMIT $1"));
+    assert!(plan.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
+    assert!(plan.statement.sql.contains("AND hot.\"_seq\" IS NULL"));
+    assert!(!plan.statement.sql.contains("SNOWFLAKE_ID()"));
 }

@@ -3,7 +3,9 @@
 pub mod backfill;
 pub mod columns;
 pub mod constraints;
+pub mod jobs;
 pub mod lock;
+pub mod order;
 pub mod register;
 pub mod rehydrate;
 pub mod rollback;
@@ -14,6 +16,17 @@ use uuid::Uuid;
 
 use crate::spi::SpiStatement;
 use crate::sql::ddl::MigrateTableRequest;
+
+use self::backfill::DEFAULT_BACKFILL_BATCH_ROWS;
+use self::columns::ExistingTableSystemColumnPreparePlan;
+use self::jobs::{
+    enqueue_migration_backfill_job_plan, ManagedTableType, MigrationBackfillJobRequest,
+    MigrationBatchSize, MigrationJobEnqueuePlan, MigrationJobPhase,
+};
+use self::order::{
+    choose_migration_ordering, CatalogColumn, CatalogPrimaryKey, MigrationOrdering,
+    MigrationOrderingRequest,
+};
 
 pub use scope::SYSTEM_SCOPE_COLUMN;
 
@@ -38,6 +51,12 @@ pub enum MigrationError {
     /// SPI statement metadata could not be prepared.
     #[error("{0}")]
     Spi(String),
+    /// Existing-table ordering metadata is insufficient.
+    #[error("{0}")]
+    Ordering(String),
+    /// Migration job planning failed.
+    #[error("{0}")]
+    Job(String),
 }
 
 /// Parsed table name accepted by `koldstore.migrate_table`.
@@ -109,6 +128,40 @@ pub struct EmptyTableMigrationPlan {
     pub empty_table_probe: SpiStatement,
 }
 
+/// Catalog metadata for a populated table migration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingTableCatalog {
+    /// Primary-key metadata.
+    pub primary_key: CatalogPrimaryKey,
+    /// Column metadata.
+    pub columns: Vec<CatalogColumn>,
+    /// Simple indexed or constrained columns eligible for cold metadata.
+    pub indexed_columns: Vec<String>,
+}
+
+/// Planned work for an async existing-table migration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExistingTableMigrationPlan {
+    /// Target table.
+    pub table: QualifiedTableName,
+    /// OID of the target table.
+    pub table_oid: u32,
+    /// Registered storage id.
+    pub storage_id: Uuid,
+    /// Effective user scope column, if user-scoped.
+    pub effective_scope_column: Option<String>,
+    /// Oldest-to-newest ordering selected for backfill.
+    pub ordering: MigrationOrdering,
+    /// Bounded backfill batch size.
+    pub backfill_batch_size: MigrationBatchSize,
+    /// Initial durable job phase.
+    pub initial_phase: MigrationJobPhase,
+    /// System-column DDL prepared for populated tables.
+    pub system_column_prepare: ExistingTableSystemColumnPreparePlan,
+    /// Async migration backfill job enqueue plan.
+    pub backfill_job: MigrationJobEnqueuePlan,
+}
+
 /// Plans the first migration step for an empty greenfield table.
 ///
 /// # Errors
@@ -158,6 +211,84 @@ pub fn plan_empty_table_migration(
         effective_scope_column,
         empty_table_probe,
     })
+}
+
+/// Plans migration of a populated table into async backfill.
+///
+/// # Errors
+///
+/// Returns an error when request arguments are invalid, the table has no stable
+/// oldest-to-newest order, or job statement metadata cannot be prepared.
+pub fn plan_existing_table_migration(
+    request: &MigrateTableRequest,
+    context: MigrationTableContext,
+    catalog: ExistingTableCatalog,
+    job_id: Uuid,
+) -> MigrationResult<ExistingTableMigrationPlan> {
+    let base = plan_empty_table_migration(request, context)?;
+    let explicit_order_column = request
+        .options
+        .get("order_column")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+        .map(ToString::to_string);
+    let ordering = choose_migration_ordering(&MigrationOrderingRequest {
+        primary_key: catalog.primary_key,
+        columns: catalog.columns,
+        explicit_order_column,
+    })
+    .map_err(|error| MigrationError::Ordering(error.to_string()))?;
+    let backfill_batch_size = migration_backfill_batch_size(request)?;
+    let table_type = match request.table_type.as_str() {
+        "shared" => ManagedTableType::Shared,
+        "user" => ManagedTableType::User,
+        _ => {
+            return Err(MigrationError::UnsupportedTableType(
+                request.table_type.clone(),
+            ))
+        }
+    };
+    let system_column_prepare = columns::plan_existing_table_system_column_prepare(
+        &base.table,
+        table_type == ManagedTableType::User && request.scope_column.is_none(),
+    )?;
+    let backfill_job = enqueue_migration_backfill_job_plan(MigrationBackfillJobRequest::new(
+        job_id,
+        base.table_oid,
+        &base.table,
+        table_type,
+        base.storage_id,
+        base.effective_scope_column.clone(),
+        &ordering,
+        backfill_batch_size,
+        request.flush_policy.clone(),
+    ))
+    .map_err(|error| MigrationError::Job(error.to_string()))?;
+
+    Ok(ExistingTableMigrationPlan {
+        table: base.table,
+        table_oid: base.table_oid,
+        storage_id: base.storage_id,
+        effective_scope_column: base.effective_scope_column,
+        ordering,
+        backfill_batch_size,
+        initial_phase: MigrationJobPhase::AddSystemColumns,
+        system_column_prepare,
+        backfill_job,
+    })
+}
+
+fn migration_backfill_batch_size(
+    request: &MigrateTableRequest,
+) -> MigrationResult<MigrationBatchSize> {
+    let configured = request
+        .options
+        .get("backfill_batch_size")
+        .and_then(serde_json::Value::as_u64)
+        .map_or(DEFAULT_BACKFILL_BATCH_ROWS, |value| value as usize);
+
+    MigrationBatchSize::new(configured).map_err(|error| MigrationError::Job(error.to_string()))
 }
 
 fn is_safe_identifier(value: &str) -> bool {

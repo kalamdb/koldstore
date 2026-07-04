@@ -1,14 +1,27 @@
 //! Parquet writer surface.
 
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::sync::Arc;
 
 use crate::footer::ColumnStats;
+use arrow_array::RecordBatch;
+use arrow_schema::SchemaRef;
+use parquet::{
+    arrow::ArrowWriter,
+    errors::ParquetError,
+    file::properties::{EnabledStatistics, WriterProperties},
+    schema::types::ColumnPath,
+};
 
 /// Writer options.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WriterOptions {
     pub compression: String,
     pub row_group_size: usize,
+    pub statistics_columns: Vec<String>,
+    pub bloom_filter_columns: Vec<String>,
+    pub bloom_filter_false_positive_rate: Option<f64>,
 }
 
 impl Default for WriterOptions {
@@ -16,7 +29,55 @@ impl Default for WriterOptions {
         Self {
             compression: "snappy".to_string(),
             row_group_size: 64 * 1024,
+            statistics_columns: Vec::new(),
+            bloom_filter_columns: Vec::new(),
+            bloom_filter_false_positive_rate: Some(0.01),
         }
+    }
+}
+
+impl WriterOptions {
+    /// Sets columns with Parquet statistics enabled.
+    #[must_use]
+    pub fn with_statistics_columns<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.statistics_columns = dedupe_nonblank(columns);
+        self
+    }
+
+    /// Sets columns with Parquet bloom filters enabled.
+    #[must_use]
+    pub fn with_bloom_filter_columns<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.bloom_filter_columns = dedupe_nonblank(columns);
+        self
+    }
+
+    /// Builds native Parquet writer properties for stats and bloom metadata.
+    #[must_use]
+    pub fn native_writer_properties(&self) -> WriterProperties {
+        let mut builder =
+            WriterProperties::builder().set_statistics_enabled(EnabledStatistics::None);
+        for column in &self.statistics_columns {
+            builder = builder.set_column_statistics_enabled(
+                ColumnPath::from(column.as_str()),
+                EnabledStatistics::Chunk,
+            );
+        }
+        for column in &self.bloom_filter_columns {
+            let path = ColumnPath::from(column.as_str());
+            builder = builder.set_column_bloom_filter_enabled(path.clone(), true);
+            if let Some(false_positive_rate) = self.bloom_filter_false_positive_rate {
+                builder = builder.set_column_bloom_filter_fpp(path, false_positive_rate);
+            }
+        }
+        builder.build()
     }
 }
 
@@ -57,6 +118,9 @@ impl ParquetSegmentWriter {
             column_stats: BTreeMap::new(),
             pk_filter_kind: None,
             pk_filter_columns: Vec::new(),
+            statistics_columns: self.options.statistics_columns.clone(),
+            bloom_filter_columns: self.options.bloom_filter_columns.clone(),
+            writes_native_bloom_filters: !self.options.bloom_filter_columns.is_empty(),
         }
     }
 
@@ -81,8 +145,70 @@ impl ParquetSegmentWriter {
         plan.column_stats = metadata.column_stats.into_iter().collect();
         plan.pk_filter_kind = (!metadata.pk_columns.is_empty()).then(|| "bloom".to_string());
         plan.pk_filter_columns = metadata.pk_columns;
+        plan.bloom_filter_columns = dedupe_nonblank(
+            metadata
+                .bloom_filter_columns
+                .into_iter()
+                .chain(plan.bloom_filter_columns),
+        );
+        plan.statistics_columns = dedupe_nonblank(
+            metadata
+                .statistics_columns
+                .into_iter()
+                .chain(plan.statistics_columns),
+        );
+        plan.writes_native_bloom_filters = !plan.bloom_filter_columns.is_empty();
         plan
     }
+
+    /// Plans bounded row-group streaming for a segment write.
+    #[must_use]
+    pub fn plan_streaming_row_groups(&self, total_rows: u64) -> StreamingRowGroupPlan {
+        let row_group_size = self.options.row_group_size.max(1);
+        let row_group_count = total_rows.div_ceil(row_group_size as u64) as usize;
+        StreamingRowGroupPlan {
+            total_rows,
+            row_group_count,
+            max_rows_in_memory: row_group_size,
+        }
+    }
+
+    /// Writes Arrow record batches to a native Parquet writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Parquet error if the schema, writer, or any batch write fails.
+    pub fn write_record_batches<W, I>(
+        &self,
+        writer: W,
+        schema: SchemaRef,
+        batches: I,
+    ) -> Result<Arc<parquet::file::metadata::ParquetMetaData>, ParquetError>
+    where
+        W: Write + Send,
+        I: IntoIterator<Item = RecordBatch>,
+    {
+        let mut writer = ArrowWriter::try_new(
+            writer,
+            schema,
+            Some(self.options.native_writer_properties()),
+        )?;
+        for batch in batches {
+            writer.write(&batch)?;
+        }
+        Ok(Arc::new(writer.close()?))
+    }
+}
+
+/// Bounded row-group streaming plan for writing a Parquet segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamingRowGroupPlan {
+    /// Total logical rows expected in the segment.
+    pub total_rows: u64,
+    /// Number of row groups to write.
+    pub row_group_count: usize,
+    /// Maximum rows buffered before flushing a row group.
+    pub max_rows_in_memory: usize,
 }
 
 /// Segment metadata captured while writing a Parquet object.
@@ -102,6 +228,10 @@ pub struct SegmentMetadataInput {
     pub byte_size: u64,
     /// Primary-key columns eligible for bloom metadata.
     pub pk_columns: Vec<String>,
+    /// Columns configured for native Parquet bloom filters.
+    pub bloom_filter_columns: Vec<String>,
+    /// Columns configured for Parquet statistics.
+    pub statistics_columns: Vec<String>,
     /// Column stats used by segment pruning.
     pub column_stats: Vec<(String, ColumnStats)>,
 }
@@ -131,4 +261,25 @@ pub struct SegmentWritePlan {
     pub pk_filter_kind: Option<String>,
     /// PK columns covered by the filter.
     pub pk_filter_columns: Vec<String>,
+    /// Columns with Parquet statistics enabled.
+    pub statistics_columns: Vec<String>,
+    /// Columns with native Parquet bloom filters enabled.
+    pub bloom_filter_columns: Vec<String>,
+    /// Whether native Parquet bloom filters will be written.
+    pub writes_native_bloom_filters: bool,
+}
+
+fn dedupe_nonblank<I, S>(values: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    values.into_iter().fold(Vec::new(), |mut columns, value| {
+        let column = value.into();
+        let column = column.trim();
+        if !column.is_empty() && !columns.iter().any(|existing| existing == column) {
+            columns.push(column.to_string());
+        }
+        columns
+    })
 }

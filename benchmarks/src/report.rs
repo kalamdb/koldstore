@@ -27,6 +27,16 @@ impl BenchmarkReport {
             results: Vec::new(),
         }
     }
+
+    /// Returns benchmark names whose verdict failed.
+    #[must_use]
+    pub fn failed_result_names(&self) -> Vec<&str> {
+        self.results
+            .iter()
+            .filter(|result| !result.passed)
+            .map(|result| result.name.as_str())
+            .collect()
+    }
 }
 
 /// Machine and environment metadata.
@@ -92,4 +102,35 @@ pub fn to_html_summary(report: &BenchmarkReport) -> String {
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title></head><body><h1>{}</h1><table><thead><tr><th>scenario</th><th>rows</th><th>ops/s</th><th>p50</th><th>p95</th><th>p99</th><th>passed</th></tr></thead><tbody>{}</tbody></table></body></html>",
         report.suite, report.suite, rows
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_result_names_reports_only_failed_verdicts() {
+        let report = BenchmarkReport {
+            suite: "pg-koldstore".to_string(),
+            generated_at: Utc::now(),
+            machine: MachineMetadata::default(),
+            results: vec![result("heap", true), result("koldstore", false)],
+        };
+
+        assert_eq!(report.failed_result_names(), vec!["koldstore"]);
+    }
+
+    fn result(name: &str, passed: bool) -> BenchmarkResult {
+        BenchmarkResult {
+            name: name.to_string(),
+            row_count: 1,
+            throughput_ops_sec: 1.0,
+            p50_ms: 1.0,
+            p95_ms: 1.0,
+            p99_ms: 1.0,
+            peak_rss_bytes: None,
+            allocated_bytes: None,
+            passed,
+        }
+    }
 }

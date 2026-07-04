@@ -123,6 +123,10 @@ async fn run_real_pgbench_suite(config: BenchmarkConfig) -> Result<()> {
             .with_context(|| format!("write {}", path.display()))?;
     }
     println!("{json}");
+    let failed_results = report.failed_result_names();
+    if !failed_results.is_empty() {
+        anyhow::bail!("benchmark verdict failed for {}", failed_results.join(", "));
+    }
     Ok(())
 }
 
@@ -171,7 +175,7 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
             SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
          INSERT INTO bench.koldstore_items
             SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
-         SELECT koldstore.migrate_table('bench.koldstore_items'::regclass, 'shared', 'bench-local', NULL, NULL);",
+         SELECT koldstore.migrate_table('bench.koldstore_items'::regclass, 'shared', 'bench-local', NULL, NULL, 'id');",
         rows = config.rows
     );
     client.batch_execute(&seed_sql).await?;

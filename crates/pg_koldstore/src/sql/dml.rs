@@ -241,7 +241,16 @@ pub enum DeleteDecision {
 /// Decides how to route a delete from local cold metadata.
 #[must_use]
 pub const fn delete_decision(cold_may_contain_pk: bool) -> DeleteDecision {
-    if cold_may_contain_pk {
+    delete_decision_with_flush_fence(cold_may_contain_pk, false)
+}
+
+/// Decides how to route a delete while an in-flight flush may have copied the row.
+#[must_use]
+pub const fn delete_decision_with_flush_fence(
+    cold_may_contain_pk: bool,
+    active_flush_fence: bool,
+) -> DeleteDecision {
+    if cold_may_contain_pk || active_flush_fence {
         DeleteDecision::Tombstone
     } else {
         DeleteDecision::PhysicalDelete

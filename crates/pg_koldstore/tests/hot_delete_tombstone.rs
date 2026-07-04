@@ -1,13 +1,20 @@
 use koldstore_core::{CommitSeq, SeqId};
 use pg_koldstore::{
     hooks::executor,
-    sql::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation},
+    sql::dml::{
+        delete_decision, delete_decision_with_flush_fence, DeleteDecision, DmlStamp,
+        ManagedDmlOperation,
+    },
 };
 
 #[test]
 fn hot_delete_routes_to_physical_delete_or_tombstone_from_cold_hints() {
     assert_eq!(delete_decision(false), DeleteDecision::PhysicalDelete);
     assert_eq!(delete_decision(true), DeleteDecision::Tombstone);
+    assert_eq!(
+        delete_decision_with_flush_fence(false, true),
+        DeleteDecision::Tombstone
+    );
 
     let physical_delete_stamp = DmlStamp::new(
         SeqId::new(10).unwrap(),

@@ -1,8 +1,11 @@
 //! Row-group pruning helpers.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use koldstore_core::{CommitSeq, SeqId};
+
+use crate::ColumnStats;
 
 /// Pruning result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,5 +117,46 @@ impl RowGroupPruner {
                 .saturating_sub(selected_row_groups.len()),
             selected_row_groups,
         }
+    }
+
+    /// Returns true when segment min/max stats may overlap the requested range.
+    ///
+    /// Missing, null, or incomparable stats return true so callers scan
+    /// conservatively instead of risking false negatives.
+    #[must_use]
+    pub fn segment_column_may_overlap(
+        &self,
+        column_stats: &BTreeMap<String, ColumnStats>,
+        column: &str,
+        min: &serde_json::Value,
+        max: &serde_json::Value,
+    ) -> bool {
+        let Some(stats) = column_stats.get(column) else {
+            return true;
+        };
+        if min.is_null() || max.is_null() || stats.min.is_null() || stats.max.is_null() {
+            return true;
+        }
+        let Some(max_vs_min) = compare_json_values(&stats.max, min) else {
+            return true;
+        };
+        let Some(min_vs_max) = compare_json_values(&stats.min, max) else {
+            return true;
+        };
+
+        max_vs_min != Ordering::Less && min_vs_max != Ordering::Greater
+    }
+}
+
+fn compare_json_values(left: &serde_json::Value, right: &serde_json::Value) -> Option<Ordering> {
+    match (left, right) {
+        (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
+            left.as_f64()?.partial_cmp(&right.as_f64()?)
+        }
+        (serde_json::Value::String(left), serde_json::Value::String(right)) => {
+            Some(left.cmp(right))
+        }
+        (serde_json::Value::Bool(left), serde_json::Value::Bool(right)) => Some(left.cmp(right)),
+        _ => None,
     }
 }

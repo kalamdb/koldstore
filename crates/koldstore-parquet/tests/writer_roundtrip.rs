@@ -2,6 +2,10 @@ use koldstore_parquet::{
     ColumnStats, FooterSummary, ParquetSegmentWriter, RowGroupStats, SegmentFooterMetadata,
     SegmentMetadataInput, WriterOptions,
 };
+use std::sync::Arc;
+
+use arrow_array::{Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Schema};
 use serde_json::json;
 
 #[test]
@@ -31,6 +35,8 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
             row_count: 100,
             byte_size: 4096,
             pk_columns: vec!["id".to_string()],
+            bloom_filter_columns: vec!["id".to_string(), "created_at".to_string()],
+            statistics_columns: vec!["id".to_string(), "created_at".to_string()],
             column_stats: vec![
                 (
                     "id".to_string(),
@@ -62,6 +68,9 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
     assert_eq!(plan.byte_size, 4096);
     assert_eq!(plan.pk_filter_kind.as_deref(), Some("bloom"));
     assert_eq!(plan.pk_filter_columns, vec!["id"]);
+    assert_eq!(plan.bloom_filter_columns, vec!["id", "created_at"]);
+    assert_eq!(plan.statistics_columns, vec!["id", "created_at"]);
+    assert!(plan.writes_native_bloom_filters);
     assert_eq!(
         plan.column_stats
             .get("_seq")
@@ -70,6 +79,68 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
     );
     assert!(plan.column_stats.contains_key("id"));
     assert!(plan.column_stats.contains_key("_commit_seq"));
+}
+
+#[test]
+fn writer_plan_bounds_streaming_row_groups_by_configured_row_group_size() {
+    let writer = ParquetSegmentWriter::new(WriterOptions {
+        compression: "snappy".to_string(),
+        row_group_size: 2,
+        statistics_columns: Vec::new(),
+        bloom_filter_columns: Vec::new(),
+        bloom_filter_false_positive_rate: Some(0.01),
+    });
+
+    let plan = writer.plan_streaming_row_groups(5);
+
+    assert_eq!(plan.row_group_count, 3);
+    assert_eq!(plan.max_rows_in_memory, 2);
+    assert_eq!(plan.total_rows, 5);
+}
+
+#[test]
+fn writer_options_build_native_parquet_properties_for_stats_and_bloom_filters() {
+    let options = WriterOptions::default()
+        .with_statistics_columns(["id", "created_at"])
+        .with_bloom_filter_columns(["id"]);
+    let properties = options.native_writer_properties();
+    let id = parquet::schema::types::ColumnPath::from("id");
+    let created_at = parquet::schema::types::ColumnPath::from("created_at");
+
+    assert_ne!(
+        properties.statistics_enabled(&id),
+        parquet::file::properties::EnabledStatistics::None
+    );
+    assert!(properties.bloom_filter_properties(&id).is_some());
+    assert!(properties.bloom_filter_properties(&created_at).is_none());
+}
+
+#[test]
+fn writer_writes_record_batches_with_native_parquet_properties() {
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions::default()
+            .with_statistics_columns(["id", "status"])
+            .with_bloom_filter_columns(["id"]),
+    );
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("status", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2])),
+            Arc::new(StringArray::from(vec!["new", "done"])),
+        ],
+    )
+    .unwrap();
+
+    let metadata = writer
+        .write_record_batches(Vec::new(), schema, vec![batch])
+        .unwrap();
+
+    assert_eq!(metadata.file_metadata().num_rows(), 2);
+    assert_eq!(metadata.num_row_groups(), 1);
 }
 
 #[test]

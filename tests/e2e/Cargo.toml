@@ -7,63 +7,63 @@ repository.workspace = true
 
 [[test]]
 name = "greenfield_matrix"
-path = "greenfield_matrix.rs"
+path = "migrate/greenfield_matrix.rs"
 
 [[test]]
 name = "migrate_existing_matrix"
-path = "migrate_existing_matrix.rs"
+path = "migrate/migrate_existing_matrix.rs"
 
 [[test]]
 name = "flush_to_cold"
-path = "flush_to_cold.rs"
+path = "flush/flush_to_cold.rs"
 
 [[test]]
 name = "flush_recovery"
-path = "flush_recovery.rs"
+path = "flush/flush_recovery.rs"
 
 [[test]]
 name = "flush_object_outage"
-path = "flush_object_outage.rs"
+path = "flush/flush_object_outage.rs"
 
 [[test]]
 name = "flush_matrix"
-path = "flush_matrix.rs"
+path = "flush/flush_matrix.rs"
 
 [[test]]
 name = "merge_scan_results"
-path = "merge_scan_results.rs"
+path = "merge/merge_scan_results.rs"
 
 [[test]]
 name = "merge_scan_outage"
-path = "merge_scan_outage.rs"
+path = "merge/merge_scan_outage.rs"
 
 [[test]]
 name = "merge_scan_matrix"
-path = "merge_scan_matrix.rs"
+path = "merge/merge_scan_matrix.rs"
 
 [[test]]
 name = "cold_dml_matrix"
-path = "cold_dml_matrix.rs"
+path = "dml/cold_dml_matrix.rs"
 
 [[test]]
 name = "user_scope_cold_pruning"
-path = "user_scope_cold_pruning.rs"
+path = "merge/user_scope_cold_pruning.rs"
 
 [[test]]
 name = "user_scope_matrix"
-path = "user_scope_matrix.rs"
+path = "scope/user_scope_matrix.rs"
 
 [[test]]
 name = "change_feed"
-path = "change_feed.rs"
+path = "dml/change_feed.rs"
 
 [[test]]
 name = "demigrate_cold_artifacts"
-path = "demigrate_cold_artifacts.rs"
+path = "migrate/demigrate_cold_artifacts.rs"
 
 [[test]]
 name = "demigrate_matrix"
-path = "demigrate_matrix.rs"
+path = "migrate/demigrate_matrix.rs"
 
 [[test]]
 name = "jobs_and_recovery"
@@ -71,11 +71,11 @@ path = "jobs_and_recovery.rs"
 
 [[test]]
 name = "storage_rotation"
-path = "storage_rotation.rs"
+path = "storage/storage_rotation.rs"
 
 [[test]]
 name = "export_compatibility"
-path = "export_compatibility.rs"
+path = "storage/export_compatibility.rs"
 
 [[test]]
 name = "quickstart_matrix"
@@ -93,12 +93,17 @@ path = "failure_injection.rs"
 name = "snowflake_concurrency"
 path = "snowflake_concurrency.rs"
 
+[[test]]
+name = "full_lifecycle"
+path = "full_lifecycle.rs"
+
 [dev-dependencies]
 anyhow.workspace = true
 koldstore-core.workspace = true
 koldstore-manifest.workspace = true
 koldstore-parquet.workspace = true
 koldstore-storage.workspace = true
+parquet.workspace = true
 pg_koldstore = { path = "../../crates/pg_koldstore", default-features = false }
 serde_json.workspace = true
 tokio.workspace = true

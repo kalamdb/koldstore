@@ -1,5 +1,6 @@
 //! Schema registry insertion helpers.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 use uuid::Uuid;
@@ -86,8 +87,118 @@ pub enum RegistryError {
 pub struct ColdMetadataCandidates {
     /// Columns worth recording min/max/null-count style statistics for.
     pub stats_columns: Vec<String>,
+    /// Columns configured for Parquet bloom filters.
+    pub bloom_filter_columns: Vec<String>,
     /// Columns worth considering for bloom filters.
     pub bloom_candidate_columns: Vec<String>,
+}
+
+/// Source of a column's cold metadata eligibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IndexedColumnSource {
+    /// Column participates in the application primary key.
+    PrimaryKey,
+    /// Column participates in a UNIQUE index or constraint.
+    Unique,
+    /// Column participates in a foreign key.
+    ForeignKey,
+    /// Column participates in a secondary index.
+    SecondaryIndex,
+}
+
+/// Structured metadata for one indexed/constraint-derived column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexedColumnMetadata {
+    /// Column name.
+    pub column: String,
+    /// Metadata source.
+    pub source: IndexedColumnSource,
+    /// Optional source index/constraint name.
+    pub source_name: Option<String>,
+    /// One-based ordinal within the source key.
+    pub ordinal: u32,
+    /// Whether the source guarantees uniqueness.
+    pub unique: bool,
+    /// Whether this column is part of the application primary key.
+    pub primary_key: bool,
+    /// Whether this column is part of a foreign key.
+    pub foreign_key: bool,
+    /// Whether min/max stats are safe to collect for this column type.
+    pub supports_stats: bool,
+    /// Whether bloom filters are safe to collect for this column type.
+    pub supports_bloom: bool,
+}
+
+impl IndexedColumnMetadata {
+    /// Creates primary-key column metadata.
+    #[must_use]
+    pub fn primary_key(column: impl Into<String>, ordinal: u32) -> Self {
+        Self {
+            column: column.into(),
+            source: IndexedColumnSource::PrimaryKey,
+            source_name: Some("primary_key".to_string()),
+            ordinal,
+            unique: true,
+            primary_key: true,
+            foreign_key: false,
+            supports_stats: true,
+            supports_bloom: true,
+        }
+    }
+
+    /// Creates secondary-index column metadata.
+    #[must_use]
+    pub fn secondary_index(column: impl Into<String>, ordinal: u32) -> Self {
+        Self {
+            column: column.into(),
+            source: IndexedColumnSource::SecondaryIndex,
+            source_name: None,
+            ordinal,
+            unique: false,
+            primary_key: false,
+            foreign_key: false,
+            supports_stats: true,
+            supports_bloom: true,
+        }
+    }
+}
+
+/// Ordered index shape retained for future composite pruning/order planning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OrderedIndexMetadata {
+    /// Index or constraint name.
+    pub name: String,
+    /// Columns in index key order.
+    pub columns: Vec<String>,
+    /// Whether the ordered key is unique.
+    pub unique: bool,
+}
+
+/// Typed cold metadata configuration stored in schema options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColdMetadataConfig {
+    /// Columns worth recording min/max/null-count style statistics for.
+    pub stats_columns: Vec<String>,
+    /// Columns configured for Parquet bloom filters.
+    pub bloom_filter_columns: Vec<String>,
+    /// Backward-compatible alias for readers still looking for candidate columns.
+    pub bloom_candidate_columns: Vec<String>,
+    /// Structured metadata for columns selected from indexes/constraints.
+    pub indexed_columns: Vec<IndexedColumnMetadata>,
+    /// Composite index shapes retained for future ordered pruning.
+    pub ordered_indexes: Vec<OrderedIndexMetadata>,
+}
+
+impl ColdMetadataConfig {
+    /// Returns true when no cold metadata is configured.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.stats_columns.is_empty()
+            && self.bloom_filter_columns.is_empty()
+            && self.indexed_columns.is_empty()
+            && self.ordered_indexes.is_empty()
+    }
 }
 
 /// Metadata recorded for a greenfield registration.
@@ -227,17 +338,12 @@ impl RegistrationMetadata {
                 );
             }
         }
-        let cold_metadata = cold_metadata_candidates(&self.primary_key, &self.indexed_columns);
-        if !cold_metadata.stats_columns.is_empty()
-            || !cold_metadata.bloom_candidate_columns.is_empty()
-        {
+        let cold_metadata = cold_metadata_config(&self.primary_key, &self.indexed_columns);
+        if !cold_metadata.is_empty() {
             let object = options_object_mut(&mut options)?;
             object.insert(
                 "cold_metadata".to_string(),
-                serde_json::json!({
-                    "stats_columns": cold_metadata.stats_columns,
-                    "bloom_candidate_columns": cold_metadata.bloom_candidate_columns,
-                }),
+                serde_json::to_value(cold_metadata).unwrap_or_else(|_| Value::Object(Map::new())),
             );
         }
         let type_matrix = if self.type_matrix.is_null() {
@@ -335,17 +441,55 @@ pub fn cold_metadata_candidates(
     primary_key: &[String],
     indexed_columns: &[String],
 ) -> ColdMetadataCandidates {
+    let config = cold_metadata_config(primary_key, indexed_columns);
+
+    ColdMetadataCandidates {
+        stats_columns: config.stats_columns,
+        bloom_filter_columns: config.bloom_filter_columns,
+        bloom_candidate_columns: config.bloom_candidate_columns,
+    }
+}
+
+/// Builds typed cold metadata configuration from PK and indexed columns.
+#[must_use]
+pub fn cold_metadata_config(
+    primary_key: &[String],
+    indexed_columns: &[String],
+) -> ColdMetadataConfig {
     let stats_columns = dedupe_nonblank(indexed_columns.iter().map(String::as_str));
-    let bloom_candidate_columns = dedupe_nonblank(
+    let bloom_filter_columns = dedupe_nonblank(
         primary_key
             .iter()
             .chain(indexed_columns)
             .map(String::as_str),
     );
+    let mut indexed_metadata = Vec::new();
+    for (index, column) in primary_key
+        .iter()
+        .map(String::as_str)
+        .filter(|column| !column.trim().is_empty())
+        .enumerate()
+    {
+        indexed_metadata.push(IndexedColumnMetadata::primary_key(
+            column.trim(),
+            (index + 1) as u32,
+        ));
+    }
+    for (index, column) in stats_columns.iter().map(String::as_str).enumerate() {
+        if !primary_key.iter().any(|pk| pk == column) {
+            indexed_metadata.push(IndexedColumnMetadata::secondary_index(
+                column,
+                (index + 1) as u32,
+            ));
+        }
+    }
 
-    ColdMetadataCandidates {
+    ColdMetadataConfig {
         stats_columns,
-        bloom_candidate_columns,
+        bloom_candidate_columns: bloom_filter_columns.clone(),
+        bloom_filter_columns,
+        indexed_columns: indexed_metadata,
+        ordered_indexes: Vec::new(),
     }
 }
 

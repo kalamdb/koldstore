@@ -1,4 +1,4 @@
-#[path = "common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 use anyhow::Result;
@@ -109,8 +109,8 @@ async fn run_existing_table_scenario(
 
     client
         .execute(
-            "SELECT koldstore.migrate_table($1::text::regclass, 'shared', 'local-minio', NULL, NULL)",
-            &[&relation],
+            "SELECT koldstore.migrate_table($1::text::regclass, 'shared', 'local-minio', NULL, NULL, $2)",
+            &[&relation, &scenario.primary_key],
         )
         .await?;
 

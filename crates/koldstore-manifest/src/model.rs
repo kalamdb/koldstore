@@ -1,5 +1,6 @@
 //! Manifest model.
 
+use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Utc};
@@ -19,6 +20,15 @@ pub struct Manifest {
     pub publish: Option<PublishState>,
     pub segments: Vec<ManifestSegment>,
     pub files: FilesState,
+}
+
+/// Result of applying a batch of manifest segment appends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManifestBatchAppend {
+    /// Number of segment entries appended.
+    pub appended_segments: usize,
+    /// Number of object-store `manifest.json` writes needed for the batch.
+    pub manifest_writes_required: usize,
 }
 
 impl Manifest {
@@ -66,12 +76,42 @@ impl Manifest {
 
     /// Appends a segment and updates watermarks for visible committed segments.
     pub fn append_segment(&mut self, segment: ManifestSegment) {
-        if segment.status != SegmentStatus::Deleted {
-            self.max_seq = self.max_seq.max(segment.max_seq);
-            self.max_commit_seq = self.max_commit_seq.max(segment.max_commit_seq);
+        let _ = self.append_segment_batch([segment]);
+    }
+
+    /// Appends several segments with one reserved vector growth and one manifest write.
+    #[must_use]
+    pub fn append_segment_batch(
+        &mut self,
+        segments: impl IntoIterator<Item = ManifestSegment>,
+    ) -> ManifestBatchAppend {
+        let segments = segments.into_iter();
+        let (lower_bound, _) = segments.size_hint();
+        self.segments.reserve(lower_bound);
+
+        let mut appended_segments = 0usize;
+        let mut visible_files = 0u64;
+        for segment in segments {
+            if segment.status != SegmentStatus::Deleted {
+                self.max_seq = self.max_seq.max(segment.max_seq);
+                self.max_commit_seq = self.max_commit_seq.max(segment.max_commit_seq);
+                visible_files += 1;
+            }
+            self.segments.push(segment);
+            appended_segments += 1;
         }
-        self.segments.push(segment);
-        self.updated_at = Utc::now();
+
+        if appended_segments > 0 {
+            if let Some(total_files) = self.files.total_files.as_mut() {
+                *total_files += visible_files;
+            }
+            self.updated_at = Utc::now();
+        }
+
+        ManifestBatchAppend {
+            appended_segments,
+            manifest_writes_required: usize::from(appended_segments > 0),
+        }
     }
 
     /// Serializes the manifest to JSON.
@@ -107,6 +147,10 @@ pub struct ManifestSegment {
     pub byte_size: u64,
     pub schema_version: u32,
     pub pk_filter: Option<PkFilter>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub column_stats: BTreeMap<String, ManifestColumnStats>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bloom_filters: Vec<ManifestBloomFilter>,
     pub status: SegmentStatus,
     pub checksum: Option<String>,
     pub etag: Option<String>,
@@ -142,11 +186,28 @@ impl ManifestSegment {
             byte_size,
             schema_version,
             pk_filter: None,
+            column_stats: BTreeMap::new(),
+            bloom_filters: Vec::new(),
             status: SegmentStatus::Committed,
             checksum: None,
             etag: None,
             created_at: Some(Utc::now()),
         }
+    }
+}
+
+/// Min/max stats for one manifest column.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifestColumnStats {
+    pub min: serde_json::Value,
+    pub max: serde_json::Value,
+}
+
+impl ManifestColumnStats {
+    /// Creates manifest min/max stats.
+    #[must_use]
+    pub fn new(min: serde_json::Value, max: serde_json::Value) -> Self {
+        Self { min, max }
     }
 }
 
@@ -165,6 +226,26 @@ pub struct PkFilter {
     pub kind: String,
     pub column_ids: Vec<u32>,
     pub false_positive_rate: Option<f64>,
+}
+
+/// Bloom filter availability metadata for manifest consumers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifestBloomFilter {
+    pub kind: String,
+    pub columns: Vec<String>,
+    pub false_positive_rate: Option<f64>,
+}
+
+impl ManifestBloomFilter {
+    /// Creates bloom filter metadata for the given columns.
+    #[must_use]
+    pub fn bloom(columns: Vec<String>, false_positive_rate: Option<f64>) -> Self {
+        Self {
+            kind: "bloom".to_string(),
+            columns,
+            false_positive_rate,
+        }
+    }
 }
 
 impl PkFilter {

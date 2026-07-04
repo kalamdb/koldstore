@@ -10,4 +10,7 @@ pub use footer::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadat
 pub use prune::{PruneDecision, RowGroupPruner};
 pub use reader::{ParquetReadOptions, ParquetReadRequest, RecordBatchFileStream};
 pub use schema::{build_arrow_schema, PgColumn, PgType, SchemaError, SystemColumn};
-pub use writer::{ParquetSegmentWriter, SegmentMetadataInput, SegmentWritePlan, WriterOptions};
+pub use writer::{
+    ParquetSegmentWriter, SegmentMetadataInput, SegmentWritePlan, StreamingRowGroupPlan,
+    WriterOptions,
+};

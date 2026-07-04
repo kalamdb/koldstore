@@ -72,6 +72,81 @@ fn operational_functions_build_parameterized_catalog_plans() {
 }
 
 #[test]
+fn flush_job_claim_plan_uses_skip_locked_leases_and_seq_watermark() {
+    use pg_koldstore::flush::job::FlushLeaseSeconds;
+    use pg_koldstore::spi::SpiAccess;
+
+    let claim =
+        pg_koldstore::sql::ops::claim_flush_jobs_plan(32, FlushLeaseSeconds::new(30).unwrap())
+            .unwrap();
+
+    assert_eq!(claim.limit, 32);
+    assert_eq!(claim.lease_seconds.get(), 30);
+    assert_eq!(claim.statement.access, SpiAccess::ReadWrite);
+    assert!(claim.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
+    assert!(claim
+        .statement
+        .sql
+        .contains("lease_epoch = j.lease_epoch + 1"));
+    assert!(claim.statement.sql.contains("flush_seq_upper_bound"));
+    assert!(claim.statement.sql.contains("status = 'running'"));
+}
+
+#[test]
+fn flush_job_progress_and_finish_plans_are_guarded_by_live_lease() {
+    use koldstore_core::{CommitSeq, SeqId};
+    use pg_koldstore::flush::job::{FlushJobPhase, JobLeaseEpoch};
+    use pg_koldstore::spi::SpiAccess;
+    use uuid::Uuid;
+
+    let job_id = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    let progress = pg_koldstore::sql::ops::flush_job_progress_plan(
+        job_id,
+        owner,
+        JobLeaseEpoch::new(3).unwrap(),
+        FlushJobPhase::CommitCatalog,
+        SeqId::new(99).unwrap(),
+        CommitSeq::new(199).unwrap(),
+        2,
+        500,
+    )
+    .unwrap();
+    let finish = pg_koldstore::sql::ops::finish_flush_job_plan(
+        job_id,
+        owner,
+        JobLeaseEpoch::new(3).unwrap(),
+        true,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(progress.job_id, job_id);
+    assert_eq!(progress.lease_owner, owner);
+    assert_eq!(progress.lease_epoch.get(), 3);
+    assert_eq!(progress.phase, FlushJobPhase::CommitCatalog);
+    assert_eq!(progress.statement.access, SpiAccess::ReadWrite);
+    assert!(progress.statement.sql.contains("lease_owner = $2::uuid"));
+    assert!(progress.statement.sql.contains("lease_epoch = $3::bigint"));
+    assert!(progress
+        .statement
+        .sql
+        .contains("checkpoint_seq = $5::bigint"));
+    assert!(progress.statement.sql.contains("last_heartbeat_at = now()"));
+
+    assert_eq!(finish.job_id, job_id);
+    assert!(finish.success);
+    assert_eq!(finish.statement.access, SpiAccess::ReadWrite);
+    assert!(finish
+        .statement
+        .sql
+        .contains("status = CASE WHEN $4::boolean THEN 'completed' ELSE 'error' END"));
+    assert!(finish.statement.sql.contains("lease_owner = $2::uuid"));
+    assert!(finish.statement.sql.contains("lease_epoch = $3::bigint"));
+    assert!(finish.statement.sql.contains("lease_owner = NULL"));
+}
+
+#[test]
 fn sql_exposes_export_import_boundary() {
     use koldstore_core::TableName;
 
@@ -107,7 +182,7 @@ fn sql_exposes_export_import_boundary() {
 
 #[test]
 fn flush_sql_requests_capture_policy_table_scope_and_pending_limits() {
-    use koldstore_core::{ScopeKey, TableName};
+    use koldstore_core::{ScopeKey, SeqId, TableName};
 
     let policy = pg_koldstore::sql::ops::set_flush_policy_request(
         TableName::parse("app.items").unwrap(),
@@ -128,4 +203,17 @@ fn flush_sql_requests_capture_policy_table_scope_and_pending_limits() {
     assert_eq!(table_flush.scope_key.as_ref().unwrap().as_str(), "tenant-a");
     assert!(table_flush.force);
     assert_eq!(pending_flush.limit, 25);
+
+    let enqueue = pg_koldstore::sql::ops::enqueue_flush_job_plan(
+        table_flush,
+        Some(SeqId::new(1_000).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(enqueue.seq_upper_bound.unwrap().get(), 1_000);
+    assert!(enqueue.statement.sql.contains("flush_seq_upper_bound"));
+    assert!(enqueue.statement.sql.contains("ON CONFLICT"));
+    assert!(enqueue
+        .statement
+        .sql
+        .contains("WHERE job_type = 'flush' AND status IN ('pending', 'running')"));
 }

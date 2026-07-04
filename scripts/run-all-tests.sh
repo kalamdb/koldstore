@@ -25,7 +25,7 @@ Options:
   --pg-versions LIST   Comma-separated PostgreSQL majors for local pgrx checks (default: 16)
   --skip-fmt           Skip cargo fmt --check
   --skip-lint          Skip cargo clippy
-  --skip-unit          Skip cargo test --workspace
+  --skip-unit          Skip cargo nextest workspace tests
   --skip-pgrx          Skip pgrx feature compile/install checks
   --skip-e2e           Skip local pgrx-backed E2E matrix
   --skip-memory        Skip memory checks
@@ -73,6 +73,13 @@ require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "error: required command not found: $1" >&2
     exit 1
+  fi
+}
+
+ensure_cargo_nextest() {
+  if ! command -v cargo-nextest >/dev/null 2>&1; then
+    step "installing cargo-nextest"
+    cargo install cargo-nextest --locked
   fi
 }
 
@@ -207,8 +214,9 @@ if [[ "${SKIP_LINT}" -eq 0 ]]; then
 fi
 
 if [[ "${SKIP_UNIT}" -eq 0 ]]; then
-  step "cargo test --workspace --no-default-features"
-  cargo test --workspace --no-default-features
+  ensure_cargo_nextest
+  step "cargo nextest run --workspace --no-default-features --exclude koldstore-e2e"
+  cargo nextest run --workspace --no-default-features --exclude koldstore-e2e
 fi
 
 IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"
@@ -265,7 +273,7 @@ if [[ "${SKIP_BENCHMARKS}" -eq 0 ]]; then
     --rows 1000 \
     --clients 2 \
     --jobs 2 \
-    --seconds 1
+    --seconds 3
 fi
 
 step "all requested test suites passed"

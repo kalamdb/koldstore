@@ -1,9 +1,14 @@
 //! Flush job state transitions.
 
-use std::collections::{btree_map::Entry, BTreeMap};
+use std::{
+    cmp::Ordering,
+    collections::{btree_map::Entry, BTreeMap},
+    num::{NonZeroU32, NonZeroUsize},
+};
 
-use koldstore_core::{CommitSeq, Result, ScopeKey, SeqId, StablePkHash};
+use koldstore_core::{CommitSeq, KoldstoreError, Result, ScopeKey, SeqId, StablePkHash};
 use koldstore_parquet::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
+use uuid::Uuid;
 
 /// Manifest sync states used by flush jobs.
 pub const FLUSH_STATES: &[&str] = &["pending_write", "syncing", "in_sync", "stale", "error"];
@@ -21,6 +26,315 @@ pub enum ManifestSyncState {
     Stale,
     /// Last flush attempt failed.
     Error,
+}
+
+/// Positive lease duration for a claimed flush job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlushLeaseSeconds(NonZeroU32);
+
+impl FlushLeaseSeconds {
+    /// Creates a positive lease duration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the duration is zero.
+    pub fn new(value: u32) -> Result<Self> {
+        let Some(value) = NonZeroU32::new(value) else {
+            return Err(KoldstoreError::InvalidSequence {
+                field: "lease_seconds",
+                value: 0,
+            });
+        };
+        Ok(Self(value))
+    }
+
+    /// Returns the raw seconds value.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+/// Monotonic lease epoch used to fence stale workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JobLeaseEpoch(i64);
+
+impl JobLeaseEpoch {
+    /// Creates a non-negative lease epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the epoch is negative.
+    pub const fn new(value: i64) -> Result<Self> {
+        if value < 0 {
+            Err(KoldstoreError::InvalidSequence {
+                field: "lease_epoch",
+                value,
+            })
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the raw epoch value.
+    #[must_use]
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
+/// Claimed flush job lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlushJobLease {
+    /// Job id.
+    pub job_id: Uuid,
+    /// Worker/backend that owns the current lease.
+    pub lease_owner: Uuid,
+    /// Lease epoch observed by the worker.
+    pub lease_epoch: JobLeaseEpoch,
+    /// Lease duration.
+    pub lease_seconds: FlushLeaseSeconds,
+}
+
+impl FlushJobLease {
+    /// Creates a claimed lease.
+    #[must_use]
+    pub const fn new(
+        job_id: Uuid,
+        lease_owner: Uuid,
+        lease_epoch: JobLeaseEpoch,
+        lease_seconds: FlushLeaseSeconds,
+    ) -> Self {
+        Self {
+            job_id,
+            lease_owner,
+            lease_epoch,
+            lease_seconds,
+        }
+    }
+
+    /// Returns whether a progress update belongs to this live lease.
+    #[must_use]
+    pub const fn matches(self, lease_owner: Uuid, lease_epoch: JobLeaseEpoch) -> bool {
+        self.lease_owner.as_u128() == lease_owner.as_u128()
+            && self.lease_epoch.get() == lease_epoch.get()
+    }
+}
+
+/// Bounded flush execution settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlushExecutionConfig {
+    max_rows_per_batch: NonZeroUsize,
+    max_bytes_per_batch: u64,
+    max_batches_per_run: NonZeroUsize,
+    lease_seconds: FlushLeaseSeconds,
+}
+
+impl FlushExecutionConfig {
+    /// Creates validated flush execution settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any bounded setting is zero.
+    pub fn new(
+        max_rows_per_batch: usize,
+        max_bytes_per_batch: u64,
+        max_batches_per_run: usize,
+        lease_seconds: u32,
+    ) -> Result<Self> {
+        let Some(max_rows_per_batch) = NonZeroUsize::new(max_rows_per_batch) else {
+            return Err(KoldstoreError::InvalidSequence {
+                field: "max_rows_per_batch",
+                value: 0,
+            });
+        };
+        if max_bytes_per_batch == 0 {
+            return Err(KoldstoreError::InvalidSequence {
+                field: "max_bytes_per_batch",
+                value: 0,
+            });
+        }
+        let Some(max_batches_per_run) = NonZeroUsize::new(max_batches_per_run) else {
+            return Err(KoldstoreError::InvalidSequence {
+                field: "max_batches_per_run",
+                value: 0,
+            });
+        };
+
+        Ok(Self {
+            max_rows_per_batch,
+            max_bytes_per_batch,
+            max_batches_per_run,
+            lease_seconds: FlushLeaseSeconds::new(lease_seconds)?,
+        })
+    }
+
+    /// Maximum candidate rows buffered for a batch.
+    #[must_use]
+    pub const fn max_rows_per_batch(self) -> usize {
+        self.max_rows_per_batch.get()
+    }
+
+    /// Maximum estimated row bytes buffered for a batch.
+    #[must_use]
+    pub const fn max_bytes_per_batch(self) -> u64 {
+        self.max_bytes_per_batch
+    }
+
+    /// Maximum batches a worker should process before releasing the job.
+    #[must_use]
+    pub const fn max_batches_per_run(self) -> usize {
+        self.max_batches_per_run.get()
+    }
+
+    /// Lease duration.
+    #[must_use]
+    pub const fn lease_seconds(self) -> FlushLeaseSeconds {
+        self.lease_seconds
+    }
+}
+
+/// Result of trying to append a row to a bounded flush batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushBatchPush {
+    /// Row was accepted into the current batch.
+    Accepted,
+    /// Batch is full and the caller should flush/finish it first.
+    Full,
+}
+
+/// Bounded hot-row batch builder.
+#[derive(Debug, Clone)]
+pub struct FlushBatchBuilder {
+    config: FlushExecutionConfig,
+    rows: Vec<HotRowCandidate>,
+    estimated_bytes: u64,
+}
+
+impl FlushBatchBuilder {
+    /// Creates a batch builder with bounded preallocation.
+    #[must_use]
+    pub fn new(config: FlushExecutionConfig) -> Self {
+        Self {
+            config,
+            rows: Vec::with_capacity(config.max_rows_per_batch().min(1024)),
+            estimated_bytes: 0,
+        }
+    }
+
+    /// Attempts to append one row without exceeding configured bounds.
+    pub fn push(&mut self, row: HotRowCandidate, estimated_row_bytes: u64) -> FlushBatchPush {
+        if self.rows.len() >= self.config.max_rows_per_batch() {
+            return FlushBatchPush::Full;
+        }
+
+        let would_exceed_bytes = self.estimated_bytes.saturating_add(estimated_row_bytes)
+            > self.config.max_bytes_per_batch();
+        if would_exceed_bytes && !self.rows.is_empty() {
+            return FlushBatchPush::Full;
+        }
+
+        self.rows.push(row);
+        self.estimated_bytes = self.estimated_bytes.saturating_add(estimated_row_bytes);
+        FlushBatchPush::Accepted
+    }
+
+    /// Finishes the builder into a flush-batch input.
+    #[must_use]
+    pub fn finish(self) -> FlushBatchInput {
+        FlushBatchInput {
+            batch_size: self.config.max_rows_per_batch(),
+            rows: self.rows,
+        }
+    }
+}
+
+/// Sequence upper bound captured when a flush job claims a scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlushWatermark {
+    seq_upper_bound: SeqId,
+}
+
+impl FlushWatermark {
+    /// Creates a flush watermark from a committed sequence upper bound.
+    #[must_use]
+    pub const fn new(seq_upper_bound: SeqId) -> Self {
+        Self { seq_upper_bound }
+    }
+
+    /// Returns the sequence upper bound.
+    #[must_use]
+    pub const fn seq_upper_bound(self) -> SeqId {
+        self.seq_upper_bound
+    }
+
+    /// Returns whether a hot candidate belongs to this flush attempt.
+    #[must_use]
+    pub fn includes(self, row: &HotRowCandidate) -> bool {
+        row.seq <= self.seq_upper_bound
+    }
+}
+
+/// Durable phase for a flush job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushJobPhase {
+    /// Job has been claimed and leased.
+    Claimed,
+    /// Hot rows are being scanned under the flush watermark.
+    ScanHotRows,
+    /// Parquet data is being written to a temp object.
+    WriteParquetTemp,
+    /// Temp object is being copied/validated as final.
+    PublishFinalObject,
+    /// Manifest is being committed as the cold visibility boundary.
+    PublishManifest,
+    /// PostgreSQL catalog rows are being committed after manifest visibility.
+    CommitCatalog,
+    /// Hot heap rows are being conditionally cleaned up.
+    CleanupHotRows,
+    /// Job finished.
+    Finished,
+}
+
+impl FlushJobPhase {
+    /// Returns the catalog representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::ScanHotRows => "scan_hot_rows",
+            Self::WriteParquetTemp => "write_parquet_temp",
+            Self::PublishFinalObject => "publish_final_object",
+            Self::PublishManifest => "publish_manifest",
+            Self::CommitCatalog => "commit_catalog",
+            Self::CleanupHotRows => "cleanup_hot_rows",
+            Self::Finished => "finished",
+        }
+    }
+}
+
+/// Returns the durable flush phase order.
+#[must_use]
+pub const fn flush_execution_phases() -> &'static [FlushJobPhase] {
+    &[
+        FlushJobPhase::Claimed,
+        FlushJobPhase::ScanHotRows,
+        FlushJobPhase::WriteParquetTemp,
+        FlushJobPhase::PublishFinalObject,
+        FlushJobPhase::PublishManifest,
+        FlushJobPhase::CommitCatalog,
+        FlushJobPhase::CleanupHotRows,
+        FlushJobPhase::Finished,
+    ]
+}
+
+/// Returns whether hot cleanup may run in the given phase.
+#[must_use]
+pub const fn can_cleanup_hot_rows(phase: FlushJobPhase) -> bool {
+    matches!(
+        phase,
+        FlushJobPhase::CleanupHotRows | FlushJobPhase::Finished
+    )
 }
 
 impl ManifestSyncState {
@@ -90,29 +404,47 @@ pub struct HotRowCandidate {
     pub commit_seq: CommitSeq,
     /// Whether this candidate is a hot tombstone.
     pub deleted: bool,
+    /// Optional app/system column values used to compute cold stats.
+    pub column_values: BTreeMap<String, serde_json::Value>,
 }
 
 impl HotRowCandidate {
     /// Creates a live hot-row candidate.
     #[must_use]
-    pub const fn live(pk_hash: StablePkHash, seq: SeqId, commit_seq: CommitSeq) -> Self {
+    pub fn live(pk_hash: StablePkHash, seq: SeqId, commit_seq: CommitSeq) -> Self {
         Self {
             pk_hash,
             seq,
             commit_seq,
             deleted: false,
+            column_values: BTreeMap::new(),
         }
     }
 
     /// Creates a hot tombstone candidate.
     #[must_use]
-    pub const fn tombstone(pk_hash: StablePkHash, seq: SeqId, commit_seq: CommitSeq) -> Self {
+    pub fn tombstone(pk_hash: StablePkHash, seq: SeqId, commit_seq: CommitSeq) -> Self {
         Self {
             pk_hash,
             seq,
             commit_seq,
             deleted: true,
+            column_values: BTreeMap::new(),
         }
+    }
+
+    /// Attaches column values captured for the flushed row image.
+    #[must_use]
+    pub fn with_column_values<I, K>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = (K, serde_json::Value)>,
+        K: Into<String>,
+    {
+        self.column_values = values
+            .into_iter()
+            .map(|(column, value)| (column.into(), value))
+            .collect();
+        self
     }
 }
 
@@ -198,6 +530,131 @@ impl FlushBatchPlan {
                 max_commit_seq,
             }],
         }
+    }
+
+    /// Computes min/max stats for configured columns from live flushed rows.
+    #[must_use]
+    pub fn column_stats<I, S>(&self, columns: I) -> BTreeMap<String, ColumnStats>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut accumulators = BTreeMap::<String, ColumnStatsAccumulator>::new();
+        for column in columns {
+            let column = column.as_ref().trim();
+            if !column.is_empty() {
+                accumulators.entry(column.to_string()).or_default();
+            }
+        }
+
+        for row in self.rows.iter().filter(|row| !row.deleted) {
+            for (column, accumulator) in &mut accumulators {
+                if let Some(value) = row.column_values.get(column) {
+                    accumulator.push(value);
+                }
+            }
+        }
+
+        accumulators
+            .into_iter()
+            .filter_map(|(column, accumulator)| accumulator.finish().map(|stats| (column, stats)))
+            .collect()
+    }
+
+    /// Computes segment stats for `_seq`, `_commit_seq`, and configured app columns.
+    #[must_use]
+    pub fn segment_column_stats<I, S>(&self, columns: I) -> BTreeMap<String, ColumnStats>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut stats = self.column_stats(columns);
+        if let Some((min_seq, max_seq, min_commit_seq, max_commit_seq)) =
+            self.footer_summary().segment_bounds()
+        {
+            stats.insert(
+                "_seq".to_string(),
+                ColumnStats {
+                    min: serde_json::json!(min_seq),
+                    max: serde_json::json!(max_seq),
+                },
+            );
+            stats.insert(
+                "_commit_seq".to_string(),
+                ColumnStats {
+                    min: serde_json::json!(min_commit_seq),
+                    max: serde_json::json!(max_commit_seq),
+                },
+            );
+        }
+        stats
+    }
+}
+
+#[derive(Debug, Default)]
+struct ColumnStatsAccumulator {
+    min: Option<serde_json::Value>,
+    max: Option<serde_json::Value>,
+    invalid: bool,
+}
+
+impl ColumnStatsAccumulator {
+    fn push(&mut self, value: &serde_json::Value) {
+        if value.is_null() || self.invalid {
+            return;
+        }
+        match (&self.min, &self.max) {
+            (None, None) => {
+                self.min = Some(value.clone());
+                self.max = Some(value.clone());
+            }
+            (Some(min), Some(max)) => {
+                let Some(min_ordering) = compare_json_values(value, min) else {
+                    self.invalidate();
+                    return;
+                };
+                let Some(max_ordering) = compare_json_values(value, max) else {
+                    self.invalidate();
+                    return;
+                };
+                if min_ordering == Ordering::Less {
+                    self.min = Some(value.clone());
+                }
+                if max_ordering == Ordering::Greater {
+                    self.max = Some(value.clone());
+                }
+            }
+            _ => self.invalidate(),
+        }
+    }
+
+    fn finish(self) -> Option<ColumnStats> {
+        if self.invalid {
+            return None;
+        }
+        Some(ColumnStats {
+            min: self.min?,
+            max: self.max?,
+        })
+    }
+
+    fn invalidate(&mut self) {
+        self.invalid = true;
+        self.min = None;
+        self.max = None;
+    }
+}
+
+fn compare_json_values(left: &serde_json::Value, right: &serde_json::Value) -> Option<Ordering> {
+    match (left, right) {
+        (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
+            left.as_f64()?.partial_cmp(&right.as_f64()?)
+        }
+        (serde_json::Value::String(left), serde_json::Value::String(right)) => {
+            Some(left.cmp(right))
+        }
+        (serde_json::Value::Bool(left), serde_json::Value::Bool(right)) => Some(left.cmp(right)),
+        _ => None,
     }
 }
 
@@ -321,6 +778,20 @@ pub fn plan_cold_pk_hint_updates(
             latest_commit_seq: row.commit_seq,
         })
         .collect()
+}
+
+/// Returns whether a flushed live row may be removed from hot storage.
+#[must_use]
+pub fn conditional_cleanup_allowed(
+    flushed_candidate: &HotRowCandidate,
+    current_seq: SeqId,
+    current_commit_seq: CommitSeq,
+    watermark: FlushWatermark,
+) -> bool {
+    !flushed_candidate.deleted
+        && watermark.includes(flushed_candidate)
+        && flushed_candidate.seq == current_seq
+        && flushed_candidate.commit_seq == current_commit_seq
 }
 
 /// Returns the next manifest sync state after a successful flush.

@@ -1,7 +1,7 @@
 #[allow(dead_code)]
-#[path = "common/assertions.rs"]
+#[path = "../common/assertions.rs"]
 mod assertions;
-#[path = "common/mod.rs"]
+#[path = "../common/mod.rs"]
 mod common;
 
 use anyhow::Result;

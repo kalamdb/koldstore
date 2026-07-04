@@ -12,7 +12,9 @@
 - `koldstore.alter_storage_credentials(...)` rotates credentials without
   rewriting existing cold object paths.
 - `koldstore.migrate_table(...)` validates a heap table, preserves its primary
-  key, adds system columns, and registers managed metadata.
+  key, adds system columns, and enqueues async backfill. Existing populated
+  tables need a single auto-increment primary key or the overload that supplies
+  an explicit order column.
 - `koldstore.demigrate_table(...)` disables management after rehydration or
   archive-detach mode.
 

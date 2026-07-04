@@ -1,6 +1,7 @@
 use koldstore_catalog::SchemaColumn;
 use pg_koldstore::migrate::register::{
-    plan_schema_registry_insert_with_id, RegistrationMetadata, INITIAL_SCHEMA_VERSION,
+    cold_metadata_config, plan_schema_registry_insert_with_id, IndexedColumnSource,
+    RegistrationMetadata, INITIAL_SCHEMA_VERSION,
 };
 use pg_koldstore::spi::SpiAccess;
 use uuid::Uuid;
@@ -51,7 +52,33 @@ fn schema_registry_plan_captures_greenfield_metadata() {
             "flush_policy": "rows:1000,interval:60",
             "cold_metadata": {
                 "stats_columns": ["id", "created_at"],
-                "bloom_candidate_columns": ["id", "created_at"]
+                "bloom_filter_columns": ["id", "created_at"],
+                "bloom_candidate_columns": ["id", "created_at"],
+                "indexed_columns": [
+                    {
+                        "column": "id",
+                        "source": "primary_key",
+                        "source_name": "primary_key",
+                        "ordinal": 1,
+                        "unique": true,
+                        "primary_key": true,
+                        "foreign_key": false,
+                        "supports_stats": true,
+                        "supports_bloom": true
+                    },
+                    {
+                        "column": "created_at",
+                        "source": "secondary_index",
+                        "source_name": null,
+                        "ordinal": 2,
+                        "unique": false,
+                        "primary_key": false,
+                        "foreign_key": false,
+                        "supports_stats": true,
+                        "supports_bloom": true
+                    }
+                ],
+                "ordered_indexes": []
             }
         })
     );
@@ -88,9 +115,70 @@ fn schema_registry_plan_derives_type_matrix_and_cold_metadata_candidates() {
         plan.metadata.options["cold_metadata"],
         serde_json::json!({
             "stats_columns": ["created_at", "title"],
-            "bloom_candidate_columns": ["id", "created_at", "title"]
+            "bloom_filter_columns": ["id", "created_at", "title"],
+            "bloom_candidate_columns": ["id", "created_at", "title"],
+            "indexed_columns": [
+                {
+                    "column": "id",
+                    "source": "primary_key",
+                    "source_name": "primary_key",
+                    "ordinal": 1,
+                    "unique": true,
+                    "primary_key": true,
+                    "foreign_key": false,
+                    "supports_stats": true,
+                    "supports_bloom": true
+                },
+                {
+                    "column": "created_at",
+                    "source": "secondary_index",
+                    "source_name": null,
+                    "ordinal": 1,
+                    "unique": false,
+                    "primary_key": false,
+                    "foreign_key": false,
+                    "supports_stats": true,
+                    "supports_bloom": true
+                },
+                {
+                    "column": "title",
+                    "source": "secondary_index",
+                    "source_name": null,
+                    "ordinal": 2,
+                    "unique": false,
+                    "primary_key": false,
+                    "foreign_key": false,
+                    "supports_stats": true,
+                    "supports_bloom": true
+                }
+            ],
+            "ordered_indexes": []
         })
     );
+}
+
+#[test]
+fn cold_metadata_config_records_typed_sources_and_bloom_columns() {
+    let config = cold_metadata_config(
+        &["id".to_string()],
+        &["created_at".to_string(), "tenant_id".to_string()],
+    );
+
+    assert_eq!(config.stats_columns, vec!["created_at", "tenant_id"]);
+    assert_eq!(
+        config.bloom_filter_columns,
+        vec!["id", "created_at", "tenant_id"]
+    );
+    assert_eq!(config.bloom_candidate_columns, config.bloom_filter_columns);
+    assert_eq!(
+        config.indexed_columns[0].source,
+        IndexedColumnSource::PrimaryKey
+    );
+    assert_eq!(
+        config.indexed_columns[1].source,
+        IndexedColumnSource::SecondaryIndex
+    );
+    assert!(config.ordered_indexes.is_empty());
 }
 
 #[test]

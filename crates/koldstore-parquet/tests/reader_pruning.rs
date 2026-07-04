@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use koldstore_core::{CommitSeq, SeqId};
-use koldstore_parquet::{FooterSummary, ParquetReadOptions, RowGroupPruner, RowGroupStats};
+use koldstore_parquet::{
+    ColumnStats, FooterSummary, ParquetReadOptions, RowGroupPruner, RowGroupStats,
+};
+use serde_json::json;
 
 #[test]
 fn reader_options_capture_projection_seq_range_and_pk_values() {
@@ -135,4 +138,42 @@ fn row_group_pruner_uses_pk_bloom_may_contain_metadata() {
 
     assert_eq!(decision.selected_row_groups, vec![1, 2]);
     assert_eq!(decision.skipped_row_groups, 1);
+}
+
+#[test]
+fn segment_column_stats_pruning_skips_only_proven_non_overlaps() {
+    let stats = BTreeMap::from([(
+        "created_at".to_string(),
+        ColumnStats {
+            min: json!("2026-01-10"),
+            max: json!("2026-01-20"),
+        },
+    )]);
+
+    assert!(!RowGroupPruner.segment_column_may_overlap(
+        &stats,
+        "created_at",
+        &json!("2026-02-01"),
+        &json!("2026-02-28")
+    ));
+    assert!(RowGroupPruner.segment_column_may_overlap(
+        &stats,
+        "created_at",
+        &json!("2026-01-15"),
+        &json!("2026-01-31")
+    ));
+}
+
+#[test]
+fn segment_column_stats_pruning_scans_when_metadata_is_missing_or_incomparable() {
+    let stats = BTreeMap::from([(
+        "score".to_string(),
+        ColumnStats {
+            min: json!(10),
+            max: json!(20),
+        },
+    )]);
+
+    assert!(RowGroupPruner.segment_column_may_overlap(&stats, "missing", &json!(30), &json!(40)));
+    assert!(RowGroupPruner.segment_column_may_overlap(&stats, "score", &json!("30"), &json!("40")));
 }

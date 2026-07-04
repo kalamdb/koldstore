@@ -1,5 +1,6 @@
 use koldstore_manifest::{
-    FilesState, Manifest, ManifestSegment, PkFilter, SegmentStatus, SyncState,
+    FilesState, Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment, PkFilter,
+    SegmentStatus, SyncState,
 };
 use serde_json::json;
 
@@ -45,11 +46,55 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
     let decoded: Manifest = serde_json::from_str(&encoded).unwrap();
 
     assert_eq!(decoded.scope_id.as_deref(), Some("user-a"));
-    assert_eq!(decoded.files.total_files, Some(7));
+    assert_eq!(decoded.files.total_files, Some(8));
     assert_eq!(
         decoded.segments[0].pk_filter.as_ref().unwrap().kind,
         "exact"
     );
+}
+
+#[test]
+fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
+    let mut manifest = Manifest::new_shared("app", "items", 1);
+    let mut segment =
+        ManifestSegment::committed(1, "batch-1.parquet", 20..=30, 120..=130, 11, 8192, 1);
+    segment.column_stats.insert(
+        "created_at".to_string(),
+        ManifestColumnStats::new(json!("2026-01-01T00:00:00Z"), json!("2026-01-31T00:00:00Z")),
+    );
+    segment.bloom_filters.push(ManifestBloomFilter::bloom(
+        vec!["id".to_string()],
+        Some(0.01),
+    ));
+    manifest.append_segment(segment);
+
+    let encoded = serde_json::to_string(&manifest).unwrap();
+    let decoded: Manifest = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(
+        decoded.segments[0].column_stats["created_at"].min,
+        json!("2026-01-01T00:00:00Z")
+    );
+    assert_eq!(decoded.segments[0].bloom_filters[0].kind, "bloom");
+    assert_eq!(decoded.segments[0].bloom_filters[0].columns, vec!["id"]);
+}
+
+#[test]
+fn manifest_batch_append_reserves_once_and_updates_watermarks_once_per_flush() {
+    let mut manifest = Manifest::new_shared("app", "items", 1);
+    let segments = vec![
+        ManifestSegment::committed(1, "batch-1.parquet", 1..=10, 11..=20, 10, 1024, 1),
+        ManifestSegment::committed(2, "batch-2.parquet", 11..=30, 21..=40, 20, 2048, 1),
+    ];
+
+    let update = manifest.append_segment_batch(segments);
+
+    assert_eq!(update.appended_segments, 2);
+    assert_eq!(update.manifest_writes_required, 1);
+    assert_eq!(manifest.segments.len(), 2);
+    assert_eq!(manifest.max_seq, 30);
+    assert_eq!(manifest.max_commit_seq, 40);
+    assert_eq!(manifest.files.total_files, Some(2));
 }
 
 #[test]

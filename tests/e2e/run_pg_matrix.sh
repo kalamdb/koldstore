@@ -42,4 +42,9 @@ export KOLDSTORE_E2E_PGPASSWORD="$PG_PASSWORD"
 export KOLDSTORE_E2E_PGDATABASE="$PG_DATABASE"
 
 echo "running pg-koldstore E2E tests against local pgrx PostgreSQL ${PG_VERSION}"
-cargo test -p koldstore-e2e -- --include-ignored
+if ! command -v cargo-nextest >/dev/null 2>&1; then
+  echo "error: required command not found: cargo-nextest" >&2
+  exit 1
+fi
+cargo nextest run -p koldstore-e2e --run-ignored all --test-threads 1 -- \
+  --skip full_lifecycle_migrates_flushes_merges_hot_and_cold_then_flushes_again

@@ -5,7 +5,7 @@
 ```bash
 cargo fmt --all
 cargo check --workspace --all-targets --no-default-features
-cargo test --workspace --no-default-features
+cargo nextest run --workspace --no-default-features --exclude koldstore-e2e
 ```
 
 The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, or `pg17` feature when `cargo pgrx` is configured.
