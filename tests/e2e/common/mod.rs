@@ -12,8 +12,8 @@ pub use catalog::{
     assert_no_active_jobs, assert_system_columns_present, cold_segment_count, manifest_count,
 };
 pub use cluster::{
-    connect, expected_pg_ports, expected_pg_versions, local_pg_matrix, wait_for_postgres, PgTarget,
-    PgrxServer,
+    connect, expected_pg_ports, expected_pg_versions, local_pg_matrix, require_pgrx_server,
+    require_pgrx_server_sync, wait_for_postgres, PgTarget, PgrxServer,
 };
 pub use db::{ManagedTable, TestDb};
 pub use sql::{

@@ -126,7 +126,7 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
 
-          pg_versions = [15, 16, 17]
+          pg_versions = [15, 16, 17, 18]
           linux = []
           if "${{ inputs.platform_linux_x86_64 }}" == "true":
               linux.extend(
@@ -195,7 +195,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17]
+        pg: [15, 16, 17, 18]
     env:
       PG_VER: ${{ matrix.pg }}
       PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
@@ -266,7 +266,7 @@ jobs:
           KOLDSTORE_E2E_PGPORT: 288${{ matrix.pg }}
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
           PGRX_PG_CONFIG: ${{ env.PG_CONFIG }}
-        run: tests/e2e/run_pg_matrix.sh
+        run: scripts/run-pg-e2e.sh
 
   build_linux:
     name: "Build · ${{ matrix.platform }} · PG${{ matrix.pg }}"

@@ -4,7 +4,10 @@ mod common;
 use koldstore_core::TableKind;
 
 #[test]
-fn user_scope_matrix_targets_postgresql_15_16_17() {
+fn user_scope_matrix_targets_active_pgrx_versions() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     assert_eq!(
         common::local_pg_matrix()
             .into_iter()
@@ -16,6 +19,9 @@ fn user_scope_matrix_targets_postgresql_15_16_17() {
 
 #[test]
 fn user_scope_matrix_contract_covers_missing_scope_and_cross_scope_denial() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let missing =
         pg_koldstore::hooks::planner::plan_scope_key_for_read(TableKind::User, None).unwrap_err();
     assert_eq!(missing.to_string(), "koldstore.user_id is not set");

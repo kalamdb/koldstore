@@ -24,8 +24,8 @@
 - [X] T008 [P] Create the catalog validation crate skeleton in `/Users/jamal/git/pg-kalam/crates/koldstore-catalog/Cargo.toml` and `/Users/jamal/git/pg-kalam/crates/koldstore-catalog/src/lib.rs`
 - [X] T009 Create the pgrx extension crate skeleton in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/Cargo.toml` and `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/lib.rs`
 - [X] T010 Create the PostgreSQL Custom Scan C shim skeleton in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/native/custom_scan.c` and `/Users/jamal/git/pg-kalam/crates/pg_koldstore/native/custom_scan.h`
-- [X] T011 Create the local integration environment for PostgreSQL 15, 16, 17, and MinIO in `/Users/jamal/git/pg-kalam/tests/docker-compose.yml`
-- [X] T012 Create the PostgreSQL version matrix E2E runner in `/Users/jamal/git/pg-kalam/tests/e2e/run_pg_matrix.sh`
+- [X] T011 Create the local integration environment for PostgreSQL 15, 16, 17, 18, and MinIO in `/Users/jamal/git/pg-kalam/tests/docker-compose.yml`
+- [X] T012 Create the PostgreSQL version matrix E2E runner in `/Users/jamal/git/pg-kalam/scripts/run-pg-e2e.sh`
 - [X] T013 Create the Rust E2E helper crate/module for pgrx, tokio-postgres, and MinIO bootstrapping in `/Users/jamal/git/pg-kalam/tests/e2e/common/mod.rs`
 - [X] T014 Create the benchmarking harness crate and baseline report schema in `/Users/jamal/git/pg-kalam/benchmarks/Cargo.toml` and `/Users/jamal/git/pg-kalam/benchmarks/src/report.rs`
 - [X] T015 Create memory and leak testing scripts for ASAN, LSAN, Valgrind, heaptrack, and PostgreSQL memory-context smoke checks in `/Users/jamal/git/pg-kalam/tests/memory/run_memory_checks.sh`
@@ -86,7 +86,7 @@
 
 - [X] T049 [P] [US1] Add failing SQL regression test for shared greenfield migration with `DEFAULT SNOWFLAKE_ID()` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/greenfield_shared.rs`
 - [X] T050 [P] [US1] Add failing SQL regression test for user-scoped greenfield migration with `scope_column => 'user_id'` and required `koldstore.user_id` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/greenfield_user.rs`
-- [X] T051 [P] [US1] Add failing E2E matrix test for greenfield shared and user-scoped tables on PostgreSQL 15, 16, and 17 in `/Users/jamal/git/pg-kalam/tests/e2e/greenfield_matrix.rs`
+- [X] T051 [P] [US1] Add failing E2E matrix test for greenfield shared and user-scoped tables on PostgreSQL 15, 16, 17, and 18 in `/Users/jamal/git/pg-kalam/tests/e2e/greenfield_matrix.rs`
 - [X] T052 [P] [US1] Add failing unit tests for storage registration path templates and credential redaction in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/storage_registration.rs`
 
 ### Implementation for User Story 1
@@ -115,7 +115,7 @@
 - [X] T061 [P] [US2] Add failing migration rejection tests for unsupported column types, generated columns, expression primary keys, and unsupported type evolution in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/migrate_type_matrix.rs`
 - [X] T062 [P] [US2] Add failing migration tests that preserve existing data, primary key, secondary indexes, check constraints, and not-null constraints in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/migrate_existing.rs`
 - [X] T063 [P] [US2] Add failing FK policy tests that reject inbound and outbound FKs when flush is enabled unless `options.allow_fk_hot_only = true` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/migrate_fk_policy.rs`
-- [X] T064 [P] [US2] Add failing E2E matrix test for existing table migration across PostgreSQL 15, 16, and 17 in `/Users/jamal/git/pg-kalam/tests/e2e/migrate_existing_matrix.rs`
+- [X] T064 [P] [US2] Add failing E2E matrix test for existing table migration across PostgreSQL 15, 16, 17, and 18 in `/Users/jamal/git/pg-kalam/tests/e2e/migrate_existing_matrix.rs`
 
 ### Implementation for User Story 2
 
@@ -178,7 +178,7 @@
 - [X] T092 [P] [US3] Add failing integration test for `koldstore.flush_table` writing Parquet, manifest, `koldstore.cold_segments`, and `koldstore.cold_pk_hints` in `/Users/jamal/git/pg-kalam/tests/e2e/flush_to_cold.rs`
 - [X] T093 [P] [US3] Add failing crash/recovery test for orphan temp objects and unmanifested final objects in `/Users/jamal/git/pg-kalam/tests/e2e/flush_recovery.rs`
 - [X] T094 [P] [US3] Add failing object-store outage test that leaves hot data authoritative and records retry/error job state in `/Users/jamal/git/pg-kalam/tests/e2e/flush_object_outage.rs`
-- [X] T095 [P] [US3] Add failing PostgreSQL 15/16/17 E2E matrix test for flush, manifest, metadata, and hot cleanup in `/Users/jamal/git/pg-kalam/tests/e2e/flush_matrix.rs`
+- [X] T095 [P] [US3] Add failing PostgreSQL 15/16/17/18 E2E matrix test for flush, manifest, metadata, and hot cleanup in `/Users/jamal/git/pg-kalam/tests/e2e/flush_matrix.rs`
 
 ### Implementation for User Story 3
 
@@ -215,7 +215,7 @@
 - [X] T113 [P] [US4] Add failing integration test for object-store outage returning ERROR instead of partial hot-only results when cold is required in `/Users/jamal/git/pg-kalam/tests/e2e/merge_scan_outage.rs`
 - [X] T114 [P] [US4] Add failing performance test that PK point lookup skips at least 90 percent of row groups in the fixture in `/Users/jamal/git/pg-kalam/benchmarks/src/cold_pruning.rs`
 - [X] T115 [P] [US4] Add failing memory leak test that repeated KoldstoreMergeScan executions release scan memory contexts and object-store handles in `/Users/jamal/git/pg-kalam/tests/memory/merge_scan_leak.rs`
-- [X] T116 [P] [US4] Add failing PostgreSQL 15/16/17 E2E matrix test for merged SELECT, EXPLAIN, residual quals, and cold outage behavior in `/Users/jamal/git/pg-kalam/tests/e2e/merge_scan_matrix.rs`
+- [X] T116 [P] [US4] Add failing PostgreSQL 15/16/17/18 E2E matrix test for merged SELECT, EXPLAIN, residual quals, and cold outage behavior in `/Users/jamal/git/pg-kalam/tests/e2e/merge_scan_matrix.rs`
 
 ### Implementation for User Story 4
 
@@ -246,7 +246,7 @@
 - [X] T128 [P] [US6] Add failing test that `koldstore.delete_row` writes a PK-only tombstone from local metadata without scanning Parquet on the default path in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/delete_row_api.rs`
 - [X] T129 [P] [US6] Add failing SQL regression test that standard SQL cold-only UPDATE affects 0 rows in MVP in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/cold_only_update_mvp.rs`
 - [X] T130 [P] [US6] Add failing SQL regression test that standard SQL cold-only DELETE is enabled only for simple PK predicates with exact local metadata in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/cold_only_delete_sql.rs`
-- [X] T131 [P] [US6] Add failing E2E test for cold-only DML APIs, row events, and object-store read counters across PostgreSQL 15, 16, and 17 in `/Users/jamal/git/pg-kalam/tests/e2e/cold_dml_matrix.rs`
+- [X] T131 [P] [US6] Add failing E2E test for cold-only DML APIs, row events, and object-store read counters across PostgreSQL 15, 16, 17, and 18 in `/Users/jamal/git/pg-kalam/tests/e2e/cold_dml_matrix.rs`
 
 ### Implementation for User Story 6
 
@@ -273,7 +273,7 @@
 - [X] T139 [P] [US7] Add failing SQL regression test that cross-scope INSERT, UPDATE, DELETE, hydrate, update_row, and delete_row are denied in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/user_scope_dml.rs`
 - [X] T140 [P] [US7] Add failing integration test that cold path selection applies scope filters before opening object-store streams in `/Users/jamal/git/pg-kalam/tests/e2e/user_scope_cold_pruning.rs`
 - [X] T141 [P] [US7] Add failing test that RLS/security quals are evaluated against cold rows or planning fails closed in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/rls_cold_security.rs`
-- [X] T142 [P] [US7] Add failing PostgreSQL 15/16/17 E2E matrix test for missing scope, cross-scope denial, flush, merged SELECT, and cold-only APIs in `/Users/jamal/git/pg-kalam/tests/e2e/user_scope_matrix.rs`
+- [X] T142 [P] [US7] Add failing PostgreSQL 15/16/17/18 E2E matrix test for missing scope, cross-scope denial, flush, merged SELECT, and cold-only APIs in `/Users/jamal/git/pg-kalam/tests/e2e/user_scope_matrix.rs`
 
 ### Implementation for User Story 7
 
@@ -323,7 +323,7 @@
 - [X] T157 [P] [US9] Add failing SQL regression test that demigrated tables no longer use KoldstoreMergeScan, DML hooks, flush jobs, or managed metadata in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/demigrate_disable.rs`
 - [X] T158 [P] [US9] Add failing integration test that cold artifacts are retained by default and deleted only with `drop_cold => true` after rehydrate succeeds in `/Users/jamal/git/pg-kalam/tests/e2e/demigrate_cold_artifacts.rs`
 - [X] T159 [P] [US9] Add failing test for `rehydrate => false` archive-detach warning and cold-only row invisibility in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/demigrate_archive_detach.rs`
-- [X] T160 [P] [US9] Add failing PostgreSQL 15/16/17 E2E matrix test for demigration after flush, cold-only delete, and user-scoped tables in `/Users/jamal/git/pg-kalam/tests/e2e/demigrate_matrix.rs`
+- [X] T160 [P] [US9] Add failing PostgreSQL 15/16/17/18 E2E matrix test for demigration after flush, cold-only delete, and user-scoped tables in `/Users/jamal/git/pg-kalam/tests/e2e/demigrate_matrix.rs`
 
 ### Implementation for User Story 9
 
@@ -370,7 +370,7 @@
 **Purpose**: Full-system quality gates, edge-case coverage, performance proof, memory/leak checks, documentation, and final validation across PostgreSQL versions.
 
 - [X] T178 [P] Add exhaustive edge-case SQL regression suite covering every `spec.md` edge case in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/edge_cases.rs`
-- [X] T179 [P] Add end-to-end quickstart validation runner that executes every scenario in `quickstart.md` against PostgreSQL 15, 16, and 17 in `/Users/jamal/git/pg-kalam/tests/e2e/quickstart_matrix.rs`
+- [X] T179 [P] Add end-to-end quickstart validation runner that executes every scenario in `quickstart.md` against PostgreSQL 15, 16, 17, and 18 in `/Users/jamal/git/pg-kalam/tests/e2e/quickstart_matrix.rs`
 - [X] T180 [P] Add benchmark suite comparing regular heap versus pg-koldstore for hot INSERT, hot UPDATE, hot DELETE, PK SELECT hot-only, PK SELECT cold-required, flush throughput, and demigration throughput in `/Users/jamal/git/pg-kalam/benchmarks/src/suite.rs`
 - [X] T181 [P] Add benchmark report thresholds for SC-002 hot DML within 10 percent of regular heap and SC-006 PK lookup row-group pruning of at least 90 percent in `/Users/jamal/git/pg-kalam/benchmarks/src/verdict.rs`
 - [X] T182 [P] Add benchmark JSON and HTML report generation with machine metadata, PostgreSQL version, object-store backend, row counts, percentiles, throughput, RSS, and allocation counters in `/Users/jamal/git/pg-kalam/benchmarks/src/report.rs`
@@ -386,8 +386,8 @@
 - [X] T192 [P] Add documentation examples for SQL API, migration decisions, DML limitations, cold-only APIs, security, operations, and performance tuning in `/Users/jamal/git/pg-kalam/docs/sql-api.md`
 - [X] T193 [P] Add developer architecture notes explaining differences from kalamdb RocksDB/Raft/DataFusion internals and why pg-koldstore uses heap plus Custom Scan in `/Users/jamal/git/pg-kalam/docs/architecture.md`
 - [X] T194 [P] Add performance profiling guide with tracing span names, benchmark commands, heap baseline comparison, and investigation workflow in `/Users/jamal/git/pg-kalam/docs/performance.md`
-- [X] T195 [P] Add release checklist covering build, install, extension upgrade SQL, PG 15/16/17 matrix, MinIO integration, benchmark thresholds, memory/leak gates, docs, and backup warnings in `/Users/jamal/git/pg-kalam/docs/release-checklist.md`
-- [ ] T196 Run `cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features`, `cargo nextest run --workspace`, `cargo pgrx test`, `tests/e2e/run_pg_matrix.sh`, `tests/memory/run_memory_checks.sh`, and `cargo run -p pg-koldstore-benchmarks -- --suite all` and record results in `/Users/jamal/git/pg-kalam/docs/verification-results.md`
+- [X] T195 [P] Add release checklist covering build, install, extension upgrade SQL, PG 15/16/17/18 matrix, MinIO integration, benchmark thresholds, memory/leak gates, docs, and backup warnings in `/Users/jamal/git/pg-kalam/docs/release-checklist.md`
+- [ ] T196 Run `cargo fmt --all`, `cargo clippy --workspace --all-targets --all-features`, `cargo nextest run --workspace`, `cargo pgrx test`, `scripts/run-pg-e2e.sh`, `tests/memory/run_memory_checks.sh`, and `cargo run -p pg-koldstore-benchmarks -- --suite all` and record results in `/Users/jamal/git/pg-kalam/docs/verification-results.md`
 
 ---
 
@@ -426,7 +426,7 @@
 - Catalog/schema changes must be reflected in SQL migration files and Rust models in the same task or immediately adjacent dependent task.
 - Any task touching FFI or PostgreSQL memory contexts must be validated by the memory/leak scripts before completion.
 - Performance claims must be backed by the benchmark suite and compared to a regular heap table without pg-koldstore.
-- PostgreSQL 15, 16, and 17 E2E matrix tests must pass before marking a story complete when that story has a matrix task.
+- PostgreSQL 15, 16, 17, and 18 E2E matrix tests must pass before marking a story complete when that story has a matrix task.
 
 ---
 
@@ -446,7 +446,7 @@ Task: "Create the Parquet crate skeleton in /Users/jamal/git/pg-kalam/crates/kol
 ```text
 Task: "Add failing SQL regression test for shared greenfield migration with DEFAULT SNOWFLAKE_ID() in /Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/greenfield_shared.rs"
 Task: "Add failing SQL regression test for user-scoped greenfield migration with scope_column => 'user_id' and required koldstore.user_id in /Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/greenfield_user.rs"
-Task: "Add failing E2E matrix test for greenfield shared and user-scoped tables on PostgreSQL 15, 16, and 17 in /Users/jamal/git/pg-kalam/tests/e2e/greenfield_matrix.rs"
+Task: "Add failing E2E matrix test for greenfield shared and user-scoped tables on PostgreSQL 15, 16, 17, and 18 in /Users/jamal/git/pg-kalam/tests/e2e/greenfield_matrix.rs"
 ```
 
 ### User Story 3
@@ -485,7 +485,7 @@ Task: "Add failure-injection tests for MinIO outage, corrupt Parquet footer, sta
 2. Complete US1 and US2 to make table management real.
 3. Complete US5 to make hot DML correct and measurable.
 4. Complete US3 to make cold artifacts and metadata real.
-5. Stop and validate the P1 MVP with `cargo nextest run --workspace`, `cargo pgrx test`, `tests/e2e/run_pg_matrix.sh`, and the heap-vs-pg-koldstore hot DML benchmark.
+5. Stop and validate the P1 MVP with `cargo nextest run --workspace`, `cargo pgrx test`, `scripts/run-pg-e2e.sh`, and the heap-vs-pg-koldstore hot DML benchmark.
 
 ### Incremental Delivery
 
@@ -499,7 +499,7 @@ Task: "Add failure-injection tests for MinIO outage, corrupt Parquet footer, sta
 
 1. Unit tests for every pure crate.
 2. SQL regression tests for every public SQL API and error condition.
-3. PostgreSQL 15/16/17 E2E matrix for user-facing workflows.
+3. PostgreSQL 15/16/17/18 E2E matrix for user-facing workflows.
 4. MinIO/object-store failure-injection coverage.
 5. Benchmark comparison against regular heap table without pg-koldstore.
 6. Memory allocation growth and leak detection gates for pgrx, FFI, Arrow, Parquet, and object-store paths.

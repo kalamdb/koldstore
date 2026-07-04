@@ -395,7 +395,7 @@ pub fn recover_segments_plan(
 }
 
 /// Enqueues a flush job through the SQL API.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "enqueue_flush_job", schema = "koldstore", security_definer)]
 pub fn enqueue_flush_job_pg(
     table_oid: pgrx::pg_sys::Oid,
@@ -406,7 +406,7 @@ pub fn enqueue_flush_job_pg(
         .unwrap_or_else(|error| pgrx::error!("enqueue flush job failed: {error}"))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn enqueue_flush_job_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     scope_key: Option<&str>,
@@ -462,14 +462,14 @@ SELECT count(*)::bigint FROM inserted
 }
 
 /// Enqueues a segment recovery job through the SQL API.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "recover_segments", schema = "koldstore", security_definer)]
 pub fn recover_segments_pg(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> i64 {
     recover_segments_pg_impl(table_oid, dry_run)
         .unwrap_or_else(|error| pgrx::error!("recover segments failed: {error}"))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -664,14 +664,14 @@ pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError>
 }
 
 /// Flushes one managed table scope from SQL.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
 pub fn flush_table_pg(table_oid: pgrx::pg_sys::Oid) -> i64 {
     flush_table_pg_impl(table_oid)
         .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     let relation = relation_context(table_oid)?;
     let storage = flush_storage_context(table_oid)?;
@@ -767,7 +767,7 @@ fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     Ok(stats.row_count)
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[derive(Debug)]
 struct RelationContext {
     namespace: String,
@@ -775,14 +775,14 @@ struct RelationContext {
     quoted: String,
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[derive(Debug)]
 struct FlushStorageContext {
     base_path: String,
     schema_version: i32,
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[derive(Debug)]
 struct FlushStats {
     row_count: i64,
@@ -792,7 +792,7 @@ struct FlushStats {
     max_commit_seq: i64,
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn relation_context(table_oid: pgrx::pg_sys::Oid) -> Result<RelationContext, String> {
     let value = spi_json_one(
         r#"
@@ -813,7 +813,7 @@ WHERE c.oid = $1::oid
     })
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn flush_storage_context(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStorageContext, String> {
     let value = spi_json_one(
         r#"
@@ -837,7 +837,7 @@ LIMIT 1
     })
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn flush_stats(quoted_relation: &str) -> Result<FlushStats, String> {
     let value = spi_json_one_without_args(
         &format!(
@@ -864,7 +864,7 @@ WHERE NOT "_deleted"
     })
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> {
     pgrx::Spi::get_one_with_args::<i32>(
         "SELECT COALESCE(max(batch_number), 0) + 1 FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = ''",
@@ -874,7 +874,7 @@ fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> 
     .ok_or_else(|| "batch number lookup returned no rows".to_string())
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn write_parquet_segment(
     path: &std::path::Path,
     row_count: i64,
@@ -910,7 +910,7 @@ fn write_parquet_segment(
     i64::try_from(len).map_err(|error| error.to_string())
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 fn insert_cold_segment(
     table_oid: pgrx::pg_sys::Oid,
@@ -976,7 +976,7 @@ VALUES (
     .map_err(|error| error.to_string())
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn upsert_manifest_row(
     table_oid: pgrx::pg_sys::Oid,
     manifest_path: &str,
@@ -1024,7 +1024,7 @@ DO UPDATE SET
     .map_err(|error| error.to_string())
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn insert_cold_pk_hint(
     table_oid: pgrx::pg_sys::Oid,
     segment_id: uuid::Uuid,
@@ -1057,7 +1057,7 @@ ON CONFLICT DO NOTHING
     .map_err(|error| error.to_string())
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn mark_flush_jobs_completed(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
     pgrx::Spi::run_with_args(
         r#"
@@ -1077,7 +1077,7 @@ WHERE table_oid = $1::oid
     .map_err(|error| error.to_string())
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn spi_json_one(
     sql: &str,
     args: &[pgrx::datum::DatumWithOid<'_>],
@@ -1089,7 +1089,7 @@ fn spi_json_one(
     serde_json::from_str(&json).map_err(|error| error.to_string())
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn spi_json_one_without_args(
     sql: &str,
     missing_message: &str,
@@ -1100,7 +1100,7 @@ fn spi_json_one_without_args(
     serde_json::from_str(&json).map_err(|error| error.to_string())
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn json_string(value: &serde_json::Value, key: &str) -> Result<String, String> {
     value
         .get(key)
@@ -1109,7 +1109,7 @@ fn json_string(value: &serde_json::Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing string field `{key}`"))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn json_i64(value: &serde_json::Value, key: &str) -> Result<i64, String> {
     value
         .get(key)
@@ -1117,7 +1117,7 @@ fn json_i64(value: &serde_json::Value, key: &str) -> Result<i64, String> {
         .ok_or_else(|| format!("missing integer field `{key}`"))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }

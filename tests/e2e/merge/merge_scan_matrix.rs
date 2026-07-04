@@ -5,6 +5,9 @@ use anyhow::Result;
 
 #[test]
 fn merge_scan_matrix_targets_active_pgrx_versions() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     assert_eq!(
         common::local_pg_matrix()
             .into_iter()
@@ -16,6 +19,9 @@ fn merge_scan_matrix_targets_active_pgrx_versions() {
 
 #[test]
 fn merge_scan_matrix_covers_results_explain_residual_quals_and_outage() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let required_assertions = [
         "merged_select",
         "custom_scan_explain",

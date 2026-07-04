@@ -4,7 +4,10 @@ mod common;
 use anyhow::Result;
 
 #[test]
-fn migrate_existing_matrix_targets_postgresql_15_16_17() {
+fn migrate_existing_matrix_targets_active_pgrx_versions() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let ports: Vec<u16> = common::local_pg_matrix()
         .into_iter()
         .map(|target| target.port)
@@ -15,6 +18,9 @@ fn migrate_existing_matrix_targets_postgresql_15_16_17() {
 
 #[test]
 fn migrate_existing_matrix_covers_data_and_constraint_preservation() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let scenario = existing_table_scenario();
 
     assert_eq!(scenario.schema_name, "legacy");

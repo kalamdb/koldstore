@@ -12,6 +12,9 @@ use tokio_postgres::Client;
 
 #[test]
 fn full_lifecycle_contract_covers_migrate_flush_merge_and_dml_checkpoints() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let checkpoints = [
         "heap table starts with primary key, unique, foreign key, and secondary index metadata",
         "migrate_table registers schema and records indexed columns for cold metadata",

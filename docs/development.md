@@ -8,14 +8,14 @@ cargo check --workspace --all-targets --no-default-features
 cargo nextest run --workspace --no-default-features --exclude e2e
 ```
 
-The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, or `pg17` feature when `cargo pgrx` is configured.
+The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, `pg17`, or `pg18` feature when `cargo pgrx` is configured.
 
 ## pgrx Setup
 
 ```bash
 cargo install cargo-pgrx
 cargo pgrx init
-tests/e2e/run_pg_matrix.sh
+scripts/run-pg-e2e.sh
 ```
 
 The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. Avoid direct `cargo pgrx test` for now because normal Rust integration tests link as native pg-feature test binaries and can fail on unresolved PostgreSQL server symbols.
@@ -23,12 +23,14 @@ The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schem
 ## Local pgrx PostgreSQL Matrix
 
 ```bash
-tests/e2e/run_pg_matrix.sh
+scripts/run-pgrx-matrix.sh
 ```
 
-The default matrix target is pgrx-managed PostgreSQL 16 on port `28816`. Override with `KOLDSTORE_E2E_PGVERSION`, `KOLDSTORE_E2E_PGPORT`, or the other `KOLDSTORE_E2E_PG*` environment variables when needed.
+The matrix runner executes non-E2E workspace tests once, then loops over PostgreSQL 15, 16, 17, and 18 for pgrx feature clippy, extension install, and E2E checks. Use `scripts/run-pgrx-matrix.sh --download-missing` to let cargo-pgrx download missing PostgreSQL versions. On local machines without ICU development packages, add `--without-icu` for downloaded PostgreSQL builds.
 
-After the runner prepares PostgreSQL and installs the extension, it executes `cargo nextest run -p e2e --test-threads 1`. To select another PostgreSQL version locally, pass it as the first argument, for example `tests/e2e/run_pg_matrix.sh 17`, or set `KOLDSTORE_E2E_PGVERSION=17`.
+For a single version, use `scripts/run-pg-e2e.sh 18` or `scripts/run-pgrx-matrix.sh --pg-versions 18`. After the E2E runner prepares PostgreSQL and installs the extension, it executes `cargo nextest run -p e2e --test-threads 1`.
+
+Every E2E test now calls a shared pgrx gate before running. The gate connects to the configured PostgreSQL port, verifies the server major version and listening port, and ensures `koldstore` is installed in the E2E database. If pgrx PostgreSQL is stopped or unreachable, the suite fails fast instead of letting contract-only tests pass.
 
 ## Benchmark Thresholds
 

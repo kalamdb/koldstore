@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17]
+        pg: [15, 16, 17, 18]
     env:
       PG_VER: ${{ matrix.pg }}
     steps:
@@ -70,6 +70,12 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: [15, 16, 17, 18]
+    env:
+      PG_VER: ${{ matrix.pg }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
@@ -90,7 +96,7 @@ jobs:
           done
           docker logs minio
           exit 1
-      - name: Install PostgreSQL 16
+      - name: Install PostgreSQL ${{ matrix.pg }}
         run: |
           sudo apt-get update -y -qq
           sudo apt-get install -y wget gnupg lsb-release
@@ -101,16 +107,17 @@ jobs:
             build-essential \
             libssl-dev \
             pkg-config \
-            postgresql-16 \
-            postgresql-server-dev-16
+            postgresql-${PG_VER} \
+            postgresql-server-dev-${PG_VER}
       - name: Install cargo-pgrx
         run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
-      - name: Initialize pgrx for PostgreSQL 16
-        run: cargo pgrx init --pg16 /usr/lib/postgresql/16/bin/pg_config
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} /usr/lib/postgresql/${PG_VER}/bin/pg_config
       - name: Run pgrx E2E tests
-        run: tests/e2e/run_pg_matrix.sh
+        run: scripts/run-pg-e2e.sh "${PG_VER}"
         env:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+          PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
 
   memory:
     runs-on: ubuntu-latest

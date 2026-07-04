@@ -5,6 +5,9 @@ use anyhow::Result;
 
 #[test]
 fn flush_matrix_targets_active_pgrx_versions() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let versions = common::local_pg_matrix()
         .iter()
         .map(|target| target.version)
@@ -15,6 +18,9 @@ fn flush_matrix_targets_active_pgrx_versions() {
 
 #[test]
 fn flush_matrix_covers_flush_manifest_metadata_and_hot_cleanup() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let workflow = [
         "koldstore.flush_table",
         "batch-0.parquet",

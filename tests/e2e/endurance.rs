@@ -5,6 +5,9 @@ use anyhow::Result;
 
 #[test]
 fn endurance_cycle_contract_covers_repeated_lifecycle_operations() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let cycle = [
         "migrate",
         "DML",

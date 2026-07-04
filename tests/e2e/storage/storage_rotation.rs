@@ -5,6 +5,9 @@ use anyhow::Result;
 
 #[test]
 fn storage_rotation_contract_keeps_existing_object_paths_stable() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let registration = pg_koldstore::sql::ddl::StorageRegistration {
         name: "local-minio".to_string(),
         storage_type: "s3".to_string(),

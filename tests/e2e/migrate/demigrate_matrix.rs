@@ -5,6 +5,9 @@ use anyhow::Result;
 
 #[test]
 fn demigrate_matrix_targets_active_pgrx_versions() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     assert_eq!(
         common::local_pg_matrix()
             .into_iter()
@@ -16,6 +19,9 @@ fn demigrate_matrix_targets_active_pgrx_versions() {
 
 #[test]
 fn demigrate_matrix_covers_flush_cold_delete_and_user_scoped_tables() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let scenarios = [
         "demigrate_after_flush",
         "demigrate_after_cold_only_delete",

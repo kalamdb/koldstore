@@ -5,6 +5,9 @@ use anyhow::{Context, Result};
 
 #[test]
 fn failure_injection_matrix_lists_required_faults() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let faults = [
         "filesystem outage",
         "corrupt Parquet footer",

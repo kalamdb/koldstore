@@ -5,6 +5,9 @@ use anyhow::{Context, Result};
 
 #[test]
 fn flush_object_outage_keeps_hot_authoritative_and_records_error_job_state() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     use pg_koldstore::flush::job::{FlushFailurePlan, ManifestSyncState};
 
     let plan = FlushFailurePlan::object_store_outage("s3 timeout");

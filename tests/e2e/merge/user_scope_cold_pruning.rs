@@ -8,6 +8,9 @@ use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 
 #[test]
 fn user_scope_cold_pruning_filters_segments_before_stream_open() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let mut plan = MergeScanPlan::new(42, vec!["id".to_string()]);
     plan.scope_key = Some(ScopeKey::new("user-a").unwrap());
     plan.segment_hints = vec![

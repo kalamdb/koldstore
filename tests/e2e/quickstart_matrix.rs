@@ -5,6 +5,9 @@ use anyhow::Result;
 
 #[test]
 fn quickstart_matrix_covers_all_documented_scenarios() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let quickstart = include_str!("../../specs/001-pg-kalam-hot-cold-storage/quickstart.md");
     let scenario_count = quickstart.matches("## Scenario ").count();
 

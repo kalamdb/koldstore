@@ -170,11 +170,11 @@ impl SpiExecutor for RecordingSpiExecutor {
 }
 
 /// PostgreSQL SPI executor.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[derive(Debug, Default)]
 pub struct PgSpiExecutor;
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 impl SpiExecutor for PgSpiExecutor {
     fn execute(&self, statement: SpiStatement) -> SpiResult<SpiRows> {
         let rows = match statement.access {

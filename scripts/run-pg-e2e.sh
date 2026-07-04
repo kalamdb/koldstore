@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PG_VERSION="${1:-${KOLDSTORE_E2E_PGVERSION:-16}}"
@@ -33,6 +33,8 @@ echo "recreating local E2E database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
   -c "DROP DATABASE IF EXISTS ${PG_DATABASE}" \
   -c "CREATE DATABASE ${PG_DATABASE}"
+"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
+  -c "CREATE EXTENSION IF NOT EXISTS koldstore;"
 
 export KOLDSTORE_E2E_PGVERSION="$PG_VERSION"
 export KOLDSTORE_E2E_PGHOST="$PG_HOST"
@@ -40,6 +42,7 @@ export KOLDSTORE_E2E_PGPORT="$PG_PORT"
 export KOLDSTORE_E2E_PGUSER="$PG_USER"
 export KOLDSTORE_E2E_PGPASSWORD="$PG_PASSWORD"
 export KOLDSTORE_E2E_PGDATABASE="$PG_DATABASE"
+export KOLDSTORE_E2E_WAIT_FOR_STARTUP=1
 
 echo "running pg-koldstore E2E tests against local pgrx PostgreSQL ${PG_VERSION}"
 if ! command -v cargo-nextest >/dev/null 2>&1; then

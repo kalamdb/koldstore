@@ -6,6 +6,9 @@ use parquet::file::reader::{FileReader, SerializedFileReader};
 
 #[test]
 fn flush_to_cold_plan_writes_parquet_manifest_segments_and_pk_hints() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     use koldstore_core::{CommitSeq, ScopeKey, SeqId, StablePkHash};
     use koldstore_parquet::{ColumnStats, SegmentFooterMetadata};
     use pg_koldstore::flush::job::{

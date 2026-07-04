@@ -145,7 +145,7 @@ chat/messages/
 
 ## What works in v0.1
 
-- `CREATE EXTENSION koldstore` on PostgreSQL 15–17
+- `CREATE EXTENSION koldstore` on PostgreSQL 15–18
 - `koldstore.migrate_table` for shared and user-scoped tables
 - Storage registration: filesystem, S3, GCS, Azure (MinIO via S3-compatible config)
 - Manual flush + `rows:N,interval:S` policies

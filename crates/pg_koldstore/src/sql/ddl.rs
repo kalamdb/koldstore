@@ -308,7 +308,7 @@ pub fn alter_storage_location_plan(
 }
 
 /// Registers or updates a storage backend from SQL.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg(
     name: &str,
@@ -331,7 +331,7 @@ pub fn register_storage_pg(
 }
 
 /// Registers or updates a storage backend from SQL using default path templates.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg_with_default_templates(
     name: &str,
@@ -351,7 +351,7 @@ pub fn register_storage_pg_with_default_templates(
     )
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn register_storage_pg_impl(
     name: &str,
     storage_type: &str,
@@ -396,7 +396,7 @@ fn register_storage_pg_impl(
 }
 
 /// Rotates storage credentials from SQL without changing backend paths.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(
     name = "alter_storage_credentials",
     schema = "koldstore",
@@ -417,7 +417,7 @@ pub fn alter_storage_credentials_pg(name: &str, credentials: pgrx::JsonB) {
 }
 
 /// Alters storage location/configuration from SQL without direct catalog DML.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(
     name = "alter_storage_location",
     schema = "koldstore",
@@ -440,7 +440,7 @@ pub fn alter_storage_location_pg(name: &str, base_path: &str, config: pgrx::Json
 }
 
 /// Migrates a heap table into pg-koldstore management from SQL.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "migrate_table", schema = "koldstore", security_definer)]
 pub fn migrate_table_pg(
     table_name: pgrx::pg_sys::Oid,
@@ -460,7 +460,7 @@ pub fn migrate_table_pg(
 }
 
 /// Migrates a heap table and supplies an explicit oldest-to-newest order column.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "migrate_table", schema = "koldstore", security_definer)]
 pub fn migrate_table_pg_with_order(
     table_name: pgrx::pg_sys::Oid,
@@ -480,7 +480,7 @@ pub fn migrate_table_pg_with_order(
     )
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 fn migrate_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
@@ -594,7 +594,7 @@ fn migrate_table_pg_impl(
     )
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn table_has_rows(table: &crate::migrate::QualifiedTableName) -> Result<bool, pgrx::spi::Error> {
     pgrx::Spi::get_one::<bool>(&format!(
         "SELECT EXISTS (SELECT 1 FROM ONLY {} LIMIT 1)",
@@ -603,7 +603,7 @@ fn table_has_rows(table: &crate::migrate::QualifiedTableName) -> Result<bool, pg
     .map(|value| value.unwrap_or(false))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn managed_table_info_tuple(
     table_oid_u32: u32,
     table_type: &str,
@@ -631,7 +631,7 @@ fn managed_table_info_tuple(
     tuple
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn qualified_relation_name(table_oid: u32) -> Result<String, pgrx::spi::Error> {
     pgrx::Spi::get_one_with_args::<String>(
         "SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1::oid",
@@ -642,7 +642,7 @@ fn qualified_relation_name(table_oid: u32) -> Result<String, pgrx::spi::Error> {
     .map(|value| value.unwrap_or_else(|| pgrx::error!("table oid {table_oid} does not exist")))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn storage_id_by_name(name: &str) -> Option<Uuid> {
     let id = pgrx::Spi::get_one_with_args::<pgrx::Uuid>(
         "SELECT id FROM koldstore.storage WHERE name = $1",
@@ -652,7 +652,7 @@ fn storage_id_by_name(name: &str) -> Option<Uuid> {
     Some(Uuid::from_bytes(*id.as_bytes()))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn migration_catalog(table_oid: u32) -> Result<crate::migrate::ExistingTableCatalog, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -777,7 +777,7 @@ FROM ranked
     })
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 struct SchemaRegistrationInput<'a> {
     table_oid: u32,
     table_type: &'a str,
@@ -791,7 +791,7 @@ struct SchemaRegistrationInput<'a> {
     migration_status: &'a str,
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgrx::spi::Error> {
     use pgrx::datum::DatumWithOid;
 
@@ -870,7 +870,7 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgr
     )
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn enqueue_backfill_job(
     plan: &crate::migrate::jobs::MigrationJobEnqueuePlan,
 ) -> Result<(), pgrx::spi::Error> {
@@ -886,7 +886,7 @@ fn enqueue_backfill_job(
     )
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn run_existing_table_migration_inline(
     plan: &crate::migrate::ExistingTableMigrationPlan,
 ) -> Result<(), pgrx::spi::Error> {
@@ -962,7 +962,7 @@ WHERE id = $1::uuid
     )
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
@@ -1010,7 +1010,7 @@ impl DemigrateTableRequest {
 }
 
 /// Demigrates a managed table through the SQL API.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "demigrate_table", schema = "koldstore", security_definer)]
 pub fn demigrate_table_pg(
     table_name: pgrx::pg_sys::Oid,
@@ -1029,7 +1029,7 @@ pub fn demigrate_table_pg(
         .unwrap_or_else(|error| pgrx::error!("demigrate table failed: {error}"))
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn demigrate_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     options: DemigrateOptions,

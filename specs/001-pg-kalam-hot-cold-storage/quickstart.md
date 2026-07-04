@@ -286,10 +286,10 @@ Expected:
 
 ```bash
 cargo test
-tests/e2e/run_pg_matrix.sh
+scripts/run-pgrx-matrix.sh
 ```
 
-The E2E runner starts pgrx-managed PostgreSQL, installs `koldstore`, recreates the test database, then runs `cargo nextest run -p e2e --test-threads 1`. Select a PostgreSQL version with the first argument, for example `tests/e2e/run_pg_matrix.sh 17`, or with `KOLDSTORE_E2E_PGVERSION`.
+The matrix runner loops over PostgreSQL 15, 16, 17, and 18 using pgrx, installs `koldstore`, recreates the test database for each version, then runs `cargo nextest run -p e2e --test-threads 1`. Use `scripts/run-pgrx-matrix.sh --download-missing` when a supported PostgreSQL version is not already initialized in pgrx.
 
 ## Failure Indicators
 

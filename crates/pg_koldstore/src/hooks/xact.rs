@@ -6,7 +6,7 @@ use std::sync::{
 };
 
 use koldstore_core::{CommitSeq, Result, ScopeKey};
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 use koldstore_core::{Diagnostic, KoldstoreError};
 
 static NEXT_COMMIT_SEQ: AtomicI64 = AtomicI64::new(1);
@@ -143,7 +143,7 @@ impl CommitSequenceAllocator {
 /// # Errors
 ///
 /// Returns an error when PostgreSQL SPI cannot acquire the lock or sequence.
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 pub fn allocate_for_current_transaction(
     domain: &CommitSequenceDomain,
 ) -> Result<CommitSequenceAllocation> {
@@ -170,7 +170,7 @@ pub fn allocate_for_current_transaction(
     })
 }
 
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+#[cfg(feature = "pg")]
 fn catalog_error(code: &'static str, error: impl std::fmt::Display) -> KoldstoreError {
     KoldstoreError::CatalogValidation {
         diagnostic: Diagnostic::new(code, error.to_string()),

@@ -38,6 +38,9 @@ fn cold(id: i64, seq: i64, commit_seq: i64, body: &str) -> ColdRow {
 
 #[test]
 fn merge_scan_results_resolve_hot_winner_and_tombstone_masking() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let result = execute_merge_scan(
         vec![
             hot(1, 20, 20, false, "hot-winner"),
@@ -62,6 +65,9 @@ fn merge_scan_results_resolve_hot_winner_and_tombstone_masking() {
 
 #[test]
 fn merge_scan_results_apply_residual_filters_after_winner_resolution() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let result = execute_merge_scan_with_filters(
         vec![hot(1, 20, 20, false, "hot-winner")],
         vec![cold(1, 10, 10, "older-cold"), cold(2, 11, 11, "cold-only")],

@@ -34,7 +34,7 @@ Options:
 
 Examples:
   scripts/run-all-tests.sh
-  scripts/run-all-tests.sh --pg-versions 15,16,17
+  scripts/run-all-tests.sh --pg-versions 15,16,17,18
   scripts/run-all-tests.sh --skip-e2e --skip-benchmarks
 EOF
 }
@@ -159,7 +159,7 @@ run_local_pgrx_e2e() {
   KOLDSTORE_E2E_PGVERSION="${pg}" \
     KOLDSTORE_E2E_PGPORT="${port}" \
     PGRX_PG_CONFIG="${pg_config}" \
-    tests/e2e/run_pg_matrix.sh
+    scripts/run-pg-e2e.sh
 }
 
 first_pg_version() {

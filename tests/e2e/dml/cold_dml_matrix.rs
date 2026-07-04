@@ -11,6 +11,9 @@ use serde_json::json;
 
 #[test]
 fn cold_dml_matrix_targets_active_pgrx_versions() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     assert_eq!(
         common::local_pg_matrix()
             .into_iter()
@@ -22,6 +25,9 @@ fn cold_dml_matrix_targets_active_pgrx_versions() {
 
 #[test]
 fn cold_dml_plans_cover_hydrate_update_delete_and_no_default_object_reads() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let table_name = TableName::parse("app.items").unwrap();
     let hydrate = plan_hydrate_pk(
         &HydratePkRequest {

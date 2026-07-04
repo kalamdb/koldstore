@@ -1,9 +1,15 @@
+#[path = "../common/mod.rs"]
+mod common;
+
 use koldstore_core::{CommitSeq, LogicalPk, PkColumn, RowOperation, SeqId};
 use pg_koldstore::sql::events;
 use serde_json::json;
 
 #[test]
 fn change_feed_orders_flush_cold_delete_hydrate_and_demigration_boundary_events() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let pk =
         LogicalPk::from_json_object(&json!({"id": 7}), &[PkColumn::new("id").unwrap()]).unwrap();
     let event = |op, seq, commit_seq, payload| {

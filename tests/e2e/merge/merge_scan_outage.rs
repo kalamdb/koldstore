@@ -6,6 +6,9 @@ use pg_koldstore::merge_scan::exec::{begin_merge_scan, ColdAvailability, MergeSc
 
 #[test]
 fn merge_scan_outage_requires_error_not_partial_hot_only_results() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
     let error = begin_merge_scan(
         42,
         vec!["app/items/batch-0.parquet".to_string()],
