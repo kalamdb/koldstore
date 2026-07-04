@@ -149,6 +149,9 @@ jobs:
             cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
           fi
 
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
+
       - name: Run E2E tests on PostgreSQL ${{ matrix.pg }}
         run: bash scripts/run-pg-e2e.sh "${PG_VER}"
         env:
