@@ -15,6 +15,7 @@ pg15 = ["pg", "pgrx/pg15"]
 pg16 = ["pg", "pgrx/pg16"]
 pg17 = ["pg", "pgrx/pg17"]
 pg18 = ["pg", "pgrx/pg18"]
+cshim = ["dep:pgrx", "pgrx/cshim"]
 pg_test = []
 
 [dependencies]
