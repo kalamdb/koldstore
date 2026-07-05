@@ -3,7 +3,7 @@ mod common;
 
 use anyhow::Result;
 use koldstore_core::{ScopeKey, SeqId};
-use pg_koldstore::merge_scan::exec::{ColdAvailability, begin_merge_scan_with_plan};
+use pg_koldstore::merge_scan::exec::{begin_merge_scan_with_plan, ColdAvailability};
 use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 
 #[test]

@@ -69,7 +69,8 @@ fn storage_root_for(pg_version: u16) -> Result<PathBuf> {
 async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Path) -> Result<()> {
     let started = Instant::now();
     {
-        let _step = common::log_step_always(format!("pg{pg_version}: install extension and storage"));
+        let _step =
+            common::log_step_always(format!("pg{pg_version}: install extension and storage"));
         install_extension_and_storage(client, storage_root).await?;
     }
     {
@@ -118,7 +119,8 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         wait_for_jobs_to_finish(client, pg_version).await?;
     }
     let second_manifest = {
-        let _step = common::log_step_always(format!("pg{pg_version}: verify second flush artifacts"));
+        let _step =
+            common::log_step_always(format!("pg{pg_version}: verify second flush artifacts"));
         assert_manifest_and_parquet_artifacts(client, pg_version, storage_root, 2)
             .await
             .context("second flush artifacts")?

@@ -53,7 +53,7 @@ The usual fixes — archive tables, cron dumps, time partitions, a separate data
    SELECT  →  KoldstoreMergeScan merges by primary key
 ```
 
-You create a normal table, register storage, and call `koldstore.migrate_table`. Inserts and updates hit the heap like always. A flush writes eligible hot rows to Parquet, updates the manifest, and drops those rows from the heap. Tombstones stick around when cold might still have an older version of the same key.
+You create a normal table, register storage, and call `koldstore.migrate_table`. Inserts and updates hit the heap like always. KoldStore tracks latest change state in an internal per-table `koldstore.<table>__cl` mirror instead of adding metadata columns to your table. A flush writes eligible hot rows and mirror metadata to Parquet, updates the manifest, and drops flushed rows from the heap when safe. Delete markers are preserved when cold might still have an older version of the same key.
 
 ---
 
@@ -93,7 +93,7 @@ SELECT koldstore.migrate_table(
   table_name   => 'chat.messages',
   table_type   => 'user',
   storage_name => 'local-minio',
-  flush_policy => 'rows:1000,interval:60',
+  flush_policy => 'rows:1000',
   scope_column => 'user_id'
 );
 
@@ -108,13 +108,14 @@ SELECT * FROM chat.messages;
 
 ### Flush policies (today)
 
-Right now retention is driven by row count and time between flushes, not by a column predicate:
+Right now retention is driven by mirror row count by default, with optional row-age duration policies:
 
 ```
-rows:<count>,interval:<seconds>
+rows:<count>
+duration:<age>
 ```
 
-Set it at migration or later with `koldstore.set_flush_policy`. When the hot row count crosses the threshold (or the interval elapses, with the background worker enabled), eligible rows get flushed. You can also call `koldstore.flush_table` or `koldstore.flush_pending()` yourself.
+Set it at migration or later with `koldstore.set_flush_policy`. `rows:N` is the default hot-row-limit policy: KoldStore checks pending latest-state rows in the table's internal change-log mirror and flushes the oldest rows by `seq` when the limit is exceeded. `duration:1d` or `duration:5d` flushes mirror rows whose `changed_at` is older than that duration. If an `interval:<seconds>` spelling remains supported, it means row age in seconds, not time since the last flush. You can also call `koldstore.flush_table` or `koldstore.flush_pending()` yourself.
 
 ### Cold storage policies (planned)
 
@@ -148,11 +149,11 @@ chat/messages/
 - `CREATE EXTENSION koldstore` on PostgreSQL 15–18
 - `koldstore.migrate_table` for shared and user-scoped tables
 - Storage registration: filesystem, S3, GCS, Azure (MinIO via S3-compatible config)
-- Manual flush + `rows:N,interval:S` policies
+- Manual flush + `rows:N` and `duration:S` policies
 - `KoldstoreMergeScan` for merged hot/cold reads
 - Hot DML without object-store reads on the write path
 - Cold-only helpers: `hydrate_pk`, `update_row`, `delete_row`
-- Change feed via `changes_since`
+- Latest-state change feed via `changes_since`
 - Demigration with optional rehydration
 - Operator functions: `table_status`, `validate_cold_storage`, `recover_segments`
 
@@ -162,13 +163,16 @@ Things still rough around the edges: background flush needs `shared_preload_libr
 
 ## Requirements
 
-Managed tables need a **primary key**. Migration adds three system columns:
+Managed tables need a **primary key**. Clean-schema migration does not add KoldStore columns to the user table. Instead, KoldStore creates an internal per-table change-log mirror such as `koldstore.messages__cl` with the same primary-key columns plus:
 
 | Column | What it's for |
 |--------|---------------|
-| `_seq` | Row version |
-| `_commit_seq` | Commit-order cursor for `changes_since` |
-| `_deleted` | Tombstone flag |
+| `seq` | Latest-state version used for flush cutoffs and change-feed cursors |
+| `op` | `1 = INSERT`, `2 = UPDATE`, `3 = DELETE` |
+| `changed_at` | Change timestamp |
+| `commit_lsn` | Optional PostgreSQL LSN for diagnostics |
+
+`koldstore.changes_since` reads latest-state changes from the mirror and flushed cold metadata. It is not a full event-history feed; repeated changes to one primary key may be collapsed to the latest available state.
 
 ### Type support
 
@@ -180,6 +184,7 @@ That's not because PostgreSQL can't store other types — it's because every typ
 
 - FK constraints with flush enabled need `options.allow_fk_hot_only => true`; native FK checks only see hot rows
 - If a query needs cold data and object storage is down, you get an error — we don't fall back to hot-only results
+- Altering primary-key values or primary-key definitions on managed tables is not implemented yet.
 - Custom PostgreSQL indexes do not move to cold storage. When rows are flushed out of the heap, their entries disappear from PostgreSQL-owned indexes.
 - pgvector indexes are hot-only. HNSW and IVFFlat indexes only cover rows still resident in the PostgreSQL table; flushed vector values may live in cold files in future vector support, but they are not included in the live pgvector index.
 - ParadeDB/BM25 and other extension indexes follow the same rule: they index PostgreSQL-resident rows, not external Parquet cold files, unless Kalam builds a separate cold index for them.
