@@ -22,7 +22,7 @@ fn merge_scan_outage_requires_error_not_partial_hot_only_results() {
 
 #[tokio::test]
 async fn dirty_manifest_outage_state_uses_partial_index_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "merge_scan_outage").await?;
         let table = db.create_indexed_items_table("outage_items", 8).await?;
         db.migrate_shared(&table.relation, "id").await?;

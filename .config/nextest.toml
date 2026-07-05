@@ -1,0 +1,4 @@
+# Show proof-of-work output for the full lifecycle scenario test during suite runs.
+[[profile.default.overrides]]
+filter = 'test(full_lifecycle_migrates_flushes_merges_hot_and_cold_then_flushes_again)'
+success-output = "immediate"

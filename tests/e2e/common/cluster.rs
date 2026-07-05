@@ -91,20 +91,47 @@ pub fn local_pg_matrix() -> Vec<PgTarget> {
     }
 
     if let Ok(versions) = std::env::var("KOLDSTORE_E2E_PGVERSIONS") {
-        return versions
+        let targets = versions
             .split(',')
-            .filter_map(|version| version.trim().parse::<u16>().ok())
-            .map(|version| PgTarget {
-                version,
-                port: 28800 + version,
+            .map(str::trim)
+            .filter(|version| !version.is_empty())
+            .map(|version| {
+                let version = version
+                    .parse::<u16>()
+                    .expect("KOLDSTORE_E2E_PGVERSIONS must contain PostgreSQL major versions");
+                PgTarget {
+                    version,
+                    port: 28800 + version,
+                }
             })
-            .collect();
+            .collect::<Vec<_>>();
+        assert!(
+            !targets.is_empty(),
+            "KOLDSTORE_E2E_PGVERSIONS must configure at least one PostgreSQL target"
+        );
+        return targets;
     }
 
     vec![PgTarget {
         version: 16,
         port: 28816,
     }]
+}
+
+/// PostgreSQL targets for scenario tests.
+///
+/// # Panics
+///
+/// Panics when no target is configured. This keeps `for target in ...` scenario
+/// tests from silently passing without executing any PostgreSQL work.
+#[must_use]
+pub fn scenario_pg_matrix() -> Vec<PgTarget> {
+    let targets = local_pg_matrix();
+    assert!(
+        !targets.is_empty(),
+        "E2E scenario matrix must contain at least one PostgreSQL target"
+    );
+    targets
 }
 
 /// Expected PostgreSQL versions for the active test target mode.

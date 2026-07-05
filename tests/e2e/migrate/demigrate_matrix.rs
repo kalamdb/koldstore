@@ -36,7 +36,7 @@ fn demigrate_matrix_covers_flush_cold_delete_and_user_scoped_tables() {
 #[tokio::test]
 async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_pgrx() -> Result<()>
 {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "demigrate_matrix").await?;
         let table = db.create_indexed_items_table("demigrate_items", 40).await?;
         db.migrate_shared(&table.relation, "id").await?;

@@ -85,7 +85,7 @@ fn merge_scan_results_apply_residual_filters_after_winner_resolution() {
 
 #[tokio::test]
 async fn flushed_table_and_later_hot_dml_return_current_rows_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "merge_scan_results").await?;
         let table = db
             .create_indexed_items_table("merge_result_items", 16)

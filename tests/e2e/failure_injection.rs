@@ -23,7 +23,7 @@ fn failure_injection_matrix_lists_required_faults() {
 
 #[tokio::test]
 async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "failure_injection").await?;
         let table = db.create_indexed_items_table("failure_items", 32).await?;
         db.migrate_shared(&table.relation, "id").await?;

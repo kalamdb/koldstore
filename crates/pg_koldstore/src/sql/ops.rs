@@ -682,20 +682,22 @@ fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
 
     let batch_number = next_flush_batch_number(table_oid)?;
     let prefix = format!("{}/{}", relation.namespace, relation.name);
-    let segment_path = format!("{prefix}/batch-{batch_number}.parquet");
+    let batch_file_name = format!("batch-{batch_number}.parquet");
+    let object_path = format!("{prefix}/{batch_file_name}");
     let manifest_path = format!("{prefix}/manifest.json");
-    let absolute_segment_path = std::path::Path::new(&storage.base_path).join(&segment_path);
+    let absolute_segment_path = std::path::Path::new(&storage.base_path).join(&object_path);
     let absolute_manifest_path = std::path::Path::new(&storage.base_path).join(&manifest_path);
     if let Some(parent) = absolute_segment_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
 
     let byte_size = write_parquet_segment(&absolute_segment_path, stats.row_count, stats.min_seq)?;
+    let segment_checksum = parquet_sha256_checksum(&absolute_segment_path)?;
     let segment_id = uuid::Uuid::new_v4();
     insert_cold_segment(
         table_oid,
         segment_id,
-        &segment_path,
+        &object_path,
         batch_number,
         &stats,
         byte_size,
@@ -716,13 +718,14 @@ fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     };
     let mut segment = koldstore_manifest::ManifestSegment::committed(
         batch_number as u32,
-        segment_path.clone(),
+        batch_file_name,
         stats.min_seq..=stats.max_seq,
         stats.min_commit_seq..=stats.max_commit_seq,
         stats.row_count as u64,
         byte_size as u64,
         storage.schema_version as u32,
     );
+    segment.checksum = Some(segment_checksum);
     segment.column_stats.insert(
         "_seq".to_string(),
         koldstore_manifest::ManifestColumnStats::new(
@@ -758,7 +761,7 @@ fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     insert_cold_pk_hint(
         table_oid,
         segment_id,
-        &segment_path,
+        &object_path,
         stats.max_seq,
         stats.max_commit_seq,
     )?;
@@ -908,6 +911,24 @@ fn write_parquet_segment(
         .map_err(|error| error.to_string())?
         .len();
     i64::try_from(len).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
+fn parquet_sha256_checksum(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
 }
 
 #[cfg(feature = "pg")]

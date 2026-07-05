@@ -545,6 +545,11 @@ fn migrate_table_pg_impl(
             migration_status: "active",
         })
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+        apply_user_scope_policy(
+            &empty_plan.table,
+            empty_plan.effective_scope_column.as_deref(),
+        )
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         return managed_table_info_tuple(
             table_oid_u32,
             table_type,
@@ -585,6 +590,8 @@ fn migrate_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     run_existing_table_migration_inline(&plan)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    apply_user_scope_policy(&plan.table, plan.effective_scope_column.as_deref())
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
     managed_table_info_tuple(
         table_oid_u32,
@@ -592,6 +599,22 @@ fn migrate_table_pg_impl(
         storage_id,
         plan.effective_scope_column.as_deref(),
     )
+}
+
+#[cfg(feature = "pg")]
+fn apply_user_scope_policy(
+    table: &crate::migrate::QualifiedTableName,
+    scope_column: Option<&str>,
+) -> Result<(), String> {
+    let Some(scope_column) = scope_column else {
+        return Ok(());
+    };
+    let policy = crate::migrate::scope::plan_user_scope_policy(table, scope_column)
+        .map_err(|error| error.to_string())?;
+    for statement in &policy.statements {
+        pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 #[cfg(feature = "pg")]

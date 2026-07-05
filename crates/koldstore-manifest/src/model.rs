@@ -17,6 +17,7 @@ pub struct Manifest {
     pub max_seq: i64,
     pub max_commit_seq: i64,
     pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub publish: Option<PublishState>,
     pub segments: Vec<ManifestSegment>,
     pub files: FilesState,
@@ -90,21 +91,16 @@ impl Manifest {
         self.segments.reserve(lower_bound);
 
         let mut appended_segments = 0usize;
-        let mut visible_files = 0u64;
         for segment in segments {
             if segment.status != SegmentStatus::Deleted {
                 self.max_seq = self.max_seq.max(segment.max_seq);
                 self.max_commit_seq = self.max_commit_seq.max(segment.max_commit_seq);
-                visible_files += 1;
             }
             self.segments.push(segment);
             appended_segments += 1;
         }
 
         if appended_segments > 0 {
-            if let Some(total_files) = self.files.total_files.as_mut() {
-                *total_files += visible_files;
-            }
             self.updated_at = Utc::now();
         }
 
@@ -138,6 +134,7 @@ pub struct PublishState {
 pub struct ManifestSegment {
     pub batch: u32,
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub temp_path: Option<String>,
     pub min_seq: i64,
     pub max_seq: i64,
@@ -152,7 +149,9 @@ pub struct ManifestSegment {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bloom_filters: Vec<ManifestBloomFilter>,
     pub status: SegmentStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub checksum: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub etag: Option<String>,
     pub created_at: Option<DateTime<Utc>>,
 }
@@ -225,6 +224,7 @@ pub enum SegmentStatus {
 pub struct PkFilter {
     pub kind: String,
     pub column_ids: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub false_positive_rate: Option<f64>,
 }
 

@@ -3,12 +3,14 @@ mod common;
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use koldstore_manifest::Manifest;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use tokio_postgres::Client;
+
+const INITIAL_ROW_COUNT: i64 = 512;
 
 #[test]
 fn full_lifecycle_contract_covers_migrate_flush_merge_and_dml_checkpoints() {
@@ -39,7 +41,14 @@ fn full_lifecycle_contract_covers_migrate_flush_merge_and_dml_checkpoints() {
 
 #[tokio::test]
 async fn full_lifecycle_migrates_flushes_merges_hot_and_cold_then_flushes_again() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    common::require_pgrx_server().await?;
+
+    for target in common::scenario_pg_matrix() {
+        common::log_always(format!(
+            "full_lifecycle starting pg{} on port {}",
+            target.version, target.port
+        ));
+
         let client = common::wait_for_postgres(&target).await?;
         let storage_root = storage_root_for(target.version)?;
         run_full_lifecycle(&client, target.version, &storage_root).await?;
@@ -58,53 +67,76 @@ fn storage_root_for(pg_version: u16) -> Result<PathBuf> {
 }
 
 async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Path) -> Result<()> {
-    install_extension_and_storage(client, storage_root).await?;
-    create_source_table(client, pg_version).await?;
-    migrate_existing_table(client, pg_version).await?;
-    wait_for_jobs_to_finish(client, pg_version).await?;
-    assert_system_columns_filled(client, pg_version, 4).await?;
-    assert_indexed_columns_registered(client, pg_version).await?;
+    let started = Instant::now();
+    {
+        let _step = common::log_step_always(format!("pg{pg_version}: install extension and storage"));
+        install_extension_and_storage(client, storage_root).await?;
+    }
+    {
+        let _step = common::log_step_always(format!(
+            "pg{pg_version}: create source table ({INITIAL_ROW_COUNT} rows)"
+        ));
+        create_source_table(client, pg_version).await?;
+    }
+    {
+        let _step = common::log_step_always(format!("pg{pg_version}: migrate existing table"));
+        migrate_existing_table(client, pg_version).await?;
+    }
+    {
+        let _step = common::log_step_always(format!("pg{pg_version}: wait for migration jobs"));
+        wait_for_jobs_to_finish(client, pg_version).await?;
+    }
+    {
+        let _step =
+            common::log_step_always(format!("pg{pg_version}: assert system columns and indexes"));
+        assert_system_columns_filled(client, pg_version, INITIAL_ROW_COUNT).await?;
+        assert_indexed_columns_registered(client, pg_version).await?;
+    }
 
-    flush_table(client, pg_version).await?;
-    wait_for_jobs_to_finish(client, pg_version).await?;
-    let first_manifest = assert_manifest_and_parquet_artifacts(client, pg_version, storage_root, 1)
-        .await
-        .context("first flush artifacts")?;
+    {
+        let _step = common::log_step_always(format!("pg{pg_version}: first flush"));
+        flush_table(client, pg_version).await?;
+        wait_for_jobs_to_finish(client, pg_version).await?;
+    }
+    let first_manifest = {
+        let _step = common::log_step(format!("pg{pg_version}: verify first flush artifacts"));
+        assert_manifest_and_parquet_artifacts(client, pg_version, storage_root, 1)
+            .await
+            .context("first flush artifacts")?
+    };
     assert_local_cold_metadata(client, pg_version, 1).await?;
 
-    apply_hot_dml_after_first_flush(client, pg_version).await?;
-    assert_visible_rows(
-        client,
-        pg_version,
-        &[
-            (2, "two-hot-update", 20),
-            (3, "three", 3),
-            (4, "four", 4),
-            (5, "five-hot", 5),
-        ],
-    )
-    .await?;
+    {
+        let _step = common::log_step_always(format!("pg{pg_version}: hot DML after first flush"));
+        apply_hot_dml_after_first_flush(client, pg_version).await?;
+    }
+    assert_lifecycle_row_state(client, pg_version).await?;
 
-    flush_table(client, pg_version).await?;
-    wait_for_jobs_to_finish(client, pg_version).await?;
-    let second_manifest =
+    {
+        let _step = common::log_step_always(format!("pg{pg_version}: second flush"));
+        flush_table(client, pg_version).await?;
+        wait_for_jobs_to_finish(client, pg_version).await?;
+    }
+    let second_manifest = {
+        let _step = common::log_step_always(format!("pg{pg_version}: verify second flush artifacts"));
         assert_manifest_and_parquet_artifacts(client, pg_version, storage_root, 2)
             .await
-            .context("second flush artifacts")?;
+            .context("second flush artifacts")?
+    };
     assert_local_cold_metadata(client, pg_version, 2).await?;
     assert!(second_manifest.segments.len() >= first_manifest.segments.len());
-    assert_visible_rows(
-        client,
-        pg_version,
-        &[
-            (2, "two-hot-update", 20),
-            (3, "three", 3),
-            (4, "four", 4),
-            (5, "five-hot", 5),
-        ],
-    )
-    .await?;
+    assert_lifecycle_row_state(client, pg_version).await?;
     assert_no_pending_jobs(client, pg_version).await?;
+
+    common::log_always(format!(
+        "full_lifecycle completed pg{pg_version}: rows={INITIAL_ROW_COUNT}, \
+         first_flush_segments={}, second_flush_segments={}, \
+         storage={}, elapsed={:.3}s",
+        first_manifest.segments.len(),
+        second_manifest.segments.len(),
+        storage_root.display(),
+        started.elapsed().as_secs_f64()
+    ));
 
     Ok(())
 }
@@ -161,11 +193,25 @@ async fn create_source_table(client: &Client, pg_version: u16) -> Result<()> {
             );
             CREATE INDEX full_lifecycle_qty_idx_pg{pg_version} ON {relation} (qty);
             INSERT INTO {relation} (id, account_id, title, qty)
-            VALUES
-              (1, 10, 'one', 1),
-              (2, 10, 'two', 2),
-              (3, 20, 'three', 3),
-              (4, 20, 'four', 4);
+            SELECT
+              gs::bigint,
+              CASE WHEN gs <= 64 THEN 10 ELSE 20 END,
+              CASE gs
+                WHEN 1 THEN 'one'
+                WHEN 2 THEN 'two'
+                WHEN 3 THEN 'three'
+                WHEN 4 THEN 'four'
+                ELSE 'row-' || gs::text
+              END,
+              CASE gs
+                WHEN 1 THEN 1
+                WHEN 2 THEN 2
+                WHEN 3 THEN 3
+                WHEN 4 THEN 4
+                ELSE (gs % 100)::integer
+              END
+            FROM generate_series(1, {INITIAL_ROW_COUNT}) AS gs;
+            ANALYZE {relation};
             "#,
         ))
         .await?;
@@ -202,11 +248,19 @@ async fn flush_table(client: &Client, pg_version: u16) -> Result<()> {
 }
 
 async fn wait_for_jobs_to_finish(client: &Client, pg_version: u16) -> Result<()> {
-    for _ in 0..60 {
+    for attempt in 0..60 {
         let active = active_job_count(client, pg_version).await?;
         if active == 0 {
+            common::log_always(format!(
+                "pg{pg_version}: jobs idle after {} poll(s)",
+                attempt + 1
+            ));
             return Ok(());
         }
+        common::log(format!(
+            "pg{pg_version}: waiting on {active} active job(s), poll {}/60",
+            attempt + 1
+        ));
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     anyhow::bail!("jobs did not finish for {}", relation(pg_version));
@@ -331,7 +385,10 @@ async fn assert_manifest_and_parquet_artifacts(
             segment.path
         );
 
-        let parquet_path = storage_root.join(&segment.path);
+        let parquet_path = manifest_file
+            .parent()
+            .context("manifest directory missing")?
+            .join(&segment.path);
         assert!(parquet_path.exists(), "missing {}", parquet_path.display());
         let parquet_file = File::open(&parquet_path)
             .with_context(|| format!("open {}", parquet_path.display()))?;
@@ -390,25 +447,58 @@ async fn apply_hot_dml_after_first_flush(client: &Client, pg_version: u16) -> Re
             WHERE id = 1;
 
             INSERT INTO {relation} (id, account_id, title, qty)
-            VALUES (5, 20, 'five-hot', 5);
+            VALUES ({insert_id}, 20, 'five-hot', 5);
             "#,
+            insert_id = INITIAL_ROW_COUNT + 1
         ))
         .await?;
     Ok(())
 }
 
-async fn assert_visible_rows(
+async fn assert_lifecycle_row_state(client: &Client, pg_version: u16) -> Result<()> {
+    assert_eq!(
+        common::row_count(client, &relation(pg_version)).await?,
+        INITIAL_ROW_COUNT
+    );
+    assert_row_absent(client, pg_version, 1).await?;
+    assert_rows_match(
+        client,
+        pg_version,
+        &[
+            (2, "two-hot-update", 20),
+            (3, "three", 3),
+            (4, "four", 4),
+            (INITIAL_ROW_COUNT + 1, "five-hot", 5),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn assert_row_absent(client: &Client, pg_version: u16, id: i64) -> Result<()> {
+    let row = client
+        .query_opt(
+            &format!("SELECT 1 FROM {} WHERE id = $1", relation(pg_version)),
+            &[&id],
+        )
+        .await?;
+    assert!(row.is_none(), "expected id {id} to be absent");
+    Ok(())
+}
+
+async fn assert_rows_match(
     client: &Client,
     pg_version: u16,
     expected: &[(i64, &str, i32)],
 ) -> Result<()> {
+    let expected_ids: Vec<i64> = expected.iter().map(|(id, _, _)| *id).collect();
     let rows = client
         .query(
             &format!(
-                "SELECT id, title, qty FROM {} ORDER BY id",
+                "SELECT id, title, qty FROM {} WHERE id = ANY($1) ORDER BY id",
                 relation(pg_version)
             ),
-            &[],
+            &[&expected_ids],
         )
         .await?;
     let visible_rows = rows

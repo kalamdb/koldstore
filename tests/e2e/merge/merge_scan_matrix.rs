@@ -37,7 +37,7 @@ fn merge_scan_matrix_covers_results_explain_residual_quals_and_outage() {
 
 #[tokio::test]
 async fn managed_hot_read_preserves_indexed_access_path_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "merge_scan_matrix").await?;
         let table = db.create_indexed_items_table("merge_items", 1_000).await?;
         db.migrate_shared(&table.relation, "id").await?;

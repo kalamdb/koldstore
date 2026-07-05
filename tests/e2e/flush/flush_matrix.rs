@@ -43,7 +43,7 @@ fn flush_matrix_covers_flush_manifest_metadata_and_hot_cleanup() {
 
 #[tokio::test]
 async fn flush_matrix_covers_small_and_larger_batches_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "flush_matrix").await?;
 
         for (table_name, rows) in [("flush_matrix_small", 1_i64), ("flush_matrix_large", 128)] {

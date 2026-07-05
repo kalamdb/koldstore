@@ -11,6 +11,7 @@ set -euo pipefail
 : "${PGRX_VERSION:=0.19.1}"
 : "${EXTENSION_CRATE:=pg_koldstore}"
 : "${EXTENSION_SQL_NAME:=koldstore}"
+: "${CARGO_PROFILE:=release-pg}"
 
 build_release_root_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd
@@ -67,7 +68,7 @@ artifact_basename() {
 
 pgrx_package_root() {
   local pg="$1"
-  printf 'target/release/%s-pg%s' "$EXTENSION_SQL_NAME" "$pg"
+  printf 'target/%s/%s-pg%s' "${CARGO_PROFILE}" "${EXTENSION_SQL_NAME}" "$pg"
 }
 
 require_command() {
@@ -91,8 +92,10 @@ run_cargo_pgrx_package() {
   local pg_config="$2"
   ensure_cargo_pgrx
   cargo pgrx init --pg"${pg}" "${pg_config}"
+  echo "packaging pg_koldstore with cargo profile ${CARGO_PROFILE}"
   cargo pgrx package \
     -p "${EXTENSION_CRATE}" \
+    --profile "${CARGO_PROFILE}" \
     --no-default-features \
     --features "pg${pg}" \
     --pg-config "${pg_config}"

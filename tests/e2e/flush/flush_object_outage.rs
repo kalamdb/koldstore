@@ -20,7 +20,7 @@ fn flush_object_outage_keeps_hot_authoritative_and_records_error_job_state() {
 
 #[tokio::test]
 async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "flush_object_outage").await?;
         let table = db
             .create_indexed_items_table("object_outage_items", 20)

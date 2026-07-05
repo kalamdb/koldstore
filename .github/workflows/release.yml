@@ -30,6 +30,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_VERSION: "1.96.0"
   PGRX_VERSION: "0.19.1"
+  CARGO_PROFILE: release-pg
 
 jobs:
   read_version:

@@ -33,7 +33,7 @@ fn migrate_existing_matrix_covers_data_and_constraint_preservation() {
 
 #[tokio::test]
 async fn existing_table_migration_preserves_rows_and_shape_on_pg_matrix() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let client = common::wait_for_postgres(&target).await?;
         install_storage_fixture(&client).await?;
         run_existing_table_scenario(&client, &existing_table_scenario(), target.version).await?;

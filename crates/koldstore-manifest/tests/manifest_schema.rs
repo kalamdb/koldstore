@@ -46,7 +46,7 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
     let decoded: Manifest = serde_json::from_str(&encoded).unwrap();
 
     assert_eq!(decoded.scope_id.as_deref(), Some("user-a"));
-    assert_eq!(decoded.files.total_files, Some(8));
+    assert_eq!(decoded.files.total_files, Some(7));
     assert_eq!(
         decoded.segments[0].pk_filter.as_ref().unwrap().kind,
         "exact"
@@ -94,7 +94,29 @@ fn manifest_batch_append_reserves_once_and_updates_watermarks_once_per_flush() {
     assert_eq!(manifest.segments.len(), 2);
     assert_eq!(manifest.max_seq, 30);
     assert_eq!(manifest.max_commit_seq, 40);
-    assert_eq!(manifest.files.total_files, Some(2));
+    assert_eq!(manifest.files.total_files, Some(0));
+}
+
+#[test]
+fn manifest_omits_unset_optional_fields_on_serialize() {
+    let mut manifest = Manifest::new_shared("app", "items", 1);
+    manifest.append_segment(ManifestSegment::committed(
+        0,
+        "batch-0.parquet",
+        1..=10,
+        11..=20,
+        10,
+        4096,
+        1,
+    ));
+
+    let json = manifest.to_json_value().unwrap();
+
+    assert!(json.get("publish").is_none());
+    assert!(json["segments"][0].get("temp_path").is_none());
+    assert!(json["segments"][0].get("checksum").is_none());
+    assert!(json["segments"][0].get("etag").is_none());
+    assert_eq!(json["files"]["total_files"], 0);
 }
 
 #[test]
@@ -133,7 +155,6 @@ fn golden_manifest_fixture_remains_compatible() {
         json!({
             "kind": "exact",
             "column_ids": [0],
-            "false_positive_rate": null
         })
     );
 }

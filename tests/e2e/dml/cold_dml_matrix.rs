@@ -65,7 +65,7 @@ fn cold_dml_plans_cover_hydrate_update_delete_and_no_default_object_reads() {
 
 #[tokio::test]
 async fn standard_hot_dml_on_managed_table_preserves_system_columns_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "cold_dml_matrix").await?;
         let table = db.create_indexed_items_table("dml_items", 20).await?;
         db.migrate_shared(&table.relation, "id").await?;

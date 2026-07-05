@@ -24,6 +24,7 @@ $Formats = "zip"
 $ExtensionCrate = "pg_koldstore"
 $ExtensionSqlName = "koldstore"
 $PgrxVersion = if ($env:PGRX_VERSION) { $env:PGRX_VERSION } else { "0.19.1" }
+$CargoProfile = if ($env:CARGO_PROFILE) { $env:CARGO_PROFILE } else { "release-pg" }
 
 function Get-ArtifactBaseName {
   param(
@@ -66,12 +67,13 @@ if (-not $SkipBuild) {
   cargo pgrx init "--pg$Pg" $PgConfig
   cargo pgrx package `
     -p $ExtensionCrate `
+    --profile $CargoProfile `
     --no-default-features `
     --features "pg$Pg" `
     --pg-config $PgConfig
 }
 
-$packageRoot = Join-Path $RootDir "target/release/$ExtensionSqlName-pg$Pg"
+$packageRoot = Join-Path $RootDir "target/$CargoProfile/$ExtensionSqlName-pg$Pg"
 if (-not (Test-Path $packageRoot)) {
   throw "expected pgrx package directory $packageRoot"
 }

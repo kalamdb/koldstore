@@ -23,7 +23,7 @@ fn quickstart_matrix_covers_all_documented_scenarios() {
 
 #[tokio::test]
 async fn quickstart_managed_table_keeps_size_and_index_overhead_bounded() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "quickstart_matrix").await?;
         let baseline = db
             .create_indexed_items_table("quickstart_baseline", 2_000)

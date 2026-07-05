@@ -1,6 +1,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+use anyhow::Result;
 use koldstore_core::{CommitSeq, LogicalPk, PkColumn, RowOperation, SeqId};
 use pg_koldstore::sql::events;
 use serde_json::json;
@@ -60,4 +61,64 @@ fn change_feed_orders_flush_cold_delete_hydrate_and_demigration_boundary_events(
         ]
     );
     assert!(changes[2].deleted);
+}
+
+#[tokio::test]
+async fn change_feed_events_are_persisted_and_ordered_on_pgrx() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "change_feed").await?;
+        let table = db
+            .create_indexed_items_table("change_feed_items", 2)
+            .await?;
+        db.migrate_shared(&table.relation, "id").await?;
+
+        db.client
+            .execute(
+                r#"
+                INSERT INTO koldstore.row_events
+                  (table_oid, pk_hash, pk_json, op, seq, commit_seq, deleted, row_image_json)
+                VALUES
+                  ($1::text::regclass::oid, decode('03', 'hex'), '{"id":3}'::jsonb, 'revive', 4, 40, false, '{"boundary":"demigrate"}'::jsonb),
+                  ($1::text::regclass::oid, decode('02', 'hex'), '{"id":2}'::jsonb, 'delete', 3, 30, true, NULL),
+                  ($1::text::regclass::oid, decode('01', 'hex'), '{"id":1}'::jsonb, 'update', 2, 20, false, '{"source":"hydrate"}'::jsonb)
+                "#,
+                &[&table.relation],
+            )
+            .await?;
+
+        let rows = db
+            .client
+            .query(
+                r#"
+                SELECT op, commit_seq, deleted
+                FROM koldstore.row_events
+                WHERE table_oid = $1::text::regclass::oid
+                  AND commit_seq > 10
+                ORDER BY commit_seq
+                "#,
+                &[&table.relation],
+            )
+            .await?;
+        let changes = rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, String>(0),
+                    row.get::<_, i64>(1),
+                    row.get::<_, bool>(2),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            changes,
+            vec![
+                ("update".to_string(), 20, false),
+                ("delete".to_string(), 30, true),
+                ("revive".to_string(), 40, false),
+            ]
+        );
+    }
+
+    Ok(())
 }

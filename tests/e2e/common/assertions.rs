@@ -70,6 +70,22 @@ pub fn assert_catalog_index_plan(plan: &str, index_name: &str) -> Result<()> {
         plan.contains(index_name),
         "expected {index_name} in plan, got:\n{plan}"
     );
+    assert_catalog_plan_is_index_backed(plan)
+}
+
+/// Asserts a catalog plan uses at least one acceptable index.
+pub fn assert_catalog_index_plan_uses_any(plan: &str, index_names: &[&str]) -> Result<()> {
+    anyhow::ensure!(
+        index_names
+            .iter()
+            .any(|index_name| plan.contains(index_name)),
+        "expected one of {} in plan, got:\n{plan}",
+        index_names.join(", ")
+    );
+    assert_catalog_plan_is_index_backed(plan)
+}
+
+fn assert_catalog_plan_is_index_backed(plan: &str) -> Result<()> {
     anyhow::ensure!(
         plan.contains("Index Scan")
             || plan.contains("Index Only Scan")

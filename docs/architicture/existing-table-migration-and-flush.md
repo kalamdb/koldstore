@@ -114,6 +114,66 @@ only old backfilled rows. Rows inserted, updated, or deleted after the
 watermark are skipped by the flush job and remain hot until a later periodic
 flush.
 
+## System Column Semantics (`_seq` vs `_commit_seq`)
+
+pg-koldstore uses two different bigint watermarks:
+
+| Column | Source | Purpose |
+|--------|--------|---------|
+| `_seq` | `koldstore.global_seq` during backfill; `SNOWFLAKE_ID()` for new rows after migration | Monotonic row version / effect id for tie-breaks and diagnostics |
+| `_commit_seq` | `koldstore.global_commit_seq` for all managed writes | Durable commit-order watermark used by `changes_since` and flush pruning |
+
+This split is intentional.
+
+- **Backfilled rows** must receive ordered, deterministic `_seq` values from
+  `koldstore.global_seq` so migration can walk oldest-to-newest safely and set
+  an inclusive `flush_seq_upper_bound` without depending on heap order.
+- **New rows after migration** receive Snowflake `_seq` values from the column
+  default (`SNOWFLAKE_ID()`), giving globally unique version ids for concurrent
+  writers.
+- **`_commit_seq` is never a Snowflake id.** It always comes from
+  `koldstore.global_commit_seq` and represents commit order, not row identity.
+
+### What this means in `manifest.json`
+
+A migrated table that later receives hot DML can therefore show **mixed**
+`_seq` ranges in segment metadata:
+
+- Small values (for example `26938`–`27760`) are backfilled rows from
+  `global_seq`.
+- Large values (for example `332241131154739200`) are Snowflake ids assigned to
+  rows inserted after migration.
+- `min_commit_seq` / `max_commit_seq` stay on the smaller `global_commit_seq`
+  scale because commit order never uses Snowflake.
+
+Top-level `max_seq` and `max_commit_seq` are the maxima across committed
+segments. After hot inserts, `max_seq` may jump to a Snowflake value while
+`max_commit_seq` remains on the commit-sequence scale.
+
+Greenfield tables created with `SNOWFLAKE_ID()` defaults never go through
+`global_seq` backfill, so their cold segments typically show only Snowflake
+`_seq` values.
+
+## Manifest Shape on Flush
+
+Object-store `manifest.json` follows the kalamdb-compatible contract:
+
+- **Segment `path`** is relative to the manifest directory, for example
+  `batch-1.parquet`, not `lifecycle/full_lifecycle_pg16/batch-1.parquet`.
+  The catalog `koldstore.cold_segments.object_path` keeps the storage-root
+  relative path (`{namespace}/{table}/batch-N.parquet`) for internal lookups.
+- **`temp_path`** is omitted on committed segments. It is only used during the
+  publish workflow when a writer stages objects under `.tmp/...` before the
+  manifest commit makes them visible.
+- **`publish`** is omitted until a backend-specific publish identity exists.
+  The stub flush path writes the manifest directly; full object-store publish
+  will populate this block later.
+- **`checksum`** is set to `sha256:<hex>` for each flushed Parquet object.
+  Unset checksums are not serialized.
+- **`files.total_files`** counts only Kalamdb `FILE` datatype objects, not
+  Parquet segments. Parquet batch files live under `segments`; `files` stays at
+  `0` until FILE uploads are implemented.
+
 ## User-Scoped Tables
 
 Shared tables enqueue one initial flush job with an empty scope key. User-scoped

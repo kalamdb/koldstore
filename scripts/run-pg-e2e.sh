@@ -62,4 +62,11 @@ if ! cargo nextest --version >/dev/null 2>&1; then
   echo "error: cargo-nextest is required; install with: cargo install cargo-nextest --locked" >&2
   exit 1
 fi
-cargo nextest run -p e2e --test-threads 1
+
+NEXT_ARGS=(-p e2e --test-threads 1)
+if [[ "${KOLDSTORE_E2E_VERBOSE:-}" == "1" || "${KOLDSTORE_E2E_VERBOSE:-}" == "true" ]]; then
+  echo "E2E verbose logging enabled (KOLDSTORE_E2E_VERBOSE); showing live test output"
+  NEXT_ARGS+=(--no-capture)
+fi
+
+cargo nextest run "${NEXT_ARGS[@]}"

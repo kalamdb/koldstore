@@ -3,7 +3,7 @@ mod common;
 
 use anyhow::Result;
 use koldstore_core::{ScopeKey, SeqId};
-use pg_koldstore::merge_scan::exec::{begin_merge_scan_with_plan, ColdAvailability};
+use pg_koldstore::merge_scan::exec::{ColdAvailability, begin_merge_scan_with_plan};
 use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 
 #[test]
@@ -43,8 +43,8 @@ fn user_scope_cold_pruning_filters_segments_before_stream_open() {
 }
 
 #[tokio::test]
-async fn user_scope_cold_segment_lookup_uses_scope_seq_index_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+async fn user_scope_cold_segment_lookup_is_index_backed_on_pgrx() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "user_scope_cold_pruning").await?;
         let table = db.create_user_notes_table("scope_notes").await?;
         db.migrate_user_scoped(&table.relation, "user_id").await?;
@@ -60,12 +60,22 @@ async fn user_scope_cold_segment_lookup_uses_scope_seq_index_on_pgrx() -> Result
                   AND status = 'active'
                   AND min_seq <= 5
                   AND max_seq >= 5
+                ORDER BY min_seq, max_seq
                 "#,
                 table.relation
             ),
         )
         .await?;
-        common::assertions::assert_catalog_index_plan(&plan, "cold_segments_active_scope_seq_idx")?;
+        common::assertions::assert_catalog_index_plan_uses_any(
+            &plan,
+            &[
+                "cold_segments_active_scope_seq_idx",
+                "cold_segments_active_commit_idx",
+            ],
+        )?;
+        assert!(plan.contains("scope_key = 'user-a'::text"), "{plan}");
+        assert!(plan.contains("min_seq <= 5"), "{plan}");
+        assert!(plan.contains("max_seq >= 5"), "{plan}");
 
         let rows = db
             .client

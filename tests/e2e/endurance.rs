@@ -23,7 +23,7 @@ fn endurance_cycle_contract_covers_repeated_lifecycle_operations() {
 
 #[tokio::test]
 async fn repeated_flush_and_hot_dml_cycles_remain_bounded_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "endurance").await?;
         let baseline = db
             .create_indexed_items_table("endurance_baseline", 512)

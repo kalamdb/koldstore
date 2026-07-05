@@ -32,7 +32,7 @@ fn storage_rotation_contract_keeps_existing_object_paths_stable() {
 
 #[tokio::test]
 async fn storage_rotation_and_session_functions_work_on_pg_matrix() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let client = common::wait_for_postgres(&target).await?;
         client
             .batch_execute("CREATE EXTENSION IF NOT EXISTS koldstore;")

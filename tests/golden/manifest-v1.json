@@ -17,7 +17,6 @@
     {
       "batch": 0,
       "path": "batch-0.parquet",
-      "temp_path": null,
       "min_seq": 1,
       "max_seq": 10,
       "min_commit_seq": 11,
@@ -27,8 +26,7 @@
       "schema_version": 1,
       "pk_filter": {
         "kind": "exact",
-        "column_ids": [0],
-        "false_positive_rate": null
+        "column_ids": [0]
       },
       "status": "committed",
       "checksum": "sha256:golden",

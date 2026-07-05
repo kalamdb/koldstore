@@ -22,7 +22,7 @@ fn jobs_and_recovery_contract_covers_status_retries_and_idempotence() {
 
 #[tokio::test]
 async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "jobs_and_recovery").await?;
         let table = db.create_indexed_items_table("job_items", 16).await?;
         db.migrate_shared(&table.relation, "id").await?;
@@ -100,7 +100,7 @@ async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<(
 
 #[tokio::test]
 async fn extension_catalog_dml_is_blocked_but_storage_api_is_allowed_on_pgrx() -> Result<()> {
-    for target in common::local_pg_matrix() {
+    for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "catalog_dml_blocked").await?;
         let app_role = format!("{}_app", db.schema);
         db.client
