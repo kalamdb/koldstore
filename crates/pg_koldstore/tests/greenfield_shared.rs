@@ -35,7 +35,7 @@ fn sql_extension_exposes_shared_greenfield_migration_contract() {
 
 #[test]
 fn shared_greenfield_request_uses_no_scope_column() {
-    let request = pg_koldstore::sql::ddl::MigrateTableRequest {
+    let request = koldstore_migrate::MigrateTableRequest {
         table_name: "app.shared_items".to_string(),
         table_type: "shared".to_string(),
         storage_name: "local-minio".to_string(),

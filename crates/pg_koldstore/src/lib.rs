@@ -1,14 +1,12 @@
 //! Thin PostgreSQL integration layer for pg-koldstore.
 
 pub mod catalog;
-pub mod flush;
 pub mod guc;
 pub mod hooks;
 pub mod memory;
 pub mod merge_scan;
-pub mod migrate;
 pub mod observability;
-pub mod security;
+pub mod privileges;
 pub mod spi;
 pub mod sql;
 

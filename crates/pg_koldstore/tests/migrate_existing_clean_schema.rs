@@ -1,17 +1,17 @@
-use koldstore_core::{PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape};
-use pg_koldstore::{
-    flush::job::allows_flush_after_initialization,
-    migrate::{
-        backfill::plan_mirror_initialization_batch,
-        jobs::{
-            enqueue_migration_backfill_job_plan, finish_mirror_initialization_plan,
-            MigrationBackfillJobRequest, MigrationBatchSize, MigrationJobPhase,
-        },
-        order::{MigrationOrdering, OrderingSource},
-        QualifiedTableName,
-    },
-    spi::SpiAccess,
+use koldstore_common::{
+    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
 };
+use koldstore_flush::job::allows_flush_after_initialization;
+use koldstore_migrate::{
+    backfill::plan_mirror_initialization_batch,
+    jobs::{
+        enqueue_migration_backfill_job_plan, finish_mirror_initialization_plan,
+        MigrationBackfillJobRequest, MigrationBatchSize, MigrationJobPhase,
+    },
+    order::{MigrationOrdering, OrderingSource},
+    QualifiedTableName,
+};
+use pg_koldstore::spi::SpiAccess;
 use uuid::Uuid;
 
 fn table() -> QualifiedTableName {
@@ -154,7 +154,7 @@ fn mirror_initialization_job_starts_in_capturing_phase_not_system_column_phase()
         Uuid::from_u128(1),
         42,
         &table(),
-        pg_koldstore::migrate::jobs::ManagedTableType::Shared,
+        koldstore_migrate::jobs::ManagedTableType::Shared,
         Uuid::from_u128(2),
         None,
         &ordering(),
@@ -174,7 +174,7 @@ fn finishing_mirror_initialization_marks_metadata_complete_without_enqueuing_flu
     let plan = finish_mirror_initialization_plan(
         Uuid::from_u128(3),
         Uuid::from_u128(4),
-        pg_koldstore::migrate::jobs::MigrationLeaseEpoch::new(5).unwrap(),
+        koldstore_migrate::jobs::MigrationLeaseEpoch::new(5).unwrap(),
     )
     .unwrap();
 

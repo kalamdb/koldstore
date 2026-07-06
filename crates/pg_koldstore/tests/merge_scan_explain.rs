@@ -28,7 +28,7 @@ fn merge_scan_explain_and_plan_contract_are_exposed() {
 
 #[test]
 fn merge_scan_plan_serializes_complete_custom_private_payload() {
-    use koldstore_core::{ColumnClass, Predicate, PredicateValue, ScopeKey, SeqId};
+    use koldstore_common::{ColumnClass, Predicate, PredicateValue, ScopeKey, SeqId};
     use merge_scan::plan::{MergeMetadataAttnums, MergeScanPlan, SegmentHint};
     use serde_json::json;
 

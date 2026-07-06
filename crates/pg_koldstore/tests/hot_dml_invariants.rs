@@ -1,5 +1,6 @@
-use koldstore_core::{CommitSeq, SeqId};
-use pg_koldstore::{hooks::executor, sql::dml};
+use koldstore_common::{CommitSeq, SeqId};
+use koldstore_merge::dml;
+use pg_koldstore::hooks::executor;
 
 #[test]
 fn dml_helpers_keep_one_hot_row_per_pk_by_using_upsert_revival() {
@@ -10,7 +11,7 @@ fn dml_helpers_keep_one_hot_row_per_pk_by_using_upsert_revival() {
     assert!(revive.keeps_one_hot_row_per_pk());
     assert_eq!(
         executor::plan_mirror_capture_effect(revive).operation,
-        koldstore_core::MirrorOperation::Insert
+        koldstore_common::MirrorOperation::Insert
     );
     assert!(dml::ManagedDmlOperation::Update.keeps_one_hot_row_per_pk());
     assert!(dml::ManagedDmlOperation::Delete.keeps_one_hot_row_per_pk());
@@ -27,7 +28,7 @@ fn managed_insert_effect_stamps_live_mirror_operation_and_pending_manifest() {
     assert_eq!(effect.stamp.operation, dml::ManagedDmlOperation::Insert);
     assert_eq!(
         effect.mirror_operation,
-        koldstore_core::MirrorOperation::Insert
+        koldstore_common::MirrorOperation::Insert
     );
     assert_eq!(effect.manifest_sync_state, "pending_write");
     assert_eq!(effect.delete_decision, None);

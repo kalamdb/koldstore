@@ -1,20 +1,20 @@
 #[test]
 fn sql_exposes_demigrate_table_with_rehydrate_default() {
-    let options = pg_koldstore::migrate::rehydrate::DemigrateOptions::default();
+    let options = koldstore_migrate::rehydrate::DemigrateOptions::default();
 
     assert!(options.rehydrate);
     assert_eq!(
         options.mode(),
-        pg_koldstore::migrate::rehydrate::DemigrationMode::Rehydrate
+        koldstore_migrate::rehydrate::DemigrationMode::Rehydrate
     );
 }
 
 #[test]
 fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts() {
-    use pg_koldstore::migrate::rehydrate::{
+    use koldstore_migrate::rehydrate::{
         plan_demigration, ColdArtifactAction, DemigrateOptions, DemigrationContext, DemigrationMode,
     };
-    use pg_koldstore::migrate::QualifiedTableName;
+    use koldstore_migrate::QualifiedTableName;
 
     let plan = plan_demigration(
         DemigrationContext {
@@ -48,7 +48,7 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
 
 #[test]
 fn demigrate_table_request_maps_sql_defaults_to_demigration_options() {
-    let request = pg_koldstore::sql::ddl::DemigrateTableRequest {
+    let request = koldstore_migrate::DemigrateTableRequest {
         table_name: "app.items".to_string(),
         rehydrate: None,
         drop_cold: None,

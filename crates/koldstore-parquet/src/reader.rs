@@ -3,7 +3,7 @@
 use std::pin::Pin;
 
 use arrow_array::RecordBatch;
-use koldstore_core::{CommitSeq, SeqId};
+use koldstore_common::{CommitSeq, SeqId};
 
 /// Boxed record-batch stream.
 pub type RecordBatchFileStream =

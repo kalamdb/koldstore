@@ -1,5 +1,5 @@
-use koldstore_core::{ColumnClass, Predicate, PredicateValue};
-use pg_koldstore::security::rls;
+use koldstore_common::{ColumnClass, Predicate, PredicateValue};
+use koldstore_merge::rls;
 use serde_json::json;
 
 #[test]

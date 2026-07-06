@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+ignored = ["cc"]
+
 [lib]
 crate-type = ["lib", "cdylib"]
 
@@ -23,11 +26,14 @@ arrow-array.workspace = true
 arrow-schema.workspace = true
 chrono.workspace = true
 koldstore-catalog.workspace = true
-koldstore-core.workspace = true
+koldstore-common.workspace = true
+koldstore-flush.workspace = true
 koldstore-manifest.workspace = true
 koldstore-merge.workspace = true
 koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
+koldstore-migrate.workspace = true
+koldstore-schema.workspace = true
 koldstore-storage.workspace = true
 pgrx = { workspace = true, optional = true }
 hex.workspace = true
@@ -38,6 +44,13 @@ thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+koldstore-common.workspace = true
+koldstore-flush.workspace = true
+koldstore-merge.workspace = true
+koldstore-migrate.workspace = true
+koldstore-storage.workspace = true
 
 [build-dependencies]
 cc = "1"

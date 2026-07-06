@@ -1,6 +1,6 @@
 //! CustomScan plan serialization.
 
-use koldstore_core::{Predicate, Result, ScopeKey, SeqId};
+use koldstore_common::{Predicate, Result, ScopeKey, SeqId};
 use serde::{Deserialize, Serialize};
 
 /// Attribute numbers for merge metadata projected during hot/cold reads.

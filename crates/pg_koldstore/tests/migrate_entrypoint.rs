@@ -1,6 +1,6 @@
-use pg_koldstore::migrate::{plan_empty_table_migration, MigrationError, MigrationTableContext};
+use koldstore_migrate::MigrateTableRequest;
+use koldstore_migrate::{plan_empty_table_migration, MigrationError, MigrationTableContext};
 use pg_koldstore::spi::SpiAccess;
-use pg_koldstore::sql::ddl::MigrateTableRequest;
 use uuid::Uuid;
 
 fn shared_request() -> MigrateTableRequest {

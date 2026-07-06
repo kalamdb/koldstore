@@ -1,8 +1,9 @@
-use koldstore_catalog::{MirrorInitializationState, SchemaColumn};
-use koldstore_core::{
+use koldstore_catalog::MirrorInitializationState;
+use koldstore_common::{
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
 };
-use pg_koldstore::migrate::{mirror, register, QualifiedTableName};
+use koldstore_migrate::{mirror, register, QualifiedTableName};
+use koldstore_schema::SchemaColumn;
 use uuid::Uuid;
 
 fn pk_shape() -> PrimaryKeyShape {
@@ -61,6 +62,7 @@ fn registry_metadata_records_clean_schema_mirror_without_system_columns() {
         mirror_relation: Some("koldstore.messages__cl".to_string()),
         primary_key_shape: Some(pk_shape()),
         initialization_state: MirrorInitializationState::Complete,
+        active: true,
         primary_key: vec!["id".to_string()],
         columns: vec![
             SchemaColumn::app("id", "bigint", false),

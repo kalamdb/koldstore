@@ -5,9 +5,9 @@ use std::sync::{
     Mutex,
 };
 
-use koldstore_core::{CommitSeq, Result, ScopeKey};
+use koldstore_common::{CommitSeq, Result, ScopeKey};
 #[cfg(feature = "pg")]
-use koldstore_core::{Diagnostic, KoldstoreError};
+use koldstore_common::{Diagnostic, KoldstoreError};
 
 static NEXT_COMMIT_SEQ: AtomicI64 = AtomicI64::new(1);
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;

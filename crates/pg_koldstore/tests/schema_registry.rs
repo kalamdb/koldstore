@@ -1,11 +1,12 @@
-use koldstore_catalog::{MirrorInitializationState, SchemaColumn};
-use koldstore_core::{
+use koldstore_catalog::MirrorInitializationState;
+use koldstore_common::{
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
 };
-use pg_koldstore::migrate::register::{
+use koldstore_migrate::register::{
     cold_metadata_config, plan_schema_registry_insert_with_id, IndexedColumnSource,
     RegistrationMetadata, INITIAL_SCHEMA_VERSION,
 };
+use koldstore_schema::SchemaColumn;
 use pg_koldstore::spi::SpiAccess;
 use uuid::Uuid;
 
@@ -32,6 +33,7 @@ fn metadata() -> RegistrationMetadata {
         mirror_relation: Some("koldstore.items__cl".to_string()),
         primary_key_shape: Some(pk_shape()),
         initialization_state: MirrorInitializationState::Complete,
+        active: true,
         primary_key: vec!["id".to_string()],
         columns: vec![
             SchemaColumn::app("id", "bigint", false),
@@ -219,6 +221,7 @@ fn schema_registry_plan_uses_parameterized_upsert_sql() {
 
     for placeholder in [
         "$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14",
+        "$15",
     ] {
         assert!(
             plan.statement.sql.contains(placeholder),

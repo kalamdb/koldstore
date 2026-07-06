@@ -1,23 +1,23 @@
 #[test]
 fn archive_detach_mode_warns_about_cold_only_rows() {
-    let options = pg_koldstore::migrate::rehydrate::DemigrateOptions {
+    let options = koldstore_migrate::rehydrate::DemigrateOptions {
         rehydrate: false,
         drop_cold: false,
     };
 
     assert_eq!(
         options.mode(),
-        pg_koldstore::migrate::rehydrate::DemigrationMode::ArchiveDetach
+        koldstore_migrate::rehydrate::DemigrationMode::ArchiveDetach
     );
     assert!(!options.requires_successful_rehydrate());
 }
 
 #[test]
 fn archive_detach_plan_skips_rehydrate_and_warns_about_invisible_cold_rows() {
-    use pg_koldstore::migrate::rehydrate::{
+    use koldstore_migrate::rehydrate::{
         plan_demigration, ColdArtifactAction, DemigrateOptions, DemigrationContext, DemigrationMode,
     };
-    use pg_koldstore::migrate::QualifiedTableName;
+    use koldstore_migrate::QualifiedTableName;
 
     let plan = plan_demigration(
         DemigrationContext {

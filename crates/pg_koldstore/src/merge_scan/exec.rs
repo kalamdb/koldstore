@@ -1,6 +1,6 @@
 //! CustomScan execution glue.
 
-use koldstore_core::{ColdRow, HotRow};
+use koldstore_common::{ColdRow, HotRow};
 use koldstore_merge::{resolve_rows, ResolvedRow};
 use thiserror::Error;
 
@@ -144,8 +144,8 @@ pub fn begin_merge_scan_with_plan(
 }
 
 fn segment_matches_scope(
-    plan_scope: Option<&koldstore_core::ScopeKey>,
-    segment_scope: Option<&koldstore_core::ScopeKey>,
+    plan_scope: Option<&koldstore_common::ScopeKey>,
+    segment_scope: Option<&koldstore_common::ScopeKey>,
 ) -> bool {
     match (plan_scope, segment_scope) {
         (Some(plan_scope), Some(segment_scope)) => plan_scope == segment_scope,

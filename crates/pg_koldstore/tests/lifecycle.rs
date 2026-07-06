@@ -1,6 +1,5 @@
 use pg_koldstore::{
-    catalog, flush, guc, hooks, koldstore_version, memory, migrate, observability, security, spi,
-    sql,
+    catalog, guc, hooks, koldstore_version, memory, observability, privileges, spi, sql,
 };
 
 #[test]
@@ -29,23 +28,23 @@ fn guc_definitions_include_public_and_internal_settings() {
 
 #[test]
 fn application_roles_cannot_set_internal_gucs() {
-    assert!(security::privileges::can_set_guc(
-        security::privileges::RoleClass::Application,
+    assert!(privileges::can_set_guc(
+        privileges::RoleClass::Application,
         "koldstore.user_id",
     ));
-    assert!(!security::privileges::can_set_guc(
-        security::privileges::RoleClass::Application,
+    assert!(!privileges::can_set_guc(
+        privileges::RoleClass::Application,
         "koldstore.internal_system_write",
     ));
-    assert!(security::privileges::can_set_guc(
-        security::privileges::RoleClass::Superuser,
+    assert!(privileges::can_set_guc(
+        privileges::RoleClass::Superuser,
         "koldstore.internal_system_write",
     ));
 }
 
 #[test]
 fn commit_sequence_allocator_is_monotonic_for_test_shell() {
-    use koldstore_core::ScopeKey;
+    use koldstore_common::ScopeKey;
 
     let first = hooks::xact::allocate_commit_seq_for_tests().unwrap();
     let second = hooks::xact::allocate_commit_seq_for_tests().unwrap();
@@ -92,8 +91,10 @@ fn hook_shell_exposes_required_hook_names() {
 
 #[test]
 fn migration_helpers_match_contract() {
-    assert!(migrate::constraints::primary_key_shape_supported(&["id"]));
-    assert!(!migrate::constraints::primary_key_shape_supported(&[]));
+    assert!(koldstore_migrate::constraints::primary_key_shape_supported(
+        &["id"]
+    ));
+    assert!(!koldstore_migrate::constraints::primary_key_shape_supported(&[]));
 }
 
 #[test]
@@ -101,7 +102,7 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
     assert_eq!(spi::KOLDSTORE_SQLSTATE, "XXKLD");
     assert_eq!(
         spi::map_spi_error("select", "permission denied").to_string(),
-        "SPI select failed: permission denied"
+        "SQL select failed: permission denied"
     );
 
     let select =
@@ -204,7 +205,7 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
         "SELECT * FROM koldstore.items__cl WHERE seq > $1::bigint",
         [koldstore_mirror::SqlParamType::BigInt],
     );
-    let spi_statement = spi::mirror_to_spi(mirror_statement).unwrap();
+    let spi_statement = koldstore_mirror::mirror_to_sql(mirror_statement).unwrap();
     assert_eq!(spi_statement.param_types, vec![spi::SqlParamType::BigInt]);
 
     let relation = catalog::decode::relation_context(&serde_json::json!({
@@ -226,7 +227,7 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
     let missing = catalog::decode::relation_context(&serde_json::json!({"namespace": "public"}));
     assert!(missing.unwrap_err().contains("missing string field `name`"));
 
-    let snapshot = catalog::cache::decode_managed_table_snapshot(&serde_json::json!({
+    let snapshot = koldstore_catalog::decode_managed_table_snapshot(&serde_json::json!({
         "table_oid": 42,
         "schema_version": 3,
         "active": true,
@@ -240,7 +241,7 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
     assert_eq!(snapshot.table_oid, 42);
     assert_eq!(snapshot.schema_version, 3);
     assert!(snapshot.active);
-    assert_eq!(snapshot.mirror_relation.name, "items__cl");
+    assert_eq!(snapshot.mirror_relation.relation(), "items__cl");
     assert_eq!(snapshot.primary_key_columns, vec!["id".to_string()]);
     assert!(snapshot.scope_column.is_none());
 }
@@ -307,8 +308,8 @@ fn sql_migration_keeps_behavior_in_rust_pgrx_modules() {
 
 #[test]
 fn operation_boundaries_document_safe_defaults() {
-    assert!(flush::worker::requires_shared_preload());
-    assert!(flush::cleanup::cleanup_allowed(true));
-    assert!(!flush::cleanup::cleanup_allowed(false));
-    assert_eq!(sql::events::DEFAULT_CHANGE_LIMIT, 1000);
+    assert!(koldstore_flush::worker::requires_shared_preload());
+    assert!(koldstore_flush::cleanup::cleanup_allowed(true));
+    assert!(!koldstore_flush::cleanup::cleanup_allowed(false));
+    assert_eq!(koldstore_merge::events::DEFAULT_CHANGE_LIMIT, 1000);
 }

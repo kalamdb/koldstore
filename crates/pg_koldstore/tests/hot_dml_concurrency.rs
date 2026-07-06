@@ -1,8 +1,6 @@
-use koldstore_core::ScopeKey;
-use pg_koldstore::{
-    hooks::xact::{CommitSequenceAllocator, CommitSequenceDomain},
-    sql::dml::ManagedDmlOperation,
-};
+use koldstore_common::ScopeKey;
+use koldstore_merge::dml::ManagedDmlOperation;
+use pg_koldstore::hooks::xact::{CommitSequenceAllocator, CommitSequenceDomain};
 
 #[test]
 fn commit_sequence_allocator_is_monotonic_for_same_pk_writers_with_rollback_gaps() {

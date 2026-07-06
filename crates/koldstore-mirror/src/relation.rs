@@ -1,6 +1,6 @@
 //! Mirror relation naming.
 
-use koldstore_core::{is_safe_identifier, TableName};
+use koldstore_common::{is_safe_identifier, TableName};
 
 use crate::{MirrorError, MirrorResult};
 

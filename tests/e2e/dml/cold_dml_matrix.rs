@@ -2,8 +2,8 @@
 mod common;
 
 use anyhow::Result;
-use koldstore_core::TableName;
-use pg_koldstore::sql::dml::{
+use koldstore_common::TableName;
+use koldstore_merge::dml::{
     plan_delete_row, plan_hydrate_pk, plan_update_row, ColdUpdateOutcome, DeleteInputState,
     DeleteRowRequest, HydratePkRequest, UpdateRowRequest,
 };

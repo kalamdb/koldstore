@@ -2,9 +2,10 @@
 
 use uuid::Uuid;
 
+use koldstore_migrate::QualifiedTableName;
+
 use crate::{
     catalog::{decode, queries},
-    migrate::QualifiedTableName,
     spi,
 };
 

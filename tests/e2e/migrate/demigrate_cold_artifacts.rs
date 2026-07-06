@@ -2,10 +2,10 @@
 mod common;
 
 use anyhow::Result;
-use pg_koldstore::migrate::rehydrate::{
+use koldstore_migrate::rehydrate::{
     plan_demigration, ColdArtifactAction, DemigrateOptions, DemigrationContext,
 };
-use pg_koldstore::migrate::QualifiedTableName;
+use koldstore_migrate::QualifiedTableName;
 
 #[test]
 fn demigrate_cold_artifacts_are_retained_by_default_and_dropped_only_after_rehydrate() {

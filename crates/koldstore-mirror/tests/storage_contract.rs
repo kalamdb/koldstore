@@ -1,4 +1,4 @@
-use koldstore_core::{
+use koldstore_common::{
     MirrorOperation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
     TableName,
 };

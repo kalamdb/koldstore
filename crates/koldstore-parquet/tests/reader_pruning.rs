@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use koldstore_core::{CommitSeq, SeqId};
+use koldstore_common::{CommitSeq, SeqId};
 use koldstore_parquet::{
     ColumnStats, FooterSummary, ParquetReadOptions, RowGroupPruner, RowGroupStats,
 };

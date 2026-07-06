@@ -1,6 +1,6 @@
 //! Low-level mirror write SQL builders.
 
-use koldstore_core::{is_safe_identifier, quote_ident, MirrorOperation};
+use koldstore_common::{is_safe_identifier, quote_ident, MirrorOperation};
 
 use crate::columns::MirrorColumn;
 use crate::{MirrorError, MirrorRelation, MirrorResult, MirrorStatement, SqlParamType};

@@ -1,8 +1,8 @@
-use koldstore_core::{
+use koldstore_common::{
     PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
     PrimaryKeyShape,
 };
-use pg_koldstore::migrate::{mirror, register, QualifiedTableName};
+use koldstore_migrate::{mirror, register, QualifiedTableName};
 
 fn pk_column(
     name: &str,

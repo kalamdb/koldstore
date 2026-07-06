@@ -1,6 +1,6 @@
 //! Qual classification helpers.
 
-use koldstore_core::{ColumnClass, Predicate, PredicateClass, PredicateValue, Result};
+use koldstore_common::{ColumnClass, Predicate, PredicateClass, PredicateValue, Result};
 
 /// Inclusive integer range extracted for safe row-group pruning.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,5 +1,7 @@
-use koldstore_core::{PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape};
-use pg_koldstore::migrate::{mirror::plan_change_log_mirror_from_columns, QualifiedTableName};
+use koldstore_common::{
+    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+};
+use koldstore_migrate::{mirror::plan_change_log_mirror_from_columns, QualifiedTableName};
 
 #[test]
 fn clean_schema_migration_uses_mirror_table_instead_of_system_columns() {

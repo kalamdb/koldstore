@@ -1,5 +1,5 @@
-use pg_koldstore::migrate::lock::plan_migration_operation_lock;
-use pg_koldstore::migrate::QualifiedTableName;
+use koldstore_migrate::lock::plan_migration_operation_lock;
+use koldstore_migrate::QualifiedTableName;
 use pg_koldstore::spi::SpiAccess;
 
 #[test]
@@ -13,10 +13,8 @@ fn migration_operation_lock_blocks_concurrent_table_conversion_work() {
         .statements
         .iter()
         .all(|statement| statement.access == SpiAccess::ReadWrite));
-    assert_eq!(
-        plan.statements[0].sql,
-        "SELECT pg_advisory_xact_lock($1, $2)"
-    );
+    assert_eq!(plan.statements[0].sql, "SELECT pg_advisory_xact_lock($1)");
+    assert_eq!(plan.lock_key.as_advisory_lock_key(), 0x6b6f466473746f);
     assert_eq!(
         plan.statements[1].sql,
         "LOCK TABLE ONLY \"app\".\"items\" IN ACCESS EXCLUSIVE MODE"

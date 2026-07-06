@@ -1,10 +1,8 @@
-use pg_koldstore::{
-    migrate::{
-        jobs::MigrationJobPhase,
-        order::{CatalogColumn, CatalogPrimaryKey, OrderingSource},
-        plan_existing_table_migration, ExistingTableCatalog, MigrationTableContext,
-    },
-    sql::ddl::MigrateTableRequest,
+use koldstore_migrate::{
+    jobs::MigrationJobPhase,
+    order::{CatalogColumn, CatalogPrimaryKey, OrderingSource},
+    plan_existing_table_migration, ExistingTableCatalog, MigrateTableRequest,
+    MigrationTableContext,
 };
 use uuid::Uuid;
 

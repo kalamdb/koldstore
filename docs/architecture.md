@@ -4,6 +4,9 @@ pg-koldstore is a PostgreSQL extension for normal heap tables. It differs from
 kalamdb internals by keeping PostgreSQL as the transaction, locking, and hot-row
 authority.
 
+See [crate architecture](architecture/crate-architecture.md) for the layered
+Rust crate layout and contributor guidance.
+
 ## PostgreSQL Heap Plus Cold Segments
 
 Managed tables preserve the application primary key and add `_seq`,

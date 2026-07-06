@@ -1,4 +1,7 @@
 //! Safe SPI helper boundary.
+//!
+//! Re-exports pg-free SQL plans from `koldstore-common` and adds PostgreSQL SPI
+//! execution helpers behind the `pg` feature.
 
 use std::{
     collections::hash_map::DefaultHasher,
@@ -6,100 +9,35 @@ use std::{
     sync::Mutex,
 };
 
-use thiserror::Error;
+pub use koldstore_common::sql::{
+    map_sql_error as map_spi_error, SqlAccess as SpiAccess, SqlError as SpiError, SqlParamType,
+    SqlResult as SpiResult, SqlStatement as SpiStatement,
+};
 
 /// SQLSTATE used for pg-koldstore errors.
 pub const KOLDSTORE_SQLSTATE: &str = "XXKLD";
 
-/// SPI helper result.
-pub type SpiResult<T> = Result<T, SpiError>;
-
-/// Mapped SPI error.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("SPI {operation} failed: {message}")]
-pub struct SpiError {
-    /// SPI operation name.
-    pub operation: String,
-    /// Error message.
-    pub message: String,
-}
-
-/// Maps a SPI failure into a typed error.
+/// Maps one pg-free parameter type to a PostgreSQL OID.
+#[cfg(feature = "pg")]
 #[must_use]
-pub fn map_spi_error(operation: &str, message: &str) -> SpiError {
-    SpiError {
-        operation: operation.to_string(),
-        message: message.to_string(),
-    }
-}
-
-/// SPI access mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SpiAccess {
-    /// Read-only catalog access.
-    ReadOnly,
-    /// Read/write catalog access.
-    ReadWrite,
-}
-
-/// Pg-free SQL parameter type metadata used by prepared-plan signatures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SqlParamType {
-    /// PostgreSQL `bigint` / `int8`.
-    BigInt,
-    /// PostgreSQL `integer` / `int4`.
-    Integer,
-    /// PostgreSQL `text`.
-    Text,
-    /// PostgreSQL `jsonb`.
-    Jsonb,
-    /// PostgreSQL `oid`.
-    Oid,
-    /// PostgreSQL `uuid`.
-    Uuid,
-    /// PostgreSQL `boolean`.
-    Boolean,
-}
-
-impl From<koldstore_mirror::SqlParamType> for SqlParamType {
-    fn from(value: koldstore_mirror::SqlParamType) -> Self {
-        match value {
-            koldstore_mirror::SqlParamType::BigInt => Self::BigInt,
-            koldstore_mirror::SqlParamType::Integer => Self::Integer,
-            koldstore_mirror::SqlParamType::Text => Self::Text,
-            koldstore_mirror::SqlParamType::Jsonb => Self::Jsonb,
-            koldstore_mirror::SqlParamType::Oid => Self::Oid,
-            koldstore_mirror::SqlParamType::Uuid => Self::Uuid,
-            koldstore_mirror::SqlParamType::Boolean => Self::Boolean,
-        }
-    }
+fn sql_param_pg_oid(param: SqlParamType) -> pgrx::pg_sys::PgOid {
+    let oid = match param {
+        SqlParamType::BigInt => pgrx::pg_sys::INT8OID,
+        SqlParamType::Integer => pgrx::pg_sys::INT4OID,
+        SqlParamType::Text => pgrx::pg_sys::TEXTOID,
+        SqlParamType::Jsonb => pgrx::pg_sys::JSONBOID,
+        SqlParamType::Oid => pgrx::pg_sys::OIDOID,
+        SqlParamType::Uuid => pgrx::pg_sys::UUIDOID,
+        SqlParamType::Boolean => pgrx::pg_sys::BOOLOID,
+    };
+    pgrx::pg_sys::PgOid::from(oid)
 }
 
 /// Maps pg-free parameter metadata to pgrx PostgreSQL OIDs.
 #[cfg(feature = "pg")]
 #[must_use]
 pub fn pg_param_oids(param_types: &[SqlParamType]) -> Vec<pgrx::pg_sys::PgOid> {
-    param_types
-        .iter()
-        .copied()
-        .map(SqlParamType::pg_oid)
-        .collect()
-}
-
-#[cfg(feature = "pg")]
-impl SqlParamType {
-    fn pg_oid(self) -> pgrx::pg_sys::PgOid {
-        let oid = match self {
-            Self::BigInt => pgrx::pg_sys::INT8OID,
-            Self::Integer => pgrx::pg_sys::INT4OID,
-            Self::Text => pgrx::pg_sys::TEXTOID,
-            Self::Jsonb => pgrx::pg_sys::JSONBOID,
-            Self::Oid => pgrx::pg_sys::OIDOID,
-            Self::Uuid => pgrx::pg_sys::UUIDOID,
-            Self::Boolean => pgrx::pg_sys::BOOLOID,
-        };
-        pgrx::pg_sys::PgOid::from(oid)
-    }
+    param_types.iter().copied().map(sql_param_pg_oid).collect()
 }
 
 /// Cache key for a backend-local prepared SPI plan.
@@ -125,121 +63,6 @@ pub fn prepared_plan_key(statement: &SpiStatement) -> PreparedPlanKey {
     }
 }
 
-/// Validated SPI statement metadata.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpiStatement {
-    /// Human-readable operation name for diagnostics.
-    pub operation: String,
-    /// SQL text.
-    pub sql: String,
-    /// Required SPI access mode.
-    pub access: SpiAccess,
-    /// Bind parameter types by one-based placeholder position.
-    pub param_types: Vec<SqlParamType>,
-}
-
-impl SpiStatement {
-    /// Creates a read-only catalog statement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when operation or SQL text is blank.
-    pub fn read(operation: &str, sql: &str) -> SpiResult<Self> {
-        Self::read_with_params(operation, sql, [])
-    }
-
-    /// Creates a read-only catalog statement with parameter metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when operation or SQL text is blank.
-    pub fn read_with_params(
-        operation: &str,
-        sql: &str,
-        param_types: impl Into<Vec<SqlParamType>>,
-    ) -> SpiResult<Self> {
-        Self::new(operation, sql, SpiAccess::ReadOnly, param_types)
-    }
-
-    /// Creates a read/write catalog statement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when operation or SQL text is blank.
-    pub fn write(operation: &str, sql: &str) -> SpiResult<Self> {
-        Self::write_with_params(operation, sql, [])
-    }
-
-    /// Creates a read/write catalog statement with parameter metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when operation or SQL text is blank.
-    pub fn write_with_params(
-        operation: &str,
-        sql: &str,
-        param_types: impl Into<Vec<SqlParamType>>,
-    ) -> SpiResult<Self> {
-        Self::new(operation, sql, SpiAccess::ReadWrite, param_types)
-    }
-
-    fn new(
-        operation: &str,
-        sql: &str,
-        access: SpiAccess,
-        param_types: impl Into<Vec<SqlParamType>>,
-    ) -> SpiResult<Self> {
-        let operation = operation.trim();
-        let sql = sql.trim();
-        if operation.is_empty() {
-            return Err(map_spi_error(
-                "validate statement",
-                "operation cannot be empty",
-            ));
-        }
-        if sql.is_empty() {
-            return Err(map_spi_error(operation, "sql cannot be empty"));
-        }
-
-        Ok(Self {
-            operation: operation.to_string(),
-            sql: sql.to_string(),
-            access,
-            param_types: param_types.into(),
-        })
-    }
-}
-
-impl TryFrom<koldstore_mirror::MirrorStatement> for SpiStatement {
-    type Error = SpiError;
-
-    fn try_from(statement: koldstore_mirror::MirrorStatement) -> SpiResult<Self> {
-        let access = match statement.access {
-            koldstore_mirror::MirrorAccess::ReadOnly => SpiAccess::ReadOnly,
-            koldstore_mirror::MirrorAccess::ReadWrite => SpiAccess::ReadWrite,
-        };
-        Self::new(
-            statement.label,
-            &statement.sql,
-            access,
-            statement
-                .param_types
-                .into_iter()
-                .map(SqlParamType::from)
-                .collect::<Vec<_>>(),
-        )
-    }
-}
-
-/// Converts a mirror storage statement into SPI metadata.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata is blank or invalid.
-pub fn mirror_to_spi(statement: koldstore_mirror::MirrorStatement) -> SpiResult<SpiStatement> {
-    statement.try_into()
-}
-
 /// SPI execution result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpiRows {
@@ -255,24 +78,6 @@ pub trait SpiExecutor {
     ///
     /// Returns an error when the underlying SPI call fails.
     fn execute(&self, statement: SpiStatement) -> SpiResult<SpiRows>;
-}
-
-/// Executes a read-only catalog statement.
-///
-/// # Errors
-///
-/// Returns an error if the statement is not read-only or execution fails.
-pub fn execute_catalog_read(
-    executor: &impl SpiExecutor,
-    statement: SpiStatement,
-) -> SpiResult<SpiRows> {
-    if statement.access != SpiAccess::ReadOnly {
-        return Err(map_spi_error(
-            &statement.operation,
-            "read helper requires read-only statement",
-        ));
-    }
-    executor.execute(statement)
 }
 
 /// Executes a read/write catalog statement.
@@ -347,35 +152,6 @@ impl SpiExecutor for RecordingSpiExecutor {
             .map_err(|_| map_spi_error(&statement.operation, "recording executor lock poisoned"))?
             .push(statement);
         Ok(SpiRows { rows_affected: 1 })
-    }
-}
-
-/// PostgreSQL SPI executor.
-#[cfg(feature = "pg")]
-#[derive(Debug, Default)]
-pub struct PgSpiExecutor;
-
-#[cfg(feature = "pg")]
-impl SpiExecutor for PgSpiExecutor {
-    fn execute(&self, statement: SpiStatement) -> SpiResult<SpiRows> {
-        let rows = match statement.access {
-            SpiAccess::ReadOnly => pgrx::Spi::connect(|client| {
-                client
-                    .select(&statement.sql, None, &[])
-                    .map(|tuples| SpiRows {
-                        rows_affected: tuples.len() as u64,
-                    })
-            }),
-            SpiAccess::ReadWrite => pgrx::Spi::connect_mut(|client| {
-                client
-                    .update(&statement.sql, None, &[])
-                    .map(|tuples| SpiRows {
-                        rows_affected: tuples.len() as u64,
-                    })
-            }),
-        }
-        .map_err(|error| map_spi_error(&statement.operation, &error.to_string()))?;
-        Ok(rows)
     }
 }
 
@@ -465,6 +241,19 @@ fn execute_prepared_once<R>(
     }
 }
 
+/// Decodes the first column of the first SPI row when present.
+#[cfg(feature = "pg")]
+pub(crate) fn first_row<T>(tuples: pgrx::spi::SpiTupleTable<'_>) -> pgrx::spi::Result<Option<T>>
+where
+    T: pgrx::datum::FromDatum + pgrx::datum::IntoDatum,
+{
+    if tuples.is_empty() {
+        Ok(None)
+    } else {
+        tuples.first().get_one()
+    }
+}
+
 /// Executes a read-only parameterized statement and decodes the first column of
 /// the first row while the SPI connection is still open.
 ///
@@ -481,7 +270,7 @@ where
     T: pgrx::datum::FromDatum + pgrx::datum::IntoDatum,
 {
     require_read_only(statement)?;
-    pgrx::Spi::connect(|client| client.select(&statement.sql, Some(1), args)?.get_one())
+    pgrx::Spi::connect(|client| first_row(client.select(&statement.sql, Some(1), args)?))
         .map_err(|error| map_spi_error(&statement.operation, &error.to_string()))
 }
 
@@ -537,6 +326,6 @@ where
     T: pgrx::datum::FromDatum + pgrx::datum::IntoDatum,
 {
     require_read_write(statement)?;
-    pgrx::Spi::connect_mut(|client| client.update(&statement.sql, Some(1), args)?.get_one())
+    pgrx::Spi::connect_mut(|client| first_row(client.update(&statement.sql, Some(1), args)?))
         .map_err(|error| map_spi_error(&statement.operation, &error.to_string()))
 }

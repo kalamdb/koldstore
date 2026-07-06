@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
-use koldstore_core::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
-use pg_koldstore::{spi::SqlParamType, sql::events};
+use koldstore_common::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
+use koldstore_merge::events;
+use pg_koldstore::spi::SqlParamType;
 use serde_json::json;
 
 fn change(
@@ -111,8 +112,8 @@ fn changes_since_validates_limit_and_reports_seq_retention_gap() {
 
 #[test]
 fn mirror_backed_changes_since_plan_reads_mirror_and_not_row_events() {
-    let table = pg_koldstore::migrate::QualifiedTableName::parse("app.items").unwrap();
-    let mirror = pg_koldstore::migrate::QualifiedTableName::parse("koldstore.items__cl").unwrap();
+    let table = koldstore_migrate::QualifiedTableName::parse("app.items").unwrap();
+    let mirror = koldstore_migrate::QualifiedTableName::parse("koldstore.items__cl").unwrap();
     let plan =
         events::plan_mirror_changes_since(&table, &mirror, &["id".to_string()], Some("tenant_id"))
             .unwrap();

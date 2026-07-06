@@ -1,7 +1,7 @@
 use std::time::{Duration, SystemTime};
 
-use koldstore_core::SeqId;
-use pg_koldstore::flush::policy::{
+use koldstore_common::SeqId;
+use koldstore_flush::policy::{
     select_mirror_flush_candidates, FlushPolicy, FlushPolicyError, MirrorPolicyRow,
 };
 

@@ -1,12 +1,13 @@
-use koldstore_core::{
+use koldstore_common::{
     MirrorOperation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
     PrimaryKeyShape,
 };
-use pg_koldstore::{
-    hooks::{executor, xact},
-    migrate::{mirror, QualifiedTableName},
-    sql::dml::{self, ManagedDmlOperation},
+use koldstore_merge::dml::ManagedDmlOperation;
+use koldstore_migrate::{
+    capture::{plan_mirror_capture, MirrorCapturePlan},
+    mirror, QualifiedTableName,
 };
+use pg_koldstore::hooks::{executor, xact};
 
 fn pk_column(name: &str, ordinal: u16) -> PrimaryKeyColumnShape {
     PrimaryKeyColumnShape::new(
@@ -21,11 +22,11 @@ fn pk_column(name: &str, ordinal: u16) -> PrimaryKeyColumnShape {
     )
 }
 
-fn capture_plan(columns: Vec<PrimaryKeyColumnShape>) -> dml::MirrorCapturePlan {
+fn capture_plan(columns: Vec<PrimaryKeyColumnShape>) -> MirrorCapturePlan {
     let source = QualifiedTableName::parse("public.messages").unwrap();
     let shape = PrimaryKeyShape::new(columns).unwrap();
     let mirror = mirror::plan_change_log_mirror(&source, &shape).unwrap();
-    dml::plan_mirror_capture(&source, &mirror.mirror_table, shape.columns()).unwrap()
+    plan_mirror_capture(&source, &mirror.mirror_table, shape.columns()).unwrap()
 }
 
 #[test]

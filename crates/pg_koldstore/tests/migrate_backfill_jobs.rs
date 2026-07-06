@@ -1,18 +1,18 @@
-use koldstore_core::{PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape};
-use pg_koldstore::{
-    migrate::{
-        backfill::plan_mirror_initialization_batch,
-        jobs::{
-            claim_migration_jobs_plan, enqueue_migration_backfill_job_plan,
-            finish_mirror_initialization_plan, migration_job_progress_plan, ManagedTableType,
-            MigrationBackfillJobRequest, MigrationBatchSize, MigrationJobPhase,
-            MigrationLeaseEpoch, MigrationLeaseSeconds,
-        },
-        order::{MigrationOrdering, OrderingSource},
-        QualifiedTableName,
-    },
-    spi::SpiAccess,
+use koldstore_common::{
+    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
 };
+use koldstore_migrate::{
+    backfill::plan_mirror_initialization_batch,
+    jobs::{
+        claim_migration_jobs_plan, enqueue_migration_backfill_job_plan,
+        finish_mirror_initialization_plan, migration_job_progress_plan, ManagedTableType,
+        MigrationBackfillJobRequest, MigrationBatchSize, MigrationJobPhase, MigrationLeaseEpoch,
+        MigrationLeaseSeconds,
+    },
+    order::{MigrationOrdering, OrderingSource},
+    QualifiedTableName,
+};
+use pg_koldstore::spi::SpiAccess;
 use uuid::Uuid;
 
 fn table() -> QualifiedTableName {

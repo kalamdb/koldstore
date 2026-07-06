@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use koldstore_core::{ChangeSource, MirrorChange, SeqId};
+use koldstore_common::{ChangeSource, MirrorChange, SeqId};
 use thiserror::Error;
 
 /// Change cursor.

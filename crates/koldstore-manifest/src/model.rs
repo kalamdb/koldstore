@@ -1,4 +1,4 @@
-//! Manifest model.
+//! Manifest serialized model types.
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -30,94 +30,6 @@ pub struct ManifestBatchAppend {
     pub appended_segments: usize,
     /// Number of object-store `manifest.json` writes needed for the batch.
     pub manifest_writes_required: usize,
-}
-
-impl Manifest {
-    /// Creates a shared-table manifest.
-    #[must_use]
-    pub fn new_shared(
-        namespace: impl Into<String>,
-        table: impl Into<String>,
-        schema_version: u32,
-    ) -> Self {
-        Self::new(namespace, table, None, schema_version)
-    }
-
-    /// Creates a user-scoped manifest.
-    #[must_use]
-    pub fn new_user(
-        namespace: impl Into<String>,
-        table: impl Into<String>,
-        scope_id: impl Into<String>,
-        schema_version: u32,
-    ) -> Self {
-        Self::new(namespace, table, Some(scope_id.into()), schema_version)
-    }
-
-    fn new(
-        namespace: impl Into<String>,
-        table: impl Into<String>,
-        scope_id: Option<String>,
-        schema_version: u32,
-    ) -> Self {
-        Self {
-            version: 1,
-            table: table.into(),
-            namespace: Some(namespace.into()),
-            scope_id,
-            schema_version,
-            max_seq: 0,
-            max_commit_seq: 0,
-            updated_at: Utc::now(),
-            publish: None,
-            segments: Vec::new(),
-            files: FilesState::default(),
-        }
-    }
-
-    /// Appends a segment and updates watermarks for visible committed segments.
-    pub fn append_segment(&mut self, segment: ManifestSegment) {
-        let _ = self.append_segment_batch([segment]);
-    }
-
-    /// Appends several segments with one reserved vector growth and one manifest write.
-    #[must_use]
-    pub fn append_segment_batch(
-        &mut self,
-        segments: impl IntoIterator<Item = ManifestSegment>,
-    ) -> ManifestBatchAppend {
-        let segments = segments.into_iter();
-        let (lower_bound, _) = segments.size_hint();
-        self.segments.reserve(lower_bound);
-
-        let mut appended_segments = 0usize;
-        for segment in segments {
-            if segment.status != SegmentStatus::Deleted {
-                self.max_seq = self.max_seq.max(segment.max_seq);
-                self.max_commit_seq = self.max_commit_seq.max(segment.max_commit_seq);
-            }
-            self.segments.push(segment);
-            appended_segments += 1;
-        }
-
-        if appended_segments > 0 {
-            self.updated_at = Utc::now();
-        }
-
-        ManifestBatchAppend {
-            appended_segments,
-            manifest_writes_required: usize::from(appended_segments > 0),
-        }
-    }
-
-    /// Serializes the manifest to JSON.
-    ///
-    /// # Errors
-    ///
-    /// Returns JSON serialization errors.
-    pub fn to_json_value(&self) -> Result<serde_json::Value, serde_json::Error> {
-        serde_json::to_value(self)
-    }
 }
 
 /// Backend-specific publish metadata.

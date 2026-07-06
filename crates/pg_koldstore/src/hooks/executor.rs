@@ -1,9 +1,9 @@
 //! DML hook and clean-schema mirror integration.
 
-use koldstore_core::{CommitSeq, MirrorOperation, ScopeKey, SeqId, TableKind};
+use koldstore_common::{CommitSeq, MirrorOperation, ScopeKey, SeqId, TableKind};
 
-use crate::security::scope::{self, ScopeError};
-use crate::sql::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation};
+use koldstore_common::scope::{self, ScopeError};
+use koldstore_merge::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation};
 
 /// Manifest cache state written after hot DML dirties a managed scope.
 pub const HOT_DML_MANIFEST_SYNC_STATE: &str = "pending_write";

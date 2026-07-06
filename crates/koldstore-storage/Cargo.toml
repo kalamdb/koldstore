@@ -6,8 +6,11 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+koldstore-common.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

@@ -4,7 +4,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use koldstore_catalog::{
     FkPolicyDecision, FlushPolicy, ManagedTableMeta, MirrorInitializationState,
 };
-use koldstore_core::{
+use koldstore_common::{
     ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId, TableKind,
 };
 use koldstore_merge::resolve_rows;

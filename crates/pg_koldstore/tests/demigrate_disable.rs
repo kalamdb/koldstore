@@ -1,6 +1,6 @@
 #[test]
 fn demigration_sql_deactivates_managed_metadata() {
-    use pg_koldstore::migrate::rehydrate::{plan_catalog_deactivation, plan_flush_deactivation};
+    use koldstore_migrate::rehydrate::{plan_catalog_deactivation, plan_flush_deactivation};
 
     let catalog = plan_catalog_deactivation(42).unwrap();
     let flush = plan_flush_deactivation(42).unwrap();
@@ -17,8 +17,8 @@ fn demigration_sql_deactivates_managed_metadata() {
 
 #[test]
 fn migration_rollback_cleanup_removes_partial_catalog_rows_and_mirror_only() {
-    use pg_koldstore::migrate::rollback::RollbackCleanup;
-    use pg_koldstore::migrate::QualifiedTableName;
+    use koldstore_migrate::rollback::RollbackCleanup;
+    use koldstore_migrate::QualifiedTableName;
     use pg_koldstore::spi::SpiAccess;
 
     let table = QualifiedTableName::parse("app.items").unwrap();

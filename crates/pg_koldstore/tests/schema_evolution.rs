@@ -5,6 +5,6 @@ fn schema_evolution_contract_covers_add_column_and_type_rejection() {
 
     assert!(spec.contains("schema"));
     assert!(sql.contains("schema_version"));
-    assert!(!pg_koldstore::migrate::constraints::type_supported("bytea"));
-    assert!(pg_koldstore::migrate::constraints::type_supported("jsonb"));
+    assert!(!koldstore_migrate::constraints::type_supported("bytea"));
+    assert!(koldstore_migrate::constraints::type_supported("jsonb"));
 }

@@ -1,7 +1,7 @@
-use pg_koldstore::{
-    flush::cleanup::plan_clean_schema_cleanup, migrate::QualifiedTableName, spi::SqlParamType,
-    sql::ops::plan_mirror_flush_selection,
-};
+use koldstore_flush::cleanup::plan_clean_schema_cleanup;
+use koldstore_flush::ops::plan_mirror_flush_selection;
+use koldstore_migrate::QualifiedTableName;
+use pg_koldstore::spi::SqlParamType;
 
 fn table() -> QualifiedTableName {
     QualifiedTableName::parse("app.items").unwrap()

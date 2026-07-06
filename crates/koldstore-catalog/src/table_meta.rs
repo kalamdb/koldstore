@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use koldstore_core::{Diagnostic, KoldstoreError, PrimaryKeyShape, Result, TableKind};
+use koldstore_common::{Diagnostic, KoldstoreError, PrimaryKeyShape, Result, TableKind};
 
 /// Flush policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

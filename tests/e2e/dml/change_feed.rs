@@ -3,8 +3,8 @@ mod common;
 
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
-use koldstore_core::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
-use pg_koldstore::sql::events;
+use koldstore_common::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
+use koldstore_merge::events;
 use serde_json::json;
 
 fn change(id: i64, seq: i64, operation: MirrorOperation, source: ChangeSource) -> MirrorChange {

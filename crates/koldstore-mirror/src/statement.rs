@@ -1,5 +1,7 @@
 //! Pg-free SQL statement contract for mirror storage operations.
 
+pub use koldstore_common::SqlParamType;
+
 /// Mirror statement access mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MirrorAccess {
@@ -7,25 +9,6 @@ pub enum MirrorAccess {
     ReadOnly,
     /// Statement mutates mirror storage.
     ReadWrite,
-}
-
-/// Pg-free SQL parameter type metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SqlParamType {
-    /// PostgreSQL `bigint` / `int8`.
-    BigInt,
-    /// PostgreSQL `integer` / `int4`.
-    Integer,
-    /// PostgreSQL `text`.
-    Text,
-    /// PostgreSQL `jsonb`.
-    Jsonb,
-    /// PostgreSQL `oid`.
-    Oid,
-    /// PostgreSQL `uuid`.
-    Uuid,
-    /// PostgreSQL `boolean`.
-    Boolean,
 }
 
 /// Planned mirror storage statement.
@@ -82,5 +65,28 @@ impl MirrorStatement {
             access: MirrorAccess::ReadWrite,
             param_types: param_types.into(),
         }
+    }
+}
+
+/// Converts a mirror statement into a pg-free SQL plan.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is blank or invalid.
+pub fn mirror_to_sql(
+    statement: MirrorStatement,
+) -> koldstore_common::SqlResult<koldstore_common::SqlStatement> {
+    let param_types = statement.param_types;
+    match statement.access {
+        MirrorAccess::ReadOnly => koldstore_common::SqlStatement::read_with_params(
+            statement.label,
+            &statement.sql,
+            param_types,
+        ),
+        MirrorAccess::ReadWrite => koldstore_common::SqlStatement::write_with_params(
+            statement.label,
+            &statement.sql,
+            param_types,
+        ),
     }
 }

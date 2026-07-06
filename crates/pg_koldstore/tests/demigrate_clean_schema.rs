@@ -1,4 +1,4 @@
-use pg_koldstore::migrate::{
+use koldstore_migrate::{
     rehydrate::{plan_demigration, DemigrateOptions, DemigrationContext},
     QualifiedTableName,
 };

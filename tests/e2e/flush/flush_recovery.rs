@@ -8,7 +8,7 @@ fn flush_recovery_plan_deletes_orphan_temp_and_quarantines_unmanifested_final() 
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    use pg_koldstore::flush::recovery::{
+    use koldstore_flush::recovery::{
         plan_recovery_actions, ObjectPath, OrphanObject, RecoveryAction,
     };
 
@@ -40,7 +40,7 @@ fn flush_recovery_plan_deletes_orphan_temp_and_quarantines_unmanifested_final() 
 
 #[tokio::test]
 async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() -> Result<()> {
-    use pg_koldstore::flush::recovery::{
+    use koldstore_flush::recovery::{
         plan_recovery_actions, ObjectPath, OrphanObject, RecoveryAction,
     };
 

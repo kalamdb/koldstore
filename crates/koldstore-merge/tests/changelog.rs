@@ -1,5 +1,5 @@
 use chrono::{TimeZone, Utc};
-use koldstore_core::{ChangeSource, LogicalPk, MirrorChange, MirrorOperation, PkColumn, SeqId};
+use koldstore_common::{ChangeSource, LogicalPk, MirrorChange, MirrorOperation, PkColumn, SeqId};
 use koldstore_merge::{changes_since, ChangeCursor};
 use serde_json::json;
 

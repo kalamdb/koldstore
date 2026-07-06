@@ -1,4 +1,4 @@
-use koldstore_core::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
+use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
 use pg_koldstore::merge_scan::exec::{
     begin_merge_scan, begin_merge_scan_with_plan, execute_merge_scan_with_filters,
     ColdAvailability, FilterPlan, ScanResourceCounters,

@@ -1,4 +1,4 @@
-use koldstore_core::{
+use koldstore_common::{
     ChangeSource, ColdRow, CommitSeq, HotRow, LogicalPk, MirrorChange, MirrorOperation, PkColumn,
     ScopeKey, SeqId,
 };

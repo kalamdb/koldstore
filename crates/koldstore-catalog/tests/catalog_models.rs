@@ -1,26 +1,12 @@
 use koldstore_catalog::{
     ColdPkHint, FkPolicyDecision, HintKind, ManagedTableMeta, MirrorInitializationState, PkLookup,
-    SchemaColumn, SchemaRegistryEntry, SegmentVisibility, TypeMatrix,
+    SegmentVisibility,
 };
-use koldstore_core::{
+use koldstore_common::{
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
     TableKind,
 };
 use uuid::Uuid;
-
-#[test]
-fn type_matrix_reports_supported_and_unsupported_types() {
-    let matrix = TypeMatrix::postgres_15_default();
-
-    assert!(matrix.support_for("int8").supported);
-    assert!(matrix.support_for("text").supported);
-    let unsupported = matrix.support_for("tsvector");
-    assert!(!unsupported.supported);
-    assert!(unsupported
-        .diagnostic
-        .unwrap()
-        .contains("unsupported PostgreSQL type"));
-}
 
 fn pk_shape() -> PrimaryKeyShape {
     PrimaryKeyShape::new(vec![PrimaryKeyColumnShape::new(
@@ -34,22 +20,6 @@ fn pk_shape() -> PrimaryKeyShape {
         true,
     )])
     .unwrap()
-}
-
-#[test]
-fn schema_registry_validation_requires_pk_but_not_system_columns() {
-    let entry = SchemaRegistryEntry {
-        id: Uuid::new_v4(),
-        table_oid: 42,
-        version: 1,
-        columns: vec![SchemaColumn::app("id", "int8", false)],
-    };
-
-    entry.validate(&["id"]).unwrap();
-    assert!(entry.validate(&[]).is_err());
-    assert!(entry.validate(&["missing"]).is_err());
-    assert_eq!(entry.application_columns().len(), 1);
-    assert!(entry.system_columns().is_empty());
 }
 
 #[test]

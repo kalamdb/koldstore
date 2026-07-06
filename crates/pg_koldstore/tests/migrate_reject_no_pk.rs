@@ -1,13 +1,15 @@
 #[test]
 fn migration_sql_rejects_tables_without_primary_key() {
-    assert!(!pg_koldstore::migrate::constraints::primary_key_shape_supported(&[]));
-    assert!(!pg_koldstore::migrate::constraints::primary_key_shape_supported(&[""]));
-    assert!(pg_koldstore::migrate::constraints::primary_key_shape_supported(&["id"]));
+    assert!(!koldstore_migrate::constraints::primary_key_shape_supported(&[]));
+    assert!(!koldstore_migrate::constraints::primary_key_shape_supported(&[""]));
+    assert!(koldstore_migrate::constraints::primary_key_shape_supported(
+        &["id"]
+    ));
 }
 
 #[test]
 fn migration_validation_requires_named_primary_key_columns() {
-    let mut input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    let mut input = koldstore_migrate::constraints::MigrationValidationInput::minimal_shared();
     input.primary_key.clear();
     assert!(input.validate().is_err());
 

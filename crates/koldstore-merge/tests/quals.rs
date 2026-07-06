@@ -1,4 +1,4 @@
-use koldstore_core::{ColumnClass, Predicate, PredicateClass, PredicateValue};
+use koldstore_common::{ColumnClass, Predicate, PredicateClass, PredicateValue};
 use koldstore_merge::{build_pruning_plan, classify_predicates};
 use serde_json::json;
 

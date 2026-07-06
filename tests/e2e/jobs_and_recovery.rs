@@ -8,8 +8,8 @@ fn jobs_and_recovery_contract_covers_status_retries_and_idempotence() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    let recovery = pg_koldstore::sql::ops::recover_segments_plan(
-        Some(koldstore_core::TableName::parse("app.items").unwrap()),
+    let recovery = koldstore_flush::ops::recover_segments_plan(
+        Some(koldstore_common::TableName::parse("app.items").unwrap()),
         false,
     )
     .unwrap();

@@ -8,7 +8,7 @@ fn storage_rotation_contract_keeps_existing_object_paths_stable() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    let registration = pg_koldstore::sql::ddl::StorageRegistration {
+    let registration = koldstore_storage::registration::StorageRegistration {
         name: "local-minio".to_string(),
         storage_type: "s3".to_string(),
         base_path: "s3://koldstore-test/".to_string(),
@@ -18,7 +18,7 @@ fn storage_rotation_contract_keeps_existing_object_paths_stable() {
         user_path_template: "{namespace}/{tableName}/{scopeId}/".to_string(),
     };
     let old_path = registration.render_shared_prefix("app", "items").unwrap();
-    let rotation = pg_koldstore::sql::ddl::alter_storage_credentials_plan(
+    let rotation = koldstore_storage::registration::alter_storage_credentials_plan(
         "local-minio",
         serde_json::json!({"access_key_id": "new"}),
     )

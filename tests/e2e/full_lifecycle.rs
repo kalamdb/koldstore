@@ -482,7 +482,7 @@ async fn flush_table(client: &Client, pg_version: u16) -> Result<i64> {
 
 async fn wait_for_jobs_to_finish(client: &Client, pg_version: u16) -> Result<()> {
     for attempt in 0..120 {
-        let active = common::active_job_count(&client, &relation(pg_version)).await?;
+        let active = common::active_job_count(client, &relation(pg_version)).await?;
         if active == 0 {
             common::log(format!(
                 "pg{pg_version}: jobs idle after {} poll(s)",
@@ -720,7 +720,7 @@ async fn assert_sample_rows_readable(client: &Client, pg_version: u16) -> Result
                   count(*),
                   count(DISTINCT (tenant_id, id)),
                   min(c_text),
-                  max(pad_text_26)
+                  max(c_int8)
                 FROM {relation}
                 "#
             ),
@@ -731,7 +731,7 @@ async fn assert_sample_rows_readable(client: &Client, pg_version: u16) -> Result
     assert_eq!(summary.get::<_, i64>(0), TOTAL_ROWS);
     assert_eq!(summary.get::<_, i64>(1), TOTAL_ROWS);
     assert_eq!(summary.get::<_, String>(2), "text-1");
-    assert_eq!(summary.get::<_, String>(3), format!("pad-26-{TOTAL_ROWS}"));
+    assert_eq!(summary.get::<_, i64>(3), TOTAL_ROWS);
     Ok(())
 }
 

@@ -7,15 +7,9 @@ repository.workspace = true
 
 [dependencies]
 chrono.workspace = true
-koldstore-core.workspace = true
 koldstore-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
-uuid.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [lints]
 workspace = true

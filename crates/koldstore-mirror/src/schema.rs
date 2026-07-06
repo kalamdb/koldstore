@@ -1,6 +1,6 @@
 //! Mirror table schema planning.
 
-use koldstore_core::{is_safe_identifier, quote_ident, PrimaryKeyColumnShape};
+use koldstore_common::{is_safe_identifier, quote_ident, PrimaryKeyColumnShape};
 
 use crate::{MirrorColumn, MirrorError, MirrorRelation, MirrorResult, MirrorStatement};
 

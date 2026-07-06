@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use koldstore_core::{ColdRow, CommitSeq, HotRow, LogicalPk, SeqId};
+use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, SeqId};
 
 /// Row source for tie-breaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

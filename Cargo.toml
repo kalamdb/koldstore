@@ -1,25 +1,35 @@
 [workspace]
 members = [
-    "crates/koldstore-core",
+    "crates/koldstore-common",
+    "crates/koldstore-catalog",
+    "crates/koldstore-schema",
+    "crates/koldstore-setup",
     "crates/koldstore-manifest",
     "crates/koldstore-storage",
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
     "crates/koldstore-mirror",
-    "crates/koldstore-catalog",
+    "crates/koldstore-jobs",
+    "crates/koldstore-flush",
+    "crates/koldstore-migrate",
     "crates/pg_koldstore",
     "benchmarks",
     "tests/e2e",
     "tests/memory",
 ]
 default-members = [
-    "crates/koldstore-core",
+    "crates/koldstore-common",
+    "crates/koldstore-catalog",
+    "crates/koldstore-schema",
+    "crates/koldstore-setup",
     "crates/koldstore-manifest",
     "crates/koldstore-storage",
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
     "crates/koldstore-mirror",
-    "crates/koldstore-catalog",
+    "crates/koldstore-jobs",
+    "crates/koldstore-flush",
+    "crates/koldstore-migrate",
     "crates/pg_koldstore",
     "benchmarks",
     "tests/memory",
@@ -34,13 +44,18 @@ repository = "https://github.com/pg-koldstore/pg-kalam"
 rust-version = "1.96"
 
 [workspace.dependencies]
-koldstore-core = { path = "crates/koldstore-core" }
+koldstore-common = { path = "crates/koldstore-common" }
+koldstore-catalog = { path = "crates/koldstore-catalog" }
+koldstore-schema = { path = "crates/koldstore-schema" }
+koldstore-setup = { path = "crates/koldstore-setup" }
 koldstore-manifest = { path = "crates/koldstore-manifest" }
 koldstore-storage = { path = "crates/koldstore-storage" }
 koldstore-parquet = { path = "crates/koldstore-parquet" }
 koldstore-merge = { path = "crates/koldstore-merge" }
 koldstore-mirror = { path = "crates/koldstore-mirror" }
-koldstore-catalog = { path = "crates/koldstore-catalog" }
+koldstore-jobs = { path = "crates/koldstore-jobs" }
+koldstore-flush = { path = "crates/koldstore-flush" }
+koldstore-migrate = { path = "crates/koldstore-migrate" }
 
 anyhow = "1"
 arrow-array = { version = "59.0.0", default-features = false }

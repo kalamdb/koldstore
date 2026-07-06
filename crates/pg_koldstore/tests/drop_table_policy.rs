@@ -12,10 +12,10 @@ fn ddl_hook_documents_drop_table_cleanup_policy() {
 
 #[test]
 fn drop_table_cleanup_plan_records_retain_delete_and_failed_policies() {
+    use koldstore_migrate::QualifiedTableName;
     use pg_koldstore::hooks::ddl::{
         plan_drop_table_cleanup, DropTableCleanupOutcome, DropTableCleanupPolicy,
     };
-    use pg_koldstore::migrate::QualifiedTableName;
 
     let table = QualifiedTableName::parse("app.items").unwrap();
 
