@@ -53,10 +53,16 @@ CREATE TABLE IF NOT EXISTS koldstore.schemas (
   columns jsonb NOT NULL DEFAULT '[]'::jsonb,
   primary_key jsonb NOT NULL,
   scope_column name,
+  mirror_relation regclass,
+  primary_key_shape jsonb NOT NULL DEFAULT '[]'::jsonb,
+  initialization_state text NOT NULL DEFAULT 'not_started'
+    CHECK (initialization_state IN ('not_started', 'capturing', 'complete', 'failed')),
   indexed_columns jsonb NOT NULL DEFAULT '[]'::jsonb,
   type_matrix jsonb NOT NULL DEFAULT '{}'::jsonb,
   options jsonb NOT NULL DEFAULT '{}'::jsonb,
   storage_id uuid REFERENCES koldstore.storage(id),
+  last_flush_seq bigint NOT NULL DEFAULT 0,
+  last_flush_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (table_oid, version)
@@ -182,28 +188,6 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_pk_hints (
   PRIMARY KEY (table_oid, scope_key, pk_hash, segment_id)
 );
 
-CREATE TABLE IF NOT EXISTS koldstore.row_events (
-  table_oid oid NOT NULL,
-  scope_key text NOT NULL DEFAULT '',
-  pk_hash bytea NOT NULL,
-  pk_json jsonb NOT NULL,
-  op text NOT NULL CHECK (op IN ('insert', 'update', 'delete', 'revive')),
-  seq bigint NOT NULL,
-  commit_seq bigint NOT NULL,
-  deleted boolean NOT NULL,
-  row_image_json jsonb,
-  txid xid8 NOT NULL DEFAULT pg_current_xact_id(),
-  created_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (table_oid, scope_key, commit_seq, pk_hash)
-);
-
-CREATE TABLE IF NOT EXISTS koldstore.row_event_retention (
-  table_oid oid PRIMARY KEY,
-  oldest_retained_commit_seq bigint NOT NULL DEFAULT 0,
-  retention_days integer NOT NULL DEFAULT 30,
-  updated_at timestamptz NOT NULL DEFAULT now()
-);
-
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_seq AS bigint;
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_commit_seq AS bigint;
 
@@ -213,7 +197,5 @@ REVOKE ALL ON
   koldstore.manifest,
   koldstore.jobs,
   koldstore.cold_segments,
-  koldstore.cold_pk_hints,
-  koldstore.row_events,
-  koldstore.row_event_retention
+  koldstore.cold_pk_hints
 FROM PUBLIC;

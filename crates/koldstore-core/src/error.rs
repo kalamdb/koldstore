@@ -59,6 +59,10 @@ pub enum KoldstoreError {
     #[error("invalid primary key: {0}")]
     InvalidPrimaryKey(String),
 
+    /// A clean-schema mirror operation code was invalid.
+    #[error("invalid mirror operation code: {0}")]
+    InvalidOperationCode(i16),
+
     /// A predicate cannot safely be pushed below merge resolution.
     #[error("unsafe predicate pushdown: {0}")]
     UnsafePredicate(String),

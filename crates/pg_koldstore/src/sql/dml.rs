@@ -2,7 +2,10 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use koldstore_core::{CommitSeq, Result, SeqId, TableName};
+use koldstore_core::{CommitSeq, MirrorOperation, PrimaryKeyColumnShape, Result, SeqId, TableName};
+use thiserror::Error;
+
+use crate::{migrate::QualifiedTableName, spi::SpiStatement};
 
 static NEXT_SEQ: AtomicI64 = AtomicI64::new(1);
 
@@ -12,6 +15,243 @@ pub const COLD_DML_FUNCTIONS: &[&str] = &[
     "koldstore.update_row",
     "koldstore.delete_row",
 ];
+
+/// Change-log mirror DML capture planning result.
+pub type MirrorCaptureResult<T> = std::result::Result<T, MirrorCaptureError>;
+
+/// Change-log mirror DML capture planning error.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum MirrorCaptureError {
+    /// A capture trigger cannot be generated without primary-key columns.
+    #[error("mirror capture requires at least one primary-key column")]
+    MissingPrimaryKey,
+    /// SPI statement metadata could not be prepared.
+    #[error("{0}")]
+    Spi(String),
+}
+
+/// Planned mirror DML capture artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorCapturePlan {
+    /// Trigger function that upserts latest-state rows into the mirror.
+    pub function: SpiStatement,
+    /// INSERT capture trigger.
+    pub insert_trigger: SpiStatement,
+    /// UPDATE capture trigger.
+    pub update_trigger: SpiStatement,
+    /// DELETE capture trigger.
+    pub delete_trigger: SpiStatement,
+    /// Idempotent trigger cleanup statement.
+    pub drop_triggers: SpiStatement,
+    /// Idempotent trigger function cleanup statement.
+    pub drop_function: SpiStatement,
+}
+
+impl MirrorCapturePlan {
+    /// Trigger creation statements in dependency order.
+    #[must_use]
+    pub fn trigger_statements(&self) -> [&SpiStatement; 3] {
+        [
+            &self.insert_trigger,
+            &self.update_trigger,
+            &self.delete_trigger,
+        ]
+    }
+
+    /// All create statements in dependency order.
+    #[must_use]
+    pub fn create_statements(&self) -> [&SpiStatement; 4] {
+        [
+            &self.function,
+            &self.insert_trigger,
+            &self.update_trigger,
+            &self.delete_trigger,
+        ]
+    }
+}
+
+/// Plans transactional DML capture from a source table into its latest-state mirror.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied or statement
+/// metadata cannot be represented by the SPI helper.
+pub fn plan_mirror_capture(
+    source_table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key: &[PrimaryKeyColumnShape],
+) -> MirrorCaptureResult<MirrorCapturePlan> {
+    if primary_key.is_empty() {
+        return Err(MirrorCaptureError::MissingPrimaryKey);
+    }
+
+    let function_name = QualifiedTableName {
+        schema: Some("koldstore".to_string()),
+        name: format!("{}_capture", mirror_table.name),
+    };
+    let insert_trigger_name = format!("{}_insert_capture", mirror_table.name);
+    let update_trigger_name = format!("{}_update_capture", mirror_table.name);
+    let delete_trigger_name = format!("{}_delete_capture", mirror_table.name);
+    let source = source_table.quoted();
+    let function = SpiStatement::write(
+        "create change-log mirror capture function",
+        &capture_function_sql(&function_name, mirror_table, primary_key),
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let insert_trigger = SpiStatement::write(
+        "create change-log mirror insert trigger",
+        &capture_trigger_sql(&insert_trigger_name, "INSERT", &source, &function_name),
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let update_trigger = SpiStatement::write(
+        "create change-log mirror update trigger",
+        &capture_trigger_sql(&update_trigger_name, "UPDATE", &source, &function_name),
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let delete_trigger = SpiStatement::write(
+        "create change-log mirror delete trigger",
+        &capture_trigger_sql(&delete_trigger_name, "DELETE", &source, &function_name),
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let drop_triggers = SpiStatement::write(
+        "drop change-log mirror capture triggers",
+        &format!(
+            "DROP TRIGGER IF EXISTS {} ON {source};\nDROP TRIGGER IF EXISTS {} ON {source};\nDROP TRIGGER IF EXISTS {} ON {source}",
+            quote_ident(&insert_trigger_name),
+            quote_ident(&update_trigger_name),
+            quote_ident(&delete_trigger_name)
+        ),
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let drop_function = SpiStatement::write(
+        "drop change-log mirror capture function",
+        &format!("DROP FUNCTION IF EXISTS {}()", function_name.quoted()),
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+
+    Ok(MirrorCapturePlan {
+        function,
+        insert_trigger,
+        update_trigger,
+        delete_trigger,
+        drop_triggers,
+        drop_function,
+    })
+}
+
+fn capture_function_sql(
+    function_name: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key: &[PrimaryKeyColumnShape],
+) -> String {
+    let insert_upsert = upsert_sql(mirror_table, primary_key, MirrorOperation::Insert, "NEW");
+    let update_upsert = upsert_sql(mirror_table, primary_key, MirrorOperation::Update, "NEW");
+    let delete_upsert = upsert_sql(mirror_table, primary_key, MirrorOperation::Delete, "OLD");
+    let pk_update_guard = primary_key_update_guard(primary_key);
+
+    format!(
+        r#"
+CREATE OR REPLACE FUNCTION {function_name}()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, koldstore
+AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        {insert_upsert}
+        RETURN NEW;
+    ELSIF TG_OP = 'UPDATE' THEN
+        {pk_update_guard}
+        {update_upsert}
+        RETURN NEW;
+    ELSIF TG_OP = 'DELETE' THEN
+        {delete_upsert}
+        RETURN OLD;
+    END IF;
+
+    RAISE EXCEPTION 'unsupported pg-koldstore mirror capture operation %', TG_OP;
+END;
+$$
+"#,
+        function_name = function_name.quoted()
+    )
+}
+
+fn capture_trigger_sql(
+    trigger_name: &str,
+    operation: &str,
+    source_table: &str,
+    function_name: &QualifiedTableName,
+) -> String {
+    format!(
+        r#"
+DROP TRIGGER IF EXISTS {trigger_name} ON {source_table};
+CREATE TRIGGER {trigger_name}
+AFTER {operation} ON {source_table}
+FOR EACH ROW EXECUTE FUNCTION {function_name}()
+"#,
+        trigger_name = quote_ident(trigger_name),
+        function_name = function_name.quoted()
+    )
+}
+
+fn upsert_sql(
+    mirror_table: &QualifiedTableName,
+    primary_key: &[PrimaryKeyColumnShape],
+    operation: MirrorOperation,
+    row_ref: &str,
+) -> String {
+    let pk_columns = primary_key
+        .iter()
+        .map(|column| quote_ident(column.column().as_str()))
+        .collect::<Vec<_>>();
+    let pk_values = primary_key
+        .iter()
+        .map(|column| format!("{row_ref}.{}", quote_ident(column.column().as_str())))
+        .collect::<Vec<_>>();
+    let mut insert_columns = pk_columns.clone();
+    insert_columns.extend([
+        "\"seq\"".to_string(),
+        "\"op\"".to_string(),
+        "\"changed_at\"".to_string(),
+        "\"commit_lsn\"".to_string(),
+    ]);
+    let mut values = pk_values;
+    values.extend([
+        "SNOWFLAKE_ID()".to_string(),
+        operation.code().to_string(),
+        "now()".to_string(),
+        "pg_current_wal_lsn()".to_string(),
+    ]);
+
+    format!(
+        "INSERT INTO {mirror} ({insert_columns})\n        VALUES ({values})\n        ON CONFLICT ({conflict_columns}) DO UPDATE\n        SET \"seq\" = EXCLUDED.\"seq\",\n            \"op\" = EXCLUDED.\"op\",\n            \"changed_at\" = EXCLUDED.\"changed_at\",\n            \"commit_lsn\" = EXCLUDED.\"commit_lsn\";",
+        mirror = mirror_table.quoted(),
+        insert_columns = insert_columns.join(", "),
+        values = values.join(", "),
+        conflict_columns = pk_columns.join(", ")
+    )
+}
+
+fn primary_key_update_guard(primary_key: &[PrimaryKeyColumnShape]) -> String {
+    let changed_predicate = primary_key
+        .iter()
+        .map(|column| {
+            let name = quote_ident(column.column().as_str());
+            format!("OLD.{name} IS DISTINCT FROM NEW.{name}")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    format!(
+        "IF {changed_predicate} THEN\n            RAISE EXCEPTION 'pg-koldstore does not support primary-key updates on managed table %', TG_TABLE_NAME;\n        END IF;"
+    )
+}
+
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
 
 /// Result of a DML helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

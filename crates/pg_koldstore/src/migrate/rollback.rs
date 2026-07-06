@@ -7,7 +7,12 @@ use crate::spi::SpiStatement;
 use super::QualifiedTableName;
 
 /// Rollback cleanup phases.
-pub const ROLLBACK_PHASES: &[&str] = &["catalog_rows", "system_columns", "manifest_state"];
+pub const ROLLBACK_PHASES: &[&str] = &[
+    "mirror_artifacts",
+    "catalog_rows",
+    "system_columns",
+    "manifest_state",
+];
 
 /// Rollback cleanup planning result.
 pub type RollbackResult<T> = Result<T, RollbackError>;
@@ -32,6 +37,8 @@ pub struct RollbackCleanup {
     pub quoted_table_name: Option<String>,
     /// Target relation oid.
     pub table_oid: Option<u32>,
+    /// Clean-schema mirror table to drop if it was created before failure.
+    pub mirror_table: Option<QualifiedTableName>,
     /// System columns to remove if the transaction is not already aborting.
     pub system_columns: Vec<String>,
 }
@@ -53,6 +60,7 @@ impl RollbackCleanup {
             table_name: table_name.into(),
             quoted_table_name: None,
             table_oid: None,
+            mirror_table: None,
             system_columns,
         }
     }
@@ -71,8 +79,16 @@ impl RollbackCleanup {
             ),
             quoted_table_name: Some(table.quoted()),
             table_oid: Some(table_oid),
+            mirror_table: None,
             system_columns,
         }
+    }
+
+    /// Adds the mirror table that should be removed on rollback.
+    #[must_use]
+    pub fn with_mirror_table(mut self, mirror_table: QualifiedTableName) -> Self {
+        self.mirror_table = Some(mirror_table);
+        self
     }
 
     /// Builds cleanup statements for partial migration artifacts.
@@ -88,8 +104,17 @@ impl RollbackCleanup {
             .ok_or(RollbackError::MissingTableOid)?;
         let mut statements = Vec::with_capacity(6);
 
+        if let Some(mirror_table) = &self.mirror_table {
+            statements.push(
+                SpiStatement::write(
+                    "cleanup change-log mirror table",
+                    &format!("DROP TABLE IF EXISTS {}", mirror_table.quoted()),
+                )
+                .map_err(|error| RollbackError::Spi(error.to_string()))?,
+            );
+        }
+
         for sql in [
-            "DELETE FROM koldstore.row_events WHERE table_oid = $1",
             "DELETE FROM koldstore.cold_pk_hints WHERE table_oid = $1",
             "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1",

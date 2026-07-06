@@ -6,12 +6,19 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
 };
 
+use koldstore_catalog::MirrorInitializationState;
 use koldstore_core::{CommitSeq, KoldstoreError, Result, ScopeKey, SeqId, StablePkHash};
 use koldstore_parquet::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
 use uuid::Uuid;
 
 /// Manifest sync states used by flush jobs.
 pub const FLUSH_STATES: &[&str] = &["pending_write", "syncing", "in_sync", "stale", "error"];
+
+/// Returns whether a managed table can be selected for flush.
+#[must_use]
+pub const fn allows_flush_after_initialization(state: MirrorInitializationState) -> bool {
+    matches!(state, MirrorInitializationState::Complete)
+}
 
 /// Local manifest cache sync state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

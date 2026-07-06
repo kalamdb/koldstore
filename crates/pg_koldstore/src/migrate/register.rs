@@ -6,7 +6,11 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::spi::SpiStatement;
-use koldstore_catalog::{SchemaColumn, TypeMatrix};
+use koldstore_catalog::{MirrorInitializationState, SchemaColumn, TypeMatrix};
+use koldstore_core::{
+    PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    PrimaryKeyShape,
+};
 
 /// Initial schema version for a managed table.
 pub const INITIAL_SCHEMA_VERSION: u32 = 1;
@@ -23,6 +27,9 @@ INSERT INTO koldstore.schemas AS s (
     columns,
     primary_key,
     scope_column,
+    mirror_relation,
+    primary_key_shape,
+    initialization_state,
     indexed_columns,
     type_matrix,
     options,
@@ -37,10 +44,13 @@ VALUES (
     $5::jsonb,
     $6::jsonb,
     $7,
-    $8::jsonb,
+    $8::text::regclass,
     $9::jsonb,
-    $10::jsonb,
-    $11
+    $10,
+    $11::jsonb,
+    $12::jsonb,
+    $13::jsonb,
+    $14
 )
 ON CONFLICT (table_oid, version) DO UPDATE
 SET active = EXCLUDED.active,
@@ -48,6 +58,9 @@ SET active = EXCLUDED.active,
     columns = EXCLUDED.columns,
     primary_key = EXCLUDED.primary_key,
     scope_column = EXCLUDED.scope_column,
+    mirror_relation = EXCLUDED.mirror_relation,
+    primary_key_shape = EXCLUDED.primary_key_shape,
+    initialization_state = EXCLUDED.initialization_state,
     indexed_columns = EXCLUDED.indexed_columns,
     type_matrix = EXCLUDED.type_matrix,
     options = EXCLUDED.options,
@@ -74,6 +87,12 @@ pub enum RegistryError {
     /// Primary key metadata is missing or invalid.
     #[error("primary_key cannot be empty")]
     MissingPrimaryKey,
+    /// Change-log mirror relation is missing.
+    #[error("mirror_relation cannot be empty")]
+    MissingMirrorRelation,
+    /// Exact primary-key shape is missing.
+    #[error("primary_key_shape cannot be empty")]
+    MissingPrimaryKeyShape,
     /// User-scoped table metadata is missing its scope column.
     #[error("user-scoped table requires scope_column")]
     MissingScopeColumn,
@@ -212,9 +231,15 @@ pub struct RegistrationMetadata {
     pub storage_id: uuid::Uuid,
     /// Scope column.
     pub scope_column: Option<String>,
+    /// Table-specific change-log mirror relation.
+    pub mirror_relation: Option<String>,
+    /// Exact primary-key shape captured from PostgreSQL catalogs.
+    pub primary_key_shape: Option<PrimaryKeyShape>,
+    /// Mirror initialization lifecycle state.
+    pub initialization_state: MirrorInitializationState,
     /// Primary key columns.
     pub primary_key: Vec<String>,
-    /// Column metadata including app and pg-koldstore system columns.
+    /// Application column metadata.
     pub columns: Vec<SchemaColumn>,
     /// Indexed columns used as cold stats/bloom candidates.
     pub indexed_columns: Vec<String>,
@@ -241,6 +266,12 @@ pub struct PreparedRegistrationMetadata {
     pub primary_key: Value,
     /// Effective scope column.
     pub scope_column: Option<String>,
+    /// Stored mirror relation identity.
+    pub mirror_relation: Option<String>,
+    /// Serialized exact primary-key shape.
+    pub primary_key_shape: Value,
+    /// Stored mirror initialization state.
+    pub initialization_state: String,
     /// Serialized indexed column names.
     pub indexed_columns: Value,
     /// Type matrix JSON.
@@ -256,7 +287,7 @@ pub struct PreparedRegistrationMetadata {
 pub struct SchemaRegistryPlan {
     /// Schema registry row id to bind as `$1`.
     pub schema_id: Uuid,
-    /// Prepared metadata values to bind as `$2` through `$11`.
+    /// Prepared metadata values to bind as `$2` through `$14`.
     pub metadata: PreparedRegistrationMetadata,
     /// Parameterized SPI statement.
     pub statement: SpiStatement,
@@ -274,6 +305,13 @@ impl RegistrationMetadata {
                 .primary_key
                 .iter()
                 .all(|column| !column.trim().is_empty())
+            && self
+                .mirror_relation
+                .as_deref()
+                .map(str::trim)
+                .filter(|relation| !relation.is_empty())
+                .is_some()
+            && self.primary_key_shape.is_some()
             && (self.table_type == "shared"
                 || self
                     .scope_column
@@ -305,6 +343,18 @@ impl RegistrationMetadata {
                 .any(|column| column.trim().is_empty())
         {
             return Err(RegistryError::MissingPrimaryKey);
+        }
+        if self
+            .mirror_relation
+            .as_deref()
+            .map(str::trim)
+            .filter(|relation| !relation.is_empty())
+            .is_none()
+        {
+            return Err(RegistryError::MissingMirrorRelation);
+        }
+        if self.primary_key_shape.is_none() {
+            return Err(RegistryError::MissingPrimaryKeyShape);
         }
         if self.table_type == "user"
             && self
@@ -364,6 +414,19 @@ impl RegistrationMetadata {
                 .map(str::trim)
                 .filter(|column| !column.is_empty())
                 .map(ToString::to_string),
+            mirror_relation: self
+                .mirror_relation
+                .as_deref()
+                .map(str::trim)
+                .filter(|relation| !relation.is_empty())
+                .map(ToString::to_string),
+            primary_key_shape: serde_json::to_value(
+                self.primary_key_shape
+                    .as_ref()
+                    .expect("primary_key_shape validated"),
+            )
+            .unwrap_or_else(|_| Value::Array(vec![])),
+            initialization_state: initialization_state_name(self.initialization_state).to_string(),
             indexed_columns: serde_json::json!(self.indexed_columns),
             type_matrix,
             options,
@@ -403,6 +466,122 @@ pub fn plan_schema_registry_insert_with_id(
         metadata,
         statement,
     })
+}
+
+/// Primary-key column shape as decoded from PostgreSQL catalog JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PrimaryKeyShapeCatalogRow {
+    /// Column name.
+    pub column: String,
+    /// One-based primary-key ordinal.
+    pub ordinal: u16,
+    /// PostgreSQL type OID.
+    pub type_oid: u32,
+    /// PostgreSQL type name or rendered base type for domain-backed keys.
+    pub type_name: String,
+    /// PostgreSQL type modifier.
+    pub typmod: i32,
+    /// Optional non-default collation identity.
+    pub collation: Option<String>,
+    /// Optional domain type identity.
+    pub domain_identity: Option<String>,
+    /// Whether PostgreSQL marks the column as non-null.
+    pub not_null: bool,
+}
+
+/// Builds the catalog query that captures exact primary-key shape.
+///
+/// # Errors
+///
+/// Returns an error when `table_oid` is zero or statement metadata cannot be
+/// represented by the SPI helper.
+pub fn primary_key_shape_probe_plan(table_oid: u32) -> RegistryResult<SpiStatement> {
+    if table_oid == 0 {
+        return Err(RegistryError::MissingTableOid);
+    }
+
+    SpiStatement::read(
+        "capture primary-key shape",
+        r#"
+SELECT COALESCE(
+    jsonb_agg(
+        jsonb_build_object(
+            'column', a.attname,
+            'ordinal', key_position.ordinality,
+            'type_oid', a.atttypid::bigint,
+            'type_name', format_type(COALESCE(NULLIF(t.typbasetype, 0), a.atttypid), a.atttypmod),
+            'typmod', a.atttypmod,
+            'collation', CASE
+                WHEN coll.oid IS NULL OR coll.collname = 'default' THEN NULL
+                ELSE format('%I.%I', coll_ns.nspname, coll.collname)
+            END,
+            'domain_identity', CASE
+                WHEN t.typtype = 'd' THEN format('%I.%I', type_ns.nspname, t.typname)
+                ELSE NULL
+            END,
+            'not_null', a.attnotnull
+        )
+        ORDER BY key_position.ordinality
+    )::text,
+    '[]'
+)
+FROM pg_index i
+JOIN unnest(i.indkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
+JOIN pg_attribute a
+  ON a.attrelid = i.indrelid
+ AND a.attnum = key_position.attnum
+JOIN pg_type t
+  ON t.oid = a.atttypid
+JOIN pg_namespace type_ns
+  ON type_ns.oid = t.typnamespace
+LEFT JOIN pg_collation coll
+  ON coll.oid = a.attcollation
+ AND a.attcollation <> 0
+LEFT JOIN pg_namespace coll_ns
+  ON coll_ns.oid = coll.collnamespace
+WHERE i.indrelid = $1::oid
+  AND i.indisprimary
+  AND i.indexprs IS NULL
+"#,
+    )
+    .map_err(|error| RegistryError::Spi(error.to_string()))
+}
+
+/// Converts decoded catalog rows into a type-safe primary-key shape.
+///
+/// # Errors
+///
+/// Returns an error when the catalog rows are empty or contain invalid primary
+/// key metadata.
+pub fn primary_key_shape_from_catalog_rows(
+    rows: Vec<PrimaryKeyShapeCatalogRow>,
+) -> RegistryResult<PrimaryKeyShape> {
+    let columns = rows
+        .into_iter()
+        .map(|row| {
+            Ok(PrimaryKeyColumnShape::new(
+                PkColumn::new(row.column).map_err(|error| RegistryError::Spi(error.to_string()))?,
+                PkOrdinal::new(row.ordinal)
+                    .map_err(|error| RegistryError::Spi(error.to_string()))?,
+                PgTypeOid::new(row.type_oid)
+                    .map_err(|error| RegistryError::Spi(error.to_string()))?,
+                PgTypeName::new(row.type_name)
+                    .map_err(|error| RegistryError::Spi(error.to_string()))?,
+                PgTypmod::new(row.typmod),
+                row.collation
+                    .map(PgCollation::new)
+                    .transpose()
+                    .map_err(|error| RegistryError::Spi(error.to_string()))?,
+                row.domain_identity
+                    .map(PgTypeName::new)
+                    .transpose()
+                    .map_err(|error| RegistryError::Spi(error.to_string()))?,
+                row.not_null,
+            ))
+        })
+        .collect::<RegistryResult<Vec<_>>>()?;
+
+    PrimaryKeyShape::new(columns).map_err(|error| RegistryError::Spi(error.to_string()))
 }
 
 /// Captures supported-type metadata for the columns being registered.
@@ -523,5 +702,16 @@ fn canonical_type_name(type_name: &str) -> &str {
         "character varying" => "varchar",
         "timestamp with time zone" => "timestamptz",
         other => other,
+    }
+}
+
+/// Returns the catalog spelling for a mirror initialization state.
+#[must_use]
+pub fn initialization_state_name(state: MirrorInitializationState) -> &'static str {
+    match state {
+        MirrorInitializationState::NotStarted => "not_started",
+        MirrorInitializationState::Capturing => "capturing",
+        MirrorInitializationState::Complete => "complete",
+        MirrorInitializationState::Failed => "failed",
     }
 }

@@ -5,6 +5,39 @@ use tokio_postgres::Client;
 
 use super::sql::RelationSize;
 
+const INTERNAL_KOLDSTORE_COLUMNS: &[&str] = &["_seq", "_commit_seq", "_deleted", "_user_id"];
+
+/// Asserts an application-visible column list has no KoldStore internal columns.
+///
+/// # Errors
+///
+/// Returns an error when any internal column is present.
+pub fn assert_no_internal_koldstore_columns(column_names: &[String]) -> Result<()> {
+    let found = column_names
+        .iter()
+        .filter(|column| INTERNAL_KOLDSTORE_COLUMNS.contains(&column.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        found.is_empty(),
+        "expected no KoldStore internal columns, found {found:?}"
+    );
+    Ok(())
+}
+
+/// Asserts two ordered SQL identifier lists are identical.
+///
+/// # Errors
+///
+/// Returns an error when the actual and expected lists differ.
+pub fn assert_ordered_identifiers_eq(actual: &[String], expected: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        actual == expected,
+        "expected ordered identifiers {expected:?}, got {actual:?}"
+    );
+    Ok(())
+}
+
 /// Asserts no duplicate hot rows exist for a managed table primary key expression.
 ///
 /// # Errors

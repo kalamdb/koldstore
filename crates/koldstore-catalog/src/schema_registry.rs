@@ -48,11 +48,27 @@ pub struct SchemaRegistryEntry {
 }
 
 impl SchemaRegistryEntry {
+    /// Returns application-owned columns, excluding KoldStore metadata.
+    #[must_use]
+    pub fn application_columns(&self) -> Vec<&SchemaColumn> {
+        self.columns
+            .iter()
+            .filter(|column| !column.system)
+            .collect()
+    }
+
+    /// Returns KoldStore-owned metadata columns if a legacy schema still has any.
+    #[must_use]
+    pub fn system_columns(&self) -> Vec<&SchemaColumn> {
+        self.columns.iter().filter(|column| column.system).collect()
+    }
+
     /// Validates required schema registry invariants.
     ///
     /// # Errors
     ///
-    /// Returns catalog diagnostics for missing primary key or system columns.
+    /// Returns catalog diagnostics for missing primary key or missing primary-key
+    /// columns. Clean-schema entries do not require user-table system columns.
     pub fn validate(&self, primary_key: &[&str]) -> Result<()> {
         if primary_key.is_empty() {
             return Err(KoldstoreError::CatalogValidation {
@@ -69,21 +85,6 @@ impl SchemaRegistryEntry {
                     diagnostic: Diagnostic::new(
                         "missing_primary_key_column",
                         format!("primary key column not present in schema: {pk_column}"),
-                    ),
-                });
-            }
-        }
-
-        for required in ["_seq", "_commit_seq", "_deleted"] {
-            if !self
-                .columns
-                .iter()
-                .any(|column| column.name == required && column.system)
-            {
-                return Err(KoldstoreError::CatalogValidation {
-                    diagnostic: Diagnostic::new(
-                        "missing_system_column",
-                        format!("required system column not present: {required}"),
                     ),
                 });
             }

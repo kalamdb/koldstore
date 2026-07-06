@@ -1,33 +1,35 @@
 use pg_koldstore::sql::events;
 
 #[test]
-fn row_event_sql_contract_contains_insert_update_delete_revive_ops() {
-    use koldstore_core::{CommitSeq, LogicalPk, PkColumn, RowOperation, SeqId};
+fn row_events_catalog_is_not_required_by_clean_schema_default() {
+    use koldstore_core::{
+        PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    };
+    use pg_koldstore::migrate::{mirror::plan_change_log_mirror_from_columns, QualifiedTableName};
 
     let sql = include_str!("../sql/koldstore--0.1.0.sql");
-    for op in ["insert", "update", "delete", "revive"] {
-        assert!(sql.contains(op));
-    }
-    assert!(sql.contains("CREATE TABLE IF NOT EXISTS koldstore.row_events"));
+    assert!(!sql.contains("CREATE TABLE IF NOT EXISTS koldstore.row_events"));
     assert_eq!(events::DEFAULT_CHANGE_LIMIT, 1000);
 
-    let pk = LogicalPk::from_json_object(
-        &serde_json::json!({"id": 42}),
-        &[PkColumn::new("id").unwrap()],
-    )
-    .unwrap();
-    let event = events::append_cold_only_tombstone_event(
-        42,
+    let source = QualifiedTableName::parse("public.messages").unwrap();
+    let pk = PrimaryKeyColumnShape::new(
+        PkColumn::new("id").unwrap(),
+        PkOrdinal::new(1).unwrap(),
+        PgTypeOid::new(20).unwrap(),
+        PgTypeName::new("bigint").unwrap(),
+        PgTypmod::new(-1),
         None,
-        &pk,
-        SeqId::new(10).unwrap(),
-        CommitSeq::new(20).unwrap(),
+        None,
+        true,
     );
+    let mirror = plan_change_log_mirror_from_columns(&source, &[pk]).unwrap();
 
-    assert_eq!(event.op, RowOperation::Delete);
-    assert!(event.deleted);
-    assert_eq!(event.pk_json, serde_json::json!({"id": 42}));
-    assert!(event.row_image_json.is_none());
+    assert!(mirror
+        .create_table
+        .sql
+        .contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"messages__cl\""));
+    assert!(mirror.create_table.sql.contains("\"op\" smallint NOT NULL"));
+    assert!(mirror.create_table.sql.contains("PRIMARY KEY (\"id\")"));
 }
 
 #[test]

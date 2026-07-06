@@ -12,11 +12,11 @@
 
 **Purpose**: Prepare focused modules and helpers for the clean-schema refactor without changing behavior yet.
 
-- [ ] T001 Add `mirror` and `policy` module declarations for planned clean-schema code in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/mod.rs` and `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/mod.rs`
-- [ ] T002 [P] Add reusable clean-schema catalog assertion helpers in `/Users/jamal/git/pg-kalam/tests/e2e/common/catalog.rs`
-- [ ] T003 [P] Add reusable clean-schema SQL assertion helpers in `/Users/jamal/git/pg-kalam/tests/e2e/common/assertions.rs`
-- [ ] T004 [P] Add a regression test fixture helper for single-column, composite, and user-scoped tables in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/clean_schema_helpers.rs`
-- [ ] T005 Document the local pgrx-only verification commands for this feature in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/quickstart.md`
+- [X] T001 Add `mirror` and `policy` module declarations for planned clean-schema code in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/mod.rs` and `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/mod.rs`
+- [X] T002 [P] Add reusable clean-schema catalog assertion helpers in `/Users/jamal/git/pg-kalam/tests/e2e/common/catalog.rs`
+- [X] T003 [P] Add reusable clean-schema SQL assertion helpers in `/Users/jamal/git/pg-kalam/tests/e2e/common/assertions.rs`
+- [X] T004 [P] Add a regression test fixture helper for single-column, composite, and user-scoped tables in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/clean_schema_helpers.rs`
+- [X] T005 Document the local pgrx-only verification commands for this feature in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/quickstart.md`
 
 ---
 
@@ -26,17 +26,17 @@
 
 **Critical**: No user story implementation should start until these tasks are complete.
 
-- [ ] T006 [P] Add unit tests for mirror operation values, latest-state transitions, and delete tombstone state in `/Users/jamal/git/pg-kalam/crates/koldstore-core/tests/core_models.rs`
-- [ ] T007 [P] Add unit tests for exact primary-key shape capture including typmod, collation, domain identity, ordering, and non-nullability in `/Users/jamal/git/pg-kalam/crates/koldstore-core/tests/core_models.rs`
-- [ ] T008 [P] Add unit tests for `rows:N`, `duration:S`, and optional `interval:S` duration-alias parsing in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/flush_policy.rs`
-- [ ] T009 Implement type-safe mirror domain objects and operation enum in `/Users/jamal/git/pg-kalam/crates/koldstore-core/src/row.rs`
-- [ ] T010 Implement enriched primary-key shape/domain helpers in `/Users/jamal/git/pg-kalam/crates/koldstore-core/src/pk.rs`
-- [ ] T011 Implement clean-schema table metadata fields for mirror relation, initialization state, and primary-key shape in `/Users/jamal/git/pg-kalam/crates/koldstore-catalog/src/table_meta.rs`
-- [ ] T012 Update schema registry to store application schema separately from mirror/cold metadata in `/Users/jamal/git/pg-kalam/crates/koldstore-catalog/src/schema_registry.rs`
-- [ ] T013 Replace required `koldstore.row_events` catalog DDL with clean-schema metadata support in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
-- [ ] T014 Implement `rows:N`, `duration:S`, and optional `interval:S` duration-alias parsing in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/policy.rs`
-- [ ] T015 Wire new mirror and policy modules into public crate exports in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/lib.rs`
-- [ ] T016 Run foundational unit tests with `cargo test -p koldstore-core -p koldstore-catalog` and record any failures in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T006 [P] Add unit tests for mirror operation values, latest-state transitions, and delete tombstone state in `/Users/jamal/git/pg-kalam/crates/koldstore-core/tests/core_models.rs`
+- [X] T007 [P] Add unit tests for exact primary-key shape capture including typmod, collation, domain identity, ordering, and non-nullability in `/Users/jamal/git/pg-kalam/crates/koldstore-core/tests/core_models.rs`
+- [X] T008 [P] Add unit tests for `rows:N`, `duration:S`, and optional `interval:S` duration-alias parsing in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/flush_policy.rs`
+- [X] T009 Implement type-safe mirror domain objects and operation enum in `/Users/jamal/git/pg-kalam/crates/koldstore-core/src/row.rs`
+- [X] T010 Implement enriched primary-key shape/domain helpers in `/Users/jamal/git/pg-kalam/crates/koldstore-core/src/pk.rs`
+- [X] T011 Implement clean-schema table metadata fields for mirror relation, initialization state, and primary-key shape in `/Users/jamal/git/pg-kalam/crates/koldstore-catalog/src/table_meta.rs`
+- [X] T012 Update schema registry to store application schema separately from mirror/cold metadata in `/Users/jamal/git/pg-kalam/crates/koldstore-catalog/src/schema_registry.rs`
+- [X] T013 Replace required `koldstore.row_events` catalog DDL with clean-schema metadata support in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
+- [X] T014 Implement `rows:N`, `duration:S`, and optional `interval:S` duration-alias parsing in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/policy.rs`
+- [X] T015 Wire new mirror and policy modules into public crate exports in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/lib.rs`
+- [X] T016 Run foundational unit tests with `cargo test -p koldstore-core -p koldstore-catalog` and record any failures in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
 
 **Checkpoint**: Foundation ready; story implementation can proceed.
 
@@ -50,19 +50,26 @@
 
 ### Tests for User Story 1
 
-- [ ] T017 [P] [US1] Add SQL regression tests proving enablement adds no `_seq`, `_deleted`, `_commit_seq`, `_user_id`, or other KoldStore column to the user table in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/clean_schema_enable.rs`
-- [ ] T018 [P] [US1] Add SQL regression tests proving single-column, composite, typmod, collation, and domain primary keys are preserved in mirror tables in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/change_log_mirror_shape.rs`
-- [ ] T019 [P] [US1] Add e2e greenfield clean-schema assertions in `/Users/jamal/git/pg-kalam/tests/e2e/migrate/greenfield_matrix.rs`
+- [X] T017 [P] [US1] Add SQL regression tests proving enablement adds no `_seq`, `_deleted`, `_commit_seq`, `_user_id`, or other KoldStore column to the user table in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/clean_schema_enable.rs`
+- [X] T018 [P] [US1] Add SQL regression tests proving single-column, composite, typmod, collation, and domain primary keys are preserved in mirror tables in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/change_log_mirror_shape.rs`
+- [X] T019 [P] [US1] Add e2e greenfield clean-schema assertions in `/Users/jamal/git/pg-kalam/tests/e2e/migrate/greenfield_matrix.rs`
 
 ### Implementation for User Story 1
 
-- [ ] T020 [US1] Implement primary-key metadata extraction from PostgreSQL catalogs in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/register.rs`
-- [ ] T021 [US1] Implement mirror table naming, collision checks, and exact-PK `CREATE TABLE` planning in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/mirror.rs`
-- [ ] T022 [US1] Remove default system-column addition from greenfield enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ddl.rs`
-- [ ] T023 [US1] Register mirror relation identity and primary-key shape in managed metadata during enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/register.rs`
-- [ ] T024 [US1] Reject tables without primary keys before creating mirror artifacts in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/constraints.rs`
-- [ ] T025 [US1] Make failed enablement drop inactive mirror artifacts and leave the user schema unchanged in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/rollback.rs`
-- [ ] T026 [US1] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml clean_schema_enable change_log_mirror_shape` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T020 [US1] Implement primary-key metadata extraction from PostgreSQL catalogs in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/register.rs`
+- [X] T021 [US1] Implement mirror table naming, collision checks, and exact-PK `CREATE TABLE` planning in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/mirror.rs`
+- [X] T022 [US1] Remove default system-column addition from greenfield enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ddl.rs`
+- [X] T023 [US1] Register mirror relation identity and primary-key shape in managed metadata during enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/register.rs`
+- [X] T024 [US1] Reject tables without primary keys before creating mirror artifacts in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/constraints.rs`
+- [X] T025 [US1] Make failed enablement drop inactive mirror artifacts and leave the user schema unchanged in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/rollback.rs`
+- [X] T026 [US1] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml clean_schema_enable change_log_mirror_shape` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+
+  Verification on 2026-07-06:
+  - PASS: `cargo test -p pg_koldstore --test clean_schema_enable --test change_log_mirror_shape` (7 tests)
+  - PASS: `cargo test -p pg_koldstore --test schema_registry --test migrate_reject_no_pk` (7 tests)
+  - PASS: `cargo test -p e2e --test greenfield_matrix --no-run`
+  - PASS: `cargo fmt --check`
+  - NOTE: `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml clean_schema_enable change_log_mirror_shape` is not valid for cargo-pgrx 0.19.1 because the first filter is parsed as `PG_VERSION`. The corrected `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16 clean_schema_enable` reached compilation but failed before running filtered tests while linking unrelated integration test binaries (`greenfield_shared`, `lifecycle`) with unresolved PostgreSQL server symbols such as `CopyErrorData` and `CurrentMemoryContext`.
 
 **Checkpoint**: US1 is independently testable and is the MVP.
 
@@ -76,18 +83,25 @@
 
 ### Tests for User Story 2
 
-- [ ] T027 [P] [US2] Add SQL regression tests for INSERT, UPDATE, DELETE, and reinsert mirror upserts in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/change_log_mirror_dml.rs`
-- [ ] T028 [P] [US2] Add transaction rollback and same-primary-key concurrency tests for mirror state in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/change_log_mirror_dml.rs`
-- [ ] T029 [P] [US2] Add e2e DML mirror-state assertions in `/Users/jamal/git/pg-kalam/tests/e2e/dml/change_log_mirror.rs`
+- [X] T027 [P] [US2] Add SQL regression tests for INSERT, UPDATE, DELETE, and reinsert mirror upserts in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/change_log_mirror_dml.rs`
+- [X] T028 [P] [US2] Add transaction rollback and same-primary-key concurrency tests for mirror state in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/change_log_mirror_dml.rs`
+- [X] T029 [P] [US2] Add e2e DML mirror-state assertions in `/Users/jamal/git/pg-kalam/tests/e2e/dml/change_log_mirror.rs`
 
 ### Implementation for User Story 2
 
-- [ ] T030 [US2] Implement DML capture SQL generation for mirror upserts in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/dml.rs`
-- [ ] T031 [US2] Install INSERT/UPDATE/DELETE capture triggers or equivalent hooks during enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/mirror.rs`
-- [ ] T032 [US2] Allocate Snowflake `seq` and mirror `changed_at` transactionally with user DML in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/hooks/executor.rs`
-- [ ] T033 [US2] Implement tombstone-to-insert reinsert behavior with `ON CONFLICT` mirror upsert semantics in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/dml.rs`
-- [ ] T034 [US2] Ensure mirror mutations roll back with the user transaction in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/hooks/xact.rs`
-- [ ] T035 [US2] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml change_log_mirror_dml` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T030 [US2] Implement DML capture SQL generation for mirror upserts in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/dml.rs`
+- [X] T031 [US2] Install INSERT/UPDATE/DELETE capture triggers or equivalent hooks during enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/mirror.rs`
+- [X] T032 [US2] Allocate Snowflake `seq` and mirror `changed_at` transactionally with user DML in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/hooks/executor.rs`
+- [X] T033 [US2] Implement tombstone-to-insert reinsert behavior with `ON CONFLICT` mirror upsert semantics in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/dml.rs`
+- [X] T034 [US2] Ensure mirror mutations roll back with the user transaction in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/hooks/xact.rs`
+- [X] T035 [US2] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml change_log_mirror_dml` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+
+  Verification on 2026-07-06:
+  - PASS: `cargo test -p pg_koldstore --test change_log_mirror_dml` (9 tests)
+  - PASS: `cargo test -p e2e --test change_log_mirror --no-run`
+  - PASS: `cargo check --manifest-path crates/pg_koldstore/Cargo.toml --features pg16 --no-default-features`
+  - PASS: `cargo fmt --check`
+  - NOTE: `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml change_log_mirror_dml` cannot infer a PostgreSQL feature flag with cargo-pgrx 0.19.1. The explicit `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16 change_log_mirror_dml` reached compilation but failed before running filtered tests while linking unrelated integration test binaries (`lifecycle`, `greenfield_shared`) with unresolved PostgreSQL server symbols such as `CopyErrorData` and `CurrentMemoryContext`.
 
 **Checkpoint**: US2 works independently after US1.
 
@@ -101,18 +115,19 @@
 
 ### Tests for User Story 3
 
-- [ ] T036 [P] [US3] Add SQL regression tests for populated-table mirror initialization without base-row deletion in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/migrate_existing_clean_schema.rs`
-- [ ] T037 [P] [US3] Add SQL regression tests proving mirror initialization does not overwrite newer committed DML state in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/migrate_existing_clean_schema.rs`
-- [ ] T038 [P] [US3] Add e2e populated-table migration coverage in `/Users/jamal/git/pg-kalam/tests/e2e/migrate/migrate_existing_matrix.rs`
+- [X] T036 [P] [US3] Add SQL regression tests for populated-table mirror initialization without base-row deletion in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/migrate_existing_clean_schema.rs`
+- [X] T037 [P] [US3] Add SQL regression tests proving mirror initialization does not overwrite newer committed DML state in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/migrate_existing_clean_schema.rs`
+- [X] T038 [P] [US3] Add e2e populated-table migration coverage in `/Users/jamal/git/pg-kalam/tests/e2e/migrate/migrate_existing_matrix.rs`
 
 ### Implementation for User Story 3
 
-- [ ] T039 [US3] Replace `_seq` backfill planning with mirror initialization planning in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/jobs.rs`
-- [ ] T040 [US3] Implement existing-row mirror insertion with newer-state conflict protection in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/backfill.rs`
-- [ ] T041 [US3] Track mirror initialization state and safe cutoff in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/register.rs`
-- [ ] T042 [US3] Block or skip flush for incomplete mirror initialization in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
-- [ ] T043 [US3] Remove registration-time initial flush enqueueing that depends on user-table `_seq` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/jobs.rs`
-- [ ] T044 [US3] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml migrate_existing_clean_schema` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T039 [US3] Replace `_seq` backfill planning with mirror initialization planning in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/jobs.rs`
+- [X] T040 [US3] Implement existing-row mirror insertion with newer-state conflict protection in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/backfill.rs`
+- [X] T041 [US3] Track mirror initialization state and safe cutoff in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/register.rs`
+- [X] T042 [US3] Block or skip flush for incomplete mirror initialization in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
+- [X] T043 [US3] Remove registration-time initial flush enqueueing that depends on user-table `_seq` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/jobs.rs`
+- [X] T044 [US3] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml migrate_existing_clean_schema` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+  - Result: `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml migrate_existing_clean_schema` fails before running tests because cargo-pgrx cannot choose among multiple configured PostgreSQL versions without a feature flag. Retried as `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml --features pg16 --no-default-features migrate_existing_clean_schema`; it selects pg16 but fails in the pgrx test harness link step for another test binary (`greenfield_shared`) with unresolved PostgreSQL symbols before `migrate_existing_clean_schema` can run. Non-pgrx verification passed with `cargo test -p pg_koldstore --test migrate_existing_clean_schema`, `cargo test -p pg_koldstore`, `cargo test -p e2e --test migrate_existing_matrix --no-run`, and `cargo check --manifest-path crates/pg_koldstore/Cargo.toml --features pg16 --no-default-features`.
 
 **Checkpoint**: US3 works independently after US1 and US2.
 

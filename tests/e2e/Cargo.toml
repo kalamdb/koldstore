@@ -58,6 +58,10 @@ name = "change_feed"
 path = "dml/change_feed.rs"
 
 [[test]]
+name = "change_log_mirror"
+path = "dml/change_log_mirror.rs"
+
+[[test]]
 name = "demigrate_cold_artifacts"
 path = "migrate/demigrate_cold_artifacts.rs"
 

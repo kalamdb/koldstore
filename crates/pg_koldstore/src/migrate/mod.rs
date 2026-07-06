@@ -5,6 +5,7 @@ pub mod columns;
 pub mod constraints;
 pub mod jobs;
 pub mod lock;
+pub mod mirror;
 pub mod order;
 pub mod register;
 pub mod rehydrate;
@@ -18,7 +19,6 @@ use crate::spi::SpiStatement;
 use crate::sql::ddl::MigrateTableRequest;
 
 use self::backfill::DEFAULT_BACKFILL_BATCH_ROWS;
-use self::columns::ExistingTableSystemColumnPreparePlan;
 use self::jobs::{
     enqueue_migration_backfill_job_plan, ManagedTableType, MigrationBackfillJobRequest,
     MigrationBatchSize, MigrationJobEnqueuePlan, MigrationJobPhase,
@@ -156,8 +156,6 @@ pub struct ExistingTableMigrationPlan {
     pub backfill_batch_size: MigrationBatchSize,
     /// Initial durable job phase.
     pub initial_phase: MigrationJobPhase,
-    /// System-column DDL prepared for populated tables.
-    pub system_column_prepare: ExistingTableSystemColumnPreparePlan,
     /// Async migration backfill job enqueue plan.
     pub backfill_job: MigrationJobEnqueuePlan,
 }
@@ -249,10 +247,6 @@ pub fn plan_existing_table_migration(
             ))
         }
     };
-    let system_column_prepare = columns::plan_existing_table_system_column_prepare(
-        &base.table,
-        table_type == ManagedTableType::User && request.scope_column.is_none(),
-    )?;
     let backfill_job = enqueue_migration_backfill_job_plan(MigrationBackfillJobRequest::new(
         job_id,
         base.table_oid,
@@ -273,8 +267,7 @@ pub fn plan_existing_table_migration(
         effective_scope_column: base.effective_scope_column,
         ordering,
         backfill_batch_size,
-        initial_phase: MigrationJobPhase::AddSystemColumns,
-        system_column_prepare,
+        initial_phase: MigrationJobPhase::InitializeMirror,
         backfill_job,
     })
 }

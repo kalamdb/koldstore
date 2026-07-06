@@ -10,8 +10,11 @@ pub mod table_name;
 
 pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};
-pub use pk::{LogicalPk, PkColumn, PkValue, StablePkHash};
-pub use row::{ColdRow, HotRow, RowEvent, RowOperation, Tombstone};
+pub use pk::{
+    LogicalPk, PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue,
+    PrimaryKeyColumnShape, PrimaryKeyShape, StablePkHash,
+};
+pub use row::{ColdRow, HotRow, MirrorOperation, MirrorState, RowEvent, RowOperation, Tombstone};
 pub use seq::{CommitSeq, ScopeKey, SeqId};
 pub use table_kind::TableKind;
 pub use table_name::TableName;

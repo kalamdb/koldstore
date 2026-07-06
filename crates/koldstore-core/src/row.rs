@@ -1,10 +1,89 @@
-//! Hot, cold, tombstone, and row-event models.
+//! Hot, cold, tombstone, mirror, and row-event models.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{CommitSeq, LogicalPk, ScopeKey, SeqId, StablePkHash};
+use crate::{CommitSeq, KoldstoreError, LogicalPk, Result, ScopeKey, SeqId, StablePkHash};
+
+/// Operation recorded in a latest-state change-log mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorOperation {
+    /// Latest state is an insert or reinsert.
+    Insert,
+    /// Latest state is an update to an existing live row.
+    Update,
+    /// Latest state is a delete tombstone.
+    Delete,
+}
+
+impl MirrorOperation {
+    /// Returns the SQL `smallint` operation code.
+    #[must_use]
+    pub const fn code(self) -> i16 {
+        match self {
+            Self::Insert => 1,
+            Self::Update => 2,
+            Self::Delete => 3,
+        }
+    }
+
+    /// Parses a SQL `smallint` operation code.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `code` is not one of 1, 2, or 3.
+    pub const fn from_code(code: i16) -> Result<Self> {
+        match code {
+            1 => Ok(Self::Insert),
+            2 => Ok(Self::Update),
+            3 => Ok(Self::Delete),
+            value => Err(KoldstoreError::InvalidOperationCode(value)),
+        }
+    }
+
+    /// Returns true for delete/tombstone operations.
+    #[must_use]
+    pub const fn is_delete(self) -> bool {
+        matches!(self, Self::Delete)
+    }
+}
+
+/// Latest mirror state for one primary key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorState {
+    operation: Option<MirrorOperation>,
+}
+
+impl MirrorState {
+    /// Returns a state with no mirror row yet.
+    #[must_use]
+    pub const fn missing() -> Self {
+        Self { operation: None }
+    }
+
+    /// Applies a committed operation and returns the new latest state.
+    #[must_use]
+    pub const fn apply(self, operation: MirrorOperation) -> Self {
+        let _ = self;
+        Self {
+            operation: Some(operation),
+        }
+    }
+
+    /// Returns the latest operation, if any.
+    #[must_use]
+    pub const fn operation(self) -> Option<MirrorOperation> {
+        self.operation
+    }
+
+    /// Returns true when the latest state is a delete tombstone.
+    #[must_use]
+    pub const fn is_tombstone(self) -> bool {
+        matches!(self.operation, Some(MirrorOperation::Delete))
+    }
+}
 
 /// Change operation recorded in `koldstore.row_events`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

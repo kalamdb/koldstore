@@ -2,13 +2,28 @@
 
 use serde::{Deserialize, Serialize};
 
-use koldstore_core::{Diagnostic, KoldstoreError, Result, TableKind};
+use koldstore_core::{Diagnostic, KoldstoreError, PrimaryKeyShape, Result, TableKind};
 
 /// Flush policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlushPolicy {
-    pub rows: Option<u64>,
-    pub interval_seconds: Option<u64>,
+    pub row_limit: Option<u64>,
+    pub duration_seconds: Option<u64>,
+}
+
+/// Mirror initialization lifecycle state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorInitializationState {
+    /// Metadata exists but no complete mirror state is available.
+    #[default]
+    NotStarted,
+    /// DML capture is active and existing rows may still be scanning.
+    Capturing,
+    /// Every pre-existing row has a mirror state unless superseded by newer DML.
+    Complete,
+    /// Initialization failed and needs retry or rollback.
+    Failed,
 }
 
 /// FK migration policy classification.
@@ -48,7 +63,11 @@ pub struct ManagedTableMeta {
     pub table_oid: u32,
     pub table_kind: TableKind,
     pub scope_column: Option<String>,
+    pub mirror_relation: Option<String>,
+    pub primary_key_shape: Option<PrimaryKeyShape>,
+    pub initialization_state: MirrorInitializationState,
     pub flush_policy: Option<FlushPolicy>,
+    pub schema_version: u32,
 }
 
 impl ManagedTableMeta {
@@ -70,6 +89,30 @@ impl ManagedTableMeta {
                 diagnostic: Diagnostic::new(
                     "missing_scope_column",
                     "user-scoped managed tables require a scope column",
+                ),
+            });
+        }
+
+        if self
+            .mirror_relation
+            .as_deref()
+            .is_some_and(|relation| relation.trim().is_empty())
+        {
+            return Err(KoldstoreError::CatalogValidation {
+                diagnostic: Diagnostic::new(
+                    "blank_mirror_relation",
+                    "managed mirror relation cannot be blank",
+                ),
+            });
+        }
+
+        if self.initialization_state == MirrorInitializationState::Complete
+            && self.primary_key_shape.is_none()
+        {
+            return Err(KoldstoreError::CatalogValidation {
+                diagnostic: Diagnostic::new(
+                    "missing_primary_key_shape",
+                    "completed clean-schema metadata requires primary-key shape",
                 ),
             });
         }

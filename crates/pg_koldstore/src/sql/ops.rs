@@ -828,6 +828,7 @@ FROM koldstore.schemas s
 JOIN koldstore.storage st ON st.id = s.storage_id
 WHERE s.table_oid = $1::oid
   AND s.active
+  AND s.initialization_state = 'complete'
 ORDER BY s.version DESC
 LIMIT 1
 "#,

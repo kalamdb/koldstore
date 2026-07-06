@@ -3,7 +3,7 @@
 //! Existing-row migration is intentionally split into small catalog-visible
 //! phases. A worker can crash after any committed batch; the next worker claims
 //! the same job through the `koldstore.jobs` lease and skips rows that already
-//! received `_seq`.
+//! have a change-log mirror row.
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
@@ -136,6 +136,8 @@ impl MigrationJobKind {
 pub enum MigrationJobPhase {
     /// Job is queued before schema-column preparation.
     Pending,
+    /// Existing rows are being inserted into the clean-schema mirror.
+    InitializeMirror,
     /// System columns are being added and defaults installed for future writes.
     AddSystemColumns,
     /// Existing rows are being assigned ordered `_seq` values.
@@ -156,6 +158,7 @@ impl MigrationJobPhase {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::InitializeMirror => "initialize_mirror",
             Self::AddSystemColumns => "add_system_columns",
             Self::BackfillSeq => "backfill_seq",
             Self::FinalizeSystemColumns => "finalize_system_columns",
@@ -169,6 +172,8 @@ impl MigrationJobPhase {
 /// JSON payload recorded on a migration backfill job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MigrationBackfillPayload {
+    /// Durable phase the migration job starts with.
+    pub phase: MigrationJobPhase,
     /// Normalized target table name.
     pub table_name: String,
     /// Managed table type.
@@ -220,6 +225,7 @@ impl MigrationBackfillJobRequest {
             job_id,
             table_oid,
             payload: MigrationBackfillPayload {
+                phase: MigrationJobPhase::InitializeMirror,
                 table_name: normalized_table_name(table),
                 table_type,
                 storage_id,
@@ -309,6 +315,21 @@ pub struct MigrationBackfillFinishPlan {
     pub statement: SpiStatement,
 }
 
+/// Planned mirror-initialization completion statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationMirrorInitializationFinishPlan {
+    /// Job id.
+    pub job_id: Uuid,
+    /// Lease owner.
+    pub lease_owner: Uuid,
+    /// Lease epoch.
+    pub lease_epoch: MigrationLeaseEpoch,
+    /// Durable phase after completion.
+    pub phase: MigrationJobPhase,
+    /// Parameterized completion SQL.
+    pub statement: SpiStatement,
+}
+
 /// Migration job planning error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MigrationJobError {
@@ -370,7 +391,7 @@ VALUES (
     '',
     'migrate_backfill',
     'pending',
-    'add_system_columns',
+    'initialize_mirror',
     100,
     0,
     $3::jsonb
@@ -418,7 +439,7 @@ WITH candidate AS (
 )
 UPDATE koldstore.jobs AS j
 SET status = 'running',
-    phase = CASE WHEN j.phase = 'pending' THEN 'add_system_columns' ELSE j.phase END,
+    phase = CASE WHEN j.phase = 'pending' THEN 'initialize_mirror' ELSE j.phase END,
     attempts = CASE WHEN j.status = 'pending' THEN j.attempts + 1 ELSE j.attempts END,
     lease_owner = $2::uuid,
     lease_expires_at = now() + ($3::integer * interval '1 second'),
@@ -633,6 +654,57 @@ SELECT
         lease_owner,
         lease_epoch,
         flush_seq_upper_bound,
+        statement,
+    })
+}
+
+/// Builds the lease-guarded clean-schema mirror initialization completion plan.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be prepared.
+pub fn finish_mirror_initialization_plan(
+    job_id: Uuid,
+    lease_owner: Uuid,
+    lease_epoch: MigrationLeaseEpoch,
+) -> Result<MigrationMirrorInitializationFinishPlan, MigrationJobError> {
+    let statement = SpiStatement::write(
+        "finish mirror initialization",
+        r#"
+WITH finished AS (
+    UPDATE koldstore.jobs
+    SET status = 'completed',
+        phase = 'finished',
+        lease_owner = NULL,
+        lease_expires_at = NULL,
+        last_heartbeat_at = now(),
+        updated_at = now()
+    WHERE id = $1::uuid
+      AND lease_owner = $2::uuid
+      AND lease_epoch = $3::bigint
+      AND status = 'running'
+    RETURNING table_oid
+),
+activated AS (
+    UPDATE koldstore.schemas AS s
+    SET active = true,
+        initialization_state = 'complete',
+        options = jsonb_set(s.options, '{migration_status}', '"active"'::jsonb, true),
+        updated_at = now()
+    FROM finished
+    WHERE s.table_oid = finished.table_oid
+    RETURNING s.table_oid
+)
+SELECT count(*) FROM activated
+"#,
+    )
+    .map_err(|error| MigrationJobError::Spi(error.to_string()))?;
+
+    Ok(MigrationMirrorInitializationFinishPlan {
+        job_id,
+        lease_owner,
+        lease_epoch,
+        phase: MigrationJobPhase::Finished,
         statement,
     })
 }

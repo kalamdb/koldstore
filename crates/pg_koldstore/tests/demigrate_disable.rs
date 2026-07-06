@@ -16,21 +16,22 @@ fn demigration_sql_deactivates_managed_metadata() {
 }
 
 #[test]
-fn migration_rollback_cleanup_removes_partial_catalog_rows_and_system_columns() {
+fn migration_rollback_cleanup_removes_partial_catalog_rows_mirror_and_legacy_system_columns() {
     use pg_koldstore::migrate::rollback::RollbackCleanup;
     use pg_koldstore::migrate::QualifiedTableName;
     use pg_koldstore::spi::SpiAccess;
 
     let table = QualifiedTableName::parse("app.items").unwrap();
     let cleanup = RollbackCleanup::for_table(
-        table,
+        table.clone(),
         42,
         vec![
             "_seq".to_string(),
             "_commit_seq".to_string(),
             "_deleted".to_string(),
         ],
-    );
+    )
+    .with_mirror_table(QualifiedTableName::parse("koldstore.items__cl").unwrap());
 
     let plan = cleanup.plan().unwrap();
 
@@ -45,7 +46,7 @@ fn migration_rollback_cleanup_removes_partial_catalog_rows_and_system_columns() 
             .map(|statement| statement.sql.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "DELETE FROM koldstore.row_events WHERE table_oid = $1",
+            "DROP TABLE IF EXISTS \"koldstore\".\"items__cl\"",
             "DELETE FROM koldstore.cold_pk_hints WHERE table_oid = $1",
             "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1",

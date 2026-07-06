@@ -106,9 +106,11 @@ fn migration_backfill_job_payload_is_type_safe_and_operator_visible() {
     assert_eq!(plan.payload["order_column"], "id");
     assert_eq!(plan.payload["order_source"], "auto_increment_primary_key");
     assert_eq!(plan.payload["batch_size"], 10_000);
+    assert_eq!(plan.payload["phase"], "initialize_mirror");
     assert_eq!(plan.payload["processed_rows"], 0);
     assert!(plan.statement.sql.contains("'migrate_backfill'"));
-    assert!(plan.statement.sql.contains("'add_system_columns'"));
+    assert!(plan.statement.sql.contains("'initialize_mirror'"));
+    assert!(!plan.statement.sql.contains("'add_system_columns'"));
     assert!(plan.statement.sql.contains("rows_processed"));
     assert!(plan.statement.sql.contains("payload"));
     assert!(plan.statement.sql.contains("ON CONFLICT DO NOTHING"));
@@ -130,6 +132,10 @@ fn migration_job_claims_are_lease_guarded_and_skip_locked() {
         .statement
         .sql
         .contains("lease_epoch = j.lease_epoch + 1"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("THEN 'initialize_mirror' ELSE j.phase END"));
     assert!(plan.statement.sql.contains("rows_processed"));
     assert!(plan.statement.sql.contains("last_heartbeat_at = now()"));
 }

@@ -498,6 +498,8 @@ fn migrate_table_pg_impl(
     let catalog = migration_catalog(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let registry_catalog = catalog.clone();
+    let primary_key_shape = primary_key_shape(table_oid_u32)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let mut options = serde_json::json!({});
     if let Some(order_column) = order_column
         .map(str::trim)
@@ -524,19 +526,22 @@ fn migrate_table_pg_impl(
 
     let has_existing_rows = table_has_rows(&empty_plan.table)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    if !has_existing_rows {
-        let system_columns = crate::migrate::columns::plan_system_column_adds(
-            &empty_plan.table,
-            table_type == "user" && scope_column.is_none(),
-        )
-        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-        pgrx::Spi::run(&system_columns.statement.sql)
+    let mirror_plan =
+        crate::migrate::mirror::plan_change_log_mirror(&empty_plan.table, &primary_key_shape)
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    if !has_existing_rows {
+        for statement in mirror_plan.create_statements() {
+            pgrx::Spi::run(&statement.sql)
+                .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+        }
         register_schema_version(SchemaRegistrationInput {
             table_oid: table_oid_u32,
             table_type,
             storage_id,
             scope_column: empty_plan.effective_scope_column.as_deref(),
+            mirror_relation: &mirror_plan.mirror_table,
+            primary_key_shape: &primary_key_shape,
+            initialization_state: koldstore_catalog::MirrorInitializationState::Complete,
             flush_policy,
             primary_key: &registry_catalog.primary_key.columns,
             columns: &registry_catalog.columns,
@@ -569,7 +574,7 @@ fn migrate_table_pg_impl(
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
-    for statement in &plan.system_column_prepare.statements {
+    for statement in mirror_plan.create_statements() {
         pgrx::Spi::run(&statement.sql)
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     }
@@ -578,17 +583,18 @@ fn migrate_table_pg_impl(
         table_type,
         storage_id,
         scope_column: plan.effective_scope_column.as_deref(),
+        mirror_relation: &mirror_plan.mirror_table,
+        primary_key_shape: &primary_key_shape,
+        initialization_state: koldstore_catalog::MirrorInitializationState::Capturing,
         flush_policy,
         primary_key: &registry_catalog.primary_key.columns,
         columns: &registry_catalog.columns,
         indexed_columns: &registry_catalog.indexed_columns,
         active: false,
-        migration_status: "backfill_pending",
+        migration_status: "mirror_initializing",
     })
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    enqueue_backfill_job(&plan.backfill_job)
-        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    run_existing_table_migration_inline(&plan)
+    run_existing_table_mirror_initialization_inline(&plan, &mirror_plan, &primary_key_shape)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     apply_user_scope_policy(&plan.table, plan.effective_scope_column.as_deref())
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
@@ -801,11 +807,34 @@ FROM ranked
 }
 
 #[cfg(feature = "pg")]
+fn primary_key_shape(table_oid: u32) -> Result<koldstore_core::PrimaryKeyShape, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let probe = crate::migrate::register::primary_key_shape_probe_plan(table_oid)
+        .map_err(|error| error.to_string())?;
+    let json = pgrx::Spi::get_one_with_args::<String>(
+        &probe.sql,
+        &[DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid))],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or_else(|| "[]".to_string());
+    let rows =
+        serde_json::from_str::<Vec<crate::migrate::register::PrimaryKeyShapeCatalogRow>>(&json)
+            .map_err(|error| format!("primary key shape catalog decode failed: {error}"))?;
+
+    crate::migrate::register::primary_key_shape_from_catalog_rows(rows)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
 struct SchemaRegistrationInput<'a> {
     table_oid: u32,
     table_type: &'a str,
     storage_id: Uuid,
     scope_column: Option<&'a str>,
+    mirror_relation: &'a crate::migrate::QualifiedTableName,
+    primary_key_shape: &'a koldstore_core::PrimaryKeyShape,
+    initialization_state: koldstore_catalog::MirrorInitializationState,
     flush_policy: Option<&'a str>,
     primary_key: &'a [String],
     columns: &'a [crate::migrate::order::CatalogColumn],
@@ -818,7 +847,7 @@ struct SchemaRegistrationInput<'a> {
 fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgrx::spi::Error> {
     use pgrx::datum::DatumWithOid;
 
-    let mut schema_columns = input
+    let schema_columns = input
         .columns
         .iter()
         .map(|column| {
@@ -830,20 +859,6 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgr
             })
         })
         .collect::<Vec<_>>();
-    schema_columns.extend([
-        serde_json::json!({"name": "_seq", "type_name": "bigint", "nullable": false, "system": true}),
-        serde_json::json!({"name": "_commit_seq", "type_name": "bigint", "nullable": false, "system": true}),
-        serde_json::json!({"name": "_deleted", "type_name": "boolean", "nullable": false, "system": true}),
-    ]);
-    if input.table_type == "user" && input.scope_column == Some(crate::migrate::SYSTEM_SCOPE_COLUMN)
-    {
-        schema_columns.push(serde_json::json!({
-            "name": crate::migrate::SYSTEM_SCOPE_COLUMN,
-            "type_name": "text",
-            "nullable": true,
-            "system": true,
-        }));
-    }
 
     let mut options = serde_json::json!({ "migration_status": input.migration_status });
     if let Some(policy) = input
@@ -859,15 +874,21 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgr
         options["cold_metadata"] = serde_json::to_value(cold_metadata)
             .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
     }
+    let mirror_relation = input.mirror_relation.quoted();
+    let primary_key_shape =
+        serde_json::to_value(input.primary_key_shape).unwrap_or_else(|_| serde_json::json!([]));
+    let initialization_state =
+        crate::migrate::register::initialization_state_name(input.initialization_state);
 
     pgrx::Spi::run_with_args(
         "INSERT INTO koldstore.schemas (
             id, table_oid, version, active, table_type, columns, primary_key,
-            scope_column, indexed_columns, type_matrix, options, storage_id
+            scope_column, mirror_relation, primary_key_shape, initialization_state,
+            indexed_columns, type_matrix, options, storage_id
          )
          VALUES (
             gen_random_uuid(), $1, 1, $2, $3, $4::jsonb, $5::jsonb,
-            $6, $7::jsonb, '{}'::jsonb, $8::jsonb, $9
+            $6, $7::text::regclass, $8::jsonb, $9, $10::jsonb, '{}'::jsonb, $11::jsonb, $12
          )
          ON CONFLICT (table_oid, version) DO UPDATE
          SET active = EXCLUDED.active,
@@ -875,7 +896,10 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgr
              columns = EXCLUDED.columns,
              primary_key = EXCLUDED.primary_key,
              scope_column = EXCLUDED.scope_column,
-            indexed_columns = EXCLUDED.indexed_columns,
+             mirror_relation = EXCLUDED.mirror_relation,
+             primary_key_shape = EXCLUDED.primary_key_shape,
+             initialization_state = EXCLUDED.initialization_state,
+             indexed_columns = EXCLUDED.indexed_columns,
              options = EXCLUDED.options,
              storage_id = EXCLUDED.storage_id,
              updated_at = now()",
@@ -886,6 +910,9 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgr
             DatumWithOid::from(pgrx::JsonB(serde_json::Value::Array(schema_columns))),
             DatumWithOid::from(pgrx::JsonB(serde_json::json!(input.primary_key))),
             DatumWithOid::from(input.scope_column),
+            DatumWithOid::from(mirror_relation),
+            DatumWithOid::from(pgrx::JsonB(primary_key_shape)),
+            DatumWithOid::from(initialization_state),
             DatumWithOid::from(pgrx::JsonB(serde_json::json!(input.indexed_columns))),
             DatumWithOid::from(pgrx::JsonB(options)),
             DatumWithOid::from(pgrx::Uuid::from_bytes(*input.storage_id.as_bytes())),
@@ -894,66 +921,38 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgr
 }
 
 #[cfg(feature = "pg")]
-fn enqueue_backfill_job(
-    plan: &crate::migrate::jobs::MigrationJobEnqueuePlan,
-) -> Result<(), pgrx::spi::Error> {
-    use pgrx::datum::DatumWithOid;
-
-    pgrx::Spi::run_with_args(
-        &plan.statement.sql,
-        &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*plan.job_id.as_bytes())),
-            DatumWithOid::from(pgrx::pg_sys::Oid::from(plan.table_oid)),
-            DatumWithOid::from(pgrx::JsonB(plan.payload.clone())),
-        ],
-    )
-}
-
-#[cfg(feature = "pg")]
-fn run_existing_table_migration_inline(
+fn run_existing_table_mirror_initialization_inline(
     plan: &crate::migrate::ExistingTableMigrationPlan,
-) -> Result<(), pgrx::spi::Error> {
-    let table = plan.table.quoted();
-    let order_column = quote_ident(&plan.ordering.column);
-    pgrx::Spi::run(&format!(
-        r#"
-WITH candidate AS MATERIALIZED (
-    SELECT ctid, {order_column} AS migration_order_value
-    FROM ONLY {table}
-    WHERE "_seq" IS NULL
-    ORDER BY {order_column} ASC, ctid ASC
-),
-assigned AS MATERIALIZED (
-    SELECT
-        ctid,
-        nextval('koldstore.global_seq'::regclass) AS assigned_seq,
-        nextval('koldstore.global_commit_seq'::regclass) AS assigned_commit_seq
-    FROM candidate
-    ORDER BY migration_order_value ASC, ctid ASC
-)
-UPDATE ONLY {table} AS hot
-SET "_seq" = assigned.assigned_seq,
-    "_commit_seq" = assigned.assigned_commit_seq,
-    "_deleted" = false
-FROM assigned
-WHERE hot.ctid = assigned.ctid
-  AND hot."_seq" IS NULL
-"#
-    ))?;
-
-    pgrx::Spi::run(&format!(
-        r#"
-ALTER TABLE {table}
-    ALTER COLUMN "_seq" SET NOT NULL,
-    ALTER COLUMN "_commit_seq" SET NOT NULL,
-    ALTER COLUMN "_deleted" SET NOT NULL
-"#
-    ))?;
+    mirror_plan: &crate::migrate::mirror::ChangeLogMirrorPlan,
+    primary_key_shape: &koldstore_core::PrimaryKeyShape,
+) -> Result<(), String> {
+    let batch = crate::migrate::backfill::plan_mirror_initialization_batch(
+        &plan.table,
+        &mirror_plan.mirror_table,
+        primary_key_shape.columns(),
+        plan.ordering.clone(),
+        plan.backfill_batch_size,
+    )
+    .map_err(|error| error.to_string())?;
+    loop {
+        let candidate_rows = pgrx::Spi::get_one_with_args::<i64>(
+            &batch.statement.sql,
+            &[pgrx::datum::DatumWithOid::from(
+                i64::try_from(batch.batch_size.get()).unwrap_or(i64::MAX),
+            )],
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(0);
+        if candidate_rows == 0 {
+            break;
+        }
+    }
 
     pgrx::Spi::run_with_args(
         r#"
 UPDATE koldstore.schemas
 SET active = true,
+    initialization_state = 'complete',
     options = jsonb_set(options, '{migration_status}', '"active"'::jsonb, true),
     updated_at = now()
 WHERE table_oid = $1::oid
@@ -961,33 +960,8 @@ WHERE table_oid = $1::oid
         &[pgrx::datum::DatumWithOid::from(pgrx::pg_sys::Oid::from(
             plan.table_oid,
         ))],
-    )?;
-    pgrx::Spi::run_with_args(
-        r#"
-UPDATE koldstore.jobs
-SET status = 'completed',
-    phase = 'finished',
-    rows_processed = (
-        SELECT count(*) FROM ONLY {table}
-        WHERE "_seq" IS NOT NULL
-    ),
-    lease_owner = NULL,
-    lease_expires_at = NULL,
-    last_heartbeat_at = now(),
-    updated_at = now()
-WHERE id = $1::uuid
-"#
-        .replace("{table}", &table)
-        .as_str(),
-        &[pgrx::datum::DatumWithOid::from(pgrx::Uuid::from_bytes(
-            *plan.backfill_job.job_id.as_bytes(),
-        ))],
     )
-}
-
-#[cfg(feature = "pg")]
-fn quote_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+    .map_err(|error| error.to_string())
 }
 
 /// Migration request.

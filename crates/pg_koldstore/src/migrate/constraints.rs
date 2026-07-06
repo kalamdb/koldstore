@@ -1,5 +1,6 @@
 //! Migration validation.
 
+use koldstore_core::PrimaryKeyShape;
 use koldstore_parquet::PgType;
 use thiserror::Error;
 
@@ -7,6 +8,16 @@ use thiserror::Error;
 #[must_use]
 pub fn primary_key_shape_supported(columns: &[&str]) -> bool {
     !columns.is_empty() && columns.iter().all(|column| !column.trim().is_empty())
+}
+
+/// Returns true when an exact clean-schema primary-key shape can be mirrored.
+#[must_use]
+pub fn exact_primary_key_shape_supported(shape: &PrimaryKeyShape) -> bool {
+    !shape.columns().is_empty()
+        && shape
+            .columns()
+            .iter()
+            .all(|column| column.not_null() && !column.column().as_str().trim().is_empty())
 }
 
 /// Migration validation result.

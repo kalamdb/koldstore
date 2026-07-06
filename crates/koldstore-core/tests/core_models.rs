@@ -1,6 +1,8 @@
 use koldstore_core::{
-    ColdRow, ColumnClass, CommitSeq, HotRow, LogicalPk, PkColumn, PkValue, Predicate,
-    PredicateClass, PredicateValue, RowOperation, SeqId, StablePkHash, TableKind, TableName,
+    ColdRow, ColumnClass, CommitSeq, HotRow, LogicalPk, MirrorOperation, MirrorState, PgCollation,
+    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue, Predicate, PredicateClass,
+    PredicateValue, PrimaryKeyColumnShape, PrimaryKeyShape, RowOperation, SeqId, StablePkHash,
+    TableKind, TableName,
 };
 use serde_json::json;
 
@@ -146,4 +148,123 @@ fn row_operation_serializes_contract_names() {
         serde_json::to_value(RowOperation::Revive).unwrap(),
         json!("revive")
     );
+}
+
+#[test]
+fn mirror_operation_maps_to_smallint_contract_values() {
+    assert_eq!(MirrorOperation::Insert.code(), 1);
+    assert_eq!(MirrorOperation::Update.code(), 2);
+    assert_eq!(MirrorOperation::Delete.code(), 3);
+
+    assert_eq!(
+        MirrorOperation::from_code(1).unwrap(),
+        MirrorOperation::Insert
+    );
+    assert_eq!(
+        MirrorOperation::from_code(2).unwrap(),
+        MirrorOperation::Update
+    );
+    assert_eq!(
+        MirrorOperation::from_code(3).unwrap(),
+        MirrorOperation::Delete
+    );
+    assert!(MirrorOperation::from_code(4).is_err());
+}
+
+#[test]
+fn mirror_state_transitions_cover_insert_update_delete_and_reinsert() {
+    let inserted = MirrorState::missing().apply(MirrorOperation::Insert);
+    assert_eq!(inserted.operation(), Some(MirrorOperation::Insert));
+    assert!(!inserted.is_tombstone());
+
+    let updated = inserted.apply(MirrorOperation::Update);
+    assert_eq!(updated.operation(), Some(MirrorOperation::Update));
+    assert!(!updated.is_tombstone());
+
+    let deleted = updated.apply(MirrorOperation::Delete);
+    assert_eq!(deleted.operation(), Some(MirrorOperation::Delete));
+    assert!(deleted.is_tombstone());
+
+    let reinserted = deleted.apply(MirrorOperation::Insert);
+    assert_eq!(reinserted.operation(), Some(MirrorOperation::Insert));
+    assert!(!reinserted.is_tombstone());
+}
+
+#[test]
+fn primary_key_shape_preserves_exact_column_metadata() {
+    let shape = PrimaryKeyShape::new(vec![
+        PrimaryKeyColumnShape::new(
+            PkColumn::new("tenant_id").unwrap(),
+            PkOrdinal::new(1).unwrap(),
+            PgTypeOid::new(2950).unwrap(),
+            PgTypeName::new("uuid").unwrap(),
+            PgTypmod::new(-1),
+            None,
+            None,
+            true,
+        ),
+        PrimaryKeyColumnShape::new(
+            PkColumn::new("slug").unwrap(),
+            PkOrdinal::new(2).unwrap(),
+            PgTypeOid::new(1043).unwrap(),
+            PgTypeName::new("varchar").unwrap(),
+            PgTypmod::new(68),
+            Some(PgCollation::new("en_US").unwrap()),
+            Some(PgTypeName::new("app.slug_domain").unwrap()),
+            true,
+        ),
+    ])
+    .unwrap();
+
+    assert_eq!(shape.columns()[0].column().as_str(), "tenant_id");
+    assert_eq!(shape.columns()[1].column().as_str(), "slug");
+    assert_eq!(shape.columns()[1].ordinal().get(), 2);
+    assert_eq!(shape.columns()[1].type_oid().get(), 1043);
+    assert_eq!(shape.columns()[1].type_name().as_str(), "varchar");
+    assert_eq!(shape.columns()[1].typmod().get(), 68);
+    assert_eq!(shape.columns()[1].collation().unwrap().as_str(), "en_US");
+    assert_eq!(
+        shape.columns()[1].domain_identity().unwrap().as_str(),
+        "app.slug_domain"
+    );
+    assert!(shape.columns()[1].not_null());
+}
+
+#[test]
+fn primary_key_shape_rejects_empty_duplicate_or_unordered_ordinals() {
+    assert!(PrimaryKeyShape::new(vec![]).is_err());
+
+    let id = PrimaryKeyColumnShape::new(
+        PkColumn::new("id").unwrap(),
+        PkOrdinal::new(1).unwrap(),
+        PgTypeOid::new(20).unwrap(),
+        PgTypeName::new("int8").unwrap(),
+        PgTypmod::new(-1),
+        None,
+        None,
+        true,
+    );
+    assert!(PrimaryKeyShape::new(vec![id.clone(), id]).is_err());
+
+    let first = PrimaryKeyColumnShape::new(
+        PkColumn::new("tenant_id").unwrap(),
+        PkOrdinal::new(2).unwrap(),
+        PgTypeOid::new(2950).unwrap(),
+        PgTypeName::new("uuid").unwrap(),
+        PgTypmod::new(-1),
+        None,
+        None,
+        true,
+    );
+    let second = PrimaryKeyColumnShape::new(
+        PkColumn::new("id").unwrap(),
+        PkOrdinal::new(1).unwrap(),
+        PgTypeOid::new(20).unwrap(),
+        PgTypeName::new("int8").unwrap(),
+        PgTypmod::new(-1),
+        None,
+        None,
+        true,
+    );
+    assert!(PrimaryKeyShape::new(vec![first, second]).is_err());
 }

@@ -1,8 +1,11 @@
 use koldstore_catalog::{
-    ColdPkHint, FkPolicyDecision, HintKind, ManagedTableMeta, PkLookup, SchemaColumn,
-    SchemaRegistryEntry, SegmentVisibility, TypeMatrix,
+    ColdPkHint, FkPolicyDecision, HintKind, ManagedTableMeta, MirrorInitializationState, PkLookup,
+    SchemaColumn, SchemaRegistryEntry, SegmentVisibility, TypeMatrix,
 };
-use koldstore_core::TableKind;
+use koldstore_core::{
+    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
+    TableKind,
+};
 use uuid::Uuid;
 
 #[test]
@@ -19,23 +22,34 @@ fn type_matrix_reports_supported_and_unsupported_types() {
         .contains("unsupported PostgreSQL type"));
 }
 
+fn pk_shape() -> PrimaryKeyShape {
+    PrimaryKeyShape::new(vec![PrimaryKeyColumnShape::new(
+        PkColumn::new("id").unwrap(),
+        PkOrdinal::new(1).unwrap(),
+        PgTypeOid::new(20).unwrap(),
+        PgTypeName::new("int8").unwrap(),
+        PgTypmod::new(-1),
+        None,
+        None,
+        true,
+    )])
+    .unwrap()
+}
+
 #[test]
-fn schema_registry_validation_requires_pk_and_system_columns() {
+fn schema_registry_validation_requires_pk_but_not_system_columns() {
     let entry = SchemaRegistryEntry {
         id: Uuid::new_v4(),
         table_oid: 42,
         version: 1,
-        columns: vec![
-            SchemaColumn::app("id", "int8", false),
-            SchemaColumn::system("_seq", "int8"),
-            SchemaColumn::system("_commit_seq", "int8"),
-            SchemaColumn::system("_deleted", "bool"),
-        ],
+        columns: vec![SchemaColumn::app("id", "int8", false)],
     };
 
     entry.validate(&["id"]).unwrap();
     assert!(entry.validate(&[]).is_err());
     assert!(entry.validate(&["missing"]).is_err());
+    assert_eq!(entry.application_columns().len(), 1);
+    assert!(entry.system_columns().is_empty());
 }
 
 #[test]
@@ -44,7 +58,11 @@ fn managed_table_meta_enforces_user_scope_column() {
         table_oid: 1,
         table_kind: TableKind::Shared,
         scope_column: None,
+        mirror_relation: Some("koldstore.items__cl".to_string()),
+        primary_key_shape: Some(pk_shape()),
+        initialization_state: MirrorInitializationState::Complete,
         flush_policy: None,
+        schema_version: 1,
     };
     shared.validate().unwrap();
 
@@ -52,9 +70,25 @@ fn managed_table_meta_enforces_user_scope_column() {
         table_oid: 2,
         table_kind: TableKind::User,
         scope_column: None,
+        mirror_relation: Some("koldstore.notes__cl".to_string()),
+        primary_key_shape: Some(pk_shape()),
+        initialization_state: MirrorInitializationState::Complete,
         flush_policy: None,
+        schema_version: 1,
     };
     assert!(user_missing_scope.validate().is_err());
+
+    let complete_without_pk_shape = ManagedTableMeta {
+        table_oid: 3,
+        table_kind: TableKind::Shared,
+        scope_column: None,
+        mirror_relation: Some("koldstore.no_shape__cl".to_string()),
+        primary_key_shape: None,
+        initialization_state: MirrorInitializationState::Complete,
+        flush_policy: None,
+        schema_version: 1,
+    };
+    assert!(complete_without_pk_shape.validate().is_err());
 }
 
 #[test]

@@ -165,7 +165,9 @@ fn sql_migration_creates_required_catalog_tables() {
         "CREATE TABLE IF NOT EXISTS koldstore.jobs",
         "CREATE TABLE IF NOT EXISTS koldstore.cold_segments",
         "CREATE TABLE IF NOT EXISTS koldstore.cold_pk_hints",
-        "CREATE TABLE IF NOT EXISTS koldstore.row_events",
+        "mirror_relation regclass",
+        "primary_key_shape jsonb NOT NULL DEFAULT '[]'::jsonb",
+        "initialization_state text NOT NULL DEFAULT 'not_started'",
         "CREATE UNIQUE INDEX IF NOT EXISTS schemas_one_active_per_table_idx",
         "CREATE INDEX IF NOT EXISTS manifest_dirty_idx",
         "CREATE INDEX IF NOT EXISTS manifest_scope_lookup_idx",
@@ -184,7 +186,7 @@ fn sql_migration_creates_required_catalog_tables() {
         !sql.contains("system."),
         "extension SQL should not create or reference the legacy system schema"
     );
-    for duplicate_index in ["cold_pk_hints_lookup_idx", "row_events_commit_idx"] {
+    for duplicate_index in ["cold_pk_hints_lookup_idx"] {
         assert!(
             !sql.contains(duplicate_index),
             "primary key prefix already covers lookup pattern: {duplicate_index}"

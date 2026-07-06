@@ -1,6 +1,6 @@
 //! DML hook and system-column guard integration.
 
-use koldstore_core::{CommitSeq, RowOperation, ScopeKey, SeqId, TableKind};
+use koldstore_core::{CommitSeq, MirrorOperation, RowOperation, ScopeKey, SeqId, TableKind};
 
 use crate::security::scope::{self, ScopeError};
 use crate::sql::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation};
@@ -21,6 +21,21 @@ pub struct ManagedDmlEffect {
     pub delete_decision: Option<DeleteDecision>,
     /// Whether this path preserves the one-hot-row-per-PK invariant.
     pub keeps_one_hot_row_per_pk: bool,
+}
+
+/// Planned latest-state mirror effect for one user DML row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorCaptureEffect {
+    /// Operation value written to the mirror.
+    pub operation: MirrorOperation,
+    /// SQL expression used to allocate the mirror sequence.
+    pub seq_expression: &'static str,
+    /// SQL expression used to stamp row age.
+    pub changed_at_expression: &'static str,
+    /// SQL expression used to capture diagnostic WAL position.
+    pub commit_lsn_expression: &'static str,
+    /// Whether the effect is coupled to the user transaction.
+    pub transactional: bool,
 }
 
 /// Returns whether a column is managed system metadata.
@@ -141,6 +156,24 @@ pub fn plan_managed_delete_effect(
         RowOperation::Delete,
         Some(delete_decision(cold_may_contain_pk)),
     )
+}
+
+/// Plans the mirror state transition for a managed DML operation.
+#[must_use]
+pub const fn plan_mirror_capture_effect(operation: ManagedDmlOperation) -> MirrorCaptureEffect {
+    let operation = match operation {
+        ManagedDmlOperation::Insert | ManagedDmlOperation::Revive => MirrorOperation::Insert,
+        ManagedDmlOperation::Update => MirrorOperation::Update,
+        ManagedDmlOperation::Delete => MirrorOperation::Delete,
+    };
+
+    MirrorCaptureEffect {
+        operation,
+        seq_expression: "SNOWFLAKE_ID()",
+        changed_at_expression: "now()",
+        commit_lsn_expression: "pg_current_wal_lsn()",
+        transactional: true,
+    }
 }
 
 fn plan_effect(

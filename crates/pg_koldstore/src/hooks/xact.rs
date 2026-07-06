@@ -16,6 +16,27 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// Advisory lock namespace for transaction commit-order allocation.
 pub const COMMIT_SEQUENCE_LOCK_NAMESPACE: &str = "pg_koldstore.commit_sequence";
 
+/// Transaction coupling mode for mirror capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MirrorCaptureTransactionScope {
+    /// Mirror mutation executes as an ordinary row trigger in the user's transaction.
+    SameUserTransaction,
+}
+
+/// Returns the clean-schema mirror capture transaction scope.
+#[must_use]
+pub const fn mirror_capture_transaction_scope() -> MirrorCaptureTransactionScope {
+    MirrorCaptureTransactionScope::SameUserTransaction
+}
+
+/// Returns whether a capture scope rolls back with the user DML.
+#[must_use]
+pub const fn mirror_capture_rolls_back_with_user_transaction(
+    scope: MirrorCaptureTransactionScope,
+) -> bool {
+    matches!(scope, MirrorCaptureTransactionScope::SameUserTransaction)
+}
+
 /// Allocates a process-local commit sequence for non-pgrx tests.
 ///
 /// PostgreSQL builds replace this with advisory-lock-backed allocation.
