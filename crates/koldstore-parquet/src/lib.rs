@@ -9,8 +9,8 @@ pub mod writer;
 pub use footer::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
 pub use prune::{PruneDecision, RowGroupPruner};
 pub use reader::{ParquetReadOptions, ParquetReadRequest, RecordBatchFileStream};
-pub use schema::{build_arrow_schema, PgColumn, PgType, SchemaError, SystemColumn};
+pub use schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType, SchemaError};
 pub use writer::{
-    ParquetSegmentWriter, SegmentMetadataInput, SegmentWritePlan, StreamingRowGroupPlan,
-    WriterOptions,
+    plan_clean_cold_record, CleanColdRecordPlan, ParquetSegmentWriter, SegmentMetadataInput,
+    SegmentWritePlan, StreamingRowGroupPlan, WriterOptions,
 };

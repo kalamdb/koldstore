@@ -126,6 +126,14 @@ fn sync_state_transitions_match_flush_contract() {
     assert!(SyncState::Syncing.can_transition_to(SyncState::Error));
     assert!(SyncState::Error.can_transition_to(SyncState::PendingWrite));
     assert!(!SyncState::InSync.can_transition_to(SyncState::Syncing));
+    assert_eq!(SyncState::PendingWrite.as_str(), "pending_write");
+    assert_eq!(SyncState::PendingWrite.start_flush(), SyncState::Syncing);
+    assert_eq!(SyncState::Syncing.finish_success(false), SyncState::InSync);
+    assert_eq!(
+        SyncState::Syncing.finish_success(true),
+        SyncState::PendingWrite
+    );
+    assert_eq!(SyncState::Syncing.finish_error(), SyncState::Error);
 }
 
 #[test]

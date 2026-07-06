@@ -104,31 +104,38 @@ impl PgType {
     }
 }
 
-/// Required system column.
+/// Clean-schema cold metadata column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SystemColumn {
+pub enum ColdMetadataColumn {
     Seq,
-    CommitSeq,
+    Op,
+    ChangedAt,
     Deleted,
+    SchemaVersion,
 }
 
-impl SystemColumn {
-    /// Returns the system column name.
+impl ColdMetadataColumn {
+    /// Returns the clean cold metadata column name.
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Seq => "_seq",
-            Self::CommitSeq => "_commit_seq",
-            Self::Deleted => "_deleted",
+            Self::Seq => "seq",
+            Self::Op => "op",
+            Self::ChangedAt => "changed_at",
+            Self::Deleted => "deleted",
+            Self::SchemaVersion => "schema_version",
         }
     }
 
-    /// Returns the Arrow field for this system column.
+    /// Returns the Arrow field for this clean cold metadata column.
     #[must_use]
     pub fn field(self) -> Field {
         let data_type = match self {
+            Self::Seq => DataType::Int64,
+            Self::Op => DataType::Int16,
+            Self::ChangedAt => DataType::Timestamp(TimeUnit::Microsecond, None),
             Self::Deleted => DataType::Boolean,
-            Self::Seq | Self::CommitSeq => DataType::Int64,
+            Self::SchemaVersion => DataType::UInt32,
         };
         Field::new(self.name(), data_type, false)
     }
@@ -141,16 +148,20 @@ pub enum SchemaError {
     UnsupportedType(String),
 }
 
-/// Builds an Arrow schema with required system columns appended.
+/// Builds a clean-schema Arrow schema with mirror/cold metadata appended.
 ///
 /// # Errors
 ///
 /// Currently returns only future schema errors; all [`PgType`] variants are supported.
-pub fn build_arrow_schema(columns: &[PgColumn]) -> Result<Schema, SchemaError> {
+pub fn build_clean_arrow_schema(columns: &[PgColumn]) -> Result<Schema, SchemaError> {
     let mut fields: Vec<Field> = columns.iter().map(PgColumn::to_arrow_field).collect();
-    fields.push(SystemColumn::Seq.field());
-    fields.push(SystemColumn::CommitSeq.field());
-    fields.push(SystemColumn::Deleted.field());
+    fields.extend([
+        ColdMetadataColumn::Seq.field(),
+        ColdMetadataColumn::Op.field(),
+        ColdMetadataColumn::ChangedAt.field(),
+        ColdMetadataColumn::Deleted.field(),
+        ColdMetadataColumn::SchemaVersion.field(),
+    ]);
     Ok(Schema::new(fields))
 }
 

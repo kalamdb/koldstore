@@ -661,24 +661,14 @@ fn managed_table_info_tuple(
 }
 
 #[cfg(feature = "pg")]
-fn qualified_relation_name(table_oid: u32) -> Result<String, pgrx::spi::Error> {
-    pgrx::Spi::get_one_with_args::<String>(
-        "SELECT format('%I.%I', n.nspname, c.relname) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1::oid",
-        &[pgrx::datum::DatumWithOid::from(pgrx::pg_sys::Oid::from(
-            table_oid,
-        ))],
-    )
-    .map(|value| value.unwrap_or_else(|| pgrx::error!("table oid {table_oid} does not exist")))
+fn qualified_relation_name(table_oid: u32) -> Result<String, String> {
+    crate::catalog::resolve::qualified_relation_name(pgrx::pg_sys::Oid::from(table_oid))
 }
 
 #[cfg(feature = "pg")]
 fn storage_id_by_name(name: &str) -> Option<Uuid> {
-    let id = pgrx::Spi::get_one_with_args::<pgrx::Uuid>(
-        "SELECT id FROM koldstore.storage WHERE name = $1",
-        &[pgrx::datum::DatumWithOid::from(name)],
-    )
-    .unwrap_or_else(|error| pgrx::error!("storage lookup failed: {error}"))?;
-    Some(Uuid::from_bytes(*id.as_bytes()))
+    crate::catalog::resolve::storage_id_by_name(name)
+        .unwrap_or_else(|error| pgrx::error!("storage lookup failed: {error}"))
 }
 
 #[cfg(feature = "pg")]
@@ -917,7 +907,11 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), pgr
             DatumWithOid::from(pgrx::JsonB(options)),
             DatumWithOid::from(pgrx::Uuid::from_bytes(*input.storage_id.as_bytes())),
         ],
-    )
+    )?;
+    let table_oid = pgrx::pg_sys::Oid::from(input.table_oid);
+    crate::catalog::cache::invalidate_table(table_oid);
+    crate::spi::invalidate_all_prepared_plans();
+    Ok(())
 }
 
 #[cfg(feature = "pg")]
@@ -935,11 +929,12 @@ fn run_existing_table_mirror_initialization_inline(
     )
     .map_err(|error| error.to_string())?;
     loop {
-        let candidate_rows = pgrx::Spi::get_one_with_args::<i64>(
-            &batch.statement.sql,
+        let candidate_rows = crate::spi::execute_prepared(
+            &batch.statement,
             &[pgrx::datum::DatumWithOid::from(
                 i64::try_from(batch.batch_size.get()).unwrap_or(i64::MAX),
             )],
+            |tuples| tuples.get_one::<i64>(),
         )
         .map_err(|error| error.to_string())?
         .unwrap_or(0);
@@ -961,7 +956,10 @@ WHERE table_oid = $1::oid
             plan.table_oid,
         ))],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    crate::catalog::cache::invalidate_table(pgrx::pg_sys::Oid::from(plan.table_oid));
+    crate::spi::invalidate_all_prepared_plans();
+    Ok(())
 }
 
 /// Migration request.
@@ -990,8 +988,6 @@ pub struct DemigrateTableRequest {
     pub rehydrate: Option<bool>,
     /// Optional SQL argument; defaults to retaining cold artifacts.
     pub drop_cold: Option<bool>,
-    /// Optional SQL argument; defaults to keeping system columns as ordinary columns.
-    pub drop_system_columns: Option<bool>,
 }
 
 impl DemigrateTableRequest {
@@ -1001,7 +997,6 @@ impl DemigrateTableRequest {
         DemigrateOptions {
             rehydrate: self.rehydrate.unwrap_or(true),
             drop_cold: self.drop_cold.unwrap_or(false),
-            drop_system_columns: self.drop_system_columns.unwrap_or(false),
         }
     }
 }
@@ -1013,13 +1008,11 @@ pub fn demigrate_table_pg(
     table_name: pgrx::pg_sys::Oid,
     rehydrate: Option<bool>,
     drop_cold: Option<bool>,
-    drop_system_columns: Option<bool>,
 ) -> i64 {
     let options = DemigrateTableRequest {
         table_name: String::new(),
         rehydrate,
         drop_cold,
-        drop_system_columns,
     }
     .options();
     demigrate_table_pg_impl(table_name, options)
@@ -1041,6 +1034,7 @@ fn demigrate_table_pg_impl(
     let relation = qualified_relation_name(table_oid_u32).map_err(|error| error.to_string())?;
     let table =
         crate::migrate::QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
+    let mirror_table = crate::migrate::mirror::mirror_relation_by_table_oid(table_oid)?;
 
     pgrx::Spi::run_with_args(
         "SELECT pg_advisory_xact_lock($1)",
@@ -1058,7 +1052,7 @@ fn demigrate_table_pg_impl(
     if options.rehydrate {
         let temp_table = format!("pg_koldstore_demigrate_{table_oid_u32}");
         pgrx::Spi::run(&format!(
-            "CREATE TEMP TABLE {temp_table} AS SELECT * FROM {} WHERE COALESCE(_deleted, false) = false",
+            "CREATE TEMP TABLE {temp_table} AS SELECT * FROM {}",
             table.quoted()
         ))
         .map_err(|error| error.to_string())?;
@@ -1069,6 +1063,15 @@ fn demigrate_table_pg_impl(
             table.quoted()
         ))
         .map_err(|error| error.to_string())?;
+    }
+
+    if let Some(mirror_table) = mirror_table {
+        for statement in
+            crate::migrate::rehydrate::plan_clean_schema_artifact_cleanup(&table, &mirror_table)
+                .map_err(|error| error.to_string())?
+        {
+            pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+        }
     }
 
     let deactivated = pgrx::Spi::get_one_with_args::<i64>(
@@ -1087,14 +1090,8 @@ fn demigrate_table_pg_impl(
         &[DatumWithOid::from(table_oid)],
     )
     .map_err(|error| error.to_string())?;
-
-    if options.drop_system_columns {
-        pgrx::Spi::run(&format!(
-            "ALTER TABLE ONLY {} DROP COLUMN IF EXISTS \"_seq\", DROP COLUMN IF EXISTS \"_commit_seq\", DROP COLUMN IF EXISTS \"_deleted\"",
-            table.quoted()
-        ))
-        .map_err(|error| error.to_string())?;
-    }
+    crate::catalog::cache::invalidate_table(table_oid);
+    crate::spi::invalidate_all_prepared_plans();
 
     Ok(deactivated.unwrap_or(0))
 }
@@ -1104,7 +1101,10 @@ impl MigrateTableRequest {
     #[must_use]
     pub fn effective_scope_column(&self) -> Option<&str> {
         if self.table_type == "user" {
-            Some(self.scope_column.as_deref().unwrap_or("_user_id"))
+            self.scope_column
+                .as_deref()
+                .map(str::trim)
+                .filter(|scope| !scope.is_empty())
         } else {
             None
         }

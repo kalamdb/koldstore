@@ -5,6 +5,7 @@ members = [
     "crates/koldstore-storage",
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
+    "crates/koldstore-mirror",
     "crates/koldstore-catalog",
     "crates/pg_koldstore",
     "benchmarks",
@@ -17,6 +18,7 @@ default-members = [
     "crates/koldstore-storage",
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
+    "crates/koldstore-mirror",
     "crates/koldstore-catalog",
     "crates/pg_koldstore",
     "benchmarks",
@@ -37,6 +39,7 @@ koldstore-manifest = { path = "crates/koldstore-manifest" }
 koldstore-storage = { path = "crates/koldstore-storage" }
 koldstore-parquet = { path = "crates/koldstore-parquet" }
 koldstore-merge = { path = "crates/koldstore-merge" }
+koldstore-mirror = { path = "crates/koldstore-mirror" }
 koldstore-catalog = { path = "crates/koldstore-catalog" }
 
 anyhow = "1"

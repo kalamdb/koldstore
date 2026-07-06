@@ -1,8 +1,15 @@
-//! Row-event SQL helpers.
+//! Latest-state change-feed SQL helpers.
 
-use koldstore_core::{CommitSeq, LogicalPk, RowEvent, RowOperation, ScopeKey, SeqId, StablePkHash};
+use koldstore_core::{MirrorChange, ScopeKey, SeqId};
 use koldstore_merge::{changes_since as merge_changes_since, ChangeCursor, ChangeGap};
+use koldstore_mirror::{plan_select_mirror_rows_after_seq_with_params, SqlParamType};
 use thiserror::Error;
+
+use crate::{
+    migrate::QualifiedTableName,
+    security::scope::scope_predicate_sql,
+    spi::{mirror_to_spi, SpiStatement},
+};
 
 /// Default changes_since limit.
 pub const DEFAULT_CHANGE_LIMIT: i32 = 1000;
@@ -13,87 +20,59 @@ pub enum ChangeFeedError {
     /// `limit_rows` must be greater than zero.
     #[error("limit_rows must be positive")]
     InvalidLimit,
-    /// Requested cursor is older than retained events.
+    /// Requested cursor is older than retained changes.
     #[error(transparent)]
     RetentionGap(#[from] ChangeGap),
+    /// A primary-key column is required to build a mirror query.
+    #[error("changes_since requires primary key columns")]
+    MissingPrimaryKey,
+    /// Scope column is unsafe to quote.
+    #[error("invalid scope column `{0}`")]
+    InvalidScopeColumn(String),
+    /// SPI statement metadata could not be prepared.
+    #[error("{0}")]
+    Spi(String),
 }
 
-/// Builds a row event from DML metadata.
-#[allow(clippy::too_many_arguments)]
-#[must_use]
-pub fn append_row_event(
-    table_oid: u32,
-    scope_key: Option<koldstore_core::ScopeKey>,
-    pk: &LogicalPk,
-    op: RowOperation,
-    seq: SeqId,
-    commit_seq: CommitSeq,
-    row_image_json: Option<serde_json::Value>,
-) -> RowEvent {
-    RowEvent {
-        table_oid,
-        scope_key,
-        pk_hash: StablePkHash::compute(pk),
-        pk_json: pk.to_canonical_json(),
-        op,
-        seq,
-        commit_seq,
-        deleted: matches!(op, RowOperation::Delete),
-        row_image_json,
-        created_at: chrono::Utc::now(),
-    }
+/// Planned mirror-backed changes_since query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorChangesSincePlan {
+    /// SQL statement to execute.
+    pub statement: SpiStatement,
+    /// Parameter index used for scope filtering, when present.
+    pub scope_parameter_index: Option<usize>,
 }
 
-/// Builds the row event emitted when a cold-only delete writes a PK-only tombstone.
-#[must_use]
-pub fn append_cold_only_tombstone_event(
-    table_oid: u32,
-    scope_key: Option<koldstore_core::ScopeKey>,
-    pk: &LogicalPk,
-    seq: SeqId,
-    commit_seq: CommitSeq,
-) -> RowEvent {
-    append_row_event(
-        table_oid,
-        scope_key,
-        pk,
-        RowOperation::Delete,
-        seq,
-        commit_seq,
-        None,
-    )
-}
-
-/// Returns change events for one table/scope after a commit cursor.
+/// Returns latest-state changes for one table/scope after a mirror sequence cursor.
 ///
 /// # Errors
 ///
 /// Returns [`ChangeFeedError::InvalidLimit`] when `limit_rows <= 0`, or a
-/// retention gap when `since_commit_seq` is older than retained events.
+/// retention gap when `since_seq` is older than retained mirror/cold metadata.
 pub fn changes_since(
-    events: &[RowEvent],
+    changes: &[MirrorChange],
     table_oid: u32,
     scope_key: Option<&ScopeKey>,
-    since_commit_seq: i64,
+    since_seq: i64,
     limit_rows: Option<i32>,
-    oldest_available: Option<CommitSeq>,
-) -> Result<Vec<RowEvent>, ChangeFeedError> {
+    oldest_available: Option<SeqId>,
+) -> Result<Vec<MirrorChange>, ChangeFeedError> {
     let limit = limit_rows.unwrap_or(DEFAULT_CHANGE_LIMIT);
     if limit <= 0 {
         return Err(ChangeFeedError::InvalidLimit);
     }
 
-    let scoped_events = events
+    let scoped_changes = changes
         .iter()
-        .filter(|event| event.table_oid == table_oid)
-        .filter(|event| event.scope_key.as_ref() == scope_key)
+        .filter(|change| change.table_oid == table_oid)
+        .filter(|change| change.scope_key.as_ref() == scope_key)
         .cloned()
         .collect::<Vec<_>>();
 
     merge_changes_since(
-        &scoped_events,
+        &scoped_changes,
         ChangeCursor {
-            since_commit_seq,
+            since_seq,
             limit: limit as usize,
         },
         oldest_available,
@@ -101,29 +80,59 @@ pub fn changes_since(
     .map_err(Into::into)
 }
 
-/// Retains the latest N row events for one table/scope in commit-sequence order.
-#[must_use]
-pub fn purge_retained_events(
-    events: &[RowEvent],
-    table_oid: u32,
-    scope_key: Option<&ScopeKey>,
-    retain_latest: usize,
-) -> Vec<RowEvent> {
-    let mut scoped_events = events
-        .iter()
-        .filter(|event| event.table_oid == table_oid)
-        .filter(|event| event.scope_key.as_ref() == scope_key)
-        .cloned()
-        .collect::<Vec<_>>();
-    scoped_events.sort_by_key(|event| event.commit_seq);
-    if scoped_events.len() > retain_latest {
-        scoped_events.drain(..scoped_events.len() - retain_latest);
+/// Plans the hot mirror half of `koldstore.changes_since`.
+///
+/// The flushed-cold half is resolved by the cold reader using the same metadata
+/// names. This plan intentionally never references `koldstore.row_events`.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied, the scope column
+/// is unsafe, or the SPI statement cannot be represented.
+pub fn plan_mirror_changes_since(
+    _table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key_columns: &[String],
+    scope_column: Option<&str>,
+) -> Result<MirrorChangesSincePlan, ChangeFeedError> {
+    if primary_key_columns.is_empty() {
+        return Err(ChangeFeedError::MissingPrimaryKey);
     }
-    scoped_events
-}
 
-/// Returns the oldest retained commit sequence from an already-retained event set.
-#[must_use]
-pub fn oldest_retained_commit_seq(events: &[RowEvent]) -> Option<CommitSeq> {
-    events.iter().map(|event| event.commit_seq).min()
+    let mut additional_predicates = Vec::new();
+    let mut additional_param_types = Vec::new();
+    let scope_parameter_index = scope_column.map(|scope_column| {
+        let predicate = scope_predicate_sql("mirror", scope_column, 2)
+            .map_err(|_| ChangeFeedError::InvalidScopeColumn(scope_column.to_string()))?;
+        additional_predicates.push(predicate);
+        additional_param_types.push((2, SqlParamType::Text));
+        Ok(2)
+    });
+    let scope_parameter_index = match scope_parameter_index {
+        Some(Ok(index)) => Some(index),
+        Some(Err(error)) => return Err(error),
+        None => None,
+    };
+
+    let mirror = mirror_table
+        .as_mirror_relation()
+        .map_err(|error| ChangeFeedError::Spi(error.to_string()))?;
+    let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
+    let statement = mirror_to_spi(
+        plan_select_mirror_rows_after_seq_with_params(
+            &mirror,
+            &primary_key,
+            1,
+            3,
+            &additional_predicates,
+            &additional_param_types,
+        )
+        .map_err(|error| ChangeFeedError::Spi(error.to_string()))?,
+    )
+    .map_err(|error| ChangeFeedError::Spi(error.to_string()))?;
+
+    Ok(MirrorChangesSincePlan {
+        statement,
+        scope_parameter_index,
+    })
 }

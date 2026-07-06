@@ -37,6 +37,19 @@ impl ParquetReadOptions {
         self
     }
 
+    /// Projects clean-schema change metadata columns.
+    #[must_use]
+    pub fn with_clean_change_metadata(mut self) -> Self {
+        self.columns = vec![
+            "seq".to_string(),
+            "op".to_string(),
+            "changed_at".to_string(),
+            "deleted".to_string(),
+            "schema_version".to_string(),
+        ];
+        self
+    }
+
     /// Adds selected row groups after footer/stat/bloom pruning.
     #[must_use]
     pub fn with_row_groups<I>(mut self, row_groups: I) -> Self
@@ -47,7 +60,18 @@ impl ParquetReadOptions {
         self
     }
 
-    /// Adds `_seq` range pruning.
+    /// Adds clean-schema `seq` range pruning.
+    #[must_use]
+    pub fn with_clean_seq_range(mut self, min: SeqId, max: SeqId) -> Self {
+        self.seq_range = Some(SeqRange {
+            column: crate::schema::ColdMetadataColumn::Seq.name().to_string(),
+            min,
+            max,
+        });
+        self
+    }
+
+    /// Adds sequence range pruning for the given column name.
     #[must_use]
     pub fn with_seq_range(mut self, column: impl Into<String>, min: SeqId, max: SeqId) -> Self {
         self.seq_range = Some(SeqRange {
@@ -58,7 +82,7 @@ impl ParquetReadOptions {
         self
     }
 
-    /// Adds `_commit_seq` range pruning.
+    /// Adds commit-sequence range pruning for the given column name.
     #[must_use]
     pub fn with_commit_seq_range(
         mut self,

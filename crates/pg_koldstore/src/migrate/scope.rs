@@ -1,13 +1,11 @@
 //! User-scope migration helpers.
 
+use koldstore_core::is_safe_identifier;
 use thiserror::Error;
 
 use crate::spi::SpiStatement;
 
 use super::QualifiedTableName;
-
-/// System-added scope column name.
-pub const SYSTEM_SCOPE_COLUMN: &str = "_user_id";
 
 const SCOPE_POLICY_NAME: &str = "koldstore_user_scope_fail_closed";
 
@@ -34,11 +32,14 @@ pub struct UserScopePolicyPlan {
     pub statements: Vec<SpiStatement>,
 }
 
-/// Resolves the effective scope column for a user-scoped table.
+/// Resolves the explicit application-owned scope column for a user-scoped table.
 #[must_use]
 pub fn effective_scope_column(table_type: &str, app_scope_column: Option<&str>) -> Option<String> {
     if table_type == "user" {
-        Some(app_scope_column.unwrap_or(SYSTEM_SCOPE_COLUMN).to_string())
+        app_scope_column
+            .map(str::trim)
+            .filter(|column| !column.is_empty())
+            .map(ToString::to_string)
     } else {
         None
     }
@@ -84,10 +85,4 @@ pub fn plan_user_scope_policy(
         scope_column: scope_column.to_string(),
         statements,
     })
-}
-
-fn is_safe_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }

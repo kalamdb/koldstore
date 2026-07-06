@@ -1,5 +1,6 @@
 //! Session SQL helpers.
 
+use koldstore_core::is_safe_identifier;
 use thiserror::Error;
 
 use super::snowflake;
@@ -25,16 +26,16 @@ pub fn snowflake_id() -> i64 {
     snowflake::next_id(snowflake_worker_id()).unwrap_or_else(raise_snowflake_error)
 }
 
-/// Returns the SQL default expression for application ids and `_seq`.
+/// Returns the SQL default expression for application ids and mirror sequence values.
 #[must_use]
 pub const fn snowflake_default_expression() -> &'static str {
     "SNOWFLAKE_ID()"
 }
 
-/// Returns the SQL default clause used by pg-koldstore `_seq` columns.
+/// Returns the schema-qualified Snowflake call for restricted `search_path` contexts.
 #[must_use]
-pub const fn system_seq_default_clause() -> &'static str {
-    "DEFAULT SNOWFLAKE_ID()"
+pub const fn snowflake_id_call_expression() -> &'static str {
+    "public.snowflake_id()"
 }
 
 /// Builds a greenfield bigint primary-key column clause using `SNOWFLAKE_ID()`.
@@ -49,8 +50,8 @@ pub fn primary_key_default_clause(column_name: &str) -> SessionSqlResult<String>
     }
 
     Ok(format!(
-        "\"{column_name}\" bigint PRIMARY KEY {}",
-        system_seq_default_clause()
+        "\"{column_name}\" bigint PRIMARY KEY DEFAULT {}",
+        snowflake_default_expression()
     ))
 }
 
@@ -68,12 +69,6 @@ pub fn normalize_user_id(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-}
-
-fn is_safe_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
 
 #[cfg(feature = "pg_test")]
@@ -98,7 +93,7 @@ const fn snowflake_worker_id() -> u16 {
     0
 }
 
-#[cfg(feature = "pg")]
+#[cfg(all(not(feature = "pg_test"), feature = "pg"))]
 fn normalize_postgres_worker_id(worker_id: i32) -> u16 {
     if worker_id <= 0 {
         return 0;

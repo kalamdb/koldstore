@@ -1,7 +1,6 @@
-use chrono::Utc;
 use koldstore_core::{
-    ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, RowEvent, RowOperation, ScopeKey, SeqId,
-    StablePkHash,
+    ChangeSource, ColdRow, CommitSeq, HotRow, LogicalPk, MirrorChange, MirrorOperation, PkColumn,
+    ScopeKey, SeqId,
 };
 use koldstore_merge::{
     changes_since, resolve_rows, tombstone_required, ChangeCursor, TombstoneDecision,
@@ -86,52 +85,73 @@ fn resolver_masks_deleted_winners() {
 }
 
 #[test]
+fn cold_delete_marker_masks_older_live_rows_and_newer_hot_reinsert_wins() {
+    let deleted = ColdRow {
+        pk: pk(1),
+        scope_key: None,
+        seq: SeqId::new(20).unwrap(),
+        commit_seq: CommitSeq::new(20).unwrap(),
+        deleted: true,
+        schema_version: 1,
+        row_image: json!({"id": 1}),
+    };
+    let old_live = cold(1, 10, 10, false, "old-cold");
+
+    assert!(resolve_rows(&[], &[old_live.clone(), deleted.clone()]).is_empty());
+
+    let rows = resolve_rows(&[hot(1, 30, 30, false, "reinserted")], &[old_live, deleted]);
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].source, koldstore_merge::RowSource::Hot);
+    assert_eq!(rows[0].seq.get(), 30);
+    assert_eq!(rows[0].row_image, json!({"id": 1, "body": "reinserted"}));
+}
+
+#[test]
 fn tombstone_required_only_when_cold_may_contain_pk() {
     assert_eq!(tombstone_required(true), TombstoneDecision::KeepTombstone);
     assert_eq!(tombstone_required(false), TombstoneDecision::PhysicalDelete);
 }
 
 #[test]
-fn changes_since_orders_by_commit_seq_and_detects_retention_gap() {
-    let pk = pk(1);
-    let event = |commit_seq| RowEvent {
+fn changes_since_orders_by_seq_and_detects_retention_gap() {
+    let change = |seq| MirrorChange {
         table_oid: 1,
         scope_key: Some(ScopeKey::new("a").unwrap()),
-        pk_hash: StablePkHash::compute(&pk),
-        pk_json: pk.to_canonical_json(),
-        op: RowOperation::Update,
-        seq: SeqId::new(commit_seq + 10).unwrap(),
-        commit_seq: CommitSeq::new(commit_seq).unwrap(),
+        pk_json: serde_json::json!({"id": seq}),
+        operation: MirrorOperation::Update,
+        seq: SeqId::new(seq).unwrap(),
+        changed_at: chrono::Utc::now(),
         deleted: false,
         row_image_json: None,
-        created_at: Utc::now(),
+        source: ChangeSource::HotMirror,
     };
 
-    let events = vec![event(5), event(3), event(4)];
+    let changes = vec![change(5), change(3), change(4)];
     let selected = changes_since(
-        &events,
+        &changes,
         ChangeCursor {
-            since_commit_seq: 3,
+            since_seq: 3,
             limit: 10,
         },
-        Some(CommitSeq::new(3).unwrap()),
+        Some(SeqId::new(3).unwrap()),
     )
     .unwrap();
 
     assert_eq!(
         selected
             .iter()
-            .map(|event| event.commit_seq.get())
+            .map(|change| change.seq.get())
             .collect::<Vec<_>>(),
         vec![4, 5]
     );
     assert!(changes_since(
-        &events,
+        &changes,
         ChangeCursor {
-            since_commit_seq: 1,
+            since_seq: 1,
             limit: 10,
         },
-        Some(CommitSeq::new(4).unwrap()),
+        Some(SeqId::new(4).unwrap()),
     )
     .is_err());
 }

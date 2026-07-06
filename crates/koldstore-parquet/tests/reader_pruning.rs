@@ -9,21 +9,35 @@ use serde_json::json;
 #[test]
 fn reader_options_capture_projection_seq_range_and_pk_values() {
     let options = ParquetReadOptions::new()
-        .with_columns(["id", "_seq"])
+        .with_columns(["id", "seq"])
         .with_row_groups([1, 3])
-        .with_seq_range("_seq", SeqId::new(10).unwrap(), SeqId::new(20).unwrap())
+        .with_clean_seq_range(SeqId::new(10).unwrap(), SeqId::new(20).unwrap())
         .with_commit_seq_range(
-            "_commit_seq",
+            "commit_seq",
             CommitSeq::new(11).unwrap(),
             CommitSeq::new(21).unwrap(),
         )
         .with_pk_values("id", ["42"]);
 
-    assert_eq!(options.columns, vec!["id", "_seq"]);
+    assert_eq!(options.columns, vec!["id", "seq"]);
     assert_eq!(options.row_groups.as_ref().unwrap(), &vec![1, 3]);
     assert_eq!(options.seq_range.as_ref().unwrap().min.get(), 10);
     assert_eq!(options.commit_seq_range.as_ref().unwrap().max.get(), 21);
     assert_eq!(options.pk_values.as_ref().unwrap().values, vec!["42"]);
+}
+
+#[test]
+fn reader_options_capture_clean_schema_metadata_projection_and_seq_cursor() {
+    let options = ParquetReadOptions::new()
+        .with_clean_change_metadata()
+        .with_seq_range("seq", SeqId::new(10).unwrap(), SeqId::new(20).unwrap());
+
+    assert_eq!(
+        options.columns,
+        vec!["seq", "op", "changed_at", "deleted", "schema_version"]
+    );
+    assert_eq!(options.seq_range.as_ref().unwrap().column, "seq");
+    assert!(options.commit_seq_range.is_none());
 }
 
 #[test]

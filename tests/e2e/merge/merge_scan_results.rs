@@ -36,6 +36,18 @@ fn cold(id: i64, seq: i64, commit_seq: i64, body: &str) -> ColdRow {
     }
 }
 
+fn cold_deleted(id: i64, seq: i64, commit_seq: i64) -> ColdRow {
+    ColdRow {
+        pk: pk(id),
+        scope_key: None,
+        seq: SeqId::new(seq).unwrap(),
+        commit_seq: CommitSeq::new(commit_seq).unwrap(),
+        deleted: true,
+        schema_version: 1,
+        row_image: json!({"id": id}),
+    }
+}
+
 #[test]
 fn merge_scan_results_resolve_hot_winner_and_tombstone_masking() {
     common::require_pgrx_server_sync()
@@ -80,6 +92,31 @@ fn merge_scan_results_apply_residual_filters_after_winner_resolution() {
     assert_eq!(
         result.rows[0].row_image,
         json!({"id": 1, "body": "hot-winner"})
+    );
+}
+
+#[test]
+fn merge_scan_results_apply_cold_delete_markers_and_newer_reinserts() {
+    common::require_pgrx_server_sync()
+        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
+
+    let deleted = execute_merge_scan(
+        vec![],
+        vec![cold(1, 10, 10, "old"), cold_deleted(1, 20, 20)],
+    )
+    .unwrap();
+    assert!(deleted.rows.is_empty());
+    assert_eq!(deleted.tombstones_masked, 0);
+
+    let reinserted = execute_merge_scan(
+        vec![hot(1, 30, 30, false, "reinserted")],
+        vec![cold(1, 10, 10, "old"), cold_deleted(1, 20, 20)],
+    )
+    .unwrap();
+    assert_eq!(reinserted.rows.len(), 1);
+    assert_eq!(
+        reinserted.rows[0].row_image,
+        json!({"id": 1, "body": "reinserted"})
     );
 }
 

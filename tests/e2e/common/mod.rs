@@ -11,8 +11,7 @@ mod sql;
 pub use catalog::{
     active_job_count, assert_catalog_has_active_schema, assert_change_log_mirror_exists,
     assert_cold_metadata_present, assert_no_active_jobs, assert_primary_key_columns_match,
-    assert_system_columns_absent, assert_system_columns_present, cold_segment_count,
-    manifest_count, primary_key_columns,
+    assert_system_columns_absent, cold_segment_count, manifest_count, primary_key_columns,
 };
 pub use cluster::{
     connect, expected_pg_ports, expected_pg_versions, local_pg_matrix, require_pgrx_server,

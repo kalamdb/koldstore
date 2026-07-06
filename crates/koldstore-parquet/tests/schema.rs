@@ -1,9 +1,11 @@
 use arrow_schema::{DataType, TimeUnit};
-use koldstore_parquet::{build_arrow_schema, PgColumn, PgType, SchemaError, SystemColumn};
+use koldstore_parquet::{
+    build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType, SchemaError,
+};
 
 #[test]
-fn postgres_schema_conversion_adds_system_columns_and_supported_types() {
-    let schema = build_arrow_schema(&[
+fn clean_schema_conversion_adds_mirror_metadata_not_user_table_system_columns() {
+    let schema = build_clean_arrow_schema(&[
         PgColumn::new("id", PgType::Int8, false),
         PgColumn::new("body", PgType::Text, true),
     ])
@@ -18,32 +20,49 @@ fn postgres_schema_conversion_adds_system_columns_and_supported_types() {
         &DataType::Utf8
     );
     assert_eq!(
-        schema.field_with_name("_seq").unwrap().data_type(),
-        &DataType::Int64
-    );
-    assert_eq!(
-        schema.field_with_name("_commit_seq").unwrap().data_type(),
-        &DataType::Int64
-    );
-    assert_eq!(
-        schema.field_with_name("_deleted").unwrap().data_type(),
-        &DataType::Boolean
-    );
-    assert_eq!(
         schema
             .fields()
             .iter()
             .map(|field| field.name().as_str())
             .collect::<Vec<_>>(),
-        vec!["id", "body", "_seq", "_commit_seq", "_deleted"]
+        vec![
+            "id",
+            "body",
+            "seq",
+            "op",
+            "changed_at",
+            "deleted",
+            "schema_version"
+        ]
     );
+    assert_eq!(
+        schema.field_with_name("seq").unwrap().data_type(),
+        &DataType::Int64
+    );
+    assert_eq!(
+        schema.field_with_name("op").unwrap().data_type(),
+        &DataType::Int16
+    );
+    assert_eq!(
+        schema.field_with_name("changed_at").unwrap().data_type(),
+        &DataType::Timestamp(TimeUnit::Microsecond, None)
+    );
+    assert_eq!(
+        schema.field_with_name("deleted").unwrap().data_type(),
+        &DataType::Boolean
+    );
+    for forbidden in ["_seq", "_commit_seq", "_deleted"] {
+        assert!(schema.field_with_name(forbidden).is_err());
+    }
 }
 
 #[test]
-fn system_columns_have_contract_names() {
-    assert_eq!(SystemColumn::Seq.name(), "_seq");
-    assert_eq!(SystemColumn::CommitSeq.name(), "_commit_seq");
-    assert_eq!(SystemColumn::Deleted.name(), "_deleted");
+fn cold_metadata_columns_have_clean_contract_names() {
+    assert_eq!(ColdMetadataColumn::Seq.name(), "seq");
+    assert_eq!(ColdMetadataColumn::Op.name(), "op");
+    assert_eq!(ColdMetadataColumn::ChangedAt.name(), "changed_at");
+    assert_eq!(ColdMetadataColumn::Deleted.name(), "deleted");
+    assert_eq!(ColdMetadataColumn::SchemaVersion.name(), "schema_version");
 }
 
 #[test]

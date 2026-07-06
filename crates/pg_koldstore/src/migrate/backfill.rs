@@ -1,9 +1,10 @@
 //! Existing-row mirror initialization settings and planning.
 
-use koldstore_core::PrimaryKeyColumnShape;
+use koldstore_core::{is_safe_identifier, quote_ident, PrimaryKeyColumnShape};
+use koldstore_mirror::{quoted_pk_columns, MirrorColumn};
 use thiserror::Error;
 
-use crate::spi::SpiStatement;
+use crate::spi::{SpiStatement, SqlParamType};
 
 use super::{jobs::MigrationBatchSize, order::MigrationOrdering, QualifiedTableName};
 
@@ -25,6 +26,16 @@ pub enum MirrorInitializationError {
     /// SPI statement metadata could not be prepared.
     #[error("{0}")]
     Spi(String),
+}
+
+impl From<koldstore_mirror::MirrorError> for MirrorInitializationError {
+    fn from(error: koldstore_mirror::MirrorError) -> Self {
+        match error {
+            koldstore_mirror::MirrorError::MissingPrimaryKey => Self::MissingPrimaryKey,
+            koldstore_mirror::MirrorError::InvalidColumn(name) => Self::InvalidIdentifier(name),
+            other => Self::Spi(other.to_string()),
+        }
+    }
 }
 
 /// Planned bounded initialization batch from hot rows into the mirror.
@@ -68,19 +79,11 @@ pub fn plan_mirror_initialization_batch(
         ));
     }
 
-    let pk_columns = primary_key
+    let primary_key_names: Vec<&str> = primary_key
         .iter()
-        .map(|column| {
-            let column = column.column().as_str();
-            if is_safe_identifier(column) {
-                Ok(quote_ident(column))
-            } else {
-                Err(MirrorInitializationError::InvalidIdentifier(
-                    column.to_string(),
-                ))
-            }
-        })
-        .collect::<MirrorInitializationResult<Vec<_>>>()?;
+        .map(|column| column.column().as_str())
+        .collect();
+    let pk_columns = quoted_pk_columns(&primary_key_names)?;
     let hot_pk_columns = pk_columns
         .iter()
         .map(|column| format!("hot.{column}"))
@@ -99,12 +102,7 @@ pub fn plan_mirror_initialization_batch(
     let order_column = quote_ident(&ordering.column);
     let order_column_ref = format!("hot.{order_column}");
     let mut insert_columns = pk_columns.clone();
-    insert_columns.extend([
-        "\"seq\"".to_string(),
-        "\"op\"".to_string(),
-        "\"changed_at\"".to_string(),
-        "\"commit_lsn\"".to_string(),
-    ]);
+    insert_columns.extend(MirrorColumn::insert_quoted_names());
     let mut select_columns = pk_columns.clone();
     select_columns.extend([
         "SNOWFLAKE_ID()".to_string(),
@@ -149,8 +147,12 @@ SELECT
         select_columns = select_columns.join(", "),
         conflict_columns = pk_columns.join(", "),
     );
-    let statement = SpiStatement::write("initialize change-log mirror batch", &sql)
-        .map_err(|error| MirrorInitializationError::Spi(error.to_string()))?;
+    let statement = SpiStatement::write_with_params(
+        "initialize change-log mirror batch",
+        &sql,
+        [SqlParamType::BigInt],
+    )
+    .map_err(|error| MirrorInitializationError::Spi(error.to_string()))?;
 
     Ok(MirrorInitializationBatchPlan {
         table: table.clone(),
@@ -159,14 +161,4 @@ SELECT
         batch_size,
         statement,
     })
-}
-
-fn quote_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
-}
-
-fn is_safe_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }

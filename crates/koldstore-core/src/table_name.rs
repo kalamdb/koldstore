@@ -4,7 +4,7 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{KoldstoreError, Result};
+use crate::{ident, KoldstoreError, Result};
 
 /// A validated one- or two-part PostgreSQL table name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -22,8 +22,8 @@ impl TableName {
         let value = value.as_ref().trim();
         let parts = value.split('.').collect::<Vec<_>>();
         let valid = match parts.as_slice() {
-            [name] => is_safe_identifier(name),
-            [schema, name] => is_safe_identifier(schema) && is_safe_identifier(name),
+            [name] => ident::is_safe_identifier(name),
+            [schema, name] => ident::is_safe_identifier(schema) && ident::is_safe_identifier(name),
             _ => false,
         };
 
@@ -56,6 +56,19 @@ impl TableName {
             .split_once('.')
             .map_or(self.0.as_str(), |(_, relation)| relation)
     }
+
+    /// Returns a safely quoted SQL relation reference.
+    #[must_use]
+    pub fn quoted(&self) -> String {
+        match self.schema() {
+            Some(schema) => format!(
+                "{}.{}",
+                ident::quote_ident(schema),
+                ident::quote_ident(self.relation())
+            ),
+            None => ident::quote_ident(self.relation()),
+        }
+    }
 }
 
 impl fmt::Display for TableName {
@@ -70,10 +83,4 @@ impl FromStr for TableName {
     fn from_str(s: &str) -> Result<Self> {
         Self::parse(s)
     }
-}
-
-fn is_safe_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }

@@ -11,11 +11,11 @@ use crate::{KoldstoreError, Result};
 pub enum ColumnClass {
     /// Logical primary-key column.
     PrimaryKey,
-    /// Scope column or `_user_id`.
+    /// Scope column or application user-id column.
     Scope,
-    /// `_seq` system column.
+    /// Mirror/cold `seq` metadata column.
     Seq,
-    /// `_commit_seq` system column.
+    /// Commit-order cursor used during hot/cold merge.
     CommitSeq,
     /// Immutable or stats-only column recorded safe by schema metadata.
     Immutable,

@@ -1,8 +1,8 @@
 use koldstore_core::{
     ColdRow, ColumnClass, CommitSeq, HotRow, LogicalPk, MirrorOperation, MirrorState, PgCollation,
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue, Predicate, PredicateClass,
-    PredicateValue, PrimaryKeyColumnShape, PrimaryKeyShape, RowOperation, SeqId, StablePkHash,
-    TableKind, TableName,
+    PredicateValue, PrimaryKeyColumnShape, PrimaryKeyShape, SeqId, StablePkHash, TableKind,
+    TableName,
 };
 use serde_json::json;
 
@@ -38,6 +38,8 @@ fn table_name_newtype_normalizes_and_rejects_unsafe_names() {
     assert_eq!(table.as_str(), "app.items");
     assert_eq!(table.schema(), Some("app"));
     assert_eq!(table.relation(), "items");
+    assert_eq!(table.quoted(), "\"app\".\"items\"");
+    assert_eq!(TableName::parse("items").unwrap().quoted(), "\"items\"");
     assert_eq!(table.to_string(), "app.items");
 
     assert!(TableName::parse("").is_err());
@@ -139,18 +141,6 @@ fn cold_row_model_preserves_schema_version_and_delete_marker() {
 }
 
 #[test]
-fn row_operation_serializes_contract_names() {
-    assert_eq!(
-        serde_json::to_value(RowOperation::Insert).unwrap(),
-        json!("insert")
-    );
-    assert_eq!(
-        serde_json::to_value(RowOperation::Revive).unwrap(),
-        json!("revive")
-    );
-}
-
-#[test]
 fn mirror_operation_maps_to_smallint_contract_values() {
     assert_eq!(MirrorOperation::Insert.code(), 1);
     assert_eq!(MirrorOperation::Update.code(), 2);
@@ -169,6 +159,28 @@ fn mirror_operation_maps_to_smallint_contract_values() {
         MirrorOperation::Delete
     );
     assert!(MirrorOperation::from_code(4).is_err());
+}
+
+#[test]
+fn mirror_operation_capture_metadata_is_derived_from_enum_variants() {
+    assert_eq!(MirrorOperation::ALL.len(), 3);
+    assert_eq!(
+        MirrorOperation::Insert.capture_trigger_name("messages__cl"),
+        "messages__cl_insert_capture"
+    );
+    assert_eq!(
+        MirrorOperation::Update.capture_trigger_name("messages__cl"),
+        "messages__cl_update_capture"
+    );
+    assert_eq!(
+        MirrorOperation::Delete.capture_trigger_name("messages__cl"),
+        "messages__cl_delete_capture"
+    );
+    assert_eq!(MirrorOperation::Insert.sql_trigger_event(), "INSERT");
+    assert_eq!(MirrorOperation::Update.sql_trigger_event(), "UPDATE");
+    assert_eq!(MirrorOperation::Delete.sql_trigger_event(), "DELETE");
+    assert_eq!(MirrorOperation::Insert.capture_row_ref(), "NEW");
+    assert_eq!(MirrorOperation::Delete.capture_row_ref(), "OLD");
 }
 
 #[test]

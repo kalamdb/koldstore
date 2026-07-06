@@ -1,54 +1,68 @@
-use koldstore_core::{CommitSeq, LogicalPk, PkColumn, RowOperation, ScopeKey, SeqId};
-use pg_koldstore::sql::events;
+use chrono::{TimeZone, Utc};
+use koldstore_core::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
+use pg_koldstore::{spi::SqlParamType, sql::events};
 use serde_json::json;
 
-fn pk(id: i64) -> LogicalPk {
-    LogicalPk::from_json_object(&json!({"id": id}), &[PkColumn::new("id").unwrap()]).unwrap()
-}
-
-fn event(
+fn change(
     table_oid: u32,
     scope: Option<&str>,
     id: i64,
     seq: i64,
-    commit_seq: i64,
-) -> koldstore_core::RowEvent {
-    events::append_row_event(
+    operation: MirrorOperation,
+    source: ChangeSource,
+) -> MirrorChange {
+    MirrorChange {
         table_oid,
-        scope.map(|scope| ScopeKey::new(scope).unwrap()),
-        &pk(id),
-        RowOperation::Update,
-        SeqId::new(seq).unwrap(),
-        CommitSeq::new(commit_seq).unwrap(),
-        None,
-    )
+        scope_key: scope.map(|scope| ScopeKey::new(scope).unwrap()),
+        pk_json: json!({"id": id}),
+        operation,
+        seq: SeqId::new(seq).unwrap(),
+        changed_at: Utc.timestamp_opt(seq, 0).unwrap(),
+        deleted: operation.is_delete(),
+        row_image_json: (!operation.is_delete()).then(|| json!({"id": id, "body": seq})),
+        source,
+    }
 }
 
 #[test]
-fn changes_since_filters_table_scope_and_orders_by_commit_seq() {
-    let later = pg_koldstore::sql::events::append_row_event(
-        42,
-        Some(ScopeKey::new("user-a").unwrap()),
-        &pk(1),
-        RowOperation::Update,
-        SeqId::new(2).unwrap(),
-        CommitSeq::new(20).unwrap(),
-        None,
-    );
-    let earlier = pg_koldstore::sql::events::append_row_event(
-        42,
-        Some(ScopeKey::new("user-a").unwrap()),
-        &pk(1),
-        RowOperation::Insert,
-        SeqId::new(100).unwrap(),
-        CommitSeq::new(10).unwrap(),
-        None,
-    );
-    let other_scope = event(42, Some("user-b"), 1, 3, 15);
-    let other_table = event(99, Some("user-a"), 1, 4, 17);
+fn changes_since_filters_table_scope_orders_by_seq_and_keeps_latest_state() {
+    let changes = vec![
+        change(
+            42,
+            Some("user-a"),
+            1,
+            10,
+            MirrorOperation::Insert,
+            ChangeSource::ColdRecord,
+        ),
+        change(
+            42,
+            Some("user-a"),
+            1,
+            20,
+            MirrorOperation::Update,
+            ChangeSource::HotMirror,
+        ),
+        change(
+            42,
+            Some("user-b"),
+            2,
+            30,
+            MirrorOperation::Update,
+            ChangeSource::HotMirror,
+        ),
+        change(
+            99,
+            Some("user-a"),
+            3,
+            40,
+            MirrorOperation::Update,
+            ChangeSource::ColdRecord,
+        ),
+    ];
 
-    let changes = events::changes_since(
-        &[later, earlier, other_scope, other_table],
+    let result = events::changes_since(
+        &changes,
         42,
         Some(&ScopeKey::new("user-a").unwrap()),
         0,
@@ -57,34 +71,70 @@ fn changes_since_filters_table_scope_and_orders_by_commit_seq() {
     )
     .unwrap();
 
-    assert_eq!(changes[0].commit_seq.get(), 10);
-    assert_eq!(changes[1].commit_seq.get(), 20);
-    assert_eq!(changes.len(), 2);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].seq.get(), 20);
+    assert_eq!(result[0].operation, MirrorOperation::Update);
+    assert_eq!(result[0].source, ChangeSource::HotMirror);
 }
 
 #[test]
-fn changes_since_applies_default_limit_validates_limit_and_reports_gap() {
-    let events = [event(42, None, 1, 1, 10)];
+fn changes_since_validates_limit_and_reports_seq_retention_gap() {
+    let changes = [change(
+        42,
+        None,
+        1,
+        10,
+        MirrorOperation::Insert,
+        ChangeSource::ColdRecord,
+    )];
 
-    let defaulted =
-        pg_koldstore::sql::events::changes_since(&events, 42, None, 0, None, None).unwrap();
+    let defaulted = events::changes_since(&changes, 42, None, 0, None, None).unwrap();
     assert_eq!(defaulted.len(), 1);
 
-    let invalid =
-        pg_koldstore::sql::events::changes_since(&events, 42, None, 0, Some(0), None).unwrap_err();
+    let invalid = events::changes_since(&changes, 42, None, 0, Some(0), None).unwrap_err();
     assert_eq!(invalid.to_string(), "limit_rows must be positive");
 
-    let gap = pg_koldstore::sql::events::changes_since(
-        &events,
+    let gap = events::changes_since(
+        &changes,
         42,
         None,
         5,
         Some(10),
-        Some(CommitSeq::new(10).unwrap()),
+        Some(SeqId::new(10).unwrap()),
     )
     .unwrap_err();
     assert_eq!(
         gap.to_string(),
-        "change events before commit sequence 10 are no longer retained"
+        "change records before sequence 10 are no longer retained"
+    );
+}
+
+#[test]
+fn mirror_backed_changes_since_plan_reads_mirror_and_not_row_events() {
+    let table = pg_koldstore::migrate::QualifiedTableName::parse("app.items").unwrap();
+    let mirror = pg_koldstore::migrate::QualifiedTableName::parse("koldstore.items__cl").unwrap();
+    let plan =
+        events::plan_mirror_changes_since(&table, &mirror, &["id".to_string()], Some("tenant_id"))
+            .unwrap();
+
+    assert!(plan
+        .statement
+        .sql
+        .contains("FROM \"koldstore\".\"items__cl\" AS mirror"));
+    assert!(plan.statement.sql.contains("mirror.\"seq\" > $1::bigint"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("\"mirror\".\"tenant_id\"::text = $2::text"));
+    assert!(plan.statement.sql.contains("ORDER BY mirror.\"seq\" ASC"));
+    assert!(!plan.statement.sql.contains("row_events"));
+    assert_eq!(plan.scope_parameter_index, Some(2));
+    assert_eq!(
+        plan.statement.param_types,
+        vec![
+            SqlParamType::BigInt,
+            SqlParamType::Text,
+            SqlParamType::Integer
+        ]
     );
 }

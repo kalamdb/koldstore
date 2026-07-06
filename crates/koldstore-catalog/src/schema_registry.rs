@@ -25,17 +25,6 @@ impl SchemaColumn {
             system: false,
         }
     }
-
-    /// Creates a system column description.
-    #[must_use]
-    pub fn system(name: impl Into<String>, type_name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            type_name: type_name.into(),
-            nullable: false,
-            system: true,
-        }
-    }
 }
 
 /// Registry row.

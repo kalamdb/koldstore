@@ -527,6 +527,7 @@ name = "e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "koldstore-core",
  "koldstore-manifest",
  "koldstore-parquet",
@@ -1034,6 +1035,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "koldstore-mirror"
+version = "0.1.0"
+dependencies = [
+ "koldstore-core",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "koldstore-parquet"
 version = "0.1.0"
 dependencies = [
@@ -1352,6 +1362,7 @@ dependencies = [
  "koldstore-core",
  "koldstore-manifest",
  "koldstore-merge",
+ "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-storage",
  "pg_koldstore",
@@ -1376,6 +1387,7 @@ dependencies = [
  "koldstore-core",
  "koldstore-manifest",
  "koldstore-merge",
+ "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-storage",
  "pgrx",

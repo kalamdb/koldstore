@@ -31,7 +31,6 @@ fn spec_edge_cases_have_regression_coverage_markers() {
         pg_koldstore::migrate::rehydrate::DemigrateOptions {
             rehydrate: false,
             drop_cold: false,
-            drop_system_columns: false,
         }
         .mode(),
         pg_koldstore::migrate::rehydrate::DemigrationMode::ArchiveDetach

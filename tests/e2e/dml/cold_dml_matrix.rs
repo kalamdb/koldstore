@@ -64,7 +64,7 @@ fn cold_dml_plans_cover_hydrate_update_delete_and_no_default_object_reads() {
 }
 
 #[tokio::test]
-async fn standard_hot_dml_on_managed_table_preserves_system_columns_on_pgrx() -> Result<()> {
+async fn standard_hot_dml_on_managed_table_updates_change_log_mirror_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "cold_dml_matrix").await?;
         let table = db.create_indexed_items_table("dml_items", 20).await?;
@@ -88,23 +88,22 @@ async fn standard_hot_dml_on_managed_table_preserves_system_columns_on_pgrx() ->
             ))
             .await?;
 
+        let mirror = format!("koldstore.{}__cl", table.table_name);
         let row = db
             .client
             .query_one(
                 &format!(
                     r#"
                     SELECT count(*)
-                    FROM {relation}
-                    WHERE "_seq" IS NOT NULL
-                      AND "_commit_seq" IS NOT NULL
-                      AND "_deleted" IS NOT NULL
+                    FROM {mirror}
                     "#,
-                    relation = table.relation
+                    mirror = mirror
                 ),
                 &[],
             )
             .await?;
-        assert_eq!(row.get::<_, i64>(0), 20);
+        assert!(row.get::<_, i64>(0) >= 3);
+        common::assert_system_columns_absent(&db.client, &table.relation).await?;
         common::assertions::assert_no_duplicate_hot_pk(&db.client, &table.relation, "id").await?;
 
         let plan = common::explain_with_seqscan_disabled(

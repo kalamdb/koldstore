@@ -1,12 +1,10 @@
-use koldstore_core::SeqId;
+use koldstore_core::{PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape};
 use pg_koldstore::{
     migrate::{
-        columns::{
-            plan_existing_table_system_column_finalize, plan_existing_table_system_column_prepare,
-        },
+        backfill::plan_mirror_initialization_batch,
         jobs::{
-            backfill_batch_plan, claim_migration_jobs_plan, enqueue_migration_backfill_job_plan,
-            finish_backfill_and_enqueue_flush_plan, migration_job_progress_plan, ManagedTableType,
+            claim_migration_jobs_plan, enqueue_migration_backfill_job_plan,
+            finish_mirror_initialization_plan, migration_job_progress_plan, ManagedTableType,
             MigrationBackfillJobRequest, MigrationBatchSize, MigrationJobPhase,
             MigrationLeaseEpoch, MigrationLeaseSeconds,
         },
@@ -30,38 +28,22 @@ fn ordering() -> MigrationOrdering {
 }
 
 #[test]
-fn existing_table_system_columns_are_prepared_without_rewriting_old_rows() {
-    let prepare = plan_existing_table_system_column_prepare(&table(), false).unwrap();
-    let finalize = plan_existing_table_system_column_finalize(&table()).unwrap();
-
-    assert_eq!(prepare.columns, vec!["_seq", "_commit_seq", "_deleted"]);
-    assert_eq!(prepare.statements.len(), 2);
-    assert!(prepare
-        .statements
-        .iter()
-        .all(|statement| statement.access == SpiAccess::ReadWrite));
-    assert!(prepare.statements[0]
-        .sql
-        .contains("ADD COLUMN IF NOT EXISTS \"_seq\" bigint"));
-    assert!(!prepare.statements[0].sql.contains("NOT NULL"));
-    assert!(!prepare.statements[0].sql.contains("DEFAULT"));
-
-    assert!(prepare.statements[1]
-        .sql
-        .contains("ALTER COLUMN \"_seq\" SET DEFAULT SNOWFLAKE_ID()"));
-    assert!(prepare.statements[1]
-        .sql
-        .contains("ALTER COLUMN \"_deleted\" SET DEFAULT false"));
-    assert!(finalize
-        .statement
-        .sql
-        .contains("ALTER COLUMN \"_seq\" SET NOT NULL"));
-}
-
-#[test]
-fn backfill_batch_plan_is_bounded_ordered_and_uses_skip_locked_rows() {
-    let plan = backfill_batch_plan(
+fn existing_table_mirror_initialization_batches_without_rewriting_base_schema() {
+    let pk = vec![PrimaryKeyColumnShape::new(
+        PkColumn::new("id").unwrap(),
+        PkOrdinal::new(1).unwrap(),
+        PgTypeOid::new(20).unwrap(),
+        PgTypeName::new("bigint").unwrap(),
+        PgTypmod::new(-1),
+        None,
+        None,
+        true,
+    )];
+    let mirror = QualifiedTableName::parse("koldstore.items__cl").unwrap();
+    let plan = plan_mirror_initialization_batch(
         &table(),
+        &mirror,
+        &pk,
         ordering(),
         MigrationBatchSize::new(1_000).unwrap(),
     )
@@ -69,16 +51,28 @@ fn backfill_batch_plan_is_bounded_ordered_and_uses_skip_locked_rows() {
 
     assert_eq!(plan.batch_size.get(), 1_000);
     assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
-    assert!(plan.statement.sql.contains("FROM ONLY \"app\".\"items\""));
-    assert!(plan.statement.sql.contains("WHERE \"_seq\" IS NULL"));
-    assert!(plan.statement.sql.contains("ORDER BY \"id\" ASC, ctid ASC"));
-    assert!(plan.statement.sql.contains("LIMIT $1"));
-    assert!(plan.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
     assert!(plan
         .statement
         .sql
-        .contains("nextval('koldstore.global_seq'::regclass) AS assigned_seq"));
-    assert!(plan.statement.sql.contains("AND hot.\"_seq\" IS NULL"));
+        .contains("FROM ONLY \"app\".\"items\" AS hot"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("LEFT JOIN \"koldstore\".\"items__cl\" AS mirror"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("ON CONFLICT (\"id\") DO NOTHING"));
+    assert!(plan.statement.sql.contains("\"op\""));
+    assert!(plan.statement.sql.contains("1"));
+    for forbidden in [
+        "\"_seq\"",
+        "\"_commit_seq\"",
+        "\"_deleted\"",
+        "\"_user_id\"",
+    ] {
+        assert!(!plan.statement.sql.contains(forbidden));
+    }
 }
 
 #[test]
@@ -148,8 +142,7 @@ fn migration_progress_updates_are_guarded_by_the_live_lease() {
         job_id,
         owner,
         MigrationLeaseEpoch::new(4).unwrap(),
-        MigrationJobPhase::BackfillSeq,
-        SeqId::new(999).unwrap(),
+        MigrationJobPhase::InitializeMirror,
         512,
     )
     .unwrap();
@@ -157,76 +150,37 @@ fn migration_progress_updates_are_guarded_by_the_live_lease() {
     assert_eq!(plan.job_id, job_id);
     assert_eq!(plan.lease_owner, owner);
     assert_eq!(plan.lease_epoch.get(), 4);
-    assert_eq!(plan.phase, MigrationJobPhase::BackfillSeq);
+    assert_eq!(plan.phase, MigrationJobPhase::InitializeMirror);
     assert_eq!(plan.rows_processed_increment, 512);
     assert!(plan.statement.sql.contains("lease_owner = $2::uuid"));
     assert!(plan.statement.sql.contains("lease_epoch = $3::bigint"));
     assert!(plan
         .statement
         .sql
-        .contains("checkpoint_seq = GREATEST(checkpoint_seq, $5::bigint)"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("rows_processed = rows_processed + $6::bigint"));
+        .contains("rows_processed = rows_processed + $5::bigint"));
+    assert!(!plan.statement.sql.contains("checkpoint_seq ="));
 }
 
 #[test]
-fn finishing_backfill_activates_schema_and_enqueues_watermarked_flush() {
-    let plan = finish_backfill_and_enqueue_flush_plan(
-        &table(),
-        None,
+fn finishing_mirror_initialization_activates_schema_without_initial_flush() {
+    let plan = finish_mirror_initialization_plan(
         Uuid::from_u128(41),
         Uuid::from_u128(42),
         MigrationLeaseEpoch::new(5).unwrap(),
-        SeqId::new(10_000).unwrap(),
     )
     .unwrap();
 
-    assert_eq!(plan.flush_seq_upper_bound.get(), 10_000);
     assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
     assert!(plan.statement.sql.contains("status = 'completed'"));
     assert!(plan.statement.sql.contains("phase = 'finished'"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("flush_seq_upper_bound = $4::bigint"));
     assert!(plan.statement.sql.contains("UPDATE koldstore.schemas AS s"));
     assert!(plan.statement.sql.contains("SET active = true"));
-    assert!(plan.statement.sql.contains("INSERT INTO koldstore.jobs"));
-    assert!(plan.statement.sql.contains("'flush'"));
     assert!(plan
         .statement
         .sql
-        .contains("jsonb_build_object('source', 'migration', 'force', false)"));
-    assert!(plan.statement.sql.contains("SELECT ''::text AS scope_key"));
-}
-
-#[test]
-fn finishing_user_backfill_enqueues_one_watermarked_flush_per_scope() {
-    let plan = finish_backfill_and_enqueue_flush_plan(
-        &table(),
-        Some("tenant_id"),
-        Uuid::from_u128(51),
-        Uuid::from_u128(52),
-        MigrationLeaseEpoch::new(6).unwrap(),
-        SeqId::new(20_000).unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(plan.scope_column.as_deref(), Some("tenant_id"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("SELECT DISTINCT COALESCE(hot.\"tenant_id\"::text, '') AS scope_key"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("FROM ONLY \"app\".\"items\" AS hot"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("WHERE hot.\"_seq\" <= $4::bigint"));
+        .contains("initialization_state = 'complete'"));
+    assert!(!plan.statement.sql.contains("INSERT INTO koldstore.jobs"));
+    assert!(!plan.statement.sql.contains("flush_seq_upper_bound"));
 }
 
 #[test]

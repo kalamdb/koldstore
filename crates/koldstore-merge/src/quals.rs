@@ -20,9 +20,9 @@ pub struct PruningPlan {
     pub pk_columns: Vec<String>,
     /// Scope columns with equality filters.
     pub scope_columns: Vec<String>,
-    /// Optional `_seq` range.
+    /// Optional `seq` range.
     pub seq_range: Option<PruningRange>,
-    /// Optional `_commit_seq` range.
+    /// Optional commit-sequence range.
     pub commit_seq_range: Option<PruningRange>,
     /// Immutable/stat-only columns safe for pre-merge pruning.
     pub immutable_stat_columns: Vec<String>,

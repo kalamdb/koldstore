@@ -1,43 +1,74 @@
-#[test]
-fn migration_sql_backfills_existing_rows_in_ordered_batches() {
-    use pg_koldstore::migrate::jobs::{backfill_batch_plan, MigrationBatchSize};
-    use pg_koldstore::migrate::order::{MigrationOrdering, OrderingSource};
-    use pg_koldstore::migrate::QualifiedTableName;
+use koldstore_core::{PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape};
+use pg_koldstore::{
+    migrate::{
+        backfill::plan_mirror_initialization_batch,
+        constraints::{ColumnDefinition, IndexDefinition, MigrationValidationInput},
+        jobs::MigrationBatchSize,
+        order::{MigrationOrdering, OrderingSource},
+        QualifiedTableName,
+    },
+    spi::{SpiAccess, SqlParamType},
+};
 
-    let plan = backfill_batch_plan(
+fn pk() -> Vec<PrimaryKeyColumnShape> {
+    vec![PrimaryKeyColumnShape::new(
+        PkColumn::new("id").unwrap(),
+        PkOrdinal::new(1).unwrap(),
+        PgTypeOid::new(20).unwrap(),
+        PgTypeName::new("bigint").unwrap(),
+        PgTypmod::new(-1),
+        None,
+        None,
+        true,
+    )]
+}
+
+fn ordering() -> MigrationOrdering {
+    MigrationOrdering {
+        column: "id".to_string(),
+        source: OrderingSource::AutoIncrementPrimaryKey,
+        ascending_oldest_first: true,
+    }
+}
+
+#[test]
+fn migration_sql_initializes_existing_rows_into_mirror_in_ordered_batches() {
+    let plan = plan_mirror_initialization_batch(
         &QualifiedTableName::parse("app.items").unwrap(),
-        MigrationOrdering {
-            column: "id".to_string(),
-            source: OrderingSource::AutoIncrementPrimaryKey,
-            ascending_oldest_first: true,
-        },
+        &QualifiedTableName::parse("koldstore.items__cl").unwrap(),
+        &pk(),
+        ordering(),
         MigrationBatchSize::new(10_000).unwrap(),
     )
     .unwrap();
 
     assert!(plan.statement.sql.contains("LIMIT $1"));
-    assert!(plan.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
-    assert!(plan.statement.sql.contains("ORDER BY \"id\" ASC, ctid ASC"));
     assert!(plan
         .statement
         .sql
-        .contains("nextval('koldstore.global_seq'::regclass) AS assigned_seq"));
+        .contains("FOR KEY SHARE OF hot SKIP LOCKED"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("ORDER BY hot.\"id\" ASC, hot.ctid ASC"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("ON CONFLICT (\"id\") DO NOTHING"));
+    assert!(plan.statement.sql.contains("SNOWFLAKE_ID()"));
+    assert_eq!(plan.statement.param_types, vec![SqlParamType::BigInt]);
 }
 
 #[test]
 fn migration_validation_preserves_existing_table_shape() {
-    let mut input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    let mut input = MigrationValidationInput::minimal_shared();
     input
         .columns
-        .push(pg_koldstore::migrate::constraints::ColumnDefinition::new(
-            "title", "text", false,
-        ));
-    input
-        .indexes
-        .push(pg_koldstore::migrate::constraints::IndexDefinition::btree(
-            "items_title_idx",
-            vec!["title".to_string()],
-        ));
+        .push(ColumnDefinition::new("title", "text", false));
+    input.indexes.push(IndexDefinition::btree(
+        "items_title_idx",
+        vec!["title".to_string()],
+    ));
     input.check_constraints = vec!["title <> ''".to_string()];
     input.not_null_columns = vec!["id".to_string(), "title".to_string()];
 
@@ -55,32 +86,39 @@ fn migration_validation_preserves_existing_table_shape() {
 }
 
 #[test]
-fn existing_row_backfill_plan_uses_skip_locked_batches_not_table_wide_update() {
-    use pg_koldstore::migrate::jobs::{backfill_batch_plan, MigrationBatchSize};
-    use pg_koldstore::migrate::order::{MigrationOrdering, OrderingSource};
-    use pg_koldstore::migrate::QualifiedTableName;
-    use pg_koldstore::spi::SpiAccess;
-
+fn existing_row_initialization_uses_skip_locked_batches_not_table_wide_update() {
     let table = QualifiedTableName::parse("app.items").unwrap();
-    let plan = backfill_batch_plan(
+    let mirror = QualifiedTableName::parse("koldstore.items__cl").unwrap();
+    let plan = plan_mirror_initialization_batch(
         &table,
-        MigrationOrdering {
-            column: "id".to_string(),
-            source: OrderingSource::AutoIncrementPrimaryKey,
-            ascending_oldest_first: true,
-        },
+        &mirror,
+        &pk(),
+        ordering(),
         MigrationBatchSize::new(1_000).unwrap(),
     )
     .unwrap();
 
     assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
-    assert!(plan.statement.sql.contains("UPDATE ONLY \"app\".\"items\""));
+    assert!(plan
+        .statement
+        .sql
+        .contains("INSERT INTO \"koldstore\".\"items__cl\""));
     assert!(plan
         .statement
         .sql
         .contains("WITH candidate AS MATERIALIZED"));
     assert!(plan.statement.sql.contains("LIMIT $1"));
-    assert!(plan.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
-    assert!(plan.statement.sql.contains("AND hot.\"_seq\" IS NULL"));
-    assert!(!plan.statement.sql.contains("SNOWFLAKE_ID()"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("FOR KEY SHARE OF hot SKIP LOCKED"));
+    assert!(!plan.statement.sql.contains("UPDATE ONLY \"app\".\"items\""));
+    for forbidden in [
+        "\"_seq\"",
+        "\"_commit_seq\"",
+        "\"_deleted\"",
+        "\"_user_id\"",
+    ] {
+        assert!(!plan.statement.sql.contains(forbidden));
+    }
 }

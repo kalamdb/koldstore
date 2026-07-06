@@ -3,31 +3,6 @@
 use anyhow::Result;
 use tokio_postgres::Client;
 
-/// Asserts that pg-koldstore system columns are present on a relation.
-///
-/// # Errors
-///
-/// Returns an error when the catalog query fails or any column is missing.
-pub async fn assert_system_columns_present(client: &Client, relation: &str) -> Result<()> {
-    let row = client
-        .query_one(
-            r#"
-            SELECT count(*)
-            FROM pg_attribute
-            WHERE attrelid = $1::text::regclass
-              AND attname = ANY($2)
-              AND NOT attisdropped
-            "#,
-            &[&relation, &&["_seq", "_commit_seq", "_deleted"][..]],
-        )
-        .await?;
-    anyhow::ensure!(
-        row.get::<_, i64>(0) == 3,
-        "expected _seq, _commit_seq, and _deleted on {relation}"
-    );
-    Ok(())
-}
-
 /// Asserts that pg-koldstore system columns are absent from a relation.
 ///
 /// # Errors

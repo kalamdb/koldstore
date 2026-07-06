@@ -2,10 +2,15 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use koldstore_core::{CommitSeq, MirrorOperation, PrimaryKeyColumnShape, Result, SeqId, TableName};
+use koldstore_core::{
+    quote_ident, CommitSeq, MirrorOperation, PrimaryKeyColumnShape, Result, SeqId, TableName,
+};
+use koldstore_mirror::plan_upsert_mirror_row;
 use thiserror::Error;
 
-use crate::{migrate::QualifiedTableName, spi::SpiStatement};
+use crate::{
+    migrate::QualifiedTableName, spi::SpiStatement, sql::session::snowflake_id_call_expression,
+};
 
 static NEXT_SEQ: AtomicI64 = AtomicI64::new(1);
 
@@ -89,38 +94,29 @@ pub fn plan_mirror_capture(
         schema: Some("koldstore".to_string()),
         name: format!("{}_capture", mirror_table.name),
     };
-    let insert_trigger_name = format!("{}_insert_capture", mirror_table.name);
-    let update_trigger_name = format!("{}_update_capture", mirror_table.name);
-    let delete_trigger_name = format!("{}_delete_capture", mirror_table.name);
     let source = source_table.quoted();
-    let function = SpiStatement::write(
-        "create change-log mirror capture function",
-        &capture_function_sql(&function_name, mirror_table, primary_key),
-    )
-    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
-    let insert_trigger = SpiStatement::write(
-        "create change-log mirror insert trigger",
-        &capture_trigger_sql(&insert_trigger_name, "INSERT", &source, &function_name),
-    )
-    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
-    let update_trigger = SpiStatement::write(
-        "create change-log mirror update trigger",
-        &capture_trigger_sql(&update_trigger_name, "UPDATE", &source, &function_name),
-    )
-    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
-    let delete_trigger = SpiStatement::write(
-        "create change-log mirror delete trigger",
-        &capture_trigger_sql(&delete_trigger_name, "DELETE", &source, &function_name),
-    )
-    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let function_sql = capture_function_sql(&function_name, mirror_table, primary_key)?;
+    let function = SpiStatement::write("create change-log mirror capture function", &function_sql)
+        .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let triggers: [SpiStatement; 3] = MirrorOperation::ALL
+        .into_iter()
+        .map(|operation| plan_capture_trigger(operation, mirror_table, &source, &function_name))
+        .collect::<MirrorCaptureResult<Vec<_>>>()?
+        .try_into()
+        .expect("mirror capture has exactly three trigger operations");
+    let [insert_trigger, update_trigger, delete_trigger] = triggers;
     let drop_triggers = SpiStatement::write(
         "drop change-log mirror capture triggers",
-        &format!(
-            "DROP TRIGGER IF EXISTS {} ON {source};\nDROP TRIGGER IF EXISTS {} ON {source};\nDROP TRIGGER IF EXISTS {} ON {source}",
-            quote_ident(&insert_trigger_name),
-            quote_ident(&update_trigger_name),
-            quote_ident(&delete_trigger_name)
-        ),
+        &MirrorOperation::ALL
+            .into_iter()
+            .map(|operation| {
+                format!(
+                    "DROP TRIGGER IF EXISTS {} ON {source}",
+                    quote_ident(&operation.capture_trigger_name(&mirror_table.name))
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";\n"),
     )
     .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
     let drop_function = SpiStatement::write(
@@ -139,17 +135,102 @@ pub fn plan_mirror_capture(
     })
 }
 
+/// Plans idempotent teardown of mirror capture triggers and function.
+///
+/// Each statement is emitted separately so callers executing through SPI run
+/// exactly one command per invocation.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be represented by the SPI
+/// helper.
+pub fn plan_mirror_capture_teardown(
+    source_table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+) -> MirrorCaptureResult<Vec<SpiStatement>> {
+    let function_name = QualifiedTableName {
+        schema: Some("koldstore".to_string()),
+        name: format!("{}_capture", mirror_table.name),
+    };
+    let source = source_table.quoted();
+    let mut statements = Vec::with_capacity(4);
+    for operation in MirrorOperation::ALL {
+        let trigger_name = operation.capture_trigger_name(&mirror_table.name);
+        statements.push(
+            SpiStatement::write(
+                &format!(
+                    "drop change-log mirror {} capture trigger",
+                    operation.capture_trigger_suffix()
+                ),
+                &format!(
+                    "DROP TRIGGER IF EXISTS {} ON {source}",
+                    quote_ident(&trigger_name)
+                ),
+            )
+            .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?,
+        );
+    }
+    statements.push(
+        SpiStatement::write(
+            "drop change-log mirror capture function",
+            &format!("DROP FUNCTION IF EXISTS {}()", function_name.quoted()),
+        )
+        .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?,
+    );
+    Ok(statements)
+}
+
 fn capture_function_sql(
     function_name: &QualifiedTableName,
     mirror_table: &QualifiedTableName,
     primary_key: &[PrimaryKeyColumnShape],
-) -> String {
-    let insert_upsert = upsert_sql(mirror_table, primary_key, MirrorOperation::Insert, "NEW");
-    let update_upsert = upsert_sql(mirror_table, primary_key, MirrorOperation::Update, "NEW");
-    let delete_upsert = upsert_sql(mirror_table, primary_key, MirrorOperation::Delete, "OLD");
+) -> MirrorCaptureResult<String> {
+    let mirror = mirror_table
+        .as_mirror_relation()
+        .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let pk_names: Vec<&str> = primary_key
+        .iter()
+        .map(|column| column.column().as_str())
+        .collect();
+    let pk_values = |row_ref: &str| {
+        primary_key
+            .iter()
+            .map(|column| format!("{row_ref}.{}", quote_ident(column.column().as_str())))
+            .collect::<Vec<_>>()
+    };
+    let insert_upsert = plan_upsert_mirror_row(
+        &mirror,
+        &pk_names,
+        &pk_values("NEW"),
+        snowflake_id_call_expression(),
+        MirrorOperation::Insert,
+        "now()",
+        "pg_current_wal_lsn()",
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let update_upsert = plan_upsert_mirror_row(
+        &mirror,
+        &pk_names,
+        &pk_values("NEW"),
+        snowflake_id_call_expression(),
+        MirrorOperation::Update,
+        "now()",
+        "pg_current_wal_lsn()",
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
+    let delete_upsert = plan_upsert_mirror_row(
+        &mirror,
+        &pk_names,
+        &pk_values("OLD"),
+        snowflake_id_call_expression(),
+        MirrorOperation::Delete,
+        "now()",
+        "pg_current_wal_lsn()",
+    )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))?;
     let pk_update_guard = primary_key_update_guard(primary_key);
 
-    format!(
+    Ok(format!(
         r#"
 CREATE OR REPLACE FUNCTION {function_name}()
 RETURNS trigger
@@ -175,12 +256,29 @@ END;
 $$
 "#,
         function_name = function_name.quoted()
+    ))
+}
+
+fn plan_capture_trigger(
+    operation: MirrorOperation,
+    mirror_table: &QualifiedTableName,
+    source_table: &str,
+    function_name: &QualifiedTableName,
+) -> MirrorCaptureResult<SpiStatement> {
+    let trigger_name = operation.capture_trigger_name(&mirror_table.name);
+    SpiStatement::write(
+        &format!(
+            "create change-log mirror {} capture trigger",
+            operation.capture_trigger_suffix()
+        ),
+        &capture_trigger_sql(&trigger_name, operation, source_table, function_name),
     )
+    .map_err(|error| MirrorCaptureError::Spi(error.to_string()))
 }
 
 fn capture_trigger_sql(
     trigger_name: &str,
-    operation: &str,
+    operation: MirrorOperation,
     source_table: &str,
     function_name: &QualifiedTableName,
 ) -> String {
@@ -192,45 +290,8 @@ AFTER {operation} ON {source_table}
 FOR EACH ROW EXECUTE FUNCTION {function_name}()
 "#,
         trigger_name = quote_ident(trigger_name),
+        operation = operation.sql_trigger_event(),
         function_name = function_name.quoted()
-    )
-}
-
-fn upsert_sql(
-    mirror_table: &QualifiedTableName,
-    primary_key: &[PrimaryKeyColumnShape],
-    operation: MirrorOperation,
-    row_ref: &str,
-) -> String {
-    let pk_columns = primary_key
-        .iter()
-        .map(|column| quote_ident(column.column().as_str()))
-        .collect::<Vec<_>>();
-    let pk_values = primary_key
-        .iter()
-        .map(|column| format!("{row_ref}.{}", quote_ident(column.column().as_str())))
-        .collect::<Vec<_>>();
-    let mut insert_columns = pk_columns.clone();
-    insert_columns.extend([
-        "\"seq\"".to_string(),
-        "\"op\"".to_string(),
-        "\"changed_at\"".to_string(),
-        "\"commit_lsn\"".to_string(),
-    ]);
-    let mut values = pk_values;
-    values.extend([
-        "SNOWFLAKE_ID()".to_string(),
-        operation.code().to_string(),
-        "now()".to_string(),
-        "pg_current_wal_lsn()".to_string(),
-    ]);
-
-    format!(
-        "INSERT INTO {mirror} ({insert_columns})\n        VALUES ({values})\n        ON CONFLICT ({conflict_columns}) DO UPDATE\n        SET \"seq\" = EXCLUDED.\"seq\",\n            \"op\" = EXCLUDED.\"op\",\n            \"changed_at\" = EXCLUDED.\"changed_at\",\n            \"commit_lsn\" = EXCLUDED.\"commit_lsn\";",
-        mirror = mirror_table.quoted(),
-        insert_columns = insert_columns.join(", "),
-        values = values.join(", "),
-        conflict_columns = pk_columns.join(", ")
     )
 }
 
@@ -247,10 +308,6 @@ fn primary_key_update_guard(primary_key: &[PrimaryKeyColumnShape]) -> String {
     format!(
         "IF {changed_predicate} THEN\n            RAISE EXCEPTION 'pg-koldstore does not support primary-key updates on managed table %', TG_TABLE_NAME;\n        END IF;"
     )
-}
-
-fn quote_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 /// Result of a DML helper.
@@ -495,10 +552,4 @@ pub const fn delete_decision_with_flush_fence(
     } else {
         DeleteDecision::PhysicalDelete
     }
-}
-
-/// SQL fragment for reviving one hot tombstone row.
-#[must_use]
-pub fn revive_tombstone_sql(table_name: &str) -> String {
-    format!("UPDATE {table_name} SET _deleted = false WHERE _deleted = true")
 }

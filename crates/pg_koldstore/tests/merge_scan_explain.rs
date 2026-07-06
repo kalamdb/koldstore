@@ -29,7 +29,7 @@ fn merge_scan_explain_and_plan_contract_are_exposed() {
 #[test]
 fn merge_scan_plan_serializes_complete_custom_private_payload() {
     use koldstore_core::{ColumnClass, Predicate, PredicateValue, ScopeKey, SeqId};
-    use merge_scan::plan::{MergeScanPlan, SegmentHint, SystemColumnAttnums};
+    use merge_scan::plan::{MergeMetadataAttnums, MergeScanPlan, SegmentHint};
     use serde_json::json;
 
     let safe_pk = Predicate {
@@ -52,7 +52,7 @@ fn merge_scan_plan_serializes_complete_custom_private_payload() {
         table_oid: 42,
         scanrelid: 1,
         primary_key_columns: vec!["id".to_string()],
-        system_column_attnums: SystemColumnAttnums {
+        merge_metadata_attnums: MergeMetadataAttnums {
             seq: 3,
             commit_seq: 4,
             deleted: 5,
@@ -62,7 +62,7 @@ fn merge_scan_plan_serializes_complete_custom_private_payload() {
         safe_quals: vec![safe_pk.clone()],
         residual_quals: vec![residual_status.clone()],
         security_quals: vec![security_scope.clone()],
-        projection: vec!["id".to_string(), "status".to_string(), "_seq".to_string()],
+        projection: vec!["id".to_string(), "status".to_string(), "seq".to_string()],
         segment_hints: vec![SegmentHint {
             segment_id: "segment-1".to_string(),
             scope_key: Some(ScopeKey::new("tenant-a").unwrap()),
@@ -81,10 +81,7 @@ fn merge_scan_plan_serializes_complete_custom_private_payload() {
         decoded.custom_exprs(),
         vec![residual_status, security_scope]
     );
-    assert_eq!(
-        decoded.custom_private_projection(),
-        ["id", "status", "_seq"]
-    );
+    assert_eq!(decoded.custom_private_projection(), ["id", "status", "seq"]);
 }
 
 #[test]

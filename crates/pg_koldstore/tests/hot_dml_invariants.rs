@@ -9,8 +9,8 @@ fn dml_helpers_keep_one_hot_row_per_pk_by_using_upsert_revival() {
     assert!(insert.keeps_one_hot_row_per_pk());
     assert!(revive.keeps_one_hot_row_per_pk());
     assert_eq!(
-        dml::revive_tombstone_sql("app.items"),
-        "UPDATE app.items SET _deleted = false WHERE _deleted = true"
+        executor::plan_mirror_capture_effect(revive).operation,
+        koldstore_core::MirrorOperation::Insert
     );
     assert!(dml::ManagedDmlOperation::Update.keeps_one_hot_row_per_pk());
     assert!(dml::ManagedDmlOperation::Delete.keeps_one_hot_row_per_pk());
@@ -20,14 +20,14 @@ fn dml_helpers_keep_one_hot_row_per_pk_by_using_upsert_revival() {
 }
 
 #[test]
-fn managed_insert_effect_stamps_live_row_event_and_pending_manifest() {
+fn managed_insert_effect_stamps_live_mirror_operation_and_pending_manifest() {
     let effect =
         executor::plan_managed_insert_effect(SeqId::new(10).unwrap(), CommitSeq::new(20).unwrap());
 
     assert_eq!(effect.stamp.operation, dml::ManagedDmlOperation::Insert);
     assert_eq!(
-        effect.row_event_operation,
-        koldstore_core::RowOperation::Insert
+        effect.mirror_operation,
+        koldstore_core::MirrorOperation::Insert
     );
     assert_eq!(effect.manifest_sync_state, "pending_write");
     assert_eq!(effect.delete_decision, None);

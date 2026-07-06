@@ -7,7 +7,7 @@
 
 use std::num::{NonZeroU32, NonZeroUsize};
 
-use koldstore_core::SeqId;
+use koldstore_core::TableKind;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -20,25 +20,7 @@ use super::{
 };
 
 /// Managed table type recorded for migration activation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ManagedTableType {
-    /// Shared table with a single logical scope.
-    Shared,
-    /// User-scoped table with one cold scope per scope key.
-    User,
-}
-
-impl ManagedTableType {
-    /// Returns the catalog representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Shared => "shared",
-            Self::User => "user",
-        }
-    }
-}
+pub use koldstore_core::TableKind as ManagedTableType;
 
 /// Positive migration batch size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +98,7 @@ impl MigrationLeaseEpoch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationJobKind {
-    /// Backfills existing rows with `_seq`, `_commit_seq`, and `_deleted`.
+    /// Initializes existing rows into the clean-schema mirror.
     Backfill,
 }
 
@@ -138,16 +120,6 @@ pub enum MigrationJobPhase {
     Pending,
     /// Existing rows are being inserted into the clean-schema mirror.
     InitializeMirror,
-    /// System columns are being added and defaults installed for future writes.
-    AddSystemColumns,
-    /// Existing rows are being assigned ordered `_seq` values.
-    BackfillSeq,
-    /// Backfilled system columns are being made non-null.
-    FinalizeSystemColumns,
-    /// A watermarked flush job is being enqueued.
-    EnqueueFlush,
-    /// Flush policy is active for periodic flushing.
-    ActivatePeriodicFlush,
     /// Migration job finished.
     Finished,
 }
@@ -159,11 +131,6 @@ impl MigrationJobPhase {
         match self {
             Self::Pending => "pending",
             Self::InitializeMirror => "initialize_mirror",
-            Self::AddSystemColumns => "add_system_columns",
-            Self::BackfillSeq => "backfill_seq",
-            Self::FinalizeSystemColumns => "finalize_system_columns",
-            Self::EnqueueFlush => "enqueue_flush",
-            Self::ActivatePeriodicFlush => "activate_periodic_flush",
             Self::Finished => "finished",
         }
     }
@@ -177,7 +144,7 @@ pub struct MigrationBackfillPayload {
     /// Normalized target table name.
     pub table_name: String,
     /// Managed table type.
-    pub table_type: ManagedTableType,
+    pub table_type: TableKind,
     /// Storage binding used when the table becomes active.
     pub storage_id: Uuid,
     /// Optional user-scope column.
@@ -214,7 +181,7 @@ impl MigrationBackfillJobRequest {
         job_id: Uuid,
         table_oid: u32,
         table: &QualifiedTableName,
-        table_type: ManagedTableType,
+        table_type: TableKind,
         storage_id: Uuid,
         scope_column: Option<String>,
         ordering: &MigrationOrdering,
@@ -264,19 +231,6 @@ pub struct MigrationJobClaimPlan {
     pub statement: SpiStatement,
 }
 
-/// Planned ordered backfill batch statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationBackfillBatchPlan {
-    /// Target table.
-    pub table: QualifiedTableName,
-    /// Oldest-to-newest ordering.
-    pub ordering: MigrationOrdering,
-    /// Batch size to bind as `$1`.
-    pub batch_size: MigrationBatchSize,
-    /// Parameterized batch SQL.
-    pub statement: SpiStatement,
-}
-
 /// Planned migration progress statement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationJobProgressPlan {
@@ -288,30 +242,9 @@ pub struct MigrationJobProgressPlan {
     pub lease_epoch: MigrationLeaseEpoch,
     /// Durable phase.
     pub phase: MigrationJobPhase,
-    /// Last observed `_seq` checkpoint.
-    pub checkpoint_seq: SeqId,
     /// Rows processed by this progress update.
     pub rows_processed_increment: u64,
     /// Parameterized progress SQL.
-    pub statement: SpiStatement,
-}
-
-/// Planned backfill completion and flush handoff statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationBackfillFinishPlan {
-    /// Target table.
-    pub table: QualifiedTableName,
-    /// Optional user-scope column used to enqueue one flush per scope.
-    pub scope_column: Option<String>,
-    /// Job id.
-    pub job_id: Uuid,
-    /// Lease owner.
-    pub lease_owner: Uuid,
-    /// Lease epoch.
-    pub lease_epoch: MigrationLeaseEpoch,
-    /// Inclusive `_seq` upper bound for the initial flush.
-    pub flush_seq_upper_bound: SeqId,
-    /// Parameterized finish SQL.
     pub statement: SpiStatement,
 }
 
@@ -460,61 +393,6 @@ RETURNING j.id, j.table_oid, j.phase, j.lease_epoch, j.checkpoint_seq, j.rows_pr
     })
 }
 
-/// Builds a bounded, ordered existing-row backfill batch plan.
-///
-/// # Errors
-///
-/// Returns an error when identifiers are unsafe or statement metadata cannot be
-/// prepared.
-pub fn backfill_batch_plan(
-    table: &QualifiedTableName,
-    ordering: MigrationOrdering,
-    batch_size: MigrationBatchSize,
-) -> Result<MigrationBackfillBatchPlan, MigrationJobError> {
-    if !is_safe_identifier(&ordering.column) {
-        return Err(MigrationJobError::InvalidIdentifier(ordering.column));
-    }
-    let order_column = quoted_ident(&ordering.column);
-    let sql = format!(
-        r#"
-WITH candidate AS MATERIALIZED (
-    SELECT ctid, {order_column} AS migration_order_value
-    FROM ONLY {table}
-    WHERE "_seq" IS NULL
-    ORDER BY {order_column} ASC, ctid ASC
-    LIMIT $1
-    FOR UPDATE SKIP LOCKED
-),
-assigned AS MATERIALIZED (
-    SELECT
-        ctid,
-        nextval('koldstore.global_seq'::regclass) AS assigned_seq,
-        nextval('koldstore.global_commit_seq'::regclass) AS assigned_commit_seq
-    FROM candidate
-    ORDER BY migration_order_value ASC, ctid ASC
-)
-UPDATE ONLY {table} AS hot
-SET "_seq" = assigned.assigned_seq,
-    "_commit_seq" = assigned.assigned_commit_seq,
-    "_deleted" = false
-FROM assigned
-WHERE hot.ctid = assigned.ctid
-  AND hot."_seq" IS NULL
-RETURNING hot."_seq", hot."_commit_seq"
-"#,
-        table = table.quoted(),
-    );
-    let statement = SpiStatement::write("backfill migration batch", &sql)
-        .map_err(|error| MigrationJobError::Spi(error.to_string()))?;
-
-    Ok(MigrationBackfillBatchPlan {
-        table: table.clone(),
-        ordering,
-        batch_size,
-        statement,
-    })
-}
-
 /// Builds a lease-guarded migration progress update.
 ///
 /// # Errors
@@ -525,7 +403,6 @@ pub fn migration_job_progress_plan(
     lease_owner: Uuid,
     lease_epoch: MigrationLeaseEpoch,
     phase: MigrationJobPhase,
-    checkpoint_seq: SeqId,
     rows_processed_increment: u64,
 ) -> Result<MigrationJobProgressPlan, MigrationJobError> {
     let statement = SpiStatement::write(
@@ -533,10 +410,9 @@ pub fn migration_job_progress_plan(
         r#"
 UPDATE koldstore.jobs
 SET phase = $4::text,
-    checkpoint_seq = GREATEST(checkpoint_seq, $5::bigint),
-    rows_processed = rows_processed + $6::bigint,
+    rows_processed = rows_processed + $5::bigint,
     batches_completed = batches_completed + 1,
-    payload = jsonb_set(payload, '{processed_rows}', to_jsonb(rows_processed + $6::bigint), true),
+    payload = jsonb_set(payload, '{processed_rows}', to_jsonb(rows_processed + $5::bigint), true),
     last_heartbeat_at = now(),
     updated_at = now()
 WHERE id = $1::uuid
@@ -553,107 +429,7 @@ RETURNING id
         lease_owner,
         lease_epoch,
         phase,
-        checkpoint_seq,
         rows_processed_increment,
-        statement,
-    })
-}
-
-/// Builds the lease-guarded backfill finish and initial flush handoff plan.
-///
-/// # Errors
-///
-/// Returns an error when the optional scope column is unsafe or statement
-/// metadata cannot be prepared.
-pub fn finish_backfill_and_enqueue_flush_plan(
-    table: &QualifiedTableName,
-    scope_column: Option<&str>,
-    job_id: Uuid,
-    lease_owner: Uuid,
-    lease_epoch: MigrationLeaseEpoch,
-    flush_seq_upper_bound: SeqId,
-) -> Result<MigrationBackfillFinishPlan, MigrationJobError> {
-    let scope_column = scope_column
-        .map(str::trim)
-        .filter(|column| !column.is_empty())
-        .map(|column| {
-            if is_safe_identifier(column) {
-                Ok(column.to_string())
-            } else {
-                Err(MigrationJobError::InvalidIdentifier(column.to_string()))
-            }
-        })
-        .transpose()?;
-    let scope_source = scope_lateral_sql(table, scope_column.as_deref());
-    let sql = format!(
-        r#"
-WITH finished AS (
-    UPDATE koldstore.jobs
-    SET status = 'completed',
-        phase = 'finished',
-        flush_seq_upper_bound = $4::bigint,
-        lease_owner = NULL,
-        lease_expires_at = NULL,
-        last_heartbeat_at = now(),
-        updated_at = now()
-    WHERE id = $1::uuid
-      AND lease_owner = $2::uuid
-      AND lease_epoch = $3::bigint
-      AND status = 'running'
-    RETURNING table_oid
-),
-activated AS (
-    UPDATE koldstore.schemas AS s
-    SET active = true,
-        options = jsonb_set(s.options, '{{migration_status}}', '"active"'::jsonb, true),
-        updated_at = now()
-    FROM finished
-    WHERE s.table_oid = finished.table_oid
-    RETURNING s.table_oid
-),
-flush_scope AS (
-    {scope_source}
-),
-flush_job AS (
-    INSERT INTO koldstore.jobs (
-        id,
-        table_oid,
-        scope_key,
-        job_type,
-        status,
-        phase,
-        flush_seq_upper_bound,
-        payload
-    )
-    SELECT
-        gen_random_uuid(),
-        finished.table_oid,
-        flush_scope.scope_key,
-        'flush',
-        'pending',
-        'pending',
-        $4::bigint,
-        jsonb_build_object('source', 'migration', 'force', false)
-    FROM finished
-    CROSS JOIN flush_scope
-    ON CONFLICT DO NOTHING
-    RETURNING id
-)
-SELECT
-    (SELECT count(*) FROM activated) AS activated_tables,
-    (SELECT count(*) FROM flush_job) AS flush_jobs
-"#,
-    );
-    let statement = SpiStatement::write("finish migration backfill", &sql)
-        .map_err(|error| MigrationJobError::Spi(error.to_string()))?;
-
-    Ok(MigrationBackfillFinishPlan {
-        table: table.clone(),
-        scope_column,
-        job_id,
-        lease_owner,
-        lease_epoch,
-        flush_seq_upper_bound,
         statement,
     })
 }
@@ -709,32 +485,9 @@ SELECT count(*) FROM activated
     })
 }
 
-fn scope_lateral_sql(table: &QualifiedTableName, scope_column: Option<&str>) -> String {
-    match scope_column {
-        Some(scope_column) => format!(
-            r#"SELECT DISTINCT COALESCE(hot.{scope_column}::text, '') AS scope_key
-    FROM ONLY {table} AS hot
-    WHERE hot."_seq" <= $4::bigint"#,
-            scope_column = quoted_ident(scope_column),
-            table = table.quoted(),
-        ),
-        None => "SELECT ''::text AS scope_key".to_string(),
-    }
-}
-
 fn normalized_table_name(table: &QualifiedTableName) -> String {
     match table.schema.as_deref() {
         Some(schema) => format!("{schema}.{}", table.name),
         None => table.name.clone(),
     }
-}
-
-fn quoted_ident(identifier: &str) -> String {
-    format!("\"{identifier}\"")
-}
-
-fn is_safe_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }

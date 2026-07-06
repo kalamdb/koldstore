@@ -1,7 +1,6 @@
 //! Migration and demigration orchestration.
 
 pub mod backfill;
-pub mod columns;
 pub mod constraints;
 pub mod jobs;
 pub mod lock;
@@ -12,6 +11,7 @@ pub mod rehydrate;
 pub mod rollback;
 pub mod scope;
 
+use koldstore_core::{is_safe_identifier, TableKind, TableName};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -20,15 +20,13 @@ use crate::sql::ddl::MigrateTableRequest;
 
 use self::backfill::DEFAULT_BACKFILL_BATCH_ROWS;
 use self::jobs::{
-    enqueue_migration_backfill_job_plan, ManagedTableType, MigrationBackfillJobRequest,
-    MigrationBatchSize, MigrationJobEnqueuePlan, MigrationJobPhase,
+    enqueue_migration_backfill_job_plan, MigrationBackfillJobRequest, MigrationBatchSize,
+    MigrationJobEnqueuePlan, MigrationJobPhase,
 };
 use self::order::{
     choose_migration_ordering, CatalogColumn, CatalogPrimaryKey, MigrationOrdering,
     MigrationOrderingRequest,
 };
-
-pub use scope::SYSTEM_SCOPE_COLUMN;
 
 /// Migration planning result.
 pub type MigrationResult<T> = Result<T, MigrationError>;
@@ -48,6 +46,9 @@ pub enum MigrationError {
     /// Scope column is blank or not a simple identifier.
     #[error("invalid scope_column `{0}`")]
     InvalidScopeColumn(String),
+    /// User-scoped clean-schema tables must use an application-owned scope column.
+    #[error("user-scoped clean-schema migration requires scope_column")]
+    MissingScopeColumn,
     /// SPI statement metadata could not be prepared.
     #[error("{0}")]
     Spi(String),
@@ -75,31 +76,65 @@ impl QualifiedTableName {
     ///
     /// Returns an error for blank, multipart, or unsafe identifier text.
     pub fn parse(value: &str) -> MigrationResult<Self> {
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(MigrationError::InvalidTableName(value.to_string()));
-        }
+        let table = TableName::parse(value).map_err(|error| match error {
+            koldstore_core::KoldstoreError::InvalidIdentifier { value, .. } => {
+                MigrationError::InvalidTableName(value)
+            }
+            other => MigrationError::InvalidTableName(other.to_string()),
+        })?;
+        Ok(Self {
+            schema: table.schema().map(str::to_string),
+            name: table.relation().to_string(),
+        })
+    }
 
-        let parts = value.split('.').collect::<Vec<_>>();
-        match parts.as_slice() {
-            [name] if is_safe_identifier(name) => Ok(Self {
-                schema: None,
-                name: (*name).to_string(),
-            }),
-            [schema, name] if is_safe_identifier(schema) && is_safe_identifier(name) => Ok(Self {
-                schema: Some((*schema).to_string()),
-                name: (*name).to_string(),
-            }),
-            _ => Err(MigrationError::InvalidTableName(value.to_string())),
+    /// Returns the normalized [`TableName`] for this relation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when schema/name components are no longer valid.
+    pub fn as_table_name(&self) -> MigrationResult<TableName> {
+        TableName::parse(self.display_name()).map_err(|error| match error {
+            koldstore_core::KoldstoreError::InvalidIdentifier { value, .. } => {
+                MigrationError::InvalidTableName(value)
+            }
+            other => MigrationError::InvalidTableName(other.to_string()),
+        })
+    }
+
+    /// Builds a [`QualifiedTableName`] from a validated [`TableName`].
+    #[must_use]
+    pub fn from_table_name(table: &TableName) -> Self {
+        Self {
+            schema: table.schema().map(str::to_string),
+            name: table.relation().to_string(),
         }
+    }
+
+    /// Returns the mirror relation for this qualified table name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when schema/name components are no longer valid.
+    pub fn as_mirror_relation(&self) -> MigrationResult<koldstore_mirror::MirrorRelation> {
+        Ok(koldstore_mirror::MirrorRelation::new(self.as_table_name()?))
     }
 
     /// Returns a safely quoted SQL relation reference.
     #[must_use]
     pub fn quoted(&self) -> String {
+        self.as_table_name()
+            .map(|table| table.quoted())
+            .unwrap_or_else(|_| match &self.schema {
+                Some(schema) => format!("\"{schema}\".\"{}\"", self.name),
+                None => format!("\"{}\"", self.name),
+            })
+    }
+
+    fn display_name(&self) -> String {
         match &self.schema {
-            Some(schema) => format!("\"{}\".\"{}\"", schema, self.name),
-            None => format!("\"{}\"", self.name),
+            Some(schema) => format!("{schema}.{}", self.name),
+            None => self.name.clone(),
         }
     }
 }
@@ -183,11 +218,12 @@ pub fn plan_empty_table_migration(
     let effective_scope_column = match request.table_type.as_str() {
         "shared" => None,
         "user" => {
-            let column = request
-                .scope_column
-                .as_deref()
-                .unwrap_or(SYSTEM_SCOPE_COLUMN)
-                .trim();
+            let Some(column) = request.scope_column.as_deref().map(str::trim) else {
+                return Err(MigrationError::MissingScopeColumn);
+            };
+            if column.is_empty() {
+                return Err(MigrationError::MissingScopeColumn);
+            }
             if !is_safe_identifier(column) {
                 return Err(MigrationError::InvalidScopeColumn(column.to_string()));
             }
@@ -238,15 +274,10 @@ pub fn plan_existing_table_migration(
     })
     .map_err(|error| MigrationError::Ordering(error.to_string()))?;
     let backfill_batch_size = migration_backfill_batch_size(request)?;
-    let table_type = match request.table_type.as_str() {
-        "shared" => ManagedTableType::Shared,
-        "user" => ManagedTableType::User,
-        _ => {
-            return Err(MigrationError::UnsupportedTableType(
-                request.table_type.clone(),
-            ))
-        }
-    };
+    let table_type = request
+        .table_type
+        .parse::<TableKind>()
+        .map_err(|error| MigrationError::UnsupportedTableType(error.to_string()))?;
     let backfill_job = enqueue_migration_backfill_job_plan(MigrationBackfillJobRequest::new(
         job_id,
         base.table_oid,
@@ -282,10 +313,4 @@ fn migration_backfill_batch_size(
         .map_or(DEFAULT_BACKFILL_BATCH_ROWS, |value| value as usize);
 
     MigrationBatchSize::new(configured).map_err(|error| MigrationError::Job(error.to_string()))
-}
-
-fn is_safe_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }

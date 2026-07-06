@@ -1,6 +1,6 @@
 //! User-scope enforcement.
 
-use koldstore_core::{ScopeKey, TableKind};
+use koldstore_core::{is_safe_identifier, quote_ident, ScopeKey, TableKind};
 use thiserror::Error;
 
 /// Scope enforcement error.
@@ -88,5 +88,39 @@ pub fn enforce_row_scope(
             active_scope: active_scope.to_string(),
             row_scope: row_scope.to_string(),
         })
+    }
+}
+
+/// Builds a SQL predicate that compares an aliased application-owned scope
+/// column to a bind parameter.
+///
+/// # Errors
+///
+/// Returns an error when the scope column or alias is not a simple identifier.
+pub fn scope_predicate_sql(
+    relation_alias: &str,
+    scope_column: &str,
+    parameter_index: usize,
+) -> Result<String, ScopeSqlError> {
+    let alias = validate_identifier(relation_alias)?;
+    let column = validate_identifier(scope_column)?;
+    Ok(format!(
+        "{alias}.{column}::text = ${parameter_index}::text",
+        alias = quote_ident(alias),
+        column = quote_ident(column),
+    ))
+}
+
+/// Scope SQL helper error.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("invalid scope SQL identifier `{0}`")]
+pub struct ScopeSqlError(String);
+
+fn validate_identifier(value: &str) -> Result<&str, ScopeSqlError> {
+    let value = value.trim();
+    if is_safe_identifier(value) {
+        Ok(value)
+    } else {
+        Err(ScopeSqlError(value.to_string()))
     }
 }

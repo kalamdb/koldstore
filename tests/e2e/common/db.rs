@@ -158,7 +158,15 @@ impl TestDb {
                 &[&relation, &self.storage_name, &order_column],
             )
             .await?;
-        catalog::assert_system_columns_present(&self.client, relation).await?;
+        catalog::assert_system_columns_absent(&self.client, relation).await?;
+        catalog::assert_change_log_mirror_exists(
+            &self.client,
+            &format!(
+                "koldstore.{}__cl",
+                relation.rsplit('.').next().unwrap_or(relation)
+            ),
+        )
+        .await?;
         catalog::assert_catalog_has_active_schema(&self.client, relation).await?;
         Ok(())
     }
@@ -184,7 +192,15 @@ impl TestDb {
                 &[&relation, &self.storage_name, &scope_column],
             )
             .await?;
-        catalog::assert_system_columns_present(&self.client, relation).await?;
+        catalog::assert_system_columns_absent(&self.client, relation).await?;
+        catalog::assert_change_log_mirror_exists(
+            &self.client,
+            &format!(
+                "koldstore.{}__cl",
+                relation.rsplit('.').next().unwrap_or(relation)
+            ),
+        )
+        .await?;
         catalog::assert_catalog_has_active_schema(&self.client, relation).await?;
         Ok(())
     }

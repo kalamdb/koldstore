@@ -141,26 +141,35 @@
 
 ### Tests for User Story 4
 
-- [ ] T045 [P] [US4] Add unit tests for row-limit and duration policy selection in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/flush_policy.rs`
-- [ ] T046 [P] [US4] Add unit tests for cold live records and delete-marker schema in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/tests/schema.rs`
-- [ ] T047 [P] [US4] Add SQL regression tests for mirror-backed flush selection and cleanup in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/flush_clean_schema.rs`
-- [ ] T048 [P] [US4] Add e2e row-limit and duration-policy flush tests in `/Users/jamal/git/pg-kalam/tests/e2e/flush/flush_policy.rs`
-- [ ] T049 [P] [US4] Add e2e delete-marker and reinsert merge tests in `/Users/jamal/git/pg-kalam/tests/e2e/merge/merge_scan_results.rs`
+- [X] T045 [P] [US4] Add unit tests for row-limit and duration policy selection in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/flush_policy.rs`
+- [X] T046 [P] [US4] Add unit tests for cold live records and delete-marker schema in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/tests/schema.rs`
+- [X] T047 [P] [US4] Add SQL regression tests for mirror-backed flush selection and cleanup in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/flush_clean_schema.rs`
+- [X] T048 [P] [US4] Add e2e row-limit and duration-policy flush tests in `/Users/jamal/git/pg-kalam/tests/e2e/flush/flush_policy.rs`
+- [X] T049 [P] [US4] Add e2e delete-marker and reinsert merge tests in `/Users/jamal/git/pg-kalam/tests/e2e/merge/merge_scan_results.rs`
 
 ### Implementation for User Story 4
 
-- [ ] T050 [US4] Replace `flush_stats` user-table `_seq` scans with mirror-backed candidate selection in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ops.rs`
-- [ ] T051 [US4] Implement row-limit policy selection of oldest pending mirror rows by `seq` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/policy.rs`
-- [ ] T052 [US4] Implement duration policy selection using mirror `changed_at` row age in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/policy.rs`
-- [ ] T053 [US4] Update flush job claiming to persist selected mirror keys/sequence cutoff instead of user-table `_seq` bounds in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
-- [ ] T054 [US4] Update Parquet schema generation to write base columns plus `seq`, `op`, `changed_at`, and delete metadata in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/src/schema.rs`
-- [ ] T055 [US4] Update Parquet writer to emit live records from base rows and PK-only delete-marker records from mirror tombstones in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/src/writer.rs`
-- [ ] T056 [US4] Update Parquet reader to expose clean-schema cold metadata and delete markers in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/src/reader.rs`
-- [ ] T057 [US4] Update flush cleanup to remove only selected base rows and mirror rows after manifest visibility commits in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/cleanup.rs`
-- [ ] T058 [US4] Update merge resolution so newest sequence-bearing hot/cold state wins without user-table `_deleted` in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/resolver.rs`
-- [ ] T059 [US4] Update merge tombstone handling so cold delete markers mask older live rows and newer reinserts win in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/tombstone.rs`
-- [ ] T060 [US4] Run `cargo test -p koldstore-parquet -p koldstore-merge` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
-- [ ] T061 [US4] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml flush_clean_schema flush_policy` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T050 [US4] Replace `flush_stats` user-table `_seq` scans with mirror-backed candidate selection in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ops.rs`
+- [X] T051 [US4] Implement row-limit policy selection of oldest pending mirror rows by `seq` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/policy.rs`
+- [X] T052 [US4] Implement duration policy selection using mirror `changed_at` row age in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/policy.rs`
+- [X] T053 [US4] Update flush job claiming to persist selected mirror keys/sequence cutoff instead of user-table `_seq` bounds in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
+- [X] T054 [US4] Update Parquet schema generation to write base columns plus `seq`, `op`, `changed_at`, and delete metadata in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/src/schema.rs`
+- [X] T055 [US4] Update Parquet writer to emit live records from base rows and PK-only delete-marker records from mirror tombstones in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/src/writer.rs`
+- [X] T056 [US4] Update Parquet reader to expose clean-schema cold metadata and delete markers in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/src/reader.rs`
+- [X] T057 [US4] Update flush cleanup to remove only selected base rows and mirror rows after manifest visibility commits in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/cleanup.rs`
+- [X] T058 [US4] Update merge resolution so newest sequence-bearing hot/cold state wins without user-table `_deleted` in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/resolver.rs`
+- [X] T059 [US4] Update merge tombstone handling so cold delete markers mask older live rows and newer reinserts win in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/tombstone.rs`
+- [X] T060 [US4] Run `cargo test -p koldstore-parquet -p koldstore-merge` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T061 [US4] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml flush_clean_schema flush_policy` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+
+  Verification on 2026-07-06:
+  - PASS: `cargo test -p pg_koldstore --test flush_policy --test flush_clean_schema --test flush_lifecycle --test demigrate_clean_schema --test demigrate_rehydrate --test demigrate_archive_detach` (28 tests)
+  - PASS: `cargo test -p koldstore-parquet -p koldstore-merge` (33 tests)
+  - PASS: `cargo test -p e2e --test flush_policy --test merge_scan_results --test demigrate_matrix --no-run`
+  - PASS: `cargo check --manifest-path crates/pg_koldstore/Cargo.toml --features pg16 --no-default-features`
+  - PASS: `cargo fmt --check`
+  - PASS: `git diff --check`
+  - NOTE: `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml flush_clean_schema flush_policy` fails before running tests because cargo-pgrx treats `flush_clean_schema` as a PostgreSQL version selector. Retried as `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16 flush_clean_schema`; it reached compilation but failed while linking an unrelated pgrx test binary (`greenfield_shared`) with unresolved PostgreSQL server symbols such as `CopyErrorData` and `CurrentMemoryContext`.
 
 **Checkpoint**: US4 works independently after US1-US3.
 
@@ -174,16 +183,24 @@
 
 ### Tests for User Story 5
 
-- [ ] T062 [P] [US5] Add SQL regression tests for demigration dropping mirror/capture artifacts and preserving a clean user table in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/demigrate_clean_schema.rs`
-- [ ] T063 [P] [US5] Add e2e demigration lifecycle coverage in `/Users/jamal/git/pg-kalam/tests/e2e/migrate/demigrate_matrix.rs`
+- [X] T062 [P] [US5] Add SQL regression tests for demigration dropping mirror/capture artifacts and preserving a clean user table in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/demigrate_clean_schema.rs`
+- [X] T063 [P] [US5] Add e2e demigration lifecycle coverage in `/Users/jamal/git/pg-kalam/tests/e2e/migrate/demigrate_matrix.rs`
 
 ### Implementation for User Story 5
 
-- [ ] T064 [US5] Update demigration planning to rehydrate current logical hot+cold state without dropping system columns in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ddl.rs`
-- [ ] T065 [US5] Drop table-specific capture triggers and mirror tables during demigration in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/rollback.rs`
-- [ ] T066 [US5] Remove or deactivate mirror metadata during demigration in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/register.rs`
-- [ ] T067 [US5] Ensure failed demigration leaves clean-schema managed state retryable in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/rollback.rs`
-- [ ] T068 [US5] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml demigrate_clean_schema` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T064 [US5] Update demigration planning to rehydrate current logical hot+cold state without dropping system columns in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ddl.rs`
+- [X] T065 [US5] Drop table-specific capture triggers and mirror tables during demigration in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/rollback.rs`
+- [X] T066 [US5] Remove or deactivate mirror metadata during demigration in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/register.rs`
+- [X] T067 [US5] Ensure failed demigration leaves clean-schema managed state retryable in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/rollback.rs`
+- [X] T068 [US5] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml demigrate_clean_schema` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+
+  Verification on 2026-07-06:
+  - PASS: `cargo test -p pg_koldstore --test flush_policy --test flush_clean_schema --test flush_lifecycle --test demigrate_clean_schema --test demigrate_rehydrate --test demigrate_archive_detach` (28 tests)
+  - PASS: `cargo test -p e2e --test flush_policy --test merge_scan_results --test demigrate_matrix --no-run`
+  - PASS: `cargo check --manifest-path crates/pg_koldstore/Cargo.toml --features pg16 --no-default-features`
+  - PASS: `cargo fmt --check`
+  - PASS: `git diff --check`
+  - NOTE: `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml demigrate_clean_schema` fails before running tests because cargo-pgrx cannot choose among multiple configured PostgreSQL versions without a feature flag. Retried as `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16 demigrate_clean_schema`; it reached compilation but failed while linking an unrelated pgrx test binary (`lifecycle`) with unresolved PostgreSQL server symbols such as `CopyErrorData` and `CurrentMemoryContext`.
 
 **Checkpoint**: US5 works independently after US1-US4.
 
@@ -197,17 +214,24 @@
 
 ### Tests for User Story 6
 
-- [ ] T069 [P] [US6] Rewrite row-events catalog tests to assert `koldstore.row_events` is not required by default in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/row_events.rs`
-- [ ] T070 [P] [US6] Rewrite system-column guard tests to assert clean-schema migration does not require user-table internals in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/system_column_guards.rs`
-- [ ] T071 [P] [US6] Update lifecycle catalog tests to remove old row-events and duplicate-index expectations in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/lifecycle.rs`
+- [X] T069 [P] [US6] Rewrite row-events catalog tests to assert `koldstore.row_events` is not required by default in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/row_events.rs`
+- [X] T070 [P] [US6] Rewrite system-column guard tests to assert clean-schema migration does not require user-table internals in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/system_column_guards.rs`
+- [X] T071 [P] [US6] Update lifecycle catalog tests to remove old row-events and duplicate-index expectations in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/lifecycle.rs`
 
 ### Implementation for User Story 6
 
-- [ ] T072 [US6] Remove row-events catalog module exports or narrow them to non-default legacy-free behavior in `/Users/jamal/git/pg-kalam/crates/koldstore-catalog/src/lib.rs`
-- [ ] T073 [US6] Remove row-events-only merge helpers or replace them with mirror/cold latest-state helpers in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/changelog.rs`
-- [ ] T074 [US6] Remove system-column planning helpers from default migration path in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/columns.rs`
-- [ ] T075 [US6] Remove old system-column SQL DDL generation from default enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ddl.rs`
-- [ ] T076 [US6] Run `cargo test -p koldstore-catalog -p koldstore-merge` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T072 [US6] Remove row-events catalog module exports or narrow them to non-default legacy-free behavior in `/Users/jamal/git/pg-kalam/crates/koldstore-catalog/src/lib.rs`
+- [X] T073 [US6] Remove row-events-only merge helpers or replace them with mirror/cold latest-state helpers in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/changelog.rs`
+- [X] T074 [US6] Remove system-column planning helpers from default migration path in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/columns.rs`
+- [X] T075 [US6] Remove old system-column SQL DDL generation from default enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ddl.rs`
+- [X] T076 [US6] Run `cargo test -p koldstore-catalog -p koldstore-merge` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+
+  Verification on 2026-07-06:
+  - PASS: `cargo test -p koldstore-core -p koldstore-catalog -p koldstore-merge` (30 tests plus doc-tests)
+  - PASS: `cargo test -p pg_koldstore` (all pg_koldstore crate tests)
+  - PASS: `cargo fmt --check`
+  - PASS: `git diff --check`
+  - PASS: legacy-symbol scan found no `RowEvent`, `RowOperation`, `row_event_operation`, `CatalogRowEvent`, `migrate::columns`, `drop_system_columns`, `backfill_batch_plan`, `finish_backfill_and_enqueue_flush_plan`, `SYSTEM_SCOPE_COLUMN`, `REQUIRED_SYSTEM_COLUMNS`, or `system_seq_default_clause` matches under `crates`, `tests/e2e`, or `docker`.
 
 **Checkpoint**: US6 works independently after replacement clean-schema paths exist.
 
@@ -221,17 +245,23 @@
 
 ### Tests for User Story 7
 
-- [ ] T077 [P] [US7] Add unit tests for latest-state change-feed ordering, cursor handling, and retention gaps in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/tests/changelog.rs`
-- [ ] T078 [P] [US7] Add SQL regression tests for mirror-backed `changes_since` before and after flush in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/changes_since.rs`
-- [ ] T079 [P] [US7] Add e2e change-feed coverage without `koldstore.row_events` in `/Users/jamal/git/pg-kalam/tests/e2e/dml/change_feed.rs`
+- [X] T077 [P] [US7] Add unit tests for latest-state change-feed ordering, cursor handling, and retention gaps in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/tests/changelog.rs`
+- [X] T078 [P] [US7] Add SQL regression tests for mirror-backed `changes_since` before and after flush in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/changes_since.rs`
+- [X] T079 [P] [US7] Add e2e change-feed coverage without `koldstore.row_events` in `/Users/jamal/git/pg-kalam/tests/e2e/dml/change_feed.rs`
 
 ### Implementation for User Story 7
 
-- [ ] T080 [US7] Implement latest-state change-feed merge logic over mirror and cold metadata in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/changelog.rs`
-- [ ] T081 [US7] Update SQL `changes_since` implementation to query the table-specific mirror for unflushed rows in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/events.rs`
-- [ ] T082 [US7] Update SQL `changes_since` implementation to query flushed cold metadata after mirror cleanup in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/events.rs`
-- [ ] T083 [US7] Update `koldstore.change_event` SQL type and function docs to treat `since_commit_seq` as mirror `seq` cursor unless renamed in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
-- [ ] T084 [US7] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml changes_since` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T080 [US7] Implement latest-state change-feed merge logic over mirror and cold metadata in `/Users/jamal/git/pg-kalam/crates/koldstore-merge/src/changelog.rs`
+- [X] T081 [US7] Update SQL `changes_since` implementation to query the table-specific mirror for unflushed rows in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/events.rs`
+- [X] T082 [US7] Update SQL `changes_since` implementation to query flushed cold metadata after mirror cleanup in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/events.rs`
+- [X] T083 [US7] Update `koldstore.change_event` SQL type and function docs to treat `since_commit_seq` as mirror `seq` cursor unless renamed in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
+- [X] T084 [US7] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml changes_since` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+
+  Verification on 2026-07-06:
+  - PASS: `cargo test -p koldstore-merge --test changelog --test resolver`
+  - PASS: `cargo test -p pg_koldstore --test changes_since --test row_events --test flush_clean_schema --test snowflake_defaults`
+  - PASS: `cargo test -p e2e --test change_feed --test change_log_mirror --test cold_dml_matrix --test demigrate_cold_artifacts --test demigrate_matrix --test full_lifecycle --test greenfield_matrix --test migrate_existing_matrix --test user_scope_matrix --no-run`
+  - NOTE: `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml changes_since` fails before running tests because cargo-pgrx cannot choose among multiple configured PostgreSQL versions without a feature flag. Retried as `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16 changes_since`; it reached compilation but failed while linking unrelated pgrx test binaries (`greenfield_shared`, `lifecycle`) with unresolved PostgreSQL server symbols such as `CopyErrorData` and `CurrentMemoryContext`.
 
 **Checkpoint**: US7 works independently after US1, US2, US4, and US6.
 
@@ -245,16 +275,23 @@
 
 ### Tests for User Story 8
 
-- [ ] T085 [P] [US8] Add SQL regression tests for user-scoped clean-schema enablement with an existing scope column in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/greenfield_user.rs`
-- [ ] T086 [P] [US8] Add SQL regression tests rejecting user-scoped enablement without an application-owned scope column in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/user_scope_fail_closed.rs`
-- [ ] T087 [P] [US8] Add e2e user-scope clean-schema coverage in `/Users/jamal/git/pg-kalam/tests/e2e/scope/user_scope_matrix.rs`
+- [X] T085 [P] [US8] Add SQL regression tests for user-scoped clean-schema enablement with an existing scope column in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/greenfield_user.rs`
+- [X] T086 [P] [US8] Add SQL regression tests rejecting user-scoped enablement without an application-owned scope column in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/user_scope_fail_closed.rs`
+- [X] T087 [P] [US8] Add e2e user-scope clean-schema coverage in `/Users/jamal/git/pg-kalam/tests/e2e/scope/user_scope_matrix.rs`
 
 ### Implementation for User Story 8
 
-- [ ] T088 [US8] Enforce existing application-owned scope column validation in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/scope.rs`
-- [ ] T089 [US8] Remove default `_user_id` column creation from user-scoped enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ddl.rs`
-- [ ] T090 [US8] Apply scope predicates to mirror DML capture, flush selection, and `changes_since` queries in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/security/scope.rs`
-- [ ] T091 [US8] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml greenfield_user user_scope_fail_closed` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+- [X] T088 [US8] Enforce existing application-owned scope column validation in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/migrate/scope.rs`
+- [X] T089 [US8] Remove default `_user_id` column creation from user-scoped enablement in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ddl.rs`
+- [X] T090 [US8] Apply scope predicates to mirror DML capture, flush selection, and `changes_since` queries in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/security/scope.rs`
+- [X] T091 [US8] Run `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml greenfield_user user_scope_fail_closed` and record results in `/Users/jamal/git/pg-kalam/specs/002-clean-schema-change-log/tasks.md`
+
+  Verification on 2026-07-06:
+  - PASS: `cargo test -p pg_koldstore --test greenfield_user --test user_scope_fail_closed --test scope_policy`
+  - PASS: `cargo test -p pg_koldstore`
+  - PASS: `cargo check --manifest-path crates/pg_koldstore/Cargo.toml --features pg16 --no-default-features`
+  - PASS: `cargo test -p e2e --test user_scope_matrix --no-run` as part of the broader e2e no-run command listed above.
+  - NOTE: `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml greenfield_user user_scope_fail_closed` fails before running tests because cargo-pgrx treats `greenfield_user` as a PostgreSQL version selector. Retried as `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16 greenfield_user` and `cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16 user_scope_fail_closed`; both reached compilation but failed while linking unrelated pgrx test binaries (`greenfield_shared`, `lifecycle`) with unresolved PostgreSQL server symbols such as `CopyErrorData` and `CurrentMemoryContext`.
 
 **Checkpoint**: US8 works independently after US1, US2, and the shared scope foundation.
 

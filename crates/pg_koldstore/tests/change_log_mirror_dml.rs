@@ -36,9 +36,15 @@ fn mirror_capture_upserts_insert_update_delete_latest_state() {
     assert!(sql.contains("IF TG_OP = 'INSERT' THEN"));
     assert!(sql.contains("ELSIF TG_OP = 'UPDATE' THEN"));
     assert!(sql.contains("ELSIF TG_OP = 'DELETE' THEN"));
-    assert!(sql.contains("VALUES (NEW.\"id\", SNOWFLAKE_ID(), 1, now(), pg_current_wal_lsn())"));
-    assert!(sql.contains("VALUES (NEW.\"id\", SNOWFLAKE_ID(), 2, now(), pg_current_wal_lsn())"));
-    assert!(sql.contains("VALUES (OLD.\"id\", SNOWFLAKE_ID(), 3, now(), pg_current_wal_lsn())"));
+    assert!(
+        sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 1, now(), pg_current_wal_lsn())")
+    );
+    assert!(
+        sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 2, now(), pg_current_wal_lsn())")
+    );
+    assert!(
+        sql.contains("VALUES (OLD.\"id\", public.snowflake_id(), 3, now(), pg_current_wal_lsn())")
+    );
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(sql.contains("SET search_path = pg_catalog, koldstore"));
     assert!(sql.contains("\"seq\" = EXCLUDED.\"seq\""));
@@ -58,7 +64,7 @@ fn mirror_capture_reinsert_uses_insert_upsert_to_replace_tombstone() {
         .split("ELSIF TG_OP = 'UPDATE' THEN")
         .next()
         .expect("insert branch exists");
-    assert!(insert_branch.contains("VALUES (NEW.\"id\", SNOWFLAKE_ID(), 1"));
+    assert!(insert_branch.contains("VALUES (NEW.\"id\", public.snowflake_id(), 1"));
     assert!(insert_branch.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(insert_branch.contains("\"op\" = EXCLUDED.\"op\""));
 }
@@ -69,8 +75,8 @@ fn mirror_capture_preserves_composite_pk_in_conflict_and_row_values() {
     let sql = &plan.function.sql;
 
     assert!(sql.contains("INSERT INTO \"koldstore\".\"messages__cl\" (\"tenant_id\", \"id\", \"seq\", \"op\", \"changed_at\", \"commit_lsn\")"));
-    assert!(sql.contains("VALUES (NEW.\"tenant_id\", NEW.\"id\", SNOWFLAKE_ID(), 1"));
-    assert!(sql.contains("VALUES (OLD.\"tenant_id\", OLD.\"id\", SNOWFLAKE_ID(), 3"));
+    assert!(sql.contains("VALUES (NEW.\"tenant_id\", NEW.\"id\", public.snowflake_id(), 1"));
+    assert!(sql.contains("VALUES (OLD.\"tenant_id\", OLD.\"id\", public.snowflake_id(), 3"));
     assert!(sql.contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE"));
     assert!(sql.contains("OLD.\"tenant_id\" IS DISTINCT FROM NEW.\"tenant_id\""));
     assert!(sql.contains("OLD.\"id\" IS DISTINCT FROM NEW.\"id\""));
@@ -99,7 +105,7 @@ fn mirror_capture_installs_transactional_after_row_triggers() {
 #[test]
 fn mirror_capture_allocates_a_fresh_sequence_for_each_dml_effect() {
     let plan = capture_plan(vec![pk_column("id", 1)]);
-    let count = plan.function.sql.matches("SNOWFLAKE_ID()").count();
+    let count = plan.function.sql.matches("public.snowflake_id()").count();
 
     assert_eq!(
         count, 3,

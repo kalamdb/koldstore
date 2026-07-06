@@ -2,10 +2,16 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use koldstore_core::{CommitSeq, SeqId, StablePkHash};
-use pg_koldstore::flush::job::{
-    conditional_cleanup_allowed, plan_cold_pk_hint_updates, FlushBatchBuilder, FlushBatchInput,
-    FlushExecutionConfig, FlushWatermark, HotRowCandidate,
+use koldstore_core::{CommitSeq, SeqId, StablePkHash, TableName};
+use koldstore_mirror::{mirror_relation_for_source, plan_mirror_stats};
+use pg_koldstore::{
+    flush::job::{
+        conditional_cleanup_allowed, plan_cold_pk_hint_updates, FlushBatchBuilder, FlushBatchInput,
+        FlushExecutionConfig, FlushWatermark, HotRowCandidate,
+    },
+    migrate::QualifiedTableName,
+    spi::{mirror_to_spi, prepared_plan_key},
+    sql::events::plan_mirror_changes_since,
 };
 use serde_json::json;
 
@@ -64,6 +70,48 @@ fn bench_cleanup_policy(c: &mut Criterion) {
     });
 }
 
+fn bench_spi_plan_cache_shapes(c: &mut Criterion) {
+    let source = TableName::parse("app.items").expect("valid table name");
+    let mirror = mirror_relation_for_source(&source).expect("valid mirror relation");
+    let cached_flush_stats = mirror_to_spi(plan_mirror_stats(&mirror)).expect("valid statement");
+    let cached_flush_key = prepared_plan_key(&cached_flush_stats);
+
+    c.bench_function("one_shot_flush_stats_statement_key", |b| {
+        b.iter(|| {
+            let statement =
+                mirror_to_spi(plan_mirror_stats(black_box(&mirror))).expect("valid statement");
+            prepared_plan_key(black_box(&statement))
+        })
+    });
+    c.bench_function("cached_flush_stats_statement_key", |b| {
+        b.iter(|| black_box(&cached_flush_key))
+    });
+
+    let table = QualifiedTableName::parse("app.items").expect("valid table");
+    let mirror_table = QualifiedTableName::parse("koldstore.items__cl").expect("valid mirror");
+    let primary_key = vec!["tenant_id".to_string(), "id".to_string()];
+    let cached_changes_since =
+        plan_mirror_changes_since(&table, &mirror_table, &primary_key, Some("tenant_id"))
+            .expect("valid changes_since plan");
+    let cached_changes_key = prepared_plan_key(&cached_changes_since.statement);
+
+    c.bench_function("one_shot_changes_since_statement_key", |b| {
+        b.iter(|| {
+            let plan = plan_mirror_changes_since(
+                black_box(&table),
+                black_box(&mirror_table),
+                black_box(&primary_key),
+                Some("tenant_id"),
+            )
+            .expect("valid changes_since plan");
+            prepared_plan_key(black_box(&plan.statement))
+        })
+    });
+    c.bench_function("cached_changes_since_statement_key", |b| {
+        b.iter(|| black_box(&cached_changes_key))
+    });
+}
+
 fn flush_input(rows: usize) -> FlushBatchInput {
     FlushBatchInput {
         batch_size: rows,
@@ -97,6 +145,7 @@ criterion_group!(
     bench_flush_candidate_selection,
     bench_flush_batch_builder,
     bench_flush_metadata,
-    bench_cleanup_policy
+    bench_cleanup_policy,
+    bench_spi_plan_cache_shapes
 );
 criterion_main!(benches);

@@ -141,8 +141,8 @@ fn flush_stats_use_latest_live_values_and_ignore_tombstones() {
     assert_eq!(stats["score"].max, json!(30));
     assert_eq!(stats["status"].min, json!("new"));
     assert_eq!(stats["status"].max, json!("new"));
-    assert_eq!(stats["_seq"].min, json!(3));
-    assert_eq!(stats["_seq"].max, json!(3));
+    assert_eq!(stats["seq"].min, json!(3));
+    assert_eq!(stats["seq"].max, json!(3));
 }
 
 #[test]
@@ -222,6 +222,43 @@ fn flush_watermark_skips_rows_changed_after_claimed_seqid() {
         CommitSeq::new(111).unwrap(),
         watermark,
     ));
+}
+
+#[test]
+fn mirror_flush_selection_set_persists_selected_keys_and_seq_cutoff() {
+    use koldstore_core::{MirrorOperation, SeqId};
+    use pg_koldstore::flush::job::{MirrorFlushSelectedRow, MirrorFlushSelectionSet};
+    use serde_json::json;
+
+    let selection = MirrorFlushSelectionSet::new(vec![
+        MirrorFlushSelectedRow {
+            pk_json: json!({"id": 2}),
+            seq: SeqId::new(20).unwrap(),
+            operation: MirrorOperation::Delete,
+        },
+        MirrorFlushSelectedRow {
+            pk_json: json!({"id": 1}),
+            seq: SeqId::new(10).unwrap(),
+            operation: MirrorOperation::Update,
+        },
+    ]);
+
+    assert_eq!(selection.seq_cutoff.unwrap().get(), 20);
+    assert_eq!(
+        selection
+            .rows
+            .iter()
+            .map(|row| row.seq.get())
+            .collect::<Vec<_>>(),
+        vec![10, 20]
+    );
+    assert_eq!(
+        selection.to_payload_json(),
+        json!([
+            {"id": 1, "seq": 10, "op": 2},
+            {"id": 2, "seq": 20, "op": 3}
+        ])
+    );
 }
 
 #[test]

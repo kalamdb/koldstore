@@ -7,32 +7,31 @@ use std::{
 };
 
 use koldstore_catalog::MirrorInitializationState;
-use koldstore_core::{CommitSeq, KoldstoreError, Result, ScopeKey, SeqId, StablePkHash};
-use koldstore_parquet::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
+use koldstore_core::{
+    CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey, SeqId, StablePkHash,
+};
+use koldstore_manifest::SyncState;
+use koldstore_parquet::{
+    ColdMetadataColumn, ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata,
+};
 use uuid::Uuid;
 
+/// Manifest sync state alias used by flush orchestration.
+pub use koldstore_manifest::SyncState as ManifestSyncState;
+
 /// Manifest sync states used by flush jobs.
-pub const FLUSH_STATES: &[&str] = &["pending_write", "syncing", "in_sync", "stale", "error"];
+pub const FLUSH_STATES: &[&str] = &[
+    SyncState::PendingWrite.as_str(),
+    SyncState::Syncing.as_str(),
+    SyncState::InSync.as_str(),
+    SyncState::Stale.as_str(),
+    SyncState::Error.as_str(),
+];
 
 /// Returns whether a managed table can be selected for flush.
 #[must_use]
 pub const fn allows_flush_after_initialization(state: MirrorInitializationState) -> bool {
     matches!(state, MirrorInitializationState::Complete)
-}
-
-/// Local manifest cache sync state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManifestSyncState {
-    /// Hot DML has dirtied the local scope.
-    PendingWrite,
-    /// Flush is publishing cold artifacts.
-    Syncing,
-    /// Local cache matches the object-store manifest.
-    InSync,
-    /// Local cache must be refreshed before planning cold reads.
-    Stale,
-    /// Last flush attempt failed.
-    Error,
 }
 
 /// Positive lease duration for a claimed flush job.
@@ -262,6 +261,55 @@ pub struct FlushWatermark {
     seq_upper_bound: SeqId,
 }
 
+/// One selected mirror row captured for a clean-schema flush job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorFlushSelectedRow {
+    /// JSON primary-key identity.
+    pub pk_json: serde_json::Value,
+    /// Mirror sequence selected for this attempt.
+    pub seq: SeqId,
+    /// Latest mirror operation selected for this attempt.
+    pub operation: MirrorOperation,
+}
+
+/// Stable selected mirror set persisted or carried by a flush job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorFlushSelectionSet {
+    /// Selected rows in stable sequence order.
+    pub rows: Vec<MirrorFlushSelectedRow>,
+    /// Highest selected sequence.
+    pub seq_cutoff: Option<SeqId>,
+}
+
+impl MirrorFlushSelectionSet {
+    /// Creates a stable selected set sorted by mirror sequence.
+    #[must_use]
+    pub fn new(mut rows: Vec<MirrorFlushSelectedRow>) -> Self {
+        rows.sort_by_key(|row| row.seq);
+        let seq_cutoff = rows.iter().map(|row| row.seq).max();
+        Self { rows, seq_cutoff }
+    }
+
+    /// Serializes the selected set for job payload or cleanup SQL binding.
+    #[must_use]
+    pub fn to_payload_json(&self) -> serde_json::Value {
+        serde_json::Value::Array(
+            self.rows
+                .iter()
+                .map(|row| {
+                    let mut object = match &row.pk_json {
+                        serde_json::Value::Object(object) => object.clone(),
+                        _ => serde_json::Map::new(),
+                    };
+                    object.insert("seq".to_string(), serde_json::json!(row.seq.get()));
+                    object.insert("op".to_string(), serde_json::json!(row.operation.code()));
+                    serde_json::Value::Object(object)
+                })
+                .collect(),
+        )
+    }
+}
+
 impl FlushWatermark {
     /// Creates a flush watermark from a committed sequence upper bound.
     #[must_use]
@@ -342,45 +390,6 @@ pub const fn can_cleanup_hot_rows(phase: FlushJobPhase) -> bool {
         phase,
         FlushJobPhase::CleanupHotRows | FlushJobPhase::Finished
     )
-}
-
-impl ManifestSyncState {
-    /// Returns the SQL/catalog representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::PendingWrite => "pending_write",
-            Self::Syncing => "syncing",
-            Self::InSync => "in_sync",
-            Self::Stale => "stale",
-            Self::Error => "error",
-        }
-    }
-
-    /// Starts a flush for a pending, stale, or errored scope.
-    #[must_use]
-    pub const fn start_flush(self) -> Self {
-        match self {
-            Self::PendingWrite | Self::Stale | Self::Error => Self::Syncing,
-            Self::Syncing | Self::InSync => self,
-        }
-    }
-
-    /// Completes a successful flush.
-    #[must_use]
-    pub const fn finish_success(self, remaining_hot_rows: bool) -> Self {
-        if remaining_hot_rows {
-            Self::PendingWrite
-        } else {
-            Self::InSync
-        }
-    }
-
-    /// Completes a failed flush.
-    #[must_use]
-    pub const fn finish_error(self) -> Self {
-        Self::Error
-    }
 }
 
 /// Flush metadata written after manifest commit.
@@ -568,7 +577,7 @@ impl FlushBatchPlan {
             .collect()
     }
 
-    /// Computes segment stats for `_seq`, `_commit_seq`, and configured app columns.
+    /// Computes segment stats for clean-schema metadata and configured app columns.
     #[must_use]
     pub fn segment_column_stats<I, S>(&self, columns: I) -> BTreeMap<String, ColumnStats>
     where
@@ -580,14 +589,14 @@ impl FlushBatchPlan {
             self.footer_summary().segment_bounds()
         {
             stats.insert(
-                "_seq".to_string(),
+                ColdMetadataColumn::Seq.name().to_string(),
                 ColumnStats {
                     min: serde_json::json!(min_seq),
                     max: serde_json::json!(max_seq),
                 },
             );
             stats.insert(
-                "_commit_seq".to_string(),
+                "commit_seq".to_string(),
                 ColumnStats {
                     min: serde_json::json!(min_commit_seq),
                     max: serde_json::json!(max_commit_seq),
@@ -731,7 +740,7 @@ impl FlushFailurePlan {
     #[must_use]
     pub fn object_store_outage(error: impl Into<String>) -> Self {
         Self {
-            next_manifest_state: ManifestSyncState::Error,
+            next_manifest_state: SyncState::Error,
             hot_data_authoritative: true,
             job_state: "error",
             last_error: Some(error.into()),
@@ -804,7 +813,7 @@ pub fn conditional_cleanup_allowed(
 /// Returns the next manifest sync state after a successful flush.
 #[must_use]
 pub const fn successful_flush_state(remaining_hot_rows: bool) -> &'static str {
-    ManifestSyncState::Syncing
+    SyncState::Syncing
         .finish_success(remaining_hot_rows)
         .as_str()
 }

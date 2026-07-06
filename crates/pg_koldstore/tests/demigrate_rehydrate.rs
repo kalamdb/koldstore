@@ -22,6 +22,7 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
             table_oid: 42,
             cold_object_prefix: "app/items/".to_string(),
             logical_reader_name: "KoldstoreMergeScan".to_string(),
+            mirror_table: Some(QualifiedTableName::parse("koldstore.items__cl").unwrap()),
         },
         DemigrateOptions::default(),
     )
@@ -51,7 +52,6 @@ fn demigrate_table_request_maps_sql_defaults_to_demigration_options() {
         table_name: "app.items".to_string(),
         rehydrate: None,
         drop_cold: None,
-        drop_system_columns: None,
     };
 
     let options = request.options();
@@ -59,5 +59,4 @@ fn demigrate_table_request_maps_sql_defaults_to_demigration_options() {
     assert_eq!(request.table_name, "app.items");
     assert!(options.rehydrate);
     assert!(!options.drop_cold);
-    assert!(!options.drop_system_columns);
 }

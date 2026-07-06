@@ -1,11 +1,12 @@
 //! Operational SQL helpers.
 
-use koldstore_core::{CommitSeq, ScopeKey, SeqId, TableName};
+use koldstore_core::{is_safe_identifier, quote_ident, CommitSeq, ScopeKey, SeqId, TableName};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::flush::job::{FlushJobPhase, FlushLeaseSeconds, JobLeaseEpoch};
-use crate::spi::SpiStatement;
+use crate::migrate::QualifiedTableName;
+use crate::spi::{SpiStatement, SqlParamType};
 
 /// Placeholder status key names returned by table status.
 pub const TABLE_STATUS_FIELDS: &[&str] = &[
@@ -193,6 +194,17 @@ pub struct FlushJobEnqueuePlan {
     pub statement: SpiStatement,
 }
 
+/// Planned clean-schema mirror flush selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorFlushSelectionPlan {
+    /// Source user table.
+    pub table: QualifiedTableName,
+    /// Table-specific mirror table.
+    pub mirror_table: QualifiedTableName,
+    /// Parameterized selection statement.
+    pub statement: SpiStatement,
+}
+
 /// Flush policy update request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetFlushPolicyRequest {
@@ -284,6 +296,98 @@ RETURNING id
     Ok(FlushJobEnqueuePlan {
         request,
         seq_upper_bound,
+        statement,
+    })
+}
+
+/// Plans clean-schema flush selection from the mirror and base table.
+///
+/// The query is bounded by a captured mirror `seq` cutoff and joins the base
+/// table only for live rows. Delete mirror rows still produce PK + metadata
+/// records so cold tombstones can mask older cold rows.
+///
+/// # Errors
+///
+/// Returns an error when identifiers are unsafe or statement metadata cannot be prepared.
+pub fn plan_mirror_flush_selection(
+    table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key_columns: &[String],
+    base_columns: &[String],
+    scope_column: Option<&str>,
+) -> Result<MirrorFlushSelectionPlan, OpsError> {
+    if primary_key_columns.is_empty() {
+        return Err(OpsError::Spi(
+            "flush selection requires primary key".to_string(),
+        ));
+    }
+    let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
+    let pk_columns = koldstore_mirror::quoted_pk_columns(&primary_key)
+        .map_err(|error| OpsError::Spi(error.to_string()))?;
+    let base_columns = base_columns
+        .iter()
+        .map(|column| validate_identifier(column))
+        .collect::<Result<Vec<_>, _>>()?;
+    let join = pk_columns
+        .iter()
+        .map(|column| format!("mirror.{column} = hot.{column}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let mut select_columns = base_columns
+        .iter()
+        .map(|column| {
+            if pk_columns.iter().any(|pk| pk == column) {
+                format!("mirror.{column} AS {column}")
+            } else {
+                format!("hot.{column} AS {column}")
+            }
+        })
+        .collect::<Vec<_>>();
+    select_columns.extend([
+        format!(
+            "mirror.{} AS \"seq\"",
+            koldstore_mirror::MirrorColumn::Seq.quoted_name()
+        ),
+        format!(
+            "mirror.{} AS \"op\"",
+            koldstore_mirror::MirrorColumn::Op.quoted_name()
+        ),
+        format!(
+            "mirror.{} AS \"changed_at\"",
+            koldstore_mirror::MirrorColumn::ChangedAt.quoted_name()
+        ),
+        "(mirror.\"op\" = 3) AS deleted".to_string(),
+    ]);
+    let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];
+    let mut param_types = vec![SqlParamType::BigInt];
+    if let Some(scope_column) = scope_column {
+        let predicate = crate::security::scope::scope_predicate_sql("mirror", scope_column, 2)
+            .map_err(|error| OpsError::Spi(error.to_string()))?;
+        where_clauses.push(predicate);
+        param_types.push(SqlParamType::Text);
+    }
+    let sql = format!(
+        r#"
+SELECT {select_columns}
+FROM {mirror} AS mirror
+LEFT JOIN ONLY {table} AS hot
+  ON {join}
+WHERE {where_clause}
+ORDER BY mirror."seq" ASC
+"#,
+        select_columns = select_columns.join(", "),
+        mirror = mirror_table.quoted(),
+        table = table.quoted(),
+        join = join,
+        where_clause = where_clauses.join(" AND "),
+    );
+    let statement =
+        SpiStatement::read_with_params("select mirror-backed flush rows", &sql, param_types)
+            .map_err(|error| OpsError::Spi(error.to_string()))?;
+
+    Ok(MirrorFlushSelectionPlan {
+        table: table.clone(),
+        mirror_table: mirror_table.clone(),
         statement,
     })
 }
@@ -414,51 +518,32 @@ fn enqueue_flush_job_pg_impl(
 ) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
 
+    let table_name = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+    let table_name = TableName::parse(&table_name).map_err(|error| error.to_string())?;
     let scope_key = scope_key
         .map(str::trim)
         .filter(|scope| !scope.is_empty())
         .map(ScopeKey::new)
         .transpose()
         .map_err(|error| error.to_string())?;
+    let scope_key_arg = scope_key
+        .as_ref()
+        .map(ScopeKey::as_str)
+        .map(ToString::to_string);
+    let plan = enqueue_flush_job_plan(flush_table_request(table_name, scope_key, force), None)
+        .map_err(|error| error.to_string())?;
 
-    let inserted = pgrx::Spi::get_one_with_args::<i64>(
-        r#"
-WITH inserted AS (
-    INSERT INTO koldstore.jobs (
-        id,
-        table_oid,
-        scope_key,
-        job_type,
-        status,
-        phase,
-        flush_seq_upper_bound,
-        payload
-    )
-    VALUES (
-        gen_random_uuid(),
-        $1::oid,
-        COALESCE($2::text, ''),
-        'flush',
-        'pending',
-        'pending',
-        NULL,
-        jsonb_build_object('force', $3::boolean)
-    )
-    ON CONFLICT (table_oid, scope_key)
-    WHERE job_type = 'flush' AND status IN ('pending', 'running')
-    DO NOTHING
-    RETURNING 1
-)
-SELECT count(*)::bigint FROM inserted
-"#,
+    let inserted = crate::spi::update_one::<pgrx::Uuid>(
+        &plan.statement,
         &[
             DatumWithOid::from(table_oid),
-            DatumWithOid::from(scope_key.as_ref().map(ScopeKey::as_str)),
+            DatumWithOid::from(scope_key_arg.as_deref()),
+            DatumWithOid::from(Option::<i64>::None),
             DatumWithOid::from(force),
         ],
     )
     .map_err(|error| error.to_string())?;
-    Ok(inserted.unwrap_or(0))
+    Ok(if inserted.is_some() { 1 } else { 0 })
 }
 
 /// Enqueues a segment recovery job through the SQL API.
@@ -473,27 +558,16 @@ pub fn recover_segments_pg(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> i64 {
 fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
 
-    let inserted = pgrx::Spi::get_one_with_args::<i64>(
-        r#"
-WITH inserted AS (
-    INSERT INTO koldstore.jobs (
-        id, table_oid, job_type, status, attempts, error_trace
-    )
-    SELECT
-        gen_random_uuid(),
-        $1::oid,
-        'recover_segments',
-        CASE WHEN $2::boolean THEN 'dry_run' ELSE 'pending' END,
-        0,
-        NULL
-    RETURNING 1
-)
-SELECT count(*)::bigint FROM inserted
-"#,
+    let table_name = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+    let table_name = TableName::parse(&table_name).map_err(|error| error.to_string())?;
+    let plan =
+        recover_segments_plan(Some(table_name), dry_run).map_err(|error| error.to_string())?;
+    let inserted = crate::spi::update_one::<pgrx::Uuid>(
+        &plan.statement,
         &[DatumWithOid::from(table_oid), DatumWithOid::from(dry_run)],
     )
     .map_err(|error| error.to_string())?;
-    Ok(inserted.unwrap_or(0))
+    Ok(if inserted.is_some() { 1 } else { 0 })
 }
 
 /// Plans a scalable flush-job claim using row-level locking and leases.
@@ -673,9 +747,9 @@ pub fn flush_table_pg(table_oid: pgrx::pg_sys::Oid) -> i64 {
 
 #[cfg(feature = "pg")]
 fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
-    let relation = relation_context(table_oid)?;
-    let storage = flush_storage_context(table_oid)?;
-    let stats = flush_stats(&relation.quoted)?;
+    let relation = crate::catalog::resolve::relation_context(table_oid)?;
+    let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
+    let stats = flush_stats(table_oid)?;
     if stats.row_count == 0 {
         return Ok(0);
     }
@@ -727,7 +801,9 @@ fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     );
     segment.checksum = Some(segment_checksum);
     segment.column_stats.insert(
-        "_seq".to_string(),
+        koldstore_parquet::ColdMetadataColumn::Seq
+            .name()
+            .to_string(),
         koldstore_manifest::ManifestColumnStats::new(
             serde_json::json!(stats.min_seq),
             serde_json::json!(stats.max_seq),
@@ -772,21 +848,6 @@ fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
 
 #[cfg(feature = "pg")]
 #[derive(Debug)]
-struct RelationContext {
-    namespace: String,
-    name: String,
-    quoted: String,
-}
-
-#[cfg(feature = "pg")]
-#[derive(Debug)]
-struct FlushStorageContext {
-    base_path: String,
-    schema_version: i32,
-}
-
-#[cfg(feature = "pg")]
-#[derive(Debug)]
 struct FlushStats {
     row_count: i64,
     min_seq: i64,
@@ -796,75 +857,29 @@ struct FlushStats {
 }
 
 #[cfg(feature = "pg")]
-fn relation_context(table_oid: pgrx::pg_sys::Oid) -> Result<RelationContext, String> {
-    let value = spi_json_one(
-        r#"
-SELECT jsonb_build_object('namespace', n.nspname, 'name', c.relname)::text
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE c.oid = $1::oid
-"#,
-        &[pgrx::datum::DatumWithOid::from(table_oid)],
-        "relation lookup returned no rows",
-    )?;
-    let namespace = json_string(&value, "namespace")?;
-    let name = json_string(&value, "name")?;
-    Ok(RelationContext {
-        quoted: format!("{}.{}", quote_ident(&namespace), quote_ident(&name)),
-        namespace,
-        name,
-    })
-}
+fn flush_stats(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStats, String> {
+    use crate::spi::mirror_to_spi;
+    use koldstore_mirror::plan_mirror_stats;
 
-#[cfg(feature = "pg")]
-fn flush_storage_context(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStorageContext, String> {
-    let value = spi_json_one(
-        r#"
-SELECT jsonb_build_object(
-    'base_path', st.base_path,
-    'schema_version', s.version
-)::text
-FROM koldstore.schemas s
-JOIN koldstore.storage st ON st.id = s.storage_id
-WHERE s.table_oid = $1::oid
-  AND s.active
-  AND s.initialization_state = 'complete'
-ORDER BY s.version DESC
-LIMIT 1
-"#,
-        &[pgrx::datum::DatumWithOid::from(table_oid)],
-        "active schema/storage lookup returned no rows",
-    )?;
-    Ok(FlushStorageContext {
-        base_path: json_string(&value, "base_path")?,
-        schema_version: json_i64(&value, "schema_version")? as i32,
-    })
-}
-
-#[cfg(feature = "pg")]
-fn flush_stats(quoted_relation: &str) -> Result<FlushStats, String> {
-    let value = spi_json_one_without_args(
-        &format!(
-            r#"
-SELECT jsonb_build_object(
-    'row_count', count(*),
-    'min_seq', COALESCE(min("_seq"), 0),
-    'max_seq', COALESCE(max("_seq"), 0),
-    'min_commit_seq', COALESCE(min("_commit_seq"), 0),
-    'max_commit_seq', COALESCE(max("_commit_seq"), 0)
-)::text
-FROM ONLY {quoted_relation}
-WHERE NOT "_deleted"
-"#
-        ),
-        "flush stats lookup returned no rows",
-    )?;
+    let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
+    let mirror = snapshot
+        .mirror_relation
+        .as_mirror_relation()
+        .map_err(|error| error.to_string())?;
+    let stats = mirror_to_spi(plan_mirror_stats(&mirror)).map_err(|error| error.to_string())?;
+    let json = crate::spi::execute_prepared(&stats, &[], |tuples| tuples.get_one::<String>())
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "flush stats lookup returned no rows".to_string())?;
+    let value =
+        serde_json::from_str::<serde_json::Value>(&json).map_err(|error| error.to_string())?;
     Ok(FlushStats {
-        row_count: json_i64(&value, "row_count")?,
-        min_seq: json_i64(&value, "min_seq")?,
-        max_seq: json_i64(&value, "max_seq")?,
-        min_commit_seq: json_i64(&value, "min_commit_seq")?,
-        max_commit_seq: json_i64(&value, "max_commit_seq")?,
+        row_count: crate::catalog::decode::json_i64(&value, "row_count")?,
+        min_seq: crate::catalog::decode::json_i64(&value, "min_seq")?,
+        max_seq: crate::catalog::decode::json_i64(&value, "max_seq")?,
+        min_commit_seq: crate::catalog::decode::json_i64(&value, "min_commit_seq")?,
+        max_commit_seq: crate::catalog::decode::json_i64(&value, "max_commit_seq")?,
     })
 }
 
@@ -886,11 +901,14 @@ fn write_parquet_segment(
 ) -> Result<i64, String> {
     use std::sync::Arc;
 
+    use koldstore_parquet::ColdMetadataColumn;
+
+    let seq_column = ColdMetadataColumn::Seq.name();
     let rows = (0..row_count)
         .map(|offset| min_seq + offset)
         .collect::<Vec<_>>();
     let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
-        "_seq",
+        seq_column,
         arrow_schema::DataType::Int64,
         false,
     )]));
@@ -902,7 +920,7 @@ fn write_parquet_segment(
     let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
     let writer = koldstore_parquet::ParquetSegmentWriter::new(
         koldstore_parquet::WriterOptions::default()
-            .with_statistics_columns(["_seq"])
+            .with_statistics_columns([seq_column])
             .with_bloom_filter_columns(["id"]),
     );
     writer
@@ -991,7 +1009,7 @@ VALUES (
             pgrx::datum::DatumWithOid::from(byte_size),
             pgrx::datum::DatumWithOid::from(schema_version),
             pgrx::datum::DatumWithOid::from(pgrx::JsonB(serde_json::json!({
-                "_seq": {"min": stats.min_seq, "max": stats.max_seq}
+                "seq": {"min": stats.min_seq, "max": stats.max_seq}
             }))),
         ],
     )
@@ -1099,47 +1117,11 @@ WHERE table_oid = $1::oid
     .map_err(|error| error.to_string())
 }
 
-#[cfg(feature = "pg")]
-fn spi_json_one(
-    sql: &str,
-    args: &[pgrx::datum::DatumWithOid<'_>],
-    missing_message: &str,
-) -> Result<serde_json::Value, String> {
-    let json = pgrx::Spi::get_one_with_args::<String>(sql, args)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| missing_message.to_string())?;
-    serde_json::from_str(&json).map_err(|error| error.to_string())
-}
-
-#[cfg(feature = "pg")]
-fn spi_json_one_without_args(
-    sql: &str,
-    missing_message: &str,
-) -> Result<serde_json::Value, String> {
-    let json = pgrx::Spi::get_one::<String>(sql)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| missing_message.to_string())?;
-    serde_json::from_str(&json).map_err(|error| error.to_string())
-}
-
-#[cfg(feature = "pg")]
-fn json_string(value: &serde_json::Value, key: &str) -> Result<String, String> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| format!("missing string field `{key}`"))
-}
-
-#[cfg(feature = "pg")]
-fn json_i64(value: &serde_json::Value, key: &str) -> Result<i64, String> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| format!("missing integer field `{key}`"))
-}
-
-#[cfg(feature = "pg")]
-fn quote_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
+fn validate_identifier(value: &str) -> Result<String, OpsError> {
+    let trimmed = value.trim();
+    if is_safe_identifier(trimmed) {
+        Ok(quote_ident(trimmed))
+    } else {
+        Err(OpsError::Spi(format!("invalid identifier `{value}`")))
+    }
 }

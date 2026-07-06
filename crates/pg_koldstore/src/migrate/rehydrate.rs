@@ -2,6 +2,8 @@
 
 use thiserror::Error;
 
+use koldstore_mirror::plan_drop_mirror_table;
+
 use crate::spi::SpiStatement;
 
 use super::lock::{plan_migration_operation_lock, LockError, MigrationOperationLockPlan};
@@ -26,8 +28,6 @@ pub struct DemigrateOptions {
     pub rehydrate: bool,
     /// Whether to mark cold artifacts deleted after a successful rehydrate.
     pub drop_cold: bool,
-    /// Whether to remove pg-koldstore system columns from the heap.
-    pub drop_system_columns: bool,
 }
 
 /// Catalog and storage context resolved before demigration planning.
@@ -41,6 +41,8 @@ pub struct DemigrationContext {
     pub cold_object_prefix: String,
     /// Logical reader used for current hot+cold state.
     pub logical_reader_name: String,
+    /// Table-specific clean-schema mirror to drop after capture is disabled.
+    pub mirror_table: Option<QualifiedTableName>,
 }
 
 /// Cold artifact handling after demigration.
@@ -89,7 +91,6 @@ impl Default for DemigrateOptions {
         Self {
             rehydrate: DEFAULT_REHYDRATE,
             drop_cold: false,
-            drop_system_columns: false,
         }
     }
 }
@@ -134,12 +135,14 @@ pub fn plan_demigration(
         statements.extend(plan_rehydrate_heap(&context)?);
     }
 
+    if let Some(mirror_table) = &context.mirror_table {
+        statements.extend(plan_clean_schema_artifact_cleanup(
+            &context.table,
+            mirror_table,
+        )?);
+    }
     statements.push(plan_catalog_deactivation(context.table_oid)?);
     statements.push(plan_flush_deactivation(context.table_oid)?);
-
-    if options.drop_system_columns {
-        statements.push(plan_drop_system_columns(&context.table)?);
-    }
 
     let cold_artifact_action = if options.drop_cold {
         ColdArtifactAction::DeleteAfterRehydrate {
@@ -176,7 +179,7 @@ pub fn plan_rehydrate_heap(
     let create_temp = SpiStatement::write(
         "demigrate rehydrate current rows",
         &format!(
-            "CREATE TEMP TABLE {temp_table} AS SELECT * FROM {table} /* {} */ WHERE COALESCE(_deleted, false) = false",
+            "CREATE TEMP TABLE {temp_table} AS SELECT * FROM {}",
             context.logical_reader_name
         ),
     )
@@ -193,6 +196,29 @@ pub fn plan_rehydrate_heap(
     .map_err(|error| DemigrationError::Spi(error.to_string()))?;
 
     Ok(vec![create_temp, truncate_hot, restore_current])
+}
+
+/// Plans clean-schema capture and mirror cleanup.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be prepared.
+pub fn plan_clean_schema_artifact_cleanup(
+    table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+) -> Result<Vec<SpiStatement>, DemigrationError> {
+    let mut statements = crate::sql::dml::plan_mirror_capture_teardown(table, mirror_table)
+        .map_err(|error| DemigrationError::Spi(error.to_string()))?;
+    let mirror = mirror_table
+        .as_mirror_relation()
+        .map_err(|error| DemigrationError::Spi(error.to_string()))?;
+    let drop_mirror = plan_drop_mirror_table(&mirror);
+    statements.push(
+        SpiStatement::write("demigrate drop change-log mirror", &drop_mirror.sql)
+            .map_err(|error| DemigrationError::Spi(error.to_string()))?,
+    );
+
+    Ok(statements)
 }
 
 /// Plans metadata deactivation so planner/DML hooks treat the table as unmanaged.
@@ -219,17 +245,6 @@ pub fn plan_flush_deactivation(table_oid: u32) -> Result<SpiStatement, Demigrati
     SpiStatement::write(
         "demigrate cancel flush jobs",
         "UPDATE koldstore.jobs SET status = 'cancelled', updated_at = now() WHERE table_oid = $1 AND status IN ('pending', 'running')",
-    )
-    .map_err(|error| DemigrationError::Spi(error.to_string()))
-}
-
-fn plan_drop_system_columns(table: &QualifiedTableName) -> Result<SpiStatement, DemigrationError> {
-    SpiStatement::write(
-        "demigrate drop system columns",
-        &format!(
-            "ALTER TABLE ONLY {} DROP COLUMN IF EXISTS \"_seq\", DROP COLUMN IF EXISTS \"_commit_seq\", DROP COLUMN IF EXISTS \"_deleted\"",
-            table.quoted()
-        ),
     )
     .map_err(|error| DemigrationError::Spi(error.to_string()))
 }

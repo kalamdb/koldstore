@@ -3,7 +3,6 @@ fn archive_detach_mode_warns_about_cold_only_rows() {
     let options = pg_koldstore::migrate::rehydrate::DemigrateOptions {
         rehydrate: false,
         drop_cold: false,
-        drop_system_columns: false,
     };
 
     assert_eq!(
@@ -26,11 +25,11 @@ fn archive_detach_plan_skips_rehydrate_and_warns_about_invisible_cold_rows() {
             table_oid: 42,
             cold_object_prefix: "app/items/".to_string(),
             logical_reader_name: "KoldstoreMergeScan".to_string(),
+            mirror_table: Some(QualifiedTableName::parse("koldstore.items__cl").unwrap()),
         },
         DemigrateOptions {
             rehydrate: false,
             drop_cold: false,
-            drop_system_columns: true,
         },
     )
     .unwrap();
@@ -46,7 +45,7 @@ fn archive_detach_plan_skips_rehydrate_and_warns_about_invisible_cold_rows() {
         .statements
         .iter()
         .any(|statement| statement.sql.contains("CREATE TEMP TABLE")));
-    assert!(plan
+    assert!(!plan
         .statements
         .iter()
         .any(|statement| statement.sql.contains("DROP COLUMN IF EXISTS \"_seq\"")));

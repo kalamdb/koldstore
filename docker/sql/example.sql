@@ -103,20 +103,21 @@ SELECT 'conversations' AS table_name, count(*) AS hot_rows FROM demo.conversatio
 UNION ALL
 SELECT 'messages', count(*) FROM demo.messages;
 
-\echo '==> system column sanity check'
+\echo '==> clean-schema sanity check'
 SELECT
-  count(*) FILTER (WHERE _seq IS NULL) AS null_seq_rows,
-  count(*) FILTER (WHERE _commit_seq IS NULL) AS null_commit_seq_rows,
-  min(_seq) AS min_seq,
-  max(_seq) AS max_seq
-FROM demo.conversations;
+  table_schema,
+  table_name,
+  count(*) FILTER (WHERE column_name IN ('_seq', '_commit_seq', '_deleted', '_user_id')) AS internal_columns
+FROM information_schema.columns
+WHERE table_schema = 'demo'
+  AND table_name IN ('conversations', 'messages')
+GROUP BY table_schema, table_name
+ORDER BY table_name;
 
 SELECT
-  count(*) FILTER (WHERE _seq IS NULL) AS null_seq_rows,
-  count(*) FILTER (WHERE _commit_seq IS NULL) AS null_commit_seq_rows,
-  min(_seq) AS min_seq,
-  max(_seq) AS max_seq
-FROM demo.messages;
+  to_regclass('koldstore.conversations__cl') IS NOT NULL AS conversations_mirror_exists,
+  to_regclass('koldstore.messages__cl') IS NOT NULL AS messages_mirror_exists,
+  to_regclass('koldstore.row_events') IS NOT NULL AS global_row_events_exists;
 
 \echo '==> queue flush jobs (force)'
 SELECT koldstore.flush_table('demo.conversations', force => true) AS conversations_flush_job;
@@ -158,7 +159,7 @@ SELECT
   'completed' AS current_demo_state,
   'A completed flush has completed jobs, manifest sync_state = in_sync, segment_count > 0, active cold_segments, and manifest.json in MinIO.' AS how_to_verify;
 
-\echo '==> recent row events include normal insert/update/delete'
+\echo '==> recent mirror-backed changes include normal insert/update/delete'
 SELECT op, deleted, count(*) AS events
 FROM koldstore.changes_since('demo.messages', 0, 20000)
 GROUP BY op, deleted

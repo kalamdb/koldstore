@@ -30,6 +30,10 @@ name = "flush_matrix"
 path = "flush/flush_matrix.rs"
 
 [[test]]
+name = "flush_policy"
+path = "flush/flush_policy.rs"
+
+[[test]]
 name = "merge_scan_results"
 path = "merge/merge_scan_results.rs"
 
@@ -103,6 +107,7 @@ path = "full_lifecycle.rs"
 
 [dev-dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 koldstore-core.workspace = true
 koldstore-manifest.workspace = true
 koldstore-parquet.workspace = true

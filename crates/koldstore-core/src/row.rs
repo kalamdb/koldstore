@@ -1,4 +1,4 @@
-//! Hot, cold, tombstone, mirror, and row-event models.
+//! Hot, cold, tombstone, mirror, and latest-state change models.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -19,6 +19,9 @@ pub enum MirrorOperation {
 }
 
 impl MirrorOperation {
+    /// All mirror operations in stable insert/update/delete order.
+    pub const ALL: [Self; 3] = [Self::Insert, Self::Update, Self::Delete];
+
     /// Returns the SQL `smallint` operation code.
     #[must_use]
     pub const fn code(self) -> i16 {
@@ -27,6 +30,45 @@ impl MirrorOperation {
             Self::Update => 2,
             Self::Delete => 3,
         }
+    }
+
+    /// Returns the suffix used by change-log mirror capture trigger names.
+    #[must_use]
+    pub const fn capture_trigger_suffix(self) -> &'static str {
+        match self {
+            Self::Insert => "insert",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+
+    /// Returns the PostgreSQL `CREATE TRIGGER` event keyword for this operation.
+    #[must_use]
+    pub const fn sql_trigger_event(self) -> &'static str {
+        match self {
+            Self::Insert => "INSERT",
+            Self::Update => "UPDATE",
+            Self::Delete => "DELETE",
+        }
+    }
+
+    /// Returns the trigger-row reference used by mirror capture upserts.
+    #[must_use]
+    pub const fn capture_row_ref(self) -> &'static str {
+        match self {
+            Self::Insert | Self::Update => "NEW",
+            Self::Delete => "OLD",
+        }
+    }
+
+    /// Builds the per-table change-log mirror capture trigger name.
+    #[must_use]
+    pub fn capture_trigger_name(self, mirror_table_name: &str) -> String {
+        format!(
+            "{}_{}_capture",
+            mirror_table_name,
+            self.capture_trigger_suffix()
+        )
     }
 
     /// Parses a SQL `smallint` operation code.
@@ -83,20 +125,6 @@ impl MirrorState {
     pub const fn is_tombstone(self) -> bool {
         matches!(self.operation, Some(MirrorOperation::Delete))
     }
-}
-
-/// Change operation recorded in `koldstore.row_events`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RowOperation {
-    /// A new logical row was inserted.
-    Insert,
-    /// An existing hot row was updated.
-    Update,
-    /// A row was deleted or tombstoned.
-    Delete,
-    /// A hot tombstone was revived into a live row.
-    Revive,
 }
 
 /// Current hot overlay row metadata.
@@ -165,27 +193,35 @@ pub struct Tombstone {
     pub pk_hash: StablePkHash,
 }
 
-/// Committed row event for change-feed consumers.
+/// Source that produced a latest-state change-feed row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeSource {
+    /// Current unflushed state from the table-specific mirror.
+    HotMirror,
+    /// Flushed state reconstructed from cold record metadata.
+    ColdRecord,
+}
+
+/// Latest-state change-feed row from mirror/cold metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RowEvent {
+pub struct MirrorChange {
     /// Relation oid represented as a stable integer in pure crates.
     pub table_oid: u32,
     /// Optional user scope.
     pub scope_key: Option<ScopeKey>,
-    /// Stable PK hash.
-    pub pk_hash: StablePkHash,
     /// JSON primary-key object.
     pub pk_json: Value,
-    /// Event operation.
-    pub op: RowOperation,
+    /// Latest mirror/cold operation.
+    pub operation: MirrorOperation,
     /// Row/effect sequence.
     pub seq: SeqId,
-    /// Commit-order cursor.
-    pub commit_seq: CommitSeq,
+    /// Change timestamp.
+    pub changed_at: DateTime<Utc>,
     /// Delete/tombstone marker.
     pub deleted: bool,
-    /// Optional event payload.
+    /// Optional live row payload.
     pub row_image_json: Option<Value>,
-    /// Event timestamp.
-    pub created_at: DateTime<Utc>,
+    /// Source of this latest-state change row.
+    pub source: ChangeSource,
 }

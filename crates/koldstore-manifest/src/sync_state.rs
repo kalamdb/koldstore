@@ -19,6 +19,52 @@ pub enum SyncState {
 }
 
 impl SyncState {
+    /// All catalog-visible sync states.
+    pub const ALL: [Self; 5] = [
+        Self::PendingWrite,
+        Self::Syncing,
+        Self::InSync,
+        Self::Stale,
+        Self::Error,
+    ];
+
+    /// Returns the SQL/catalog representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InSync => "in_sync",
+            Self::PendingWrite => "pending_write",
+            Self::Syncing => "syncing",
+            Self::Stale => "stale",
+            Self::Error => "error",
+        }
+    }
+
+    /// Starts a flush for a pending, stale, or errored scope.
+    #[must_use]
+    pub const fn start_flush(self) -> Self {
+        match self {
+            Self::PendingWrite | Self::Stale | Self::Error => Self::Syncing,
+            Self::Syncing | Self::InSync => self,
+        }
+    }
+
+    /// Completes a successful flush.
+    #[must_use]
+    pub const fn finish_success(self, remaining_hot_rows: bool) -> Self {
+        if remaining_hot_rows {
+            Self::PendingWrite
+        } else {
+            Self::InSync
+        }
+    }
+
+    /// Completes a failed flush.
+    #[must_use]
+    pub const fn finish_error(self) -> Self {
+        Self::Error
+    }
+
     /// Returns whether the manifest cache can transition to `next`.
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {

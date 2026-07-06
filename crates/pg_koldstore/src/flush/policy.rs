@@ -1,7 +1,11 @@
 //! Flush policy parsing and mirror-backed selection helpers.
 
-use std::time::Duration;
+use std::{
+    collections::BTreeSet,
+    time::{Duration, SystemTime},
+};
 
+use koldstore_core::SeqId;
 use thiserror::Error;
 
 /// Parsed flush policy for clean-schema mirror selection.
@@ -11,6 +15,17 @@ pub struct FlushPolicy {
     pub row_limit: Option<u64>,
     /// Row-age threshold for duration policies.
     pub duration: Option<Duration>,
+}
+
+/// Mirror row available to flush policy evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorPolicyRow {
+    /// JSON primary-key identity used by cleanup and diagnostics.
+    pub pk_json: serde_json::Value,
+    /// Latest-state mirror sequence.
+    pub seq: SeqId,
+    /// Latest mirror change timestamp.
+    pub changed_at: SystemTime,
 }
 
 impl FlushPolicy {
@@ -65,6 +80,51 @@ impl FlushPolicy {
 
         Ok(policy)
     }
+}
+
+/// Selects mirror rows eligible for the configured flush policy.
+///
+/// `rows:N` keeps at most `N` pending mirror rows by selecting the oldest
+/// excess rows by `seq`. `duration:S` selects rows whose `changed_at` age is at
+/// least `S`. Combined policies return the union in stable sequence order.
+#[must_use]
+pub fn select_mirror_flush_candidates(
+    policy: &FlushPolicy,
+    rows: &[MirrorPolicyRow],
+    now: SystemTime,
+) -> Vec<MirrorPolicyRow> {
+    let mut selected = BTreeSet::<i64>::new();
+
+    if let Some(limit) = policy.row_limit {
+        let pending = rows.len() as u64;
+        if pending > limit {
+            let excess = (pending - limit) as usize;
+            let mut by_seq = rows.iter().collect::<Vec<_>>();
+            by_seq.sort_by_key(|row| row.seq);
+            for row in by_seq.into_iter().take(excess) {
+                selected.insert(row.seq.get());
+            }
+        }
+    }
+
+    if let Some(duration) = policy.duration {
+        for row in rows {
+            if now
+                .duration_since(row.changed_at)
+                .is_ok_and(|age| age >= duration)
+            {
+                selected.insert(row.seq.get());
+            }
+        }
+    }
+
+    let mut result = rows
+        .iter()
+        .filter(|row| selected.contains(&row.seq.get()))
+        .cloned()
+        .collect::<Vec<_>>();
+    result.sort_by_key(|row| row.seq);
+    result
 }
 
 /// Flush policy parsing error.

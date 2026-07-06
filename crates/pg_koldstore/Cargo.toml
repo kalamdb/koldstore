@@ -26,6 +26,7 @@ koldstore-catalog.workspace = true
 koldstore-core.workspace = true
 koldstore-manifest.workspace = true
 koldstore-merge.workspace = true
+koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-storage.workspace = true
 pgrx = { workspace = true, optional = true }

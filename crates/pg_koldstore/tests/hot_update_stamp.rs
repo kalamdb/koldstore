@@ -51,14 +51,14 @@ fn dml_stamp_rejects_invalid_sequence_values() {
 }
 
 #[test]
-fn managed_update_effect_mutates_live_hot_row_and_appends_update_event() {
+fn managed_update_effect_mutates_live_hot_row_and_records_mirror_update() {
     let effect =
         executor::plan_managed_update_effect(SeqId::new(10).unwrap(), CommitSeq::new(20).unwrap());
 
     assert_eq!(effect.stamp.operation, ManagedDmlOperation::Update);
     assert_eq!(
-        effect.row_event_operation,
-        koldstore_core::RowOperation::Update
+        effect.mirror_operation,
+        koldstore_core::MirrorOperation::Update
     );
     assert_eq!(effect.manifest_sync_state, "pending_write");
     assert_eq!(effect.delete_decision, None);

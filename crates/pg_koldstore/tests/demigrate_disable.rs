@@ -16,22 +16,14 @@ fn demigration_sql_deactivates_managed_metadata() {
 }
 
 #[test]
-fn migration_rollback_cleanup_removes_partial_catalog_rows_mirror_and_legacy_system_columns() {
+fn migration_rollback_cleanup_removes_partial_catalog_rows_and_mirror_only() {
     use pg_koldstore::migrate::rollback::RollbackCleanup;
     use pg_koldstore::migrate::QualifiedTableName;
     use pg_koldstore::spi::SpiAccess;
 
     let table = QualifiedTableName::parse("app.items").unwrap();
-    let cleanup = RollbackCleanup::for_table(
-        table.clone(),
-        42,
-        vec![
-            "_seq".to_string(),
-            "_commit_seq".to_string(),
-            "_deleted".to_string(),
-        ],
-    )
-    .with_mirror_table(QualifiedTableName::parse("koldstore.items__cl").unwrap());
+    let cleanup = RollbackCleanup::for_table(table.clone(), 42)
+        .with_mirror_table(QualifiedTableName::parse("koldstore.items__cl").unwrap());
 
     let plan = cleanup.plan().unwrap();
 
@@ -51,7 +43,10 @@ fn migration_rollback_cleanup_removes_partial_catalog_rows_mirror_and_legacy_sys
             "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1",
             "DELETE FROM koldstore.schemas WHERE table_oid = $1",
-            "ALTER TABLE ONLY \"app\".\"items\" DROP COLUMN IF EXISTS \"_seq\", DROP COLUMN IF EXISTS \"_commit_seq\", DROP COLUMN IF EXISTS \"_deleted\""
         ]
     );
+    assert!(!plan
+        .statements
+        .iter()
+        .any(|statement| statement.sql.contains("DROP COLUMN")));
 }

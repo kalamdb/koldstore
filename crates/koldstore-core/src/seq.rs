@@ -20,13 +20,13 @@ impl SeqId {
     pub fn new(value: i64) -> Result<Self> {
         let Some(inner) = NonZeroI64::new(value) else {
             return Err(KoldstoreError::InvalidSequence {
-                field: "_seq",
+                field: "seq",
                 value,
             });
         };
         if inner.get() < 0 {
             return Err(KoldstoreError::InvalidSequence {
-                field: "_seq",
+                field: "seq",
                 value,
             });
         }
@@ -60,13 +60,13 @@ impl CommitSeq {
     pub fn new(value: i64) -> Result<Self> {
         let Some(inner) = NonZeroI64::new(value) else {
             return Err(KoldstoreError::InvalidSequence {
-                field: "_commit_seq",
+                field: "commit_seq",
                 value,
             });
         };
         if inner.get() < 0 {
             return Err(KoldstoreError::InvalidSequence {
-                field: "_commit_seq",
+                field: "commit_seq",
                 value,
             });
         }

@@ -1,5 +1,6 @@
 //! Existing-table migration ordering decisions.
 
+use koldstore_core::is_safe_identifier;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -243,10 +244,4 @@ fn is_orderable_type(type_name: &str) -> bool {
 
 fn canonical_type(type_name: &str) -> String {
     type_name.trim().to_ascii_lowercase()
-}
-
-fn is_safe_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
 }
