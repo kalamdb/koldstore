@@ -6,7 +6,6 @@ use std::{
     num::NonZeroUsize,
 };
 
-use koldstore_catalog::MirrorInitializationState;
 use koldstore_common::{
     CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey, SeqId, StablePkHash,
 };
@@ -15,6 +14,7 @@ use koldstore_manifest::SyncState;
 use koldstore_parquet::{
     ColdMetadataColumn, ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata,
 };
+use koldstore_schema::MirrorInitializationState;
 use uuid::Uuid;
 
 /// Manifest sync state alias used by flush orchestration.

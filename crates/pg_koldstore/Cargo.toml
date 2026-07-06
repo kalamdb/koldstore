@@ -50,6 +50,8 @@ koldstore-common.workspace = true
 koldstore-flush.workspace = true
 koldstore-merge.workspace = true
 koldstore-migrate.workspace = true
+koldstore-schema.workspace = true
+koldstore-setup.workspace = true
 koldstore-storage.workspace = true
 
 [build-dependencies]

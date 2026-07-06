@@ -989,6 +989,7 @@ name = "koldstore-catalog"
 version = "0.1.0"
 dependencies = [
  "koldstore-common",
+ "koldstore-schema",
  "serde",
  "serde_json",
  "uuid",
@@ -1010,12 +1011,12 @@ dependencies = [
 name = "koldstore-flush"
 version = "0.1.0"
 dependencies = [
- "koldstore-catalog",
  "koldstore-common",
  "koldstore-jobs",
  "koldstore-manifest",
  "koldstore-mirror",
  "koldstore-parquet",
+ "koldstore-schema",
  "serde_json",
  "thiserror",
  "uuid",
@@ -1059,7 +1060,6 @@ dependencies = [
 name = "koldstore-migrate"
 version = "0.1.0"
 dependencies = [
- "koldstore-catalog",
  "koldstore-common",
  "koldstore-jobs",
  "koldstore-mirror",
@@ -1098,6 +1098,7 @@ version = "0.1.0"
 dependencies = [
  "koldstore-common",
  "serde",
+ "serde_json",
  "uuid",
 ]
 
@@ -1443,6 +1444,7 @@ dependencies = [
  "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-schema",
+ "koldstore-setup",
  "koldstore-storage",
  "pgrx",
  "serde",

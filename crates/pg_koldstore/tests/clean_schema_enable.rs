@@ -1,8 +1,8 @@
-use koldstore_catalog::MirrorInitializationState;
 use koldstore_common::{
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
 };
 use koldstore_migrate::{mirror, register, QualifiedTableName};
+use koldstore_schema::MirrorInitializationState;
 use koldstore_schema::SchemaColumn;
 use uuid::Uuid;
 

@@ -1,6 +1,6 @@
 //! Tests for migrated-table schema registry models.
 
-use koldstore_schema::{SchemaColumn, SchemaRegistryEntry, TypeMatrix};
+use koldstore_schema::{MirrorInitializationState, SchemaColumn, SchemaRegistryEntry, TypeMatrix};
 use uuid::Uuid;
 
 #[test]
@@ -31,4 +31,11 @@ fn schema_registry_validation_requires_pk_but_not_system_columns() {
     assert!(entry.validate(&["missing"]).is_err());
     assert_eq!(entry.application_columns().len(), 1);
     assert!(entry.system_columns().is_empty());
+}
+
+#[test]
+fn mirror_initialization_state_serializes_as_schema_value() {
+    let value = serde_json::to_value(MirrorInitializationState::Capturing).unwrap();
+
+    assert_eq!(value, serde_json::json!("capturing"));
 }

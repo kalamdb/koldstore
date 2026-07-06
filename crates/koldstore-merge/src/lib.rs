@@ -1,11 +1,18 @@
 //! Hot/cold merge resolver, change-feed helpers, and RLS planning.
 
+#[path = "core/changelog.rs"]
 pub mod changelog;
+#[path = "sql/dml.rs"]
 pub mod dml;
+#[path = "sql/events.rs"]
 pub mod events;
+#[path = "planning/quals.rs"]
 pub mod quals;
+#[path = "core/resolver.rs"]
 pub mod resolver;
+#[path = "planning/rls.rs"]
 pub mod rls;
+#[path = "core/tombstone.rs"]
 pub mod tombstone;
 
 pub use changelog::{changes_since, ChangeCursor, ChangeGap};

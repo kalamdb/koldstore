@@ -1,4 +1,3 @@
-use koldstore_catalog::MirrorInitializationState;
 use koldstore_common::{
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
 };
@@ -6,6 +5,7 @@ use koldstore_migrate::register::{
     cold_metadata_config, plan_schema_registry_insert_with_id, IndexedColumnSource,
     RegistrationMetadata, INITIAL_SCHEMA_VERSION,
 };
+use koldstore_schema::MirrorInitializationState;
 use koldstore_schema::SchemaColumn;
 use pg_koldstore::spi::SpiAccess;
 use uuid::Uuid;

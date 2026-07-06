@@ -3,27 +3,13 @@
 use serde::{Deserialize, Serialize};
 
 use koldstore_common::{Diagnostic, KoldstoreError, PrimaryKeyShape, Result, TableKind};
+use koldstore_schema::MirrorInitializationState;
 
 /// Flush policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlushPolicy {
     pub row_limit: Option<u64>,
     pub duration_seconds: Option<u64>,
-}
-
-/// Mirror initialization lifecycle state.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MirrorInitializationState {
-    /// Metadata exists but no complete mirror state is available.
-    #[default]
-    NotStarted,
-    /// DML capture is active and existing rows may still be scanning.
-    Capturing,
-    /// Every pre-existing row has a mirror state unless superseded by newer DML.
-    Complete,
-    /// Initialization failed and needs retry or rollback.
-    Failed,
 }
 
 /// FK migration policy classification.

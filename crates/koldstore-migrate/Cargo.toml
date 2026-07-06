@@ -8,7 +8,6 @@ description = "Table migration and demigration planning for pg-koldstore"
 
 [dependencies]
 koldstore-common.workspace = true
-koldstore-catalog.workspace = true
 koldstore-jobs.workspace = true
 koldstore-mirror.workspace = true
 koldstore-schema.workspace = true

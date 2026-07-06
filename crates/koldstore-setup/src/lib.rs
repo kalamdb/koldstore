@@ -8,4 +8,6 @@ pub mod bootstrap;
 pub mod catalog_tables;
 pub mod indexes;
 
-pub use bootstrap::BootstrapPlan;
+pub use bootstrap::{BootstrapObjectKind, BootstrapObjectPlan, BootstrapPlan};
+pub use catalog_tables::{missing_catalog_tables, CatalogTableSpec, REQUIRED_CATALOG_TABLES};
+pub use indexes::{missing_catalog_indexes, CatalogIndexSpec, REQUIRED_CATALOG_INDEXES};

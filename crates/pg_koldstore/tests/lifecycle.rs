@@ -1,3 +1,4 @@
+use koldstore_setup::{missing_catalog_indexes, missing_catalog_tables, BootstrapPlan};
 use pg_koldstore::{
     catalog, guc, hooks, koldstore_version, memory, observability, privileges, spi, sql,
 };
@@ -249,23 +250,14 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
 #[test]
 fn sql_migration_creates_required_catalog_tables() {
     let sql = include_str!("../sql/koldstore--0.1.0.sql");
+    let plan = BootstrapPlan::from_sql(sql);
 
+    assert!(missing_catalog_tables(&plan).is_empty());
+    assert!(missing_catalog_indexes(&plan).is_empty());
     for needle in [
-        "CREATE TABLE IF NOT EXISTS koldstore.storage",
-        "CREATE TABLE IF NOT EXISTS koldstore.schemas",
-        "CREATE TABLE IF NOT EXISTS koldstore.manifest",
-        "CREATE TABLE IF NOT EXISTS koldstore.jobs",
-        "CREATE TABLE IF NOT EXISTS koldstore.cold_segments",
-        "CREATE TABLE IF NOT EXISTS koldstore.cold_pk_hints",
         "mirror_relation regclass",
         "primary_key_shape jsonb NOT NULL DEFAULT '[]'::jsonb",
         "initialization_state text NOT NULL DEFAULT 'not_started'",
-        "CREATE UNIQUE INDEX IF NOT EXISTS schemas_one_active_per_table_idx",
-        "CREATE INDEX IF NOT EXISTS manifest_dirty_idx",
-        "CREATE INDEX IF NOT EXISTS manifest_scope_lookup_idx",
-        "CREATE INDEX IF NOT EXISTS jobs_pending_idx",
-        "CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx",
-        "CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx",
     ] {
         assert!(sql.contains(needle), "missing SQL fragment: {needle}");
     }

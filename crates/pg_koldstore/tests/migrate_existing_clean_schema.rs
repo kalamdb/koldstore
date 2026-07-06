@@ -194,7 +194,7 @@ fn finishing_mirror_initialization_marks_metadata_complete_without_enqueuing_flu
 
 #[test]
 fn flush_is_blocked_until_mirror_initialization_is_complete() {
-    use koldstore_catalog::MirrorInitializationState;
+    use koldstore_schema::MirrorInitializationState;
 
     assert!(!allows_flush_after_initialization(
         MirrorInitializationState::NotStarted

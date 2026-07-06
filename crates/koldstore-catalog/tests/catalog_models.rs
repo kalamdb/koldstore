@@ -1,11 +1,11 @@
 use koldstore_catalog::{
-    ColdPkHint, FkPolicyDecision, HintKind, ManagedTableMeta, MirrorInitializationState, PkLookup,
-    SegmentVisibility,
+    ColdPkHint, FkPolicyDecision, HintKind, ManagedTableMeta, PkLookup, SegmentVisibility,
 };
 use koldstore_common::{
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
     TableKind,
 };
+use koldstore_schema::MirrorInitializationState;
 use uuid::Uuid;
 
 fn pk_shape() -> PrimaryKeyShape {
