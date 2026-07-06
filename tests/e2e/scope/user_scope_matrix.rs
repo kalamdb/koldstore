@@ -2,7 +2,7 @@
 mod common;
 
 use anyhow::Result;
-use koldstore_core::TableKind;
+use koldstore_common::TableKind;
 
 #[test]
 fn user_scope_matrix_targets_active_pgrx_versions() {
@@ -31,7 +31,7 @@ fn user_scope_matrix_contract_covers_missing_scope_and_cross_scope_denial() {
         pg_koldstore::hooks::planner::plan_scope_key_for_read(TableKind::User, Some("user-a"))
             .unwrap()
             .unwrap();
-    let row_scope = koldstore_core::ScopeKey::new("user-b").unwrap();
+    let row_scope = koldstore_common::ScopeKey::new("user-b").unwrap();
     let denied = pg_koldstore::hooks::executor::enforce_dml_scope(
         TableKind::User,
         Some(planned.as_str()),

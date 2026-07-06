@@ -1,9 +1,9 @@
-//! DML hook and system-column guard integration.
+//! DML hook and clean-schema mirror integration.
 
-use koldstore_core::{CommitSeq, RowOperation, ScopeKey, SeqId, TableKind};
+use koldstore_common::{CommitSeq, MirrorOperation, ScopeKey, SeqId, TableKind};
 
-use crate::security::scope::{self, ScopeError};
-use crate::sql::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation};
+use koldstore_common::scope::{self, ScopeError};
+use koldstore_merge::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation};
 
 /// Manifest cache state written after hot DML dirties a managed scope.
 pub const HOT_DML_MANIFEST_SYNC_STATE: &str = "pending_write";
@@ -11,10 +11,10 @@ pub const HOT_DML_MANIFEST_SYNC_STATE: &str = "pending_write";
 /// Planned effect for one managed hot-DML operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedDmlEffect {
-    /// System-column stamp for the hot row or tombstone effect.
+    /// Mirror sequence stamp for the hot row or tombstone effect.
     pub stamp: DmlStamp,
-    /// Row event operation to append.
-    pub row_event_operation: RowOperation,
+    /// Latest-state mirror operation to record.
+    pub mirror_operation: MirrorOperation,
     /// Manifest sync state to record locally.
     pub manifest_sync_state: &'static str,
     /// Delete route when the operation is DELETE.
@@ -23,16 +23,19 @@ pub struct ManagedDmlEffect {
     pub keeps_one_hot_row_per_pk: bool,
 }
 
-/// Returns whether a column is managed system metadata.
-#[must_use]
-pub fn is_system_column(name: &str) -> bool {
-    matches!(name, "_seq" | "_commit_seq" | "_deleted" | "_user_id")
-}
-
-/// Returns whether a user write to a system column should be rejected.
-#[must_use]
-pub fn rejects_system_column_write(name: &str, internal_guard_active: bool) -> bool {
-    is_system_column(name) && !internal_guard_active
+/// Planned latest-state mirror effect for one user DML row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorCaptureEffect {
+    /// Operation value written to the mirror.
+    pub operation: MirrorOperation,
+    /// SQL expression used to allocate the mirror sequence.
+    pub seq_expression: &'static str,
+    /// SQL expression used to stamp row age.
+    pub changed_at_expression: &'static str,
+    /// SQL expression used to capture diagnostic WAL position.
+    pub commit_lsn_expression: &'static str,
+    /// Whether the effect is coupled to the user transaction.
+    pub transactional: bool,
 }
 
 /// DML operations observed by the managed hook shell.
@@ -110,7 +113,7 @@ pub fn plan_managed_insert_effect(seq: SeqId, commit_seq: CommitSeq) -> ManagedD
         seq,
         commit_seq,
         ManagedDmlOperation::Insert,
-        RowOperation::Insert,
+        MirrorOperation::Insert,
         None,
     )
 }
@@ -122,7 +125,7 @@ pub fn plan_managed_update_effect(seq: SeqId, commit_seq: CommitSeq) -> ManagedD
         seq,
         commit_seq,
         ManagedDmlOperation::Update,
-        RowOperation::Update,
+        MirrorOperation::Update,
         None,
     )
 }
@@ -138,22 +141,40 @@ pub fn plan_managed_delete_effect(
         seq,
         commit_seq,
         ManagedDmlOperation::Delete,
-        RowOperation::Delete,
+        MirrorOperation::Delete,
         Some(delete_decision(cold_may_contain_pk)),
     )
+}
+
+/// Plans the mirror state transition for a managed DML operation.
+#[must_use]
+pub const fn plan_mirror_capture_effect(operation: ManagedDmlOperation) -> MirrorCaptureEffect {
+    let operation = match operation {
+        ManagedDmlOperation::Insert | ManagedDmlOperation::Revive => MirrorOperation::Insert,
+        ManagedDmlOperation::Update => MirrorOperation::Update,
+        ManagedDmlOperation::Delete => MirrorOperation::Delete,
+    };
+
+    MirrorCaptureEffect {
+        operation,
+        seq_expression: "SNOWFLAKE_ID()",
+        changed_at_expression: "now()",
+        commit_lsn_expression: "pg_current_wal_lsn()",
+        transactional: true,
+    }
 }
 
 fn plan_effect(
     seq: SeqId,
     commit_seq: CommitSeq,
     operation: ManagedDmlOperation,
-    row_event_operation: RowOperation,
+    mirror_operation: MirrorOperation,
     delete_decision: Option<DeleteDecision>,
 ) -> ManagedDmlEffect {
     let stamp = DmlStamp::new(seq, commit_seq, operation);
     ManagedDmlEffect {
         stamp,
-        row_event_operation,
+        mirror_operation,
         manifest_sync_state: HOT_DML_MANIFEST_SYNC_STATE,
         delete_decision,
         keeps_one_hot_row_per_pk: operation.keeps_one_hot_row_per_pk(),

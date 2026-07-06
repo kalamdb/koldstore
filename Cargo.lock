@@ -527,8 +527,12 @@ name = "e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "koldstore-core",
+ "chrono",
+ "koldstore-common",
+ "koldstore-flush",
  "koldstore-manifest",
+ "koldstore-merge",
+ "koldstore-migrate",
  "koldstore-parquet",
  "koldstore-storage",
  "parquet",
@@ -984,15 +988,15 @@ dependencies = [
 name = "koldstore-catalog"
 version = "0.1.0"
 dependencies = [
- "koldstore-core",
+ "koldstore-common",
+ "koldstore-schema",
  "serde",
  "serde_json",
- "thiserror",
  "uuid",
 ]
 
 [[package]]
-name = "koldstore-core"
+name = "koldstore-common"
 version = "0.1.0"
 dependencies = [
  "chrono",
@@ -1001,6 +1005,29 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+]
+
+[[package]]
+name = "koldstore-flush"
+version = "0.1.0"
+dependencies = [
+ "koldstore-common",
+ "koldstore-jobs",
+ "koldstore-manifest",
+ "koldstore-mirror",
+ "koldstore-parquet",
+ "koldstore-schema",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "koldstore-jobs"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
  "uuid",
 ]
 
@@ -1009,13 +1036,9 @@ name = "koldstore-manifest"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "koldstore-core",
  "koldstore-storage",
  "serde",
  "serde_json",
- "tempfile",
- "thiserror",
- "uuid",
 ]
 
 [[package]]
@@ -1027,9 +1050,31 @@ name = "koldstore-merge"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "koldstore-core",
+ "koldstore-common",
+ "koldstore-mirror",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "koldstore-migrate"
+version = "0.1.0"
+dependencies = [
+ "koldstore-common",
+ "koldstore-jobs",
+ "koldstore-mirror",
+ "koldstore-schema",
  "serde",
  "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "koldstore-mirror"
+version = "0.1.0"
+dependencies = [
+ "koldstore-common",
  "thiserror",
 ]
 
@@ -1040,20 +1085,36 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "futures-util",
- "koldstore-core",
+ "koldstore-common",
  "parquet",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror",
 ]
+
+[[package]]
+name = "koldstore-schema"
+version = "0.1.0"
+dependencies = [
+ "koldstore-common",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "koldstore-setup"
+version = "0.1.0"
 
 [[package]]
 name = "koldstore-storage"
 version = "0.1.0"
 dependencies = [
+ "koldstore-common",
  "serde",
  "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
@@ -1349,9 +1410,12 @@ dependencies = [
  "chrono",
  "criterion",
  "koldstore-catalog",
- "koldstore-core",
+ "koldstore-common",
+ "koldstore-flush",
  "koldstore-manifest",
  "koldstore-merge",
+ "koldstore-migrate",
+ "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-storage",
  "pg_koldstore",
@@ -1360,7 +1424,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-postgres",
- "tracing",
 ]
 
 [[package]]
@@ -1373,10 +1436,15 @@ dependencies = [
  "chrono",
  "hex",
  "koldstore-catalog",
- "koldstore-core",
+ "koldstore-common",
+ "koldstore-flush",
  "koldstore-manifest",
  "koldstore-merge",
+ "koldstore-migrate",
+ "koldstore-mirror",
  "koldstore-parquet",
+ "koldstore-schema",
+ "koldstore-setup",
  "koldstore-storage",
  "pgrx",
  "serde",

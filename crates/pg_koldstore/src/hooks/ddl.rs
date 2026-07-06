@@ -2,8 +2,8 @@
 
 use thiserror::Error;
 
-use crate::migrate::QualifiedTableName;
 use crate::spi::SpiStatement;
+use koldstore_migrate::QualifiedTableName;
 
 /// DROP TABLE cleanup policies for object artifact handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

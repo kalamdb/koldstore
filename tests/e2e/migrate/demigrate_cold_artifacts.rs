@@ -2,10 +2,10 @@
 mod common;
 
 use anyhow::Result;
-use pg_koldstore::migrate::rehydrate::{
+use koldstore_migrate::rehydrate::{
     plan_demigration, ColdArtifactAction, DemigrateOptions, DemigrationContext,
 };
-use pg_koldstore::migrate::QualifiedTableName;
+use koldstore_migrate::QualifiedTableName;
 
 #[test]
 fn demigrate_cold_artifacts_are_retained_by_default_and_dropped_only_after_rehydrate() {
@@ -17,6 +17,7 @@ fn demigrate_cold_artifacts_are_retained_by_default_and_dropped_only_after_rehyd
         table_oid: 42,
         cold_object_prefix: "app/items/".to_string(),
         logical_reader_name: "KoldstoreMergeScan".to_string(),
+        mirror_table: Some(QualifiedTableName::parse("koldstore.items__cl").unwrap()),
     };
 
     let retain = plan_demigration(context.clone(), DemigrateOptions::default()).unwrap();
@@ -27,7 +28,6 @@ fn demigrate_cold_artifacts_are_retained_by_default_and_dropped_only_after_rehyd
         DemigrateOptions {
             rehydrate: true,
             drop_cold: true,
-            drop_system_columns: false,
         },
     )
     .unwrap();
@@ -43,7 +43,6 @@ fn demigrate_cold_artifacts_are_retained_by_default_and_dropped_only_after_rehyd
         DemigrateOptions {
             rehydrate: false,
             drop_cold: true,
-            drop_system_columns: false,
         },
     )
     .unwrap_err();
@@ -64,7 +63,7 @@ async fn demigrate_cold_artifact_options_execute_through_pgrx() -> Result<()> {
         let invalid = db
             .client
             .query_one(
-                "SELECT koldstore.demigrate_table($1::text::regclass, false, true, false)",
+                "SELECT koldstore.demigrate_table($1::text::regclass, false, true)",
                 &[&table.relation],
             )
             .await
@@ -81,7 +80,7 @@ async fn demigrate_cold_artifact_options_execute_through_pgrx() -> Result<()> {
         let deactivated = db
             .client
             .query_one(
-                "SELECT koldstore.demigrate_table($1::text::regclass, true, true, false)",
+                "SELECT koldstore.demigrate_table($1::text::regclass, true, true)",
                 &[&table.relation],
             )
             .await?

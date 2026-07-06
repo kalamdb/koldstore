@@ -21,38 +21,36 @@ fn migration_sql_rejects_unsupported_generated_and_expression_shapes() {
         "timestamptz",
         "timestamp with time zone",
     ] {
-        assert!(pg_koldstore::migrate::constraints::type_supported(
-            supported
-        ));
+        assert!(koldstore_migrate::constraints::type_supported(supported));
     }
     for unsupported in ["bytea", "inet", "numeric", "geometry"] {
-        assert!(!pg_koldstore::migrate::constraints::type_supported(
-            unsupported
-        ));
+        assert!(!koldstore_migrate::constraints::type_supported(unsupported));
     }
 }
 
 #[test]
 fn migration_validation_rejects_unsupported_generated_and_expression_shapes() {
-    let mut input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    let mut input = koldstore_migrate::constraints::MigrationValidationInput::minimal_shared();
     input
         .columns
-        .push(pg_koldstore::migrate::constraints::ColumnDefinition::new(
+        .push(koldstore_migrate::constraints::ColumnDefinition::new(
             "search", "tsvector", true,
         ));
     assert!(input.validate().is_err());
 
-    input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    input = koldstore_migrate::constraints::MigrationValidationInput::minimal_shared();
     input.columns[0].generated = true;
     assert!(input.validate().is_err());
 
-    input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    input = koldstore_migrate::constraints::MigrationValidationInput::minimal_shared();
     input.expression_primary_key = true;
     assert!(input.validate().is_err());
 
-    input = pg_koldstore::migrate::constraints::MigrationValidationInput::minimal_shared();
+    input = koldstore_migrate::constraints::MigrationValidationInput::minimal_shared();
     input
         .indexes
-        .push(pg_koldstore::migrate::constraints::IndexDefinition::expression("lower_title_idx"));
+        .push(koldstore_migrate::constraints::IndexDefinition::expression(
+            "lower_title_idx",
+        ));
     assert!(input.validate().is_err());
 }

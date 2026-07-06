@@ -9,11 +9,11 @@ fn flush_to_cold_plan_writes_parquet_manifest_segments_and_pk_hints() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    use koldstore_core::{CommitSeq, ScopeKey, SeqId, StablePkHash};
-    use koldstore_parquet::{ColumnStats, SegmentFooterMetadata};
-    use pg_koldstore::flush::job::{
+    use koldstore_common::{CommitSeq, ScopeKey, SeqId, StablePkHash};
+    use koldstore_flush::job::{
         plan_cold_pk_hint_updates, plan_cold_segment_insert, FlushBatchInput, HotRowCandidate,
     };
+    use koldstore_parquet::{ColumnStats, SegmentFooterMetadata};
     use serde_json::json;
 
     let batch = FlushBatchInput {

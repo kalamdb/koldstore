@@ -1,8 +1,8 @@
-use koldstore_core::{CommitSeq, SeqId};
-use pg_koldstore::{
-    hooks::executor,
-    sql::dml::{allocate_seq_for_tests, stamp_dml_effect, DmlStamp, ManagedDmlOperation},
+use koldstore_common::{CommitSeq, MirrorOperation, SeqId};
+use koldstore_merge::dml::{
+    allocate_seq_for_tests, stamp_dml_effect, DmlStamp, ManagedDmlOperation,
 };
+use pg_koldstore::hooks::executor;
 
 #[test]
 fn hot_update_stamp_advances_seq_and_commit_seq() {
@@ -51,15 +51,12 @@ fn dml_stamp_rejects_invalid_sequence_values() {
 }
 
 #[test]
-fn managed_update_effect_mutates_live_hot_row_and_appends_update_event() {
+fn managed_update_effect_mutates_live_hot_row_and_records_mirror_update() {
     let effect =
         executor::plan_managed_update_effect(SeqId::new(10).unwrap(), CommitSeq::new(20).unwrap());
 
     assert_eq!(effect.stamp.operation, ManagedDmlOperation::Update);
-    assert_eq!(
-        effect.row_event_operation,
-        koldstore_core::RowOperation::Update
-    );
+    assert_eq!(effect.mirror_operation, MirrorOperation::Update);
     assert_eq!(effect.manifest_sync_state, "pending_write");
     assert_eq!(effect.delete_decision, None);
     assert!(!effect.stamp.deleted);

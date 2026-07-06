@@ -29,15 +29,13 @@ fn sql_extension_exposes_shared_greenfield_migration_contract() {
         pg_koldstore::sql::session::snowflake_id() + 1,
         pg_koldstore::sql::session::snowflake_id()
     );
-    assert_eq!(
-        pg_koldstore::migrate::columns::REQUIRED_SYSTEM_COLUMNS,
-        ["_seq", "_commit_seq", "_deleted"]
-    );
+    assert!(!sql.contains("ADD COLUMN IF NOT EXISTS \"_seq\""));
+    assert!(!sql.contains("ADD COLUMN IF NOT EXISTS \"_deleted\""));
 }
 
 #[test]
 fn shared_greenfield_request_uses_no_scope_column() {
-    let request = pg_koldstore::sql::ddl::MigrateTableRequest {
+    let request = koldstore_migrate::MigrateTableRequest {
         table_name: "app.shared_items".to_string(),
         table_type: "shared".to_string(),
         storage_name: "local-minio".to_string(),

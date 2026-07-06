@@ -1,8 +1,6 @@
-use pg_koldstore::migrate::{
-    plan_empty_table_migration, MigrationTableContext, SYSTEM_SCOPE_COLUMN,
-};
+use koldstore_migrate::MigrateTableRequest;
+use koldstore_migrate::{plan_empty_table_migration, MigrationError, MigrationTableContext};
 use pg_koldstore::spi::SpiAccess;
-use pg_koldstore::sql::ddl::MigrateTableRequest;
 use uuid::Uuid;
 
 fn shared_request() -> MigrateTableRequest {
@@ -41,19 +39,20 @@ fn shared_migrate_table_plan_validates_and_probes_empty_table() {
 }
 
 #[test]
-fn user_migrate_table_plan_defaults_scope_column() {
+fn user_migrate_table_plan_requires_application_scope_column() {
     let mut request = shared_request();
     request.table_name = "notes".to_string();
     request.table_type = "user".to_string();
 
+    let error = plan_empty_table_migration(&request, context()).unwrap_err();
+    assert_eq!(error, MigrationError::MissingScopeColumn);
+
+    request.scope_column = Some("user_id".to_string());
     let plan = plan_empty_table_migration(&request, context()).unwrap();
 
     assert_eq!(plan.table.schema, None);
     assert_eq!(plan.table.name, "notes");
-    assert_eq!(
-        plan.effective_scope_column.as_deref(),
-        Some(SYSTEM_SCOPE_COLUMN)
-    );
+    assert_eq!(plan.effective_scope_column.as_deref(), Some("user_id"));
     assert_eq!(
         plan.empty_table_probe.sql,
         "SELECT 1 FROM ONLY \"notes\" LIMIT 1"

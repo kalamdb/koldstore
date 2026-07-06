@@ -6,8 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-koldstore-core.workspace = true
-serde.workspace = true
+koldstore-common.workspace = true
+koldstore-mirror.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

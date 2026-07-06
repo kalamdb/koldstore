@@ -50,7 +50,7 @@ async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_
         let deactivated = db
             .client
             .query_one(
-                "SELECT koldstore.demigrate_table($1::text::regclass, false, false, true)",
+                "SELECT koldstore.demigrate_table($1::text::regclass, false, false)",
                 &[&table.relation],
             )
             .await?;
@@ -80,6 +80,14 @@ async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_
             .await?
             .get::<_, i64>(0);
         assert_eq!(system_columns, 0);
+
+        let mirror = format!("koldstore.{}__cl", table.table_name);
+        let mirror_exists = db
+            .client
+            .query_one("SELECT to_regclass($1)::oid IS NOT NULL", &[&mirror])
+            .await?
+            .get::<_, bool>(0);
+        assert!(!mirror_exists);
     }
 
     Ok(())

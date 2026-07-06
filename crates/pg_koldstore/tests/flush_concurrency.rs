@@ -1,13 +1,11 @@
 use std::thread;
 
-use koldstore_core::{CommitSeq, SeqId, StablePkHash};
-use pg_koldstore::{
-    flush::job::{
-        conditional_cleanup_allowed, FlushBatchBuilder, FlushBatchPush, FlushExecutionConfig,
-        FlushWatermark, HotRowCandidate,
-    },
-    sql::dml::{delete_decision_with_flush_fence, DeleteDecision},
+use koldstore_common::{CommitSeq, SeqId, StablePkHash};
+use koldstore_flush::job::{
+    conditional_cleanup_allowed, FlushBatchBuilder, FlushBatchPush, FlushExecutionConfig,
+    FlushWatermark, HotRowCandidate,
 };
+use koldstore_merge::dml::{delete_decision_with_flush_fence, DeleteDecision};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HotState {

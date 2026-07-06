@@ -1,16 +1,16 @@
 //! CustomScan plan serialization.
 
-use koldstore_core::{Predicate, Result, ScopeKey, SeqId};
+use koldstore_common::{Predicate, Result, ScopeKey, SeqId};
 use serde::{Deserialize, Serialize};
 
-/// Attribute numbers for managed system columns.
+/// Attribute numbers for merge metadata projected during hot/cold reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemColumnAttnums {
-    /// `_seq` attribute number.
+pub struct MergeMetadataAttnums {
+    /// Mirror/cold `seq` attribute number.
     pub seq: i16,
-    /// `_commit_seq` attribute number.
+    /// Commit-order cursor attribute number.
     pub commit_seq: i16,
-    /// `_deleted` attribute number.
+    /// Delete/tombstone attribute number.
     pub deleted: i16,
     /// Optional scope attribute number.
     pub scope: Option<i16>,
@@ -27,9 +27,9 @@ pub struct SegmentHint {
     pub object_path: String,
     /// Selected row groups after safe pruning.
     pub selected_row_groups: Vec<usize>,
-    /// Segment minimum `_seq`.
+    /// Segment minimum `seq`.
     pub min_seq: SeqId,
-    /// Segment maximum `_seq`.
+    /// Segment maximum `seq`.
     pub max_seq: SeqId,
 }
 
@@ -42,8 +42,8 @@ pub struct MergeScanPlan {
     pub scanrelid: u32,
     /// Logical primary-key columns.
     pub primary_key_columns: Vec<String>,
-    /// Managed system-column attnums.
-    pub system_column_attnums: SystemColumnAttnums,
+    /// Merge metadata attnums projected by the scan.
+    pub merge_metadata_attnums: MergeMetadataAttnums,
     /// Optional user scope key captured at planning time.
     pub scope_key: Option<ScopeKey>,
     /// Predicates proven safe for pre-merge pruning.
@@ -66,7 +66,7 @@ impl MergeScanPlan {
             table_oid,
             scanrelid: 0,
             primary_key_columns,
-            system_column_attnums: SystemColumnAttnums {
+            merge_metadata_attnums: MergeMetadataAttnums {
                 seq: 0,
                 commit_seq: 0,
                 deleted: 0,

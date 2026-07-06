@@ -1,0 +1,99 @@
+//! PostgreSQL type support matrix.
+
+use serde::{Deserialize, Serialize};
+
+/// PostgreSQL type class.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PgTypeClass {
+    pub name: String,
+}
+
+/// Type support entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeSupport {
+    pub supported: bool,
+    pub diagnostic: Option<String>,
+}
+
+/// Type support matrix.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TypeMatrix {
+    pub entries: Vec<(PgTypeClass, TypeSupport)>,
+}
+
+impl TypeMatrix {
+    /// Returns the default PostgreSQL 15+ MVP type support matrix.
+    #[must_use]
+    pub fn postgres_15_default() -> Self {
+        let supported = [
+            "bool",
+            "int2",
+            "int4",
+            "int8",
+            "float4",
+            "float8",
+            "text",
+            "varchar",
+            "uuid",
+            "jsonb",
+            "timestamptz",
+        ];
+        Self {
+            entries: supported
+                .into_iter()
+                .map(|name| {
+                    (
+                        PgTypeClass {
+                            name: name.to_string(),
+                        },
+                        TypeSupport {
+                            supported: true,
+                            diagnostic: None,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// Returns support for a PostgreSQL type name.
+    #[must_use]
+    pub fn support_for(&self, type_name: &str) -> TypeSupport {
+        let normalized = normalize_type_name(type_name);
+        self.entries
+            .iter()
+            .find(|(class, _)| class.name.eq_ignore_ascii_case(normalized))
+            .map(|(_, support)| support.clone())
+            .unwrap_or_else(|| TypeSupport {
+                supported: false,
+                diagnostic: Some(format!(
+                    "unsupported PostgreSQL type: {type_name}; see pg-koldstore type matrix"
+                )),
+            })
+    }
+}
+
+/// Normalizes common PostgreSQL type aliases to canonical matrix names.
+#[must_use]
+pub fn normalize_type_name(type_name: &str) -> &str {
+    let trimmed = type_name.trim();
+    if trimmed.eq_ignore_ascii_case("bigint") {
+        "int8"
+    } else if trimmed.eq_ignore_ascii_case("integer") || trimmed.eq_ignore_ascii_case("int") {
+        "int4"
+    } else if trimmed.eq_ignore_ascii_case("smallint") {
+        "int2"
+    } else if trimmed.eq_ignore_ascii_case("boolean") {
+        "bool"
+    } else if trimmed.eq_ignore_ascii_case("character varying") {
+        "varchar"
+    } else if trimmed.eq_ignore_ascii_case("double precision") {
+        "float8"
+    } else if trimmed.eq_ignore_ascii_case("real") {
+        "float4"
+    } else if trimmed.eq_ignore_ascii_case("timestamp with time zone") {
+        "timestamptz"
+    } else {
+        trimmed
+    }
+}

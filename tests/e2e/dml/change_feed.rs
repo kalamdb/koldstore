@@ -2,69 +2,54 @@
 mod common;
 
 use anyhow::Result;
-use koldstore_core::{CommitSeq, LogicalPk, PkColumn, RowOperation, SeqId};
-use pg_koldstore::sql::events;
+use chrono::{TimeZone, Utc};
+use koldstore_common::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
+use koldstore_merge::events;
 use serde_json::json;
 
+fn change(id: i64, seq: i64, operation: MirrorOperation, source: ChangeSource) -> MirrorChange {
+    MirrorChange {
+        table_oid: 42,
+        scope_key: None,
+        pk_json: json!({"id": id}),
+        operation,
+        seq: SeqId::new(seq).unwrap(),
+        changed_at: Utc.timestamp_opt(seq, 0).unwrap(),
+        deleted: operation.is_delete(),
+        row_image_json: (!operation.is_delete()).then(|| json!({"id": id, "seq": seq})),
+        source,
+    }
+}
+
 #[test]
-fn change_feed_orders_flush_cold_delete_hydrate_and_demigration_boundary_events() {
+fn change_feed_merges_hot_mirror_and_cold_metadata_as_latest_state() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    let pk =
-        LogicalPk::from_json_object(&json!({"id": 7}), &[PkColumn::new("id").unwrap()]).unwrap();
-    let event = |op, seq, commit_seq, payload| {
-        events::append_row_event(
-            42,
-            None,
-            &pk,
-            op,
-            SeqId::new(seq).unwrap(),
-            CommitSeq::new(commit_seq).unwrap(),
-            payload,
-        )
-    };
-    let out_of_order_events = vec![
-        event(
-            RowOperation::Revive,
-            4,
-            40,
-            Some(json!({"boundary": "demigrate"})),
-        ),
-        event(RowOperation::Delete, 3, 30, None),
-        event(
-            RowOperation::Update,
-            2,
-            20,
-            Some(json!({"source": "hydrate"})),
-        ),
-        event(
-            RowOperation::Insert,
-            1,
-            10,
-            Some(json!({"source": "flush"})),
-        ),
+    let changes = vec![
+        change(1, 10, MirrorOperation::Insert, ChangeSource::ColdRecord),
+        change(1, 20, MirrorOperation::Update, ChangeSource::ColdRecord),
+        change(1, 30, MirrorOperation::Delete, ChangeSource::HotMirror),
+        change(2, 25, MirrorOperation::Insert, ChangeSource::HotMirror),
     ];
 
-    let changes = events::changes_since(&out_of_order_events, 42, None, 0, Some(10), None).unwrap();
+    let result = events::changes_since(&changes, 42, None, 0, Some(10), None).unwrap();
 
     assert_eq!(
-        changes
+        result
             .iter()
-            .map(|event| (event.op, event.commit_seq.get()))
+            .map(|change| (change.pk_json.clone(), change.seq.get(), change.operation))
             .collect::<Vec<_>>(),
         vec![
-            (RowOperation::Insert, 10),
-            (RowOperation::Update, 20),
-            (RowOperation::Delete, 30),
-            (RowOperation::Revive, 40),
+            (json!({"id": 2}), 25, MirrorOperation::Insert),
+            (json!({"id": 1}), 30, MirrorOperation::Delete),
         ]
     );
-    assert!(changes[2].deleted);
+    assert!(result[1].deleted);
 }
 
 #[tokio::test]
-async fn change_feed_events_are_persisted_and_ordered_on_pgrx() -> Result<()> {
+async fn change_feed_reads_table_specific_mirror_without_row_events_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "change_feed").await?;
         let table = db
@@ -72,53 +57,72 @@ async fn change_feed_events_are_persisted_and_ordered_on_pgrx() -> Result<()> {
             .await?;
         db.migrate_shared(&table.relation, "id").await?;
 
-        db.client
-            .execute(
-                r#"
-                INSERT INTO koldstore.row_events
-                  (table_oid, pk_hash, pk_json, op, seq, commit_seq, deleted, row_image_json)
-                VALUES
-                  ($1::text::regclass::oid, decode('03', 'hex'), '{"id":3}'::jsonb, 'revive', 4, 40, false, '{"boundary":"demigrate"}'::jsonb),
-                  ($1::text::regclass::oid, decode('02', 'hex'), '{"id":2}'::jsonb, 'delete', 3, 30, true, NULL),
-                  ($1::text::regclass::oid, decode('01', 'hex'), '{"id":1}'::jsonb, 'update', 2, 20, false, '{"source":"hydrate"}'::jsonb)
-                "#,
-                &[&table.relation],
-            )
-            .await?;
-
+        let mirror = format!("koldstore.{}__cl", table.table_name);
         let rows = db
             .client
             .query(
-                r#"
-                SELECT op, commit_seq, deleted
-                FROM koldstore.row_events
-                WHERE table_oid = $1::text::regclass::oid
-                  AND commit_seq > 10
-                ORDER BY commit_seq
-                "#,
-                &[&table.relation],
+                &format!(
+                    r#"
+                    SELECT op, seq, (op = 3) AS deleted
+                    FROM {mirror}
+                    WHERE seq > $1
+                    ORDER BY seq
+                    "#
+                ),
+                &[&0_i64],
             )
             .await?;
+
         let changes = rows
             .into_iter()
             .map(|row| {
                 (
-                    row.get::<_, String>(0),
+                    row.get::<_, i16>(0),
                     row.get::<_, i64>(1),
                     row.get::<_, bool>(2),
                 )
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            changes,
-            vec![
-                ("update".to_string(), 20, false),
-                ("delete".to_string(), 30, true),
-                ("revive".to_string(), 40, false),
-            ]
-        );
+        assert!(!changes.is_empty());
+        let row_events_exists = db
+            .client
+            .query_one(
+                "SELECT to_regclass('koldstore.row_events') IS NOT NULL",
+                &[],
+            )
+            .await?
+            .get::<_, bool>(0);
+        assert!(!row_events_exists);
     }
 
     Ok(())
+}
+
+#[test]
+fn user_scope_change_feed_filters_scope_before_latest_state_resolution() {
+    let scoped = vec![
+        MirrorChange {
+            scope_key: Some(ScopeKey::new("user-a").unwrap()),
+            ..change(1, 10, MirrorOperation::Insert, ChangeSource::ColdRecord)
+        },
+        MirrorChange {
+            scope_key: Some(ScopeKey::new("user-b").unwrap()),
+            ..change(1, 20, MirrorOperation::Update, ChangeSource::HotMirror)
+        },
+    ];
+
+    let result = events::changes_since(
+        &scoped,
+        42,
+        Some(&ScopeKey::new("user-a").unwrap()),
+        0,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].scope_key.as_ref().unwrap().as_str(), "user-a");
+    assert_eq!(result[0].seq.get(), 10);
 }

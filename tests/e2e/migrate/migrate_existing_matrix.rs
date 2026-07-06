@@ -146,7 +146,32 @@ async fn run_existing_table_scenario(
         )
         .await?
         .get::<_, i64>(0);
-    assert_eq!(system_columns, 3);
+    assert_eq!(system_columns, 0);
+
+    let mirror_relation = format!("koldstore.{}_pg{}__cl", scenario.table_name, pg_version);
+    let mirror_primary_key = client
+        .query_one(
+            r#"
+            SELECT array_agg(a.attname ORDER BY key_position.ordinality)
+            FROM pg_index i
+            JOIN unnest(i.indkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
+            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = key_position.attnum
+            WHERE i.indrelid = $1::text::regclass AND i.indisprimary
+            "#,
+            &[&mirror_relation],
+        )
+        .await?
+        .get::<_, Vec<String>>(0);
+    assert_eq!(mirror_primary_key, vec![scenario.primary_key]);
+
+    let mirror_state = client
+        .query_one(
+            &format!("SELECT count(*), count(*) FILTER (WHERE op = 1) FROM {mirror_relation}"),
+            &[],
+        )
+        .await?;
+    assert_eq!(mirror_state.get::<_, i64>(0), 2);
+    assert_eq!(mirror_state.get::<_, i64>(1), 2);
 
     Ok(())
 }

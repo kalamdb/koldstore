@@ -13,14 +13,16 @@ serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.7", features = ["html_reports"] }
 koldstore-catalog.workspace = true
-koldstore-core.workspace = true
+koldstore-common.workspace = true
 koldstore-manifest.workspace = true
+koldstore-flush.workspace = true
+koldstore-migrate.workspace = true
 koldstore-merge.workspace = true
+koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-storage.workspace = true
 pg_koldstore = { path = "../crates/pg_koldstore", default-features = false }

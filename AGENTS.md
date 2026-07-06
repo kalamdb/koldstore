@@ -15,3 +15,18 @@
 - Split large files by feature or responsibility when they become hard to scan.
 - Split crates only when there is a clear ownership, dependency, testing, or reuse boundary.
 - Favor small, composable modules over large catch-all modules.
+
+## Crate Architecture
+
+- Follow the layered crate layout in `docs/architecture/crate-architecture.md`.
+- `koldstore-common` is the only crate with no internal `koldstore-*` dependencies.
+- `pgrx` belongs only in `pg_koldstore`. Library crates must stay PostgreSQL-free.
+- New domain logic goes in the lowest crate that does not need SPI, hooks, or OIDs.
+- When moving code, remove dead helpers and duplicate types; do not carry unused code.
+
+## Documentation Standard
+
+- Every crate `lib.rs` and module file starts with a `//!` header describing ownership and purpose.
+- Logic-bearing public functions need `///` docs with purpose, invariants, and `# Errors` where applicable.
+- Extension `#[pg_extern]` wrappers document the SQL contract and which library crate they delegate to.
+- Comments explain intent, not restate the code.

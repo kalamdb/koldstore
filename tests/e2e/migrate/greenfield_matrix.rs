@@ -159,15 +159,11 @@ async fn run_greenfield_scenario(
             .await?;
     }
 
-    let system_column_names: &[&str] = &["_seq", "_commit_seq", "_deleted"];
-    let system_columns = client
-        .query_one(
-            "SELECT count(*) FROM pg_attribute WHERE attrelid = $1::text::regclass AND attname = ANY($2)",
-            &[&relation, &system_column_names],
-        )
-        .await?
-        .get::<_, i64>(0);
-    assert_eq!(system_columns, 3);
+    let source_table_name = relation.rsplit('.').next().unwrap_or(&relation);
+    let mirror_relation = format!("koldstore.{source_table_name}__cl");
+    common::assert_system_columns_absent(client, &relation).await?;
+    common::assert_change_log_mirror_exists(client, &mirror_relation).await?;
+    common::assert_primary_key_columns_match(client, &relation, &mirror_relation).await?;
 
     common::assertions::assert_no_duplicate_hot_pk(client, &relation, "id").await?;
     Ok(())

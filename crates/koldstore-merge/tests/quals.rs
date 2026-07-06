@@ -1,4 +1,4 @@
-use koldstore_core::{ColumnClass, Predicate, PredicateClass, PredicateValue};
+use koldstore_common::{ColumnClass, Predicate, PredicateClass, PredicateValue};
 use koldstore_merge::{build_pruning_plan, classify_predicates};
 use serde_json::json;
 
@@ -49,7 +49,7 @@ fn mutable_app_column_filters_remain_residual_after_winner_resolution() {
             value: PredicateValue::Eq(json!("archived")),
         },
         Predicate {
-            column: "_commit_seq".to_string(),
+            column: "commit_seq".to_string(),
             class: ColumnClass::CommitSeq,
             value: PredicateValue::Range { min: 10, max: 20 },
         },
@@ -58,7 +58,7 @@ fn mutable_app_column_filters_remain_residual_after_winner_resolution() {
     let classified = classify_predicates(&predicates).unwrap();
 
     assert_eq!(classified.safe.len(), 1);
-    assert_eq!(classified.safe[0].column, "_commit_seq");
+    assert_eq!(classified.safe[0].column, "commit_seq");
     assert_eq!(classified.residual.len(), 1);
     assert_eq!(classified.residual[0].column, "status");
     assert!(classified.requires_post_merge_filtering());
@@ -67,7 +67,7 @@ fn mutable_app_column_filters_remain_residual_after_winner_resolution() {
 #[test]
 fn malformed_ranges_are_rejected_before_pruning() {
     let predicates = vec![Predicate {
-        column: "_seq".to_string(),
+        column: "seq".to_string(),
         class: ColumnClass::Seq,
         value: PredicateValue::Range { min: 20, max: 10 },
     }];
@@ -89,12 +89,12 @@ fn pruning_plan_extracts_pk_scope_sequence_commit_and_immutable_columns() {
             value: PredicateValue::Eq(json!("tenant-a")),
         },
         Predicate {
-            column: "_seq".to_string(),
+            column: "seq".to_string(),
             class: ColumnClass::Seq,
             value: PredicateValue::Range { min: 10, max: 20 },
         },
         Predicate {
-            column: "_commit_seq".to_string(),
+            column: "commit_seq".to_string(),
             class: ColumnClass::CommitSeq,
             value: PredicateValue::Range { min: 11, max: 21 },
         },
@@ -109,8 +109,8 @@ fn pruning_plan_extracts_pk_scope_sequence_commit_and_immutable_columns() {
 
     assert_eq!(plan.pk_columns, vec!["id"]);
     assert_eq!(plan.scope_columns, vec!["tenant_id"]);
-    assert_eq!(plan.seq_range.unwrap().column, "_seq");
-    assert_eq!(plan.commit_seq_range.unwrap().column, "_commit_seq");
+    assert_eq!(plan.seq_range.unwrap().column, "seq");
+    assert_eq!(plan.commit_seq_range.unwrap().column, "commit_seq");
     assert_eq!(plan.immutable_stat_columns, vec!["created_at"]);
     assert!(plan.residual_columns.is_empty());
 }

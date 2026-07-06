@@ -1,5 +1,5 @@
-use pg_koldstore::migrate::scope::plan_user_scope_policy;
-use pg_koldstore::migrate::QualifiedTableName;
+use koldstore_migrate::scope::plan_user_scope_policy;
+use koldstore_migrate::QualifiedTableName;
 use pg_koldstore::spi::SpiAccess;
 
 #[test]

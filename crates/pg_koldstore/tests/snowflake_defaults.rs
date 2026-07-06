@@ -1,11 +1,8 @@
-use pg_koldstore::sql::session::{
-    primary_key_default_clause, snowflake_default_expression, system_seq_default_clause,
-};
+use pg_koldstore::sql::session::{primary_key_default_clause, snowflake_default_expression};
 
 #[test]
 fn snowflake_default_expression_matches_public_sql_function() {
     assert_eq!(snowflake_default_expression(), "SNOWFLAKE_ID()");
-    assert_eq!(system_seq_default_clause(), "DEFAULT SNOWFLAKE_ID()");
 }
 
 #[test]

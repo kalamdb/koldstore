@@ -2,13 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
-use koldstore_core::{Diagnostic, KoldstoreError, Result, TableKind};
+use koldstore_common::{Diagnostic, KoldstoreError, PrimaryKeyShape, Result, TableKind};
+use koldstore_schema::MirrorInitializationState;
 
 /// Flush policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FlushPolicy {
-    pub rows: Option<u64>,
-    pub interval_seconds: Option<u64>,
+    pub row_limit: Option<u64>,
+    pub duration_seconds: Option<u64>,
 }
 
 /// FK migration policy classification.
@@ -48,7 +49,11 @@ pub struct ManagedTableMeta {
     pub table_oid: u32,
     pub table_kind: TableKind,
     pub scope_column: Option<String>,
+    pub mirror_relation: Option<String>,
+    pub primary_key_shape: Option<PrimaryKeyShape>,
+    pub initialization_state: MirrorInitializationState,
     pub flush_policy: Option<FlushPolicy>,
+    pub schema_version: u32,
 }
 
 impl ManagedTableMeta {
@@ -70,6 +75,30 @@ impl ManagedTableMeta {
                 diagnostic: Diagnostic::new(
                     "missing_scope_column",
                     "user-scoped managed tables require a scope column",
+                ),
+            });
+        }
+
+        if self
+            .mirror_relation
+            .as_deref()
+            .is_some_and(|relation| relation.trim().is_empty())
+        {
+            return Err(KoldstoreError::CatalogValidation {
+                diagnostic: Diagnostic::new(
+                    "blank_mirror_relation",
+                    "managed mirror relation cannot be blank",
+                ),
+            });
+        }
+
+        if self.initialization_state == MirrorInitializationState::Complete
+            && self.primary_key_shape.is_none()
+        {
+            return Err(KoldstoreError::CatalogValidation {
+                diagnostic: Diagnostic::new(
+                    "missing_primary_key_shape",
+                    "completed clean-schema metadata requires primary-key shape",
                 ),
             });
         }

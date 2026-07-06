@@ -1,8 +1,8 @@
 //! Planner hook integration for KoldstoreMergeScan.
 
-use koldstore_core::{ScopeKey, TableKind};
+use koldstore_common::{ScopeKey, TableKind};
 
-use crate::security::scope::{self, ScopeError};
+use koldstore_common::scope::{self, ScopeError};
 
 /// Name shown in `EXPLAIN`.
 pub const MERGE_SCAN_NAME: &str = "KoldstoreMergeScan";

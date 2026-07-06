@@ -9,12 +9,12 @@ fn sql_exposes_operational_functions() {
         "last_error",
     ] {
         assert!(
-            pg_koldstore::sql::ops::TABLE_STATUS_FIELDS.contains(&status_field),
+            koldstore_flush::ops::TABLE_STATUS_FIELDS.contains(&status_field),
             "missing {status_field}"
         );
     }
 
-    let validation = pg_koldstore::sql::ops::ValidationSummary {
+    let validation = koldstore_flush::ops::ValidationSummary {
         manifests_checked: 1,
         segments_checked: 2,
         catalog_consistent: true,
@@ -29,7 +29,7 @@ fn sql_exposes_operational_functions() {
         "koldstore.recover_segments",
     ] {
         assert!(
-            pg_koldstore::sql::ops::FLUSH_SQL_FUNCTIONS.contains(&function),
+            koldstore_flush::ops::FLUSH_SQL_FUNCTIONS.contains(&function),
             "missing SQL function boundary {function}"
         );
     }
@@ -37,17 +37,17 @@ fn sql_exposes_operational_functions() {
 
 #[test]
 fn operational_functions_build_parameterized_catalog_plans() {
-    use koldstore_core::{ScopeKey, TableName};
+    use koldstore_common::{ScopeKey, TableName};
     use pg_koldstore::spi::SpiAccess;
 
     let table = TableName::parse("app.items").unwrap();
-    let status = pg_koldstore::sql::ops::table_status_plan(table.clone(), None).unwrap();
+    let status = koldstore_flush::ops::table_status_plan(table.clone(), None).unwrap();
     assert_eq!(status.table_name.as_str(), "app.items");
     assert!(status.statement.sql.contains("koldstore.manifest"));
     assert!(status.statement.sql.contains("j.scope_key = $2"));
     assert_eq!(status.statement.access, SpiAccess::ReadOnly);
 
-    let backup = pg_koldstore::sql::ops::backup_manifest_plan(
+    let backup = koldstore_flush::ops::backup_manifest_plan(
         Some(table.clone()),
         Some(ScopeKey::new("tenant-a").unwrap()),
     )
@@ -55,8 +55,7 @@ fn operational_functions_build_parameterized_catalog_plans() {
     assert!(backup.statement.sql.contains("SELECT manifest_path"));
     assert_eq!(backup.scope_key.unwrap().as_str(), "tenant-a");
 
-    let validation =
-        pg_koldstore::sql::ops::validate_cold_storage_plan(Some(table.clone())).unwrap();
+    let validation = koldstore_flush::ops::validate_cold_storage_plan(Some(table.clone())).unwrap();
     assert!(validation.statement.sql.contains("koldstore.cold_segments"));
     assert!(validation
         .statement
@@ -68,18 +67,18 @@ fn operational_functions_build_parameterized_catalog_plans() {
         .sql
         .contains("h.segment_id = cs.segment_id"));
 
-    let recovery = pg_koldstore::sql::ops::recover_segments_plan(Some(table), false).unwrap();
+    let recovery = koldstore_flush::ops::recover_segments_plan(Some(table), false).unwrap();
     assert!(!recovery.request.dry_run);
     assert!(recovery.statement.sql.contains("koldstore.jobs"));
 }
 
 #[test]
 fn flush_job_claim_plan_uses_skip_locked_leases_and_seq_watermark() {
-    use pg_koldstore::flush::job::FlushLeaseSeconds;
+    use koldstore_flush::job::FlushLeaseSeconds;
     use pg_koldstore::spi::SpiAccess;
 
     let claim =
-        pg_koldstore::sql::ops::claim_flush_jobs_plan(32, FlushLeaseSeconds::new(30).unwrap())
+        koldstore_flush::ops::claim_flush_jobs_plan(32, FlushLeaseSeconds::new(30).unwrap())
             .unwrap();
 
     assert_eq!(claim.limit, 32);
@@ -96,14 +95,14 @@ fn flush_job_claim_plan_uses_skip_locked_leases_and_seq_watermark() {
 
 #[test]
 fn flush_job_progress_and_finish_plans_are_guarded_by_live_lease() {
-    use koldstore_core::{CommitSeq, SeqId};
-    use pg_koldstore::flush::job::{FlushJobPhase, JobLeaseEpoch};
+    use koldstore_common::{CommitSeq, SeqId};
+    use koldstore_flush::job::{FlushJobPhase, JobLeaseEpoch};
     use pg_koldstore::spi::SpiAccess;
     use uuid::Uuid;
 
     let job_id = Uuid::new_v4();
     let owner = Uuid::new_v4();
-    let progress = pg_koldstore::sql::ops::flush_job_progress_plan(
+    let progress = koldstore_flush::ops::flush_job_progress_plan(
         job_id,
         owner,
         JobLeaseEpoch::new(3).unwrap(),
@@ -114,7 +113,7 @@ fn flush_job_progress_and_finish_plans_are_guarded_by_live_lease() {
         500,
     )
     .unwrap();
-    let finish = pg_koldstore::sql::ops::finish_flush_job_plan(
+    let finish = koldstore_flush::ops::finish_flush_job_plan(
         job_id,
         owner,
         JobLeaseEpoch::new(3).unwrap(),
@@ -150,12 +149,12 @@ fn flush_job_progress_and_finish_plans_are_guarded_by_live_lease() {
 
 #[test]
 fn sql_exposes_export_import_boundary() {
-    use koldstore_core::TableName;
+    use koldstore_common::TableName;
 
-    let export = pg_koldstore::sql::ops::plan_koldstore_exec("EXPORT TABLE app.items").unwrap();
+    let export = koldstore_flush::ops::plan_koldstore_exec("EXPORT TABLE app.items").unwrap();
     assert_eq!(
         export.command,
-        pg_koldstore::sql::ops::OpsCommand::ExportTable {
+        koldstore_flush::ops::OpsCommand::ExportTable {
             table_name: TableName::parse("app.items").unwrap()
         }
     );
@@ -165,37 +164,37 @@ fn sql_exposes_export_import_boundary() {
     assert!(export.archive_manifest_path.ends_with("manifest.json"));
 
     assert_eq!(
-        pg_koldstore::sql::ops::classify_command("IMPORT TABLE app.items"),
-        Some(pg_koldstore::sql::ops::OpsCommand::ImportTable {
+        koldstore_flush::ops::classify_command("IMPORT TABLE app.items"),
+        Some(koldstore_flush::ops::OpsCommand::ImportTable {
             table_name: TableName::parse("app.items").unwrap()
         })
     );
     assert_eq!(
-        pg_koldstore::sql::ops::plan_koldstore_exec("IMPORT TABLE app.items")
+        koldstore_flush::ops::plan_koldstore_exec("IMPORT TABLE app.items")
             .unwrap_err()
             .to_string(),
         "IMPORT TABLE is not supported in this MVP"
     );
     assert_eq!(
-        pg_koldstore::sql::ops::classify_command("DROP TABLE app.items"),
+        koldstore_flush::ops::classify_command("DROP TABLE app.items"),
         None
     );
 }
 
 #[test]
 fn flush_sql_requests_capture_policy_table_scope_and_pending_limits() {
-    use koldstore_core::{ScopeKey, SeqId, TableName};
+    use koldstore_common::{ScopeKey, SeqId, TableName};
 
-    let policy = pg_koldstore::sql::ops::set_flush_policy_request(
+    let policy = koldstore_flush::ops::set_flush_policy_request(
         TableName::parse("app.items").unwrap(),
         Some("rows:1000,interval:60".to_string()),
     );
-    let table_flush = pg_koldstore::sql::ops::flush_table_request(
+    let table_flush = koldstore_flush::ops::flush_table_request(
         TableName::parse("app.items").unwrap(),
         Some(ScopeKey::new("tenant-a").unwrap()),
         true,
     );
-    let pending_flush = pg_koldstore::sql::ops::flush_pending_request(25);
+    let pending_flush = koldstore_flush::ops::flush_pending_request(25);
 
     assert_eq!(policy.table_name.as_str(), "app.items");
     assert_eq!(
@@ -206,11 +205,9 @@ fn flush_sql_requests_capture_policy_table_scope_and_pending_limits() {
     assert!(table_flush.force);
     assert_eq!(pending_flush.limit, 25);
 
-    let enqueue = pg_koldstore::sql::ops::enqueue_flush_job_plan(
-        table_flush,
-        Some(SeqId::new(1_000).unwrap()),
-    )
-    .unwrap();
+    let enqueue =
+        koldstore_flush::ops::enqueue_flush_job_plan(table_flush, Some(SeqId::new(1_000).unwrap()))
+            .unwrap();
     assert_eq!(enqueue.seq_upper_bound.unwrap().get(), 1_000);
     assert!(enqueue.statement.sql.contains("flush_seq_upper_bound"));
     assert!(enqueue.statement.sql.contains("ON CONFLICT"));

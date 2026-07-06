@@ -1,8 +1,8 @@
-//! SQL function modules.
+//! PostgreSQL SQL entrypoints.
+//!
+//! Library crates own SQL planning; these modules execute plans through SPI.
 
-pub mod ddl;
-pub mod dml;
-pub mod events;
-pub mod ops;
+pub mod flush_pg;
+pub mod migrate_pg;
 pub mod session;
-pub mod snowflake;
+pub mod storage_pg;

@@ -1,0 +1,15 @@
+[package]
+name = "koldstore-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared job lease, phase, and batch primitives for pg-koldstore workflows"
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -3,27 +3,93 @@
 use anyhow::Result;
 use tokio_postgres::Client;
 
-/// Asserts that pg-koldstore system columns are present on a relation.
+/// Asserts that pg-koldstore system columns are absent from a relation.
 ///
 /// # Errors
 ///
-/// Returns an error when the catalog query fails or any column is missing.
-pub async fn assert_system_columns_present(client: &Client, relation: &str) -> Result<()> {
+/// Returns an error when the catalog query fails or any internal column exists.
+pub async fn assert_system_columns_absent(client: &Client, relation: &str) -> Result<()> {
     let row = client
         .query_one(
             r#"
-            SELECT count(*)
+            SELECT array_agg(attname ORDER BY attnum)
             FROM pg_attribute
             WHERE attrelid = $1::text::regclass
               AND attname = ANY($2)
               AND NOT attisdropped
             "#,
-            &[&relation, &&["_seq", "_commit_seq", "_deleted"][..]],
+            &[
+                &relation,
+                &&["_seq", "_commit_seq", "_deleted", "_user_id"][..],
+            ],
+        )
+        .await?;
+    let found = row.get::<_, Option<Vec<String>>>(0).unwrap_or_default();
+    anyhow::ensure!(
+        found.is_empty(),
+        "expected no pg-koldstore system columns on {relation}, found {found:?}"
+    );
+    Ok(())
+}
+
+/// Asserts that the table-specific change-log mirror relation exists.
+///
+/// # Errors
+///
+/// Returns an error when the catalog query fails or the mirror is missing.
+pub async fn assert_change_log_mirror_exists(client: &Client, mirror_relation: &str) -> Result<()> {
+    let row = client
+        .query_one(
+            "SELECT to_regclass($1)::oid IS NOT NULL",
+            &[&mirror_relation],
         )
         .await?;
     anyhow::ensure!(
-        row.get::<_, i64>(0) == 3,
-        "expected _seq, _commit_seq, and _deleted on {relation}"
+        row.get::<_, bool>(0),
+        "expected change-log mirror {mirror_relation} to exist"
+    );
+    Ok(())
+}
+
+/// Returns ordered primary-key column names for a relation.
+///
+/// # Errors
+///
+/// Returns an error when the catalog query fails.
+pub async fn primary_key_columns(client: &Client, relation: &str) -> Result<Vec<String>> {
+    let rows = client
+        .query(
+            r#"
+            SELECT a.attname
+            FROM pg_index i
+            JOIN pg_attribute a
+              ON a.attrelid = i.indrelid
+             AND a.attnum = ANY(i.indkey)
+            WHERE i.indrelid = $1::text::regclass
+              AND i.indisprimary
+            ORDER BY array_position(i.indkey, a.attnum)
+            "#,
+            &[&relation],
+        )
+        .await?;
+    Ok(rows.into_iter().map(|row| row.get(0)).collect())
+}
+
+/// Asserts that a mirror relation has the same ordered primary-key columns.
+///
+/// # Errors
+///
+/// Returns an error when catalog queries fail or the primary-key columns differ.
+pub async fn assert_primary_key_columns_match(
+    client: &Client,
+    source_relation: &str,
+    mirror_relation: &str,
+) -> Result<()> {
+    let source = primary_key_columns(client, source_relation).await?;
+    let mirror = primary_key_columns(client, mirror_relation).await?;
+    anyhow::ensure!(
+        source == mirror,
+        "expected mirror {mirror_relation} primary key {mirror:?} to match source {source_relation} primary key {source:?}"
     );
     Ok(())
 }

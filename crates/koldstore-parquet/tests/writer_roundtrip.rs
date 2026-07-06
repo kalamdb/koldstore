@@ -1,6 +1,6 @@
 use koldstore_parquet::{
-    ColumnStats, FooterSummary, ParquetSegmentWriter, RowGroupStats, SegmentFooterMetadata,
-    SegmentMetadataInput, WriterOptions,
+    plan_clean_cold_record, ColumnStats, FooterSummary, ParquetSegmentWriter, RowGroupStats,
+    SegmentFooterMetadata, SegmentMetadataInput, WriterOptions,
 };
 use std::sync::Arc;
 
@@ -19,6 +19,41 @@ fn writer_plan_records_kalamdb_compatible_layout_metadata() {
     assert_eq!(plan.min_commit_seq, 11);
     assert_eq!(plan.max_commit_seq, 20);
     assert_eq!(plan.compression, "snappy");
+}
+
+#[test]
+fn clean_cold_record_plan_writes_live_rows_and_pk_only_delete_markers() {
+    let live = plan_clean_cold_record(
+        [("id", json!(1)), ("body", json!("hello"))],
+        ["id"],
+        10,
+        2,
+        "2026-07-06T00:00:00Z",
+        1,
+    )
+    .unwrap();
+    assert!(!live.deleted);
+    assert_eq!(live.values["id"], json!(1));
+    assert_eq!(live.values["body"], json!("hello"));
+    assert_eq!(live.values["seq"], json!(10));
+    assert_eq!(live.values["op"], json!(2));
+    assert_eq!(live.values["schema_version"], json!(1));
+
+    let tombstone = plan_clean_cold_record(
+        [("id", json!(1)), ("body", json!("stale-payload"))],
+        ["id"],
+        11,
+        3,
+        "2026-07-06T00:00:01Z",
+        1,
+    )
+    .unwrap();
+    assert!(tombstone.deleted);
+    assert_eq!(tombstone.values["id"], json!(1));
+    assert!(!tombstone.values.contains_key("body"));
+    assert_eq!(tombstone.values["seq"], json!(11));
+    assert_eq!(tombstone.values["op"], json!(3));
+    assert_eq!(tombstone.values["deleted"], json!(true));
 }
 
 #[test]
@@ -46,14 +81,14 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
                     },
                 ),
                 (
-                    "_seq".to_string(),
+                    "seq".to_string(),
                     ColumnStats {
                         min: json!(1),
                         max: json!(10),
                     },
                 ),
                 (
-                    "_commit_seq".to_string(),
+                    "commit_seq".to_string(),
                     ColumnStats {
                         min: json!(11),
                         max: json!(20),
@@ -73,12 +108,12 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
     assert!(plan.writes_native_bloom_filters);
     assert_eq!(
         plan.column_stats
-            .get("_seq")
+            .get("seq")
             .map(|stats| (&stats.min, &stats.max)),
         Some((&json!(1), &json!(10)))
     );
     assert!(plan.column_stats.contains_key("id"));
-    assert!(plan.column_stats.contains_key("_commit_seq"));
+    assert!(plan.column_stats.contains_key("commit_seq"));
 }
 
 #[test]

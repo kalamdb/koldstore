@@ -1,8 +1,8 @@
-use pg_koldstore::spi::SpiAccess;
-use pg_koldstore::sql::ddl::{
+use koldstore_storage::registration::{
     alter_storage_credentials_plan, alter_storage_location_plan, StorageRegistration,
     DEFAULT_SHARED_PATH_TEMPLATE, DEFAULT_USER_PATH_TEMPLATE,
 };
+use pg_koldstore::spi::SpiAccess;
 use uuid::Uuid;
 
 fn example_registration() -> StorageRegistration {

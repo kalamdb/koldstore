@@ -1,54 +1,34 @@
-use pg_koldstore::migrate::columns::{
-    plan_system_column_adds, system_columns, REQUIRED_SYSTEM_COLUMNS,
+use koldstore_common::{
+    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
 };
-use pg_koldstore::migrate::QualifiedTableName;
-use pg_koldstore::spi::SpiAccess;
+use koldstore_migrate::{mirror::plan_change_log_mirror_from_columns, QualifiedTableName};
 
 #[test]
-fn shared_system_column_plan_preserves_primary_key_shape() {
-    let table = QualifiedTableName::parse("app.items").unwrap();
-    let plan = plan_system_column_adds(&table, false).unwrap();
-
-    assert_eq!(plan.columns, REQUIRED_SYSTEM_COLUMNS);
-    assert_eq!(plan.statement.operation, "add system columns");
-    assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
-    assert!(plan
-        .statement
-        .sql
-        .contains("ALTER TABLE ONLY \"app\".\"items\""));
-    assert!(plan
-        .statement
-        .sql
-        .contains("ADD COLUMN IF NOT EXISTS \"_seq\" bigint NOT NULL"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("ADD COLUMN IF NOT EXISTS \"_commit_seq\" bigint NOT NULL"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("ADD COLUMN IF NOT EXISTS \"_deleted\" boolean NOT NULL"));
-    assert!(!plan.statement.sql.contains("\"_user_id\""));
-    assert!(!plan.statement.sql.contains("PRIMARY KEY"));
-    assert!(!plan.statement.sql.contains("DROP CONSTRAINT"));
-}
-
-#[test]
-fn user_system_column_plan_adds_internal_scope_when_needed() {
-    let table = QualifiedTableName::parse("notes").unwrap();
-    let plan = plan_system_column_adds(&table, true).unwrap();
-
-    assert_eq!(
-        plan.columns,
-        ["_seq", "_commit_seq", "_deleted", "_user_id"]
+fn clean_schema_migration_uses_mirror_table_instead_of_system_columns() {
+    let source = QualifiedTableName::parse("app.items").unwrap();
+    let pk = PrimaryKeyColumnShape::new(
+        PkColumn::new("id").unwrap(),
+        PkOrdinal::new(1).unwrap(),
+        PgTypeOid::new(20).unwrap(),
+        PgTypeName::new("bigint").unwrap(),
+        PgTypmod::new(-1),
+        None,
+        None,
+        true,
     );
-    assert_eq!(
-        system_columns(true),
-        vec!["_seq", "_commit_seq", "_deleted", "_user_id"]
-    );
-    assert!(plan.statement.sql.contains("ALTER TABLE ONLY \"notes\""));
+
+    let plan = plan_change_log_mirror_from_columns(&source, &[pk]).unwrap();
+
     assert!(plan
-        .statement
+        .create_table
         .sql
-        .contains("ADD COLUMN IF NOT EXISTS \"_user_id\" text"));
+        .contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"items__cl\""));
+    for forbidden in [
+        "\"_seq\"",
+        "\"_commit_seq\"",
+        "\"_deleted\"",
+        "\"_user_id\"",
+    ] {
+        assert!(!plan.create_table.sql.contains(forbidden));
+    }
 }

@@ -1,8 +1,10 @@
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use koldstore_catalog::{FkPolicyDecision, FlushPolicy, ManagedTableMeta};
-use koldstore_core::{
+use koldstore_catalog::{
+    FkPolicyDecision, FlushPolicy, ManagedTableMeta, MirrorInitializationState,
+};
+use koldstore_common::{
     ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId, TableKind,
 };
 use koldstore_merge::resolve_rows;
@@ -48,10 +50,14 @@ fn bench_path_and_policy(c: &mut Criterion) {
         table_oid: 42,
         table_kind: TableKind::User,
         scope_column: Some("user_id".to_string()),
+        mirror_relation: Some("koldstore.bench_events__cl".to_string()),
+        primary_key_shape: None,
+        initialization_state: MirrorInitializationState::Capturing,
         flush_policy: Some(FlushPolicy {
-            rows: Some(10_000),
-            interval_seconds: Some(300),
+            row_limit: Some(10_000),
+            duration_seconds: Some(300),
         }),
+        schema_version: 1,
     };
     c.bench_function("policy_evaluation_for_hot_retention", |b| {
         b.iter(|| should_flush_by_policy(black_box(&meta), 12_000, 600))
@@ -169,9 +175,9 @@ fn should_flush_by_policy(
         return false;
     };
     meta.validate().is_ok()
-        && (policy.rows.is_some_and(|rows| pending_rows >= rows)
+        && (policy.row_limit.is_some_and(|rows| pending_rows >= rows)
             || policy
-                .interval_seconds
+                .duration_seconds
                 .is_some_and(|seconds| pending_seconds >= seconds))
 }
 

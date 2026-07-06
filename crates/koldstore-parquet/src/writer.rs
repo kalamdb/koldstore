@@ -13,6 +13,7 @@ use parquet::{
     file::properties::{EnabledStatistics, WriterProperties},
     schema::types::ColumnPath,
 };
+use serde_json::json;
 
 /// Writer options.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +23,73 @@ pub struct WriterOptions {
     pub statistics_columns: Vec<String>,
     pub bloom_filter_columns: Vec<String>,
     pub bloom_filter_false_positive_rate: Option<f64>,
+}
+
+/// Planned clean-schema cold record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CleanColdRecordPlan {
+    /// Values to write into the cold row.
+    pub values: BTreeMap<String, serde_json::Value>,
+    /// Whether this row is a delete marker.
+    pub deleted: bool,
+}
+
+/// Plans one clean-schema cold record from base row values and mirror metadata.
+///
+/// For delete markers (`op = 3`), only primary-key values plus KoldStore cold
+/// metadata are authoritative; non-key base values are intentionally omitted.
+///
+/// # Errors
+///
+/// Returns an error when a primary-key value is missing or an unsupported op
+/// code is supplied.
+pub fn plan_clean_cold_record<I, K, P>(
+    row_values: I,
+    pk_columns: P,
+    seq: i64,
+    op: i16,
+    changed_at: impl Into<String>,
+    schema_version: u32,
+) -> Result<CleanColdRecordPlan, String>
+where
+    I: IntoIterator<Item = (K, serde_json::Value)>,
+    K: Into<String>,
+    P: IntoIterator,
+    P::Item: AsRef<str>,
+{
+    if !matches!(op, 1..=3) {
+        return Err(format!("unsupported mirror operation code {op}"));
+    }
+
+    let input_values = row_values
+        .into_iter()
+        .map(|(column, value)| (column.into(), value))
+        .collect::<BTreeMap<_, _>>();
+    let pk_columns = pk_columns
+        .into_iter()
+        .map(|column| column.as_ref().to_string())
+        .collect::<Vec<_>>();
+    let deleted = op == 3;
+    let mut values = BTreeMap::new();
+
+    if deleted {
+        for column in &pk_columns {
+            let value = input_values
+                .get(column)
+                .ok_or_else(|| format!("delete marker missing primary-key column {column}"))?;
+            values.insert(column.clone(), value.clone());
+        }
+    } else {
+        values.extend(input_values);
+    }
+
+    values.insert("seq".to_string(), json!(seq));
+    values.insert("op".to_string(), json!(op));
+    values.insert("changed_at".to_string(), json!(changed_at.into()));
+    values.insert("deleted".to_string(), json!(deleted));
+    values.insert("schema_version".to_string(), json!(schema_version));
+
+    Ok(CleanColdRecordPlan { values, deleted })
 }
 
 impl Default for WriterOptions {

@@ -1,5 +1,6 @@
+use koldstore_setup::{missing_catalog_indexes, missing_catalog_tables, BootstrapPlan};
 use pg_koldstore::{
-    flush, guc, hooks, koldstore_version, memory, migrate, observability, security, spi, sql,
+    catalog, guc, hooks, koldstore_version, memory, observability, privileges, spi, sql,
 };
 
 #[test]
@@ -28,23 +29,23 @@ fn guc_definitions_include_public_and_internal_settings() {
 
 #[test]
 fn application_roles_cannot_set_internal_gucs() {
-    assert!(security::privileges::can_set_guc(
-        security::privileges::RoleClass::Application,
+    assert!(privileges::can_set_guc(
+        privileges::RoleClass::Application,
         "koldstore.user_id",
     ));
-    assert!(!security::privileges::can_set_guc(
-        security::privileges::RoleClass::Application,
+    assert!(!privileges::can_set_guc(
+        privileges::RoleClass::Application,
         "koldstore.internal_system_write",
     ));
-    assert!(security::privileges::can_set_guc(
-        security::privileges::RoleClass::Superuser,
+    assert!(privileges::can_set_guc(
+        privileges::RoleClass::Superuser,
         "koldstore.internal_system_write",
     ));
 }
 
 #[test]
 fn commit_sequence_allocator_is_monotonic_for_test_shell() {
-    use koldstore_core::ScopeKey;
+    use koldstore_common::ScopeKey;
 
     let first = hooks::xact::allocate_commit_seq_for_tests().unwrap();
     let second = hooks::xact::allocate_commit_seq_for_tests().unwrap();
@@ -90,18 +91,11 @@ fn hook_shell_exposes_required_hook_names() {
 }
 
 #[test]
-fn managed_column_and_migration_helpers_match_contract() {
-    assert!(hooks::executor::is_system_column("_seq"));
-    assert!(hooks::executor::is_system_column("_commit_seq"));
-    assert!(hooks::executor::is_system_column("_deleted"));
-    assert!(!hooks::executor::is_system_column("title"));
-
-    assert!(migrate::constraints::primary_key_shape_supported(&["id"]));
-    assert!(!migrate::constraints::primary_key_shape_supported(&[]));
-    assert_eq!(
-        migrate::columns::REQUIRED_SYSTEM_COLUMNS,
-        ["_seq", "_commit_seq", "_deleted"]
-    );
+fn migration_helpers_match_contract() {
+    assert!(koldstore_migrate::constraints::primary_key_shape_supported(
+        &["id"]
+    ));
+    assert!(!koldstore_migrate::constraints::primary_key_shape_supported(&[]));
 }
 
 #[test]
@@ -109,24 +103,69 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
     assert_eq!(spi::KOLDSTORE_SQLSTATE, "XXKLD");
     assert_eq!(
         spi::map_spi_error("select", "permission denied").to_string(),
-        "SPI select failed: permission denied"
+        "SQL select failed: permission denied"
     );
 
     let select =
         spi::SpiStatement::read("read active schema", "SELECT * FROM koldstore.schemas").unwrap();
     assert_eq!(select.access, spi::SpiAccess::ReadOnly);
+    assert!(select.param_types.is_empty());
+    assert!(spi::require_read_only(&select).is_ok());
+    assert!(spi::require_read_write(&select).is_err());
     let insert = spi::SpiStatement::write(
-        "insert row event",
-        "INSERT INTO koldstore.row_events DEFAULT VALUES",
+        "insert change-log mirror row",
+        "INSERT INTO koldstore.items__cl DEFAULT VALUES",
     )
     .unwrap();
     assert_eq!(insert.access, spi::SpiAccess::ReadWrite);
+    assert!(spi::require_read_write(&insert).is_ok());
+    assert!(spi::require_read_only(&insert).is_err());
     assert!(spi::SpiStatement::read("blank", "  ").is_err());
+
+    let read_with_param = spi::SpiStatement::read_with_params(
+        "read one",
+        "SELECT $1::bigint",
+        [spi::SqlParamType::BigInt],
+    )
+    .unwrap();
+    let same_read = spi::SpiStatement::read_with_params(
+        "read again",
+        "SELECT $1::bigint",
+        [spi::SqlParamType::BigInt],
+    )
+    .unwrap();
+    let write_with_param = spi::SpiStatement::write_with_params(
+        "write one",
+        "SELECT $1::bigint",
+        [spi::SqlParamType::BigInt],
+    )
+    .unwrap();
+    let different_param = spi::SpiStatement::read_with_params(
+        "read text",
+        "SELECT $1::bigint",
+        [spi::SqlParamType::Text],
+    )
+    .unwrap();
+    assert_eq!(
+        spi::prepared_plan_key(&read_with_param),
+        spi::prepared_plan_key(&same_read)
+    );
+    assert_ne!(
+        spi::prepared_plan_key(&read_with_param),
+        spi::prepared_plan_key(&write_with_param)
+    );
+    assert_ne!(
+        spi::prepared_plan_key(&read_with_param),
+        spi::prepared_plan_key(&different_param)
+    );
 
     let executor = spi::RecordingSpiExecutor::default();
     let rows = spi::execute_catalog_write(&executor, insert).unwrap();
     assert_eq!(rows.rows_affected, 1);
-    assert_eq!(executor.statements()[0].operation, "insert row event");
+    assert_eq!(
+        executor.statements()[0].operation,
+        "insert change-log mirror row"
+    );
 
     let mut owner = memory::MemoryOwner::new("scan_state");
     owner.track_allocation(1024);
@@ -155,23 +194,70 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
 }
 
 #[test]
+fn catalog_helpers_build_queries_and_decode_contexts() {
+    let mirror_lookup = catalog::queries::plan_mirror_relation_by_table_oid().unwrap();
+    assert_eq!(mirror_lookup.access, spi::SpiAccess::ReadOnly);
+    assert_eq!(mirror_lookup.param_types, vec![spi::SqlParamType::Oid]);
+    assert!(mirror_lookup.sql.contains("koldstore.schemas"));
+    assert!(mirror_lookup.sql.contains("s.mirror_relation"));
+
+    let mirror_statement = koldstore_mirror::MirrorStatement::read_with_params(
+        "mirror scan",
+        "SELECT * FROM koldstore.items__cl WHERE seq > $1::bigint",
+        [koldstore_mirror::SqlParamType::BigInt],
+    );
+    let spi_statement = koldstore_mirror::mirror_to_sql(mirror_statement).unwrap();
+    assert_eq!(spi_statement.param_types, vec![spi::SqlParamType::BigInt]);
+
+    let relation = catalog::decode::relation_context(&serde_json::json!({
+        "namespace": "public",
+        "name": "items"
+    }))
+    .unwrap();
+    assert_eq!(relation.namespace, "public");
+    assert_eq!(relation.name, "items");
+
+    let storage = catalog::decode::flush_storage_context(&serde_json::json!({
+        "base_path": "s3://bucket/prefix",
+        "schema_version": 7
+    }))
+    .unwrap();
+    assert_eq!(storage.base_path, "s3://bucket/prefix");
+    assert_eq!(storage.schema_version, 7);
+
+    let missing = catalog::decode::relation_context(&serde_json::json!({"namespace": "public"}));
+    assert!(missing.unwrap_err().contains("missing string field `name`"));
+
+    let snapshot = koldstore_catalog::decode_managed_table_snapshot(&serde_json::json!({
+        "table_oid": 42,
+        "schema_version": 3,
+        "active": true,
+        "initialization_state": "complete",
+        "mirror_relation": "koldstore.items__cl",
+        "primary_key": ["id"],
+        "primary_key_shape": [{"column": "id", "type_oid": 20}],
+        "scope_column": null
+    }))
+    .unwrap();
+    assert_eq!(snapshot.table_oid, 42);
+    assert_eq!(snapshot.schema_version, 3);
+    assert!(snapshot.active);
+    assert_eq!(snapshot.mirror_relation.relation(), "items__cl");
+    assert_eq!(snapshot.primary_key_columns, vec!["id".to_string()]);
+    assert!(snapshot.scope_column.is_none());
+}
+
+#[test]
 fn sql_migration_creates_required_catalog_tables() {
     let sql = include_str!("../sql/koldstore--0.1.0.sql");
+    let plan = BootstrapPlan::from_sql(sql);
 
+    assert!(missing_catalog_tables(&plan).is_empty());
+    assert!(missing_catalog_indexes(&plan).is_empty());
     for needle in [
-        "CREATE TABLE IF NOT EXISTS koldstore.storage",
-        "CREATE TABLE IF NOT EXISTS koldstore.schemas",
-        "CREATE TABLE IF NOT EXISTS koldstore.manifest",
-        "CREATE TABLE IF NOT EXISTS koldstore.jobs",
-        "CREATE TABLE IF NOT EXISTS koldstore.cold_segments",
-        "CREATE TABLE IF NOT EXISTS koldstore.cold_pk_hints",
-        "CREATE TABLE IF NOT EXISTS koldstore.row_events",
-        "CREATE UNIQUE INDEX IF NOT EXISTS schemas_one_active_per_table_idx",
-        "CREATE INDEX IF NOT EXISTS manifest_dirty_idx",
-        "CREATE INDEX IF NOT EXISTS manifest_scope_lookup_idx",
-        "CREATE INDEX IF NOT EXISTS jobs_pending_idx",
-        "CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx",
-        "CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx",
+        "mirror_relation regclass",
+        "primary_key_shape jsonb NOT NULL DEFAULT '[]'::jsonb",
+        "initialization_state text NOT NULL DEFAULT 'not_started'",
     ] {
         assert!(sql.contains(needle), "missing SQL fragment: {needle}");
     }
@@ -184,7 +270,8 @@ fn sql_migration_creates_required_catalog_tables() {
         !sql.contains("system."),
         "extension SQL should not create or reference the legacy system schema"
     );
-    for duplicate_index in ["cold_pk_hints_lookup_idx", "row_events_commit_idx"] {
+    {
+        let duplicate_index = "cold_pk_hints_lookup_idx";
         assert!(
             !sql.contains(duplicate_index),
             "primary key prefix already covers lookup pattern: {duplicate_index}"
@@ -213,8 +300,8 @@ fn sql_migration_keeps_behavior_in_rust_pgrx_modules() {
 
 #[test]
 fn operation_boundaries_document_safe_defaults() {
-    assert!(flush::worker::requires_shared_preload());
-    assert!(flush::cleanup::cleanup_allowed(true));
-    assert!(!flush::cleanup::cleanup_allowed(false));
-    assert_eq!(sql::events::DEFAULT_CHANGE_LIMIT, 1000);
+    assert!(koldstore_flush::worker::requires_shared_preload());
+    assert!(koldstore_flush::cleanup::cleanup_allowed(true));
+    assert!(!koldstore_flush::cleanup::cleanup_allowed(false));
+    assert_eq!(koldstore_merge::events::DEFAULT_CHANGE_LIMIT, 1000);
 }

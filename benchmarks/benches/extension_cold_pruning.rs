@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use koldstore_core::{CommitSeq, SeqId};
+use koldstore_common::{CommitSeq, SeqId};
 use koldstore_parquet::{
     ColumnStats, FooterSummary, RowGroupPruner, RowGroupStats, SegmentFooterMetadata,
 };

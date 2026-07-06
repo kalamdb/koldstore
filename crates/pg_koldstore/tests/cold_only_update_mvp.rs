@@ -1,10 +1,10 @@
 #[test]
 fn standard_sql_cold_only_update_is_documented_as_out_of_mvp() {
-    use koldstore_core::TableName;
-    use pg_koldstore::sql::dml::{plan_standard_sql_cold_only_update, ColdUpdateOutcome};
+    use koldstore_common::TableName;
+    use koldstore_merge::dml::{plan_standard_sql_cold_only_update, ColdUpdateOutcome};
 
     let spec = include_str!("../../../specs/001-pg-kalam-hot-cold-storage/spec.md");
-    let request = pg_koldstore::sql::dml::UpdateRowRequest {
+    let request = koldstore_merge::dml::UpdateRowRequest {
         table_name: TableName::parse("app.items").unwrap(),
         pk_json: serde_json::json!({"id": 1}),
         patch_json: serde_json::json!({"title": "new"}),

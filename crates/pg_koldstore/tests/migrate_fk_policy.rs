@@ -1,19 +1,19 @@
 #[test]
 fn migration_sql_enforces_fk_hot_only_policy() {
-    assert!(pg_koldstore::migrate::constraints::fk_policy_allowed(
+    assert!(koldstore_migrate::constraints::fk_policy_allowed(
         true, true, true
     ));
-    assert!(pg_koldstore::migrate::constraints::fk_policy_allowed(
+    assert!(koldstore_migrate::constraints::fk_policy_allowed(
         true, false, false
     ));
-    assert!(!pg_koldstore::migrate::constraints::fk_policy_allowed(
+    assert!(!koldstore_migrate::constraints::fk_policy_allowed(
         true, true, false
     ));
 }
 
 #[test]
 fn migration_validation_records_fk_hot_only_override() {
-    use pg_koldstore::migrate::constraints::{
+    use koldstore_migrate::constraints::{
         FkDirection, FkPolicy, ForeignKeyShape, MigrationValidationInput,
     };
 
@@ -38,9 +38,7 @@ fn migration_validation_records_fk_hot_only_override() {
 
 #[test]
 fn migration_validation_rejects_inbound_fk_with_flush_without_override() {
-    use pg_koldstore::migrate::constraints::{
-        FkDirection, ForeignKeyShape, MigrationValidationInput,
-    };
+    use koldstore_migrate::constraints::{FkDirection, ForeignKeyShape, MigrationValidationInput};
 
     let mut input = MigrationValidationInput::minimal_shared();
     input.foreign_keys = vec![ForeignKeyShape {

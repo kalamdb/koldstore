@@ -1,9 +1,9 @@
-use koldstore_core::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
+use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
 use pg_koldstore::merge_scan::exec::{
     begin_merge_scan, begin_merge_scan_with_plan, execute_merge_scan_with_filters,
     ColdAvailability, FilterPlan, ScanResourceCounters,
 };
-use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint, SystemColumnAttnums};
+use pg_koldstore::merge_scan::plan::{MergeMetadataAttnums, MergeScanPlan, SegmentHint};
 use serde_json::json;
 
 fn pk(id: i64) -> LogicalPk {
@@ -38,7 +38,7 @@ fn plan() -> MergeScanPlan {
         table_oid: 42,
         scanrelid: 1,
         primary_key_columns: vec!["id".to_string()],
-        system_column_attnums: SystemColumnAttnums {
+        merge_metadata_attnums: MergeMetadataAttnums {
             seq: 3,
             commit_seq: 4,
             deleted: 5,

@@ -1,4 +1,4 @@
 # Show proof-of-work output for the full lifecycle scenario test during suite runs.
 [[profile.default.overrides]]
-filter = 'test(full_lifecycle_migrates_flushes_merges_hot_and_cold_then_flushes_again)'
+filter = 'test(full_lifecycle_wide_table_migrates_flushes_in_batches_and_queries_all_rows)'
 success-output = "immediate"

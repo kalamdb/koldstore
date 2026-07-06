@@ -1,0 +1,18 @@
+[package]
+name = "koldstore-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Migrated-table schema registry models for pg-koldstore"
+
+[dependencies]
+koldstore-common.workspace = true
+serde.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

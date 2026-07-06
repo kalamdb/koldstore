@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use koldstore_core::{CommitSeq, SeqId};
+use koldstore_common::{CommitSeq, SeqId};
 
 use crate::ColumnStats;
 

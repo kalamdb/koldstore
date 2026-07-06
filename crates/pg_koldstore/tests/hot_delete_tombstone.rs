@@ -1,11 +1,9 @@
-use koldstore_core::{CommitSeq, SeqId};
-use pg_koldstore::{
-    hooks::executor,
-    sql::dml::{
-        delete_decision, delete_decision_with_flush_fence, DeleteDecision, DmlStamp,
-        ManagedDmlOperation,
-    },
+use koldstore_common::{CommitSeq, SeqId};
+use koldstore_merge::dml::{
+    delete_decision, delete_decision_with_flush_fence, DeleteDecision, DmlStamp,
+    ManagedDmlOperation,
 };
+use pg_koldstore::hooks::executor;
 
 #[test]
 fn hot_delete_routes_to_physical_delete_or_tombstone_from_cold_hints() {
@@ -34,7 +32,7 @@ fn hot_delete_routes_to_physical_delete_or_tombstone_from_cold_hints() {
 }
 
 #[test]
-fn managed_delete_effect_routes_physical_delete_or_tombstone_and_appends_delete_event() {
+fn managed_delete_effect_routes_physical_delete_or_tombstone_and_records_mirror_delete() {
     let physical = executor::plan_managed_delete_effect(
         SeqId::new(10).unwrap(),
         CommitSeq::new(20).unwrap(),
@@ -48,8 +46,8 @@ fn managed_delete_effect_routes_physical_delete_or_tombstone_and_appends_delete_
 
     assert_eq!(physical.stamp.operation, ManagedDmlOperation::Delete);
     assert_eq!(
-        physical.row_event_operation,
-        koldstore_core::RowOperation::Delete
+        physical.mirror_operation,
+        koldstore_common::MirrorOperation::Delete
     );
     assert_eq!(physical.manifest_sync_state, "pending_write");
     assert_eq!(

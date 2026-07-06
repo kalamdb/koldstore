@@ -1,10 +1,8 @@
-use pg_koldstore::{
-    migrate::{
-        jobs::MigrationJobPhase,
-        order::{CatalogColumn, CatalogPrimaryKey, OrderingSource},
-        plan_existing_table_migration, ExistingTableCatalog, MigrationTableContext,
-    },
-    sql::ddl::MigrateTableRequest,
+use koldstore_migrate::{
+    jobs::MigrationJobPhase,
+    order::{CatalogColumn, CatalogPrimaryKey, OrderingSource},
+    plan_existing_table_migration, ExistingTableCatalog, MigrateTableRequest,
+    MigrationTableContext,
 };
 use uuid::Uuid;
 
@@ -27,7 +25,7 @@ fn context() -> MigrationTableContext {
 }
 
 #[test]
-fn existing_table_migration_plan_prepares_async_ordered_backfill_job() {
+fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
     let catalog = ExistingTableCatalog {
         primary_key: CatalogPrimaryKey::single("id"),
         indexed_columns: vec!["body".to_string()],
@@ -55,16 +53,23 @@ fn existing_table_migration_plan_prepares_async_ordered_backfill_job() {
         OrderingSource::AutoIncrementPrimaryKey
     );
     assert_eq!(plan.backfill_batch_size.get(), 2_048);
-    assert_eq!(plan.initial_phase, MigrationJobPhase::AddSystemColumns);
-    assert_eq!(plan.system_column_prepare.statements.len(), 2);
-    assert!(!plan.system_column_prepare.statements[0]
-        .sql
-        .contains("DEFAULT"));
+    assert_eq!(plan.initial_phase, MigrationJobPhase::InitializeMirror);
     assert!(plan
         .backfill_job
         .statement
         .sql
         .contains("'migrate_backfill'"));
+    assert!(plan
+        .backfill_job
+        .statement
+        .sql
+        .contains("'initialize_mirror'"));
+    assert!(!plan
+        .backfill_job
+        .statement
+        .sql
+        .contains("'add_system_columns'"));
+    assert_eq!(plan.backfill_job.payload["phase"], "initialize_mirror");
     assert_eq!(
         plan.backfill_job.payload["flush_policy"],
         "rows:1000,interval:60"

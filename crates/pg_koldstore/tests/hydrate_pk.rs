@@ -1,7 +1,7 @@
 #[test]
 fn sql_exposes_hydrate_pk_api() {
-    use koldstore_core::TableName;
-    use pg_koldstore::sql::dml::{plan_hydrate_pk, HydratePkRequest};
+    use koldstore_common::TableName;
+    use koldstore_merge::dml::{plan_hydrate_pk, HydratePkRequest};
 
     let contract =
         include_str!("../../../specs/001-pg-kalam-hot-cold-storage/contracts/sql-api.md");
@@ -10,7 +10,7 @@ fn sql_exposes_hydrate_pk_api() {
         pk_json: serde_json::json!({"id": 1}),
     };
 
-    assert!(pg_koldstore::sql::dml::COLD_DML_FUNCTIONS.contains(&"koldstore.hydrate_pk"));
+    assert!(koldstore_merge::dml::COLD_DML_FUNCTIONS.contains(&"koldstore.hydrate_pk"));
     assert!(contract.contains("hydrate_pk"));
     assert!(contract.contains("reads cold only for the requested PK"));
 

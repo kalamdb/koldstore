@@ -1,5 +1,5 @@
-use koldstore_core::{ScopeKey, TableKind};
-use pg_koldstore::security::scope;
+use koldstore_common::scope;
+use koldstore_common::{ScopeKey, TableKind};
 
 #[test]
 fn missing_user_scope_fails_closed() {

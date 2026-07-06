@@ -1,20 +1,20 @@
 #[test]
 fn sql_exposes_demigrate_table_with_rehydrate_default() {
-    let options = pg_koldstore::migrate::rehydrate::DemigrateOptions::default();
+    let options = koldstore_migrate::rehydrate::DemigrateOptions::default();
 
     assert!(options.rehydrate);
     assert_eq!(
         options.mode(),
-        pg_koldstore::migrate::rehydrate::DemigrationMode::Rehydrate
+        koldstore_migrate::rehydrate::DemigrationMode::Rehydrate
     );
 }
 
 #[test]
 fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts() {
-    use pg_koldstore::migrate::rehydrate::{
+    use koldstore_migrate::rehydrate::{
         plan_demigration, ColdArtifactAction, DemigrateOptions, DemigrationContext, DemigrationMode,
     };
-    use pg_koldstore::migrate::QualifiedTableName;
+    use koldstore_migrate::QualifiedTableName;
 
     let plan = plan_demigration(
         DemigrationContext {
@@ -22,6 +22,7 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
             table_oid: 42,
             cold_object_prefix: "app/items/".to_string(),
             logical_reader_name: "KoldstoreMergeScan".to_string(),
+            mirror_table: Some(QualifiedTableName::parse("koldstore.items__cl").unwrap()),
         },
         DemigrateOptions::default(),
     )
@@ -47,11 +48,10 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
 
 #[test]
 fn demigrate_table_request_maps_sql_defaults_to_demigration_options() {
-    let request = pg_koldstore::sql::ddl::DemigrateTableRequest {
+    let request = koldstore_migrate::DemigrateTableRequest {
         table_name: "app.items".to_string(),
         rehydrate: None,
         drop_cold: None,
-        drop_system_columns: None,
     };
 
     let options = request.options();
@@ -59,5 +59,4 @@ fn demigrate_table_request_maps_sql_defaults_to_demigration_options() {
     assert_eq!(request.table_name, "app.items");
     assert!(options.rehydrate);
     assert!(!options.drop_cold);
-    assert!(!options.drop_system_columns);
 }

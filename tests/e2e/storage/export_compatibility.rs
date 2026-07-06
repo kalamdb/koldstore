@@ -8,7 +8,7 @@ fn export_contract_mentions_kalamdb_compatible_manifest_and_parquet() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    let export = pg_koldstore::sql::ops::plan_koldstore_exec("EXPORT TABLE app.items").unwrap();
+    let export = koldstore_flush::ops::plan_koldstore_exec("EXPORT TABLE app.items").unwrap();
 
     assert_eq!(export.archive_manifest_path, "app/items/manifest.json");
     assert!(export.statement.sql.contains("koldstore.manifest"));
@@ -23,11 +23,9 @@ async fn export_query_reads_manifest_and_segments_from_pgrx() -> Result<()> {
         db.migrate_shared(&table.relation, "id").await?;
         assert_eq!(db.flush_table(&table.relation).await?, 12);
 
-        let export = pg_koldstore::sql::ops::plan_koldstore_exec(&format!(
-            "EXPORT TABLE {}",
-            table.relation
-        ))
-        .unwrap();
+        let export =
+            koldstore_flush::ops::plan_koldstore_exec(&format!("EXPORT TABLE {}", table.relation))
+                .unwrap();
         let executable_sql = export
             .statement
             .sql

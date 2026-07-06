@@ -22,22 +22,21 @@ fn spec_edge_cases_have_regression_coverage_markers() {
         assert!(spec.contains(edge_case), "missing edge case: {edge_case}");
     }
 
-    assert!(!pg_koldstore::migrate::constraints::primary_key_shape_supported(&[]));
-    assert!(!pg_koldstore::migrate::constraints::type_supported("bytea"));
-    assert!(!pg_koldstore::migrate::constraints::fk_policy_allowed(
+    assert!(!koldstore_migrate::constraints::primary_key_shape_supported(&[]));
+    assert!(!koldstore_migrate::constraints::type_supported("bytea"));
+    assert!(!koldstore_migrate::constraints::fk_policy_allowed(
         true, true, false
     ));
     assert_eq!(
-        pg_koldstore::migrate::rehydrate::DemigrateOptions {
+        koldstore_migrate::rehydrate::DemigrateOptions {
             rehydrate: false,
             drop_cold: false,
-            drop_system_columns: false,
         }
         .mode(),
-        pg_koldstore::migrate::rehydrate::DemigrationMode::ArchiveDetach
+        koldstore_migrate::rehydrate::DemigrationMode::ArchiveDetach
     );
     assert!(matches!(
-        pg_koldstore::sql::ops::classify_command("EXPORT TABLE app.items"),
-        Some(pg_koldstore::sql::ops::OpsCommand::ExportTable { .. })
+        koldstore_flush::ops::classify_command("EXPORT TABLE app.items"),
+        Some(koldstore_flush::ops::OpsCommand::ExportTable { .. })
     ));
 }

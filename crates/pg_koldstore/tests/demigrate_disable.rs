@@ -1,6 +1,6 @@
 #[test]
 fn demigration_sql_deactivates_managed_metadata() {
-    use pg_koldstore::migrate::rehydrate::{plan_catalog_deactivation, plan_flush_deactivation};
+    use koldstore_migrate::rehydrate::{plan_catalog_deactivation, plan_flush_deactivation};
 
     let catalog = plan_catalog_deactivation(42).unwrap();
     let flush = plan_flush_deactivation(42).unwrap();
@@ -16,21 +16,14 @@ fn demigration_sql_deactivates_managed_metadata() {
 }
 
 #[test]
-fn migration_rollback_cleanup_removes_partial_catalog_rows_and_system_columns() {
-    use pg_koldstore::migrate::rollback::RollbackCleanup;
-    use pg_koldstore::migrate::QualifiedTableName;
+fn migration_rollback_cleanup_removes_partial_catalog_rows_and_mirror_only() {
+    use koldstore_migrate::rollback::RollbackCleanup;
+    use koldstore_migrate::QualifiedTableName;
     use pg_koldstore::spi::SpiAccess;
 
     let table = QualifiedTableName::parse("app.items").unwrap();
-    let cleanup = RollbackCleanup::for_table(
-        table,
-        42,
-        vec![
-            "_seq".to_string(),
-            "_commit_seq".to_string(),
-            "_deleted".to_string(),
-        ],
-    );
+    let cleanup = RollbackCleanup::for_table(table.clone(), 42)
+        .with_mirror_table(QualifiedTableName::parse("koldstore.items__cl").unwrap());
 
     let plan = cleanup.plan().unwrap();
 
@@ -45,12 +38,15 @@ fn migration_rollback_cleanup_removes_partial_catalog_rows_and_system_columns() 
             .map(|statement| statement.sql.as_str())
             .collect::<Vec<_>>(),
         vec![
-            "DELETE FROM koldstore.row_events WHERE table_oid = $1",
+            "DROP TABLE IF EXISTS \"koldstore\".\"items__cl\"",
             "DELETE FROM koldstore.cold_pk_hints WHERE table_oid = $1",
             "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1",
             "DELETE FROM koldstore.schemas WHERE table_oid = $1",
-            "ALTER TABLE ONLY \"app\".\"items\" DROP COLUMN IF EXISTS \"_seq\", DROP COLUMN IF EXISTS \"_commit_seq\", DROP COLUMN IF EXISTS \"_deleted\""
         ]
     );
+    assert!(!plan
+        .statements
+        .iter()
+        .any(|statement| statement.sql.contains("DROP COLUMN")));
 }

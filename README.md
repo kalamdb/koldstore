@@ -39,6 +39,13 @@ The usual fixes — archive tables, cron dumps, time partitions, a separate data
         │ Active rows             │
         │ One row per PK          │
         └──────────┬──────────────┘
+                   │  AFTER ROW triggers
+                   ▼
+        ┌─────────────────────────┐
+        │  Change-log mirror        │
+        │  koldstore.<table>__cl    │
+        │  latest state per PK      │
+        └──────────┬──────────────┘
                    │
               flush job
                    │
@@ -53,7 +60,35 @@ The usual fixes — archive tables, cron dumps, time partitions, a separate data
    SELECT  →  KoldstoreMergeScan merges by primary key
 ```
 
-You create a normal table, register storage, and call `koldstore.migrate_table`. Inserts and updates hit the heap like always. KoldStore tracks latest change state in an internal per-table `koldstore.<table>__cl` mirror instead of adding metadata columns to your table. A flush writes eligible hot rows and mirror metadata to Parquet, updates the manifest, and drops flushed rows from the heap when safe. Delete markers are preserved when cold might still have an older version of the same key.
+You create a normal table, register storage, and call `koldstore.migrate_table`. Inserts and updates hit the heap like always. KoldStore tracks latest change state in a separate internal mirror table — `koldstore.<table>__cl` — instead of adding `_seq`, `_deleted`, or `_commit_seq` columns to your business table. A flush writes eligible hot rows plus mirror metadata (`seq`, `op`, `changed_at`) to Parquet, updates the manifest, and drops flushed rows from the heap when safe. Delete markers are preserved when cold might still have an older version of the same key.
+
+### Change-log mirrors (clean schema)
+
+Earlier development added KoldStore metadata directly to managed tables and used a global `koldstore.row_events` feed. The current default is **clean schema**: your application table keeps exactly the columns you defined; KoldStore owns a companion mirror in the `koldstore` schema.
+
+For `public.messages`, enablement creates `koldstore.messages__cl`:
+
+```sql
+-- your table — unchanged
+CREATE TABLE public.messages (
+  id bigint PRIMARY KEY,
+  body text NOT NULL
+);
+
+-- created by koldstore.migrate_table — not for application DML
+CREATE TABLE koldstore.messages__cl (
+  id bigint NOT NULL,
+  seq bigint NOT NULL,
+  op smallint NOT NULL,          -- 1=INSERT, 2=UPDATE, 3=DELETE
+  changed_at timestamptz NOT NULL DEFAULT now(),
+  commit_lsn pg_lsn NULL,
+  PRIMARY KEY (id)
+);
+```
+
+`migrate_table` installs AFTER ROW capture triggers on the user table. Each insert, update, or delete upserts one latest-state row in the mirror (at most one row per primary key). Flush policy, flush cutoffs, and `changes_since` cursors all read mirror state — not user-table system columns and not `koldstore.row_events`.
+
+Populated tables follow the same model: the mirror and capture triggers are created first, existing rows are backfilled into the mirror, and flush stays blocked until that initialization reaches a safe cutoff. Demigration drops the mirror, capture triggers, and catalog metadata; your user table is left without KoldStore columns.
 
 ---
 
@@ -147,14 +182,17 @@ chat/messages/
 ## What works in v0.1
 
 - `CREATE EXTENSION koldstore` on PostgreSQL 15–18
+- Clean-schema `koldstore.migrate_table` — no KoldStore columns added to user tables
+- Per-table change-log mirrors (`koldstore.<table>__cl`) with capture triggers and mirror-backed flush
+- Greenfield and populated-table migration with mirror initialization before flush eligibility
 - `koldstore.migrate_table` for shared and user-scoped tables
 - Storage registration: filesystem, S3, GCS, Azure (MinIO via S3-compatible config)
-- Manual flush + `rows:N` and `duration:S` policies
+- Manual flush + `rows:N` and `duration:S` policies driven by mirror `seq` / `changed_at`
 - `KoldstoreMergeScan` for merged hot/cold reads
-- Hot DML without object-store reads on the write path
+- Hot DML without object-store reads on the write path (one mirror upsert per changed row)
 - Cold-only helpers: `hydrate_pk`, `update_row`, `delete_row`
-- Latest-state change feed via `changes_since`
-- Demigration with optional rehydration
+- Latest-state change feed via `changes_since` (mirror + flushed cold metadata; not `row_events`)
+- Demigration with optional rehydration — drops mirror artifacts, leaves user schema clean
 - Operator functions: `table_status`, `validate_cold_storage`, `recover_segments`
 
 Things still rough around the edges: background flush needs `shared_preload_libraries = 'koldstore'`, export/import isn't finished, and cold storage isn't in WAL — you need to back up PostgreSQL and your object-store prefixes together.
@@ -163,7 +201,7 @@ Things still rough around the edges: background flush needs `shared_preload_libr
 
 ## Requirements
 
-Managed tables need a **primary key**. Clean-schema migration does not add KoldStore columns to the user table. Instead, KoldStore creates an internal per-table change-log mirror such as `koldstore.messages__cl` with the same primary-key columns plus:
+Managed tables need a **primary key**. Clean-schema migration does **not** add KoldStore columns to the user table. Instead, it creates a separate change-log mirror such as `koldstore.messages__cl` with the same primary-key columns (same names, types, order, and non-nullability) plus:
 
 | Column | What it's for |
 |--------|---------------|
@@ -172,7 +210,9 @@ Managed tables need a **primary key**. Clean-schema migration does not add KoldS
 | `changed_at` | Change timestamp |
 | `commit_lsn` | Optional PostgreSQL LSN for diagnostics |
 
-`koldstore.changes_since` reads latest-state changes from the mirror and flushed cold metadata. It is not a full event-history feed; repeated changes to one primary key may be collapsed to the latest available state.
+The mirror is latest-state only: one row per primary key, not a full mutation history. Cold Parquet segments carry the same metadata (`seq`, `op`, `changed_at`, plus a `deleted` flag derived from `op`) alongside your application columns.
+
+`koldstore.changes_since` reads latest-state changes from the mirror and flushed cold metadata. Pass the last seen mirror `seq` as the cursor. It is not a full event-history feed; repeated changes to one primary key within a transaction collapse to the final committed state.
 
 ### Type support
 
@@ -217,7 +257,7 @@ That's not because PostgreSQL can't store other types — it's because every typ
 
 ## Roadmap
 
-**v0.1 (now)** — extension skeleton, migrate/flush/merge-scan, user-scoped layouts, basic operator tooling.
+**v0.1 (now)** — clean-schema change-log mirrors, migrate/flush/merge-scan, user-scoped layouts, basic operator tooling.
 
 **v0.2** — background flush worker, real `EXPORT TABLE`, harder failure recovery.
 

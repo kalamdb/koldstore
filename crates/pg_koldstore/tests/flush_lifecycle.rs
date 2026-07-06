@@ -1,4 +1,4 @@
-use pg_koldstore::flush::{cleanup, job, worker};
+use koldstore_flush::{cleanup, job, worker};
 use uuid::Uuid;
 
 #[test]
@@ -35,8 +35,8 @@ fn zero_sized_flush_batch_does_not_request_another_scan() {
 
 #[test]
 fn bounded_flush_batch_builder_stops_before_row_or_memory_limits() {
-    use koldstore_core::{CommitSeq, SeqId, StablePkHash};
-    use pg_koldstore::flush::job::{
+    use koldstore_common::{CommitSeq, SeqId, StablePkHash};
+    use koldstore_flush::job::{
         FlushBatchBuilder, FlushBatchPush, FlushExecutionConfig, HotRowCandidate,
     };
 
@@ -109,8 +109,8 @@ fn bounded_flush_batch_builder_stops_before_row_or_memory_limits() {
 
 #[test]
 fn flush_stats_use_latest_live_values_and_ignore_tombstones() {
-    use koldstore_core::{CommitSeq, SeqId, StablePkHash};
-    use pg_koldstore::flush::job::{FlushBatchInput, HotRowCandidate};
+    use koldstore_common::{CommitSeq, SeqId, StablePkHash};
+    use koldstore_flush::job::{FlushBatchInput, HotRowCandidate};
     use serde_json::json;
 
     let pk_one = StablePkHash::from_hex("01").unwrap();
@@ -141,14 +141,14 @@ fn flush_stats_use_latest_live_values_and_ignore_tombstones() {
     assert_eq!(stats["score"].max, json!(30));
     assert_eq!(stats["status"].min, json!("new"));
     assert_eq!(stats["status"].max, json!("new"));
-    assert_eq!(stats["_seq"].min, json!(3));
-    assert_eq!(stats["_seq"].max, json!(3));
+    assert_eq!(stats["seq"].min, json!(3));
+    assert_eq!(stats["seq"].max, json!(3));
 }
 
 #[test]
 fn flush_stats_omit_incomparable_columns_to_keep_pruning_conservative() {
-    use koldstore_core::{CommitSeq, SeqId, StablePkHash};
-    use pg_koldstore::flush::job::{FlushBatchInput, HotRowCandidate};
+    use koldstore_common::{CommitSeq, SeqId, StablePkHash};
+    use koldstore_flush::job::{FlushBatchInput, HotRowCandidate};
     use serde_json::json;
 
     let batch = FlushBatchInput {
@@ -177,7 +177,7 @@ fn flush_stats_omit_incomparable_columns_to_keep_pruning_conservative() {
 
 #[test]
 fn flush_phase_order_defers_heap_cleanup_until_manifest_and_catalog_are_committed() {
-    use pg_koldstore::flush::job::{can_cleanup_hot_rows, flush_execution_phases, FlushJobPhase};
+    use koldstore_flush::job::{can_cleanup_hot_rows, flush_execution_phases, FlushJobPhase};
 
     let phases = flush_execution_phases();
 
@@ -193,8 +193,8 @@ fn flush_phase_order_defers_heap_cleanup_until_manifest_and_catalog_are_committe
 
 #[test]
 fn flush_watermark_skips_rows_changed_after_claimed_seqid() {
-    use koldstore_core::{CommitSeq, SeqId, StablePkHash};
-    use pg_koldstore::flush::job::{conditional_cleanup_allowed, FlushWatermark, HotRowCandidate};
+    use koldstore_common::{CommitSeq, SeqId, StablePkHash};
+    use koldstore_flush::job::{conditional_cleanup_allowed, FlushWatermark, HotRowCandidate};
 
     let watermark = FlushWatermark::new(SeqId::new(10).unwrap());
     let included = HotRowCandidate::live(
@@ -225,8 +225,45 @@ fn flush_watermark_skips_rows_changed_after_claimed_seqid() {
 }
 
 #[test]
+fn mirror_flush_selection_set_persists_selected_keys_and_seq_cutoff() {
+    use koldstore_common::{MirrorOperation, SeqId};
+    use koldstore_flush::job::{MirrorFlushSelectedRow, MirrorFlushSelectionSet};
+    use serde_json::json;
+
+    let selection = MirrorFlushSelectionSet::new(vec![
+        MirrorFlushSelectedRow {
+            pk_json: json!({"id": 2}),
+            seq: SeqId::new(20).unwrap(),
+            operation: MirrorOperation::Delete,
+        },
+        MirrorFlushSelectedRow {
+            pk_json: json!({"id": 1}),
+            seq: SeqId::new(10).unwrap(),
+            operation: MirrorOperation::Update,
+        },
+    ]);
+
+    assert_eq!(selection.seq_cutoff.unwrap().get(), 20);
+    assert_eq!(
+        selection
+            .rows
+            .iter()
+            .map(|row| row.seq.get())
+            .collect::<Vec<_>>(),
+        vec![10, 20]
+    );
+    assert_eq!(
+        selection.to_payload_json(),
+        json!([
+            {"id": 1, "seq": 10, "op": 2},
+            {"id": 2, "seq": 20, "op": 3}
+        ])
+    );
+}
+
+#[test]
 fn flush_leases_fence_stale_workers_by_owner_and_epoch() {
-    use pg_koldstore::flush::job::{FlushJobLease, FlushLeaseSeconds, JobLeaseEpoch};
+    use koldstore_flush::job::{FlushJobLease, FlushLeaseSeconds, JobLeaseEpoch};
 
     let job_id = Uuid::new_v4();
     let worker_id = Uuid::new_v4();

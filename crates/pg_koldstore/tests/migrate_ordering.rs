@@ -1,4 +1,4 @@
-use pg_koldstore::migrate::order::{
+use koldstore_migrate::order::{
     choose_migration_ordering, CatalogColumn, CatalogPrimaryKey, MigrationOrdering,
     MigrationOrderingRequest, OrderingSource,
 };
