@@ -122,7 +122,7 @@ removed_mirror AS (
     RETURNING mirror."seq"
 )
 DELETE FROM ONLY {table} AS hot
-USING selected
+USING selected, removed_mirror
 WHERE selected."op" IN (1, 2)
   AND {hot_join}
 "#,

@@ -37,14 +37,20 @@ fn sql_exposes_operational_functions() {
 
 #[test]
 fn operational_functions_build_parameterized_catalog_plans() {
-    use koldstore_common::{ScopeKey, TableName};
+    use koldstore_common::{QualifiedTableName, ScopeKey, TableName};
     use pg_koldstore::spi::SpiAccess;
 
     let table = TableName::parse("app.items").unwrap();
-    let status = koldstore_flush::ops::table_status_plan(table.clone(), None).unwrap();
+    let qualified = QualifiedTableName::parse("app.items").unwrap();
+    let mirror = QualifiedTableName::parse("koldstore.items__cl").unwrap();
+    let status = koldstore_flush::ops::table_status_plan(&qualified, &mirror, None).unwrap();
     assert_eq!(status.table_name.as_str(), "app.items");
-    assert!(status.statement.sql.contains("koldstore.manifest"));
-    assert!(status.statement.sql.contains("j.scope_key = $2"));
+    assert!(status.statement.sql.contains("jsonb_build_object"));
+    assert!(status.statement.sql.contains("'hot_rows'"));
+    assert!(status.statement.sql.contains("'mirror_rows'"));
+    assert!(status.statement.sql.contains("'cold_row_count'"));
+    assert!(status.statement.sql.contains("\"app\".\"items\""));
+    assert!(status.statement.sql.contains("\"koldstore\".\"items__cl\""));
     assert_eq!(status.statement.access, SpiAccess::ReadOnly);
 
     let backup = koldstore_flush::ops::backup_manifest_plan(

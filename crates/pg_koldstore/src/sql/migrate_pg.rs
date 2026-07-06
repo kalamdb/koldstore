@@ -24,6 +24,7 @@ pub fn migrate_table_pg(
         flush_policy,
         scope_column,
         None,
+        None,
     )
 }
 
@@ -45,6 +46,30 @@ pub fn migrate_table_pg_with_order(
         flush_policy,
         scope_column,
         order_column,
+        None,
+    )
+}
+
+/// Migrates a heap table and supplies explicit oldest-to-newest order and compression options.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore", security_definer)]
+pub fn migrate_table_pg_with_order_and_compression(
+    table_name: pgrx::pg_sys::Oid,
+    table_type: &str,
+    storage_name: &str,
+    flush_policy: Option<&str>,
+    scope_column: Option<&str>,
+    order_column: Option<&str>,
+    compression: Option<&str>,
+) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
+    migrate_table_pg_impl(
+        table_name,
+        table_type,
+        storage_name,
+        flush_policy,
+        scope_column,
+        order_column,
+        compression,
     )
 }
 
@@ -57,6 +82,7 @@ fn migrate_table_pg_impl(
     flush_policy: Option<&str>,
     scope_column: Option<&str>,
     order_column: Option<&str>,
+    compression: Option<&str>,
 ) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
     let table_oid_u32 = table_oid.to_u32();
     let table_oid = pgrx::pg_sys::Oid::from(table_oid_u32);
@@ -70,13 +96,7 @@ fn migrate_table_pg_impl(
     let registry_catalog = catalog.clone();
     let primary_key_shape = primary_key_shape(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let mut options = serde_json::json!({});
-    if let Some(order_column) = order_column
-        .map(str::trim)
-        .filter(|column| !column.is_empty())
-    {
-        options["order_column"] = serde_json::Value::String(order_column.to_string());
-    }
+    let options = migration_options(order_column, compression);
     let request = MigrateTableRequest {
         table_name: relation,
         table_type: table_type.to_string(),
@@ -116,6 +136,7 @@ fn migrate_table_pg_impl(
             primary_key: &registry_catalog.primary_key.columns,
             columns: &registry_catalog.columns,
             indexed_columns: &registry_catalog.indexed_columns,
+            options: &request.options,
             active: true,
             migration_status: "active",
         })
@@ -160,6 +181,7 @@ fn migrate_table_pg_impl(
         primary_key: &registry_catalog.primary_key.columns,
         columns: &registry_catalog.columns,
         indexed_columns: &registry_catalog.indexed_columns,
+        options: &request.options,
         active: false,
         migration_status: "mirror_initializing",
     })
@@ -231,7 +253,9 @@ fn managed_table_info_tuple(
 }
 
 #[cfg(feature = "pg")]
-fn migration_catalog(table_oid: u32) -> Result<koldstore_migrate::ExistingTableCatalog, String> {
+pub(crate) fn migration_catalog(
+    table_oid: u32,
+) -> Result<koldstore_migrate::ExistingTableCatalog, String> {
     use pgrx::datum::DatumWithOid;
 
     let oid = pgrx::pg_sys::Oid::from(table_oid);
@@ -297,6 +321,7 @@ struct SchemaRegistrationInput<'a> {
     primary_key: &'a [String],
     columns: &'a [koldstore_migrate::order::CatalogColumn],
     indexed_columns: &'a [String],
+    options: &'a serde_json::Value,
     active: bool,
     migration_status: &'a str,
 }
@@ -308,6 +333,15 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
     };
     use pgrx::datum::DatumWithOid;
 
+    let mut options = input.options.clone();
+    if let serde_json::Value::Object(object) = &mut options {
+        object.insert(
+            "migration_status".to_string(),
+            serde_json::Value::String(input.migration_status.to_string()),
+        );
+    } else {
+        options = serde_json::json!({ "migration_status": input.migration_status });
+    }
     let metadata = RegistrationMetadata {
         table_oid: input.table_oid,
         table_type: input.table_type.to_string(),
@@ -326,7 +360,7 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
             .map(str::trim)
             .filter(|policy| !policy.is_empty())
             .map(str::to_string),
-        options: serde_json::json!({ "migration_status": input.migration_status }),
+        options,
     };
     let plan = plan_schema_registry_insert_with_id(&metadata, Uuid::new_v4())
         .map_err(|error| error.to_string())?;
@@ -495,4 +529,50 @@ fn execute_demigration_statements(
     }
 
     Ok(deactivated)
+}
+
+#[cfg(feature = "pg")]
+fn migration_options(order_column: Option<&str>, compression: Option<&str>) -> serde_json::Value {
+    let mut options = serde_json::Map::new();
+    if let Some(order_column) = order_column
+        .map(str::trim)
+        .filter(|column| !column.is_empty())
+    {
+        options.insert(
+            "order_column".to_string(),
+            serde_json::Value::String(order_column.to_string()),
+        );
+    }
+    if let Some(compression) = compression.map(str::trim).filter(|codec| !codec.is_empty()) {
+        options.insert(
+            "compression".to_string(),
+            serde_json::Value::String(compression.to_ascii_lowercase()),
+        );
+    }
+    serde_json::Value::Object(options)
+}
+
+#[cfg(all(test, feature = "pg"))]
+mod tests {
+    use super::migration_options;
+
+    #[test]
+    fn migration_options_include_ordering_and_compression_when_provided() {
+        let options = migration_options(Some("created_at"), Some("zstd"));
+
+        assert_eq!(
+            options,
+            serde_json::json!({
+                "order_column": "created_at",
+                "compression": "zstd"
+            })
+        );
+    }
+
+    #[test]
+    fn migration_options_skip_blank_values() {
+        let options = migration_options(Some(" "), Some(""));
+
+        assert_eq!(options, serde_json::json!({}));
+    }
 }

@@ -42,6 +42,20 @@ async fn managed_hot_read_preserves_indexed_access_path_on_pgrx() -> Result<()> 
         let table = db.create_indexed_items_table("merge_items", 1_000).await?;
         db.migrate_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
+        common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 1_000).await?;
+
+        db.client
+            .batch_execute(&format!(
+                r#"
+                INSERT INTO {relation} (id, account_id, title, qty, category)
+                VALUES (1001, 1, 'item-000333', 1, 'hot-after-flush')
+                ON CONFLICT (id) DO UPDATE
+                SET title = EXCLUDED.title;
+                ANALYZE {relation};
+                "#,
+                relation = table.relation
+            ))
+            .await?;
 
         let plan = common::explain_with_seqscan_disabled(
             &db.client,
@@ -63,7 +77,7 @@ async fn managed_hot_read_preserves_indexed_access_path_on_pgrx() -> Result<()> 
                 &[],
             )
             .await?;
-        assert_eq!(row.get::<_, i64>(0), 333);
+        assert_eq!(row.get::<_, i64>(0), 1001);
         assert_eq!(row.get::<_, String>(1), "item-000333");
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
     }

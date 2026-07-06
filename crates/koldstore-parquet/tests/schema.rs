@@ -83,8 +83,13 @@ fn postgres_type_parser_supports_mvp_types_and_common_catalog_aliases() {
         ("text", DataType::Utf8),
         ("varchar", DataType::Utf8),
         ("character varying", DataType::Utf8),
+        ("character varying(255)", DataType::Utf8),
+        ("numeric", DataType::Utf8),
+        ("numeric(18, 4)", DataType::Utf8),
         ("uuid", DataType::Utf8),
         ("jsonb", DataType::Utf8),
+        ("text[]", DataType::Utf8),
+        ("bytea", DataType::Utf8),
         (
             "timestamptz",
             DataType::Timestamp(TimeUnit::Microsecond, None),
@@ -104,9 +109,9 @@ fn postgres_type_parser_supports_mvp_types_and_common_catalog_aliases() {
 
 #[test]
 fn postgres_catalog_column_conversion_rejects_unsupported_types() {
-    let error = PgColumn::from_catalog("payload", "bytea", true).unwrap_err();
+    let error = PgColumn::from_catalog("payload", "inet", true).unwrap_err();
 
-    assert_eq!(error, SchemaError::UnsupportedType("bytea".to_string()));
-    assert!(PgColumn::from_catalog("amount", "numeric", false).is_err());
-    assert!(PgColumn::from_catalog("addr", "inet", true).is_err());
+    assert_eq!(error, SchemaError::UnsupportedType("inet".to_string()));
+    assert!(PgColumn::from_catalog("amount", "numeric", false).is_ok());
+    assert!(PgColumn::from_catalog("payload", "bytea", true).is_ok());
 }

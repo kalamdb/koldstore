@@ -1,9 +1,16 @@
 //! Direct ObjectStore-backed Parquet reader surface.
 
+use std::path::Path;
 use std::pin::Pin;
 
-use arrow_array::RecordBatch;
+use arrow_array::{
+    Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    RecordBatch, StringArray, TimestampMicrosecondArray, UInt32Array,
+};
 use koldstore_common::{CommitSeq, SeqId};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+use crate::schema::{ColdMetadataColumn, PgColumn, PgType};
 
 /// Boxed record-batch stream.
 pub type RecordBatchFileStream =
@@ -145,6 +152,24 @@ pub struct ParquetReadRequest {
     pub options: ParquetReadOptions,
 }
 
+/// Logical row read from a clean-schema cold Parquet segment.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CleanColdRow {
+    /// Primary-key values encoded by column name.
+    pub pk_json: serde_json::Value,
+    /// Base table row image, or `null` for delete markers.
+    pub row_image: serde_json::Value,
+    /// KoldStore sequence number.
+    pub seq: i64,
+    /// Commit sequence used for winner ordering. Clean segments currently use
+    /// `seq` as the commit ordering value.
+    pub commit_seq: i64,
+    /// Whether this row is a cold delete marker.
+    pub deleted: bool,
+    /// Schema version used to write the segment.
+    pub schema_version: u32,
+}
+
 impl ParquetReadRequest {
     /// Creates a direct Parquet read request.
     #[must_use]
@@ -166,4 +191,158 @@ impl ParquetReadRequest {
     pub fn uses_pk_bloom_checks(&self) -> bool {
         self.options.pk_values.is_some()
     }
+}
+
+/// Reads clean-schema cold rows from a local Parquet file.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be opened, Parquet decoding fails, or
+/// required metadata/primary-key columns are missing.
+pub fn read_clean_cold_rows_from_path(
+    path: impl AsRef<Path>,
+    columns: &[PgColumn],
+    primary_key_columns: &[String],
+) -> Result<Vec<CleanColdRow>, String> {
+    let file = std::fs::File::open(path.as_ref()).map_err(|error| error.to_string())?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|error| error.to_string())?
+        .build()
+        .map_err(|error| error.to_string())?;
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|error| error.to_string())?;
+        rows.extend(clean_rows_from_batch(&batch, columns, primary_key_columns)?);
+    }
+    Ok(rows)
+}
+
+fn clean_rows_from_batch(
+    batch: &RecordBatch,
+    columns: &[PgColumn],
+    primary_key_columns: &[String],
+) -> Result<Vec<CleanColdRow>, String> {
+    let seq = required_column(batch, ColdMetadataColumn::Seq.name())?
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| "cold seq column has unexpected Arrow type".to_string())?;
+    let deleted = required_column(batch, ColdMetadataColumn::Deleted.name())?
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .ok_or_else(|| "cold deleted column has unexpected Arrow type".to_string())?;
+    let schema_version = required_column(batch, ColdMetadataColumn::SchemaVersion.name())?
+        .as_any()
+        .downcast_ref::<UInt32Array>()
+        .ok_or_else(|| "cold schema_version column has unexpected Arrow type".to_string())?;
+
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    for row_index in 0..batch.num_rows() {
+        let deleted_value = deleted.value(row_index);
+        let mut row_image = serde_json::Map::new();
+        for column in columns {
+            row_image.insert(
+                column.name.clone(),
+                json_value_for_column(batch, column, row_index)?,
+            );
+        }
+        let mut pk_json = serde_json::Map::new();
+        for column in primary_key_columns {
+            pk_json.insert(
+                column.clone(),
+                row_image
+                    .get(column)
+                    .cloned()
+                    .ok_or_else(|| format!("cold row is missing primary-key field `{column}`"))?,
+            );
+        }
+        let row_image = if deleted_value {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::Object(row_image)
+        };
+        let seq_value = seq.value(row_index);
+        rows.push(CleanColdRow {
+            pk_json: serde_json::Value::Object(pk_json),
+            row_image,
+            seq: seq_value,
+            commit_seq: seq_value,
+            deleted: deleted_value,
+            schema_version: schema_version.value(row_index),
+        });
+    }
+    Ok(rows)
+}
+
+fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a dyn Array, String> {
+    batch
+        .column_by_name(name)
+        .map(|column| column.as_ref())
+        .ok_or_else(|| format!("cold segment is missing required column `{name}`"))
+}
+
+fn json_value_for_column(
+    batch: &RecordBatch,
+    column: &PgColumn,
+    row_index: usize,
+) -> Result<serde_json::Value, String> {
+    let array = required_column(batch, &column.name)?;
+    if array.is_null(row_index) {
+        return Ok(serde_json::Value::Null);
+    }
+    match column.pg_type {
+        PgType::Bool => Ok(serde_json::json!(array_for::<BooleanArray>(
+            array,
+            &column.name
+        )?
+        .value(row_index))),
+        PgType::Int2 => Ok(serde_json::json!(array_for::<Int16Array>(
+            array,
+            &column.name
+        )?
+        .value(row_index))),
+        PgType::Int4 => Ok(serde_json::json!(array_for::<Int32Array>(
+            array,
+            &column.name
+        )?
+        .value(row_index))),
+        PgType::Int8 => Ok(serde_json::json!(array_for::<Int64Array>(
+            array,
+            &column.name
+        )?
+        .value(row_index))),
+        PgType::Float4 => Ok(serde_json::json!(array_for::<Float32Array>(
+            array,
+            &column.name
+        )?
+        .value(row_index))),
+        PgType::Float8 => Ok(serde_json::json!(array_for::<Float64Array>(
+            array,
+            &column.name
+        )?
+        .value(row_index))),
+        PgType::Text
+        | PgType::Numeric
+        | PgType::Uuid
+        | PgType::Jsonb
+        | PgType::TextArray
+        | PgType::Bytea => Ok(serde_json::Value::String(
+            array_for::<StringArray>(array, &column.name)?
+                .value(row_index)
+                .to_string(),
+        )),
+        PgType::Timestamptz => {
+            let micros =
+                array_for::<TimestampMicrosecondArray>(array, &column.name)?.value(row_index);
+            let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(micros)
+                .ok_or_else(|| format!("timestamp value out of range in `{}`", column.name))?;
+            Ok(serde_json::Value::String(timestamp.to_rfc3339()))
+        }
+    }
+}
+
+fn array_for<'a, T: 'static>(array: &'a dyn Array, name: &str) -> Result<&'a T, String> {
+    array
+        .as_any()
+        .downcast_ref::<T>()
+        .ok_or_else(|| format!("cold column `{name}` has unexpected Arrow type"))
 }

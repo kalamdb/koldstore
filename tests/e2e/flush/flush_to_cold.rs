@@ -92,6 +92,7 @@ async fn flush_to_cold_writes_catalog_manifest_and_parquet_on_pgrx() -> Result<(
         assert_eq!(flushed, 64);
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
         common::assert_no_active_jobs(&db.client, &table.relation).await?;
+        common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 64).await?;
 
         let artifact = db
             .client

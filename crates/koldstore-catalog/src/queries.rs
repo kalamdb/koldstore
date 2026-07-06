@@ -79,7 +79,8 @@ pub fn plan_active_flush_storage_context() -> SqlResult<SqlStatement> {
         r#"
 SELECT jsonb_build_object(
     'base_path', st.base_path,
-    'schema_version', s.version
+    'schema_version', s.version,
+    'compression', COALESCE(s.options->>'compression', 'zstd')
 )::text
 FROM koldstore.schemas s
 JOIN koldstore.storage st ON st.id = s.storage_id

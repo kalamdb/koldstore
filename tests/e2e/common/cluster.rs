@@ -68,10 +68,7 @@ impl PgrxServer {
     pub async fn start(target: PgTarget) -> Result<Self> {
         maybe_start_pgrx(&target)?;
         let client = wait_for_postgres(&target).await?;
-        client
-            .batch_execute("CREATE EXTENSION IF NOT EXISTS koldstore;")
-            .await
-            .context("create koldstore extension")?;
+        ensure_koldstore_extension(&client).await?;
         Ok(Self { target, client })
     }
 }
@@ -285,6 +282,7 @@ async fn verify_pgrx_target(client: &Client, target: &PgTarget) -> Result<()> {
         .batch_execute("CREATE EXTENSION IF NOT EXISTS koldstore;")
         .await
         .context("install koldstore extension for E2E database")?;
+    sync_koldstore_extension_sql(client).await?;
 
     let extension_present = client
         .query_one(
@@ -301,6 +299,57 @@ async fn verify_pgrx_target(client: &Client, target: &PgTarget) -> Result<()> {
         target.port
     );
 
+    Ok(())
+}
+
+async fn ensure_koldstore_extension(client: &Client) -> Result<()> {
+    client
+        .batch_execute("CREATE EXTENSION IF NOT EXISTS koldstore;")
+        .await
+        .context("create koldstore extension")?;
+    sync_koldstore_extension_sql(client).await
+}
+
+/// Ensures the installed extension SQL matches the currently built `cargo pgrx install` artifacts.
+///
+/// `ALTER EXTENSION ... UPDATE` only applies when the extension version changes, so local
+/// iterative development can leave an older SQL catalog behind. When required entities such
+/// as `koldstore.table_status` are missing, reinstall the extension in-place.
+async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
+    let required_sql_present = client
+        .query_one(
+            r#"
+            SELECT EXISTS (
+              SELECT 1
+              FROM pg_proc p
+              JOIN pg_namespace n ON n.oid = p.pronamespace
+              WHERE n.nspname = 'koldstore'
+                AND p.proname = 'table_status'
+            )
+            "#,
+            &[],
+        )
+        .await
+        .context("check koldstore extension SQL availability")?
+        .get::<_, bool>(0);
+
+    if required_sql_present {
+        client
+            .batch_execute("ALTER EXTENSION koldstore UPDATE;")
+            .await
+            .context("refresh koldstore extension SQL after install")?;
+        return Ok(());
+    }
+
+    client
+        .batch_execute(
+            r#"
+            DROP EXTENSION IF EXISTS koldstore CASCADE;
+            CREATE EXTENSION koldstore;
+            "#,
+        )
+        .await
+        .context("reinstall koldstore extension to pick up new SQL entities")?;
     Ok(())
 }
 

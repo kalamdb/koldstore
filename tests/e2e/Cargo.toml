@@ -118,6 +118,7 @@ koldstore-storage.workspace = true
 parquet.workspace = true
 pg_koldstore = { path = "../../crates/pg_koldstore", default-features = false }
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 

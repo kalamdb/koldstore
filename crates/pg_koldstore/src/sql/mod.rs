@@ -4,5 +4,6 @@
 
 pub mod flush_pg;
 pub mod migrate_pg;
+pub mod ops_pg;
 pub mod session;
 pub mod storage_pg;

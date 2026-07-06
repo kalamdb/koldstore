@@ -16,6 +16,8 @@ pub struct FlushStorageContext {
     pub base_path: String,
     /// Active KoldStore schema version.
     pub schema_version: i32,
+    /// Configured Parquet compression codec.
+    pub compression: String,
 }
 
 /// Decodes a relation context JSON payload.
@@ -39,6 +41,7 @@ pub fn flush_storage_context(value: &serde_json::Value) -> Result<FlushStorageCo
     Ok(FlushStorageContext {
         base_path: json_string(value, "base_path")?,
         schema_version: json_i64(value, "schema_version")? as i32,
+        compression: json_string(value, "compression")?,
     })
 }
 
@@ -65,4 +68,23 @@ pub fn json_i64(value: &serde_json::Value, key: &str) -> Result<i64, String> {
         .get(key)
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| format!("missing integer field `{key}`"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::flush_storage_context;
+
+    #[test]
+    fn flush_storage_context_requires_compression_codec() {
+        let value = serde_json::json!({
+            "base_path": "/tmp/koldstore",
+            "schema_version": 3,
+            "compression": "zstd"
+        });
+
+        let context = flush_storage_context(&value).unwrap();
+        assert_eq!(context.base_path, "/tmp/koldstore");
+        assert_eq!(context.schema_version, 3);
+        assert_eq!(context.compression, "zstd");
+    }
 }

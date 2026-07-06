@@ -107,13 +107,14 @@ def main() -> None:
             "pgbench latency percentiles are derived from pgbench per-transaction logs.",
             "Rows processed are estimates based on each benchmark's LIMIT or batch size.",
             "Memory and CPU fields are approximate process measurements from ps/pgrep.",
-            "All 5 query benchmarks run in every mode; TPS delta vs baseline shows extension overhead for hot-range and cold-range reads.",
-            "flush_table writes _seq-keyed parquet segments and manifest.json. "
-            "Hot data is NOT pruned from the heap automatically; cold query benchmarks "
-            "measure the extension's catalog-check overhead, not parquet-served reads.",
-            "DML benchmarks are marked N/A for cold-only mode (archive tier is read-only by design).",
-            "Size snapshots are taken after setup (seed + indexes + flush + compaction) and before workloads, "
-            "so all modes compare on equal footing (same seed rows).",
+            "Baseline and extension hot-only run the full pgbench workload suite.",
+            "Extension hot+cold and cold-only are storage-focused modes: the harness verifies flush output, "
+            "prunes flushed hot rows for the size snapshot, and skips long pgbench workloads.",
+            "Cold storage snapshots reflect benchmark-managed prune-after-flush, so they measure storage savings "
+            "instead of catalog-check overhead on still-hot rows.",
+            "DML benchmarks are marked N/A for cold-only mode when workloads are enabled; in storage-only modes they are not run.",
+            "Size snapshots are taken after setup and compaction. For flushed storage modes this means "
+            "seed + indexes + flush + verified prune + compaction.",
             "Hot heap/table/index sizes come from PostgreSQL pg_relation_size, pg_table_size, and pg_indexes_size; "
             "only cold storage size comes from the local cold-storage directory.",
             "GitHub Actions results are useful for trend checks, not absolute machine performance numbers.",
@@ -235,7 +236,7 @@ def load_size_stats(results_dir: Path) -> list[dict[str, Any]]:
             if isinstance(payload, dict):
                 payload.setdefault(
                     "measurement_note",
-                    "Size snapshot taken after setup (seed + indexes + flush) but before workloads.",
+                    "Size snapshot taken after setup. Flushed storage modes include verified prune + compaction before the snapshot.",
                 )
                 sizes.append(payload)
     return sizes
@@ -320,7 +321,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
             "",
             "## Size Comparison",
             "",
-            "*(snapshot taken after setup, compaction, and flush; before workloads)*",
+            "*(snapshot taken after setup and compaction; flushed storage modes include verified prune-before-snapshot)*",
             "",
             "| Mode | Hot heap (PG) | Hot table total (PG) | Hot indexes (PG) | Cold storage | Dead tuples est. | Extension metadata |",
             "|---|---:|---:|---:|---:|---:|---:|",

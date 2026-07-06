@@ -7,6 +7,7 @@ mod cluster;
 mod db;
 mod log;
 mod sql;
+mod table_status;
 
 pub use catalog::{
     active_job_count, assert_catalog_has_active_schema, assert_change_log_mirror_exists,
@@ -22,4 +23,7 @@ pub use log::{log, log_always, log_step, log_step_always, verbose_enabled};
 pub use sql::{
     assert_index_scan, explain, explain_with_seqscan_disabled, relation_size, row_count,
     RelationSize,
+};
+pub use table_status::{
+    assert_cold_rows_at_least, assert_flush_pruned_hot_storage, table_status, TableStorageStatus,
 };

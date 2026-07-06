@@ -29,6 +29,7 @@ pub const FLUSH_SQL_FUNCTIONS: &[&str] = &[
     "koldstore.flush_table",
     "koldstore.flush_pending",
     "koldstore.recover_segments",
+    "koldstore.table_status",
 ];
 
 /// Operational maintenance command.
@@ -414,24 +415,82 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
     }
 }
 
-/// Plans `koldstore.table_status`.
+/// Plans `koldstore.table_status` for one managed table and mirror relation.
+///
+/// The caller supplies validated quoted table and mirror relation names. The
+/// returned JSON includes hot heap, mirror, and cold row accounting used by
+/// storage verification tests and operators.
 ///
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
 pub fn table_status_plan(
-    table_name: TableName,
+    table: &QualifiedTableName,
+    mirror: &QualifiedTableName,
     scope_key: Option<ScopeKey>,
 ) -> Result<TableStatusPlan, OpsError> {
-    let statement = SqlStatement::read(
+    let scope_key = scope_key.as_ref().map(ScopeKey::as_str).unwrap_or("");
+    let statement = SqlStatement::read_with_params(
         "table status",
-        "SELECT s.table_oid, m.sync_state AS manifest_state, COALESCE(m.segment_count, 0) AS cold_segment_count, COALESCE(j.pending_jobs, 0) AS pending_jobs, s.storage_id AS storage_binding, m.last_error FROM koldstore.schemas s LEFT JOIN koldstore.manifest m ON m.table_oid = s.table_oid AND ($2::text IS NULL OR m.scope_key = $2) LEFT JOIN LATERAL (SELECT count(*) AS pending_jobs FROM koldstore.jobs j WHERE j.table_oid = s.table_oid AND j.status IN ('pending', 'running') AND ($2::text IS NULL OR j.scope_key = $2)) j ON true WHERE s.table_oid = $1::regclass::oid",
+        &format!(
+            r#"
+SELECT jsonb_build_object(
+    'hot_rows', (SELECT count(*)::bigint FROM ONLY {table}),
+    'mirror_rows', (SELECT count(*)::bigint FROM {mirror}),
+    'cold_row_count', COALESCE((
+        SELECT sum(cs.row_count)::bigint
+        FROM koldstore.cold_segments cs
+        WHERE cs.table_oid = $1::regclass::oid
+          AND cs.status = 'active'
+          AND ($2::text = '' OR cs.scope_key = $2)
+    ), 0),
+    'cold_segment_count', COALESCE((
+        SELECT count(*)::bigint
+        FROM koldstore.cold_segments cs
+        WHERE cs.table_oid = $1::regclass::oid
+          AND cs.status = 'active'
+          AND ($2::text = '' OR cs.scope_key = $2)
+    ), 0),
+    'heap_size_bytes', pg_relation_size($1::regclass),
+    'table_size_bytes', pg_table_size($1::regclass),
+    'index_size_bytes', pg_indexes_size($1::regclass),
+    'manifest_state', m.sync_state,
+    'manifest_max_seq', COALESCE(m.max_seq, 0),
+    'pending_jobs', COALESCE(j.pending_jobs, 0),
+    'storage_binding', s.storage_id::text,
+    'last_error', m.last_error
+)::text
+FROM koldstore.schemas s
+LEFT JOIN koldstore.manifest m
+  ON m.table_oid = s.table_oid
+ AND ($2::text = '' OR m.scope_key = $2)
+LEFT JOIN LATERAL (
+    SELECT count(*)::bigint AS pending_jobs
+    FROM koldstore.jobs j
+    WHERE j.table_oid = s.table_oid
+      AND j.status IN ('pending', 'running')
+      AND ($2::text = '' OR j.scope_key = $2)
+) j ON true
+WHERE s.table_oid = $1::regclass::oid
+  AND s.active
+LIMIT 1
+"#,
+            table = table.quoted(),
+            mirror = mirror.quoted(),
+        ),
+        [SqlParamType::Oid, SqlParamType::Text],
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 
     Ok(TableStatusPlan {
-        table_name,
-        scope_key,
+        table_name: table
+            .as_table_name()
+            .map_err(|error| OpsError::Sql(error.to_string()))?,
+        scope_key: if scope_key.is_empty() {
+            None
+        } else {
+            Some(ScopeKey::new(scope_key).map_err(|error| OpsError::Sql(error.to_string()))?)
+        },
         statement,
     })
 }

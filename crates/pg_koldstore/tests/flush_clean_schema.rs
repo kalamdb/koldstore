@@ -92,6 +92,11 @@ fn cleanup_removes_only_selected_mirror_rows_after_manifest_commit() {
         .statement
         .sql
         .contains("mirror.\"seq\" = selected.\"seq\""));
+    assert!(plan.statement.sql.contains("removed_mirror AS"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("USING selected, removed_mirror"));
     assert!(plan
         .statement
         .sql
