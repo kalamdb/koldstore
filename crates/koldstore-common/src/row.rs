@@ -1,6 +1,5 @@
 //! Hot, cold, tombstone, mirror, and latest-state change models.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -216,8 +215,6 @@ pub struct MirrorChange {
     pub operation: MirrorOperation,
     /// Row/effect sequence.
     pub seq: SeqId,
-    /// Change timestamp.
-    pub changed_at: DateTime<Utc>,
     /// Delete/tombstone marker.
     pub deleted: bool,
     /// Optional live row payload.

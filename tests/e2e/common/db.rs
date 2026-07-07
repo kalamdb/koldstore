@@ -137,22 +137,20 @@ impl TestDb {
         })
     }
 
-    /// Migrates a table as a shared managed table using the fixture storage.
+    /// Manages a table as a shared managed table using the fixture storage.
     ///
     /// # Errors
     ///
-    /// Returns an error when migration fails.
-    pub async fn migrate_shared(&self, relation: &str, order_column: &str) -> Result<()> {
+    /// Returns an error when management fails.
+    pub async fn manage_shared(&self, relation: &str, order_column: &str) -> Result<()> {
         self.client
             .execute(
                 r#"
-                SELECT koldstore.migrate_table(
-                  $1::text::regclass,
-                  'shared',
-                  $2,
-                  NULL,
-                  NULL,
-                  $3
+                SELECT koldstore.manage_table(
+                  table_name     => $1::text::regclass,
+                  storage        => $2,
+                  hot_row_limit  => NULL,
+                  order_column   => $3
                 )
                 "#,
                 &[&relation, &self.storage_name, &order_column],
@@ -171,22 +169,22 @@ impl TestDb {
         Ok(())
     }
 
-    /// Migrates a table as a user-scoped managed table.
+    /// Manages a table as a user-scoped managed table.
     ///
     /// # Errors
     ///
-    /// Returns an error when migration fails.
-    pub async fn migrate_user_scoped(&self, relation: &str, scope_column: &str) -> Result<()> {
+    /// Returns an error when management fails.
+    pub async fn manage_user_scoped(&self, relation: &str, scope_column: &str) -> Result<()> {
         self.client
             .execute(
                 r#"
-                SELECT koldstore.migrate_table(
-                  $1::text::regclass,
-                  'user',
-                  $2,
-                  NULL,
-                  $3,
-                  'id'
+                SELECT koldstore.manage_table(
+                  table_name     => $1::text::regclass,
+                  storage        => $2,
+                  hot_row_limit  => NULL,
+                  table_type     => 'user',
+                  scope_column   => $3,
+                  order_column   => 'id'
                 )
                 "#,
                 &[&relation, &self.storage_name, &scope_column],

@@ -20,7 +20,6 @@ pub fn plan_upsert_mirror_row(
     pk_value_expressions: &[String],
     seq_expression: &str,
     operation: MirrorOperation,
-    changed_at_expression: &str,
     commit_lsn_expression: &str,
 ) -> MirrorResult<String> {
     if primary_key.is_empty() {
@@ -40,12 +39,11 @@ pub fn plan_upsert_mirror_row(
     values.extend([
         seq_expression.to_string(),
         operation.code().to_string(),
-        changed_at_expression.to_string(),
         commit_lsn_expression.to_string(),
     ]);
 
     Ok(format!(
-        "INSERT INTO {mirror} ({insert_columns})\n        VALUES ({values})\n        ON CONFLICT ({conflict_columns}) DO UPDATE\n        SET \"seq\" = EXCLUDED.\"seq\",\n            \"op\" = EXCLUDED.\"op\",\n            \"changed_at\" = EXCLUDED.\"changed_at\",\n            \"commit_lsn\" = EXCLUDED.\"commit_lsn\";",
+        "INSERT INTO {mirror} ({insert_columns})\n        VALUES ({values})\n        ON CONFLICT ({conflict_columns}) DO UPDATE\n        SET \"seq\" = EXCLUDED.\"seq\",\n            \"op\" = EXCLUDED.\"op\",\n            \"commit_lsn\" = EXCLUDED.\"commit_lsn\";",
         mirror = mirror_table.quoted(),
         insert_columns = insert_columns.join(", "),
         values = values.join(", "),

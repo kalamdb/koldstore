@@ -5,12 +5,16 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
+use koldstore_common::{dedupe_nonblank, ManageTableOptions};
+
 use koldstore_common::SqlStatement;
 use koldstore_common::{
     PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
     PrimaryKeyShape,
 };
-use koldstore_schema::{MirrorInitializationState, SchemaColumn, TypeMatrix};
+use koldstore_schema::{
+    normalize_type_name, MirrorInitializationState, SchemaColumn, TypeMatrix,
+};
 
 /// Initial schema version for a managed table.
 pub const INITIAL_SCHEMA_VERSION: u32 = 1;
@@ -247,10 +251,8 @@ pub struct RegistrationMetadata {
     pub indexed_columns: Vec<String>,
     /// Captured type support/coercion metadata.
     pub type_matrix: Value,
-    /// Optional flush policy.
-    pub flush_policy: Option<String>,
-    /// Additional migration options.
-    pub options: Value,
+    /// Additional manage-table options.
+    pub options: ManageTableOptions,
 }
 
 /// Prepared JSON metadata for `koldstore.schemas`.
@@ -382,16 +384,7 @@ impl RegistrationMetadata {
     pub fn prepare(&self) -> RegistryResult<PreparedRegistrationMetadata> {
         self.validate()?;
 
-        let mut options = self.options.clone();
-        if let Some(flush_policy) = self.flush_policy.as_deref().map(str::trim) {
-            if !flush_policy.is_empty() {
-                let object = options_object_mut(&mut options)?;
-                object.insert(
-                    "flush_policy".to_string(),
-                    Value::String(flush_policy.to_string()),
-                );
-            }
-        }
+        let mut options = self.options.to_value();
         let cold_metadata = cold_metadata_config(&self.primary_key, &self.indexed_columns);
         if !cold_metadata.is_empty() {
             let object = options_object_mut(&mut options)?;
@@ -445,7 +438,15 @@ impl RegistrationMetadata {
 pub fn schema_columns_from_catalog(columns: &[crate::order::CatalogColumn]) -> Vec<SchemaColumn> {
     columns
         .iter()
-        .map(|column| SchemaColumn::app(column.name.clone(), column.type_name.clone(), true))
+        .map(|column| {
+            SchemaColumn::typed(
+                column.name.clone(),
+                column.pg_type,
+                column.catalog_type_name(),
+                true,
+                false,
+            )
+        })
         .collect()
 }
 
@@ -630,17 +631,18 @@ pub fn capture_type_matrix(columns: &[SchemaColumn]) -> Value {
     let columns = columns
         .iter()
         .map(|column| {
-            let support = matrix.support_for(canonical_type_name(&column.type_name));
+            let type_name = column.catalog_type_name();
+            let support = matrix.support_for(&normalize_type_name(type_name));
             match support.diagnostic {
                 Some(diagnostic) => serde_json::json!({
                     "name": column.name,
-                    "type_name": column.type_name,
+                    "type_name": type_name,
                     "supported": support.supported,
                     "diagnostic": diagnostic,
                 }),
                 None => serde_json::json!({
                     "name": column.name,
-                    "type_name": column.type_name,
+                    "type_name": type_name,
                     "supported": support.supported,
                 }),
             }
@@ -718,30 +720,6 @@ fn options_object_mut(options: &mut Value) -> RegistryResult<&mut Map<String, Va
     options
         .as_object_mut()
         .ok_or_else(|| RegistryError::Spi("registry options must be a JSON object".to_string()))
-}
-
-fn dedupe_nonblank<'a>(values: impl Iterator<Item = &'a str>) -> Vec<String> {
-    values.fold(Vec::new(), |mut columns, value| {
-        let column = value.trim();
-        if !column.is_empty() && !columns.iter().any(|existing| existing == column) {
-            columns.push(column.to_string());
-        }
-        columns
-    })
-}
-
-fn canonical_type_name(type_name: &str) -> &str {
-    match type_name {
-        "boolean" => "bool",
-        "smallint" => "int2",
-        "integer" => "int4",
-        "bigint" => "int8",
-        "real" => "float4",
-        "double precision" => "float8",
-        "character varying" => "varchar",
-        "timestamp with time zone" => "timestamptz",
-        other => other,
-    }
 }
 
 /// Returns the catalog spelling for a mirror initialization state.

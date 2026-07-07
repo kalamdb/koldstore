@@ -25,12 +25,12 @@ pub const TABLE_STATUS_FIELDS: &[&str] = &[
 
 /// SQL-callable flush API function names exposed through pgrx.
 pub const FLUSH_SQL_FUNCTIONS: &[&str] = &[
-    "koldstore.set_flush_policy",
     "koldstore.enqueue_flush_job",
     "koldstore.flush_table",
-    "koldstore.flush_pending",
     "koldstore.recover_segments",
-    "koldstore.table_status",
+    "koldstore.describe_table",
+    "koldstore.manage_table",
+    "koldstore.unmanage_table",
 ];
 
 /// Operational maintenance command.
@@ -213,34 +213,6 @@ pub struct MirrorFlushSelectionPlan {
     pub statement: SqlStatement,
 }
 
-/// Flush policy update request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SetFlushPolicyRequest {
-    /// Table name.
-    pub table_name: TableName,
-    /// New flush policy, or `None` to disable automatic flush.
-    pub flush_policy: Option<String>,
-}
-
-/// Flush-pending request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlushPendingRequest {
-    /// Maximum pending scopes to flush.
-    pub limit: u32,
-}
-
-/// Creates a flush policy update request.
-#[must_use]
-pub const fn set_flush_policy_request(
-    table_name: TableName,
-    flush_policy: Option<String>,
-) -> SetFlushPolicyRequest {
-    SetFlushPolicyRequest {
-        table_name,
-        flush_policy,
-    }
-}
-
 /// Creates a flush request.
 #[must_use]
 pub const fn flush_table_request(
@@ -253,12 +225,6 @@ pub const fn flush_table_request(
         scope_key,
         force,
     }
-}
-
-/// Creates a flush-pending request.
-#[must_use]
-pub const fn flush_pending_request(limit: u32) -> FlushPendingRequest {
-    FlushPendingRequest { limit }
 }
 
 /// Plans enqueueing a flush job for a table/scope and optional `_seq` watermark.
@@ -360,10 +326,6 @@ pub fn plan_mirror_flush_selection(
             "mirror.{} AS \"op\"",
             koldstore_mirror::MirrorColumn::Op.quoted_name()
         ),
-        format!(
-            "mirror.{} AS \"changed_at\"",
-            koldstore_mirror::MirrorColumn::ChangedAt.quoted_name()
-        ),
         "(mirror.\"op\" = 3) AS deleted".to_string(),
     ]);
     let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];
@@ -418,7 +380,7 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
     }
 }
 
-/// Plans `koldstore.table_status` for one managed table and mirror relation.
+/// Plans `koldstore.describe_table` for one managed table and mirror relation.
 ///
 /// The caller supplies validated quoted table and mirror relation names. The
 /// returned JSON includes hot heap, mirror, and cold row accounting used by
@@ -427,7 +389,7 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
-pub fn table_status_plan(
+pub fn describe_table_plan(
     table: &QualifiedTableName,
     mirror: &QualifiedTableName,
     scope_key: Option<ScopeKey>,

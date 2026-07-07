@@ -153,8 +153,8 @@ pub struct MigrationBackfillPayload {
     pub order_source: OrderingSource,
     /// Bounded rows per batch.
     pub batch_size: MigrationBatchSize,
-    /// Optional periodic flush policy activated after migration.
-    pub flush_policy: Option<String>,
+    /// Optional periodic flush hot-row limit activated after migration.
+    pub hot_row_limit: Option<u64>,
     /// Rows processed so far. The SQL job row is authoritative; this is for
     /// operator-readable payload snapshots.
     pub processed_rows: u64,
@@ -184,7 +184,7 @@ impl MigrationBackfillJobRequest {
         scope_column: Option<String>,
         ordering: &MigrationOrdering,
         batch_size: MigrationBatchSize,
-        flush_policy: Option<String>,
+        hot_row_limit: Option<u64>,
     ) -> Self {
         Self {
             job_id,
@@ -198,7 +198,7 @@ impl MigrationBackfillJobRequest {
                 order_column: ordering.column.clone(),
                 order_source: ordering.source,
                 batch_size,
-                flush_policy,
+                hot_row_limit,
                 processed_rows: 0,
             },
         }

@@ -33,7 +33,7 @@ fn mirror_backed_flush_selection_reads_mirror_and_base_rows_without_system_colum
     assert!(plan.statement.sql.contains("mirror.\"id\" = hot.\"id\""));
     assert!(plan.statement.sql.contains("mirror.\"seq\" <= $1::bigint"));
     assert!(plan.statement.sql.contains("mirror.\"op\""));
-    assert!(plan.statement.sql.contains("mirror.\"changed_at\""));
+    assert!(!plan.statement.sql.contains("mirror.\"changed_at\""));
     assert!(plan
         .statement
         .sql

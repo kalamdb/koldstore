@@ -1,5 +1,6 @@
 //! Migration request parsing and shared migration error types.
 
+use koldstore_common::ManageTableOptions;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -46,15 +47,13 @@ pub struct MigrateTableRequest {
     pub table_type: String,
     /// Storage registration name.
     pub storage_name: String,
-    /// Optional flush policy.
-    pub flush_policy: Option<String>,
     /// Optional app scope column.
     pub scope_column: Option<String>,
-    /// Additional options.
-    pub options: serde_json::Value,
+    /// Additional manage-table options.
+    pub options: ManageTableOptions,
 }
 
-/// Demigration request from `koldstore.demigrate_table`.
+/// Demigration request from `koldstore.unmanage_table`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DemigrateTableRequest {
     /// PostgreSQL relation name.
@@ -77,6 +76,18 @@ impl DemigrateTableRequest {
 }
 
 impl MigrateTableRequest {
+    /// Returns whether automatic flush is configured through schema options.
+    #[must_use]
+    pub fn flush_enabled(&self) -> bool {
+        self.options.flush_enabled()
+    }
+
+    /// Returns the configured hot-row limit when flush is enabled.
+    #[must_use]
+    pub fn hot_row_limit(&self) -> Option<u64> {
+        self.options.hot_row_limit()
+    }
+
     /// Returns the effective user scope column.
     #[must_use]
     pub fn effective_scope_column(&self) -> Option<&str> {

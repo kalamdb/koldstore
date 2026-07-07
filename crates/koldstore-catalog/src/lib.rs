@@ -14,4 +14,5 @@ pub mod table_meta;
 pub use cache::{decode_managed_table_snapshot, ManagedTableSnapshot, ManagedTableSnapshotCache};
 pub use cold_pk_hints::{ColdPkHint, HintKind, PkLookup};
 pub use cold_segments::{ColdSegment, SegmentVisibility};
-pub use table_meta::{FkPolicyDecision, FlushPolicy, ManagedTableMeta};
+pub use koldstore_common::FlushPolicy;
+pub use table_meta::{FkPolicyDecision, ManagedTableMeta};

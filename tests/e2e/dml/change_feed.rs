@@ -2,7 +2,6 @@
 mod common;
 
 use anyhow::Result;
-use chrono::{TimeZone, Utc};
 use koldstore_common::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
 use koldstore_merge::events;
 use serde_json::json;
@@ -14,7 +13,6 @@ fn change(id: i64, seq: i64, operation: MirrorOperation, source: ChangeSource) -
         pk_json: json!({"id": id}),
         operation,
         seq: SeqId::new(seq).unwrap(),
-        changed_at: Utc.timestamp_opt(seq, 0).unwrap(),
         deleted: operation.is_delete(),
         row_image_json: (!operation.is_delete()).then(|| json!({"id": id, "seq": seq})),
         source,
@@ -55,7 +53,7 @@ async fn change_feed_reads_table_specific_mirror_without_row_events_on_pgrx() ->
         let table = db
             .create_indexed_items_table("change_feed_items", 2)
             .await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
 
         let mirror = format!("koldstore.{}__cl", table.table_name);
         let rows = db

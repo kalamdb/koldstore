@@ -4,6 +4,15 @@
 
 **Status: early development - not production ready.** The extension builds and the core flow works, but recovery, export/import, and background flush behavior are still being hardened.
 
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.96%2B-orange.svg" alt="Rust 1.96+" /></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
+  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml"><img src="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kalamdb/pg-kalam/pg-koldstore-ci.yml?branch=main&amp;label=tests" alt="Tests" /></a>
+  <a href="https://github.com/kalamdb/pg-kalam/releases"><img src="https://img.shields.io/github/v/release/kalamdb/pg-kalam?display_name=tag&amp;label=extension" alt="Extension Version" /></a>
+  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/release.yml"><img src="https://github.com/kalamdb/pg-kalam/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
+</p>
+
 `pg-koldstore` is a PostgreSQL extension named `koldstore`. You create a normal heap table, migrate it into KoldStore management, and keep querying that table with regular SQL. KoldStore keeps recent rows in PostgreSQL and writes flushed rows to Parquet files on filesystem, S3/MinIO, GCS, or Azure Blob storage.
 
 Reads use a PostgreSQL custom scan named `KoldMergeScan`. It reads hot heap rows, reads cold Parquet segments when needed, and merges by primary key so the newest visible row wins.
@@ -25,7 +34,7 @@ Parquet segment + manifest.json
 SELECT from the original table -> Custom Scan (KoldMergeScan)
 ```
 
-The user table stays clean. migration creates a companion latest-state mirror table in the `koldstore` schema. For `app.messages`, that mirror is `koldstore.messages__cl`.
+The user table stays clean. Management creates a companion latest-state mirror table in the `koldstore` schema. For `app.messages`, that mirror is `koldstore.messages__cl`.
 
 The mirror stores one row per primary key with KoldStore metadata:
 
@@ -33,9 +42,8 @@ The mirror stores one row per primary key with KoldStore metadata:
 | Column              | Purpose                                                    |
 | ------------------- | ---------------------------------------------------------- |
 | primary key columns | Same shape as the source table primary key                 |
-| `seq`               | Latest-state conflict-free sequence used for flush cutoffs |
+| `seq`               | Latest-state conflict-free sequence used for flush cutoffs and change cursors |
 | `op`                | `1 = insert`, `2 = update`, `3 = delete`                   |
-| `changed_at`        | Change timestamp                                           |
 | `commit_lsn`        | Optional PostgreSQL LSN for diagnostics                    |
 
 
@@ -75,30 +83,30 @@ SELECT
 FROM generate_series(1, 1012) AS gs;
 ```
 
-Migrate the existing table:
+Manage the existing table:
 
 ```sql
-SELECT koldstore.migrate_table(
-  'app.messages'::regclass,
-  'shared',
-  'local-dev',
-  'rows:1000',
-  NULL,
-  'id'
-) AS migrate_job_id;
+SELECT koldstore.manage_table(
+  table_name        => 'app.messages',
+  storage           => 'local-dev',
+  hot_row_limit     => 1000,
+  min_flush_rows    => 1,
+  max_rows_per_file => 500,
+  order_column      => 'id'
+) AS manage_job_id;
 ```
 
-`rows:1000` keeps at most 1000 primary keys hot. When the mirror tracks more than 1000 keys, `koldstore.flush_table` moves only the oldest excess rows by mirror `seq` to cold storage.
+`hot_row_limit` keeps at most 1000 primary keys hot. When the mirror tracks more than 1000 keys, `koldstore.flush_table` moves only the oldest excess rows by mirror `seq` to cold storage. The low `min_flush_rows` keeps this small tutorial predictable; production tables usually use `1000` or higher.
 
 Sample result:
 
 ```text
-            migrate_job_id            
+            manage_job_id            
 --------------------------------------
  2c2bcf44-d6ea-4b3e-b62c-cfaf18ad5225
 ```
 
-Migration runs inline for this table. The returned UUID is the `migrate_backfill` job id in `koldstore.jobs`.
+Management runs inline for this table. The returned UUID is the `migrate_backfill` job id in `koldstore.jobs`.
 
 The application table is still the table you created:
 
@@ -117,30 +125,30 @@ LIMIT 3;
   3 |          0 | message-000003
 ```
 
-Migration also creates `koldstore.messages__cl`, a latest-state mirror with one metadata row per primary key. It stores the key columns plus `seq`, `op`, and `changed_at`; it does not duplicate full application row payloads.
+Management also creates `koldstore.messages__cl`, a latest-state mirror with one metadata row per primary key. It stores the key columns plus `seq` and `op`; it does not duplicate full application row payloads.
 
 ```sql
-SELECT id, seq, op, changed_at
+SELECT id, seq, op
 FROM koldstore.messages__cl
 ORDER BY id
 LIMIT 3;
 ```
 
 ```text
- id |        seq         | op |          changed_at
-----+--------------------+----+-------------------------------
-  1 | 332882280164896768 |  1 | 2026-07-07 16:55:20.217928+03
-  2 | 332882280169091072 |  1 | 2026-07-07 16:55:20.217928+03
-  3 | 332882280173285376 |  1 | 2026-07-07 16:55:20.217928+03
+ id |        seq         | op
+----+--------------------+----
+  1 | 332882280164896768 |  1
+  2 | 332882280169091072 |  1
+  3 | 332882280173285376 |  1
 ```
 
-With 1012 keys and `rows:1000`, all rows are still hot immediately after migration. Nothing is cold yet:
+With 1012 keys and `hot_row_limit => 1000`, all rows are still hot immediately after management. Nothing is cold yet:
 
 ```sql
 SELECT
-  (koldstore.table_status('app.messages'::regclass, NULL::text)::jsonb->>'hot_rows')::int AS hot_rows,
-  (koldstore.table_status('app.messages'::regclass, NULL::text)::jsonb->>'mirror_rows')::int AS mirror_rows,
-  (koldstore.table_status('app.messages'::regclass, NULL::text)::jsonb->>'cold_row_count')::int AS cold_row_count;
+  (koldstore.describe_table(table_name => 'app.messages')::jsonb->>'hot_rows')::int AS hot_rows,
+  (koldstore.describe_table(table_name => 'app.messages')::jsonb->>'mirror_rows')::int AS mirror_rows,
+  (koldstore.describe_table(table_name => 'app.messages')::jsonb->>'cold_row_count')::int AS cold_row_count;
 ```
 
 ```text
@@ -153,10 +161,10 @@ SELECT
 
 ## Flush To Cold
 
-`koldstore.flush_table` evaluates the configured flush policy, runs the flush inline, and returns the flush job id. With `rows:1000` and 1012 tracked keys, only the 12 oldest mirror entries move to cold storage; the newest 1000 keys stay hot.
+`koldstore.flush_table` evaluates the configured flush policy, runs the flush inline, and returns the flush job id. With `hot_row_limit => 1000` and 1012 tracked keys, only the 12 oldest mirror entries move to cold storage; the newest 1000 keys stay hot.
 
 ```sql
-SELECT koldstore.flush_table('app.messages'::regclass) AS flush_job_id;
+SELECT koldstore.flush_table(table_name => 'app.messages') AS flush_job_id;
 ```
 
 ```text
@@ -199,12 +207,12 @@ Cold files are written below the storage root using the table namespace and name
 
 
 
-## View Table And Migration Stats
+## View Table And Management Stats
 
-Use `koldstore.table_status` to see what is hot, what is cold, and whether anything is still pending.
+Use `koldstore.describe_table` to see what is hot, what is cold, and whether anything is still pending.
 
 ```sql
-SELECT jsonb_pretty(koldstore.table_status('app.messages'::regclass, NULL::text));
+SELECT jsonb_pretty(koldstore.describe_table(table_name => 'app.messages'));
 ```
 
 Sample result after the flush:
@@ -318,7 +326,7 @@ WHERE title = 'message-000007';
 
 ## Shared And User Tables
 
-`migrate_table` supports two table types.
+`manage_table` supports two table types.
 
 
 | Type     | Use when                                        | Cold layout                          |
@@ -330,13 +338,13 @@ WHERE title = 'message-000007';
 User-scoped tables require a `scope_column` and a session `koldstore.user_id` value. Reads and writes fail closed when the scope is missing or mismatched.
 
 ```sql
-SELECT koldstore.migrate_table(
-  'app.user_messages'::regclass,
-  'user',
-  'local-dev',
-  'rows:1000',
-  'user_id',
-  'id'
+SELECT koldstore.manage_table(
+  table_name     => 'app.user_messages',
+  storage        => 'local-dev',
+  hot_row_limit  => 1000,
+  table_type     => 'user',
+  scope_column   => 'user_id',
+  order_column   => 'id'
 );
 
 SET koldstore.user_id = 'user-123';

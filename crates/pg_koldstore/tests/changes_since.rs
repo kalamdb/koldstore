@@ -1,4 +1,3 @@
-use chrono::{TimeZone, Utc};
 use koldstore_common::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
 use koldstore_merge::events;
 use pg_koldstore::spi::SqlParamType;
@@ -18,7 +17,6 @@ fn change(
         pk_json: json!({"id": id}),
         operation,
         seq: SeqId::new(seq).unwrap(),
-        changed_at: Utc.timestamp_opt(seq, 0).unwrap(),
         deleted: operation.is_delete(),
         row_image_json: (!operation.is_delete()).then(|| json!({"id": id, "body": seq})),
         source,

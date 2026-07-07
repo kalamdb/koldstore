@@ -175,7 +175,7 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
             SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
          INSERT INTO bench.koldstore_items
             SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
-         SELECT koldstore.migrate_table('bench.koldstore_items'::regclass, 'shared', 'bench-local', NULL, NULL, 'id');",
+         SELECT koldstore.manage_table(table_name => 'bench.koldstore_items'::regclass, storage => 'bench-local', hot_row_limit => NULL, order_column => 'id');",
         rows = config.rows
     );
     client.batch_execute(&seed_sql).await?;

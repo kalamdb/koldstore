@@ -121,7 +121,6 @@ fn changes_since_orders_by_seq_and_detects_retention_gap() {
         pk_json: serde_json::json!({"id": seq}),
         operation: MirrorOperation::Update,
         seq: SeqId::new(seq).unwrap(),
-        changed_at: chrono::Utc::now(),
         deleted: false,
         row_image_json: None,
         source: ChangeSource::HotMirror,

@@ -9,14 +9,12 @@ SELECT koldstore.register_storage(
 );
 
 SELECT *
-FROM koldstore.migrate_table(
-  'bench_events'::regclass,
-  'shared',
-  'bench-local',
-  NULL,
-  NULL,
-  'created_at',
-  :'KOLDSTORE_BENCH_COMPRESSION'
+FROM koldstore.manage_table(
+  table_name     => 'bench_events'::regclass,
+  storage        => 'bench-local',
+  hot_row_limit  => NULL,
+  order_column   => 'created_at',
+  compression    => :'KOLDSTORE_BENCH_COMPRESSION'
 );
 
 -- Benchmark note:

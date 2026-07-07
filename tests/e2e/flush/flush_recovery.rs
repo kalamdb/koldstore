@@ -47,7 +47,7 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "flush_recovery").await?;
         let table = db.create_indexed_items_table("recovery_items", 24).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
 
         let manifest_row = db

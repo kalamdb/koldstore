@@ -102,7 +102,7 @@ pub async fn setup_koldstore_items_with_mixed_storage(
     let table = db
         .create_indexed_items_table(table_name, COLD_ROW_COUNT)
         .await?;
-    db.migrate_shared(&table.relation, "id").await?;
+    db.manage_shared(&table.relation, "id").await?;
     db.flush_table(&table.relation).await?;
     common::assert_flush_pruned_hot_storage(&db.client, &table.relation, COLD_ROW_COUNT).await?;
 
@@ -119,7 +119,7 @@ pub async fn setup_koldstore_items_with_mixed_storage(
         ))
         .await?;
 
-    let status = common::table_status(&db.client, &table.relation).await?;
+    let status = common::describe_table(&db.client, &table.relation).await?;
     anyhow::ensure!(
         status.hot_rows == 2 && status.cold_row_count >= COLD_ROW_COUNT,
         "expected mixed hot/cold items fixture, got {:?}",
@@ -159,7 +159,7 @@ pub async fn setup_koldstore_order_lines_with_mixed_storage(
         ))
         .await?;
 
-    db.migrate_shared(&relation, "id").await?;
+    db.manage_shared(&relation, "id").await?;
     db.flush_table(&relation).await?;
     common::assert_flush_pruned_hot_storage(&db.client, &relation, COLD_ROW_COUNT).await?;
 
@@ -176,7 +176,7 @@ pub async fn setup_koldstore_order_lines_with_mixed_storage(
         ))
         .await?;
 
-    let status = common::table_status(&db.client, &relation).await?;
+    let status = common::describe_table(&db.client, &relation).await?;
     anyhow::ensure!(
         status.hot_rows == 2 && status.cold_row_count >= COLD_ROW_COUNT,
         "expected mixed hot/cold order-lines fixture, got {:?}",

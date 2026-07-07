@@ -82,11 +82,11 @@ fn populated_table_initialization_inserts_existing_primary_keys_without_touching
     assert!(plan
         .statement
         .sql
-        .contains("(\"id\", \"seq\", \"op\", \"changed_at\", \"commit_lsn\")"));
+        .contains("(\"id\", \"seq\", \"op\", \"commit_lsn\")"));
     assert!(plan
         .statement
         .sql
-        .contains("SELECT \"id\", SNOWFLAKE_ID(), 1, now(), pg_current_wal_lsn()"));
+        .contains("SELECT \"id\", SNOWFLAKE_ID(), 1, pg_current_wal_lsn()"));
     assert!(plan
         .statement
         .sql
@@ -159,7 +159,7 @@ fn mirror_initialization_job_starts_in_capturing_phase_not_system_column_phase()
         None,
         &ordering(),
         MigrationBatchSize::new(10_000).unwrap(),
-        Some("rows:1000".to_string()),
+        Some(1_000),
     );
     let plan = enqueue_migration_backfill_job_plan(request).unwrap();
 

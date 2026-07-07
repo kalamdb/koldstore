@@ -56,14 +56,14 @@ async fn demigrate_cold_artifact_options_execute_through_pgrx() -> Result<()> {
         let table = db
             .create_indexed_items_table("demigrate_artifact_items", 8)
             .await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
         assert_eq!(db.flush_table(&table.relation).await?, 8);
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
 
         let invalid = db
             .client
             .query_one(
-                "SELECT koldstore.demigrate_table($1::text::regclass, false, true)",
+                "SELECT koldstore.unmanage_table($1::text::regclass, false, true)",
                 &[&table.relation],
             )
             .await
@@ -80,7 +80,7 @@ async fn demigrate_cold_artifact_options_execute_through_pgrx() -> Result<()> {
         let deactivated = db
             .client
             .query_one(
-                "SELECT koldstore.demigrate_table($1::text::regclass, true, true)",
+                "SELECT koldstore.unmanage_table($1::text::regclass, true, true)",
                 &[&table.relation],
             )
             .await?

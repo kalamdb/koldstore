@@ -1,5 +1,6 @@
 use koldstore_common::{
-    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
+    ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    PrimaryKeyColumnShape, PrimaryKeyShape,
 };
 use koldstore_migrate::register::{
     cold_metadata_config, plan_schema_registry_insert_with_id, IndexedColumnSource,
@@ -42,8 +43,10 @@ fn metadata() -> RegistrationMetadata {
         ],
         indexed_columns: vec!["id".to_string(), "created_at".to_string()],
         type_matrix: serde_json::json!({"postgres": 16}),
-        flush_policy: Some("rows:1000,interval:60".to_string()),
-        options: serde_json::json!({"compression": "zstd"}),
+        options: ManageTableOptions::from_value(&serde_json::json!({
+            "compression": "zstd",
+            "hot_row_limit": 1000
+        })),
     }
 }
 
@@ -77,7 +80,7 @@ fn schema_registry_plan_captures_greenfield_metadata() {
         plan.metadata.options,
         serde_json::json!({
             "compression": "zstd",
-            "flush_policy": "rows:1000,interval:60",
+            "hot_row_limit": 1000,
             "cold_metadata": {
                 "stats_columns": ["id", "created_at"],
                 "bloom_filter_columns": ["id", "created_at"],
@@ -228,7 +231,7 @@ fn schema_registry_plan_uses_parameterized_upsert_sql() {
             "missing placeholder {placeholder}"
         );
     }
-    for literal in ["rows:1000", "created_at", "compression", "user_id"] {
+    for literal in ["hot_row_limit", "created_at", "compression", "user_id"] {
         assert!(
             !plan.statement.sql.contains(literal),
             "registry SQL must keep metadata in bind parameters"

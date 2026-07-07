@@ -139,10 +139,7 @@ pub fn plan_existing_table_migration(
     let base = plan_empty_table_migration(request, context)?;
     let explicit_order_column = request
         .options
-        .get("order_column")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|column| !column.is_empty())
+        .explicit_order_column()
         .map(ToString::to_string);
     let ordering = choose_migration_ordering(&MigrationOrderingRequest {
         primary_key: catalog.primary_key,
@@ -164,7 +161,7 @@ pub fn plan_existing_table_migration(
         base.effective_scope_column.clone(),
         &ordering,
         backfill_batch_size,
-        request.flush_policy.clone(),
+        request.hot_row_limit(),
     ))
     .map_err(|error| MigrationError::Job(error.to_string()))?;
 
@@ -185,8 +182,7 @@ fn migration_backfill_batch_size(
 ) -> MigrationResult<MigrationBatchSize> {
     let configured = request
         .options
-        .get("backfill_batch_size")
-        .and_then(serde_json::Value::as_u64)
+        .backfill_batch_size
         .map_or(DEFAULT_BACKFILL_BATCH_ROWS, |value| value as usize);
 
     MigrationBatchSize::new(configured).map_err(|error| MigrationError::Job(error.to_string()))

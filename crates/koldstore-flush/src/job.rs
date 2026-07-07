@@ -7,7 +7,8 @@ use std::{
 };
 
 use koldstore_common::{
-    CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey, SeqId, StablePkHash,
+    compare_json_values, CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey, SeqId,
+    StablePkHash,
 };
 use koldstore_jobs::{LeaseEpoch, LeaseSeconds};
 use koldstore_manifest::SyncState;
@@ -659,19 +660,6 @@ impl ColumnStatsAccumulator {
         self.invalid = true;
         self.min = None;
         self.max = None;
-    }
-}
-
-fn compare_json_values(left: &serde_json::Value, right: &serde_json::Value) -> Option<Ordering> {
-    match (left, right) {
-        (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
-            left.as_f64()?.partial_cmp(&right.as_f64()?)
-        }
-        (serde_json::Value::String(left), serde_json::Value::String(right)) => {
-            Some(left.cmp(right))
-        }
-        (serde_json::Value::Bool(left), serde_json::Value::Bool(right)) => Some(left.cmp(right)),
-        _ => None,
     }
 }
 

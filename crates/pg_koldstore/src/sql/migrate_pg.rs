@@ -1,5 +1,7 @@
-//! PostgreSQL migration and demigration SQL entrypoints.
+//! PostgreSQL table management and unmanagement SQL entrypoints.
 
+#[cfg(feature = "pg")]
+use koldstore_common::{ManageTableOptions, MigrationStatus, ParquetCompression};
 #[cfg(feature = "pg")]
 use koldstore_migrate::rehydrate::DemigrateOptions;
 #[cfg(feature = "pg")]
@@ -7,82 +9,51 @@ use koldstore_migrate::{introspection, DemigrateTableRequest, MigrateTableReques
 #[cfg(feature = "pg")]
 use uuid::Uuid;
 
-/// Migrates a heap table into pg-koldstore management from SQL.
+/// Manages a heap table with structured hot/cold flush settings.
 #[cfg(feature = "pg")]
-#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore", security_definer)]
-pub fn migrate_table_pg(
+#[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
+pub fn manage_table_pg(
     table_name: pgrx::pg_sys::Oid,
-    table_type: &str,
-    storage_name: &str,
-    flush_policy: Option<&str>,
-    scope_column: Option<&str>,
+    storage: &str,
+    hot_row_limit: Option<i64>,
+    min_flush_rows: pgrx::default!(i64, 1000),
+    max_rows_per_file: pgrx::default!(i64, 500),
+    table_type: pgrx::default!(&str, "'shared'"),
+    scope_column: pgrx::default!(Option<&str>, "NULL"),
+    order_column: pgrx::default!(Option<&str>, "NULL"),
+    compression: pgrx::default!(Option<&str>, "NULL"),
 ) -> pgrx::Uuid {
-    migrate_table_pg_impl(
+    let structured_flush = hot_row_limit.map(|hot_row_limit| {
+        let hot_row_limit = positive_i64(hot_row_limit, "hot_row_limit");
+        let min_flush_rows = positive_i64(min_flush_rows, "min_flush_rows");
+        let max_rows_per_file = positive_i64(max_rows_per_file, "max_rows_per_file");
+        (
+            hot_row_limit as u64,
+            min_flush_rows as u64,
+            max_rows_per_file as u64,
+        )
+    });
+    manage_table_pg_impl(
         table_name,
         table_type,
-        storage_name,
-        flush_policy,
-        scope_column,
-        None,
-        None,
-    )
-}
-
-/// Migrates a heap table and supplies an explicit oldest-to-newest order column.
-#[cfg(feature = "pg")]
-#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore", security_definer)]
-pub fn migrate_table_pg_with_order(
-    table_name: pgrx::pg_sys::Oid,
-    table_type: &str,
-    storage_name: &str,
-    flush_policy: Option<&str>,
-    scope_column: Option<&str>,
-    order_column: Option<&str>,
-) -> pgrx::Uuid {
-    migrate_table_pg_impl(
-        table_name,
-        table_type,
-        storage_name,
-        flush_policy,
-        scope_column,
-        order_column,
-        None,
-    )
-}
-
-/// Migrates a heap table and supplies explicit oldest-to-newest order and compression options.
-#[cfg(feature = "pg")]
-#[pgrx::pg_extern(name = "migrate_table", schema = "koldstore", security_definer)]
-pub fn migrate_table_pg_with_order_and_compression(
-    table_name: pgrx::pg_sys::Oid,
-    table_type: &str,
-    storage_name: &str,
-    flush_policy: Option<&str>,
-    scope_column: Option<&str>,
-    order_column: Option<&str>,
-    compression: Option<&str>,
-) -> pgrx::Uuid {
-    migrate_table_pg_impl(
-        table_name,
-        table_type,
-        storage_name,
-        flush_policy,
+        storage,
         scope_column,
         order_column,
         compression,
+        structured_flush,
     )
 }
 
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
-fn migrate_table_pg_impl(
+fn manage_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     table_type: &str,
     storage_name: &str,
-    flush_policy: Option<&str>,
     scope_column: Option<&str>,
     order_column: Option<&str>,
     compression: Option<&str>,
+    structured_flush: Option<(u64, u64, u64)>,
 ) -> pgrx::Uuid {
     let table_oid_u32 = table_oid.to_u32();
     let table_oid = pgrx::pg_sys::Oid::from(table_oid_u32);
@@ -98,13 +69,12 @@ fn migrate_table_pg_impl(
     let registry_catalog = catalog.clone();
     let primary_key_shape = primary_key_shape(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let options = migration_options(order_column, compression);
+    let options = migration_options(order_column, compression, structured_flush);
     let job_id = Uuid::new_v4();
     let request = MigrateTableRequest {
         table_name: relation,
         table_type: table_type.to_string(),
         storage_name: storage_name.to_string(),
-        flush_policy: flush_policy.map(ToString::to_string),
         scope_column: scope_column.map(ToString::to_string),
         options,
     };
@@ -135,13 +105,12 @@ fn migrate_table_pg_impl(
             mirror_relation: &mirror_plan.mirror_table,
             primary_key_shape: &primary_key_shape,
             initialization_state: koldstore_schema::MirrorInitializationState::Complete,
-            flush_policy,
             primary_key: &registry_catalog.primary_key.columns,
             columns: &registry_catalog.columns,
             indexed_columns: &registry_catalog.indexed_columns,
             options: &request.options,
             active: true,
-            migration_status: "active",
+            migration_status: MigrationStatus::Active,
         })
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         apply_user_scope_policy(
@@ -184,13 +153,12 @@ fn migrate_table_pg_impl(
         mirror_relation: &mirror_plan.mirror_table,
         primary_key_shape: &primary_key_shape,
         initialization_state: koldstore_schema::MirrorInitializationState::Capturing,
-        flush_policy,
         primary_key: &registry_catalog.primary_key.columns,
         columns: &registry_catalog.columns,
         indexed_columns: &registry_catalog.indexed_columns,
         options: &request.options,
         active: false,
-        migration_status: "mirror_initializing",
+        migration_status: MigrationStatus::MirrorInitializing,
     })
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     enqueue_migration_job(&plan)
@@ -296,13 +264,12 @@ struct SchemaRegistrationInput<'a> {
     mirror_relation: &'a koldstore_migrate::QualifiedTableName,
     primary_key_shape: &'a koldstore_common::PrimaryKeyShape,
     initialization_state: koldstore_schema::MirrorInitializationState,
-    flush_policy: Option<&'a str>,
     primary_key: &'a [String],
     columns: &'a [koldstore_migrate::order::CatalogColumn],
     indexed_columns: &'a [String],
-    options: &'a serde_json::Value,
+    options: &'a ManageTableOptions,
     active: bool,
-    migration_status: &'a str,
+    migration_status: MigrationStatus,
 }
 
 #[cfg(feature = "pg")]
@@ -312,15 +279,10 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
     };
     use pgrx::datum::DatumWithOid;
 
-    let mut options = input.options.clone();
-    if let serde_json::Value::Object(object) = &mut options {
-        object.insert(
-            "migration_status".to_string(),
-            serde_json::Value::String(input.migration_status.to_string()),
-        );
-    } else {
-        options = serde_json::json!({ "migration_status": input.migration_status });
-    }
+    let options = input
+        .options
+        .clone()
+        .with_migration_status(input.migration_status);
     let metadata = RegistrationMetadata {
         table_oid: input.table_oid,
         table_type: input.table_type.to_string(),
@@ -334,11 +296,6 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
         columns: schema_columns_from_catalog(input.columns),
         indexed_columns: input.indexed_columns.to_vec(),
         type_matrix: serde_json::Value::Null,
-        flush_policy: input
-            .flush_policy
-            .map(str::trim)
-            .filter(|policy| !policy.is_empty())
-            .map(str::to_string),
         options,
     };
     let plan = plan_schema_registry_insert_with_id(&metadata, Uuid::new_v4())
@@ -528,10 +485,10 @@ fn run_existing_table_mirror_initialization_inline(
     Ok(processed_rows)
 }
 
-/// Demigrates a managed table through the SQL API.
+/// Unmanages a managed table through the SQL API.
 #[cfg(feature = "pg")]
-#[pgrx::pg_extern(name = "demigrate_table", schema = "koldstore", security_definer)]
-pub fn demigrate_table_pg(
+#[pgrx::pg_extern(name = "unmanage_table", schema = "koldstore", security_definer)]
+pub fn unmanage_table_pg(
     table_name: pgrx::pg_sys::Oid,
     rehydrate: Option<bool>,
     drop_cold: Option<bool>,
@@ -542,12 +499,12 @@ pub fn demigrate_table_pg(
         drop_cold,
     }
     .options();
-    demigrate_table_pg_impl(table_name, options)
-        .unwrap_or_else(|error| pgrx::error!("demigrate table failed: {error}"))
+    unmanage_table_pg_impl(table_name, options)
+        .unwrap_or_else(|error| pgrx::error!("unmanage table failed: {error}"))
 }
 
 #[cfg(feature = "pg")]
-fn demigrate_table_pg_impl(
+fn unmanage_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     options: DemigrateOptions,
 ) -> Result<i64, String> {
@@ -624,36 +581,48 @@ fn execute_demigration_statements(
 }
 
 #[cfg(feature = "pg")]
-fn migration_options(order_column: Option<&str>, compression: Option<&str>) -> serde_json::Value {
-    let mut options = serde_json::Map::new();
+fn migration_options(
+    order_column: Option<&str>,
+    compression: Option<&str>,
+    structured_flush: Option<(u64, u64, u64)>,
+) -> ManageTableOptions {
+    let mut options = ManageTableOptions::default();
     if let Some(order_column) = order_column
         .map(str::trim)
         .filter(|column| !column.is_empty())
     {
-        options.insert(
-            "order_column".to_string(),
-            serde_json::Value::String(order_column.to_string()),
-        );
+        options = options.with_order_column(order_column);
     }
     if let Some(compression) = compression.map(str::trim).filter(|codec| !codec.is_empty()) {
-        options.insert(
-            "compression".to_string(),
-            serde_json::Value::String(compression.to_ascii_lowercase()),
-        );
+        let codec = ParquetCompression::parse(compression)
+            .unwrap_or_else(|| pgrx::error!("unsupported compression codec `{compression}`"));
+        options = options.with_compression(codec);
     }
-    serde_json::Value::Object(options)
+    if let Some((hot_row_limit, min_flush_rows, max_rows_per_file)) = structured_flush {
+        options = options.with_flush(hot_row_limit, min_flush_rows, max_rows_per_file);
+    }
+    options
+}
+
+#[cfg(feature = "pg")]
+fn positive_i64(value: i64, field: &str) -> i64 {
+    if value <= 0 {
+        pgrx::error!("{field} must be greater than zero");
+    }
+    value
 }
 
 #[cfg(all(test, feature = "pg"))]
 mod tests {
     use super::migration_options;
+    use koldstore_common::ParquetCompression;
 
     #[test]
     fn migration_options_include_ordering_and_compression_when_provided() {
-        let options = migration_options(Some("created_at"), Some("zstd"));
+        let options = migration_options(Some("created_at"), Some("zstd"), None);
 
         assert_eq!(
-            options,
+            options.to_value(),
             serde_json::json!({
                 "order_column": "created_at",
                 "compression": "zstd"
@@ -662,9 +631,23 @@ mod tests {
     }
 
     #[test]
-    fn migration_options_skip_blank_values() {
-        let options = migration_options(Some(" "), Some(""));
+    fn migration_options_include_structured_flush_settings() {
+        let options = migration_options(None, None, Some((10_000, 1_000, 500)));
 
-        assert_eq!(options, serde_json::json!({}));
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({
+                "hot_row_limit": 10_000,
+                "min_flush_rows": 1_000,
+                "max_rows_per_file": 500
+            })
+        );
+    }
+
+    #[test]
+    fn migration_options_skip_blank_values() {
+        let options = migration_options(Some(" "), Some(""), None);
+
+        assert_eq!(options.to_value(), serde_json::json!({}));
     }
 }

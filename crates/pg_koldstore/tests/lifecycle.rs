@@ -199,12 +199,12 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
     assert!(observability::SPAN_NAMES.contains(&"koldstore.merge_execute"));
 
     let sql_span = observability::KoldstoreSpan::SqlApi {
-        function: "koldstore.migrate_table",
+        function: "koldstore.manage_table",
     };
     assert_eq!(sql_span.name(), "koldstore.sql_api");
     assert!(sql_span
         .fields()
-        .contains(&("function", "koldstore.migrate_table")));
+        .contains(&("function", "koldstore.manage_table")));
 
     let counter = observability::ObjectStoreIoCounter::default();
     counter.record_read("manifest");

@@ -1,3 +1,4 @@
+use koldstore_common::ManageTableOptions;
 use koldstore_migrate::{
     jobs::MigrationJobPhase,
     order::{CatalogColumn, CatalogPrimaryKey, OrderingSource},
@@ -6,12 +7,11 @@ use koldstore_migrate::{
 };
 use uuid::Uuid;
 
-fn request(options: serde_json::Value) -> MigrateTableRequest {
+fn request(options: ManageTableOptions) -> MigrateTableRequest {
     MigrateTableRequest {
         table_name: "app.items".to_string(),
         table_type: "shared".to_string(),
         storage_name: "local".to_string(),
-        flush_policy: Some("rows:1000,interval:60".to_string()),
         scope_column: None,
         options,
     }
@@ -38,7 +38,10 @@ fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
     };
 
     let plan = plan_existing_table_migration(
-        &request(serde_json::json!({ "backfill_batch_size": 2_048 })),
+        &request(ManageTableOptions::from_value(&serde_json::json!({
+            "backfill_batch_size": 2_048,
+            "hot_row_limit": 1000
+        }))),
         context(),
         catalog,
         Uuid::from_u128(99),
@@ -70,10 +73,7 @@ fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
         .sql
         .contains("'add_system_columns'"));
     assert_eq!(plan.backfill_job.payload["phase"], "initialize_mirror");
-    assert_eq!(
-        plan.backfill_job.payload["flush_policy"],
-        "rows:1000,interval:60"
-    );
+    assert_eq!(plan.backfill_job.payload["hot_row_limit"], 1000);
 }
 
 #[test]
@@ -88,7 +88,9 @@ fn existing_table_migration_plan_accepts_explicit_order_column_from_options() {
     };
 
     let plan = plan_existing_table_migration(
-        &request(serde_json::json!({ "order_column": "created_at" })),
+        &request(ManageTableOptions::from_value(&serde_json::json!({
+            "order_column": "created_at"
+        }))),
         context(),
         catalog,
         Uuid::from_u128(100),
@@ -108,7 +110,7 @@ fn existing_table_migration_plan_rejects_existing_rows_without_stable_ordering()
     };
 
     let error = plan_existing_table_migration(
-        &request(serde_json::json!({})),
+        &request(ManageTableOptions::default()),
         context(),
         catalog,
         Uuid::from_u128(101),

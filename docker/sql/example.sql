@@ -12,7 +12,7 @@
 --
 -- Notes:
 --   * MinIO is reached at http://minio:9000 from inside the compose network.
---   * Flush policy rows:1000 means a flush is due once a table has ~1k hot rows.
+--   * hot_row_limit => 1000 keeps at most 1000 mirror rows hot before flushing oldest rows by seq.
 --   * force => true queues a flush job immediately (scaffold queues jobs today).
 
 \set ON_ERROR_STOP on
@@ -49,22 +49,19 @@ CREATE TABLE demo.messages (
 
 CREATE INDEX messages_conversation_id_idx ON demo.messages (conversation_id);
 
-\echo '==> migrate tables into koldstore (flush after 1000 hot rows)'
--- FK is hot-only while flush is enabled; accept that explicitly.
-SELECT koldstore.migrate_table(
-  table_name   => 'demo.conversations',
-  table_type   => 'shared',
-  storage_name => 'local-minio',
-  flush_policy => 'rows:1000,interval:60',
-  options      => '{"allow_fk_hot_only": true}'::jsonb
+\echo '==> manage tables into koldstore (flush after 1000 hot rows)'
+SELECT koldstore.manage_table(
+  table_name     => 'demo.conversations',
+  storage        => 'local-minio',
+  hot_row_limit  => 1000,
+  min_flush_rows => 1
 );
 
-SELECT koldstore.migrate_table(
-  table_name   => 'demo.messages',
-  table_type   => 'shared',
-  storage_name => 'local-minio',
-  flush_policy => 'rows:1000,interval:60',
-  options      => '{"allow_fk_hot_only": true}'::jsonb
+SELECT koldstore.manage_table(
+  table_name     => 'demo.messages',
+  storage        => 'local-minio',
+  hot_row_limit  => 1000,
+  min_flush_rows => 1
 );
 
 \echo '==> seed conversations'
@@ -120,12 +117,12 @@ SELECT
   to_regclass('koldstore.row_events') IS NOT NULL AS global_row_events_exists;
 
 \echo '==> queue flush jobs (force)'
-SELECT koldstore.flush_table('demo.conversations', force => true) AS conversations_flush_job;
-SELECT koldstore.flush_table('demo.messages', force => true) AS messages_flush_job;
+SELECT koldstore.flush_table(table_name => 'demo.conversations') AS conversations_flush_job;
+SELECT koldstore.flush_table(table_name => 'demo.messages') AS messages_flush_job;
 
 \echo '==> table status'
-SELECT 'demo.conversations' AS table_name, koldstore.table_status('demo.conversations');
-SELECT 'demo.messages' AS table_name, koldstore.table_status('demo.messages');
+SELECT 'demo.conversations' AS table_name, koldstore.describe_table(table_name => 'demo.conversations');
+SELECT 'demo.messages' AS table_name, koldstore.describe_table(table_name => 'demo.messages');
 
 \echo '==> queued flush jobs'
 SELECT

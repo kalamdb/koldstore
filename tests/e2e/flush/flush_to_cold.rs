@@ -86,7 +86,7 @@ async fn flush_to_cold_writes_catalog_manifest_and_parquet_on_pgrx() -> Result<(
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "flush_to_cold").await?;
         let table = db.create_indexed_items_table("flush_items", 64).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
 
         let flushed = db.flush_table(&table.relation).await?;
         assert_eq!(flushed, 64);

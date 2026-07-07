@@ -34,7 +34,7 @@ fn reader_options_capture_clean_schema_metadata_projection_and_seq_cursor() {
 
     assert_eq!(
         options.columns,
-        vec!["seq", "op", "changed_at", "deleted", "schema_version"]
+        vec!["seq", "op", "deleted", "schema_version"]
     );
     assert_eq!(options.seq_range.as_ref().unwrap().column, "seq");
     assert!(options.commit_seq_range.is_none());

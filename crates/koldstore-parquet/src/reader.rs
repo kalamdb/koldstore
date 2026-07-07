@@ -4,13 +4,12 @@ use std::path::Path;
 use std::pin::Pin;
 
 use arrow_array::{
-    Array, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    RecordBatch, StringArray, TimestampMicrosecondArray, UInt32Array,
+    Array, BooleanArray, Int64Array, RecordBatch, UInt32Array,
 };
 use koldstore_common::{CommitSeq, SeqId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::schema::{ColdMetadataColumn, PgColumn, PgType};
+use crate::schema::{ColdMetadataColumn, PgColumn};
 
 /// Boxed record-batch stream.
 pub type RecordBatchFileStream =
@@ -50,7 +49,6 @@ impl ParquetReadOptions {
         self.columns = vec![
             "seq".to_string(),
             "op".to_string(),
-            "changed_at".to_string(),
             "deleted".to_string(),
             "schema_version".to_string(),
         ];
@@ -242,7 +240,7 @@ fn clean_rows_from_batch(
         for column in columns {
             row_image.insert(
                 column.name.clone(),
-                json_value_for_column(batch, column, row_index)?,
+                crate::pg_type_codec::json_value_from_arrow_column(batch, column, row_index)?,
             );
         }
         let mut pk_json = serde_json::Map::new();
@@ -278,71 +276,4 @@ fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a dyn Arr
         .column_by_name(name)
         .map(|column| column.as_ref())
         .ok_or_else(|| format!("cold segment is missing required column `{name}`"))
-}
-
-fn json_value_for_column(
-    batch: &RecordBatch,
-    column: &PgColumn,
-    row_index: usize,
-) -> Result<serde_json::Value, String> {
-    let array = required_column(batch, &column.name)?;
-    if array.is_null(row_index) {
-        return Ok(serde_json::Value::Null);
-    }
-    match column.pg_type {
-        PgType::Bool => Ok(serde_json::json!(array_for::<BooleanArray>(
-            array,
-            &column.name
-        )?
-        .value(row_index))),
-        PgType::Int2 => Ok(serde_json::json!(array_for::<Int16Array>(
-            array,
-            &column.name
-        )?
-        .value(row_index))),
-        PgType::Int4 => Ok(serde_json::json!(array_for::<Int32Array>(
-            array,
-            &column.name
-        )?
-        .value(row_index))),
-        PgType::Int8 => Ok(serde_json::json!(array_for::<Int64Array>(
-            array,
-            &column.name
-        )?
-        .value(row_index))),
-        PgType::Float4 => Ok(serde_json::json!(array_for::<Float32Array>(
-            array,
-            &column.name
-        )?
-        .value(row_index))),
-        PgType::Float8 => Ok(serde_json::json!(array_for::<Float64Array>(
-            array,
-            &column.name
-        )?
-        .value(row_index))),
-        PgType::Text
-        | PgType::Numeric
-        | PgType::Uuid
-        | PgType::Jsonb
-        | PgType::TextArray
-        | PgType::Bytea => Ok(serde_json::Value::String(
-            array_for::<StringArray>(array, &column.name)?
-                .value(row_index)
-                .to_string(),
-        )),
-        PgType::Timestamptz => {
-            let micros =
-                array_for::<TimestampMicrosecondArray>(array, &column.name)?.value(row_index);
-            let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(micros)
-                .ok_or_else(|| format!("timestamp value out of range in `{}`", column.name))?;
-            Ok(serde_json::Value::String(timestamp.to_rfc3339()))
-        }
-    }
-}
-
-fn array_for<'a, T: 'static>(array: &'a dyn Array, name: &str) -> Result<&'a T, String> {
-    array
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| format!("cold column `{name}` has unexpected Arrow type"))
 }

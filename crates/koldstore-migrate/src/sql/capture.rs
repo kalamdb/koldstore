@@ -195,7 +195,6 @@ fn capture_function_sql(
         &pk_values("NEW"),
         snowflake_id_call_expression(),
         MirrorOperation::Insert,
-        "now()",
         "pg_current_wal_lsn()",
     )
     .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
@@ -205,7 +204,6 @@ fn capture_function_sql(
         &pk_values("NEW"),
         snowflake_id_call_expression(),
         MirrorOperation::Update,
-        "now()",
         "pg_current_wal_lsn()",
     )
     .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
@@ -215,7 +213,6 @@ fn capture_function_sql(
         &pk_values("OLD"),
         snowflake_id_call_expression(),
         MirrorOperation::Delete,
-        "now()",
         "pg_current_wal_lsn()",
     )
     .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;

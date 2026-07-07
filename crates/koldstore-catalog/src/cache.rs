@@ -60,64 +60,58 @@ impl ManagedTableSnapshotCache {
 pub fn decode_managed_table_snapshot(
     value: &serde_json::Value,
 ) -> Result<ManagedTableSnapshot, String> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    let wire: ManagedTableSnapshotWire =
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    wire.try_into()
+}
 
-    let table_oid = value
-        .get("table_oid")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| "missing integer field `table_oid`".to_string())
-        .and_then(|oid| u32::try_from(oid).map_err(|error| error.to_string()))?;
-    let schema_version = value
-        .get("schema_version")
-        .and_then(serde_json::Value::as_i64)
-        .ok_or_else(|| "missing integer field `schema_version`".to_string())
-        .and_then(|version| i32::try_from(version).map_err(|error| error.to_string()))?;
-    let active = value
-        .get("active")
-        .and_then(serde_json::Value::as_bool)
-        .ok_or_else(|| "missing boolean field `active`".to_string())?;
-    let initialization_state = value
-        .get("initialization_state")
-        .and_then(serde_json::Value::as_str)
-        .map(ToString::to_string)
-        .ok_or_else(|| "missing string field `initialization_state`".to_string())?;
-    let mirror_relation = value
-        .get("mirror_relation")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "missing string field `mirror_relation`".to_string())?;
-    let mirror_relation = TableName::parse(mirror_relation).map_err(|error| error.to_string())?;
-    let primary_key_columns = serde_json::from_value::<Vec<String>>(
-        value
-            .get("primary_key")
-            .cloned()
-            .ok_or_else(|| "missing array field `primary_key`".to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let primary_key_shape = value
-        .get("primary_key_shape")
-        .ok_or_else(|| "missing field `primary_key_shape`".to_string())?;
-    let mut hasher = DefaultHasher::new();
-    primary_key_shape.to_string().hash(&mut hasher);
-    let scope_column = match value.get("scope_column") {
-        Some(scope) if scope.is_null() => None,
-        Some(scope) => Some(
-            scope
-                .as_str()
-                .ok_or_else(|| "field `scope_column` must be string or null".to_string())?
-                .to_string(),
-        ),
-        None => None,
-    };
+#[derive(Debug, serde::Deserialize)]
+struct ManagedTableSnapshotWire {
+    table_oid: i64,
+    schema_version: i64,
+    active: bool,
+    initialization_state: String,
+    mirror_relation: String,
+    primary_key: Vec<String>,
+    primary_key_shape: serde_json::Value,
+    #[serde(default)]
+    scope_column: Option<serde_json::Value>,
+}
 
-    Ok(ManagedTableSnapshot {
-        table_oid,
-        schema_version,
-        active,
-        initialization_state,
-        mirror_relation,
-        primary_key_columns,
-        primary_key_shape_hash: hasher.finish(),
-        scope_column,
-    })
+impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
+    type Error = String;
+
+    fn try_from(wire: ManagedTableSnapshotWire) -> Result<Self, Self::Error> {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let table_oid = u32::try_from(wire.table_oid).map_err(|error| error.to_string())?;
+        let schema_version =
+            i32::try_from(wire.schema_version).map_err(|error| error.to_string())?;
+        let mirror_relation =
+            TableName::parse(&wire.mirror_relation).map_err(|error| error.to_string())?;
+        let scope_column = match wire.scope_column {
+            None => None,
+            Some(scope) if scope.is_null() => None,
+            Some(scope) => Some(
+                scope
+                    .as_str()
+                    .ok_or_else(|| "field `scope_column` must be string or null".to_string())?
+                    .to_string(),
+            ),
+        };
+        let mut hasher = DefaultHasher::new();
+        wire.primary_key_shape.to_string().hash(&mut hasher);
+
+        Ok(Self {
+            table_oid,
+            schema_version,
+            active: wire.active,
+            initialization_state: wire.initialization_state,
+            mirror_relation,
+            primary_key_columns: wire.primary_key,
+            primary_key_shape_hash: hasher.finish(),
+            scope_column,
+        })
+    }
 }

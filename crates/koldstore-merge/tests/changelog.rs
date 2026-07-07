@@ -1,4 +1,3 @@
-use chrono::{TimeZone, Utc};
 use koldstore_common::{ChangeSource, LogicalPk, MirrorChange, MirrorOperation, PkColumn, SeqId};
 use koldstore_merge::{changes_since, ChangeCursor};
 use serde_json::json;
@@ -14,7 +13,6 @@ fn changelog_orders_by_mirror_seq_and_reports_retention_gap() {
             .to_canonical_json(),
         operation: MirrorOperation::Update,
         seq: SeqId::new(seq).unwrap(),
-        changed_at: Utc.timestamp_opt(seq, 0).unwrap(),
         deleted: false,
         row_image_json: None,
         source: ChangeSource::HotMirror,
@@ -59,7 +57,6 @@ fn changelog_returns_latest_state_per_primary_key() {
         pk_json: pk.to_canonical_json(),
         operation,
         seq: SeqId::new(seq).unwrap(),
-        changed_at: Utc.timestamp_opt(seq, 0).unwrap(),
         deleted: operation.is_delete(),
         row_image_json: Some(json!({"id": 1, "version": seq})),
         source,

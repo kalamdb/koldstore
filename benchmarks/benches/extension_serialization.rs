@@ -53,13 +53,14 @@ fn bench_path_and_policy(c: &mut Criterion) {
         primary_key_shape: None,
         initialization_state: MirrorInitializationState::Capturing,
         flush_policy: Some(FlushPolicy {
-            row_limit: Some(10_000),
-            duration_seconds: Some(300),
+            hot_row_limit: Some(10_000),
+            min_flush_rows: None,
+            max_rows_per_file: None,
         }),
         schema_version: 1,
     };
     c.bench_function("policy_evaluation_for_hot_retention", |b| {
-        b.iter(|| should_flush_by_policy(black_box(&meta), 12_000, 600))
+        b.iter(|| should_flush_by_policy(black_box(&meta), 12_000))
     });
     c.bench_function("foreign_key_policy_classification", |b| {
         b.iter(|| FkPolicyDecision::classify(true, false, true, false))
@@ -165,19 +166,12 @@ fn render_cold_path(
     format!("{prefix}batch-{batch}.parquet")
 }
 
-fn should_flush_by_policy(
-    meta: &ManagedTableMeta,
-    pending_rows: u64,
-    pending_seconds: u64,
-) -> bool {
+fn should_flush_by_policy(meta: &ManagedTableMeta, pending_rows: u64) -> bool {
     let Some(policy) = &meta.flush_policy else {
         return false;
     };
     meta.validate().is_ok()
-        && (policy.row_limit.is_some_and(|rows| pending_rows >= rows)
-            || policy
-                .duration_seconds
-                .is_some_and(|seconds| pending_seconds >= seconds))
+        && policy.hot_row_limit.is_some_and(|rows| pending_rows >= rows)
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -33,7 +33,7 @@ async fn quickstart_managed_table_keeps_size_and_index_overhead_bounded() -> Res
             .await?;
 
         let baseline_size = common::relation_size(&db.client, &baseline.relation).await?;
-        db.migrate_shared(&managed.relation, "id").await?;
+        db.manage_shared(&managed.relation, "id").await?;
         let managed_size = common::relation_size(&db.client, &managed.relation).await?;
 
         common::assertions::assert_system_column_size_overhead(baseline_size, managed_size, 2_000)?;

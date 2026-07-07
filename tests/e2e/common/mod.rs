@@ -7,7 +7,7 @@ mod cluster;
 mod db;
 mod log;
 mod sql;
-mod table_status;
+mod describe_table;
 
 pub use assertions::{
     assert_kold_merge_scan_cold_reads, assert_kold_merge_scan_executed_cold_reads,
@@ -31,6 +31,6 @@ pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
     relation_size, row_count, row_count_from_sql, RelationSize,
 };
-pub use table_status::{
-    assert_cold_rows_at_least, assert_flush_pruned_hot_storage, table_status, TableStorageStatus,
+pub use describe_table::{
+    assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
 };

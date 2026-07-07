@@ -107,7 +107,6 @@ pub fn plan_mirror_initialization_batch(
     select_columns.extend([
         "SNOWFLAKE_ID()".to_string(),
         "1".to_string(),
-        "now()".to_string(),
         "pg_current_wal_lsn()".to_string(),
     ]);
     let order_direction = if ordering.ascending_oldest_first {

@@ -1,16 +1,19 @@
 //! Existing-table migration ordering decisions.
 
 use koldstore_common::is_safe_identifier;
+use koldstore_schema::{PgType, SchemaError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Catalog column metadata needed to choose a safe backfill order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogColumn {
     /// Column name.
     pub name: String,
-    /// PostgreSQL type name.
-    pub type_name: String,
+    /// Supported PostgreSQL type parsed from catalog metadata.
+    pub pg_type: PgType,
+    /// Original `format_type` spelling preserved for SQL casts.
+    pub catalog_type_name: String,
     /// Whether the column participates in the primary key.
     pub is_primary_key: bool,
     /// Whether PostgreSQL marks the column as identity/generated.
@@ -19,47 +22,124 @@ pub struct CatalogColumn {
     pub default_expr: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct CatalogColumnWire {
+    name: String,
+    type_name: String,
+    is_primary_key: bool,
+    identity: bool,
+    #[serde(default)]
+    default_expr: Option<String>,
+}
+
+impl TryFrom<CatalogColumnWire> for CatalogColumn {
+    type Error = SchemaError;
+
+    fn try_from(wire: CatalogColumnWire) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: wire.name,
+            pg_type: PgType::from_postgres_name(&wire.type_name)?,
+            catalog_type_name: wire.type_name,
+            is_primary_key: wire.is_primary_key,
+            identity: wire.identity,
+            default_expr: wire.default_expr,
+        })
+    }
+}
+
+impl Serialize for CatalogColumn {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        CatalogColumnWire {
+            name: self.name.clone(),
+            type_name: self.catalog_type_name.clone(),
+            is_primary_key: self.is_primary_key,
+            identity: self.identity,
+            default_expr: self.default_expr.clone(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CatalogColumn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        CatalogColumnWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 impl CatalogColumn {
     /// Creates bigint column metadata.
     #[must_use]
     pub fn bigint(name: impl Into<String>) -> Self {
-        Self::new(name, "bigint")
+        Self::typed(name, PgType::Int8, "bigint")
     }
 
     /// Creates text column metadata.
     #[must_use]
     pub fn text(name: impl Into<String>) -> Self {
-        Self::new(name, "text")
+        Self::typed(name, PgType::Text, "text")
     }
 
     /// Creates uuid column metadata.
     #[must_use]
     pub fn uuid(name: impl Into<String>) -> Self {
-        Self::new(name, "uuid")
+        Self::typed(name, PgType::Uuid, "uuid")
     }
 
     /// Creates timestamp column metadata.
     #[must_use]
     pub fn timestamp(name: impl Into<String>) -> Self {
-        Self::new(name, "timestamp without time zone")
+        Self::typed(name, PgType::Timestamptz, "timestamp without time zone")
     }
 
     /// Creates jsonb column metadata.
     #[must_use]
     pub fn jsonb(name: impl Into<String>) -> Self {
-        Self::new(name, "jsonb")
+        Self::typed(name, PgType::Jsonb, "jsonb")
     }
 
-    /// Creates column metadata with a raw PostgreSQL type name.
+    /// Creates column metadata from a supported PostgreSQL type.
     #[must_use]
-    pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
+    pub fn typed(
+        name: impl Into<String>,
+        pg_type: PgType,
+        catalog_type_name: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
-            type_name: type_name.into(),
+            pg_type,
+            catalog_type_name: catalog_type_name.into(),
             is_primary_key: false,
             identity: false,
             default_expr: None,
         }
+    }
+
+    /// Creates column metadata from a raw PostgreSQL catalog type name.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `type_name` is outside the MVP support matrix. Tests and
+    /// builders should prefer [`Self::typed`] or the typed constructors.
+    #[must_use]
+    pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
+        let catalog_type_name = type_name.into();
+        let pg_type = PgType::from_postgres_name(&catalog_type_name)
+            .expect("catalog column builders must use supported PostgreSQL types");
+        Self::typed(name, pg_type, catalog_type_name)
+    }
+
+    /// Returns the original catalog type spelling for SQL casts.
+    #[must_use]
+    pub fn catalog_type_name(&self) -> &str {
+        &self.catalog_type_name
     }
 
     /// Marks the column as a primary-key column.
@@ -205,12 +285,14 @@ pub fn choose_migration_ordering(
 }
 
 fn ensure_orderable(column: &CatalogColumn) -> Result<(), MigrationOrderingError> {
-    if is_orderable_type(&column.type_name) {
+    if column.pg_type.is_orderable()
+        || PgType::is_orderable_catalog_type(&column.catalog_type_name)
+    {
         Ok(())
     } else {
         Err(MigrationOrderingError::UnsupportedOrderColumnType {
             column: column.name.clone(),
-            type_name: column.type_name.clone(),
+            type_name: column.catalog_type_name.clone(),
         })
     }
 }
@@ -222,26 +304,4 @@ fn is_auto_increment_column(column: &CatalogColumn) -> bool {
             .as_deref()
             .map(|default| default.to_ascii_lowercase().contains("nextval("))
             .unwrap_or(false)
-}
-
-fn is_orderable_type(type_name: &str) -> bool {
-    let canonical = canonical_type(type_name);
-    matches!(
-        canonical.as_str(),
-        "int2"
-            | "int4"
-            | "int8"
-            | "smallint"
-            | "integer"
-            | "bigint"
-            | "timestamp"
-            | "timestamp without time zone"
-            | "timestamp with time zone"
-            | "timestamptz"
-            | "date"
-    )
-}
-
-fn canonical_type(type_name: &str) -> String {
-    type_name.trim().to_ascii_lowercase()
 }

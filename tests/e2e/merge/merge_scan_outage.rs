@@ -25,7 +25,7 @@ async fn dirty_manifest_outage_state_uses_partial_index_on_pgrx() -> Result<()> 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "merge_scan_outage").await?;
         let table = db.create_indexed_items_table("outage_items", 8).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
 
         let plan = common::explain_with_seqscan_disabled(
             &db.client,

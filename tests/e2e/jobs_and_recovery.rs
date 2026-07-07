@@ -25,7 +25,7 @@ async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<(
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "jobs_and_recovery").await?;
         let table = db.create_indexed_items_table("job_items", 16).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
 
         let first_insert = db.insert_pending_flush_job(&table.relation, "").await?;
         let duplicate_insert = db.insert_pending_flush_job(&table.relation, "").await?;
@@ -150,7 +150,7 @@ async fn cold_reads_off_blocks_managed_scans_that_need_parquet_on_pgrx() -> Resu
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "cold_reads_off").await?;
         let table = db.create_indexed_items_table("cold_read_items", 16).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
         common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 16).await?;
 
@@ -213,13 +213,11 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
             .query_one(
                 r#"
                 WITH job AS (
-                  SELECT koldstore.migrate_table(
-                      $1::text::regclass,
-                      'shared',
-                      $2,
-                      NULL,
-                      NULL,
-                      'id'
+                  SELECT koldstore.manage_table(
+                      table_name     => $1::text::regclass,
+                      storage        => $2,
+                      hot_row_limit  => NULL,
+                      order_column   => 'id'
                     ) AS id
                 )
                 SELECT
@@ -276,7 +274,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
         let status_row = db
             .client
             .query_one(
-                "SELECT koldstore.table_status($1::text::regclass::oid, NULL::text)::text",
+                "SELECT koldstore.describe_table(table_name => $1::text::regclass)::text",
                 &[&table.relation],
             )
             .await?;
@@ -294,7 +292,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                             && job.get("rows_flushed").is_some()
                     })
                 }),
-            "table_status should expose job progress, got {status}"
+            "describe_table should expose job progress, got {status}"
         );
 
         wait_for_completed_job(&db.client, &flush_job_id).await?;

@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 
+use koldstore_common::dedupe_nonblank;
 use crate::footer::ColumnStats;
-use crate::schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType};
+use crate::pg_type_codec::{json_bool, json_i16, json_i64, json_u32};
+use crate::schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
 use arrow_array::{
-    ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    RecordBatch, StringArray, TimestampMicrosecondArray, UInt32Array,
+    ArrayRef, BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array,
 };
 use arrow_schema::SchemaRef;
 use parquet::{
@@ -53,7 +54,6 @@ pub fn plan_clean_cold_record<I, K, P>(
     pk_columns: P,
     seq: i64,
     op: i16,
-    changed_at: impl Into<String>,
     schema_version: u32,
 ) -> Result<CleanColdRecordPlan, String>
 where
@@ -90,7 +90,6 @@ where
 
     values.insert("seq".to_string(), json!(seq));
     values.insert("op".to_string(), json!(op));
-    values.insert("changed_at".to_string(), json!(changed_at.into()));
     values.insert("deleted".to_string(), json!(deleted));
     values.insert("schema_version".to_string(), json!(schema_version));
 
@@ -108,7 +107,7 @@ pub fn record_batch_from_clean_cold_records(
     rows: &[CleanColdRecordPlan],
 ) -> Result<RecordBatch, String> {
     let schema = Arc::new(build_clean_arrow_schema(columns).map_err(|error| error.to_string())?);
-    let mut arrays = Vec::<ArrayRef>::with_capacity(columns.len() + 5);
+    let mut arrays = Vec::<ArrayRef>::with_capacity(columns.len() + 4);
     for column in columns {
         arrays.push(array_for_pg_column(column, rows)?);
     }
@@ -120,11 +119,6 @@ pub fn record_batch_from_clean_cold_records(
     arrays.push(Arc::new(Int16Array::from_iter(
         rows.iter()
             .map(|row| json_i16(row.values.get(ColdMetadataColumn::Op.name())))
-            .collect::<Result<Vec<_>, _>>()?,
-    )));
-    arrays.push(Arc::new(TimestampMicrosecondArray::from_iter(
-        rows.iter()
-            .map(|row| json_timestamp_micros(row.values.get(ColdMetadataColumn::ChangedAt.name())))
             .collect::<Result<Vec<_>, _>>()?,
     )));
     arrays.push(Arc::new(BooleanArray::from_iter(
@@ -393,157 +387,16 @@ pub struct SegmentWritePlan {
     pub writes_native_bloom_filters: bool,
 }
 
-fn dedupe_nonblank<I, S>(values: I) -> Vec<String>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    values.into_iter().fold(Vec::new(), |mut columns, value| {
-        let column = value.into();
-        let column = column.trim();
-        if !column.is_empty() && !columns.iter().any(|existing| existing == column) {
-            columns.push(column.to_string());
-        }
-        columns
-    })
-}
-
 fn array_for_pg_column(
     column: &PgColumn,
     rows: &[CleanColdRecordPlan],
 ) -> Result<ArrayRef, String> {
     let column_name = column.name.as_str();
-    match column.pg_type {
-        PgType::Bool => Ok(Arc::new(BooleanArray::from_iter(
-            rows.iter()
-                .map(|row| json_bool(row.values.get(column_name)))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-        PgType::Int2 => Ok(Arc::new(Int16Array::from_iter(
-            rows.iter()
-                .map(|row| json_i16(row.values.get(column_name)))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-        PgType::Int4 => Ok(Arc::new(Int32Array::from_iter(
-            rows.iter()
-                .map(|row| json_i32(row.values.get(column_name)))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-        PgType::Int8 => Ok(Arc::new(Int64Array::from_iter(
-            rows.iter()
-                .map(|row| json_i64(row.values.get(column_name)))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-        PgType::Float4 => Ok(Arc::new(Float32Array::from_iter(
-            rows.iter()
-                .map(|row| json_f32(row.values.get(column_name)))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-        PgType::Float8 => Ok(Arc::new(Float64Array::from_iter(
-            rows.iter()
-                .map(|row| json_f64(row.values.get(column_name)))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-        PgType::Text
-        | PgType::Numeric
-        | PgType::Uuid
-        | PgType::Jsonb
-        | PgType::TextArray
-        | PgType::Bytea => Ok(Arc::new(StringArray::from_iter(
-            rows.iter()
-                .map(|row| json_stringified(row.values.get(column_name)))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-        PgType::Timestamptz => Ok(Arc::new(TimestampMicrosecondArray::from_iter(
-            rows.iter()
-                .map(|row| json_timestamp_micros(row.values.get(column_name)))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
-    }
-}
-
-fn json_bool(value: Option<&serde_json::Value>) -> Result<Option<bool>, String> {
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
-        Some(other) => Err(format!("expected boolean JSON value, got {other}")),
-    }
-}
-
-fn json_i16(value: Option<&serde_json::Value>) -> Result<Option<i16>, String> {
-    json_i64(value)?
-        .map(|value| i16::try_from(value).map_err(|error| error.to_string()))
-        .transpose()
-}
-
-fn json_i32(value: Option<&serde_json::Value>) -> Result<Option<i32>, String> {
-    json_i64(value)?
-        .map(|value| i32::try_from(value).map_err(|error| error.to_string()))
-        .transpose()
-}
-
-fn json_i64(value: Option<&serde_json::Value>) -> Result<Option<i64>, String> {
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Number(value)) => value
-            .as_i64()
-            .map(Some)
-            .ok_or_else(|| format!("expected integer JSON value, got {value}")),
-        Some(other) => Err(format!("expected integer JSON value, got {other}")),
-    }
-}
-
-fn json_u32(value: Option<&serde_json::Value>) -> Result<Option<u32>, String> {
-    json_i64(value)?
-        .map(|value| u32::try_from(value).map_err(|error| error.to_string()))
-        .transpose()
-}
-
-fn json_f32(value: Option<&serde_json::Value>) -> Result<Option<f32>, String> {
-    json_f64(value)?
-        .map(|value| {
-            if value.is_finite() && value >= f32::MIN as f64 && value <= f32::MAX as f64 {
-                Ok(value as f32)
-            } else {
-                Err(format!("float32 out of range: {value}"))
-            }
-        })
-        .transpose()
-}
-
-fn json_f64(value: Option<&serde_json::Value>) -> Result<Option<f64>, String> {
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::Number(value)) => value
-            .as_f64()
-            .map(Some)
-            .ok_or_else(|| format!("expected float JSON value, got {value}")),
-        Some(other) => Err(format!("expected float JSON value, got {other}")),
-    }
-}
-
-fn json_stringified(value: Option<&serde_json::Value>) -> Result<Option<String>, String> {
-    match value {
-        None | Some(serde_json::Value::Null) => Ok(None),
-        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
-        Some(other) => serde_json::to_string(other)
-            .map(Some)
-            .map_err(|error| error.to_string()),
-    }
-}
-
-fn json_timestamp_micros(value: Option<&serde_json::Value>) -> Result<Option<i64>, String> {
-    let Some(value) = json_stringified(value)? else {
-        return Ok(None);
-    };
-    parse_timestamp_micros(&value).map(Some)
-}
-
-fn parse_timestamp_micros(value: &str) -> Result<i64, String> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .or_else(|_| chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z"))
-        .map(|timestamp| timestamp.timestamp_micros())
-        .map_err(|error| format!("unsupported timestamp literal `{value}`: {error}"))
+    let json_values = rows
+        .iter()
+        .map(|row| row.values.get(column_name))
+        .collect::<Vec<_>>();
+    crate::pg_type_codec::arrow_array_for_column(column, &json_values)
 }
 
 fn parquet_compression(codec: &str) -> Result<Compression, String> {

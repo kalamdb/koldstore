@@ -48,7 +48,7 @@ async fn flush_matrix_covers_small_and_larger_batches_on_pgrx() -> Result<()> {
 
         for (table_name, rows) in [("flush_matrix_small", 1_i64), ("flush_matrix_large", 128)] {
             let table = db.create_indexed_items_table(table_name, rows).await?;
-            db.migrate_shared(&table.relation, "id").await?;
+            db.manage_shared(&table.relation, "id").await?;
             let flushed = db.flush_table(&table.relation).await?;
             assert_eq!(flushed, rows);
             common::assert_cold_metadata_present(&db.client, &table.relation).await?;
