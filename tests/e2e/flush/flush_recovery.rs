@@ -2,6 +2,8 @@
 mod common;
 
 use anyhow::Result;
+use serde_json::Value;
+use std::collections::BTreeSet;
 
 #[test]
 fn flush_recovery_plan_deletes_orphan_temp_and_quarantines_unmanifested_final() {
@@ -84,6 +86,75 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
         assert_eq!(plan.actions[0].action, RecoveryAction::DeleteTemp);
         assert_eq!(plan.actions[1].action, RecoveryAction::QuarantineFinal);
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_file() -> Result<()>
+{
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "flush_manifest_retry").await?;
+        let table = db.create_indexed_items_table("retry_items", 16).await?;
+        db.manage_shared(&table.relation, "id").await?;
+        db.flush_table(&table.relation).await?;
+
+        let manifest_path: String = db
+            .client
+            .query_one(
+                r#"
+                SELECT manifest_path
+                FROM koldstore.manifest
+                WHERE table_oid = $1::text::regclass::oid
+                "#,
+                &[&table.relation],
+            )
+            .await?
+            .get(0);
+        let absolute_manifest_path = db.storage_root.join(&manifest_path);
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&absolute_manifest_path)?)?;
+        let first_segment = manifest["segments"][0].clone();
+        manifest["segments"]
+            .as_array_mut()
+            .expect("manifest segments should be an array")
+            .push(first_segment);
+        std::fs::write(
+            &absolute_manifest_path,
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+
+        db.client
+            .batch_execute(&format!(
+                r#"
+                INSERT INTO {} (id, account_id, title, qty, category)
+                SELECT g, g % 17, 'retry-' || g, g % 100, 'retry'
+                FROM generate_series(100, 103) AS g
+                "#,
+                table.relation
+            ))
+            .await?;
+        db.flush_table(&table.relation).await?;
+
+        let rebuilt: Value =
+            serde_json::from_str(&std::fs::read_to_string(&absolute_manifest_path)?)?;
+        let segments = rebuilt["segments"]
+            .as_array()
+            .expect("manifest segments should be an array");
+        let unique_batches = segments
+            .iter()
+            .map(|segment| {
+                segment["batch"]
+                    .as_i64()
+                    .expect("batch should be an integer")
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            segments.len(),
+            unique_batches.len(),
+            "manifest should not retain duplicate stale segment entries: {rebuilt}"
+        );
     }
 
     Ok(())

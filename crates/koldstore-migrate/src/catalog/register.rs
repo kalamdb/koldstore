@@ -12,9 +12,7 @@ use koldstore_common::{
     PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
     PrimaryKeyShape,
 };
-use koldstore_schema::{
-    normalize_type_name, MirrorInitializationState, SchemaColumn, TypeMatrix,
-};
+use koldstore_schema::{normalize_type_name, MirrorInitializationState, SchemaColumn, TypeMatrix};
 
 /// Initial schema version for a managed table.
 pub const INITIAL_SCHEMA_VERSION: u32 = 1;

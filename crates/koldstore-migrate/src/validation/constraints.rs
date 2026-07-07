@@ -65,8 +65,8 @@ pub enum MigrationConstraintError {
 pub struct ColumnDefinition {
     /// Column name.
     pub name: String,
-    /// Supported PostgreSQL type parsed from catalog metadata.
-    pub pg_type: PgType,
+    /// PostgreSQL type parsed from catalog metadata when it is recognized.
+    pub pg_type: Option<PgType>,
     /// Original catalog type spelling preserved for diagnostics.
     pub catalog_type_name: String,
     /// Whether the column is nullable.
@@ -76,18 +76,18 @@ pub struct ColumnDefinition {
 }
 
 impl ColumnDefinition {
-    /// Creates a plain column definition from a supported PostgreSQL catalog type name.
-    ///
-    /// # Panics
-    ///
-    /// Panics when `type_name` is outside the MVP support matrix. Tests and
-    /// builders should prefer [`Self::typed`].
+    /// Creates a plain column definition from a PostgreSQL catalog type name.
     #[must_use]
     pub fn new(name: impl Into<String>, type_name: impl Into<String>, nullable: bool) -> Self {
         let catalog_type_name = type_name.into();
-        let pg_type = PgType::from_postgres_name(&catalog_type_name)
-            .expect("column definition builders must use supported PostgreSQL types");
-        Self::typed(name, pg_type, catalog_type_name, nullable, false)
+        let pg_type = PgType::from_postgres_name(&catalog_type_name).ok();
+        Self {
+            name: name.into(),
+            pg_type,
+            catalog_type_name,
+            nullable,
+            generated: false,
+        }
     }
 
     /// Creates a column definition from a supported PostgreSQL type.
@@ -101,7 +101,7 @@ impl ColumnDefinition {
     ) -> Self {
         Self {
             name: name.into(),
-            pg_type,
+            pg_type: Some(pg_type),
             catalog_type_name: catalog_type_name.into(),
             nullable,
             generated,
@@ -298,7 +298,12 @@ impl MigrationValidationInput {
                     column.name.clone(),
                 ));
             }
-            let pg_type = column.pg_type;
+            let Some(pg_type) = column.pg_type else {
+                return Err(MigrationConstraintError::UnsupportedColumnType {
+                    column: column.name.clone(),
+                    type_name: column.catalog_type_name.clone(),
+                });
+            };
             if !pg_type.is_mvp_supported() {
                 return Err(MigrationConstraintError::UnsupportedColumnType {
                     column: column.name.clone(),

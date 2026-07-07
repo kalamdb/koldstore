@@ -1,10 +1,13 @@
 //! Flush orchestration: prepare, batch write, and finalize.
 
-use koldstore_catalog::ManagedTableSnapshot;
 use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
+use koldstore_catalog::ManagedTableSnapshot;
 
 use super::jobs::{ensure_flush_job, mark_flush_job_completed, mark_flush_job_running};
-use super::segments::{next_flush_batch_number, upsert_manifest_row, write_flush_segment};
+use super::segments::{
+    manifest_from_active_cold_segments, next_flush_batch_number, upsert_manifest_row,
+    write_flush_segment,
+};
 use super::stats::{active_flush_policy, resolve_flush_stats};
 use super::write::{chunk_flush_write_input, flush_write_input, FlushWriteInput};
 
@@ -78,18 +81,6 @@ pub(super) fn write_flush_batches(
     let prefix = format!("{}/{}", ctx.relation.namespace, ctx.relation.name);
     let manifest_path = format!("{prefix}/manifest.json");
     let absolute_manifest_path = std::path::Path::new(&ctx.storage.base_path).join(&manifest_path);
-    let mut manifest = if absolute_manifest_path.exists() {
-        serde_json::from_str::<koldstore_manifest::Manifest>(
-            &std::fs::read_to_string(&absolute_manifest_path).map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?
-    } else {
-        koldstore_manifest::Manifest::new_shared(
-            ctx.relation.namespace.clone(),
-            ctx.relation.name.clone(),
-            ctx.storage.schema_version as u32,
-        )
-    };
     let mut batch_number = next_flush_batch_number(table_oid)?;
     let mut total_rows_flushed = 0_i64;
     let mut last_max_seq = 0_i64;
@@ -97,7 +88,7 @@ pub(super) fn write_flush_batches(
 
     for chunk in chunk_flush_write_input(write_input, ctx.max_rows_per_file) {
         let chunk_stats = super::stats::flush_stats_for_rows(&chunk.rows)?;
-        let segment = write_flush_segment(
+        write_flush_segment(
             table_oid,
             &ctx.relation,
             &ctx.storage,
@@ -107,12 +98,17 @@ pub(super) fn write_flush_batches(
             batch_number,
             &chunk_stats,
         )?;
-        manifest.append_segment(segment.0);
         total_rows_flushed = total_rows_flushed.saturating_add(chunk_stats.row_count);
         last_max_seq = chunk_stats.max_seq;
         last_max_commit_seq = chunk_stats.max_commit_seq;
         batch_number = batch_number.saturating_add(1);
     }
+    let manifest = manifest_from_active_cold_segments(
+        table_oid,
+        &ctx.relation,
+        &ctx.snapshot,
+        ctx.storage.schema_version,
+    )?;
 
     Ok(FlushBatchOutcome {
         total_rows_flushed,

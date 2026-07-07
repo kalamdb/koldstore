@@ -1,7 +1,6 @@
 use arrow_schema::{DataType, TimeUnit};
 use koldstore_parquet::{
-    arrow_data_type, build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType,
-    SchemaError,
+    arrow_data_type, build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType, SchemaError,
 };
 
 #[test]
@@ -26,14 +25,7 @@ fn clean_schema_conversion_adds_mirror_metadata_not_user_table_system_columns() 
             .iter()
             .map(|field| field.name().as_str())
             .collect::<Vec<_>>(),
-        vec![
-            "id",
-            "body",
-            "seq",
-            "op",
-            "deleted",
-            "schema_version"
-        ]
+        vec!["id", "body", "seq", "op", "deleted", "schema_version"]
     );
     assert_eq!(
         schema.field_with_name("seq").unwrap().data_type(),

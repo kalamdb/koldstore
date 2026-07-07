@@ -37,15 +37,9 @@ fn mirror_capture_upserts_insert_update_delete_latest_state() {
     assert!(sql.contains("IF TG_OP = 'INSERT' THEN"));
     assert!(sql.contains("ELSIF TG_OP = 'UPDATE' THEN"));
     assert!(sql.contains("ELSIF TG_OP = 'DELETE' THEN"));
-    assert!(
-        sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 1, pg_current_wal_lsn())")
-    );
-    assert!(
-        sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 2, pg_current_wal_lsn())")
-    );
-    assert!(
-        sql.contains("VALUES (OLD.\"id\", public.snowflake_id(), 3, pg_current_wal_lsn())")
-    );
+    assert!(sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 1, pg_current_wal_lsn())"));
+    assert!(sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 2, pg_current_wal_lsn())"));
+    assert!(sql.contains("VALUES (OLD.\"id\", public.snowflake_id(), 3, pg_current_wal_lsn())"));
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(sql.contains("SET search_path = pg_catalog, koldstore"));
     assert!(sql.contains("\"seq\" = EXCLUDED.\"seq\""));

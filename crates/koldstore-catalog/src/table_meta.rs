@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use koldstore_common::{Diagnostic, FlushPolicy, KoldstoreError, PrimaryKeyShape, Result, TableKind};
+use koldstore_common::{
+    Diagnostic, FlushPolicy, KoldstoreError, PrimaryKeyShape, Result, TableKind,
+};
 use koldstore_schema::MirrorInitializationState;
 
 /// FK migration policy classification.

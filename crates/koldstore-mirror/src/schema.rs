@@ -1,6 +1,9 @@
 //! Mirror table schema planning.
 
-use koldstore_common::{escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident, PrimaryKeyColumnShape};
+use koldstore_common::{
+    escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident,
+    PrimaryKeyColumnShape,
+};
 
 use crate::{MirrorColumn, MirrorError, MirrorRelation, MirrorResult, MirrorStatement};
 
@@ -97,12 +100,7 @@ fn render_pk_column(column: &PrimaryKeyColumnShape) -> MirrorResult<String> {
     let type_sql = render_type(column);
     let collation_sql = column
         .collation()
-        .map(|collation| {
-            format!(
-                " COLLATE {}",
-                quote_qualified_ident(collation.as_str())
-            )
-        })
+        .map(|collation| format!(" COLLATE {}", quote_qualified_ident(collation.as_str())))
         .unwrap_or_default();
 
     Ok(format!(

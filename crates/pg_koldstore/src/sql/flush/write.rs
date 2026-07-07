@@ -76,9 +76,7 @@ pub(super) fn flush_write_input(
         serde_json::from_str(&json).map_err(|error| error.to_string())?;
     let columns = columns
         .iter()
-        .map(|column| {
-            koldstore_parquet::PgColumn::new(column.name.clone(), column.pg_type, true)
-        })
+        .map(|column| koldstore_parquet::PgColumn::new(column.name.clone(), column.pg_type, true))
         .collect::<Vec<_>>();
     let rows = values
         .iter()

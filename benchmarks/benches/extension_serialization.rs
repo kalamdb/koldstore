@@ -171,7 +171,9 @@ fn should_flush_by_policy(meta: &ManagedTableMeta, pending_rows: u64) -> bool {
         return false;
     };
     meta.validate().is_ok()
-        && policy.hot_row_limit.is_some_and(|rows| pending_rows >= rows)
+        && policy
+            .hot_row_limit
+            .is_some_and(|rows| pending_rows >= rows)
 }
 
 #[derive(Debug, Clone, Copy)]

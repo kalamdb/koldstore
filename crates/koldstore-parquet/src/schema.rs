@@ -47,11 +47,7 @@ impl PgColumn {
     /// Converts this column to an Arrow field.
     #[must_use]
     pub fn to_arrow_field(&self) -> Field {
-        Field::new(
-            &self.name,
-            arrow_data_type(self.pg_type),
-            self.nullable,
-        )
+        Field::new(&self.name, arrow_data_type(self.pg_type), self.nullable)
     }
 }
 

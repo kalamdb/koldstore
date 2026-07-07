@@ -16,7 +16,9 @@ mod literals;
 mod profile;
 mod tuple;
 
-use literals::{list_node_pointers, scalar_array_filter_sql, sql_literal, typed_literal_sql, unwrap_relabel};
+use literals::{
+    list_node_pointers, scalar_array_filter_sql, sql_literal, typed_literal_sql, unwrap_relabel,
+};
 
 use profile::{ColdReadProfile, SegmentReadProfile};
 use tuple::{copy_spi_datum, store_materialized_row, MaterializedRow};
