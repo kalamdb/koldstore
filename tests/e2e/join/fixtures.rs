@@ -191,11 +191,7 @@ pub fn log_join_plan(label: &str, plan: &str) {
 }
 
 /// Asserts a join plan uses PostgreSQL join execution and KoldMergeScan where expected.
-pub fn assert_join_plan_shape(
-    plan: &str,
-    label: &str,
-    min_merge_scans: usize,
-) -> Result<()> {
+pub fn assert_join_plan_shape(plan: &str, label: &str, min_merge_scans: usize) -> Result<()> {
     anyhow::ensure!(
         plan.contains("Join")
             || plan.contains("Nested Loop")
@@ -257,7 +253,11 @@ pub async fn assert_join_pair(
     Ok(())
 }
 
-pub async fn assert_koldstore_pg_join_samples(db: &TestDb, items: &str, accounts: &str) -> Result<()> {
+pub async fn assert_koldstore_pg_join_samples(
+    db: &TestDb,
+    items: &str,
+    accounts: &str,
+) -> Result<()> {
     let cold = db
         .client
         .query_one(

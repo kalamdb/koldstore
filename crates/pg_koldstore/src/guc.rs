@@ -168,7 +168,7 @@ pub fn cold_reads_mode() -> settings::ColdReadsMode {
             .get()
             .and_then(|value| value.to_str().ok().map(str::to_string))
             .unwrap_or_else(|| settings::DEFAULT_COLD_READS.to_string());
-        return settings::ColdReadsMode::parse(&value).unwrap_or(settings::ColdReadsMode::Auto);
+        settings::ColdReadsMode::parse(&value).unwrap_or(settings::ColdReadsMode::Auto)
     }
 
     #[cfg(not(feature = "pg"))]
@@ -182,7 +182,7 @@ pub fn cold_reads_mode() -> settings::ColdReadsMode {
 pub fn max_open_parquet_readers() -> i32 {
     #[cfg(feature = "pg")]
     {
-        return settings::bounded_concurrency_limit(MAX_OPEN_PARQUET_READERS.get());
+        settings::bounded_concurrency_limit(MAX_OPEN_PARQUET_READERS.get())
     }
 
     #[cfg(not(feature = "pg"))]
@@ -196,7 +196,7 @@ pub fn max_open_parquet_readers() -> i32 {
 pub fn max_running_jobs() -> i32 {
     #[cfg(feature = "pg")]
     {
-        return settings::bounded_concurrency_limit(MAX_RUNNING_JOBS.get());
+        settings::bounded_concurrency_limit(MAX_RUNNING_JOBS.get())
     }
 
     #[cfg(not(feature = "pg"))]

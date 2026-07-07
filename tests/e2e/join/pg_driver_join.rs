@@ -60,14 +60,7 @@ async fn plain_pg_table_can_drive_join_against_koldstore_items() -> Result<()> {
             order_lines = order_lines,
             items = items.relation
         );
-        assert_join_plan_reads_cold_storage(
-            &db.client,
-            &sql,
-            "pg-driver cold rows",
-            1,
-            1,
-        )
-        .await?;
+        assert_join_plan_reads_cold_storage(&db.client, &sql, "pg-driver cold rows", 1, 1).await?;
     }
 
     Ok(())

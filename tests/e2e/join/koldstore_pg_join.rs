@@ -5,7 +5,10 @@ mod common;
 mod fixtures;
 
 use anyhow::Result;
-use fixtures::{assert_join_pair, assert_koldstore_pg_join_samples, create_plain_accounts_table, setup_koldstore_items_with_mixed_storage, JoinKind};
+use fixtures::{
+    assert_join_pair, assert_koldstore_pg_join_samples, create_plain_accounts_table,
+    setup_koldstore_items_with_mixed_storage, JoinKind,
+};
 
 #[tokio::test]
 async fn koldstore_table_joins_plain_pg_table_across_all_join_kinds() -> Result<()> {

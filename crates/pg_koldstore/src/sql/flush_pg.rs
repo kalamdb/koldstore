@@ -5,9 +5,7 @@ pub use koldstore_flush::ops::*;
 #[cfg(feature = "pg")]
 use koldstore_common::{QualifiedTableName, ScopeKey, TableName};
 #[cfg(feature = "pg")]
-use koldstore_flush::policy::{
-    select_mirror_flush_candidates, FlushPolicy, MirrorPolicyRow,
-};
+use koldstore_flush::policy::{select_mirror_flush_candidates, FlushPolicy, MirrorPolicyRow};
 #[cfg(feature = "pg")]
 use std::time::SystemTime;
 
