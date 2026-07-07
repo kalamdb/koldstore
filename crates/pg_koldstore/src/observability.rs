@@ -2,10 +2,12 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-/// Initializes tracing for non-PostgreSQL tests.
-pub fn init_tracing() {
-    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
-}
+/// Reserved for future PostgreSQL logging integration.
+///
+/// A `tracing-subscriber` is intentionally not installed in the extension
+/// shared library: it adds significant binary size and PostgreSQL already
+/// provides its own logging facilities.
+pub fn init_tracing() {}
 
 /// Tracing span names used by SQL and background paths.
 pub const SPAN_NAMES: &[&str] = &[
