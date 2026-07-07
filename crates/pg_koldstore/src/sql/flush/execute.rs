@@ -3,7 +3,9 @@
 use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
 use koldstore_catalog::ManagedTableSnapshot;
 
-use super::jobs::{ensure_flush_job, mark_flush_job_completed, mark_flush_job_running};
+use super::jobs::{
+    ensure_flush_job, mark_flush_job_completed, mark_flush_job_failed, mark_flush_job_running,
+};
 use super::segments::{
     manifest_from_active_cold_segments, next_flush_batch_number, upsert_manifest_row,
     write_flush_segment,
@@ -152,14 +154,41 @@ pub(super) fn finalize_flush(
 }
 
 pub(super) fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<pgrx::Uuid, String> {
-    let ctx = prepare_flush_context(table_oid)?;
+    let mut ctx = prepare_flush_context(table_oid)?;
+    let job_uuid = pgrx::Uuid::from_bytes(*ctx.job_id.as_bytes());
+    match crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid) {
+        Ok(true) => {
+            ctx = prepare_flush_context(table_oid).inspect_err(|error| {
+                let _ = mark_flush_job_failed(ctx.job_id, table_oid, error);
+            })?;
+        }
+        Ok(false) => {}
+        Err(error) => {
+            mark_flush_job_failed(ctx.job_id, table_oid, &error)?;
+            return Ok(job_uuid);
+        }
+    }
+    let result = flush_prepared_table(table_oid, &ctx);
+    match result {
+        Ok(()) => Ok(job_uuid),
+        Err(error) => {
+            mark_flush_job_failed(ctx.job_id, table_oid, &error)?;
+            Ok(job_uuid)
+        }
+    }
+}
+
+fn flush_prepared_table(
+    table_oid: pgrx::pg_sys::Oid,
+    ctx: &FlushPreparedContext,
+) -> Result<(), String> {
     let stats = resolve_flush_stats(table_oid, ctx.force)?;
     if stats.row_count == 0 {
         mark_flush_job_completed(ctx.job_id, table_oid, 0, 0, 0)?;
-        return Ok(pgrx::Uuid::from_bytes(*ctx.job_id.as_bytes()));
+        return Ok(());
     }
 
-    let write_input = build_flush_write_input(table_oid, &ctx, &stats)?;
+    let write_input = build_flush_write_input(table_oid, ctx, &stats)?;
     if i64::try_from(write_input.rows.len()).map_err(|error| error.to_string())? != stats.row_count
     {
         return Err(format!(
@@ -169,7 +198,6 @@ pub(super) fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<pgrx::
         ));
     }
 
-    let outcome = write_flush_batches(table_oid, &ctx, &write_input)?;
-    finalize_flush(table_oid, &ctx, &outcome)?;
-    Ok(pgrx::Uuid::from_bytes(*ctx.job_id.as_bytes()))
+    let outcome = write_flush_batches(table_oid, ctx, &write_input)?;
+    finalize_flush(table_oid, ctx, &outcome)
 }

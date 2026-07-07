@@ -236,10 +236,22 @@ fn clean_rows_from_batch(
         let deleted_value = deleted.value(row_index);
         let mut row_image = serde_json::Map::new();
         for column in columns {
-            row_image.insert(
-                column.name.clone(),
-                crate::pg_type_codec::json_value_from_arrow_column(batch, column, row_index)?,
-            );
+            let value = match batch.column_by_name(&column.name) {
+                Some(array) => crate::pg_type_codec::json_from_arrow_cell(
+                    column.pg_type,
+                    &column.name,
+                    array.as_ref(),
+                    row_index,
+                )?,
+                None if primary_key_columns.iter().any(|pk| pk == &column.name) => {
+                    return Err(format!(
+                        "cold segment is missing required primary-key column `{}`",
+                        column.name
+                    ));
+                }
+                None => serde_json::Value::Null,
+            };
+            row_image.insert(column.name.clone(), value);
         }
         let mut pk_json = serde_json::Map::new();
         for column in primary_key_columns {

@@ -7,6 +7,8 @@ use koldstore_migrate::rehydrate::DemigrateOptions;
 #[cfg(feature = "pg")]
 use koldstore_migrate::{introspection, DemigrateTableRequest, MigrateTableRequest};
 #[cfg(feature = "pg")]
+use serde::Deserialize;
+#[cfg(feature = "pg")]
 use uuid::Uuid;
 
 /// Manages a heap table with structured hot/cold flush settings.
@@ -326,6 +328,197 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
     let table_oid = pgrx::pg_sys::Oid::from(input.table_oid);
     crate::catalog::cache::invalidate_table(table_oid);
     crate::spi::invalidate_all_prepared_plans();
+    Ok(())
+}
+
+#[cfg(feature = "pg")]
+#[derive(Debug, Deserialize)]
+struct ActiveSchemaRefreshContext {
+    version: i32,
+    table_type: String,
+    storage_id: String,
+    scope_column: Option<String>,
+    mirror_relation: String,
+    primary_key: Vec<String>,
+    columns: Vec<koldstore_schema::SchemaColumn>,
+    indexed_columns: Vec<String>,
+    options: serde_json::Value,
+}
+
+#[cfg(feature = "pg")]
+pub(crate) fn refresh_active_schema_if_changed(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<bool, String> {
+    let table_oid_u32 = table_oid.to_u32();
+    let Some(active) = active_schema_refresh_context(table_oid)? else {
+        return Ok(false);
+    };
+    let catalog = migration_catalog(table_oid_u32)?;
+    let current_columns = catalog
+        .columns
+        .iter()
+        .map(|column| koldstore_schema::CatalogColumnShape {
+            name: column.name.as_str(),
+            pg_type: column.pg_type,
+            catalog_type_name: column.catalog_type_name(),
+        })
+        .collect::<Vec<_>>();
+    let action = koldstore_schema::plan_schema_evolution(&koldstore_schema::SchemaEvolutionInput {
+        active_primary_key: &active.primary_key,
+        active_columns: &active.columns,
+        active_indexed_columns: &active.indexed_columns,
+        current_primary_key: &catalog.primary_key.columns,
+        current_columns: &current_columns,
+        current_indexed_columns: &catalog.indexed_columns,
+    })
+    .map_err(|error| error.to_string())?;
+    if action == koldstore_schema::SchemaEvolutionAction::Unchanged {
+        return Ok(false);
+    }
+
+    let primary_key_shape = primary_key_shape(table_oid_u32)?;
+    insert_refreshed_schema_version(
+        table_oid,
+        table_oid_u32,
+        &active,
+        &catalog,
+        &primary_key_shape,
+    )?;
+    crate::catalog::cache::invalidate_table(table_oid);
+    crate::spi::invalidate_all_prepared_plans();
+    Ok(true)
+}
+
+#[cfg(feature = "pg")]
+fn active_schema_refresh_context(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<ActiveSchemaRefreshContext>, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let json = pgrx::Spi::get_one_with_args::<String>(
+        r#"
+SELECT jsonb_build_object(
+    'version', version,
+    'table_type', table_type,
+    'storage_id', storage_id::text,
+    'scope_column', scope_column,
+    'mirror_relation', mirror_relation::text,
+    'primary_key', primary_key,
+    'columns', columns,
+    'indexed_columns', indexed_columns,
+    'options', options
+)::text
+FROM koldstore.schemas
+WHERE table_oid = $1::oid
+  AND active
+  AND initialization_state = 'complete'
+ORDER BY version DESC
+LIMIT 1
+"#,
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?;
+
+    json.map(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+#[cfg(feature = "pg")]
+fn insert_refreshed_schema_version(
+    table_oid: pgrx::pg_sys::Oid,
+    table_oid_u32: u32,
+    active: &ActiveSchemaRefreshContext,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    primary_key_shape: &koldstore_common::PrimaryKeyShape,
+) -> Result<(), String> {
+    use koldstore_migrate::register::{capture_type_matrix, schema_columns_from_catalog};
+    use pgrx::datum::DatumWithOid;
+
+    let next_version = active
+        .version
+        .checked_add(1)
+        .ok_or_else(|| "schema version overflow".to_string())?;
+    let columns = schema_columns_from_catalog(&catalog.columns);
+    let type_matrix = capture_type_matrix(&columns);
+    let storage_id =
+        Uuid::parse_str(&active.storage_id).map_err(|error| format!("storage id: {error}"))?;
+
+    pgrx::Spi::connect_mut(|client| {
+        client
+            .update(
+                "UPDATE koldstore.schemas SET active = false, updated_at = now() WHERE table_oid = $1::oid AND active",
+                None,
+                &[DatumWithOid::from(table_oid)],
+            )
+            .map_err(|error| error.to_string())?;
+        client
+            .update(
+                r#"
+INSERT INTO koldstore.schemas (
+    id,
+    table_oid,
+    version,
+    active,
+    table_type,
+    columns,
+    primary_key,
+    scope_column,
+    mirror_relation,
+    primary_key_shape,
+    initialization_state,
+    indexed_columns,
+    type_matrix,
+    options,
+    storage_id
+)
+VALUES (
+    $1::uuid,
+    $2::oid,
+    $3::integer,
+    true,
+    $4::text,
+    $5::jsonb,
+    $6::jsonb,
+    $7::name,
+    $8::text::regclass,
+    $9::jsonb,
+    'complete',
+    $10::jsonb,
+    $11::jsonb,
+    $12::jsonb,
+    $13::uuid
+)
+"#,
+                None,
+                &[
+                    DatumWithOid::from(pgrx::Uuid::from_bytes(*Uuid::new_v4().as_bytes())),
+                    DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid_u32)),
+                    DatumWithOid::from(next_version),
+                    DatumWithOid::from(active.table_type.as_str()),
+                    DatumWithOid::from(pgrx::JsonB(
+                        serde_json::to_value(&columns).map_err(|error| error.to_string())?,
+                    )),
+                    DatumWithOid::from(pgrx::JsonB(serde_json::json!(
+                        catalog.primary_key.columns
+                    ))),
+                    DatumWithOid::from(active.scope_column.as_deref()),
+                    DatumWithOid::from(active.mirror_relation.as_str()),
+                    DatumWithOid::from(pgrx::JsonB(
+                        serde_json::to_value(primary_key_shape)
+                            .map_err(|error| error.to_string())?,
+                    )),
+                    DatumWithOid::from(pgrx::JsonB(serde_json::json!(
+                        catalog.indexed_columns
+                    ))),
+                    DatumWithOid::from(pgrx::JsonB(type_matrix)),
+                    DatumWithOid::from(pgrx::JsonB(active.options.clone())),
+                    DatumWithOid::from(pgrx::Uuid::from_bytes(*storage_id.as_bytes())),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        Ok::<(), String>(())
+    })
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 

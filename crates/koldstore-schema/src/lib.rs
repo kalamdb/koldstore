@@ -4,11 +4,16 @@
 //! state for managed tables. Must not depend on `pgrx`. SQL execution stays in
 //! `pg_koldstore`.
 
+pub mod evolution;
 pub mod pg_type;
 pub mod schema_registry;
 pub mod state;
 pub mod type_matrix;
 
+pub use evolution::{
+    plan_schema_evolution, CatalogColumnShape, SchemaEvolutionAction, SchemaEvolutionError,
+    SchemaEvolutionInput,
+};
 pub use pg_type::{PgIntegerArrayOid, PgType, SchemaError};
 pub use schema_registry::{SchemaColumn, SchemaRegistryEntry};
 pub use state::MirrorInitializationState;
