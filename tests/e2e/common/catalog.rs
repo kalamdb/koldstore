@@ -32,6 +32,16 @@ pub async fn assert_system_columns_absent(client: &Client, relation: &str) -> Re
     Ok(())
 }
 
+/// Returns the default `koldstore.<table>__cl` mirror relation for a source table.
+#[must_use]
+pub fn change_log_mirror_relation(source_relation: &str) -> String {
+    let relation = source_relation
+        .split_once('.')
+        .map(|(_, name)| name)
+        .unwrap_or(source_relation);
+    format!("koldstore.{relation}__cl")
+}
+
 /// Asserts that the table-specific change-log mirror relation exists.
 ///
 /// # Errors

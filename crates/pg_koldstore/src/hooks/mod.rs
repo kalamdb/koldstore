@@ -6,7 +6,10 @@ pub mod planner;
 pub mod xact;
 
 /// Registers PostgreSQL hooks.
-pub fn register_hooks() {}
+pub fn register_hooks() {
+    #[cfg(feature = "pg")]
+    crate::merge_scan::pg::register_custom_scan_hooks();
+}
 
 /// Hook names installed by the extension shell.
 #[must_use]

@@ -26,6 +26,10 @@ name = "flush_object_outage"
 path = "flush/flush_object_outage.rs"
 
 [[test]]
+name = "flush_hot_mirror_cleanup"
+path = "flush/flush_hot_mirror_cleanup.rs"
+
+[[test]]
 name = "flush_matrix"
 path = "flush/flush_matrix.rs"
 
@@ -44,6 +48,22 @@ path = "merge/merge_scan_outage.rs"
 [[test]]
 name = "merge_scan_matrix"
 path = "merge/merge_scan_matrix.rs"
+
+[[test]]
+name = "join_targets"
+path = "join/join_targets.rs"
+
+[[test]]
+name = "koldstore_pg_join"
+path = "join/koldstore_pg_join.rs"
+
+[[test]]
+name = "koldstore_koldstore_join"
+path = "join/koldstore_koldstore_join.rs"
+
+[[test]]
+name = "pg_driver_join"
+path = "join/pg_driver_join.rs"
 
 [[test]]
 name = "cold_dml_matrix"
@@ -118,6 +138,7 @@ koldstore-storage.workspace = true
 parquet.workspace = true
 pg_koldstore = { path = "../../crates/pg_koldstore", default-features = false }
 serde_json.workspace = true
+serde.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 

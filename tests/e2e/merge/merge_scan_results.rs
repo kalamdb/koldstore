@@ -121,7 +121,7 @@ fn merge_scan_results_apply_cold_delete_markers_and_newer_reinserts() {
 }
 
 #[tokio::test]
-async fn flushed_table_and_later_hot_dml_return_current_rows_on_pgrx() -> Result<()> {
+async fn flushed_table_prunes_hot_rows_and_keeps_cold_payload_for_merge_reads() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "merge_scan_results").await?;
         let table = db
@@ -129,23 +129,27 @@ async fn flushed_table_and_later_hot_dml_return_current_rows_on_pgrx() -> Result
             .await?;
         db.migrate_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
+        common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 16).await?;
 
         db.client
             .batch_execute(&format!(
                 r#"
-                UPDATE {relation}
-                SET title = 'hot-winner'
-                WHERE id = 1;
-
-                DELETE FROM {relation}
-                WHERE id = 2;
-
-                INSERT INTO {relation} (id, account_id, title, qty, category)
+                INSERT INTO {} (id, account_id, title, qty, category)
                 VALUES (100, 1, 'new-hot', 100, 'new');
                 "#,
-                relation = table.relation
+                table.relation
             ))
             .await?;
+
+        let cold_count = db
+            .client
+            .query_one(&format!("SELECT count(*) FROM {}", table.relation), &[])
+            .await?
+            .get::<_, i64>(0);
+        assert_eq!(
+            cold_count, 17,
+            "managed SELECT must merge 16 cold rows plus 1 hot row"
+        );
 
         let rows = db
             .client
@@ -164,9 +168,33 @@ async fn flushed_table_and_later_hot_dml_return_current_rows_on_pgrx() -> Result
 
         assert_eq!(
             visible,
-            vec![(1, "hot-winner".to_string()), (100, "new-hot".to_string())]
+            vec![
+                (1, "item-000001".to_string()),
+                (2, "item-000002".to_string()),
+                (100, "new-hot".to_string()),
+            ]
         );
+
+        let planned = common::explain(
+            &db.client,
+            &format!("SELECT count(*) FROM {}", table.relation),
+        )
+        .await?;
+        common::assert_kold_merge_scan_cold_reads(&planned, "manifest.json", 1)?;
+
+        let analyzed = common::explain_analyze(
+            &db.client,
+            &format!("SELECT count(*) FROM {}", table.relation),
+        )
+        .await?;
+        common::assert_kold_merge_scan_executed_cold_reads(&analyzed, 1)?;
+
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
+
+        let status = common::table_status(&db.client, &table.relation).await?;
+        assert_eq!(status.hot_rows, 1);
+        assert_eq!(status.mirror_rows, 1);
+        assert!(status.cold_row_count >= 16);
     }
 
     Ok(())

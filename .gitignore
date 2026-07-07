@@ -32,3 +32,4 @@ Thumbs.db
 .vscode/
 .idea/
 
+/benchmarks/scripts/__pycache__

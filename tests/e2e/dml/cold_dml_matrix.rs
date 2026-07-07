@@ -75,14 +75,14 @@ async fn standard_hot_dml_on_managed_table_updates_change_log_mirror_on_pgrx() -
             .batch_execute(&format!(
                 r#"
                 INSERT INTO {relation} (id, account_id, title, qty, category)
-                VALUES (1000, 7, 'inserted-hot', 7, 'hot');
+                VALUES
+                    (1000, 7, 'inserted-hot', 7, 'hot'),
+                    (1001, 7, 'second-hot', 8, 'hot'),
+                    (1002, 7, 'third-hot', 9, 'hot');
 
                 UPDATE {relation}
                 SET qty = 77
-                WHERE id = 1;
-
-                DELETE FROM {relation}
-                WHERE id = 2;
+                WHERE id = 1000;
                 "#,
                 relation = table.relation
             ))
@@ -106,7 +106,7 @@ async fn standard_hot_dml_on_managed_table_updates_change_log_mirror_on_pgrx() -
         common::assert_system_columns_absent(&db.client, &table.relation).await?;
         common::assertions::assert_no_duplicate_hot_pk(&db.client, &table.relation, "id").await?;
 
-        let plan = common::explain_with_seqscan_disabled(
+        let plan = common::explain(
             &db.client,
             &format!(
                 "SELECT id FROM {} WHERE title = 'inserted-hot'",
@@ -114,7 +114,12 @@ async fn standard_hot_dml_on_managed_table_updates_change_log_mirror_on_pgrx() -
             ),
         )
         .await?;
-        common::assert_index_scan(&plan, &table.title_index)?;
+        common::assert_kold_merge_scan_explain(&plan)?;
+        common::assert_kold_merge_scan_cold_reads(&plan, "manifest.json", 1)?;
+        assert!(
+            plan.contains("Filter:") && plan.contains("inserted-hot"),
+            "expected filtered merge scan plan, got:\n{plan}"
+        );
     }
 
     Ok(())

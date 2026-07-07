@@ -30,6 +30,10 @@ if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUD
 fi
 cargo pgrx install "${INSTALL_ARGS[@]}"
 
+echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
+cargo pgrx stop "$PG_FEATURE"
+cargo pgrx start "$PG_FEATURE"
+
 echo "recreating local E2E database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
   -c "DROP DATABASE IF EXISTS ${PG_DATABASE}" \

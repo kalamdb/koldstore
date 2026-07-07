@@ -92,11 +92,20 @@ fn cleanup_removes_only_selected_mirror_rows_after_manifest_commit() {
         .statement
         .sql
         .contains("mirror.\"seq\" = selected.\"seq\""));
+    assert!(plan.statement.sql.contains("removed_mirror AS"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("USING selected, removed_mirror"));
     assert!(plan
         .statement
         .sql
         .contains("DELETE FROM ONLY \"app\".\"items\" AS hot"));
     assert!(plan.statement.sql.contains("selected.\"op\" IN (1, 2)"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("removed_mirror.\"seq\" = selected.\"seq\""));
     assert!(plan.statement.sql.contains("$1::jsonb"));
     assert_eq!(plan.statement.param_types, vec![SqlParamType::Jsonb]);
     assert!(!plan.statement.sql.contains("\"_deleted\""));
@@ -104,4 +113,21 @@ fn cleanup_removes_only_selected_mirror_rows_after_manifest_commit() {
         .statement
         .sql
         .contains("DELETE FROM koldstore.row_events"));
+}
+
+#[test]
+fn cleanup_deletes_mirror_and_hot_rows_in_one_atomic_statement() {
+    let plan = plan_clean_schema_cleanup(&table(), &mirror(), &["id".to_string()]).unwrap();
+    let sql = &plan.statement.sql;
+
+    assert_eq!(
+        sql.matches("DELETE FROM").count(),
+        2,
+        "cleanup must delete mirror rows in a CTE and base rows in the same statement"
+    );
+    assert!(
+        sql.find("removed_mirror AS").expect("mirror cleanup CTE")
+            < sql.find("DELETE FROM ONLY").expect("base-table cleanup"),
+        "mirror rows must be removed before base rows in the unified cleanup statement"
+    );
 }

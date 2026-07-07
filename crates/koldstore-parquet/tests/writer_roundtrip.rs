@@ -1,10 +1,13 @@
 use koldstore_parquet::{
-    plan_clean_cold_record, ColumnStats, FooterSummary, ParquetSegmentWriter, RowGroupStats,
-    SegmentFooterMetadata, SegmentMetadataInput, WriterOptions,
+    plan_clean_cold_record, record_batch_from_clean_cold_records, ColumnStats, FooterSummary,
+    ParquetSegmentWriter, PgColumn, PgType, RowGroupStats, SegmentFooterMetadata,
+    SegmentMetadataInput, WriterOptions,
 };
 use std::sync::Arc;
 
-use arrow_array::{Int64Array, RecordBatch, StringArray};
+use arrow_array::{
+    Array, BooleanArray, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
+};
 use arrow_schema::{DataType, Field, Schema};
 use serde_json::json;
 
@@ -18,7 +21,7 @@ fn writer_plan_records_kalamdb_compatible_layout_metadata() {
     assert_eq!(plan.max_seq, 10);
     assert_eq!(plan.min_commit_seq, 11);
     assert_eq!(plan.max_commit_seq, 20);
-    assert_eq!(plan.compression, "snappy");
+    assert_eq!(plan.compression, "zstd");
 }
 
 #[test]
@@ -119,7 +122,7 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
 #[test]
 fn writer_plan_bounds_streaming_row_groups_by_configured_row_group_size() {
     let writer = ParquetSegmentWriter::new(WriterOptions {
-        compression: "snappy".to_string(),
+        compression: "zstd".to_string(),
         row_group_size: 2,
         statistics_columns: Vec::new(),
         bloom_filter_columns: Vec::new(),
@@ -138,7 +141,7 @@ fn writer_options_build_native_parquet_properties_for_stats_and_bloom_filters() 
     let options = WriterOptions::default()
         .with_statistics_columns(["id", "created_at"])
         .with_bloom_filter_columns(["id"]);
-    let properties = options.native_writer_properties();
+    let properties = options.try_native_writer_properties().unwrap();
     let id = parquet::schema::types::ColumnPath::from("id");
     let created_at = parquet::schema::types::ColumnPath::from("created_at");
 
@@ -148,6 +151,140 @@ fn writer_options_build_native_parquet_properties_for_stats_and_bloom_filters() 
     );
     assert!(properties.bloom_filter_properties(&id).is_some());
     assert!(properties.bloom_filter_properties(&created_at).is_none());
+}
+
+#[test]
+fn writer_options_apply_configured_compression_codec() {
+    let properties = WriterOptions {
+        compression: "zstd".to_string(),
+        ..WriterOptions::default()
+    }
+    .try_native_writer_properties()
+    .unwrap();
+
+    let id = parquet::schema::types::ColumnPath::from("id");
+    assert_eq!(
+        properties.compression(&id),
+        parquet::basic::Compression::ZSTD(parquet::basic::ZstdLevel::default())
+    );
+}
+
+#[test]
+fn writer_options_reject_unknown_compression_codec() {
+    let result = WriterOptions {
+        compression: "made_up_codec".to_string(),
+        ..WriterOptions::default()
+    }
+    .try_native_writer_properties();
+
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .contains("unsupported parquet compression"));
+}
+
+#[test]
+fn clean_cold_record_batch_builder_preserves_payloads_and_metadata_types() {
+    let rows = vec![
+        plan_clean_cold_record(
+            [
+                ("id", json!(1)),
+                ("amount", json!(123.4500)),
+                ("tags", json!(["alpha", "beta"])),
+                ("binary_hash", json!("\\xdeadbeef")),
+                ("created_at", json!("2026-07-06T00:00:00Z")),
+            ],
+            ["id"],
+            10,
+            1,
+            "2026-07-06T00:00:01Z",
+            7,
+        )
+        .unwrap(),
+        plan_clean_cold_record(
+            [
+                ("id", json!(2)),
+                ("amount", json!(null)),
+                ("tags", json!(["gamma"])),
+                ("binary_hash", json!(null)),
+                ("created_at", json!("2026-07-06T00:00:02Z")),
+            ],
+            ["id"],
+            11,
+            3,
+            "2026-07-06T00:00:03Z",
+            7,
+        )
+        .unwrap(),
+    ];
+    let batch = record_batch_from_clean_cold_records(
+        &[
+            PgColumn::new("id", PgType::Int8, false),
+            PgColumn::new("amount", PgType::Numeric, true),
+            PgColumn::new("tags", PgType::TextArray, true),
+            PgColumn::new("binary_hash", PgType::Bytea, true),
+            PgColumn::new("created_at", PgType::Timestamptz, true),
+        ],
+        &rows,
+    )
+    .unwrap();
+
+    assert_eq!(batch.num_rows(), 2);
+    let id = batch
+        .column_by_name("id")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(id.value(0), 1);
+    assert_eq!(id.value(1), 2);
+
+    let amount = batch
+        .column_by_name("amount")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(amount.value(0), "123.45");
+    assert!(amount.is_null(1));
+
+    let tags = batch
+        .column_by_name("tags")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(tags.value(0), r#"["alpha","beta"]"#);
+    assert!(tags.is_null(1));
+
+    let binary_hash = batch
+        .column_by_name("binary_hash")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(binary_hash.value(0), "\\xdeadbeef");
+    assert!(binary_hash.is_null(1));
+
+    let created_at = batch
+        .column_by_name("created_at")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+    let expected_created_at = chrono::DateTime::parse_from_rfc3339("2026-07-06T00:00:00Z")
+        .unwrap()
+        .timestamp_micros();
+    assert_eq!(created_at.value(0), expected_created_at);
+
+    let deleted = batch
+        .column_by_name("deleted")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap();
+    assert!(!deleted.value(0));
+    assert!(deleted.value(1));
 }
 
 #[test]

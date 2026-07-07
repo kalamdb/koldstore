@@ -16,8 +16,11 @@ pub enum PgType {
     Float4,
     Float8,
     Text,
+    Numeric,
     Uuid,
     Jsonb,
+    TextArray,
+    Bytea,
     Timestamptz,
 }
 
@@ -72,7 +75,7 @@ impl PgType {
     ///
     /// Returns [`SchemaError::UnsupportedType`] for unsupported or blank types.
     pub fn from_postgres_name(type_name: &str) -> Result<Self, SchemaError> {
-        let normalized = normalize_type_name(type_name);
+        let normalized = canonical_type_name(type_name);
         match normalized.as_str() {
             "bool" | "boolean" => Ok(Self::Bool),
             "int2" | "smallint" => Ok(Self::Int2),
@@ -81,8 +84,11 @@ impl PgType {
             "float4" | "real" => Ok(Self::Float4),
             "float8" | "double precision" => Ok(Self::Float8),
             "text" | "varchar" | "character varying" => Ok(Self::Text),
+            "numeric" => Ok(Self::Numeric),
             "uuid" => Ok(Self::Uuid),
             "jsonb" => Ok(Self::Jsonb),
+            "text[]" => Ok(Self::TextArray),
+            "bytea" => Ok(Self::Bytea),
             "timestamptz" | "timestamp with time zone" => Ok(Self::Timestamptz),
             _ => Err(SchemaError::UnsupportedType(normalized)),
         }
@@ -98,7 +104,12 @@ impl PgType {
             Self::Int8 => DataType::Int64,
             Self::Float4 => DataType::Float32,
             Self::Float8 => DataType::Float64,
-            Self::Text | Self::Uuid | Self::Jsonb => DataType::Utf8,
+            Self::Text
+            | Self::Numeric
+            | Self::Uuid
+            | Self::Jsonb
+            | Self::TextArray
+            | Self::Bytea => DataType::Utf8,
             Self::Timestamptz => DataType::Timestamp(TimeUnit::Microsecond, None),
         }
     }
@@ -172,4 +183,20 @@ fn normalize_type_name(type_name: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn canonical_type_name(type_name: &str) -> String {
+    let normalized = normalize_type_name(type_name);
+    if normalized == "timestamp with time zone" {
+        return normalized;
+    }
+    if normalized.starts_with("timestamp(") && normalized.ends_with(" with time zone") {
+        return "timestamp with time zone".to_string();
+    }
+    if let Some((prefix, suffix)) = normalized.split_once('(') {
+        if suffix.ends_with(')') {
+            return prefix.trim().to_string();
+        }
+    }
+    normalized
 }

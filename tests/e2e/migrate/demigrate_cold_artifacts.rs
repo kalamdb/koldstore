@@ -16,7 +16,7 @@ fn demigrate_cold_artifacts_are_retained_by_default_and_dropped_only_after_rehyd
         table: QualifiedTableName::parse("app.items").unwrap(),
         table_oid: 42,
         cold_object_prefix: "app/items/".to_string(),
-        logical_reader_name: "KoldstoreMergeScan".to_string(),
+        logical_reader_name: "KoldMergeScan".to_string(),
         mirror_table: Some(QualifiedTableName::parse("koldstore.items__cl").unwrap()),
     };
 

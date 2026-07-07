@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
+chrono.workspace = true
 futures-util.workspace = true
 koldstore-common.workspace = true
 parquet.workspace = true

@@ -12,7 +12,22 @@ psql_in_mode() {
     psql "$DATABASE_URL" -v ON_ERROR_STOP=1 "$@"
 }
 
+storage_only_mode() {
+  [[ "$MODE" == extension-hot-cold || "$MODE" == extension-cold-only ]]
+}
+
+reset_extension_state() {
+  echo "[setup] resetting extension-owned state for ${MODE}"
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 <<'SQL'
+DROP EXTENSION IF EXISTS koldstore CASCADE;
+DROP SCHEMA IF EXISTS koldstore CASCADE;
+SQL
+  rm -rf "$KOLDSTORE_BENCH_STORAGE_PATH"
+  mkdir -p "$KOLDSTORE_BENCH_STORAGE_PATH"
+}
+
 setup_mode() {
+  reset_extension_state
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v schema="$BENCH_SCHEMA" <<'SQL'
 DROP SCHEMA IF EXISTS :"schema" CASCADE;
 CREATE SCHEMA :"schema";
@@ -30,12 +45,14 @@ SQL
   if [[ "$MODE" != baseline ]]; then
     psql_in_mode \
       -v KOLDSTORE_BENCH_STORAGE_PATH="$KOLDSTORE_BENCH_STORAGE_PATH" \
+      -v KOLDSTORE_BENCH_COMPRESSION="$KOLDSTORE_BENCH_COMPRESSION" \
       -f "$SQL_DIR/04_extension_setup.sql"
     wait_for_migrate_jobs
   fi
 
-  if [[ "$MODE" == extension-hot-cold || "$MODE" == extension-cold-only ]]; then
+  if storage_only_mode; then
     flush_and_verify
+    prune_flushed_rows_for_storage_snapshot
   fi
 
   compact_hot_table
@@ -118,6 +135,15 @@ PY
   fi
 
   echo "[flush] VERIFIED: $manifest_file ($committed committed segment(s), $flush_rows rows)"
+}
+
+prune_flushed_rows_for_storage_snapshot() {
+  echo "[prune] removing flushed hot rows for storage snapshot"
+  psql_in_mode <<'SQL'
+TRUNCATE TABLE ONLY bench_events;
+TRUNCATE TABLE koldstore.bench_events__cl;
+ANALYZE bench_events;
+SQL
 }
 
 compact_hot_table() {
@@ -391,11 +417,12 @@ run_mode() {
   esac
 
   : "${DATABASE_URL:=postgres}"
-  : "${BENCH_ROWS:=100000}"
-  : "${BENCH_CLIENTS:=4}"
-  : "${BENCH_JOBS:=4}"
-  : "${BENCH_SECONDS:=30}"
-  : "${BENCH_MIXED_SECONDS:=120}"
+  : "${BENCH_ROWS:=25000}"
+  : "${BENCH_CLIENTS:=2}"
+  : "${BENCH_JOBS:=2}"
+  : "${BENCH_SECONDS:=5}"
+  : "${BENCH_MIXED_SECONDS:=15}"
+  : "${KOLDSTORE_BENCH_COMPRESSION:=zstd}"
 
   RAW_DIR="$RESULTS_DIR/raw/$MODE"
   PLAN_DIR="$RESULTS_DIR/plans/$MODE"
@@ -408,6 +435,11 @@ run_mode() {
 
   setup_mode
   "$ROOT_DIR/benchmarks/scripts/collect_db_stats.sh" "$MODE" "$RAW_DIR/db.before.json"
+
+  if storage_only_mode; then
+    echo "[bench] ${MODE} uses storage-only snapshot mode; skipping pgbench workloads"
+    return
+  fi
 
   run_benchmark "single_hot_query" "query_hot_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 0
   run_benchmark "batch_hot_query" "query_hot_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 0
@@ -528,11 +560,13 @@ CREATE EXTENSION IF NOT EXISTS koldstore;
 SELECT koldstore_version();
 SQL
 
-export BENCH_ROWS="${BENCH_ROWS:-100000}"
-export BENCH_SECONDS="${BENCH_SECONDS:-30}"
-export BENCH_MIXED_SECONDS="${BENCH_MIXED_SECONDS:-120}"
-export BENCH_CLIENTS="${BENCH_CLIENTS:-4}"
-export BENCH_JOBS="${BENCH_JOBS:-4}"
+export BENCH_ROWS="${BENCH_ROWS:-25000}"
+export BENCH_SECONDS="${BENCH_SECONDS:-5}"
+export BENCH_MIXED_SECONDS="${BENCH_MIXED_SECONDS:-15}"
+export BENCH_CLIENTS="${BENCH_CLIENTS:-2}"
+export BENCH_JOBS="${BENCH_JOBS:-2}"
+export KOLDSTORE_BENCH_COMPRESSION="${KOLDSTORE_BENCH_COMPRESSION:-zstd}"
+export KOLDSTORE_BENCH_SKIP_CRITERION="${KOLDSTORE_BENCH_SKIP_CRITERION:-1}"
 
 echo "running pgKalam benchmark suite"
 echo "BENCH_PROFILE=$BENCH_PROFILE"

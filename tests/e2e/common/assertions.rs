@@ -57,13 +57,79 @@ pub async fn assert_no_duplicate_hot_pk(
     Ok(())
 }
 
-/// Asserts an EXPLAIN plan includes KoldstoreMergeScan.
-pub fn assert_merge_scan_explain(plan: &str) -> Result<()> {
+/// Asserts an `EXPLAIN` plan includes `KoldMergeScan`.
+pub fn assert_kold_merge_scan_explain(plan: &str) -> Result<()> {
     anyhow::ensure!(
-        plan.contains("KoldstoreMergeScan"),
-        "expected KoldstoreMergeScan in plan"
+        plan.contains("Custom Scan (KoldMergeScan)"),
+        "expected Custom Scan (KoldMergeScan) in plan, got:\n{plan}"
     );
     Ok(())
+}
+
+/// Asserts a merge scan `EXPLAIN` lists manifest and parquet cold sources.
+pub fn assert_kold_merge_scan_cold_reads(
+    plan: &str,
+    manifest_path_hint: &str,
+    min_parquet_segments: usize,
+) -> Result<()> {
+    assert_kold_merge_scan_explain(plan)?;
+    anyhow::ensure!(
+        plan.lines().any(|line| line.contains("Manifest:")),
+        "expected manifest read details in plan, got:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.contains(manifest_path_hint) || plan.contains("manifest.json"),
+        "expected manifest path hint `{manifest_path_hint}` in plan, got:\n{plan}"
+    );
+
+    let parquet_segments = plan
+        .lines()
+        .filter(|line| line.contains("Parquet segment:"))
+        .count();
+    anyhow::ensure!(
+        parquet_segments >= min_parquet_segments,
+        "expected at least {min_parquet_segments} parquet segment(s), got {parquet_segments} in plan:\n{plan}"
+    );
+    Ok(())
+}
+
+/// Backward-compatible alias for planned cold-read assertions.
+pub fn assert_kold_merge_scan_planned_cold_reads(
+    plan: &str,
+    manifest_path_hint: &str,
+    min_parquet_segments: usize,
+) -> Result<()> {
+    assert_kold_merge_scan_cold_reads(plan, manifest_path_hint, min_parquet_segments)
+}
+
+/// Asserts an analyzed merge scan reports timed manifest and parquet reads.
+pub fn assert_kold_merge_scan_executed_cold_reads(
+    plan: &str,
+    min_parquet_segments: usize,
+) -> Result<()> {
+    assert_kold_merge_scan_explain(plan)?;
+    anyhow::ensure!(
+        plan.lines()
+            .any(|line| line.contains("Manifest:") && line.contains(" ms")),
+        "expected timed manifest read in analyzed plan, got:\n{plan}"
+    );
+
+    let timed_segments = plan
+        .lines()
+        .filter(|line| {
+            line.contains("Parquet segment:") && line.contains(" rows, ") && line.contains(" ms")
+        })
+        .count();
+    anyhow::ensure!(
+        timed_segments >= min_parquet_segments,
+        "expected at least {min_parquet_segments} timed parquet segment(s), got {timed_segments} in plan:\n{plan}"
+    );
+    Ok(())
+}
+
+/// Backward-compatible alias for older tests.
+pub fn assert_merge_scan_explain(plan: &str) -> Result<()> {
+    assert_kold_merge_scan_explain(plan)
 }
 
 /// Asserts hot DML instrumentation did not record object-store reads.

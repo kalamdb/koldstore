@@ -123,6 +123,9 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         assert_flush_jobs_recorded(client, pg_version, 1).await?;
         let batches = fetch_cold_flush_batches(client, pg_version).await?;
         assert_flush_completed_in_batches(&batches, INITIAL_ROWS, 1, FLUSH_POLICY_ROW_LIMIT, true)?;
+        common::assert_flush_pruned_hot_storage(client, &relation, INITIAL_ROWS).await?;
+        assert_eq!(common::hot_row_count(client, &relation).await?, 0);
+        assert_eq!(common::row_count(client, &mirror).await?, 0);
         batches
     };
     let first_manifest = {
@@ -153,7 +156,23 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         let _step = common::log_step_always(format!(
             "pg{pg_version}: verify row count before second flush"
         ));
-        assert_eq!(common::row_count(client, &relation).await?, TOTAL_ROWS);
+        let status = common::assert_cold_rows_at_least(client, &relation, INITIAL_ROWS).await?;
+        assert_eq!(
+            status.hot_rows, SECOND_INSERT_ROWS,
+            "second insert batch should remain on hot heap until second flush"
+        );
+        assert_eq!(
+            status.mirror_rows, SECOND_INSERT_ROWS,
+            "mirror should track only rows inserted after first flush prune"
+        );
+        assert_eq!(
+            common::hot_row_count(client, &relation).await?,
+            SECOND_INSERT_ROWS
+        );
+        assert_eq!(
+            common::row_count(client, &mirror).await?,
+            SECOND_INSERT_ROWS
+        );
     }
 
     let second_flush_started = Instant::now();
@@ -164,7 +183,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
     {
         let _step = common::log_step_always(format!("pg{pg_version}: run second flush"));
         let flushed = flush_table(client, pg_version).await?;
-        assert_eq!(flushed, TOTAL_ROWS);
+        assert_eq!(flushed, SECOND_INSERT_ROWS);
     }
     {
         let _step = common::log_step_always(format!("pg{pg_version}: wait for second flush jobs"));
@@ -186,6 +205,9 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         assert_flush_jobs_recorded(client, pg_version, 2).await?;
         let batches = fetch_cold_flush_batches(client, pg_version).await?;
         assert_flush_completed_in_batches(&batches, TOTAL_ROWS, 2, FLUSH_POLICY_ROW_LIMIT, false)?;
+        common::assert_flush_pruned_hot_storage(client, &relation, TOTAL_ROWS).await?;
+        assert_eq!(common::hot_row_count(client, &relation).await?, 0);
+        assert_eq!(common::row_count(client, &mirror).await?, 0);
         batches
     };
     assert!(
@@ -219,10 +241,49 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
 
     {
         let _step = common::log_step_always(format!(
-            "pg{pg_version}: query all {TOTAL_ROWS} rows from managed table"
+            "pg{pg_version}: verify cold storage covers all {TOTAL_ROWS} flushed rows"
         ));
-        assert_eq!(common::row_count(client, &relation).await?, TOTAL_ROWS);
+        let status = common::table_status(client, &relation).await?;
+        assert_eq!(status.hot_rows, 0);
+        assert_eq!(status.mirror_rows, 0);
+        assert!(
+            status.cold_row_count >= TOTAL_ROWS,
+            "cold segments should account for all flushed rows, got {:?}",
+            status
+        );
+        assert_cold_parquet_sample_readable(client, pg_version, storage_root).await?;
+    }
+    {
+        let _step = common::log_step_always(format!(
+            "pg{pg_version}: verify merged SELECT returns all {TOTAL_ROWS} rows"
+        ));
         assert_sample_rows_readable(client, pg_version).await?;
+        let status = common::table_status(client, &relation).await?;
+        assert_eq!(status.hot_rows, 0, "merged read should see pruned hot heap");
+        assert_eq!(
+            status.mirror_rows, 0,
+            "merged read should see pruned mirror"
+        );
+        assert!(
+            status.cold_row_count >= TOTAL_ROWS,
+            "table_status cold rows should cover flushed data, got {:?}",
+            status
+        );
+    }
+    {
+        let _step = common::log_step_always(format!(
+            "pg{pg_version}: verify KoldMergeScan planned cold reads in EXPLAIN"
+        ));
+        let plan = common::explain(client, &format!("SELECT count(*) FROM {relation}")).await?;
+        common::assert_kold_merge_scan_cold_reads(&plan, "manifest.json", 2)?;
+    }
+    {
+        let _step = common::log_step_always(format!(
+            "pg{pg_version}: verify KoldMergeScan executed cold reads in EXPLAIN ANALYZE"
+        ));
+        let plan =
+            common::explain_analyze(client, &format!("SELECT count(*) FROM {relation}")).await?;
+        common::assert_kold_merge_scan_executed_cold_reads(&plan, 2)?;
     }
     {
         let _step = common::log_step_always(format!("pg{pg_version}: verify no pending jobs"));
@@ -473,11 +534,18 @@ async fn enqueue_flush_job(client: &Client, pg_version: u16) -> Result<()> {
 async fn flush_table(client: &Client, pg_version: u16) -> Result<i64> {
     let row = client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)",
+            "SELECT koldstore.flush_table($1::text::regclass)::text",
             &[&relation(pg_version)],
         )
         .await?;
-    Ok(row.get(0))
+    let job_id: String = row.get(0);
+    let progress = client
+        .query_one(
+            "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
+            &[&job_id],
+        )
+        .await?;
+    Ok(progress.get(0))
 }
 
 async fn wait_for_jobs_to_finish(client: &Client, pg_version: u16) -> Result<()> {
@@ -708,6 +776,53 @@ async fn load_manifest(client: &Client, pg_version: u16, storage_root: &Path) ->
     }
 
     Ok(manifest)
+}
+
+async fn assert_cold_parquet_sample_readable(
+    client: &Client,
+    pg_version: u16,
+    storage_root: &Path,
+) -> Result<()> {
+    use parquet::file::reader::{FileReader, SerializedFileReader};
+
+    let manifest = load_manifest(client, pg_version, storage_root).await?;
+    let manifest_path = client
+        .query_one(
+            r#"
+            SELECT manifest_path
+            FROM koldstore.manifest
+            WHERE table_oid = $1::text::regclass::oid
+              AND sync_state = 'in_sync'
+            ORDER BY generation DESC
+            LIMIT 1
+            "#,
+            &[&relation(pg_version)],
+        )
+        .await?
+        .get::<_, String>(0);
+    let manifest_file = storage_root.join(&manifest_path);
+    let segment_dir = manifest_file
+        .parent()
+        .context("manifest directory missing")?;
+
+    let mut total_rows = 0_i64;
+    for segment in &manifest.segments {
+        let parquet_path = segment_dir.join(&segment.path);
+        let file = std::fs::File::open(&parquet_path)
+            .with_context(|| format!("open cold segment {}", parquet_path.display()))?;
+        let reader = SerializedFileReader::new(file)?;
+        total_rows += reader.metadata().file_metadata().num_rows();
+    }
+
+    assert!(
+        total_rows >= TOTAL_ROWS,
+        "parquet segments should contain at least {TOTAL_ROWS} rows, got {total_rows}"
+    );
+    assert!(
+        manifest.segments.len() >= 2,
+        "expected at least two committed parquet segments after two flushes"
+    );
+    Ok(())
 }
 
 async fn assert_sample_rows_readable(client: &Client, pg_version: u16) -> Result<()> {

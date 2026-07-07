@@ -7,6 +7,7 @@ pub mod memory;
 pub mod merge_scan;
 pub mod observability;
 pub mod privileges;
+pub mod settings;
 pub mod spi;
 pub mod sql;
 

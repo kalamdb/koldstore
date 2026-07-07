@@ -1,7 +1,7 @@
 //! CustomPath construction glue.
 
 /// Custom scan provider name.
-pub const CUSTOM_PATH_NAME: &str = "KoldstoreMergeScan";
+pub const CUSTOM_PATH_NAME: &str = "KoldMergeScan";
 
 /// Simplified planner path kind used by pure Rust planner tests.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +104,7 @@ impl PathReplacementDecision {
 /// Returns the `EXPLAIN` label for the custom scan node.
 #[must_use]
 pub const fn custom_scan_explain_label() -> &'static str {
-    "Custom Scan (KoldstoreMergeScan)"
+    "Custom Scan (KoldMergeScan)"
 }
 
 /// Returns whether heap-only final paths must be replaced for a managed relation.
@@ -115,7 +115,7 @@ pub const fn replace_heap_final_path(is_managed: bool) -> bool {
 
 /// Builds the pure path replacement decision for a relation.
 ///
-/// Managed relations expose only the KoldstoreMergeScan final path; the best
+/// Managed relations expose only the KoldMergeScan final path; the best
 /// hot heap path remains available as the custom child.
 #[must_use]
 pub fn build_path_replacement(

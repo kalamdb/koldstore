@@ -29,7 +29,7 @@ cargo pgrx init
 ./benchmarks/scripts/run.sh
 ```
 
-`benchmarks/scripts/run.sh` starts pgrx PostgreSQL, installs `pg_koldstore`, verifies the connection, runs `CREATE EXTENSION IF NOT EXISTS koldstore`, checks `koldstore_version()`, then runs Criterion and `pgbench` for every configured PostgreSQL mode. It always generates the benchmark reports when it finishes, even if a mode fails and only partial raw data is available. Results are written to:
+`benchmarks/scripts/run.sh` starts pgrx PostgreSQL, installs `pg_koldstore`, verifies the connection, runs `CREATE EXTENSION IF NOT EXISTS koldstore`, checks `koldstore_version()`, then runs the configured benchmark modes. By default it skips Criterion and uses shorter pgbench timings so storage checks finish quickly. It always generates the benchmark reports when it finishes, even if a mode fails and only partial raw data is available. Results are written to:
 
 - `benchmarks/results/summary.json`
 - `benchmarks/results/report.md`
@@ -40,7 +40,7 @@ cargo pgrx init
 Useful knobs:
 
 ```bash
-BENCH_ROWS=100000 BENCH_SECONDS=30 BENCH_MIXED_SECONDS=120 ./benchmarks/scripts/run.sh
+BENCH_ROWS=25000 BENCH_SECONDS=5 BENCH_MIXED_SECONDS=15 ./benchmarks/scripts/run.sh
 ```
 
 For quick harness/debug runs that still generate the full report shape:
@@ -51,13 +51,13 @@ For quick harness/debug runs that still generate the full report shape:
 
 Mini mode defaults to 5,000 rows, 1-second pgbench workloads, 3-second mixed workload, 2 clients/jobs, and skips Criterion. It is for validating benchmark plumbing and report generation, not publishable performance numbers.
 
-By default the runner compacts each mode after setup and before size snapshots:
+By default the runner drops extension-owned state between modes, migrates extension modes with `zstd` Parquet compression, and compacts each mode after setup and before size snapshots:
 
 ```bash
 KOLDSTORE_BENCH_COMPACT_AFTER_SETUP=0 ./benchmarks/scripts/run.sh
 ```
 
-Leave compaction enabled for storage comparisons. It removes migration-backfill bloat with PostgreSQL `VACUUM FULL` and `REINDEX`, so size rows reflect the steady hot table/index footprint instead of temporary migration tombstones.
+Leave compaction enabled for storage comparisons. For flushed storage modes the harness also prunes flushed hot rows after manifest verification, then compacts with PostgreSQL `VACUUM FULL` and `REINDEX`, so size rows reflect actual saved hot-space instead of temporary migration or mirror bloat.
 
 Useful pgrx overrides:
 
@@ -85,7 +85,7 @@ Criterion reports are generated under `target/criterion/report/`. These benchmar
 
 ## pgbench Modes
 
-The full runner executes all pgbench modes internally from the same script: baseline, extension hot-only, extension hot+cold, and extension cold-only. Each mode creates its own schema, loads the same 100,000-row `bench_events` table by default, applies the same indexes, compacts setup bloat, runs workload scripts, captures approximate system stats, captures table/index/cold sizes, and records representative `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` plans.
+The full runner executes all pgbench modes internally from the same script: baseline, extension hot-only, extension hot+cold, and extension cold-only. Each mode creates its own schema, drops prior extension-owned state, loads the same `bench_events` seed by default, applies the same indexes, and captures table/index/cold sizes. Baseline and extension hot-only run the full pgbench workload suite. Extension hot+cold and extension cold-only focus on storage validation: they flush to cold storage, verify the manifest, prune flushed hot rows for the snapshot, compact, and skip the long pgbench workload loop.
 
 ## Workloads
 
@@ -107,7 +107,7 @@ The pgbench suite includes at least these groups:
 The mixed workload uses:
 
 ```bash
-pgbench -c 20 -j 4 -T 120 -f benchmarks/pgbench/mixed_20_clients.sql
+pgbench -c 20 -j 4 -T 15 -f benchmarks/pgbench/mixed_20_clients.sql
 ```
 
 ## Interpreting Results
@@ -138,11 +138,11 @@ Rows processed are estimates based on query `LIMIT` or batch size. Memory and CP
 
 For overhead, compare baseline TPS and p95 latency against extension hot-only first. That is the safest signal for normal application overhead.
 
-For storage savings, compare baseline hot table/index size with extension hot+cold hot table/index size plus cold storage size. The report intentionally omits whole-database size because it includes unrelated PostgreSQL storage noise.
+For storage savings, compare baseline hot table/index size with extension hot+cold or cold-only after the harness has pruned verified flushed rows. The report intentionally omits whole-database size because it includes unrelated PostgreSQL storage noise.
 
 ## Known Limitations
 
-- Query benchmarks run in every mode. Cold-range query rows currently still come from the PostgreSQL heap because `flush_table` writes cold metadata/files but does not prune hot rows from the heap.
+- Hot+cold and cold-only modes are storage-focused today. The harness prunes hot rows only for the benchmark snapshot, not as a general-purpose public flush/read path.
 - DML workloads are marked N/A in cold-only mode because that mode represents an archive/read-only tier.
 - GitHub Actions runners are noisy and shared. Treat CI numbers as trend checks and artifact generation checks, not absolute performance claims.
 - CPU and memory measurements are approximate and intended for coarse comparison only.
@@ -153,7 +153,7 @@ For storage savings, compare baseline hot table/index size with extension hot+co
 Run benchmarks on an otherwise quiet machine, plugged into power, with a local PostgreSQL data directory on stable storage. Use longer durations than CI:
 
 ```bash
-BENCH_ROWS=100000 BENCH_SECONDS=60 BENCH_MIXED_SECONDS=120 ./benchmarks/scripts/run.sh
+BENCH_ROWS=100000 BENCH_SECONDS=20 BENCH_MIXED_SECONDS=60 KOLDSTORE_BENCH_SKIP_CRITERION=0 ./benchmarks/scripts/run.sh
 ```
 
 Run the same command at least three times and compare medians. Use CI artifacts to confirm the harness keeps working, not to publish absolute throughput claims.

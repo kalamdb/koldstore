@@ -1,11 +1,11 @@
-//! Planner hook integration for KoldstoreMergeScan.
+//! Planner hook integration for KoldMergeScan.
 
 use koldstore_common::{ScopeKey, TableKind};
 
 use koldstore_common::scope::{self, ScopeError};
 
 /// Name shown in `EXPLAIN`.
-pub const MERGE_SCAN_NAME: &str = "KoldstoreMergeScan";
+pub const MERGE_SCAN_NAME: &str = "KoldMergeScan";
 
 /// Resolves the plan-time scope key for a managed read.
 ///

@@ -5,6 +5,7 @@ fn sql_exposes_operational_functions() {
         "cold_segment_count",
         "manifest_state",
         "pending_jobs",
+        "jobs",
         "storage_binding",
         "last_error",
     ] {
@@ -37,14 +38,20 @@ fn sql_exposes_operational_functions() {
 
 #[test]
 fn operational_functions_build_parameterized_catalog_plans() {
-    use koldstore_common::{ScopeKey, TableName};
+    use koldstore_common::{QualifiedTableName, ScopeKey, TableName};
     use pg_koldstore::spi::SpiAccess;
 
     let table = TableName::parse("app.items").unwrap();
-    let status = koldstore_flush::ops::table_status_plan(table.clone(), None).unwrap();
+    let qualified = QualifiedTableName::parse("app.items").unwrap();
+    let mirror = QualifiedTableName::parse("koldstore.items__cl").unwrap();
+    let status = koldstore_flush::ops::table_status_plan(&qualified, &mirror, None).unwrap();
     assert_eq!(status.table_name.as_str(), "app.items");
-    assert!(status.statement.sql.contains("koldstore.manifest"));
-    assert!(status.statement.sql.contains("j.scope_key = $2"));
+    assert!(status.statement.sql.contains("jsonb_build_object"));
+    assert!(status.statement.sql.contains("'hot_rows'"));
+    assert!(status.statement.sql.contains("'mirror_rows'"));
+    assert!(status.statement.sql.contains("'cold_row_count'"));
+    assert!(status.statement.sql.contains("\"app\".\"items\""));
+    assert!(status.statement.sql.contains("\"koldstore\".\"items__cl\""));
     assert_eq!(status.statement.access, SpiAccess::ReadOnly);
 
     let backup = koldstore_flush::ops::backup_manifest_plan(
@@ -78,13 +85,17 @@ fn flush_job_claim_plan_uses_skip_locked_leases_and_seq_watermark() {
     use pg_koldstore::spi::SpiAccess;
 
     let claim =
-        koldstore_flush::ops::claim_flush_jobs_plan(32, FlushLeaseSeconds::new(30).unwrap())
+        koldstore_flush::ops::claim_flush_jobs_plan(32, 4, FlushLeaseSeconds::new(30).unwrap())
             .unwrap();
 
     assert_eq!(claim.limit, 32);
+    assert_eq!(claim.max_running_jobs, 4);
     assert_eq!(claim.lease_seconds.get(), 30);
     assert_eq!(claim.statement.access, SpiAccess::ReadWrite);
     assert!(claim.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
+    assert!(claim.statement.sql.contains("$4::integer"));
+    assert!(claim.statement.sql.contains("running_jobs"));
+    assert!(claim.statement.sql.contains("table_running"));
     assert!(claim
         .statement
         .sql

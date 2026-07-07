@@ -83,7 +83,7 @@ const KoldstoreCustomScanCallbacks *
 koldstore_custom_scan_callbacks(void)
 {
     static const KoldstoreCustomScanCallbacks callbacks = {
-        "KoldstoreMergeScan",
+        "KoldMergeScan",
         koldstore_custom_path,
         koldstore_custom_scan,
         koldstore_begin_custom_scan,

@@ -5,10 +5,15 @@ use std::io::Write;
 use std::sync::Arc;
 
 use crate::footer::ColumnStats;
-use arrow_array::RecordBatch;
+use crate::schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType};
+use arrow_array::{
+    ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
+    RecordBatch, StringArray, TimestampMicrosecondArray, UInt32Array,
+};
 use arrow_schema::SchemaRef;
 use parquet::{
     arrow::ArrowWriter,
+    basic::{Compression, ZstdLevel},
     errors::ParquetError,
     file::properties::{EnabledStatistics, WriterProperties},
     schema::types::ColumnPath,
@@ -92,10 +97,53 @@ where
     Ok(CleanColdRecordPlan { values, deleted })
 }
 
+/// Builds one Arrow record batch from planned clean-schema cold rows.
+///
+/// # Errors
+///
+/// Returns an error when schema conversion fails or any JSON value cannot be
+/// coerced into the requested Arrow type.
+pub fn record_batch_from_clean_cold_records(
+    columns: &[PgColumn],
+    rows: &[CleanColdRecordPlan],
+) -> Result<RecordBatch, String> {
+    let schema = Arc::new(build_clean_arrow_schema(columns).map_err(|error| error.to_string())?);
+    let mut arrays = Vec::<ArrayRef>::with_capacity(columns.len() + 5);
+    for column in columns {
+        arrays.push(array_for_pg_column(column, rows)?);
+    }
+    arrays.push(Arc::new(Int64Array::from_iter(
+        rows.iter()
+            .map(|row| json_i64(row.values.get(ColdMetadataColumn::Seq.name())))
+            .collect::<Result<Vec<_>, _>>()?,
+    )));
+    arrays.push(Arc::new(Int16Array::from_iter(
+        rows.iter()
+            .map(|row| json_i16(row.values.get(ColdMetadataColumn::Op.name())))
+            .collect::<Result<Vec<_>, _>>()?,
+    )));
+    arrays.push(Arc::new(TimestampMicrosecondArray::from_iter(
+        rows.iter()
+            .map(|row| json_timestamp_micros(row.values.get(ColdMetadataColumn::ChangedAt.name())))
+            .collect::<Result<Vec<_>, _>>()?,
+    )));
+    arrays.push(Arc::new(BooleanArray::from_iter(
+        rows.iter()
+            .map(|row| json_bool(row.values.get(ColdMetadataColumn::Deleted.name())))
+            .collect::<Result<Vec<_>, _>>()?,
+    )));
+    arrays.push(Arc::new(UInt32Array::from_iter(
+        rows.iter()
+            .map(|row| json_u32(row.values.get(ColdMetadataColumn::SchemaVersion.name())))
+            .collect::<Result<Vec<_>, _>>()?,
+    )));
+    RecordBatch::try_new(schema, arrays).map_err(|error| error.to_string())
+}
+
 impl Default for WriterOptions {
     fn default() -> Self {
         Self {
-            compression: "snappy".to_string(),
+            compression: "zstd".to_string(),
             row_group_size: 64 * 1024,
             statistics_columns: Vec::new(),
             bloom_filter_columns: Vec::new(),
@@ -127,11 +175,15 @@ impl WriterOptions {
         self
     }
 
-    /// Builds native Parquet writer properties for stats and bloom metadata.
-    #[must_use]
-    pub fn native_writer_properties(&self) -> WriterProperties {
-        let mut builder =
-            WriterProperties::builder().set_statistics_enabled(EnabledStatistics::None);
+    /// Builds native Parquet writer properties for stats, bloom metadata, and compression.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the configured compression codec is unsupported.
+    pub fn try_native_writer_properties(&self) -> Result<WriterProperties, String> {
+        let mut builder = WriterProperties::builder()
+            .set_compression(parquet_compression(&self.compression)?)
+            .set_statistics_enabled(EnabledStatistics::None);
         for column in &self.statistics_columns {
             builder = builder.set_column_statistics_enabled(
                 ColumnPath::from(column.as_str()),
@@ -145,7 +197,7 @@ impl WriterOptions {
                 builder = builder.set_column_bloom_filter_fpp(path, false_positive_rate);
             }
         }
-        builder.build()
+        Ok(builder.build())
     }
 }
 
@@ -259,7 +311,11 @@ impl ParquetSegmentWriter {
         let mut writer = ArrowWriter::try_new(
             writer,
             schema,
-            Some(self.options.native_writer_properties()),
+            Some(
+                self.options
+                    .try_native_writer_properties()
+                    .map_err(ParquetError::General)?,
+            ),
         )?;
         for batch in batches {
             writer.write(&batch)?;
@@ -350,4 +406,151 @@ where
         }
         columns
     })
+}
+
+fn array_for_pg_column(
+    column: &PgColumn,
+    rows: &[CleanColdRecordPlan],
+) -> Result<ArrayRef, String> {
+    let column_name = column.name.as_str();
+    match column.pg_type {
+        PgType::Bool => Ok(Arc::new(BooleanArray::from_iter(
+            rows.iter()
+                .map(|row| json_bool(row.values.get(column_name)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        PgType::Int2 => Ok(Arc::new(Int16Array::from_iter(
+            rows.iter()
+                .map(|row| json_i16(row.values.get(column_name)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        PgType::Int4 => Ok(Arc::new(Int32Array::from_iter(
+            rows.iter()
+                .map(|row| json_i32(row.values.get(column_name)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        PgType::Int8 => Ok(Arc::new(Int64Array::from_iter(
+            rows.iter()
+                .map(|row| json_i64(row.values.get(column_name)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        PgType::Float4 => Ok(Arc::new(Float32Array::from_iter(
+            rows.iter()
+                .map(|row| json_f32(row.values.get(column_name)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        PgType::Float8 => Ok(Arc::new(Float64Array::from_iter(
+            rows.iter()
+                .map(|row| json_f64(row.values.get(column_name)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        PgType::Text
+        | PgType::Numeric
+        | PgType::Uuid
+        | PgType::Jsonb
+        | PgType::TextArray
+        | PgType::Bytea => Ok(Arc::new(StringArray::from_iter(
+            rows.iter()
+                .map(|row| json_stringified(row.values.get(column_name)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+        PgType::Timestamptz => Ok(Arc::new(TimestampMicrosecondArray::from_iter(
+            rows.iter()
+                .map(|row| json_timestamp_micros(row.values.get(column_name)))
+                .collect::<Result<Vec<_>, _>>()?,
+        ))),
+    }
+}
+
+fn json_bool(value: Option<&serde_json::Value>) -> Result<Option<bool>, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(value)) => Ok(Some(*value)),
+        Some(other) => Err(format!("expected boolean JSON value, got {other}")),
+    }
+}
+
+fn json_i16(value: Option<&serde_json::Value>) -> Result<Option<i16>, String> {
+    json_i64(value)?
+        .map(|value| i16::try_from(value).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+fn json_i32(value: Option<&serde_json::Value>) -> Result<Option<i32>, String> {
+    json_i64(value)?
+        .map(|value| i32::try_from(value).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+fn json_i64(value: Option<&serde_json::Value>) -> Result<Option<i64>, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(value)) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| format!("expected integer JSON value, got {value}")),
+        Some(other) => Err(format!("expected integer JSON value, got {other}")),
+    }
+}
+
+fn json_u32(value: Option<&serde_json::Value>) -> Result<Option<u32>, String> {
+    json_i64(value)?
+        .map(|value| u32::try_from(value).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+fn json_f32(value: Option<&serde_json::Value>) -> Result<Option<f32>, String> {
+    json_f64(value)?
+        .map(|value| {
+            if value.is_finite() && value >= f32::MIN as f64 && value <= f32::MAX as f64 {
+                Ok(value as f32)
+            } else {
+                Err(format!("float32 out of range: {value}"))
+            }
+        })
+        .transpose()
+}
+
+fn json_f64(value: Option<&serde_json::Value>) -> Result<Option<f64>, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(value)) => value
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| format!("expected float JSON value, got {value}")),
+        Some(other) => Err(format!("expected float JSON value, got {other}")),
+    }
+}
+
+fn json_stringified(value: Option<&serde_json::Value>) -> Result<Option<String>, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(other) => serde_json::to_string(other)
+            .map(Some)
+            .map_err(|error| error.to_string()),
+    }
+}
+
+fn json_timestamp_micros(value: Option<&serde_json::Value>) -> Result<Option<i64>, String> {
+    let Some(value) = json_stringified(value)? else {
+        return Ok(None);
+    };
+    parse_timestamp_micros(&value).map(Some)
+}
+
+fn parse_timestamp_micros(value: &str) -> Result<i64, String> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .or_else(|_| chrono::DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f%:z"))
+        .map(|timestamp| timestamp.timestamp_micros())
+        .map_err(|error| format!("unsupported timestamp literal `{value}`: {error}"))
+}
+
+fn parquet_compression(codec: &str) -> Result<Compression, String> {
+    match codec.trim().to_ascii_lowercase().as_str() {
+        "" | "snappy" => Ok(Compression::SNAPPY),
+        "zstd" => Ok(Compression::ZSTD(ZstdLevel::default())),
+        "uncompressed" | "none" => Ok(Compression::UNCOMPRESSED),
+        other => Err(format!("unsupported parquet compression `{other}`")),
+    }
 }

@@ -18,6 +18,7 @@ pub const TABLE_STATUS_FIELDS: &[&str] = &[
     "cold_segment_count",
     "manifest_state",
     "pending_jobs",
+    "jobs",
     "storage_binding",
     "last_error",
 ];
@@ -29,6 +30,7 @@ pub const FLUSH_SQL_FUNCTIONS: &[&str] = &[
     "koldstore.flush_table",
     "koldstore.flush_pending",
     "koldstore.recover_segments",
+    "koldstore.table_status",
 ];
 
 /// Operational maintenance command.
@@ -99,6 +101,8 @@ pub struct RecoverSegmentsPlan {
 pub struct FlushJobClaimPlan {
     /// Maximum jobs to claim.
     pub limit: u32,
+    /// Maximum concurrently running jobs allowed before this claim pauses.
+    pub max_running_jobs: u32,
     /// Lease duration to bind for each claimed job.
     pub lease_seconds: FlushLeaseSeconds,
     /// Parameterized claim statement.
@@ -414,24 +418,116 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
     }
 }
 
-/// Plans `koldstore.table_status`.
+/// Plans `koldstore.table_status` for one managed table and mirror relation.
+///
+/// The caller supplies validated quoted table and mirror relation names. The
+/// returned JSON includes hot heap, mirror, and cold row accounting used by
+/// storage verification tests and operators.
 ///
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
 pub fn table_status_plan(
-    table_name: TableName,
+    table: &QualifiedTableName,
+    mirror: &QualifiedTableName,
     scope_key: Option<ScopeKey>,
 ) -> Result<TableStatusPlan, OpsError> {
-    let statement = SqlStatement::read(
+    let scope_key = scope_key.as_ref().map(ScopeKey::as_str).unwrap_or("");
+    let statement = SqlStatement::read_with_params(
         "table status",
-        "SELECT s.table_oid, m.sync_state AS manifest_state, COALESCE(m.segment_count, 0) AS cold_segment_count, COALESCE(j.pending_jobs, 0) AS pending_jobs, s.storage_id AS storage_binding, m.last_error FROM koldstore.schemas s LEFT JOIN koldstore.manifest m ON m.table_oid = s.table_oid AND ($2::text IS NULL OR m.scope_key = $2) LEFT JOIN LATERAL (SELECT count(*) AS pending_jobs FROM koldstore.jobs j WHERE j.table_oid = s.table_oid AND j.status IN ('pending', 'running') AND ($2::text IS NULL OR j.scope_key = $2)) j ON true WHERE s.table_oid = $1::regclass::oid",
+        &format!(
+            r#"
+SELECT jsonb_build_object(
+    'hot_rows', (SELECT count(*)::bigint FROM ONLY {table}),
+    'mirror_rows', (SELECT count(*)::bigint FROM {mirror}),
+    'cold_row_count', COALESCE((
+        SELECT sum(cs.row_count)::bigint
+        FROM koldstore.cold_segments cs
+        WHERE cs.table_oid = $1::regclass::oid
+          AND cs.status = 'active'
+          AND ($2::text = '' OR cs.scope_key = $2)
+    ), 0),
+    'cold_segment_count', COALESCE((
+        SELECT count(*)::bigint
+        FROM koldstore.cold_segments cs
+        WHERE cs.table_oid = $1::regclass::oid
+          AND cs.status = 'active'
+          AND ($2::text = '' OR cs.scope_key = $2)
+    ), 0),
+    'heap_size_bytes', pg_relation_size($1::regclass),
+    'table_size_bytes', pg_table_size($1::regclass),
+    'index_size_bytes', pg_indexes_size($1::regclass),
+    'manifest_state', m.sync_state,
+    'manifest_max_seq', COALESCE(m.max_seq, 0),
+    'pending_jobs', COALESCE(j.pending_jobs, 0),
+    'jobs', COALESCE(jobs.jobs, '[]'::jsonb),
+    'storage_binding', s.storage_id::text,
+    'last_error', m.last_error
+)::text
+FROM koldstore.schemas s
+LEFT JOIN koldstore.manifest m
+  ON m.table_oid = s.table_oid
+ AND ($2::text = '' OR m.scope_key = $2)
+LEFT JOIN LATERAL (
+    SELECT count(*)::bigint AS pending_jobs
+    FROM koldstore.jobs j
+    WHERE j.table_oid = s.table_oid
+      AND j.status IN ('pending', 'running')
+      AND ($2::text = '' OR j.scope_key = $2)
+) j ON true
+LEFT JOIN LATERAL (
+    SELECT jsonb_agg(
+        jsonb_build_object(
+            'id', job_snapshot.id::text,
+            'job_type', job_snapshot.job_type,
+            'status', job_snapshot.status,
+            'phase', job_snapshot.phase,
+            'rows_processed', job_snapshot.rows_processed,
+            'rows_flushed', job_snapshot.rows_flushed,
+            'checkpoint_seq', job_snapshot.checkpoint_seq,
+            'checkpoint_commit_seq', job_snapshot.checkpoint_commit_seq,
+            'updated_at', job_snapshot.updated_at
+        )
+        ORDER BY job_snapshot.updated_at DESC, job_snapshot.id
+    ) AS jobs
+    FROM (
+        SELECT
+            id,
+            job_type,
+            status,
+            phase,
+            rows_processed,
+            rows_flushed,
+            checkpoint_seq,
+            checkpoint_commit_seq,
+            updated_at
+        FROM koldstore.jobs
+        WHERE table_oid = s.table_oid
+          AND ($2::text = '' OR scope_key = $2)
+        ORDER BY updated_at DESC, id
+        LIMIT 20
+    ) AS job_snapshot
+) jobs ON true
+WHERE s.table_oid = $1::regclass::oid
+  AND s.active
+LIMIT 1
+"#,
+            table = table.quoted(),
+            mirror = mirror.quoted(),
+        ),
+        [SqlParamType::Oid, SqlParamType::Text],
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 
     Ok(TableStatusPlan {
-        table_name,
-        scope_key,
+        table_name: table
+            .as_table_name()
+            .map_err(|error| OpsError::Sql(error.to_string()))?,
+        scope_key: if scope_key.is_empty() {
+            None
+        } else {
+            Some(ScopeKey::new(scope_key).map_err(|error| OpsError::Sql(error.to_string()))?)
+        },
         statement,
     })
 }
@@ -509,23 +605,47 @@ pub fn recover_segments_plan(
 /// Returns an error when SPI statement metadata cannot be prepared.
 pub fn claim_flush_jobs_plan(
     limit: u32,
+    max_running_jobs: u32,
     lease_seconds: FlushLeaseSeconds,
 ) -> Result<FlushJobClaimPlan, OpsError> {
     let statement = SqlStatement::write(
         "claim flush jobs",
         r#"
-WITH candidate AS (
-    SELECT id
+WITH running_jobs AS (
+    SELECT count(*)::integer AS count
     FROM koldstore.jobs
-    WHERE job_type = 'flush'
-      AND status IN ('pending', 'running')
-      AND run_after <= now()
+    WHERE status = 'running'
       AND (
-          status = 'pending'
-          OR lease_expires_at IS NULL
-          OR lease_expires_at < now()
+          lease_expires_at IS NULL
+          OR lease_expires_at >= now()
       )
-    ORDER BY priority DESC, updated_at, id
+),
+candidate AS (
+    SELECT j.id
+    FROM koldstore.jobs AS j
+    CROSS JOIN running_jobs
+    WHERE j.job_type = 'flush'
+      AND j.status IN ('pending', 'running')
+      AND running_jobs.count < $4::integer
+      AND j.run_after <= now()
+      AND (
+          j.status = 'pending'
+          OR j.lease_expires_at IS NULL
+          OR j.lease_expires_at < now()
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM koldstore.jobs AS table_running
+          WHERE table_running.table_oid = j.table_oid
+            AND table_running.id <> j.id
+            AND table_running.job_type IN ('flush', 'migrate_backfill')
+            AND table_running.status = 'running'
+            AND (
+                table_running.lease_expires_at IS NULL
+                OR table_running.lease_expires_at >= now()
+            )
+      )
+    ORDER BY j.priority DESC, j.updated_at, j.id
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
@@ -547,6 +667,7 @@ RETURNING j.id, j.table_oid, j.scope_key, j.lease_epoch, j.flush_seq_upper_bound
 
     Ok(FlushJobClaimPlan {
         limit,
+        max_running_jobs,
         lease_seconds,
         statement,
     })

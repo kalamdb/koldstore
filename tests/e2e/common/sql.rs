@@ -1,6 +1,6 @@
 //! SQL helpers used by pgrx-backed E2E tests.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio_postgres::Client;
 
 /// PostgreSQL relation size snapshot.
@@ -62,6 +62,39 @@ pub async fn row_count(client: &Client, relation: &str) -> Result<i64> {
     Ok(row.get(0))
 }
 
+/// Counts rows returned by an arbitrary SQL statement.
+///
+/// # Errors
+///
+/// Returns an error when the query fails.
+pub async fn row_count_from_sql(client: &Client, sql: &str) -> Result<i64> {
+    let row = client
+        .query_one(&format!("SELECT count(*) FROM ({sql}) AS joined_rows"), &[])
+        .await?;
+    Ok(row.get(0))
+}
+
+/// Counts rows stored on the hot heap, bypassing merge-scan cold reads.
+///
+/// Uses `koldstore.table_status` because managed-table `SELECT count(*)`
+/// routes through KoldMergeScan even with `ONLY`.
+///
+/// # Errors
+///
+/// Returns an error when the query fails.
+pub async fn hot_row_count(client: &Client, relation: &str) -> Result<i64> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT (koldstore.table_status($1::text::regclass::oid, NULL::text)::jsonb->>'hot_rows')::bigint
+            "#,
+            &[&relation],
+        )
+        .await
+        .with_context(|| format!("load hot row count for {relation}"))?;
+    Ok(row.get(0))
+}
+
 /// Returns an `EXPLAIN (COSTS OFF)` plan as text.
 ///
 /// # Errors
@@ -70,6 +103,25 @@ pub async fn row_count(client: &Client, relation: &str) -> Result<i64> {
 pub async fn explain(client: &Client, sql: &str) -> Result<String> {
     let rows = client
         .query(&format!("EXPLAIN (COSTS OFF) {sql}"), &[])
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+/// Returns an `EXPLAIN (ANALYZE, COSTS OFF)` plan as text.
+///
+/// # Errors
+///
+/// Returns an error when `EXPLAIN` fails.
+pub async fn explain_analyze(client: &Client, sql: &str) -> Result<String> {
+    let rows = client
+        .query(
+            &format!("EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, BUFFERS OFF) {sql}"),
+            &[],
+        )
         .await?;
     Ok(rows
         .into_iter()

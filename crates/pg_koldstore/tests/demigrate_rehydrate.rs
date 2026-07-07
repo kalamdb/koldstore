@@ -21,7 +21,7 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
             table: QualifiedTableName::parse("app.items").unwrap(),
             table_oid: 42,
             cold_object_prefix: "app/items/".to_string(),
-            logical_reader_name: "KoldstoreMergeScan".to_string(),
+            logical_reader_name: "KoldMergeScan".to_string(),
             mirror_table: Some(QualifiedTableName::parse("koldstore.items__cl").unwrap()),
         },
         DemigrateOptions::default(),

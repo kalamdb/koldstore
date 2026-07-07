@@ -24,6 +24,7 @@ koldstore-migrate.workspace = true
 koldstore-merge.workspace = true
 koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
+koldstore-schema.workspace = true
 koldstore-storage.workspace = true
 pg_koldstore = { path = "../crates/pg_koldstore", default-features = false }
 
