@@ -321,10 +321,26 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
             r#"
             SELECT EXISTS (
               SELECT 1
-              FROM pg_proc p
-              JOIN pg_namespace n ON n.oid = p.pronamespace
-              WHERE n.nspname = 'koldstore'
-                AND p.proname = 'table_status'
+              FROM pg_proc status_proc
+              JOIN pg_namespace status_ns ON status_ns.oid = status_proc.pronamespace
+              WHERE status_ns.nspname = 'koldstore'
+                AND status_proc.proname = 'table_status'
+            )
+            AND EXISTS (
+              SELECT 1
+              FROM pg_proc migrate_proc
+              JOIN pg_namespace migrate_ns ON migrate_ns.oid = migrate_proc.pronamespace
+              WHERE migrate_ns.nspname = 'koldstore'
+                AND migrate_proc.proname = 'migrate_table'
+                AND migrate_proc.prorettype = 'uuid'::regtype
+            )
+            AND EXISTS (
+              SELECT 1
+              FROM pg_proc flush_proc
+              JOIN pg_namespace flush_ns ON flush_ns.oid = flush_proc.pronamespace
+              WHERE flush_ns.nspname = 'koldstore'
+                AND flush_proc.proname = 'flush_table'
+                AND flush_proc.prorettype = 'uuid'::regtype
             )
             "#,
             &[],

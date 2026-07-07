@@ -18,6 +18,7 @@ pub const TABLE_STATUS_FIELDS: &[&str] = &[
     "cold_segment_count",
     "manifest_state",
     "pending_jobs",
+    "jobs",
     "storage_binding",
     "last_error",
 ];
@@ -100,6 +101,8 @@ pub struct RecoverSegmentsPlan {
 pub struct FlushJobClaimPlan {
     /// Maximum jobs to claim.
     pub limit: u32,
+    /// Maximum concurrently running jobs allowed before this claim pauses.
+    pub max_running_jobs: u32,
     /// Lease duration to bind for each claimed job.
     pub lease_seconds: FlushLeaseSeconds,
     /// Parameterized claim statement.
@@ -457,6 +460,7 @@ SELECT jsonb_build_object(
     'manifest_state', m.sync_state,
     'manifest_max_seq', COALESCE(m.max_seq, 0),
     'pending_jobs', COALESCE(j.pending_jobs, 0),
+    'jobs', COALESCE(jobs.jobs, '[]'::jsonb),
     'storage_binding', s.storage_id::text,
     'last_error', m.last_error
 )::text
@@ -471,6 +475,39 @@ LEFT JOIN LATERAL (
       AND j.status IN ('pending', 'running')
       AND ($2::text = '' OR j.scope_key = $2)
 ) j ON true
+LEFT JOIN LATERAL (
+    SELECT jsonb_agg(
+        jsonb_build_object(
+            'id', job_snapshot.id::text,
+            'job_type', job_snapshot.job_type,
+            'status', job_snapshot.status,
+            'phase', job_snapshot.phase,
+            'rows_processed', job_snapshot.rows_processed,
+            'rows_flushed', job_snapshot.rows_flushed,
+            'checkpoint_seq', job_snapshot.checkpoint_seq,
+            'checkpoint_commit_seq', job_snapshot.checkpoint_commit_seq,
+            'updated_at', job_snapshot.updated_at
+        )
+        ORDER BY job_snapshot.updated_at DESC, job_snapshot.id
+    ) AS jobs
+    FROM (
+        SELECT
+            id,
+            job_type,
+            status,
+            phase,
+            rows_processed,
+            rows_flushed,
+            checkpoint_seq,
+            checkpoint_commit_seq,
+            updated_at
+        FROM koldstore.jobs
+        WHERE table_oid = s.table_oid
+          AND ($2::text = '' OR scope_key = $2)
+        ORDER BY updated_at DESC, id
+        LIMIT 20
+    ) AS job_snapshot
+) jobs ON true
 WHERE s.table_oid = $1::regclass::oid
   AND s.active
 LIMIT 1
@@ -568,23 +605,47 @@ pub fn recover_segments_plan(
 /// Returns an error when SPI statement metadata cannot be prepared.
 pub fn claim_flush_jobs_plan(
     limit: u32,
+    max_running_jobs: u32,
     lease_seconds: FlushLeaseSeconds,
 ) -> Result<FlushJobClaimPlan, OpsError> {
     let statement = SqlStatement::write(
         "claim flush jobs",
         r#"
-WITH candidate AS (
-    SELECT id
+WITH running_jobs AS (
+    SELECT count(*)::integer AS count
     FROM koldstore.jobs
-    WHERE job_type = 'flush'
-      AND status IN ('pending', 'running')
-      AND run_after <= now()
+    WHERE status = 'running'
       AND (
-          status = 'pending'
-          OR lease_expires_at IS NULL
-          OR lease_expires_at < now()
+          lease_expires_at IS NULL
+          OR lease_expires_at >= now()
       )
-    ORDER BY priority DESC, updated_at, id
+),
+candidate AS (
+    SELECT j.id
+    FROM koldstore.jobs AS j
+    CROSS JOIN running_jobs
+    WHERE j.job_type = 'flush'
+      AND j.status IN ('pending', 'running')
+      AND running_jobs.count < $4::integer
+      AND j.run_after <= now()
+      AND (
+          j.status = 'pending'
+          OR j.lease_expires_at IS NULL
+          OR j.lease_expires_at < now()
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM koldstore.jobs AS table_running
+          WHERE table_running.table_oid = j.table_oid
+            AND table_running.id <> j.id
+            AND table_running.job_type IN ('flush', 'migrate_backfill')
+            AND table_running.status = 'running'
+            AND (
+                table_running.lease_expires_at IS NULL
+                OR table_running.lease_expires_at >= now()
+            )
+      )
+    ORDER BY j.priority DESC, j.updated_at, j.id
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
@@ -606,6 +667,7 @@ RETURNING j.id, j.table_oid, j.scope_key, j.lease_epoch, j.flush_seq_upper_bound
 
     Ok(FlushJobClaimPlan {
         limit,
+        max_running_jobs,
         lease_seconds,
         statement,
     })

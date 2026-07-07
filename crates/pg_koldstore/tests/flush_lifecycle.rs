@@ -282,7 +282,7 @@ fn flush_leases_fence_stale_workers_by_owner_and_epoch() {
 }
 
 #[test]
-fn catalog_schema_supports_lease_based_flush_jobs_and_one_active_scope_job() {
+fn catalog_schema_supports_lease_based_flush_jobs_and_one_active_table_job() {
     let sql = include_str!("../sql/koldstore--0.1.0.sql");
 
     assert!(sql.contains("lease_owner uuid"));
@@ -290,6 +290,8 @@ fn catalog_schema_supports_lease_based_flush_jobs_and_one_active_scope_job() {
     assert!(sql.contains("lease_epoch bigint NOT NULL DEFAULT 0"));
     assert!(sql.contains("flush_seq_upper_bound bigint"));
     assert!(sql.contains("checkpoint_commit_seq bigint NOT NULL DEFAULT 0"));
+    assert!(sql.contains("jobs_one_active_table_work_idx"));
+    assert!(sql.contains("WHERE job_type IN ('flush', 'migrate_backfill')"));
     assert!(sql.contains("jobs_one_active_flush_per_scope_idx"));
     assert!(sql.contains("WHERE job_type = 'flush' AND status IN ('pending', 'running')"));
 }

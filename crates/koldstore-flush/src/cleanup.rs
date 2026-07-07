@@ -81,9 +81,9 @@ pub const fn plan_hot_cleanup(
 /// Plans cleanup for a committed clean-schema flush selected set.
 ///
 /// `$1::jsonb` is expected to be an array of objects containing primary-key
-/// columns plus `seq` and `op`. Cleanup removes only mirror rows that still
-/// match the flushed `seq`; live selected rows may be removed from the base
-/// table, while delete marker rows have no base row to remove.
+/// columns plus `seq` and `op`. Cleanup removes mirror rows first, then matching
+/// live base rows, in one atomic SQL statement so the hot heap and `__cl` mirror
+/// cannot diverge if the statement succeeds.
 ///
 /// # Errors
 ///
@@ -124,6 +124,7 @@ removed_mirror AS (
 DELETE FROM ONLY {table} AS hot
 USING selected, removed_mirror
 WHERE selected."op" IN (1, 2)
+  AND removed_mirror."seq" = selected."seq"
   AND {hot_join}
 "#,
         table = table.quoted(),

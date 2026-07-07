@@ -1,114 +1,353 @@
 # pg-koldstore
 
-> **Keep PostgreSQL fast. Archive flushed rows to low-cost object storage. Query both as one.**
+> Keep PostgreSQL fast by moving old rows to cold Parquet storage while queries keep using the same table.
 
-**Status: early development — not production ready.** The extension builds and the core design is in place, but we're still hardening flush recovery, export/import, and the background worker. Treat this as experimental until we ship a 1.0.
+**Status: early development - not production ready.** The extension builds and the core flow works, but recovery, export/import, and background flush behavior are still being hardened.
 
-<p align="center">
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.96%2B-orange.svg" alt="Rust 1.96+" /></a>
-  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml"><img src="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kalamdb/pg-kalam/pg-koldstore-ci.yml?branch=main&amp;label=tests" alt="Tests" /></a>
-  <a href="https://github.com/kalamdb/pg-kalam/releases"><img src="https://img.shields.io/github/v/release/kalamdb/pg-kalam?display_name=tag&amp;label=extension" alt="Extension Version" /></a>
-  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/release.yml"><img src="https://github.com/kalamdb/pg-kalam/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
-</p>
+`pg-koldstore` is a PostgreSQL extension named `koldstore`. You create a normal heap table, migrate it into KoldStore management, and keep querying that table with regular SQL. KoldStore keeps recent rows in PostgreSQL and writes flushed rows to Parquet files on filesystem, S3/MinIO, GCS, or Azure Blob storage.
 
-`pg-koldstore` is a PostgreSQL extension (`koldstore`) that lets you keep recent rows in the heap and push older ones to Parquet on object storage — S3 (including MinIO), GCS, Azure Blob, or a local path. You still query the same table name; reads go through a `KoldstoreMergeScan` custom scan that merges hot heap rows with cold segments.
+Reads use a PostgreSQL custom scan named `KoldMergeScan`. It reads hot heap rows, reads cold Parquet segments when needed, and merges by primary key so the newest visible row wins.
 
-PostgreSQL stays in charge of transactions, locking, and permissions. Cold files follow a kalamdb-compatible manifest + Parquet layout so they can be read outside the database too.
+## How It Works
 
----
+```text
+Application SQL
+    |
+    v
+Normal PostgreSQL table
+    |  AFTER ROW capture triggers
+    v
+koldstore.<table>__cl mirror
+    |  flush_table()
+    v
+Parquet segment + manifest.json
 
-## The problem
-
-Tables grow. Indexes grow with them. Backups get slower, VACUUM takes longer, and you're paying for terabytes of history that almost nobody touches in day-to-day queries.
-
-The usual fixes — archive tables, cron dumps, time partitions, a separate data lake — work, but they're another thing to operate. pg-koldstore tries to fold archival into PostgreSQL itself: same SQL, same table name, cold data on cheap storage.
-
----
-
-## How it works
-
-```
-                 PostgreSQL
-
-        ┌─────────────────────────┐
-        │      Hot Storage        │
-        │   (normal heap table)   │
-        │                         │
-        │ Active rows             │
-        │ One row per PK          │
-        └──────────┬──────────────┘
-                   │  AFTER ROW triggers
-                   ▼
-        ┌─────────────────────────┐
-        │  Change-log mirror        │
-        │  koldstore.<table>__cl    │
-        │  latest state per PK      │
-        └──────────┬──────────────┘
-                   │
-              flush job
-                   │
-                   ▼
-        ┌─────────────────────────┐
-        │      Cold Storage       │
-        │  Parquet + manifest     │
-        │  filesystem / S3 / GCS  │
-        │  / Azure                │
-        └─────────────────────────┘
-
-   SELECT  →  KoldstoreMergeScan merges by primary key
+SELECT from the original table -> Custom Scan (KoldMergeScan)
 ```
 
-You create a normal table, register storage, and call `koldstore.migrate_table`. Inserts and updates hit the heap like always. KoldStore tracks latest change state in a separate internal mirror table — `koldstore.<table>__cl` — instead of adding `_seq`, `_deleted`, or `_commit_seq` columns to your business table. A flush writes eligible hot rows plus mirror metadata (`seq`, `op`, `changed_at`) to Parquet, updates the manifest, and drops flushed rows from the heap when safe. Delete markers are preserved when cold might still have an older version of the same key.
+The user table stays clean. migration creates a companion latest-state mirror table in the `koldstore` schema. For `app.messages`, that mirror is `koldstore.messages__cl`.
 
-### Change-log mirrors (clean schema)
+The mirror stores one row per primary key with KoldStore metadata:
 
-Earlier development added KoldStore metadata directly to managed tables and used a global `koldstore.row_events` feed. The current default is **clean schema**: your application table keeps exactly the columns you defined; KoldStore owns a companion mirror in the `koldstore` schema.
 
-For `public.messages`, enablement creates `koldstore.messages__cl`:
+| Column              | Purpose                                                    |
+| ------------------- | ---------------------------------------------------------- |
+| primary key columns | Same shape as the source table primary key                 |
+| `seq`               | Latest-state conflict-free sequence used for flush cutoffs |
+| `op`                | `1 = insert`, `2 = update`, `3 = delete`                   |
+| `changed_at`        | Change timestamp                                           |
+| `commit_lsn`        | Optional PostgreSQL LSN for diagnostics                    |
 
-```sql
--- your table — unchanged
-CREATE TABLE public.messages (
-  id bigint PRIMARY KEY,
-  body text NOT NULL
-);
 
--- created by koldstore.migrate_table — not for application DML
-CREATE TABLE koldstore.messages__cl (
-  id bigint NOT NULL,
-  seq bigint NOT NULL,
-  op smallint NOT NULL,          -- 1=INSERT, 2=UPDATE, 3=DELETE
-  changed_at timestamptz NOT NULL DEFAULT now(),
-  commit_lsn pg_lsn NULL,
-  PRIMARY KEY (id)
-);
-```
+Flush writes the mirror-selected rows to a Parquet batch, updates `manifest.json`, records segment metadata in `koldstore.cold_segments`, and prunes flushed rows from the hot heap when safe.
 
-`migrate_table` installs AFTER ROW capture triggers on the user table. Each insert, update, or delete upserts one latest-state row in the mirror (at most one row per primary key). Flush policy, flush cutoffs, and `changes_since` cursors all read mirror state — not user-table system columns and not `koldstore.row_events`.
+## Quick Start
 
-Populated tables follow the same model: the mirror and capture triggers are created first, existing rows are backfilled into the mirror, and flush stays blocked until that initialization reaches a safe cutoff. Demigration drops the mirror, capture triggers, and catalog metadata; your user table is left without KoldStore columns.
-
----
-
-## Shared vs user tables
-
-When you migrate a table you pick `table_type => 'shared'` or `'user'`. They behave differently on cold storage layout and access control.
-
-**Shared** — one cold prefix for the whole table. Good for app-wide data: audit logs, product catalog history, anything where every query is allowed to see every row. Cold path looks like `{namespace}/{tableName}/`.
-
-**User** — data is scoped to a tenant or user. You pass a `scope_column` (e.g. `user_id`) and set `koldstore.user_id` in the session. Reads and writes fail if the GUC isn't set or doesn't match the row. Cold files land under `{namespace}/{tableName}/{scopeId}/`, so each tenant's archive is separate in object storage.
-
-Why bother with two types? Multi-tenant apps often want per-user isolation and per-user cold layout. In PostgreSQL you'd reach for `PARTITION BY LIST (user_id)` — but that doesn't scale to millions of users. Partition counts blow up, planner overhead grows, and managing that many child tables is painful. pg-koldstore pushes that partitioning problem to object storage prefixes instead of PostgreSQL catalog entries. The heap stays one table; cold storage fans out by scope.
-
----
-
-## Quick start
+This example uses local filesystem storage so you can try the extension without S3 or Docker.
 
 ```sql
 CREATE EXTENSION koldstore;
 
+SELECT koldstore.register_storage(
+  'local-dev',
+  'filesystem',
+  '/tmp/koldstore-demo',
+  '{}'::jsonb,
+  '{}'::jsonb
+);
+
+CREATE SCHEMA IF NOT EXISTS app;
+
+CREATE TABLE app.messages (
+  id bigint PRIMARY KEY,
+  account_id bigint NOT NULL,
+  title text NOT NULL,
+  body text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO app.messages (id, account_id, title, body)
+SELECT
+  gs,
+  gs % 3,
+  'message-' || lpad(gs::text, 6, '0'),
+  'hello from row ' || gs
+FROM generate_series(1, 1012) AS gs;
+```
+
+Migrate the existing table:
+
+```sql
+SELECT koldstore.migrate_table(
+  'app.messages'::regclass,
+  'shared',
+  'local-dev',
+  'rows:1000',
+  NULL,
+  'id'
+) AS migrate_job_id;
+```
+
+`rows:1000` keeps at most 1000 primary keys hot. When the mirror tracks more than 1000 keys, `koldstore.flush_table` moves only the oldest excess rows by mirror `seq` to cold storage.
+
+Sample result:
+
+```text
+            migrate_job_id            
+--------------------------------------
+ 2c2bcf44-d6ea-4b3e-b62c-cfaf18ad5225
+```
+
+Migration runs inline for this table. The returned UUID is the `migrate_backfill` job id in `koldstore.jobs`.
+
+The application table is still the table you created:
+
+```sql
+SELECT id, account_id, title
+FROM app.messages
+ORDER BY id
+LIMIT 3;
+```
+
+```text
+ id | account_id |     title
+----+------------+----------------
+  1 |          1 | message-000001
+  2 |          2 | message-000002
+  3 |          0 | message-000003
+```
+
+Migration also creates `koldstore.messages__cl`, a latest-state mirror with one metadata row per primary key. It stores the key columns plus `seq`, `op`, and `changed_at`; it does not duplicate full application row payloads.
+
+```sql
+SELECT id, seq, op, changed_at
+FROM koldstore.messages__cl
+ORDER BY id
+LIMIT 3;
+```
+
+```text
+ id |        seq         | op |          changed_at
+----+--------------------+----+-------------------------------
+  1 | 332882280164896768 |  1 | 2026-07-07 16:55:20.217928+03
+  2 | 332882280169091072 |  1 | 2026-07-07 16:55:20.217928+03
+  3 | 332882280173285376 |  1 | 2026-07-07 16:55:20.217928+03
+```
+
+With 1012 keys and `rows:1000`, all rows are still hot immediately after migration. Nothing is cold yet:
+
+```sql
+SELECT
+  (koldstore.table_status('app.messages'::regclass, NULL::text)::jsonb->>'hot_rows')::int AS hot_rows,
+  (koldstore.table_status('app.messages'::regclass, NULL::text)::jsonb->>'mirror_rows')::int AS mirror_rows,
+  (koldstore.table_status('app.messages'::regclass, NULL::text)::jsonb->>'cold_row_count')::int AS cold_row_count;
+```
+
+```text
+ hot_rows | mirror_rows | cold_row_count
+----------+-------------+----------------
+     1012 |        1012 |              0
+```
+
+## Flush To Cold
+
+`koldstore.flush_table` evaluates the configured flush policy, runs the flush inline, and returns the flush job id. With `rows:1000` and 1012 tracked keys, only the 12 oldest mirror entries move to cold storage; the newest 1000 keys stay hot.
+
+```sql
+SELECT koldstore.flush_table('app.messages'::regclass) AS flush_job_id;
+```
+
+```text
+             flush_job_id             
+--------------------------------------
+ e30eb374-a9db-4ff1-97d3-72f8511dfc60
+```
+
+```sql
+SELECT rows_flushed
+FROM koldstore.jobs
+WHERE id = 'e30eb374-a9db-4ff1-97d3-72f8511dfc60'::uuid;
+```
+
+```text
+ rows_flushed
+--------------
+           12
+```
+
+The application table still returns all rows through `KoldMergeScan`:
+
+```sql
+SELECT count(*) FROM app.messages;
+```
+
+```text
+ count
+-------
+  1012
+```
+
+Cold files are written below the storage root using the table namespace and name:
+
+```text
+/tmp/koldstore-demo/app/messages/
+  manifest.json
+  batch-1.parquet
+```
+
+## View Table And Migration Stats
+
+Use `koldstore.table_status` to see what is hot, what is cold, and whether anything is still pending.
+
+```sql
+SELECT jsonb_pretty(koldstore.table_status('app.messages'::regclass, NULL::text));
+```
+
+Sample result after the flush:
+
+```json
+{
+  "jobs": [
+    {
+      "id": "e30eb374-a9db-4ff1-97d3-72f8511dfc60",
+      "phase": "finished",
+      "status": "completed",
+      "job_type": "flush",
+      "updated_at": "2026-07-07T16:56:10.123456+03:00",
+      "rows_flushed": 12,
+      "checkpoint_seq": 332882280212668416,
+      "rows_processed": 12,
+      "checkpoint_commit_seq": 332882280212668416
+    },
+    {
+      "id": "2c2bcf44-d6ea-4b3e-b62c-cfaf18ad5225",
+      "phase": "finished",
+      "status": "completed",
+      "job_type": "migrate_backfill",
+      "updated_at": "2026-07-07T16:56:09.987654+03:00",
+      "rows_flushed": 0,
+      "checkpoint_seq": 0,
+      "rows_processed": 1012,
+      "checkpoint_commit_seq": 0
+    }
+  ],
+  "hot_rows": 1000,
+  "mirror_rows": 1000,
+  "cold_row_count": 12,
+  "cold_segment_count": 1,
+  "heap_size_bytes": 442368,
+  "table_size_bytes": 606208,
+  "index_size_bytes": 16384,
+  "manifest_state": "in_sync",
+  "manifest_max_seq": 332882280212668416,
+  "pending_jobs": 0,
+  "storage_binding": "4a3b2ab3-5ea8-4761-9e37-1a2f98b128e4",
+  "last_error": null
+}
+```
+
+The fields to watch most often are:
+
+
+| Field                | Meaning                                         |
+| -------------------- | ----------------------------------------------- |
+| `hot_rows`           | Rows still present in the PostgreSQL heap       |
+| `mirror_rows`        | Primary keys tracked in the `__cl` mirror     |
+| `cold_row_count`     | Rows already copied to active cold segments     |
+| `cold_segment_count` | Active Parquet segment count                    |
+| `manifest_state`     | `in_sync` means catalog and manifest agree      |
+| `manifest_max_seq`   | Highest mirror `seq` represented in cold data   |
+| `pending_jobs`       | Pending or running KoldStore jobs for the table |
+| `jobs`               | Recent job ids, phases, and progress counters   |
+| `last_error`         | Last manifest or storage error, if any          |
+
+
+For job-level progress, inspect `koldstore.jobs`:
+
+```sql
+SELECT job_type, status, phase, rows_processed, rows_flushed, error_trace
+FROM koldstore.jobs
+WHERE table_oid = 'app.messages'::regclass
+ORDER BY created_at DESC
+LIMIT 5;
+```
+
+## Explain A Managed Query
+
+KoldStore-managed reads show up in `EXPLAIN` as `Custom Scan (KoldMergeScan)`.
+
+```sql
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, BUFFERS OFF)
+SELECT id, title
+FROM app.messages
+WHERE title = 'message-000007';
+```
+
+Sample output:
+
+```text
+Custom Scan (KoldMergeScan) on messages (actual rows=1 loops=1)
+  Filter: (title = 'message-000007'::text)
+  Manifest: app/messages/manifest.json, 0.479 ms
+  Parquet segment: app/messages/batch-1.parquet, 12 rows, 0.485 ms
+ Planning Time: 0.025 ms
+ Execution Time: 7.884 ms
+```
+
+The result is still normal SQL:
+
+```sql
+SELECT id, title
+FROM app.messages
+WHERE title = 'message-000007';
+```
+
+```text
+ id |     title
+----+----------------
+  7 | message-000007
+```
+
+## Shared And User Tables
+
+`migrate_table` supports two table types.
+
+
+| Type     | Use when                                        | Cold layout                          |
+| -------- | ----------------------------------------------- | ------------------------------------ |
+| `shared` | Every query may see the same table-wide archive | `{namespace}/{tableName}/`           |
+| `user`   | Rows are scoped to a tenant or user             | `{namespace}/{tableName}/{scopeId}/` |
+
+
+User-scoped tables require a `scope_column` and a session `koldstore.user_id` value. Reads and writes fail closed when the scope is missing or mismatched.
+
+```sql
+SELECT koldstore.migrate_table(
+  'app.user_messages'::regclass,
+  'user',
+  'local-dev',
+  'rows:1000',
+  'user_id',
+  'id'
+);
+
+SET koldstore.user_id = 'user-123';
+```
+
+## Storage Backends
+
+
+| Provider             | `storage_type` | Example `base_path`         |
+| -------------------- | -------------- | --------------------------- |
+| Local filesystem     | `filesystem`   | `/var/lib/koldstore`        |
+| Amazon S3 / MinIO    | `s3`           | `s3://bucket/prefix/`       |
+| Google Cloud Storage | `gcs`          | `gs://bucket/prefix/`       |
+| Azure Blob           | `azure`        | `azure://container/prefix/` |
+
+
+Example S3-compatible registration:
+
+```sql
 SELECT koldstore.register_storage(
   'local-minio',
   's3',
@@ -116,167 +355,45 @@ SELECT koldstore.register_storage(
   '{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}'::jsonb,
   '{"endpoint":"http://localhost:9000","region":"us-east-1","path_style":true}'::jsonb
 );
-
-CREATE TABLE chat.messages (
-  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id uuid NOT NULL,
-  body text NOT NULL,
-  created_at timestamptz DEFAULT now()
-);
-
-SELECT koldstore.migrate_table(
-  table_name   => 'chat.messages',
-  table_type   => 'user',
-  storage_name => 'local-minio',
-  flush_policy => 'rows:1000',
-  scope_column => 'user_id'
-);
-
-SET koldstore.user_id = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
-
-INSERT INTO chat.messages (user_id, body)
-VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'hello');
-
-SELECT koldstore.flush_table('chat.messages', force => true);
-SELECT * FROM chat.messages;
 ```
 
-### Flush policies (today)
+## Current Requirements
 
-Right now retention is driven by mirror row count by default, with optional row-age duration policies:
+- PostgreSQL 15-18.
+- Managed tables need a primary key.
+- Supported column types are currently limited to `boolean`, integer types, `real`, `double precision`, `text`, `varchar`, `uuid`, `jsonb`, and `timestamptz`.
+- `pgrx` is the recommended local development loop.
+- Docker is used for packaging and final runtime smoke checks, not as the main correctness loop.
 
-```
-rows:<count>
-duration:<age>
-```
+## Current Limitations
 
-Set it at migration or later with `koldstore.set_flush_policy`. `rows:N` is the default hot-row-limit policy: KoldStore checks pending latest-state rows in the table's internal change-log mirror and flushes the oldest rows by `seq` when the limit is exceeded. `duration:1d` or `duration:5d` flushes mirror rows whose `changed_at` is older than that duration. If an `interval:<seconds>` spelling remains supported, it means row age in seconds, not time since the last flush. You can also call `koldstore.flush_table` or `koldstore.flush_pending()` yourself.
+- This is not production ready.
+- Cold storage is not WAL-protected. Back up PostgreSQL and the cold storage prefix together.
+- Foreign keys only see hot PostgreSQL rows after flush.
+- Primary-key value changes and primary-key definition changes on managed tables are not implemented.
+- PostgreSQL indexes cover hot rows only. Flushed rows live in Parquet, not in PostgreSQL-owned indexes.
+- If a query needs cold data and the cold storage backend is unavailable, the query errors instead of returning partial hot-only results.
+- Export/import, compaction, and richer cold-storage policies are still being built.
 
-### Cold storage policies (planned)
+## Development
 
-We want something closer to how you'd think about retention — archive rows that match a condition:
+Useful local commands:
 
-```sql
--- not implemented yet; syntax subject to change
-CREATE COLD STORAGE POLICY messages_archive
-  ON chat.messages
-  WHERE created_at < now() - interval '7 days';
-```
-
-That would let you say "keep the last week in PostgreSQL, push everything older to cold" without tuning row-count thresholds. Today you approximate this with flush frequency and how much hot data you're willing to hold; column-based policies are on the roadmap for v0.3.
-
-### Where cold files land (user table)
-
-```
-chat/messages/
-  aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/
-    manifest.json
-    batch-0.parquet
-  bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/
-    manifest.json
-    batch-0.parquet
+```bash
+cargo test --workspace
+cargo pgrx install -p pg_koldstore --no-default-features --features pg16
+scripts/run-pg-e2e.sh 16
 ```
 
----
+Project docs:
 
-## What works in v0.1
-
-- `CREATE EXTENSION koldstore` on PostgreSQL 15–18
-- Clean-schema `koldstore.migrate_table` — no KoldStore columns added to user tables
-- Per-table change-log mirrors (`koldstore.<table>__cl`) with capture triggers and mirror-backed flush
-- Greenfield and populated-table migration with mirror initialization before flush eligibility
-- `koldstore.migrate_table` for shared and user-scoped tables
-- Storage registration: filesystem, S3, GCS, Azure (MinIO via S3-compatible config)
-- Manual flush + `rows:N` and `duration:S` policies driven by mirror `seq` / `changed_at`
-- `KoldstoreMergeScan` for merged hot/cold reads
-- Hot DML without object-store reads on the write path (one mirror upsert per changed row)
-- Cold-only helpers: `hydrate_pk`, `update_row`, `delete_row`
-- Latest-state change feed via `changes_since` (mirror + flushed cold metadata; not `row_events`)
-- Demigration with optional rehydration — drops mirror artifacts, leaves user schema clean
-- Operator functions: `table_status`, `validate_cold_storage`, `recover_segments`
-
-Things still rough around the edges: background flush needs `shared_preload_libraries = 'koldstore'`, export/import isn't finished, and cold storage isn't in WAL — you need to back up PostgreSQL and your object-store prefixes together.
-
----
-
-## Requirements
-
-Managed tables need a **primary key**. Clean-schema migration does **not** add KoldStore columns to the user table. Instead, it creates a separate change-log mirror such as `koldstore.messages__cl` with the same primary-key columns (same names, types, order, and non-nullability) plus:
-
-| Column | What it's for |
-|--------|---------------|
-| `seq` | Latest-state version used for flush cutoffs and change-feed cursors |
-| `op` | `1 = INSERT`, `2 = UPDATE`, `3 = DELETE` |
-| `changed_at` | Change timestamp |
-| `commit_lsn` | Optional PostgreSQL LSN for diagnostics |
-
-The mirror is latest-state only: one row per primary key, not a full mutation history. Cold Parquet segments carry the same metadata (`seq`, `op`, `changed_at`, plus a `deleted` flag derived from `op`) alongside your application columns.
-
-`koldstore.changes_since` reads latest-state changes from the mirror and flushed cold metadata. Pass the last seen mirror `seq` as the cursor. It is not a full event-history feed; repeated changes to one primary key within a transaction collapse to the final committed state.
-
-### Type support
-
-v0.1 only allows a small set of types: `boolean`, integer types, `real`, `double precision`, `text`, `varchar`, `uuid`, `jsonb`, `timestamptz`.
-
-That's not because PostgreSQL can't store other types — it's because every type we support has to map cleanly to Arrow/Parquet, round-trip through flush and merge-scan, and have tests. `numeric`, `bytea`, arrays, `json` (non-`jsonb`), enums, ranges, geometry, and most extension types aren't wired up yet. We'll expand the matrix as we go; migration will reject unsupported columns up front rather than silently corrupting data.
-
-### Known limitations
-
-- FK constraints with flush enabled need `options.allow_fk_hot_only => true`; native FK checks only see hot rows
-- If a query needs cold data and object storage is down, you get an error — we don't fall back to hot-only results
-- Altering primary-key values or primary-key definitions on managed tables is not implemented yet.
-- Custom PostgreSQL indexes do not move to cold storage. When rows are flushed out of the heap, their entries disappear from PostgreSQL-owned indexes.
-- pgvector indexes are hot-only. HNSW and IVFFlat indexes only cover rows still resident in the PostgreSQL table; flushed vector values may live in cold files in future vector support, but they are not included in the live pgvector index.
-- ParadeDB/BM25 and other extension indexes follow the same rule: they index PostgreSQL-resident rows, not external Parquet cold files, unless Kalam builds a separate cold index for them.
-
----
-
-## Storage backends
-
-| Provider | `storage_type` | Example `base_path` |
-|----------|----------------|---------------------|
-| Local filesystem | `filesystem` | `file:///var/koldstore/` |
-| Amazon S3 / MinIO | `s3` | `s3://bucket/prefix/` |
-| Google Cloud Storage | `gcs` | `gs://bucket/prefix/` |
-| Azure Blob | `azure` | `azure://...` or `abfs://...` |
-
-
----
-
-## Example use cases
-
-- Chat and messaging history
-- Notifications and activity feeds
-- Audit and event logs
-- AI conversation history
-- IoT telemetry
-- User timelines
-- Analytics history retained cheaply but still queryable through SQL
-
----
-
-## Roadmap
-
-**v0.1 (now)** — clean-schema change-log mirrors, migrate/flush/merge-scan, user-scoped layouts, basic operator tooling.
-
-**v0.2** — background flush worker, real `EXPORT TABLE`, harder failure recovery.
-
-**v0.3** — `IMPORT TABLE`, segment compaction, column-based cold storage policies (the `CREATE COLD STORAGE POLICY` idea above), more type coverage.
-
-**Future** — cold vector search with Kalam-managed segment indexes, likely using USearch as a custom vector index stored as sidecar files beside Parquet segments, for example `segment-0001.parquet` plus `segment-0001.usearch`.
-
-**v1.0** — production guidance, monitoring, backup/PITR docs, benchmarks.
-
----
+- [Development guide](docs/development.md)
+- [Architecture overview](docs/architecture.md)
+- [Crate architecture](docs/architecture/crate-architecture.md)
+- [Limitations](docs/limitations.md)
 
 ## License
 
 Apache License 2.0. Copyright 2026 KalamDB.
 
 See [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0).
-
----
-
-## Contributing
-
-Bug reports, ideas, and PRs welcome. This is early — if something looks wrong in the docs or the code, open an issue.

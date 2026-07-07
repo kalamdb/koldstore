@@ -76,6 +76,12 @@ pub const REQUIRED_CATALOG_INDEXES: &[CatalogIndexSpec] = &[
         purpose: "single active migration backfill per table",
     },
     CatalogIndexSpec {
+        name: "jobs_one_active_table_work_idx",
+        table: "koldstore.jobs",
+        unique: true,
+        purpose: "single active flush or migration job per table",
+    },
+    CatalogIndexSpec {
         name: "cold_segments_active_scope_seq_idx",
         table: "koldstore.cold_segments",
         unique: false,

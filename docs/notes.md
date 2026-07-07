@@ -13,3 +13,14 @@ into another crates if needed and check if we even need that long files
 
 - there is more things we can move to the commo crate which is scattered around the codebase
 - the source crates/pg_koldstore/src/catalog i guess need to be moved to the catalog crate
+
+
+- Check the explain to show if the manifest is read from hot table or from object store json if it didnt existed there, we already have a table which stores segments there.
+i think it would be good to add to the explain:
+-- reading the manifest's segment from the hot table
+-- reading the manifest from object store
+-- deserializing the manifest
+to be included in the explain
+
+- We should add more e2e tests which covers the explain/count/joining with 2 tables which has cold rows
+

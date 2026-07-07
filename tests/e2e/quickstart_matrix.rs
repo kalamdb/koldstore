@@ -39,7 +39,7 @@ async fn quickstart_managed_table_keeps_size_and_index_overhead_bounded() -> Res
         common::assertions::assert_system_column_size_overhead(baseline_size, managed_size, 2_000)?;
         common::assertions::assert_no_duplicate_hot_pk(&db.client, &managed.relation, "id").await?;
 
-        let plan = common::explain_with_seqscan_disabled(
+        let plan = common::explain(
             &db.client,
             &format!(
                 "SELECT id, title FROM {} WHERE title = 'item-000777'",
@@ -47,7 +47,11 @@ async fn quickstart_managed_table_keeps_size_and_index_overhead_bounded() -> Res
             ),
         )
         .await?;
-        common::assert_index_scan(&plan, &managed.title_index)?;
+        common::assert_kold_merge_scan_explain(&plan)?;
+        assert!(
+            plan.contains("Filter:") && plan.contains("item-000777"),
+            "expected filtered merge scan plan, got:\n{plan}"
+        );
     }
 
     Ok(())

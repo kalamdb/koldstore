@@ -2,11 +2,11 @@ use pg_koldstore::{hooks::planner, merge_scan};
 
 #[test]
 fn merge_scan_explain_and_plan_contract_are_exposed() {
-    assert_eq!(planner::MERGE_SCAN_NAME, "KoldstoreMergeScan");
-    assert_eq!(merge_scan::path::CUSTOM_PATH_NAME, "KoldstoreMergeScan");
+    assert_eq!(planner::MERGE_SCAN_NAME, "KoldMergeScan");
+    assert_eq!(merge_scan::path::CUSTOM_PATH_NAME, "KoldMergeScan");
     assert_eq!(
         merge_scan::path::custom_scan_explain_label(),
-        "Custom Scan (KoldstoreMergeScan)"
+        "Custom Scan (KoldMergeScan)"
     );
     merge_scan::ffi::register_native_custom_scan();
     assert_eq!(
@@ -101,7 +101,7 @@ fn managed_read_replaces_heap_only_final_paths_but_keeps_hot_child_path() {
     assert_eq!(decision.final_paths.len(), 1);
     assert_eq!(
         decision.final_paths[0].explain_label(),
-        "Custom Scan (KoldstoreMergeScan)"
+        "Custom Scan (KoldMergeScan)"
     );
     assert_eq!(
         decision.custom_child_paths,

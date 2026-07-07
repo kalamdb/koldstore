@@ -112,9 +112,10 @@ fn migration_backfill_job_payload_is_type_safe_and_operator_visible() {
 
 #[test]
 fn migration_job_claims_are_lease_guarded_and_skip_locked() {
-    let plan = claim_migration_jobs_plan(64, MigrationLeaseSeconds::new(45).unwrap()).unwrap();
+    let plan = claim_migration_jobs_plan(64, 4, MigrationLeaseSeconds::new(45).unwrap()).unwrap();
 
     assert_eq!(plan.limit, 64);
+    assert_eq!(plan.max_running_jobs, 4);
     assert_eq!(plan.lease_seconds.get(), 45);
     assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
     assert!(plan
@@ -122,6 +123,9 @@ fn migration_job_claims_are_lease_guarded_and_skip_locked() {
         .sql
         .contains("job_type IN ('migrate_backfill')"));
     assert!(plan.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
+    assert!(plan.statement.sql.contains("$4::integer"));
+    assert!(plan.statement.sql.contains("running_jobs"));
+    assert!(plan.statement.sql.contains("table_running"));
     assert!(plan
         .statement
         .sql
@@ -190,6 +194,7 @@ fn catalog_schema_supports_migration_job_status_and_concurrency() {
     assert!(sql.contains("rows_processed bigint NOT NULL DEFAULT 0"));
     assert!(sql.contains("jobs_claimable_by_type_idx"));
     assert!(sql.contains("ON koldstore.jobs (job_type, status, run_after"));
+    assert!(sql.contains("jobs_one_active_table_work_idx"));
     assert!(sql.contains("jobs_one_active_migration_per_table_idx"));
     assert!(
         sql.contains("WHERE job_type IN ('migrate_backfill') AND status IN ('pending', 'running')")

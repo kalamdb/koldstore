@@ -16,7 +16,7 @@ pub fn migrate_table_pg(
     storage_name: &str,
     flush_policy: Option<&str>,
     scope_column: Option<&str>,
-) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
+) -> pgrx::Uuid {
     migrate_table_pg_impl(
         table_name,
         table_type,
@@ -38,7 +38,7 @@ pub fn migrate_table_pg_with_order(
     flush_policy: Option<&str>,
     scope_column: Option<&str>,
     order_column: Option<&str>,
-) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
+) -> pgrx::Uuid {
     migrate_table_pg_impl(
         table_name,
         table_type,
@@ -61,7 +61,7 @@ pub fn migrate_table_pg_with_order_and_compression(
     scope_column: Option<&str>,
     order_column: Option<&str>,
     compression: Option<&str>,
-) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
+) -> pgrx::Uuid {
     migrate_table_pg_impl(
         table_name,
         table_type,
@@ -83,9 +83,11 @@ fn migrate_table_pg_impl(
     scope_column: Option<&str>,
     order_column: Option<&str>,
     compression: Option<&str>,
-) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
+) -> pgrx::Uuid {
     let table_oid_u32 = table_oid.to_u32();
     let table_oid = pgrx::pg_sys::Oid::from(table_oid_u32);
+    crate::sql::job_lock_pg::lock_table_job(table_oid)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let storage_id = crate::catalog::resolve::storage_id_by_name(storage_name)
@@ -97,6 +99,7 @@ fn migrate_table_pg_impl(
     let primary_key_shape = primary_key_shape(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let options = migration_options(order_column, compression);
+    let job_id = Uuid::new_v4();
     let request = MigrateTableRequest {
         table_name: relation,
         table_type: table_type.to_string(),
@@ -146,12 +149,16 @@ fn migrate_table_pg_impl(
             empty_plan.effective_scope_column.as_deref(),
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-        return managed_table_info_tuple(
+        insert_completed_empty_migration_job(
+            job_id,
             table_oid_u32,
             table_type,
             storage_id,
             empty_plan.effective_scope_column.as_deref(),
-        );
+            &empty_plan.table,
+        )
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+        return pgrx::Uuid::from_bytes(*job_id.as_bytes());
     }
 
     let plan = koldstore_migrate::plan_existing_table_migration(
@@ -161,7 +168,7 @@ fn migrate_table_pg_impl(
             storage_id,
         },
         catalog,
-        Uuid::new_v4(),
+        job_id,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
@@ -186,17 +193,17 @@ fn migrate_table_pg_impl(
         migration_status: "mirror_initializing",
     })
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    run_existing_table_mirror_initialization_inline(&plan, &mirror_plan, &primary_key_shape)
+    enqueue_migration_job(&plan)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let processed_rows =
+        run_existing_table_mirror_initialization_inline(&plan, &mirror_plan, &primary_key_shape)
+            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     apply_user_scope_policy(&plan.table, plan.effective_scope_column.as_deref())
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    complete_migration_job(job_id, table_oid_u32, processed_rows)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
-    managed_table_info_tuple(
-        table_oid_u32,
-        table_type,
-        storage_id,
-        plan.effective_scope_column.as_deref(),
-    )
+    pgrx::Uuid::from_bytes(*job_id.as_bytes())
 }
 
 #[cfg(feature = "pg")]
@@ -222,34 +229,6 @@ fn table_has_rows(table: &koldstore_migrate::QualifiedTableName) -> Result<bool,
         table.quoted()
     ))
     .map(|value| value.unwrap_or(false))
-}
-
-#[cfg(feature = "pg")]
-fn managed_table_info_tuple(
-    table_oid_u32: u32,
-    table_type: &str,
-    storage_id: Uuid,
-    scope_column: Option<&str>,
-) -> pgrx::composite_type!('static, "koldstore.managed_table_info") {
-    let mut tuple =
-        pgrx::heap_tuple::PgHeapTuple::new_composite_type("koldstore.managed_table_info")
-            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    tuple
-        .set_by_name("table_oid", pgrx::pg_sys::Oid::from(table_oid_u32))
-        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    tuple
-        .set_by_name("table_type", table_type)
-        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    tuple
-        .set_by_name("storage_id", pgrx::Uuid::from_bytes(*storage_id.as_bytes()))
-        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    tuple
-        .set_by_name("schema_version", 1_i32)
-        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    tuple
-        .set_by_name("scope_column", scope_column)
-        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    tuple
 }
 
 #[cfg(feature = "pg")]
@@ -394,11 +373,122 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
 }
 
 #[cfg(feature = "pg")]
+fn insert_completed_empty_migration_job(
+    job_id: Uuid,
+    table_oid: u32,
+    table_type: &str,
+    storage_id: Uuid,
+    scope_column: Option<&str>,
+    table: &koldstore_migrate::QualifiedTableName,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    let table_name = table.quoted();
+    pgrx::Spi::run_with_args(
+        r#"
+INSERT INTO koldstore.jobs (
+    id,
+    table_oid,
+    scope_key,
+    job_type,
+    status,
+    phase,
+    priority,
+    rows_processed,
+    payload,
+    last_heartbeat_at,
+    updated_at
+)
+VALUES (
+    $1::uuid,
+    $2::oid,
+    '',
+    'migrate_backfill',
+    'completed',
+    'finished',
+    100,
+    0,
+    jsonb_build_object(
+        'phase', 'finished',
+        'table_name', $3::text,
+        'table_type', $4::text,
+        'storage_id', $5::uuid,
+        'scope_column', $6::text,
+        'processed_rows', 0
+    ),
+    now(),
+    now()
+)
+"#,
+        &[
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
+            DatumWithOid::from(table_name.as_str()),
+            DatumWithOid::from(table_type),
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*storage_id.as_bytes())),
+            DatumWithOid::from(scope_column),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
+fn enqueue_migration_job(
+    plan: &koldstore_migrate::ExistingTableMigrationPlan,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    pgrx::Spi::run_with_args(
+        &plan.backfill_job.statement.sql,
+        &[
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*plan.backfill_job.job_id.as_bytes())),
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(plan.backfill_job.table_oid)),
+            DatumWithOid::from(pgrx::JsonB(plan.backfill_job.payload.clone())),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
+fn complete_migration_job(job_id: Uuid, table_oid: u32, processed_rows: i64) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    pgrx::Spi::run_with_args(
+        r#"
+UPDATE koldstore.jobs
+SET status = 'completed',
+    phase = 'finished',
+    rows_processed = $3::bigint,
+    batches_completed = GREATEST(batches_completed, CASE WHEN $3::bigint > 0 THEN 1 ELSE 0 END),
+    payload = jsonb_set(
+        jsonb_set(payload, '{phase}', '"finished"'::jsonb, true),
+        '{processed_rows}',
+        to_jsonb($3::bigint),
+        true
+    ),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_heartbeat_at = now(),
+    updated_at = now()
+WHERE id = $1::uuid
+  AND table_oid = $2::oid
+  AND job_type = 'migrate_backfill'
+"#,
+        &[
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
+            DatumWithOid::from(processed_rows),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
 fn run_existing_table_mirror_initialization_inline(
     plan: &koldstore_migrate::ExistingTableMigrationPlan,
     mirror_plan: &koldstore_migrate::ChangeLogMirrorPlan,
     primary_key_shape: &koldstore_common::PrimaryKeyShape,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let batch = koldstore_migrate::backfill::plan_mirror_initialization_batch(
         &plan.table,
         &mirror_plan.mirror_table,
@@ -407,6 +497,7 @@ fn run_existing_table_mirror_initialization_inline(
         plan.backfill_batch_size,
     )
     .map_err(|error| error.to_string())?;
+    let mut processed_rows = 0_i64;
     loop {
         let candidate_rows = crate::spi::execute_prepared(
             &batch.statement,
@@ -420,6 +511,7 @@ fn run_existing_table_mirror_initialization_inline(
         if candidate_rows == 0 {
             break;
         }
+        processed_rows = processed_rows.saturating_add(candidate_rows);
     }
 
     pgrx::Spi::run_with_args(
@@ -433,7 +525,7 @@ fn run_existing_table_mirror_initialization_inline(
     .map_err(|error| error.to_string())?;
     crate::catalog::cache::invalidate_table(pgrx::pg_sys::Oid::from(plan.table_oid));
     crate::spi::invalidate_all_prepared_plans();
-    Ok(())
+    Ok(processed_rows)
 }
 
 /// Demigrates a managed table through the SQL API.

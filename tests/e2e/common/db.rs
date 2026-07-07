@@ -214,11 +214,19 @@ impl TestDb {
         let row = self
             .client
             .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)",
+                "SELECT koldstore.flush_table($1::text::regclass)::text",
                 &[&relation],
             )
             .await?;
-        Ok(row.get(0))
+        let job_id: String = row.get(0);
+        let progress = self
+            .client
+            .query_one(
+                "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
+                &[&job_id],
+            )
+            .await?;
+        Ok(progress.get(0))
     }
 
     /// Creates a user-scoped notes table and seeds rows for two tenants.

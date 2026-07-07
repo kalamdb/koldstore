@@ -147,6 +147,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_migration_per_table_idx
   ON koldstore.jobs (table_oid)
   WHERE job_type IN ('migrate_backfill') AND status IN ('pending', 'running');
 
+CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_table_work_idx
+  ON koldstore.jobs (table_oid)
+  WHERE job_type IN ('flush', 'migrate_backfill') AND status IN ('pending', 'running');
+
 CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   segment_id uuid PRIMARY KEY,
   table_oid oid NOT NULL,

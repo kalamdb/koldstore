@@ -9,10 +9,17 @@ mod log;
 mod sql;
 mod table_status;
 
+pub use assertions::{
+    assert_kold_merge_scan_cold_reads, assert_kold_merge_scan_executed_cold_reads,
+    assert_kold_merge_scan_explain, assert_kold_merge_scan_planned_cold_reads,
+    assert_merge_scan_explain,
+};
+
 pub use catalog::{
     active_job_count, assert_catalog_has_active_schema, assert_change_log_mirror_exists,
     assert_cold_metadata_present, assert_no_active_jobs, assert_primary_key_columns_match,
-    assert_system_columns_absent, cold_segment_count, manifest_count, primary_key_columns,
+    assert_system_columns_absent, change_log_mirror_relation, cold_segment_count, manifest_count,
+    primary_key_columns,
 };
 pub use cluster::{
     connect, expected_pg_ports, expected_pg_versions, local_pg_matrix, require_pgrx_server,
@@ -21,8 +28,8 @@ pub use cluster::{
 pub use db::{ManagedTable, TestDb};
 pub use log::{log, log_always, log_step, log_step_always, verbose_enabled};
 pub use sql::{
-    assert_index_scan, explain, explain_with_seqscan_disabled, relation_size, row_count,
-    RelationSize,
+    assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
+    relation_size, row_count, row_count_from_sql, RelationSize,
 };
 pub use table_status::{
     assert_cold_rows_at_least, assert_flush_pruned_hot_storage, table_status, TableStorageStatus,

@@ -1,13 +1,12 @@
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use koldstore_catalog::{
-    FkPolicyDecision, FlushPolicy, ManagedTableMeta, MirrorInitializationState,
-};
+use koldstore_catalog::{FkPolicyDecision, FlushPolicy, ManagedTableMeta};
 use koldstore_common::{
     ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId, TableKind,
 };
 use koldstore_merge::resolve_rows;
+use koldstore_schema::MirrorInitializationState;
 use koldstore_storage::PathTemplate;
 use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 use serde_json::json;

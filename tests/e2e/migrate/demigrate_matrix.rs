@@ -50,7 +50,7 @@ async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_
         let deactivated = db
             .client
             .query_one(
-                "SELECT koldstore.demigrate_table($1::text::regclass, false, false)",
+                "SELECT koldstore.demigrate_table($1::text::regclass, true, false)",
                 &[&table.relation],
             )
             .await?;

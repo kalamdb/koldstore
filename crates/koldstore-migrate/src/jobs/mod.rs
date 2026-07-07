@@ -223,6 +223,8 @@ pub struct MigrationJobEnqueuePlan {
 pub struct MigrationJobClaimPlan {
     /// Maximum jobs to claim.
     pub limit: u32,
+    /// Maximum concurrently running jobs allowed before this claim pauses.
+    pub max_running_jobs: u32,
     /// Lease duration.
     pub lease_seconds: MigrationLeaseSeconds,
     /// Parameterized claim SQL.
@@ -348,23 +350,47 @@ RETURNING id
 /// Returns an error when statement metadata cannot be prepared.
 pub fn claim_migration_jobs_plan(
     limit: u32,
+    max_running_jobs: u32,
     lease_seconds: MigrationLeaseSeconds,
 ) -> Result<MigrationJobClaimPlan, MigrationJobError> {
     let statement = SqlStatement::write(
         "claim migration jobs",
         r#"
-WITH candidate AS (
-    SELECT id
+WITH running_jobs AS (
+    SELECT count(*)::integer AS count
     FROM koldstore.jobs
-    WHERE job_type IN ('migrate_backfill')
-      AND status IN ('pending', 'running')
-      AND run_after <= now()
+    WHERE status = 'running'
       AND (
-          status = 'pending'
-          OR lease_expires_at IS NULL
-          OR lease_expires_at < now()
+          lease_expires_at IS NULL
+          OR lease_expires_at >= now()
       )
-    ORDER BY priority DESC, updated_at, id
+),
+candidate AS (
+    SELECT j.id
+    FROM koldstore.jobs AS j
+    CROSS JOIN running_jobs
+    WHERE j.job_type IN ('migrate_backfill')
+      AND j.status IN ('pending', 'running')
+      AND running_jobs.count < $4::integer
+      AND j.run_after <= now()
+      AND (
+          j.status = 'pending'
+          OR j.lease_expires_at IS NULL
+          OR j.lease_expires_at < now()
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM koldstore.jobs AS table_running
+          WHERE table_running.table_oid = j.table_oid
+            AND table_running.id <> j.id
+            AND table_running.job_type IN ('flush', 'migrate_backfill')
+            AND table_running.status = 'running'
+            AND (
+                table_running.lease_expires_at IS NULL
+                OR table_running.lease_expires_at >= now()
+            )
+      )
+    ORDER BY j.priority DESC, j.updated_at, j.id
     LIMIT $1
     FOR UPDATE SKIP LOCKED
 )
@@ -386,6 +412,7 @@ RETURNING j.id, j.table_oid, j.phase, j.lease_epoch, j.checkpoint_seq, j.rows_pr
 
     Ok(MigrationJobClaimPlan {
         limit,
+        max_running_jobs,
         lease_seconds,
         statement,
     })

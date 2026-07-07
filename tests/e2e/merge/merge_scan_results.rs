@@ -174,6 +174,21 @@ async fn flushed_table_prunes_hot_rows_and_keeps_cold_payload_for_merge_reads() 
                 (100, "new-hot".to_string()),
             ]
         );
+
+        let planned = common::explain(
+            &db.client,
+            &format!("SELECT count(*) FROM {}", table.relation),
+        )
+        .await?;
+        common::assert_kold_merge_scan_cold_reads(&planned, "manifest.json", 1)?;
+
+        let analyzed = common::explain_analyze(
+            &db.client,
+            &format!("SELECT count(*) FROM {}", table.relation),
+        )
+        .await?;
+        common::assert_kold_merge_scan_executed_cold_reads(&analyzed, 1)?;
+
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
 
         let status = common::table_status(&db.client, &table.relation).await?;

@@ -5,28 +5,45 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
+use std::time::{Duration, Instant};
 
 use koldstore_common::{quote_ident, QualifiedTableName};
 use pgrx::pg_sys;
 
-const CUSTOM_SCAN_NAME: &[u8] = b"KoldstoreMergeScan\0";
+use crate::merge_scan::path::CUSTOM_PATH_NAME;
+
+mod profile;
+mod tuple;
+
+use profile::{ColdReadProfile, SegmentReadProfile};
+use tuple::{copy_spi_datum, store_materialized_row, MaterializedRow};
+
+const CUSTOM_SCAN_NAME: &[u8] = b"KoldMergeScan\0";
 const HOT_SEQ: i64 = i64::MAX;
+const READER_PERMIT_RETRY_SLEEP: Duration = Duration::from_millis(10);
+const READER_PERMIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 thread_local! {
-    static SCAN_STATES: RefCell<HashMap<usize, MaterializedScan>> = RefCell::new(HashMap::new());
+    static SCAN_STATES: RefCell<HashMap<usize, ScanExecutionState>> = RefCell::new(HashMap::new());
     static DISABLE_HOOK: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[derive(Debug)]
-struct MaterializedScan {
+struct ScanExecutionState {
     rows: Vec<MaterializedRow>,
     next: usize,
+    cold_profile: ColdReadProfile,
 }
 
-#[derive(Debug, Clone)]
-struct MaterializedRow {
-    values: Vec<pg_sys::Datum>,
-    is_null: Vec<bool>,
+impl ScanExecutionState {
+    unsafe fn store_next_row(&mut self, slot: *mut pg_sys::TupleTableSlot) -> bool {
+        let Some(row) = self.rows.get(self.next) else {
+            return false;
+        };
+        self.next += 1;
+        store_materialized_row(slot, row);
+        true
+    }
 }
 
 static mut PREVIOUS_SET_REL_PATHLIST_HOOK: pg_sys::set_rel_pathlist_hook_type = None;
@@ -55,10 +72,10 @@ static mut EXEC_METHODS: pg_sys::CustomExecMethods = pg_sys::CustomExecMethods {
     ReInitializeDSMCustomScan: None,
     InitializeWorkerCustomScan: None,
     ShutdownCustomScan: Some(end_custom_scan),
-    ExplainCustomScan: None,
+    ExplainCustomScan: Some(explain_custom_scan),
 };
 
-/// Registers KoldstoreMergeScan with PostgreSQL and installs the planner hook.
+/// Registers KoldMergeScan with PostgreSQL and installs the planner hook.
 pub fn register_custom_scan_hooks() {
     unsafe {
         pg_sys::RegisterCustomScanMethods(&raw const SCAN_METHODS);
@@ -67,7 +84,7 @@ pub fn register_custom_scan_hooks() {
     }
 }
 
-/// Runs extension-internal SQL without injecting KoldstoreMergeScan paths.
+/// Runs extension-internal SQL without injecting KoldMergeScan paths.
 pub fn with_custom_scan_disabled<T>(f: impl FnOnce() -> T) -> T {
     with_hook_disabled(f)
 }
@@ -92,8 +109,14 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     if (*rte).rtekind != pg_sys::RTEKind::RTE_RELATION {
         return;
     }
+    if (*root).parse.is_null() {
+        return;
+    }
+    if (*(*root).parse).commandType != pg_sys::CmdType::CMD_SELECT {
+        return;
+    }
 
-    let table_oid = pg_sys::Oid::from((*rte).relid);
+    let table_oid = (*rte).relid;
     let managed = with_hook_disabled(|| {
         crate::catalog::cache::managed_table_snapshot(table_oid)
             .ok()
@@ -182,7 +205,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     if node.is_null() || (*node).ss.ss_currentRelation.is_null() {
         return;
     }
-    let table_oid = pg_sys::Oid::from((*(*node).ss.ss_currentRelation).rd_id);
+    let table_oid = (*(*node).ss.ss_currentRelation).rd_id;
     let plan = (*node).ss.ps.plan;
     let targetlist = if plan.is_null() {
         std::ptr::null_mut()
@@ -194,16 +217,42 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     } else {
         (*plan).qual
     };
-    let query = match build_materialize_query(table_oid, targetlist, qual) {
+    let (relation, catalog, snapshot) = with_hook_disabled(|| {
+        let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+        let catalog = crate::sql::migrate_pg::migration_catalog(table_oid.to_u32())?;
+        let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
+        Ok::<_, String>((relation, catalog, snapshot))
+    })
+    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} catalog lookup failed: {error}"));
+    let (cold_profile, cold_rows_json) =
+        match load_cold_rows_for_merge(table_oid, &snapshot, &catalog) {
+            Ok(result) => result,
+            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} cold read failed: {error}"),
+        };
+    let query = match build_materialize_query(
+        &relation,
+        &catalog,
+        &snapshot,
+        &cold_rows_json,
+        targetlist,
+        qual,
+    ) {
         Ok(query) => query,
-        Err(error) => pgrx::error!("KoldstoreMergeScan planning failed: {error}"),
+        Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} planning failed: {error}"),
     };
     let rows = materialize_query(&query)
-        .unwrap_or_else(|error| pgrx::error!("KoldstoreMergeScan execution failed: {error}"));
+        .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} execution failed: {error}"));
     SCAN_STATES.with(|states| {
-        states
-            .borrow_mut()
-            .insert(node as usize, MaterializedScan { rows, next: 0 });
+        states.borrow_mut().insert(
+            node as usize,
+            ScanExecutionState {
+                rows,
+                next: 0,
+                cold_profile,
+            },
+        );
     });
 }
 
@@ -219,41 +268,16 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         return std::ptr::null_mut();
     }
 
-    loop {
-        let row = SCAN_STATES.with(|states| {
-            let mut states = states.borrow_mut();
-            let scan = states.get_mut(&(node as usize))?;
-            let row = scan.rows.get(scan.next).cloned();
-            scan.next += usize::from(row.is_some());
-            row
-        });
+    let stored = SCAN_STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        let scan = states.get_mut(&(node as usize))?;
+        Some(scan.store_next_row(slot))
+    });
 
-        match row {
-            Some(row) => {
-                if !(*slot).tts_ops.is_null() {
-                    if let Some(clear) = (*(*slot).tts_ops).clear {
-                        clear(slot);
-                    }
-                }
-                let slot_natts = if (*slot).tts_tupleDescriptor.is_null() {
-                    row.values.len()
-                } else {
-                    usize::try_from((*(*slot).tts_tupleDescriptor).natts)
-                        .unwrap_or(row.values.len())
-                };
-                let copied = row.values.len().min(slot_natts);
-                for index in 0..copied {
-                    let value = row.values[index];
-                    *(*slot).tts_values.add(index) = value;
-                    *(*slot).tts_isnull.add(index) = row.is_null[index];
-                }
-                (*slot).tts_nvalid = copied as pg_sys::AttrNumber;
-                pg_sys::ExecStoreVirtualTuple(slot);
-
-                return slot;
-            }
-            None => return std::ptr::null_mut(),
-        }
+    if stored == Some(true) {
+        slot
+    } else {
+        std::ptr::null_mut()
     }
 }
 
@@ -261,7 +285,11 @@ unsafe extern "C-unwind" fn exec_custom_scan(
 unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
     if !node.is_null() {
         SCAN_STATES.with(|states| {
-            states.borrow_mut().remove(&(node as usize));
+            if let Some(scan) = states.borrow_mut().remove(&(node as usize)) {
+                if should_keep_explain_profile(node) {
+                    profile::remember_explain_profile(node as usize, scan.cold_profile);
+                }
+            }
         });
     }
 }
@@ -278,35 +306,14 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
 }
 
 fn build_materialize_query(
-    table_oid: pg_sys::Oid,
+    relation: &str,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    snapshot: &koldstore_catalog::ManagedTableSnapshot,
+    cold_rows_json: &str,
     targetlist: *mut pg_sys::List,
     qual: *mut pg_sys::List,
 ) -> Result<String, String> {
-    let (relation, catalog, snapshot, storage, segment_paths) = with_hook_disabled(|| {
-        let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
-        let catalog = crate::sql::migrate_pg::migration_catalog(table_oid.to_u32())?;
-        let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
-        let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
-        let segment_paths = active_cold_segment_paths(table_oid)?;
-        Ok::<_, String>((relation, catalog, snapshot, storage, segment_paths))
-    })?;
-    let table = QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
-    let parquet_columns = catalog
-        .columns
-        .iter()
-        .map(|column| {
-            koldstore_parquet::PgColumn::from_catalog(&column.name, &column.type_name, true)
-                .map_err(|error| error.to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let cold_rows_json = cold_rows_json_from_segments(
-        &storage.base_path,
-        &segment_paths,
-        &parquet_columns,
-        &snapshot.primary_key_columns,
-    )?;
+    let table = QualifiedTableName::parse(relation).map_err(|error| error.to_string())?;
 
     let hot_pk = snapshot
         .primary_key_columns
@@ -382,14 +389,14 @@ WHERE NOT deleted{residual_where}
         hot_pk = hot_pk,
         hot_seq = HOT_SEQ,
         table = table.quoted(),
-        cold_rows_json = sql_literal(&cold_rows_json),
+        cold_rows_json = sql_literal(cold_rows_json),
         projection = projection,
         residual_where = residual_where,
     ))
 }
 
 fn active_cold_segment_paths(table_oid: pg_sys::Oid) -> Result<Vec<String>, String> {
-    let json = pgrx::Spi::get_one_with_args::<String>(
+    let json = spi_query_one_string(
         r#"
 SELECT COALESCE(jsonb_agg(object_path ORDER BY batch_number)::text, '[]')
 FROM koldstore.cold_segments
@@ -397,11 +404,122 @@ WHERE table_oid = $1::oid
   AND scope_key = ''
   AND status = 'active'
 "#,
-        &[pgrx::datum::DatumWithOid::from(table_oid)],
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "cold segment lookup returned no rows".to_string())?;
+        table_oid,
+    )?
+    .unwrap_or_else(|| "[]".to_string());
     serde_json::from_str(&json).map_err(|error| error.to_string())
+}
+
+fn optional_manifest_path(table_oid: pg_sys::Oid) -> Result<Option<String>, String> {
+    spi_query_one_string(
+        r#"
+SELECT manifest_path
+FROM koldstore.manifest
+WHERE table_oid = $1::oid
+  AND sync_state = 'in_sync'
+ORDER BY generation DESC
+LIMIT 1
+"#,
+        table_oid,
+    )
+}
+
+fn spi_query_one_string(sql: &str, table_oid: pg_sys::Oid) -> Result<Option<String>, String> {
+    pgrx::Spi::connect(|client| {
+        let args = [pgrx::datum::DatumWithOid::from(table_oid)];
+        let tuples = client
+            .select(sql, Some(1), &args)
+            .map_err(|error| error.to_string())?;
+        if tuples.is_empty() {
+            return Ok(None);
+        }
+        tuples
+            .first()
+            .get_one::<String>()
+            .map_err(|error| error.to_string())
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn load_cold_rows_for_merge(
+    table_oid: pg_sys::Oid,
+    snapshot: &koldstore_catalog::ManagedTableSnapshot,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+) -> Result<(ColdReadProfile, String), String> {
+    with_hook_disabled(|| {
+        let manifest_started = Instant::now();
+        let segment_paths = active_cold_segment_paths(table_oid)?;
+        let manifest_path = optional_manifest_path(table_oid)?;
+
+        if segment_paths.is_empty() {
+            return Ok((
+                ColdReadProfile {
+                    manifest_path: manifest_path.unwrap_or_else(|| "(none)".to_string()),
+                    manifest_read_ms: Some(profile::elapsed_ms(manifest_started)),
+                    segments: vec![],
+                },
+                "[]".to_string(),
+            ));
+        }
+
+        if crate::guc::cold_reads_mode() == crate::settings::ColdReadsMode::Off {
+            return Err("cold reads are disabled by koldstore.cold_reads".to_string());
+        }
+
+        let manifest_path = manifest_path.ok_or_else(|| {
+            "cold segments are present but no in-sync manifest was found".to_string()
+        })?;
+        let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
+        let manifest_file = std::path::Path::new(&storage.base_path).join(&manifest_path);
+        std::fs::read_to_string(&manifest_file)
+            .map_err(|error| format!("read manifest file {}: {error}", manifest_file.display()))?;
+        let manifest_read_ms = profile::elapsed_ms(manifest_started);
+        let parquet_columns = catalog
+            .columns
+            .iter()
+            .map(|column| {
+                koldstore_parquet::PgColumn::from_catalog(&column.name, &column.type_name, true)
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let (cold_rows_json, segments) = cold_rows_json_from_segments(
+            &storage.base_path,
+            &segment_paths,
+            &parquet_columns,
+            &snapshot.primary_key_columns,
+        )?;
+
+        Ok((
+            ColdReadProfile {
+                manifest_path,
+                manifest_read_ms: Some(manifest_read_ms),
+                segments,
+            },
+            cold_rows_json,
+        ))
+    })
+}
+
+fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdReadProfile, String> {
+    with_hook_disabled(|| {
+        let manifest_started = Instant::now();
+        let segment_paths = active_cold_segment_paths(table_oid)?;
+        let manifest_path =
+            optional_manifest_path(table_oid)?.unwrap_or_else(|| "(none)".to_string());
+        Ok(ColdReadProfile {
+            manifest_path,
+            manifest_read_ms: Some(profile::elapsed_ms(manifest_started)),
+            segments: segment_paths
+                .into_iter()
+                .map(|object_path| SegmentReadProfile {
+                    object_path,
+                    row_count: 0,
+                    read_ms: None,
+                })
+                .collect(),
+        })
+    })
 }
 
 fn cold_rows_json_from_segments(
@@ -409,23 +527,157 @@ fn cold_rows_json_from_segments(
     segment_paths: &[String],
     columns: &[koldstore_parquet::PgColumn],
     primary_key_columns: &[String],
-) -> Result<String, String> {
+) -> Result<(String, Vec<SegmentReadProfile>), String> {
     let mut rows = Vec::new();
+    let mut segments = Vec::with_capacity(segment_paths.len());
     for object_path in segment_paths {
         let path = std::path::Path::new(base_path).join(object_path);
-        rows.extend(koldstore_parquet::read_clean_cold_rows_from_path(
-            &path,
-            columns,
-            primary_key_columns,
-        )?);
+        let started = Instant::now();
+        let _permit = acquire_parquet_reader_permit(crate::guc::max_open_parquet_readers())?;
+        let segment_rows =
+            koldstore_parquet::read_clean_cold_rows_from_path(&path, columns, primary_key_columns)?;
+        segments.push(SegmentReadProfile {
+            object_path: object_path.clone(),
+            row_count: segment_rows.len(),
+            read_ms: Some(profile::elapsed_ms(started)),
+        });
+        rows.extend(segment_rows);
     }
-    serde_json::to_string(&rows).map_err(|error| error.to_string())
+    let json = serde_json::to_string(&rows).map_err(|error| error.to_string())?;
+    Ok((json, segments))
 }
 
-unsafe fn requested_target_columns<'a>(
+#[derive(Debug)]
+struct ParquetReaderPermit {
+    key: crate::merge_scan::reader_pool::ParquetReaderLockKey,
+}
+
+impl Drop for ParquetReaderPermit {
+    fn drop(&mut self) {
+        let _ = release_parquet_reader_slot(self.key);
+    }
+}
+
+fn acquire_parquet_reader_permit(configured_limit: i32) -> Result<ParquetReaderPermit, String> {
+    let max_open =
+        crate::merge_scan::reader_pool::validated_max_open_parquet_readers(configured_limit);
+    let started = Instant::now();
+    loop {
+        for slot in 0..max_open {
+            let key = crate::merge_scan::reader_pool::parquet_reader_lock_key(slot);
+            if try_lock_parquet_reader_slot(key)? {
+                return Ok(ParquetReaderPermit { key });
+            }
+        }
+        if started.elapsed() >= READER_PERMIT_TIMEOUT {
+            return Err(format!(
+                "timed out waiting for a Parquet reader slot after {} ms",
+                profile::elapsed_ms(started)
+            ));
+        }
+        std::thread::sleep(READER_PERMIT_RETRY_SLEEP);
+    }
+}
+
+fn try_lock_parquet_reader_slot(
+    key: crate::merge_scan::reader_pool::ParquetReaderLockKey,
+) -> Result<bool, String> {
+    let args = [
+        pgrx::datum::DatumWithOid::from(key.0),
+        pgrx::datum::DatumWithOid::from(key.1),
+    ];
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT pg_try_advisory_lock($1::integer, $2::integer)",
+        &args,
+    )
+    .map_err(|error| error.to_string())
+    .map(|value| value.unwrap_or(false))
+}
+
+fn release_parquet_reader_slot(
+    key: crate::merge_scan::reader_pool::ParquetReaderLockKey,
+) -> Result<(), String> {
+    let args = [
+        pgrx::datum::DatumWithOid::from(key.0),
+        pgrx::datum::DatumWithOid::from(key.1),
+    ];
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT pg_advisory_unlock($1::integer, $2::integer)",
+        &args,
+    )
+    .map_err(|error| error.to_string())
+    .map(|_| ())
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn explain_custom_scan(
+    node: *mut pg_sys::CustomScanState,
+    _ancestors: *mut pg_sys::List,
+    es: *mut pg_sys::ExplainState,
+) {
+    if node.is_null() || es.is_null() {
+        return;
+    }
+
+    let profile = SCAN_STATES.with(|states| {
+        states
+            .borrow()
+            .get(&(node as usize))
+            .map(|scan| scan.cold_profile.clone())
+    });
+    let profile = profile.or_else(|| profile::saved_explain_profile(node as usize));
+    let profile = match profile {
+        Some(profile) => profile,
+        None => match resolve_table_oid(node).and_then(planned_cold_read_profile) {
+            Ok(profile) => profile,
+            Err(error) => {
+                profile::explain_property(es, "Cold storage", &format!("unavailable: {error}"));
+                return;
+            }
+        },
+    };
+
+    profile::explain_cold_read_profile(es, &profile);
+
+    if unsafe { (*es).analyze } {
+        profile::forget_explain_profile(node as usize);
+    }
+}
+
+unsafe fn resolve_table_oid(node: *mut pg_sys::CustomScanState) -> Result<pg_sys::Oid, String> {
+    if !(*node).ss.ss_currentRelation.is_null() {
+        return Ok((*(*node).ss.ss_currentRelation).rd_id);
+    }
+
+    let plan = (*node).ss.ps.plan;
+    if plan.is_null() {
+        return Err("custom scan plan is missing".to_string());
+    }
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
+    let scanrelid = (*custom_scan).scan.scanrelid;
+    if scanrelid == 0 {
+        return Err("custom scan relid is missing".to_string());
+    }
+
+    let estate = (*node).ss.ps.state;
+    if estate.is_null() {
+        return Err("executor state is missing".to_string());
+    }
+    let rte = pg_sys::rt_fetch(scanrelid, (*estate).es_range_table);
+    if rte.is_null() {
+        return Err("range table entry is missing".to_string());
+    }
+    Ok((*rte).relid)
+}
+
+unsafe fn should_keep_explain_profile(node: *mut pg_sys::CustomScanState) -> bool {
+    !(*node).ss.ps.instrument.is_null()
+}
+
+unsafe fn requested_target_columns(
     targetlist: *mut pg_sys::List,
-    columns: &'a [koldstore_migrate::order::CatalogColumn],
-) -> Vec<&'a koldstore_migrate::order::CatalogColumn> {
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> Vec<&koldstore_migrate::order::CatalogColumn> {
     if targetlist.is_null() {
         return Vec::new();
     }
@@ -477,6 +729,7 @@ unsafe fn residual_node_sql(
         return None;
     }
     match (*expr).type_ {
+        pg_sys::NodeTag::T_OpExpr => op_expr_filter_sql(expr, columns),
         pg_sys::NodeTag::T_ScalarArrayOpExpr => scalar_array_filter_sql(expr, columns),
         pg_sys::NodeTag::T_BoolExpr => {
             let bool_expr = expr.cast::<pg_sys::BoolExpr>();
@@ -490,6 +743,109 @@ unsafe fn residual_node_sql(
             (!predicates.is_empty()).then(|| predicates.join(" AND "))
         }
         _ => None,
+    }
+}
+
+unsafe fn op_expr_filter_sql(
+    expr: *mut pg_sys::Expr,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> Option<String> {
+    let op_expr = expr.cast::<pg_sys::OpExpr>();
+    let opname = cstr_to_str(pg_sys::get_opname((*op_expr).opno))?;
+    if opname != "=" {
+        return None;
+    }
+    let args = list_node_pointers((*op_expr).args);
+    if args.len() != 2 {
+        return None;
+    }
+    let (column, literal) = equality_var_and_literal(args[0], args[1], columns)?;
+    Some(format!(
+        "(row_image ->> '{name}')::{type_name} = {literal}",
+        name = sql_literal(&column.name),
+        type_name = column.type_name,
+        literal = literal,
+    ))
+}
+
+unsafe fn equality_var_and_literal(
+    left: *mut std::ffi::c_void,
+    right: *mut std::ffi::c_void,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> Option<(&koldstore_migrate::order::CatalogColumn, String)> {
+    if let Some(column) = var_column(left.cast::<pg_sys::Expr>(), columns) {
+        if let Some(literal) = typed_literal_sql(right.cast::<pg_sys::Expr>(), column) {
+            return Some((column, literal));
+        }
+    }
+    if let Some(column) = var_column(right.cast::<pg_sys::Expr>(), columns) {
+        if let Some(literal) = typed_literal_sql(left.cast::<pg_sys::Expr>(), column) {
+            return Some((column, literal));
+        }
+    }
+    None
+}
+
+unsafe fn var_column(
+    expr: *mut pg_sys::Expr,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> Option<&koldstore_migrate::order::CatalogColumn> {
+    let expr = unwrap_relabel(expr);
+    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Var {
+        return None;
+    }
+    let var = expr.cast::<pg_sys::Var>();
+    let attno = (*var).varattno;
+    if attno <= 0 {
+        return None;
+    }
+    columns.get(usize::try_from(attno - 1).ok()?)
+}
+
+unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {
+    if expr.is_null() {
+        return expr;
+    }
+    if (*expr).type_ == pg_sys::NodeTag::T_RelabelType {
+        let relabel = expr.cast::<pg_sys::RelabelType>();
+        (*relabel).arg.cast::<pg_sys::Expr>()
+    } else {
+        expr
+    }
+}
+
+unsafe fn typed_literal_sql(
+    expr: *mut pg_sys::Expr,
+    column: &koldstore_migrate::order::CatalogColumn,
+) -> Option<String> {
+    let expr = unwrap_relabel(expr);
+    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
+        return None;
+    }
+    let konst = expr.cast::<pg_sys::Const>();
+    if (*konst).constisnull {
+        return None;
+    }
+    match column.type_name.as_str() {
+        "text" | "varchar" | "character varying" | "bpchar" | "character" => {
+            let text = (*konst).constvalue.cast_mut_ptr::<pg_sys::text>();
+            if text.is_null() {
+                return None;
+            }
+            let cstr = pg_sys::text_to_cstring(text);
+            if cstr.is_null() {
+                return None;
+            }
+            let value = CStr::from_ptr(cstr).to_str().ok()?;
+            let literal = format!("'{}'", sql_literal(value));
+            pg_sys::pfree(cstr.cast());
+            Some(literal)
+        }
+        "boolean" => match (*konst).consttype.to_u32() {
+            16 => Some(((*konst).constvalue.value() != 0).to_string()),
+            _ => None,
+        },
+        _ => const_literal_sql(expr),
     }
 }
 
@@ -657,12 +1013,7 @@ unsafe fn materialize_query(query: &str) -> Result<Vec<MaterializedRow>, String>
                         values.push(pg_sys::Datum::null());
                         is_null.push(true);
                     } else {
-                        let attr = (*tupdesc).attrs.as_ptr().add(attr_index);
-                        values.push(pg_sys::SPI_datumTransfer(
-                            datum,
-                            (*attr).attbyval,
-                            i32::from((*attr).attlen),
-                        ));
+                        values.push(copy_spi_datum(tupdesc, attr_index, datum));
                         is_null.push(false);
                     }
                 }

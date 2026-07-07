@@ -124,6 +124,8 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         let batches = fetch_cold_flush_batches(client, pg_version).await?;
         assert_flush_completed_in_batches(&batches, INITIAL_ROWS, 1, FLUSH_POLICY_ROW_LIMIT, true)?;
         common::assert_flush_pruned_hot_storage(client, &relation, INITIAL_ROWS).await?;
+        assert_eq!(common::hot_row_count(client, &relation).await?, 0);
+        assert_eq!(common::row_count(client, &mirror).await?, 0);
         batches
     };
     let first_manifest = {
@@ -163,6 +165,14 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
             status.mirror_rows, SECOND_INSERT_ROWS,
             "mirror should track only rows inserted after first flush prune"
         );
+        assert_eq!(
+            common::hot_row_count(client, &relation).await?,
+            SECOND_INSERT_ROWS
+        );
+        assert_eq!(
+            common::row_count(client, &mirror).await?,
+            SECOND_INSERT_ROWS
+        );
     }
 
     let second_flush_started = Instant::now();
@@ -196,6 +206,8 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         let batches = fetch_cold_flush_batches(client, pg_version).await?;
         assert_flush_completed_in_batches(&batches, TOTAL_ROWS, 2, FLUSH_POLICY_ROW_LIMIT, false)?;
         common::assert_flush_pruned_hot_storage(client, &relation, TOTAL_ROWS).await?;
+        assert_eq!(common::hot_row_count(client, &relation).await?, 0);
+        assert_eq!(common::row_count(client, &mirror).await?, 0);
         batches
     };
     assert!(
@@ -240,6 +252,38 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
             status
         );
         assert_cold_parquet_sample_readable(client, pg_version, storage_root).await?;
+    }
+    {
+        let _step = common::log_step_always(format!(
+            "pg{pg_version}: verify merged SELECT returns all {TOTAL_ROWS} rows"
+        ));
+        assert_sample_rows_readable(client, pg_version).await?;
+        let status = common::table_status(client, &relation).await?;
+        assert_eq!(status.hot_rows, 0, "merged read should see pruned hot heap");
+        assert_eq!(
+            status.mirror_rows, 0,
+            "merged read should see pruned mirror"
+        );
+        assert!(
+            status.cold_row_count >= TOTAL_ROWS,
+            "table_status cold rows should cover flushed data, got {:?}",
+            status
+        );
+    }
+    {
+        let _step = common::log_step_always(format!(
+            "pg{pg_version}: verify KoldMergeScan planned cold reads in EXPLAIN"
+        ));
+        let plan = common::explain(client, &format!("SELECT count(*) FROM {relation}")).await?;
+        common::assert_kold_merge_scan_cold_reads(&plan, "manifest.json", 2)?;
+    }
+    {
+        let _step = common::log_step_always(format!(
+            "pg{pg_version}: verify KoldMergeScan executed cold reads in EXPLAIN ANALYZE"
+        ));
+        let plan =
+            common::explain_analyze(client, &format!("SELECT count(*) FROM {relation}")).await?;
+        common::assert_kold_merge_scan_executed_cold_reads(&plan, 2)?;
     }
     {
         let _step = common::log_step_always(format!("pg{pg_version}: verify no pending jobs"));
@@ -490,11 +534,18 @@ async fn enqueue_flush_job(client: &Client, pg_version: u16) -> Result<()> {
 async fn flush_table(client: &Client, pg_version: u16) -> Result<i64> {
     let row = client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)",
+            "SELECT koldstore.flush_table($1::text::regclass)::text",
             &[&relation(pg_version)],
         )
         .await?;
-    Ok(row.get(0))
+    let job_id: String = row.get(0);
+    let progress = client
+        .query_one(
+            "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
+            &[&job_id],
+        )
+        .await?;
+    Ok(progress.get(0))
 }
 
 async fn wait_for_jobs_to_finish(client: &Client, pg_version: u16) -> Result<()> {

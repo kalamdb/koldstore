@@ -1432,6 +1432,7 @@ dependencies = [
  "koldstore-migrate",
  "koldstore-mirror",
  "koldstore-parquet",
+ "koldstore-schema",
  "koldstore-storage",
  "pg_koldstore",
  "serde",

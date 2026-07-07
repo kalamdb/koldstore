@@ -5,6 +5,7 @@ fn sql_exposes_operational_functions() {
         "cold_segment_count",
         "manifest_state",
         "pending_jobs",
+        "jobs",
         "storage_binding",
         "last_error",
     ] {
@@ -84,13 +85,17 @@ fn flush_job_claim_plan_uses_skip_locked_leases_and_seq_watermark() {
     use pg_koldstore::spi::SpiAccess;
 
     let claim =
-        koldstore_flush::ops::claim_flush_jobs_plan(32, FlushLeaseSeconds::new(30).unwrap())
+        koldstore_flush::ops::claim_flush_jobs_plan(32, 4, FlushLeaseSeconds::new(30).unwrap())
             .unwrap();
 
     assert_eq!(claim.limit, 32);
+    assert_eq!(claim.max_running_jobs, 4);
     assert_eq!(claim.lease_seconds.get(), 30);
     assert_eq!(claim.statement.access, SpiAccess::ReadWrite);
     assert!(claim.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
+    assert!(claim.statement.sql.contains("$4::integer"));
+    assert!(claim.statement.sql.contains("running_jobs"));
+    assert!(claim.statement.sql.contains("table_running"));
     assert!(claim
         .statement
         .sql

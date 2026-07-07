@@ -4,6 +4,9 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use tokio_postgres::Client;
 
+use super::catalog::change_log_mirror_relation;
+use super::sql::{hot_row_count, row_count};
+
 /// Storage and flush status returned by `koldstore.table_status`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TableStorageStatus {
@@ -42,6 +45,9 @@ pub async fn table_status(client: &Client, relation: &str) -> Result<TableStorag
 
 /// Asserts that a full flush moved live rows to cold storage and pruned hot/mirror rows.
 ///
+/// Verifies both the managed `table_status` view and direct row counts on the base
+/// table and its `__cl` mirror so flush cleanup cannot regress on only one side.
+///
 /// # Errors
 ///
 /// Returns an error when cold accounting is wrong or hot/mirror rows were not pruned.
@@ -50,7 +56,11 @@ pub async fn assert_flush_pruned_hot_storage(
     relation: &str,
     expected_cold_rows: i64,
 ) -> Result<()> {
+    let mirror = change_log_mirror_relation(relation);
     let status = table_status(client, relation).await?;
+    let hot_rows = hot_row_count(client, relation).await?;
+    let mirror_rows = row_count(client, &mirror).await?;
+
     anyhow::ensure!(
         status.cold_row_count >= expected_cold_rows,
         "expected at least {expected_cold_rows} cold rows for {relation}, got {:?}",
@@ -65,6 +75,14 @@ pub async fn assert_flush_pruned_hot_storage(
         status.mirror_rows == 0,
         "expected flushed mirror rows to be cleaned for {relation}, got {:?}",
         status
+    );
+    anyhow::ensure!(
+        hot_rows == 0,
+        "expected hot heap for {relation} to be empty after flush cleanup, got {hot_rows} rows (mirror={mirror_rows})"
+    );
+    anyhow::ensure!(
+        mirror_rows == 0,
+        "expected change-log mirror {mirror} to be empty after flush cleanup, got {mirror_rows} rows (base={hot_rows})"
     );
     Ok(())
 }

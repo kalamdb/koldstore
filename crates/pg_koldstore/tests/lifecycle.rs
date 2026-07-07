@@ -19,6 +19,22 @@ fn guc_definitions_include_public_and_internal_settings() {
     assert!(gucs
         .iter()
         .any(|guc| guc.name == "koldstore.user_id" && !guc.internal));
+    assert!(gucs.iter().any(|guc| guc.name == "koldstore.cold_reads"
+        && !guc.internal
+        && guc.default_value == "auto"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.max_open_parquet_readers"
+            && !guc.internal
+            && guc.default_value == "32"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.max_running_jobs"
+            && !guc.internal
+            && guc.default_value == "4"));
+    assert!(gucs.iter().any(|guc| guc.name == "koldstore.log_level"
+        && !guc.internal
+        && guc.default_value == "info"));
     assert!(gucs
         .iter()
         .any(|guc| guc.name == "koldstore.internal_system_write" && guc.internal));
@@ -32,6 +48,10 @@ fn application_roles_cannot_set_internal_gucs() {
     assert!(privileges::can_set_guc(
         privileges::RoleClass::Application,
         "koldstore.user_id",
+    ));
+    assert!(privileges::can_set_guc(
+        privileges::RoleClass::Application,
+        "koldstore.max_open_parquet_readers",
     ));
     assert!(!privileges::can_set_guc(
         privileges::RoleClass::Application,
@@ -219,11 +239,13 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
 
     let storage = catalog::decode::flush_storage_context(&serde_json::json!({
         "base_path": "s3://bucket/prefix",
-        "schema_version": 7
+        "schema_version": 7,
+        "compression": "zstd"
     }))
     .unwrap();
     assert_eq!(storage.base_path, "s3://bucket/prefix");
     assert_eq!(storage.schema_version, 7);
+    assert_eq!(storage.compression, "zstd");
 
     let missing = catalog::decode::relation_context(&serde_json::json!({"namespace": "public"}));
     assert!(missing.unwrap_err().contains("missing string field `name`"));
