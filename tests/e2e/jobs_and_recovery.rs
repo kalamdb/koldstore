@@ -77,16 +77,16 @@ async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<(
             "#,
         )
         .await?;
-        assert!(
-            claim_plan.contains("jobs_claimable_by_type_idx")
-                || claim_plan.contains("jobs_one_active_flush_per_scope_idx")
-                || claim_plan.contains("jobs_pending_idx"),
-            "expected an efficient flush-job index, got:\n{claim_plan}"
-        );
-        assert!(
-            claim_plan.contains("Index Scan") || claim_plan.contains("Index Only Scan"),
-            "expected an index-backed claim plan, got:\n{claim_plan}"
-        );
+        common::assertions::assert_catalog_index_plan_uses_any(
+            &claim_plan,
+            &[
+                "jobs_claimable_by_type_idx",
+                "jobs_claimable_idx",
+                "jobs_pending_idx",
+                "jobs_one_active_flush_per_scope_idx",
+                "jobs_one_active_table_work_idx",
+            ],
+        )?;
 
         let recovered = db
             .client

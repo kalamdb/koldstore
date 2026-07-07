@@ -22,6 +22,7 @@ jobs:
       - name: Install PostgreSQL and build dependencies
         run: |
           set -euo pipefail
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
           sudo apt-get update -y -qq
           sudo apt-get install -y wget gnupg lsb-release
           sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'

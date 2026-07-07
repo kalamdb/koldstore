@@ -132,6 +132,7 @@ jobs:
 
       - name: Install PostgreSQL ${{ matrix.pg }} development packages
         run: |
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -181,7 +182,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install curl for rustup
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates curl
+        run: |
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates curl
 
       - uses: dtolnay/rust-toolchain@master
         with:
