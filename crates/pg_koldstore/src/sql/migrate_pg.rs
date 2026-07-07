@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 /// Manages a heap table with structured hot/cold flush settings.
 #[cfg(feature = "pg")]
+#[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
 pub fn manage_table_pg(
     table_name: pgrx::pg_sys::Oid,
@@ -808,7 +809,6 @@ fn positive_i64(value: i64, field: &str) -> i64 {
 #[cfg(all(test, feature = "pg"))]
 mod tests {
     use super::migration_options;
-    use koldstore_common::ParquetCompression;
 
     #[test]
     fn migration_options_include_ordering_and_compression_when_provided() {
