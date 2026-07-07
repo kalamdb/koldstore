@@ -58,14 +58,14 @@ koldstore-flush = { path = "crates/koldstore-flush" }
 koldstore-migrate = { path = "crates/koldstore-migrate" }
 
 anyhow = "1"
-arrow-array = { version = "59.0.0", default-features = false }
-arrow-schema = { version = "59.0.0", default-features = false }
+arrow-array = { version = "59.1.0", default-features = false }
+arrow-schema = { version = "59.1.0", default-features = false }
 base64 = "0.22"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
 futures-util = "0.3"
 hex = "0.4"
 pgrx = { version = "0.19.1", default-features = false }
-parquet = { version = "59.0.0", default-features = false, features = ["arrow", "zstd"] }
+parquet = { version = "59.1.0", default-features = false, features = ["arrow", "zstd"] }
 postgres-types = "0.2"
 rand = "0.10.2"
 serde = { version = "1", features = ["derive"] }
@@ -108,6 +108,7 @@ lto = true
 [profile.release-pg]
 inherits = "release-dist"
 panic = "unwind"
+strip = true
 
 [profile.bench]
 inherits = "release"

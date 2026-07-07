@@ -121,13 +121,35 @@ PG_CONFIG="${1:-pg_config}"
 LIBDIR="$("$PG_CONFIG" --pkglibdir)"
 SHAREDIR="$("$PG_CONFIG" --sharedir)/extension"
 LIB_SRC="$(find "$SCRIPT_DIR" -type f \( -name 'koldstore.so' -o -name 'koldstore.dylib' \) | head -n 1)"
+CONTROL_SRC="$(find "$SCRIPT_DIR" -type f -name 'koldstore.control' | head -n 1)"
 test -n "$LIB_SRC"
+test -n "$CONTROL_SRC"
 install -m 0755 "$LIB_SRC" "$LIBDIR/$(basename "$LIB_SRC")"
-install -m 0644 "$SCRIPT_DIR"/usr/share/postgresql/*/extension/koldstore.control "$SHAREDIR/"
-install -m 0644 "$SCRIPT_DIR"/usr/share/postgresql/*/extension/koldstore--*.sql "$SHAREDIR/"
+install -m 0644 "$CONTROL_SRC" "$SHAREDIR/"
+while IFS= read -r sql; do
+  install -m 0644 "$sql" "$SHAREDIR/"
+done < <(find "$SCRIPT_DIR" -type f -name 'koldstore--*.sql' | sort)
 echo "Installed koldstore. Run: CREATE EXTENSION koldstore;"
 INSTALL
   chmod +x "${dest}/install.sh"
+}
+
+# Emit RPM %files entries using the layout produced by pgrx (Debian or PGDG/RHEL).
+discover_rpm_file_entries() {
+  local stage_dir="$1"
+  local lib control sql_dir lib_path control_path sql_glob
+  lib="$(find "${stage_dir}" -type f -name 'koldstore.so' | head -n 1)"
+  control="$(find "${stage_dir}" -type f -name 'koldstore.control' | head -n 1)"
+  if [[ -z "${lib}" || -z "${control}" ]]; then
+    echo "error: extension artifacts missing under ${stage_dir}" >&2
+    find "${stage_dir}" -type f | sort >&2 || true
+    return 1
+  fi
+  sql_dir="$(dirname "${control}")"
+  lib_path="/${lib#"${stage_dir}/"}"
+  control_path="/${control#"${stage_dir}/"}"
+  sql_glob="/${sql_dir#"${stage_dir}/"}"/koldstore--\*.sql
+  printf '%s\n' "${lib_path}" "${control_path}" "${sql_glob}"
 }
 
 stage_release_tree() {
@@ -216,6 +238,8 @@ create_rpm_package() {
   topdir="$(mktemp -d)"
   mkdir -p "${topdir}"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
   local spec="${topdir}/SPECS/postgresql${pg}-koldstore.spec"
+  local rpm_files
+  rpm_files="$(discover_rpm_file_entries "${stage_dir}")"
   cat >"${spec}" <<EOF
 Name:           postgresql${pg}-koldstore
 Version:        ${version}
@@ -236,9 +260,7 @@ cp -a ${stage_dir}/usr %{buildroot}/
 
 %files
 %defattr(-,root,root,-)
-/usr/lib/postgresql/${pg}/lib/koldstore.so
-/usr/share/postgresql/${pg}/extension/koldstore.control
-/usr/share/postgresql/${pg}/extension/koldstore--*.sql
+$(printf '%s\n' "${rpm_files}")
 
 %changelog
 * $(date -u '+%a %b %d %Y') pg-koldstore <https://github.com/pg-koldstore/pg-kalam> - ${version}-1
