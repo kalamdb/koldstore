@@ -191,11 +191,7 @@ pub fn log_join_plan(label: &str, plan: &str) {
 }
 
 /// Asserts a join plan uses PostgreSQL join execution and KoldMergeScan where expected.
-pub fn assert_join_plan_shape(
-    plan: &str,
-    label: &str,
-    min_merge_scans: usize,
-) -> Result<()> {
+pub fn assert_join_plan_shape(plan: &str, label: &str, min_merge_scans: usize) -> Result<()> {
     anyhow::ensure!(
         plan.contains("Join")
             || plan.contains("Nested Loop")
@@ -233,6 +229,7 @@ pub async fn assert_join_plan_reads_cold_storage(
 }
 
 /// Asserts join row count and that the planner routes koldstore through merge scan.
+#[allow(clippy::too_many_arguments)]
 pub async fn assert_join_pair(
     db: &TestDb,
     join: JoinKind,
@@ -257,7 +254,11 @@ pub async fn assert_join_pair(
     Ok(())
 }
 
-pub async fn assert_koldstore_pg_join_samples(db: &TestDb, items: &str, accounts: &str) -> Result<()> {
+pub async fn assert_koldstore_pg_join_samples(
+    db: &TestDb,
+    items: &str,
+    accounts: &str,
+) -> Result<()> {
     let cold = db
         .client
         .query_one(

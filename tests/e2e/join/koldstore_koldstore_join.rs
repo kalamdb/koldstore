@@ -19,7 +19,8 @@ async fn koldstore_table_joins_another_koldstore_table_across_all_join_kinds() -
         let order_lines =
             setup_koldstore_order_lines_with_mixed_storage(&db, "join_order_lines").await?;
 
-        assert_koldstore_koldstore_join_samples(&db, &order_lines.relation, &items.relation).await?;
+        assert_koldstore_koldstore_join_samples(&db, &order_lines.relation, &items.relation)
+            .await?;
 
         assert_join_pair(
             &db,
