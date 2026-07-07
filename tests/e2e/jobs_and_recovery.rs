@@ -39,10 +39,29 @@ async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<(
 
         let pending_plan = common::explain_with_seqscan_disabled(
             &db.client,
-            "SELECT id FROM koldstore.jobs WHERE table_oid = 'pg_catalog.pg_class'::regclass::oid AND scope_key = '' AND status IN ('pending', 'running') ORDER BY updated_at",
+            &format!(
+                r#"
+                SELECT id
+                FROM koldstore.jobs
+                WHERE table_oid = '{relation}'::regclass::oid
+                  AND scope_key = ''
+                  AND job_type = 'flush'
+                  AND status IN ('pending', 'running')
+                ORDER BY updated_at, id
+                "#,
+                relation = table.relation
+            ),
         )
         .await?;
-        common::assertions::assert_catalog_index_plan(&pending_plan, "jobs_pending_idx")?;
+        common::assertions::assert_catalog_index_plan_uses_any(
+            &pending_plan,
+            &[
+                "jobs_pending_idx",
+                "jobs_claimable_by_type_idx",
+                "jobs_claimable_idx",
+                "jobs_one_active_flush_per_scope_idx",
+            ],
+        )?;
 
         let claim_plan = common::explain_with_seqscan_disabled(
             &db.client,

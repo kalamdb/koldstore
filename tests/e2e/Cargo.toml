@@ -38,6 +38,10 @@ name = "flush_policy"
 path = "flush/flush_policy.rs"
 
 [[test]]
+name = "schema_evolution"
+path = "schema_evolution.rs"
+
+[[test]]
 name = "merge_scan_results"
 path = "merge/merge_scan_results.rs"
 

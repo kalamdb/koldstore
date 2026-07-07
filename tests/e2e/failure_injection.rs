@@ -42,8 +42,7 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
             .await?;
 
         db.insert_pending_flush_job(&table.relation, "").await?;
-        let flush_error = db.flush_table(&table.relation).await.unwrap_err();
-        assert!(!flush_error.to_string().is_empty());
+        assert_eq!(db.flush_table(&table.relation).await?, 0);
 
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 32);
         assert_eq!(
@@ -56,8 +55,18 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
         );
         assert_eq!(
             common::active_job_count(&db.client, &table.relation).await?,
-            1
+            0
         );
+        let job = db
+            .client
+            .query_one(
+                "SELECT status, phase, error_trace FROM koldstore.jobs WHERE table_oid = $1::text::regclass::oid AND job_type = 'flush' ORDER BY updated_at DESC LIMIT 1",
+                &[&table.relation],
+            )
+            .await?;
+        assert_eq!(job.get::<_, String>(0), "error");
+        assert_eq!(job.get::<_, String>(1), "failed");
+        assert!(job.get::<_, Option<String>>(2).is_some());
     }
 
     Ok(())

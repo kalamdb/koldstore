@@ -172,10 +172,10 @@ impl PgType {
     /// Returns true when a raw catalog type name can provide migration ordering.
     #[must_use]
     pub fn is_orderable_catalog_type(type_name: &str) -> bool {
-        match canonical_postgres_type_name(type_name).as_str() {
-            "int2" | "int4" | "int8" | "timestamptz" | "timestamp" | "date" => true,
-            _ => false,
-        }
+        matches!(
+            canonical_postgres_type_name(type_name).as_str(),
+            "int2" | "int4" | "int8" | "timestamptz" | "timestamp" | "date"
+        )
     }
 
     /// Maps a supported integer type to its PostgreSQL type OID.

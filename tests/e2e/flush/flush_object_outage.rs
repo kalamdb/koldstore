@@ -41,7 +41,7 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
             .await?;
         db.insert_pending_flush_job(&table.relation, "").await?;
 
-        assert!(db.flush_table(&table.relation).await.is_err());
+        assert_eq!(db.flush_table(&table.relation).await?, 0);
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 20);
         assert_eq!(
             common::cold_segment_count(&db.client, &table.relation).await?,
@@ -53,8 +53,18 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
         );
         assert_eq!(
             common::active_job_count(&db.client, &table.relation).await?,
-            1
+            0
         );
+        let job = db
+            .client
+            .query_one(
+                "SELECT status, phase, error_trace FROM koldstore.jobs WHERE table_oid = $1::text::regclass::oid AND job_type = 'flush' ORDER BY updated_at DESC LIMIT 1",
+                &[&table.relation],
+            )
+            .await?;
+        assert_eq!(job.get::<_, String>(0), "error");
+        assert_eq!(job.get::<_, String>(1), "failed");
+        assert!(job.get::<_, Option<String>>(2).is_some());
     }
 
     Ok(())

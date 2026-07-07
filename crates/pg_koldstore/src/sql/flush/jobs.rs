@@ -133,3 +133,34 @@ WHERE id = $1::uuid
     )
     .map_err(|error| error.to_string())
 }
+
+pub(super) fn mark_flush_job_failed(
+    job_id: uuid::Uuid,
+    table_oid: pgrx::pg_sys::Oid,
+    error_trace: &str,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    pgrx::Spi::run_with_args(
+        r#"
+UPDATE koldstore.jobs
+SET status = 'error',
+    phase = 'failed',
+    error_trace = $3::text,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_heartbeat_at = now(),
+    updated_at = now()
+WHERE id = $1::uuid
+  AND table_oid = $2::oid
+  AND job_type = 'flush'
+  AND status IN ('pending', 'running')
+"#,
+        &[
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(error_trace),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
