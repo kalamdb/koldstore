@@ -7,9 +7,7 @@ struct PendingFlushJobWire {
     force: bool,
 }
 
-pub(super) fn ensure_flush_job(
-    table_oid: pgrx::pg_sys::Oid,
-) -> Result<(uuid::Uuid, bool), String> {
+pub(super) fn ensure_flush_job(table_oid: pgrx::pg_sys::Oid) -> Result<(uuid::Uuid, bool), String> {
     use pgrx::datum::DatumWithOid;
 
     let existing = pgrx::Spi::get_one_with_args::<String>(
@@ -32,8 +30,8 @@ SELECT COALESCE((
     )
     .map_err(|error| error.to_string())?;
     if let Some(existing) = existing.filter(|value| !value.is_empty()) {
-        let wire: PendingFlushJobWire = serde_json::from_str(&existing)
-            .map_err(|error| error.to_string())?;
+        let wire: PendingFlushJobWire =
+            serde_json::from_str(&existing).map_err(|error| error.to_string())?;
         return Ok((
             uuid::Uuid::parse_str(&wire.id).map_err(|error| error.to_string())?,
             wire.force,

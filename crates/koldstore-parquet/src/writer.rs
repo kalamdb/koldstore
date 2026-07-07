@@ -4,14 +4,12 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 
-use koldstore_common::dedupe_nonblank;
 use crate::footer::ColumnStats;
 use crate::pg_type_codec::{json_bool, json_i16, json_i64, json_u32};
 use crate::schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
-use arrow_array::{
-    ArrayRef, BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array,
-};
+use arrow_array::{ArrayRef, BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
 use arrow_schema::SchemaRef;
+use koldstore_common::dedupe_nonblank;
 use parquet::{
     arrow::ArrowWriter,
     basic::{Compression, ZstdLevel},

@@ -3,9 +3,24 @@
 use koldstore_catalog::decode::FlushStorageContext;
 use koldstore_common::QualifiedTableName;
 use koldstore_flush::cleanup::plan_clean_schema_cleanup;
+use serde::Deserialize;
 
 use super::stats::FlushStats;
 use super::write::FlushWriteChunk;
+
+#[derive(Debug, Deserialize)]
+struct CatalogManifestSegment {
+    object_path: String,
+    batch_number: i32,
+    min_seq: i64,
+    max_seq: i64,
+    min_commit_seq: i64,
+    max_commit_seq: i64,
+    row_count: i64,
+    byte_size: i64,
+    schema_version: i32,
+    column_stats: serde_json::Value,
+}
 
 pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> {
     pgrx::Spi::get_one_with_args::<i32>(
@@ -42,21 +57,118 @@ pub(super) fn write_parquet_segment(
     i64::try_from(len).map_err(|error| error.to_string())
 }
 
-pub(super) fn parquet_sha256_checksum(path: &std::path::Path) -> Result<String, String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 8192];
-    loop {
-        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
+pub(super) fn manifest_from_active_cold_segments(
+    table_oid: pgrx::pg_sys::Oid,
+    relation: &koldstore_catalog::decode::RelationContext,
+    snapshot: &koldstore_catalog::ManagedTableSnapshot,
+    schema_version: i32,
+) -> Result<koldstore_manifest::Manifest, String> {
+    let rows = active_cold_segments_for_manifest(table_oid)?;
+    let mut manifest = koldstore_manifest::Manifest::new_shared(
+        relation.namespace.clone(),
+        relation.name.clone(),
+        u32::try_from(schema_version).map_err(|error| error.to_string())?,
+    );
+    for row in rows {
+        manifest.append_segment(manifest_segment_from_catalog_row(relation, snapshot, row)?);
     }
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    Ok(manifest)
+}
+
+fn active_cold_segments_for_manifest(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Vec<CatalogManifestSegment>, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let json = pgrx::Spi::get_one_with_args::<String>(
+        r#"
+SELECT COALESCE(jsonb_agg(
+    jsonb_build_object(
+        'object_path', object_path,
+        'batch_number', batch_number,
+        'min_seq', min_seq,
+        'max_seq', max_seq,
+        'min_commit_seq', min_commit_seq,
+        'max_commit_seq', max_commit_seq,
+        'row_count', row_count,
+        'byte_size', byte_size,
+        'schema_version', schema_version,
+        'column_stats', column_stats
+    )
+    ORDER BY batch_number, segment_id
+)::text, '[]')
+FROM koldstore.cold_segments
+WHERE table_oid = $1::oid
+  AND scope_key = ''
+  AND status = 'active'
+"#,
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or_else(|| "[]".to_string());
+
+    serde_json::from_str(&json).map_err(|error| error.to_string())
+}
+
+fn manifest_segment_from_catalog_row(
+    relation: &koldstore_catalog::decode::RelationContext,
+    snapshot: &koldstore_catalog::ManagedTableSnapshot,
+    row: CatalogManifestSegment,
+) -> Result<koldstore_manifest::ManifestSegment, String> {
+    let manifest_path = manifest_relative_segment_path(relation, &row.object_path);
+    let mut segment = koldstore_manifest::ManifestSegment::committed(
+        u32::try_from(row.batch_number).map_err(|error| error.to_string())?,
+        manifest_path,
+        row.min_seq..=row.max_seq,
+        row.min_commit_seq..=row.max_commit_seq,
+        u64::try_from(row.row_count).map_err(|error| error.to_string())?,
+        u64::try_from(row.byte_size).map_err(|error| error.to_string())?,
+        u32::try_from(row.schema_version).map_err(|error| error.to_string())?,
+    );
+    segment.column_stats = manifest_column_stats(row.column_stats);
+    segment
+        .bloom_filters
+        .push(koldstore_manifest::ManifestBloomFilter::bloom(
+            snapshot.primary_key_columns.clone(),
+            Some(0.01),
+        ));
+    segment.pk_filter = Some(koldstore_manifest::PkFilter::exact(vec![1]));
+    Ok(segment)
+}
+
+fn manifest_relative_segment_path(
+    relation: &koldstore_catalog::decode::RelationContext,
+    object_path: &str,
+) -> String {
+    let prefix = format!("{}/{}/", relation.namespace, relation.name);
+    object_path
+        .strip_prefix(&prefix)
+        .unwrap_or(object_path)
+        .to_string()
+}
+
+fn manifest_column_stats(
+    column_stats: serde_json::Value,
+) -> std::collections::BTreeMap<String, koldstore_manifest::ManifestColumnStats> {
+    let mut stats = std::collections::BTreeMap::new();
+    let Some(columns) = column_stats.as_object() else {
+        return stats;
+    };
+
+    for (column, value) in columns {
+        let Some(min) = value.get("min") else {
+            continue;
+        };
+        let Some(max) = value.get("max") else {
+            continue;
+        };
+        stats.insert(
+            column.clone(),
+            koldstore_manifest::ManifestColumnStats::new(min.clone(), max.clone()),
+        );
+    }
+
+    stats
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -69,7 +181,7 @@ pub(super) fn write_flush_segment(
     chunk: &FlushWriteChunk,
     batch_number: i32,
     chunk_stats: &FlushStats,
-) -> Result<(koldstore_manifest::ManifestSegment, i64), String> {
+) -> Result<(), String> {
     let prefix = format!("{}/{}", relation.namespace, relation.name);
     let batch_file_name = format!("batch-{batch_number}.parquet");
     let object_path = format!("{prefix}/{batch_file_name}");
@@ -85,7 +197,6 @@ pub(super) fn write_flush_segment(
         &snapshot.primary_key_columns,
         &storage.compression,
     )?;
-    let segment_checksum = parquet_sha256_checksum(&absolute_segment_path)?;
     let segment_id = uuid::Uuid::new_v4();
     insert_cold_segment(
         table_oid,
@@ -96,32 +207,6 @@ pub(super) fn write_flush_segment(
         byte_size,
         storage.schema_version,
     )?;
-    let mut segment = koldstore_manifest::ManifestSegment::committed(
-        batch_number as u32,
-        batch_file_name,
-        chunk_stats.min_seq..=chunk_stats.max_seq,
-        chunk_stats.min_commit_seq..=chunk_stats.max_commit_seq,
-        chunk_stats.row_count as u64,
-        byte_size as u64,
-        storage.schema_version as u32,
-    );
-    segment.checksum = Some(segment_checksum);
-    segment.column_stats.insert(
-        koldstore_parquet::ColdMetadataColumn::Seq
-            .name()
-            .to_string(),
-        koldstore_manifest::ManifestColumnStats::new(
-            serde_json::json!(chunk_stats.min_seq),
-            serde_json::json!(chunk_stats.max_seq),
-        ),
-    );
-    segment
-        .bloom_filters
-        .push(koldstore_manifest::ManifestBloomFilter::bloom(
-            snapshot.primary_key_columns.clone(),
-            Some(0.01),
-        ));
-    segment.pk_filter = Some(koldstore_manifest::PkFilter::exact(vec![1]));
     insert_cold_pk_hint(
         table_oid,
         segment_id,
@@ -129,8 +214,12 @@ pub(super) fn write_flush_segment(
         chunk_stats.max_seq,
         chunk_stats.max_commit_seq,
     )?;
-    prune_flushed_hot_rows(table_oid, &snapshot.primary_key_columns, &chunk.cleanup_rows)?;
-    Ok((segment, byte_size))
+    prune_flushed_hot_rows(
+        table_oid,
+        &snapshot.primary_key_columns,
+        &chunk.cleanup_rows,
+    )?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

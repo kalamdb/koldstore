@@ -285,8 +285,7 @@ pub fn choose_migration_ordering(
 }
 
 fn ensure_orderable(column: &CatalogColumn) -> Result<(), MigrationOrderingError> {
-    if column.pg_type.is_orderable()
-        || PgType::is_orderable_catalog_type(&column.catalog_type_name)
+    if column.pg_type.is_orderable() || PgType::is_orderable_catalog_type(&column.catalog_type_name)
     {
         Ok(())
     } else {

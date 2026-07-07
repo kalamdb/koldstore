@@ -37,8 +37,7 @@ pub(super) fn flush_stats(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStats, St
     let json = crate::spi::execute_prepared(&stats, &[], crate::spi::first_row::<String>)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "flush stats lookup returned no rows".to_string())?;
-    let stats: MirrorSeqStats =
-        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    let stats: MirrorSeqStats = serde_json::from_str(&json).map_err(|error| error.to_string())?;
     Ok(stats.into())
 }
 

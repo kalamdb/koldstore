@@ -44,9 +44,9 @@ pub(super) unsafe fn typed_literal_sql(
             16 => Some(((*konst).constvalue.value() != 0).to_string()),
             _ => None,
         },
-        PgType::Int2 | PgType::Int4 | PgType::Int8 => pg_type.integer_sql_literal(
-            (*konst).constvalue.value() as i64,
-        ),
+        PgType::Int2 | PgType::Int4 | PgType::Int8 => {
+            pg_type.integer_sql_literal((*konst).constvalue.value() as i64)
+        }
         _ => const_literal_sql(expr),
     }
 }

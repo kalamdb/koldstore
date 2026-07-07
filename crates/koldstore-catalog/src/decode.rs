@@ -1,9 +1,7 @@
 //! Pure decoders for catalog JSON payloads.
 
-use serde::Deserialize;
-
 /// PostgreSQL relation identity resolved from `pg_class`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationContext {
     /// Schema name.
     pub namespace: String,
@@ -12,12 +10,11 @@ pub struct RelationContext {
 }
 
 /// Storage context required to publish a flush segment.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlushStorageContext {
     /// Object-store base path.
     pub base_path: String,
     /// Active KoldStore schema version.
-    #[serde(deserialize_with = "deserialize_schema_version")]
     pub schema_version: i32,
     /// Configured Parquet compression codec.
     pub compression: String,
@@ -29,7 +26,10 @@ pub struct FlushStorageContext {
 ///
 /// Returns an error when required fields are missing or have the wrong type.
 pub fn relation_context(value: &serde_json::Value) -> Result<RelationContext, String> {
-    serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    Ok(RelationContext {
+        namespace: required_string(value, "namespace")?.to_string(),
+        name: required_string(value, "name")?.to_string(),
+    })
 }
 
 /// Decodes a flush storage context JSON payload.
@@ -38,15 +38,27 @@ pub fn relation_context(value: &serde_json::Value) -> Result<RelationContext, St
 ///
 /// Returns an error when required fields are missing or have the wrong type.
 pub fn flush_storage_context(value: &serde_json::Value) -> Result<FlushStorageContext, String> {
-    serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    let schema_version = required_i32(value, "schema_version")?;
+    Ok(FlushStorageContext {
+        base_path: required_string(value, "base_path")?.to_string(),
+        schema_version,
+        compression: required_string(value, "compression")?.to_string(),
+    })
 }
 
-fn deserialize_schema_version<'de, D>(deserializer: D) -> Result<i32, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = i64::deserialize(deserializer)?;
-    i32::try_from(value).map_err(serde::de::Error::custom)
+fn required_string<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str, String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| format!("missing string field `{field}`"))
+}
+
+fn required_i32(value: &serde_json::Value, field: &str) -> Result<i32, String> {
+    let raw = value
+        .get(field)
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| format!("missing integer field `{field}`"))?;
+    i32::try_from(raw).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

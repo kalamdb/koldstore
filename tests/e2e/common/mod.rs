@@ -5,9 +5,9 @@ pub mod assertions;
 mod catalog;
 mod cluster;
 mod db;
+mod describe_table;
 mod log;
 mod sql;
-mod describe_table;
 
 pub use assertions::{
     assert_kold_merge_scan_cold_reads, assert_kold_merge_scan_executed_cold_reads,
@@ -26,11 +26,11 @@ pub use cluster::{
     require_pgrx_server_sync, scenario_pg_matrix, wait_for_postgres, PgTarget, PgrxServer,
 };
 pub use db::{ManagedTable, TestDb};
+pub use describe_table::{
+    assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
+};
 pub use log::{log, log_always, log_step, log_step_always, verbose_enabled};
 pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
     relation_size, row_count, row_count_from_sql, RelationSize,
-};
-pub use describe_table::{
-    assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
 };

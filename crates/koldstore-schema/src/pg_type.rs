@@ -163,7 +163,10 @@ impl PgType {
     /// Returns true when the type can provide oldest-to-newest migration ordering.
     #[must_use]
     pub fn is_orderable(self) -> bool {
-        matches!(self, Self::Int2 | Self::Int4 | Self::Int8 | Self::Timestamptz)
+        matches!(
+            self,
+            Self::Int2 | Self::Int4 | Self::Int8 | Self::Timestamptz
+        )
     }
 
     /// Returns true when a raw catalog type name can provide migration ordering.
@@ -299,7 +302,10 @@ mod tests {
             PgType::Bytea,
             PgType::Timestamptz,
         ] {
-            assert_eq!(PgType::from_discriminant(pg_type.discriminant()), Some(pg_type));
+            assert_eq!(
+                PgType::from_discriminant(pg_type.discriminant()),
+                Some(pg_type)
+            );
         }
     }
 }

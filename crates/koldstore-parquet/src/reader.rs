@@ -3,9 +3,7 @@
 use std::path::Path;
 use std::pin::Pin;
 
-use arrow_array::{
-    Array, BooleanArray, Int64Array, RecordBatch, UInt32Array,
-};
+use arrow_array::{Array, BooleanArray, Int64Array, RecordBatch, UInt32Array};
 use koldstore_common::{CommitSeq, SeqId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 

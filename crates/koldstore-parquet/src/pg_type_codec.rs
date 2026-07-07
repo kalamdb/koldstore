@@ -147,18 +147,36 @@ pub fn json_from_arrow_cell(
         return Ok(serde_json::Value::Null);
     }
     match pg_type {
-        PgType::Bool => Ok(serde_json::json!(array_for::<BooleanArray>(array, column_name)?
-            .value(row_index))),
-        PgType::Int2 => Ok(serde_json::json!(array_for::<Int16Array>(array, column_name)?
-            .value(row_index))),
-        PgType::Int4 => Ok(serde_json::json!(array_for::<Int32Array>(array, column_name)?
-            .value(row_index))),
-        PgType::Int8 => Ok(serde_json::json!(array_for::<Int64Array>(array, column_name)?
-            .value(row_index))),
-        PgType::Float4 => Ok(serde_json::json!(array_for::<Float32Array>(array, column_name)?
-            .value(row_index))),
-        PgType::Float8 => Ok(serde_json::json!(array_for::<Float64Array>(array, column_name)?
-            .value(row_index))),
+        PgType::Bool => Ok(serde_json::json!(array_for::<BooleanArray>(
+            array,
+            column_name
+        )?
+        .value(row_index))),
+        PgType::Int2 => Ok(serde_json::json!(array_for::<Int16Array>(
+            array,
+            column_name
+        )?
+        .value(row_index))),
+        PgType::Int4 => Ok(serde_json::json!(array_for::<Int32Array>(
+            array,
+            column_name
+        )?
+        .value(row_index))),
+        PgType::Int8 => Ok(serde_json::json!(array_for::<Int64Array>(
+            array,
+            column_name
+        )?
+        .value(row_index))),
+        PgType::Float4 => Ok(serde_json::json!(array_for::<Float32Array>(
+            array,
+            column_name
+        )?
+        .value(row_index))),
+        PgType::Float8 => Ok(serde_json::json!(array_for::<Float64Array>(
+            array,
+            column_name
+        )?
+        .value(row_index))),
         PgType::Text
         | PgType::Numeric
         | PgType::Uuid
@@ -265,9 +283,7 @@ fn json_string_cell(value: Option<&serde_json::Value>) -> Result<Option<String>,
     }
 }
 
-fn json_string_borrowed(
-    value: Option<&serde_json::Value>,
-) -> Result<Option<Cow<'_, str>>, String> {
+fn json_string_borrowed(value: Option<&serde_json::Value>) -> Result<Option<Cow<'_, str>>, String> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::String(value)) => Ok(Some(Cow::Borrowed(value.as_str()))),
@@ -293,7 +309,7 @@ fn parse_timestamp_micros(value: &str) -> Result<i64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{arrow_data_type, arrow_array_from_json, json_from_arrow_cell};
+    use super::{arrow_array_from_json, arrow_data_type, json_from_arrow_cell};
     use arrow_array::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_schema::PgType;
@@ -318,7 +334,8 @@ mod tests {
             vec![array],
         )
         .unwrap();
-        let decoded = json_from_arrow_cell(PgType::Int8, "id", batch.column(0).as_ref(), 0).unwrap();
+        let decoded =
+            json_from_arrow_cell(PgType::Int8, "id", batch.column(0).as_ref(), 0).unwrap();
         assert_eq!(decoded, serde_json::json!(42));
     }
 }
