@@ -149,6 +149,8 @@ SELECT
      1012 |        1012 |              0
 ```
 
+
+
 ## Flush To Cold
 
 `koldstore.flush_table` evaluates the configured flush policy, runs the flush inline, and returns the flush job id. With `rows:1000` and 1012 tracked keys, only the 12 oldest mirror entries move to cold storage; the newest 1000 keys stay hot.
@@ -194,6 +196,8 @@ Cold files are written below the storage root using the table namespace and name
   manifest.json
   batch-1.parquet
 ```
+
+
 
 ## View Table And Migration Stats
 
@@ -252,7 +256,7 @@ The fields to watch most often are:
 | Field                | Meaning                                         |
 | -------------------- | ----------------------------------------------- |
 | `hot_rows`           | Rows still present in the PostgreSQL heap       |
-| `mirror_rows`        | Primary keys tracked in the `__cl` mirror     |
+| `mirror_rows`        | Primary keys tracked in the `__cl` mirror       |
 | `cold_row_count`     | Rows already copied to active cold segments     |
 | `cold_segment_count` | Active Parquet segment count                    |
 | `manifest_state`     | `in_sync` means catalog and manifest agree      |
@@ -271,6 +275,8 @@ WHERE table_oid = 'app.messages'::regclass
 ORDER BY created_at DESC
 LIMIT 5;
 ```
+
+
 
 ## Explain A Managed Query
 
@@ -308,6 +314,8 @@ WHERE title = 'message-000007';
   7 | message-000007
 ```
 
+
+
 ## Shared And User Tables
 
 `migrate_table` supports two table types.
@@ -334,6 +342,8 @@ SELECT koldstore.migrate_table(
 SET koldstore.user_id = 'user-123';
 ```
 
+
+
 ## Storage Backends
 
 
@@ -357,6 +367,8 @@ SELECT koldstore.register_storage(
 );
 ```
 
+
+
 ## Current Requirements
 
 - PostgreSQL 15-18.
@@ -364,6 +376,8 @@ SELECT koldstore.register_storage(
 - Supported column types are currently limited to `boolean`, integer types, `real`, `double precision`, `text`, `varchar`, `uuid`, `jsonb`, and `timestamptz`.
 - `pgrx` is the recommended local development loop.
 - Docker is used for packaging and final runtime smoke checks, not as the main correctness loop.
+
+
 
 ## Current Limitations
 
@@ -374,6 +388,8 @@ SELECT koldstore.register_storage(
 - PostgreSQL indexes cover hot rows only. Flushed rows live in Parquet, not in PostgreSQL-owned indexes.
 - If a query needs cold data and the cold storage backend is unavailable, the query errors instead of returning partial hot-only results.
 - Export/import, compaction, and richer cold-storage policies are still being built.
+
+
 
 ## Development
 
@@ -386,11 +402,11 @@ scripts/run-pg-e2e.sh 16
 ```
 
 Project docs:
-
-- [Development guide](docs/development.md)
+- [SQL API](docs/sql-api.md)
 - [Architecture overview](docs/architecture.md)
-- [Crate architecture](docs/architecture/crate-architecture.md)
 - [Limitations](docs/limitations.md)
+
+
 
 ## License
 

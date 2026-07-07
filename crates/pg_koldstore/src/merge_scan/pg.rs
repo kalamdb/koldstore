@@ -192,7 +192,10 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
     }
     (*state).ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
     (*state).methods = &raw const EXEC_METHODS;
-    (*state).slotOps = &raw const pg_sys::TTSOpsVirtual;
+    #[cfg(not(feature = "pg15"))]
+    {
+        (*state).slotOps = &raw const pg_sys::TTSOpsVirtual;
+    }
     state.cast::<pg_sys::Node>()
 }
 

@@ -229,6 +229,7 @@ pub async fn assert_join_plan_reads_cold_storage(
 }
 
 /// Asserts join row count and that the planner routes koldstore through merge scan.
+#[allow(clippy::too_many_arguments)]
 pub async fn assert_join_pair(
     db: &TestDb,
     join: JoinKind,

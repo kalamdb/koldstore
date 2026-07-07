@@ -92,11 +92,11 @@ pub fn flush_table_pg(table_oid: pgrx::pg_sys::Oid) -> pgrx::Uuid {
 #[cfg(feature = "pg")]
 fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<pgrx::Uuid, String> {
     crate::sql::job_lock_pg::lock_table_job(table_oid)?;
-    let job_id = ensure_flush_job(table_oid)?;
+    let (job_id, force) = ensure_flush_job(table_oid)?;
     mark_flush_job_running(job_id, table_oid)?;
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
-    let stats = resolve_flush_stats(table_oid, false)?;
+    let stats = resolve_flush_stats(table_oid, force)?;
     if stats.row_count == 0 {
         mark_flush_job_completed(job_id, table_oid, 0, 0, 0)?;
         return Ok(pgrx::Uuid::from_bytes(*job_id.as_bytes()));
@@ -819,13 +819,16 @@ ON CONFLICT DO NOTHING
 }
 
 #[cfg(feature = "pg")]
-fn ensure_flush_job(table_oid: pgrx::pg_sys::Oid) -> Result<uuid::Uuid, String> {
+fn ensure_flush_job(table_oid: pgrx::pg_sys::Oid) -> Result<(uuid::Uuid, bool), String> {
     use pgrx::datum::DatumWithOid;
 
-    let existing = pgrx::Spi::get_one_with_args::<pgrx::Uuid>(
+    let existing = pgrx::Spi::get_one_with_args::<String>(
         r#"
-SELECT (
-    SELECT id
+SELECT COALESCE((
+    SELECT jsonb_build_object(
+        'id', id::text,
+        'force', COALESCE((payload->>'force')::boolean, false)
+    )::text
     FROM koldstore.jobs
     WHERE table_oid = $1::oid
       AND scope_key = ''
@@ -833,13 +836,26 @@ SELECT (
       AND status IN ('pending', 'running')
     ORDER BY updated_at, id
     LIMIT 1
-)
+), '')
 "#,
         &[DatumWithOid::from(table_oid)],
     )
     .map_err(|error| error.to_string())?;
-    if let Some(existing) = existing {
-        return Ok(uuid::Uuid::from_bytes(*existing.as_bytes()));
+    if let Some(existing) = existing.filter(|value| !value.is_empty()) {
+        let value = serde_json::from_str::<serde_json::Value>(&existing)
+            .map_err(|error| error.to_string())?;
+        let job_id = value
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "flush job lookup returned no id".to_string())?;
+        let force = value
+            .get("force")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        return Ok((
+            uuid::Uuid::parse_str(job_id).map_err(|error| error.to_string())?,
+            force,
+        ));
     }
 
     let job_id = uuid::Uuid::new_v4();
@@ -870,7 +886,7 @@ VALUES (
         ],
     )
     .map_err(|error| error.to_string())?;
-    Ok(job_id)
+    Ok((job_id, false))
 }
 
 #[cfg(feature = "pg")]
