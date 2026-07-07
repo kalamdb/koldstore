@@ -32,7 +32,7 @@ The planner chooses the order this way:
    orderable type such as integer, bigint, timestamp, timestamptz, or date.
 2. Otherwise, use the primary key only when it is a single auto-increment key
    detected from PostgreSQL identity metadata or a `nextval(...)` default.
-3. Otherwise, `koldstore.migrate_table` rejects the migration with:
+3. Otherwise, `koldstore.manage_table` rejects the migration with:
    `existing table migration requires an auto-increment primary key or explicit order column`.
 
 Composite primary keys and UUID primary keys need an explicit order column.
@@ -41,7 +41,7 @@ safe.
 
 ## Migration Flow
 
-For a populated table, `koldstore.migrate_table` records durable job progress
+For a populated table, `koldstore.manage_table` records durable job progress
 while initializing the clean-schema mirror. The current SQL wrapper executes the
 initialization path inline and returns the job id; the durable job model keeps
 the handoff compatible with a future background worker.
@@ -192,7 +192,7 @@ WHERE job_type = 'migrate_backfill'
 ORDER BY updated_at DESC;
 ```
 
-`koldstore.table_status` also counts pending and running jobs for the table.
+`koldstore.describe_table` also counts pending and running jobs for the table.
 
 ## Future Extensions
 

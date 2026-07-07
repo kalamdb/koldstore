@@ -127,7 +127,7 @@ async fn flushed_table_prunes_hot_rows_and_keeps_cold_payload_for_merge_reads() 
         let table = db
             .create_indexed_items_table("merge_result_items", 16)
             .await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
         common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 16).await?;
 
@@ -191,7 +191,7 @@ async fn flushed_table_prunes_hot_rows_and_keeps_cold_payload_for_merge_reads() 
 
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
 
-        let status = common::table_status(&db.client, &table.relation).await?;
+        let status = common::describe_table(&db.client, &table.relation).await?;
         assert_eq!(status.hot_rows, 1);
         assert_eq!(status.mirror_rows, 1);
         assert!(status.cold_row_count >= 16);

@@ -47,7 +47,7 @@ SQL
       -v KOLDSTORE_BENCH_STORAGE_PATH="$KOLDSTORE_BENCH_STORAGE_PATH" \
       -v KOLDSTORE_BENCH_COMPRESSION="$KOLDSTORE_BENCH_COMPRESSION" \
       -f "$SQL_DIR/04_extension_setup.sql"
-    wait_for_migrate_jobs
+    wait_for_manage_jobs
   fi
 
   if storage_only_mode; then
@@ -58,8 +58,8 @@ SQL
   compact_hot_table
 }
 
-wait_for_migrate_jobs() {
-  echo "[flush] waiting for migrate_table background jobs to finish..."
+wait_for_manage_jobs() {
+  echo "[flush] waiting for manage_table background jobs to finish..."
   local waited=0
   while true; do
     local pending
@@ -68,11 +68,11 @@ wait_for_migrate_jobs() {
       2>/dev/null | tr -d '[:space:]' || echo "0")
     pending="${pending:-0}"
     if [[ "$pending" == "0" ]]; then
-      echo "[flush] all migrate_table jobs finished (waited ${waited}s)"
+      echo "[flush] all manage_table jobs finished (waited ${waited}s)"
       return
     fi
     if (( waited >= 120 )); then
-      echo "ERROR: migrate_table jobs did not finish after ${waited}s ($pending still pending/running)" >&2
+      echo "ERROR: manage_table jobs did not finish after ${waited}s ($pending still pending/running)" >&2
       exit 1
     fi
     sleep 2
@@ -95,7 +95,7 @@ flush_and_verify() {
 
   if [[ -z "$flush_rows" || "$flush_rows" == "0" ]]; then
     echo "ERROR: flush_table flushed 0 rows - cold storage is empty" >&2
-    echo "  Hint: check that migrate_table backfill set _seq/_commit_seq/_deleted correctly." >&2
+    echo "  Hint: check that manage_table backfill completed and mirror rows are present." >&2
     exit 1
   fi
 

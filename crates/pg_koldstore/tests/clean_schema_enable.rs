@@ -1,5 +1,6 @@
 use koldstore_common::{
-    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
+    ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    PrimaryKeyColumnShape, PrimaryKeyShape,
 };
 use koldstore_migrate::{mirror, register, QualifiedTableName};
 use koldstore_schema::MirrorInitializationState;
@@ -28,7 +29,6 @@ fn clean_schema_enablement_plans_no_user_table_system_columns() {
         plan.collision_probe.sql.as_str(),
         plan.create_table.sql.as_str(),
         plan.seq_index.sql.as_str(),
-        plan.changed_at_index.sql.as_str(),
     ]
     .join("\n");
 
@@ -70,8 +70,7 @@ fn registry_metadata_records_clean_schema_mirror_without_system_columns() {
         ],
         indexed_columns: Vec::new(),
         type_matrix: serde_json::Value::Null,
-        flush_policy: Some("rows:1000".to_string()),
-        options: serde_json::json!({}),
+        options: ManageTableOptions::from_value(&serde_json::json!({ "hot_row_limit": 1000 })),
     };
 
     let plan = register::plan_schema_registry_insert_with_id(&metadata, Uuid::from_u128(99))

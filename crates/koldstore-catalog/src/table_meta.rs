@@ -2,15 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use koldstore_common::{Diagnostic, KoldstoreError, PrimaryKeyShape, Result, TableKind};
+use koldstore_common::{Diagnostic, FlushPolicy, KoldstoreError, PrimaryKeyShape, Result, TableKind};
 use koldstore_schema::MirrorInitializationState;
-
-/// Flush policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlushPolicy {
-    pub row_limit: Option<u64>,
-    pub duration_seconds: Option<u64>,
-}
 
 /// FK migration policy classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

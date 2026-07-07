@@ -3,19 +3,22 @@
 #[cfg(feature = "pg")]
 use koldstore_common::{QualifiedTableName, ScopeKey};
 
-/// Returns managed-table storage and flush status as JSON.
+/// Describes a managed table's storage, mirror, cold segments, and jobs.
 ///
-/// SQL contract: `koldstore.table_status(regclass, scope_key text default null)`.
+/// SQL contract: `koldstore.describe_table(regclass, scope_key text default null)`.
 #[cfg(feature = "pg")]
-#[pgrx::pg_extern(name = "table_status", schema = "koldstore", security_definer)]
-pub fn table_status_pg(table_oid: pgrx::pg_sys::Oid, scope_key: Option<&str>) -> pgrx::JsonB {
-    table_status_pg_impl(table_oid, scope_key)
+#[pgrx::pg_extern(name = "describe_table", schema = "koldstore", security_definer)]
+pub fn describe_table_pg(
+    table_name: pgrx::pg_sys::Oid,
+    scope_key: pgrx::default!(Option<&str>, "NULL"),
+) -> pgrx::JsonB {
+    describe_table_pg_impl(table_name, scope_key)
         .map(pgrx::JsonB)
-        .unwrap_or_else(|error| pgrx::error!("table status failed: {error}"))
+        .unwrap_or_else(|error| pgrx::error!("describe table failed: {error}"))
 }
 
 #[cfg(feature = "pg")]
-fn table_status_pg_impl(
+fn describe_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     scope_key: Option<&str>,
 ) -> Result<serde_json::Value, String> {
@@ -38,7 +41,7 @@ fn table_status_pg_impl(
         .map(ScopeKey::as_str)
         .unwrap_or("")
         .to_string();
-    let plan = koldstore_flush::ops::table_status_plan(&table, &mirror, scope_key)
+    let plan = koldstore_flush::ops::describe_table_plan(&table, &mirror, scope_key)
         .map_err(|error| error.to_string())?;
     let json = crate::merge_scan::pg::with_custom_scan_disabled(|| {
         crate::spi::select_one::<String>(
@@ -50,6 +53,6 @@ fn table_status_pg_impl(
         )
     })
     .map_err(|error| error.to_string())?
-    .ok_or_else(|| "table status lookup returned no rows".to_string())?;
+    .ok_or_else(|| "describe table lookup returned no rows".to_string())?;
     serde_json::from_str(&json).map_err(|error| error.to_string())
 }

@@ -31,7 +31,7 @@ async fn repeated_flush_and_hot_dml_cycles_remain_bounded_on_pgrx() -> Result<()
         let table = db
             .create_indexed_items_table("endurance_items", 512)
             .await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
 
         for cycle in 0..3 {
             for relation in [&baseline.relation, &table.relation] {

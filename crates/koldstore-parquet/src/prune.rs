@@ -3,7 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-use koldstore_common::{CommitSeq, SeqId};
+use koldstore_common::{compare_json_values, CommitSeq, SeqId};
 
 use crate::ColumnStats;
 
@@ -145,18 +145,5 @@ impl RowGroupPruner {
         };
 
         max_vs_min != Ordering::Less && min_vs_max != Ordering::Greater
-    }
-}
-
-fn compare_json_values(left: &serde_json::Value, right: &serde_json::Value) -> Option<Ordering> {
-    match (left, right) {
-        (serde_json::Value::Number(left), serde_json::Value::Number(right)) => {
-            left.as_f64()?.partial_cmp(&right.as_f64()?)
-        }
-        (serde_json::Value::String(left), serde_json::Value::String(right)) => {
-            Some(left.cmp(right))
-        }
-        (serde_json::Value::Bool(left), serde_json::Value::Bool(right)) => Some(left.cmp(right)),
-        _ => None,
     }
 }

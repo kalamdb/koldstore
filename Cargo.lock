@@ -1088,6 +1088,8 @@ name = "koldstore-mirror"
 version = "0.1.0"
 dependencies = [
  "koldstore-common",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
@@ -1100,6 +1102,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "koldstore-common",
+ "koldstore-schema",
  "parquet",
  "serde",
  "serde_json",
@@ -1113,6 +1116,7 @@ dependencies = [
  "koldstore-common",
  "serde",
  "serde_json",
+ "thiserror",
  "uuid",
 ]
 

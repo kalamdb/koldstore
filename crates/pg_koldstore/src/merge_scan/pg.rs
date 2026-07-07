@@ -12,8 +12,11 @@ use pgrx::pg_sys;
 
 use crate::merge_scan::path::CUSTOM_PATH_NAME;
 
+mod literals;
 mod profile;
 mod tuple;
+
+use literals::{list_node_pointers, scalar_array_filter_sql, sql_literal, typed_literal_sql, unwrap_relabel};
 
 use profile::{ColdReadProfile, SegmentReadProfile};
 use tuple::{copy_spi_datum, store_materialized_row, MaterializedRow};
@@ -342,7 +345,7 @@ fn build_materialize_query(
             format!(
                 "(row_image ->> '{name}')::{type_name} AS {quoted_name}",
                 name = sql_literal(&column.name),
-                type_name = column.type_name,
+                type_name = column.catalog_type_name(),
                 quoted_name = quote_ident(&column.name),
             )
         })
@@ -481,10 +484,9 @@ fn load_cold_rows_for_merge(
             .columns
             .iter()
             .map(|column| {
-                koldstore_parquet::PgColumn::from_catalog(&column.name, &column.type_name, true)
-                    .map_err(|error| error.to_string())
+                koldstore_parquet::PgColumn::new(column.name.clone(), column.pg_type, true)
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Vec<_>>();
 
         let (cold_rows_json, segments) = cold_rows_json_from_segments(
             &storage.base_path,
@@ -766,7 +768,7 @@ unsafe fn op_expr_filter_sql(
     Some(format!(
         "(row_image ->> '{name}')::{type_name} = {literal}",
         name = sql_literal(&column.name),
-        type_name = column.type_name,
+        type_name = column.catalog_type_name(),
         literal = literal,
     ))
 }
@@ -803,182 +805,6 @@ unsafe fn var_column(
         return None;
     }
     columns.get(usize::try_from(attno - 1).ok()?)
-}
-
-unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {
-    if expr.is_null() {
-        return expr;
-    }
-    if (*expr).type_ == pg_sys::NodeTag::T_RelabelType {
-        let relabel = expr.cast::<pg_sys::RelabelType>();
-        (*relabel).arg.cast::<pg_sys::Expr>()
-    } else {
-        expr
-    }
-}
-
-unsafe fn typed_literal_sql(
-    expr: *mut pg_sys::Expr,
-    column: &koldstore_migrate::order::CatalogColumn,
-) -> Option<String> {
-    let expr = unwrap_relabel(expr);
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
-        return None;
-    }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
-    match column.type_name.as_str() {
-        "text" | "varchar" | "character varying" | "bpchar" | "character" => {
-            let text = (*konst).constvalue.cast_mut_ptr::<pg_sys::text>();
-            if text.is_null() {
-                return None;
-            }
-            let cstr = pg_sys::text_to_cstring(text);
-            if cstr.is_null() {
-                return None;
-            }
-            let value = CStr::from_ptr(cstr).to_str().ok()?;
-            let literal = format!("'{}'", sql_literal(value));
-            pg_sys::pfree(cstr.cast());
-            Some(literal)
-        }
-        "boolean" => match (*konst).consttype.to_u32() {
-            16 => Some(((*konst).constvalue.value() != 0).to_string()),
-            _ => None,
-        },
-        _ => const_literal_sql(expr),
-    }
-}
-
-unsafe fn scalar_array_filter_sql(
-    expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
-) -> Option<String> {
-    let scalar = expr.cast::<pg_sys::ScalarArrayOpExpr>();
-    if !(*scalar).useOr {
-        return None;
-    }
-    let args = list_node_pointers((*scalar).args);
-    if args.len() != 2 {
-        return None;
-    }
-    let var = args[0].cast::<pg_sys::Expr>();
-    if var.is_null() || (*var).type_ != pg_sys::NodeTag::T_Var {
-        return None;
-    }
-    let var = var.cast::<pg_sys::Var>();
-    let attno = (*var).varattno;
-    if attno <= 0 {
-        return None;
-    }
-    let column = columns.get(usize::try_from(attno - 1).ok()?)?;
-    let values = array_literal_values(args[1].cast::<pg_sys::Expr>())?;
-    if values.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "(row_image ->> '{name}')::{type_name} IN ({values})",
-        name = sql_literal(&column.name),
-        type_name = column.type_name,
-        values = values.join(", ")
-    ))
-}
-
-unsafe fn array_literal_values(expr: *mut pg_sys::Expr) -> Option<Vec<String>> {
-    if expr.is_null() {
-        return None;
-    }
-    match (*expr).type_ {
-        pg_sys::NodeTag::T_ArrayExpr => {
-            let array = expr.cast::<pg_sys::ArrayExpr>();
-            Some(
-                list_node_pointers((*array).elements)
-                    .into_iter()
-                    .filter_map(|node| const_literal_sql(node.cast::<pg_sys::Expr>()))
-                    .collect::<Vec<_>>(),
-            )
-        }
-        pg_sys::NodeTag::T_Const => const_array_literal_values(expr)
-            .or_else(|| const_literal_sql(expr).map(|value| vec![value])),
-        _ => None,
-    }
-}
-
-unsafe fn const_array_literal_values(expr: *mut pg_sys::Expr) -> Option<Vec<String>> {
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
-        return None;
-    }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
-    let (element_type, elem_len, elem_byval, elem_align) = match (*konst).consttype.to_u32() {
-        1005 => (21, 2, true, b's' as c_char),
-        1007 => (23, 4, true, b'i' as c_char),
-        1016 => (20, 8, true, b'd' as c_char),
-        _ => return None,
-    };
-    let array = (*konst).constvalue.cast_mut_ptr::<pg_sys::ArrayType>();
-    if array.is_null() {
-        return None;
-    }
-    let mut values: *mut pg_sys::Datum = std::ptr::null_mut();
-    let mut nulls: *mut bool = std::ptr::null_mut();
-    let mut count: c_int = 0;
-    pg_sys::deconstruct_array(
-        array,
-        pg_sys::Oid::from(element_type),
-        elem_len,
-        elem_byval,
-        elem_align,
-        &mut values,
-        &mut nulls,
-        &mut count,
-    );
-    let count = usize::try_from(count).ok()?;
-    let mut result = Vec::with_capacity(count);
-    for index in 0..count {
-        if !nulls.is_null() && *nulls.add(index) {
-            continue;
-        }
-        let value = *values.add(index);
-        let sql = match element_type {
-            20 => (value.value() as i64).to_string(),
-            21 => (value.value() as i16).to_string(),
-            23 => (value.value() as i32).to_string(),
-            _ => return None,
-        };
-        result.push(sql);
-    }
-    Some(result)
-}
-
-unsafe fn const_literal_sql(expr: *mut pg_sys::Expr) -> Option<String> {
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
-        return None;
-    }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
-    match (*konst).consttype.to_u32() {
-        20 => Some(((*konst).constvalue.value() as i64).to_string()),
-        21 => Some(((*konst).constvalue.value() as i16).to_string()),
-        23 => Some(((*konst).constvalue.value() as i32).to_string()),
-        _ => None,
-    }
-}
-
-unsafe fn list_node_pointers(list: *mut pg_sys::List) -> Vec<*mut std::ffi::c_void> {
-    if list.is_null() {
-        return Vec::new();
-    }
-    let len = usize::try_from((*list).length).unwrap_or(0);
-    (0..len)
-        .map(|index| (*(*list).elements.add(index)).ptr_value)
-        .collect::<Vec<_>>()
 }
 
 unsafe fn materialize_query(query: &str) -> Result<Vec<MaterializedRow>, String> {
@@ -1031,10 +857,6 @@ unsafe fn materialize_query(query: &str) -> Result<Vec<MaterializedRow>, String>
     })
 }
 
-fn sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
 fn with_hook_disabled<T>(f: impl FnOnce() -> T) -> T {
     DISABLE_HOOK.with(|disabled| {
         let was_disabled = *disabled.borrow();
@@ -1045,7 +867,6 @@ fn with_hook_disabled<T>(f: impl FnOnce() -> T) -> T {
     })
 }
 
-#[allow(dead_code)]
 fn cstr_to_str(value: *const c_char) -> Option<&'static str> {
     if value.is_null() {
         return None;

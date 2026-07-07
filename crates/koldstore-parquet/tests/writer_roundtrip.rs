@@ -31,7 +31,6 @@ fn clean_cold_record_plan_writes_live_rows_and_pk_only_delete_markers() {
         ["id"],
         10,
         2,
-        "2026-07-06T00:00:00Z",
         1,
     )
     .unwrap();
@@ -47,7 +46,6 @@ fn clean_cold_record_plan_writes_live_rows_and_pk_only_delete_markers() {
         ["id"],
         11,
         3,
-        "2026-07-06T00:00:01Z",
         1,
     )
     .unwrap();
@@ -197,7 +195,6 @@ fn clean_cold_record_batch_builder_preserves_payloads_and_metadata_types() {
             ["id"],
             10,
             1,
-            "2026-07-06T00:00:01Z",
             7,
         )
         .unwrap(),
@@ -212,7 +209,6 @@ fn clean_cold_record_batch_builder_preserves_payloads_and_metadata_types() {
             ["id"],
             11,
             3,
-            "2026-07-06T00:00:03Z",
             7,
         )
         .unwrap(),

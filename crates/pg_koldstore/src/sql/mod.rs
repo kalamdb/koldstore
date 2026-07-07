@@ -2,7 +2,7 @@
 //!
 //! Library crates own SQL planning; these modules execute plans through SPI.
 
-pub mod flush_pg;
+pub mod flush;
 #[cfg(feature = "pg")]
 pub mod job_lock_pg;
 pub mod migrate_pg;

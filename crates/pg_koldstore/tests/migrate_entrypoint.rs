@@ -1,3 +1,4 @@
+use koldstore_common::ManageTableOptions;
 use koldstore_migrate::MigrateTableRequest;
 use koldstore_migrate::{plan_empty_table_migration, MigrationError, MigrationTableContext};
 use pg_koldstore::spi::SpiAccess;
@@ -8,9 +9,8 @@ fn shared_request() -> MigrateTableRequest {
         table_name: "app.items".to_string(),
         table_type: "shared".to_string(),
         storage_name: "local-minio".to_string(),
-        flush_policy: Some("rows:1000,interval:60".to_string()),
         scope_column: None,
-        options: serde_json::json!({}),
+        options: ManageTableOptions::from_value(&serde_json::json!({ "hot_row_limit": 1000 })),
     }
 }
 

@@ -21,3 +21,23 @@ pub fn quote_ident(value: &str) -> String {
     );
     format!("\"{value}\"")
 }
+
+/// Escapes a SQL string literal body for single-quoted PostgreSQL text.
+#[must_use]
+pub fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
+
+/// Quotes a dotted PostgreSQL identifier path.
+///
+/// # Panics
+///
+/// Panics when any path segment is not a safe identifier.
+#[must_use]
+pub fn quote_qualified_ident(value: &str) -> String {
+    value
+        .split('.')
+        .map(quote_ident)
+        .collect::<Vec<_>>()
+        .join(".")
+}

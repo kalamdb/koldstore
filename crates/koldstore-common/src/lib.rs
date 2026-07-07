@@ -3,9 +3,12 @@
 //! New shared identifiers, row models, sequence types, and pure validation helpers belong here.
 //! Must not depend on any other `koldstore-*` crate.
 
+pub mod config;
 pub mod error;
 pub mod filter;
 pub mod ident;
+pub mod json;
+pub mod pg_type_name;
 pub mod pk;
 pub mod row;
 pub mod scope;
@@ -13,12 +16,19 @@ pub mod seq;
 pub mod session;
 pub mod snowflake;
 pub mod sql;
+pub mod strings;
 pub mod table_kind;
 pub mod table_name;
 
+pub use config::{
+    flush_enabled_from_options, hot_row_limit_from_options, FlushPolicy, ManageTableOptions,
+    MigrationStatus, ParquetCompression,
+};
 pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};
-pub use ident::{is_safe_identifier, quote_ident};
+pub use ident::{escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident};
+pub use json::compare_json_values;
+pub use pg_type_name::canonical_postgres_type_name;
 pub use pk::{
     LogicalPk, PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue,
     PrimaryKeyColumnShape, PrimaryKeyShape, StablePkHash,
@@ -37,5 +47,6 @@ pub use session::{
 };
 pub use snowflake::{next_id, worker_id, SnowflakeError, KOLDSTORE_EPOCH_MILLIS};
 pub use sql::{map_sql_error, SqlAccess, SqlError, SqlParamType, SqlResult, SqlStatement};
+pub use strings::dedupe_nonblank;
 pub use table_kind::TableKind;
 pub use table_name::{QualifiedTableName, TableName};

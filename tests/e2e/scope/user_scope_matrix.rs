@@ -50,7 +50,7 @@ async fn user_scope_migration_installs_fail_closed_policy_on_pgrx() -> Result<()
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "user_scope_matrix").await?;
         let table = db.create_user_notes_table("scope_matrix_notes").await?;
-        db.migrate_user_scoped(&table.relation, "user_id").await?;
+        db.manage_user_scoped(&table.relation, "user_id").await?;
 
         let schema_row = db
             .client

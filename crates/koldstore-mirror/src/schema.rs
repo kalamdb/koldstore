@@ -1,6 +1,6 @@
 //! Mirror table schema planning.
 
-use koldstore_common::{is_safe_identifier, quote_ident, PrimaryKeyColumnShape};
+use koldstore_common::{escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident, PrimaryKeyColumnShape};
 
 use crate::{MirrorColumn, MirrorError, MirrorRelation, MirrorResult, MirrorStatement};
 
@@ -13,8 +13,6 @@ pub struct MirrorSchemaPlan {
     pub create_table: MirrorStatement,
     /// Sequence cursor index for scans.
     pub seq_index: MirrorStatement,
-    /// Row-age policy index.
-    pub changed_at_index: MirrorStatement,
     /// Idempotent mirror drop.
     pub drop_table: MirrorStatement,
 }
@@ -22,8 +20,8 @@ pub struct MirrorSchemaPlan {
 impl MirrorSchemaPlan {
     /// Statements required to create mirror storage after collision checks pass.
     #[must_use]
-    pub fn create_statements(&self) -> [&MirrorStatement; 3] {
-        [&self.create_table, &self.seq_index, &self.changed_at_index]
+    pub fn create_statements(&self) -> [&MirrorStatement; 2] {
+        [&self.create_table, &self.seq_index]
     }
 }
 
@@ -59,7 +57,6 @@ pub fn plan_mirror_schema(
     ddl_columns.extend([
         MirrorColumn::Seq.definition().to_string(),
         MirrorColumn::Op.definition().to_string(),
-        MirrorColumn::ChangedAt.definition().to_string(),
         MirrorColumn::CommitLsn.definition().to_string(),
         format!("PRIMARY KEY ({})", pk_columns.join(", ")),
     ]);
@@ -69,26 +66,19 @@ pub fn plan_mirror_schema(
         ddl_columns.join(",\n    ")
     );
     let seq_index_name = quote_ident(&format!("{}_seq_idx", mirror_table.relation()));
-    let changed_at_index_name = quote_ident(&format!("{}_changed_at_idx", mirror_table.relation()));
 
     Ok(MirrorSchemaPlan {
         collision_probe: MirrorStatement::read(
             "check mirror table collision",
             format!(
                 "SELECT to_regclass('{}')::oid",
-                sql_string_literal(&quoted_mirror)
+                escape_sql_literal(&quoted_mirror)
             ),
         ),
         create_table: MirrorStatement::write("create change-log mirror table", create_sql),
         seq_index: MirrorStatement::write(
             "create change-log mirror seq index",
             format!("CREATE INDEX IF NOT EXISTS {seq_index_name} ON {quoted_mirror} (\"seq\")"),
-        ),
-        changed_at_index: MirrorStatement::write(
-            "create change-log mirror changed_at index",
-            format!(
-                "CREATE INDEX IF NOT EXISTS {changed_at_index_name} ON {quoted_mirror} (\"changed_at\")"
-            ),
         ),
         drop_table: plan_drop_mirror_table(mirror_table),
     })
@@ -110,7 +100,7 @@ fn render_pk_column(column: &PrimaryKeyColumnShape) -> MirrorResult<String> {
         .map(|collation| {
             format!(
                 " COLLATE {}",
-                quote_qualified_identifier(collation.as_str())
+                quote_qualified_ident(collation.as_str())
             )
         })
         .unwrap_or_default();
@@ -123,7 +113,7 @@ fn render_pk_column(column: &PrimaryKeyColumnShape) -> MirrorResult<String> {
 
 fn render_type(column: &PrimaryKeyColumnShape) -> String {
     if let Some(domain) = column.domain_identity() {
-        return quote_qualified_identifier(domain.as_str());
+        return quote_qualified_ident(domain.as_str());
     }
 
     let type_name = column.type_name().as_str();
@@ -146,18 +136,6 @@ fn render_type(column: &PrimaryKeyColumnShape) -> String {
         ("time with time zone", _) => "timetz".to_string(),
         ("time without time zone", _) => "time".to_string(),
         (plain, _) if is_safe_identifier(plain) => plain.to_string(),
-        (qualified, _) => quote_qualified_identifier(qualified),
+        (qualified, _) => quote_qualified_ident(qualified),
     }
-}
-
-fn quote_qualified_identifier(value: &str) -> String {
-    value
-        .split('.')
-        .map(quote_ident)
-        .collect::<Vec<_>>()
-        .join(".")
-}
-
-fn sql_string_literal(value: &str) -> String {
-    value.replace('\'', "''")
 }

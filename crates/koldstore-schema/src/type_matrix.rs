@@ -1,5 +1,6 @@
 //! PostgreSQL type support matrix.
 
+use koldstore_common::canonical_postgres_type_name;
 use serde::{Deserialize, Serialize};
 
 /// PostgreSQL type class.
@@ -59,10 +60,10 @@ impl TypeMatrix {
     /// Returns support for a PostgreSQL type name.
     #[must_use]
     pub fn support_for(&self, type_name: &str) -> TypeSupport {
-        let normalized = normalize_type_name(type_name);
+        let normalized = canonical_postgres_type_name(type_name);
         self.entries
             .iter()
-            .find(|(class, _)| class.name.eq_ignore_ascii_case(normalized))
+            .find(|(class, _)| class.name == normalized)
             .map(|(_, support)| support.clone())
             .unwrap_or_else(|| TypeSupport {
                 supported: false,
@@ -75,25 +76,6 @@ impl TypeMatrix {
 
 /// Normalizes common PostgreSQL type aliases to canonical matrix names.
 #[must_use]
-pub fn normalize_type_name(type_name: &str) -> &str {
-    let trimmed = type_name.trim();
-    if trimmed.eq_ignore_ascii_case("bigint") {
-        "int8"
-    } else if trimmed.eq_ignore_ascii_case("integer") || trimmed.eq_ignore_ascii_case("int") {
-        "int4"
-    } else if trimmed.eq_ignore_ascii_case("smallint") {
-        "int2"
-    } else if trimmed.eq_ignore_ascii_case("boolean") {
-        "bool"
-    } else if trimmed.eq_ignore_ascii_case("character varying") {
-        "varchar"
-    } else if trimmed.eq_ignore_ascii_case("double precision") {
-        "float8"
-    } else if trimmed.eq_ignore_ascii_case("real") {
-        "float4"
-    } else if trimmed.eq_ignore_ascii_case("timestamp with time zone") {
-        "timestamptz"
-    } else {
-        trimmed
-    }
+pub fn normalize_type_name(type_name: &str) -> String {
+    canonical_postgres_type_name(type_name)
 }

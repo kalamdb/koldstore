@@ -102,62 +102,49 @@ koldstore.alter_storage_location(
 
 Updates storage location/configuration without direct catalog DML.
 
-### `koldstore.migrate_table`
-
-Three overloads are available:
+### `koldstore.manage_table`
 
 ```sql
-koldstore.migrate_table(
-  table_name regclass,
-  table_type text,
-  storage_name text,
-  flush_policy text DEFAULT NULL,
-  scope_column text DEFAULT NULL
-) RETURNS uuid;
-
-koldstore.migrate_table(
-  table_name regclass,
-  table_type text,
-  storage_name text,
-  flush_policy text DEFAULT NULL,
-  scope_column text DEFAULT NULL,
-  order_column text DEFAULT NULL
-) RETURNS uuid;
-
-koldstore.migrate_table(
-  table_name regclass,
-  table_type text,
-  storage_name text,
-  flush_policy text DEFAULT NULL,
-  scope_column text DEFAULT NULL,
-  order_column text DEFAULT NULL,
-  compression text DEFAULT NULL
-) RETURNS uuid;
+SELECT koldstore.manage_table(
+  table_name        => 'chat.messages',
+  storage           => 's3_archive',
+  hot_row_limit     => 10000,
+  min_flush_rows    => 1000,
+  max_rows_per_file => 500
+);
 ```
 
-`migrate_table` validates a heap table, preserves its primary key, creates the
-change-log mirror, records a `migrate_backfill` job, and returns that job id.
-`table_type` is `shared` or `user`. Existing populated tables need either a
-single auto-increment primary key or an explicit `order_column`.
+Registers a heap table for KoldStore management with structured flush settings.
+`table_type` defaults to `shared`; optional `scope_column`, `order_column`, and
+`compression` arguments are also available.
 
-`flush_policy` examples:
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `hot_row_limit` | optional | Maximum mirror rows to keep hot; omit for hot-only tables |
+| `min_flush_rows` | `1000` | Minimum excess rows required before a flush moves data cold |
+| `max_rows_per_file` | `500` | Maximum rows written into one Parquet segment per flush batch |
 
-- `rows:1000` keeps at most 1000 pending mirror rows hot; older excess rows are
-  eligible for flush.
-- `duration:1d` flushes mirror rows older than one day.
-- Policies can be combined, for example `rows:1000,duration:1h`.
+Non-forced flush selection keeps the newest rows hot by mirror `seq` and always
+flushes the oldest eligible excess first. Example with `hot_row_limit = 10000`
+and `min_flush_rows = 1000`:
 
-### `koldstore.demigrate_table`
+| Mirror rows | Flush result |
+|-------------|--------------|
+| 10,505 | No flush (`505` excess is below `min_flush_rows`) |
+| 11,000 | Flush `1,000` rows into `2` files (`max_rows_per_file = 500`) |
+| 11,250 | Flush `1,000` rows, keep `10,250` hot |
+| 11,500 | Flush `1,500` rows into `3` files |
+
+### `koldstore.unmanage_table`
 
 ```sql
-koldstore.demigrate_table(
-  table_name regclass,
-  rehydrate boolean DEFAULT NULL,
-  drop_cold boolean DEFAULT NULL
-) RETURNS bigint;
+SELECT koldstore.unmanage_table(
+  table_name => 'chat.messages'
+);
 ```
 
-Disables management after rehydration or archive-detach mode.
+Disables management after rehydration or archive-detach mode. Optional
+`rehydrate` and `drop_cold` arguments are available.
 
 ## Flush and Cold Data
 
@@ -180,27 +167,39 @@ flush policy.
 ### `koldstore.flush_table`
 
 ```sql
-koldstore.flush_table(
-  table_name regclass
-) RETURNS uuid;
+SELECT koldstore.flush_table(
+  table_name => 'chat.messages'
+);
 ```
 
 Ensures a flush job exists, runs the current flush path synchronously, and
 returns the job id. Progress is visible in `koldstore.jobs` and
-`koldstore.table_status(...)`.
+`koldstore.describe_table(...)`.
 
 Row selection behavior:
 
 - If the pending/running job payload has `force = true`, all pending mirror rows
   are flushed.
 - Otherwise, when a table flush policy is configured, only policy-selected rows
-  are flushed. For example, with `rows:100` and 2000 pending mirror rows, one
-  non-forced flush moves 1900 rows and leaves 100 hot.
+  are flushed. Tables managed through `manage_table` honor `hot_row_limit`,
+  `min_flush_rows`, and `max_rows_per_file`.
 - When no flush policy is configured, all pending mirror rows are flushed.
 
 `flush_table` does not currently expose a SQL `force` argument. Use
 `enqueue_flush_job(..., force => true)` before `flush_table`, or call
 `flush_table` directly on tables without a policy.
+
+### `koldstore.describe_table`
+
+```sql
+SELECT koldstore.describe_table(
+  table_name => 'chat.messages',
+  scope_key  => NULL
+);
+```
+
+Returns managed-table storage, mirror, cold-segment, manifest, and recent job
+state as JSONB.
 
 ### `koldstore.recover_segments`
 
@@ -213,19 +212,6 @@ koldstore.recover_segments(
 
 Enqueues a segment recovery job. Returns `1` when a new job was inserted and `0`
 when an equivalent active job already exists.
-
-### `koldstore.table_status`
-
-```sql
-koldstore.table_status(
-  table_name regclass,
-  scope_key text DEFAULT NULL
-) RETURNS jsonb;
-```
-
-Returns managed-table storage, mirror, cold-segment, manifest, and recent job
-state. Job entries include ids, phases, statuses, and progress counters such as
-`rows_flushed`.
 
 ## DML Boundaries
 
@@ -246,9 +232,6 @@ The following operator SQL functions are planned but not yet exposed by the
 extension:
 
 - `koldstore.changes_since(...)`
-- `koldstore.set_flush_policy(...)` — policy is currently set through
-  `migrate_table(..., flush_policy => ...)`
-- `koldstore.flush_pending()`
 - `koldstore.backup_manifest(...)`
 - `koldstore.validate_cold_storage(...)`
 - `koldstore_exec('EXPORT TABLE ...')` — `IMPORT TABLE` remains rejected until

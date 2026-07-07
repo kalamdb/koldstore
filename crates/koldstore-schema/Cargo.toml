@@ -9,6 +9,7 @@ description = "Migrated-table schema registry models for pg-koldstore"
 [dependencies]
 koldstore-common.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

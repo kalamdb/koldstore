@@ -40,7 +40,7 @@ async fn managed_select_uses_merge_scan_after_flush_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "merge_scan_matrix").await?;
         let table = db.create_indexed_items_table("merge_items", 1_000).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
         common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 1_000).await?;
 

@@ -36,7 +36,7 @@ pub use capture::{
     plan_mirror_capture, plan_mirror_capture_teardown, MirrorCaptureError, MirrorCapturePlan,
     MirrorCaptureResult,
 };
-pub use koldstore_common::QualifiedTableName;
+pub use koldstore_common::{FlushPolicy, ManageTableOptions, QualifiedTableName};
 pub use mirror::{
     mirror_relation_for_source, plan_change_log_mirror, plan_change_log_mirror_from_columns,
     ChangeLogMirrorPlan, MirrorError, MirrorResult,

@@ -23,11 +23,12 @@ fn sql_exposes_operational_functions() {
     assert!(validation.catalog_consistent);
 
     for function in [
-        "koldstore.set_flush_policy",
         "koldstore.enqueue_flush_job",
         "koldstore.flush_table",
-        "koldstore.flush_pending",
         "koldstore.recover_segments",
+        "koldstore.describe_table",
+        "koldstore.manage_table",
+        "koldstore.unmanage_table",
     ] {
         assert!(
             koldstore_flush::ops::FLUSH_SQL_FUNCTIONS.contains(&function),
@@ -44,7 +45,7 @@ fn operational_functions_build_parameterized_catalog_plans() {
     let table = TableName::parse("app.items").unwrap();
     let qualified = QualifiedTableName::parse("app.items").unwrap();
     let mirror = QualifiedTableName::parse("koldstore.items__cl").unwrap();
-    let status = koldstore_flush::ops::table_status_plan(&qualified, &mirror, None).unwrap();
+    let status = koldstore_flush::ops::describe_table_plan(&qualified, &mirror, None).unwrap();
     assert_eq!(status.table_name.as_str(), "app.items");
     assert!(status.statement.sql.contains("jsonb_build_object"));
     assert!(status.statement.sql.contains("'hot_rows'"));
@@ -193,28 +194,17 @@ fn sql_exposes_export_import_boundary() {
 }
 
 #[test]
-fn flush_sql_requests_capture_policy_table_scope_and_pending_limits() {
+fn flush_sql_requests_capture_table_scope_and_enqueue_metadata() {
     use koldstore_common::{ScopeKey, SeqId, TableName};
 
-    let policy = koldstore_flush::ops::set_flush_policy_request(
-        TableName::parse("app.items").unwrap(),
-        Some("rows:1000,interval:60".to_string()),
-    );
     let table_flush = koldstore_flush::ops::flush_table_request(
         TableName::parse("app.items").unwrap(),
         Some(ScopeKey::new("tenant-a").unwrap()),
         true,
     );
-    let pending_flush = koldstore_flush::ops::flush_pending_request(25);
 
-    assert_eq!(policy.table_name.as_str(), "app.items");
-    assert_eq!(
-        policy.flush_policy.as_deref(),
-        Some("rows:1000,interval:60")
-    );
     assert_eq!(table_flush.scope_key.as_ref().unwrap().as_str(), "tenant-a");
     assert!(table_flush.force);
-    assert_eq!(pending_flush.limit, 25);
 
     let enqueue =
         koldstore_flush::ops::enqueue_flush_job_plan(table_flush, Some(SeqId::new(1_000).unwrap()))

@@ -38,20 +38,20 @@ fn mirror_capture_upserts_insert_update_delete_latest_state() {
     assert!(sql.contains("ELSIF TG_OP = 'UPDATE' THEN"));
     assert!(sql.contains("ELSIF TG_OP = 'DELETE' THEN"));
     assert!(
-        sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 1, now(), pg_current_wal_lsn())")
+        sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 1, pg_current_wal_lsn())")
     );
     assert!(
-        sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 2, now(), pg_current_wal_lsn())")
+        sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 2, pg_current_wal_lsn())")
     );
     assert!(
-        sql.contains("VALUES (OLD.\"id\", public.snowflake_id(), 3, now(), pg_current_wal_lsn())")
+        sql.contains("VALUES (OLD.\"id\", public.snowflake_id(), 3, pg_current_wal_lsn())")
     );
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(sql.contains("SET search_path = pg_catalog, koldstore"));
     assert!(sql.contains("\"seq\" = EXCLUDED.\"seq\""));
     assert!(sql.contains("\"op\" = EXCLUDED.\"op\""));
-    assert!(sql.contains("\"changed_at\" = EXCLUDED.\"changed_at\""));
     assert!(sql.contains("\"commit_lsn\" = EXCLUDED.\"commit_lsn\""));
+    assert!(!sql.contains("changed_at"));
     assert!(!sql.contains("row_data"));
     assert!(!sql.contains("cold_segment_id"));
 }
@@ -75,7 +75,7 @@ fn mirror_capture_preserves_composite_pk_in_conflict_and_row_values() {
     let plan = capture_plan(vec![pk_column("tenant_id", 1), pk_column("id", 2)]);
     let sql = &plan.function.sql;
 
-    assert!(sql.contains("INSERT INTO \"koldstore\".\"messages__cl\" (\"tenant_id\", \"id\", \"seq\", \"op\", \"changed_at\", \"commit_lsn\")"));
+    assert!(sql.contains("INSERT INTO \"koldstore\".\"messages__cl\" (\"tenant_id\", \"id\", \"seq\", \"op\", \"commit_lsn\")"));
     assert!(sql.contains("VALUES (NEW.\"tenant_id\", NEW.\"id\", public.snowflake_id(), 1"));
     assert!(sql.contains("VALUES (OLD.\"tenant_id\", OLD.\"id\", public.snowflake_id(), 3"));
     assert!(sql.contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE"));
@@ -150,7 +150,6 @@ fn executor_maps_user_dml_to_latest_state_mirror_operations() {
     assert_eq!(revive.operation, MirrorOperation::Insert);
     for effect in [insert, update, delete, revive] {
         assert_eq!(effect.seq_expression, "SNOWFLAKE_ID()");
-        assert_eq!(effect.changed_at_expression, "now()");
         assert_eq!(effect.commit_lsn_expression, "pg_current_wal_lsn()");
         assert!(effect.transactional);
     }

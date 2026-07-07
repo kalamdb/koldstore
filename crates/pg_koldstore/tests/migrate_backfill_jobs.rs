@@ -88,7 +88,7 @@ fn migration_backfill_job_payload_is_type_safe_and_operator_visible() {
         None,
         &ordering(),
         MigrationBatchSize::new(10_000).unwrap(),
-        Some("rows:1000,interval:60".to_string()),
+        Some(1_000),
     );
 
     let plan = enqueue_migration_backfill_job_plan(request).unwrap();

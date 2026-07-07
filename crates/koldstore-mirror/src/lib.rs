@@ -8,6 +8,7 @@ pub mod columns;
 pub mod error;
 pub mod read;
 pub mod relation;
+pub mod row_json;
 pub mod schema;
 pub mod statement;
 pub mod write;
@@ -21,6 +22,7 @@ pub use read::{
 pub use relation::{
     mirror_relation_for_source, MirrorRelation, CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,
 };
+pub use row_json::{MirrorPolicyRowJson, MirrorSelectionRow, MirrorSeqStats};
 pub use schema::{plan_drop_mirror_table, plan_mirror_schema, MirrorSchemaPlan};
 pub use statement::{mirror_to_sql, MirrorAccess, MirrorStatement, SqlParamType};
 pub use write::{

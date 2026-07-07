@@ -1,7 +1,7 @@
 //! Migration validation.
 
 use koldstore_common::PrimaryKeyShape;
-use koldstore_schema::TypeMatrix;
+use koldstore_schema::PgType;
 use thiserror::Error;
 
 /// Returns true when the table has a primary-key shape pg-koldstore can manage.
@@ -55,9 +55,6 @@ pub enum MigrationConstraintError {
     /// Storage registration lookup failed.
     #[error("storage registration must exist before migration")]
     MissingStorage,
-    /// Flush policy is blank.
-    #[error("flush_policy cannot be blank")]
-    BlankFlushPolicy,
     /// Foreign keys need explicit hot-only acceptance when flush is enabled.
     #[error("foreign keys require options.allow_fk_hot_only = true when flush is enabled")]
     ForeignKeyRequiresHotOnlyOverride,
@@ -68,8 +65,10 @@ pub enum MigrationConstraintError {
 pub struct ColumnDefinition {
     /// Column name.
     pub name: String,
-    /// PostgreSQL type name.
-    pub type_name: String,
+    /// Supported PostgreSQL type parsed from catalog metadata.
+    pub pg_type: PgType,
+    /// Original catalog type spelling preserved for diagnostics.
+    pub catalog_type_name: String,
     /// Whether the column is nullable.
     pub nullable: bool,
     /// Whether the column is generated.
@@ -77,15 +76,49 @@ pub struct ColumnDefinition {
 }
 
 impl ColumnDefinition {
-    /// Creates a plain column definition.
+    /// Creates a plain column definition from a supported PostgreSQL catalog type name.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `type_name` is outside the MVP support matrix. Tests and
+    /// builders should prefer [`Self::typed`].
     #[must_use]
     pub fn new(name: impl Into<String>, type_name: impl Into<String>, nullable: bool) -> Self {
+        let catalog_type_name = type_name.into();
+        let pg_type = PgType::from_postgres_name(&catalog_type_name)
+            .expect("column definition builders must use supported PostgreSQL types");
+        Self::typed(name, pg_type, catalog_type_name, nullable, false)
+    }
+
+    /// Creates a column definition from a supported PostgreSQL type.
+    #[must_use]
+    pub fn typed(
+        name: impl Into<String>,
+        pg_type: PgType,
+        catalog_type_name: impl Into<String>,
+        nullable: bool,
+        generated: bool,
+    ) -> Self {
         Self {
             name: name.into(),
-            type_name: type_name.into(),
+            pg_type,
+            catalog_type_name: catalog_type_name.into(),
             nullable,
-            generated: false,
+            generated,
         }
+    }
+
+    /// Returns the original catalog type spelling.
+    #[must_use]
+    pub fn catalog_type_name(&self) -> &str {
+        &self.catalog_type_name
+    }
+
+    /// Marks the column as generated.
+    #[must_use]
+    pub fn generated(mut self) -> Self {
+        self.generated = true;
+        self
     }
 }
 
@@ -160,8 +193,8 @@ pub struct MigrationValidationInput {
     pub scope_column: Option<String>,
     /// Whether the storage registration exists.
     pub storage_exists: bool,
-    /// Optional flush policy.
-    pub flush_policy: Option<String>,
+    /// Whether automatic flush is enabled for this table.
+    pub flush_enabled: bool,
     /// Operator accepted hot-only FK semantics.
     pub allow_fk_hot_only: bool,
     /// Table columns.
@@ -188,7 +221,7 @@ impl MigrationValidationInput {
             table_type: "shared".to_string(),
             scope_column: None,
             storage_exists: true,
-            flush_policy: None,
+            flush_enabled: false,
             allow_fk_hot_only: false,
             columns: vec![ColumnDefinition::new("id", "bigint", false)],
             primary_key: vec!["id".to_string()],
@@ -207,84 +240,12 @@ impl MigrationValidationInput {
     /// Returns a typed error when the table shape is unsafe or outside the MVP
     /// migration contract.
     pub fn validate(&self) -> ConstraintResult<MigrationValidation> {
-        if self.primary_key.is_empty()
-            || self
-                .primary_key
-                .iter()
-                .any(|column| column.trim().is_empty())
-        {
-            return Err(MigrationConstraintError::MissingPrimaryKey);
-        }
-        if self.expression_primary_key {
-            return Err(MigrationConstraintError::ExpressionPrimaryKey);
-        }
-        for pk_column in &self.primary_key {
-            if !self.columns.iter().any(|column| column.name == *pk_column) {
-                return Err(MigrationConstraintError::MissingPrimaryKeyColumn(
-                    pk_column.clone(),
-                ));
-            }
-        }
+        self.validate_primary_key()?;
+        self.validate_columns()?;
+        self.validate_indexes()?;
+        self.validate_scope_and_storage()?;
+        let fk_policy = self.validate_fk_policy()?;
 
-        for column in &self.columns {
-            if column.generated {
-                return Err(MigrationConstraintError::GeneratedColumn(
-                    column.name.clone(),
-                ));
-            }
-            if !type_supported(&column.type_name) {
-                return Err(MigrationConstraintError::UnsupportedColumnType {
-                    column: column.name.clone(),
-                    type_name: column.type_name.clone(),
-                });
-            }
-        }
-
-        for index in &self.indexes {
-            if index.expression {
-                return Err(MigrationConstraintError::ExpressionIndex(
-                    index.name.clone(),
-                ));
-            }
-        }
-
-        if self.table_type == "user"
-            && self
-                .scope_column
-                .as_deref()
-                .map(str::trim)
-                .filter(|scope| !scope.is_empty())
-                .is_none()
-        {
-            return Err(MigrationConstraintError::MissingScopeColumn);
-        }
-        if !self.storage_exists {
-            return Err(MigrationConstraintError::MissingStorage);
-        }
-        if self
-            .flush_policy
-            .as_deref()
-            .is_some_and(|policy| policy.trim().is_empty())
-        {
-            return Err(MigrationConstraintError::BlankFlushPolicy);
-        }
-
-        let flush_enabled = self.flush_policy.is_some();
-        if !fk_policy_allowed(
-            !self.foreign_keys.is_empty(),
-            flush_enabled,
-            self.allow_fk_hot_only,
-        ) {
-            return Err(MigrationConstraintError::ForeignKeyRequiresHotOnlyOverride);
-        }
-
-        let fk_policy = if self.foreign_keys.is_empty() {
-            FkPolicy::None
-        } else if flush_enabled {
-            FkPolicy::AllowHotOnly
-        } else {
-            FkPolicy::Native
-        };
         let indexed_columns = self
             .indexes
             .iter()
@@ -305,6 +266,92 @@ impl MigrationValidationInput {
             preserved_check_constraints: self.check_constraints.clone(),
             preserved_not_null_columns: self.not_null_columns.clone(),
             fk_policy,
+        })
+    }
+
+    fn validate_primary_key(&self) -> ConstraintResult<()> {
+        if self.primary_key.is_empty()
+            || self
+                .primary_key
+                .iter()
+                .any(|column| column.trim().is_empty())
+        {
+            return Err(MigrationConstraintError::MissingPrimaryKey);
+        }
+        if self.expression_primary_key {
+            return Err(MigrationConstraintError::ExpressionPrimaryKey);
+        }
+        for pk_column in &self.primary_key {
+            if !self.columns.iter().any(|column| column.name == *pk_column) {
+                return Err(MigrationConstraintError::MissingPrimaryKeyColumn(
+                    pk_column.clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_columns(&self) -> ConstraintResult<()> {
+        for column in &self.columns {
+            if column.generated {
+                return Err(MigrationConstraintError::GeneratedColumn(
+                    column.name.clone(),
+                ));
+            }
+            let pg_type = column.pg_type;
+            if !pg_type.is_mvp_supported() {
+                return Err(MigrationConstraintError::UnsupportedColumnType {
+                    column: column.name.clone(),
+                    type_name: column.catalog_type_name.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_indexes(&self) -> ConstraintResult<()> {
+        for index in &self.indexes {
+            if index.expression {
+                return Err(MigrationConstraintError::ExpressionIndex(
+                    index.name.clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_scope_and_storage(&self) -> ConstraintResult<()> {
+        if self.table_type == "user"
+            && self
+                .scope_column
+                .as_deref()
+                .map(str::trim)
+                .filter(|scope| !scope.is_empty())
+                .is_none()
+        {
+            return Err(MigrationConstraintError::MissingScopeColumn);
+        }
+        if !self.storage_exists {
+            return Err(MigrationConstraintError::MissingStorage);
+        }
+        Ok(())
+    }
+
+    fn validate_fk_policy(&self) -> ConstraintResult<FkPolicy> {
+        if !fk_policy_allowed(
+            !self.foreign_keys.is_empty(),
+            self.flush_enabled,
+            self.allow_fk_hot_only,
+        ) {
+            return Err(MigrationConstraintError::ForeignKeyRequiresHotOnlyOverride);
+        }
+
+        Ok(if self.foreign_keys.is_empty() {
+            FkPolicy::None
+        } else if self.flush_enabled {
+            FkPolicy::AllowHotOnly
+        } else {
+            FkPolicy::Native
         })
     }
 }
@@ -337,7 +384,7 @@ pub const fn fk_policy_allowed(has_fk: bool, flush_enabled: bool, allow_fk_hot_o
 /// Returns whether a column type is supported by the MVP type matrix.
 #[must_use]
 pub fn type_supported(type_name: &str) -> bool {
-    TypeMatrix::postgres_15_default()
-        .support_for(type_name)
-        .supported
+    koldstore_schema::PgType::from_postgres_name(type_name)
+        .map(|pg_type| pg_type.is_mvp_supported())
+        .unwrap_or(false)
 }

@@ -314,7 +314,7 @@ async fn ensure_koldstore_extension(client: &Client) -> Result<()> {
 ///
 /// `ALTER EXTENSION ... UPDATE` only applies when the extension version changes, so local
 /// iterative development can leave an older SQL catalog behind. When required entities such
-/// as `koldstore.table_status` are missing, reinstall the extension in-place.
+/// as `koldstore.describe_table` are missing, reinstall the extension in-place.
 async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
     let required_sql_present = client
         .query_one(
@@ -324,14 +324,14 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
               FROM pg_proc status_proc
               JOIN pg_namespace status_ns ON status_ns.oid = status_proc.pronamespace
               WHERE status_ns.nspname = 'koldstore'
-                AND status_proc.proname = 'table_status'
+                AND status_proc.proname = 'describe_table'
             )
             AND EXISTS (
               SELECT 1
               FROM pg_proc migrate_proc
               JOIN pg_namespace migrate_ns ON migrate_ns.oid = migrate_proc.pronamespace
               WHERE migrate_ns.nspname = 'koldstore'
-                AND migrate_proc.proname = 'migrate_table'
+                AND migrate_proc.proname = 'manage_table'
                 AND migrate_proc.prorettype = 'uuid'::regtype
             )
             AND EXISTS (

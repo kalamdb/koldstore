@@ -26,7 +26,7 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "failure_injection").await?;
         let table = db.create_indexed_items_table("failure_items", 32).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
 
         let blocking_file = db.storage_root.join("not-a-directory");
         std::fs::write(&blocking_file, b"blocks create_dir_all")

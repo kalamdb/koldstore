@@ -23,7 +23,7 @@ async fn flush_removes_base_and_mirror_rows_together() -> Result<()> {
                 "#
             ))
             .await?;
-        db.migrate_shared(&relation, "id").await?;
+        db.manage_shared(&relation, "id").await?;
 
         db.client
             .batch_execute(&format!(

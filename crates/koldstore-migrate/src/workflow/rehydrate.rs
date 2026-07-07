@@ -21,7 +21,7 @@ pub enum DemigrationMode {
     ArchiveDetach,
 }
 
-/// Options accepted by `koldstore.demigrate_table`.
+/// Options accepted by `koldstore.unmanage_table`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DemigrateOptions {
     /// Whether to rehydrate current logical rows into the heap.

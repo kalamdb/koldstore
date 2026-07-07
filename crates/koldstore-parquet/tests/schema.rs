@@ -1,6 +1,7 @@
 use arrow_schema::{DataType, TimeUnit};
 use koldstore_parquet::{
-    build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType, SchemaError,
+    arrow_data_type, build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType,
+    SchemaError,
 };
 
 #[test]
@@ -30,7 +31,6 @@ fn clean_schema_conversion_adds_mirror_metadata_not_user_table_system_columns() 
             "body",
             "seq",
             "op",
-            "changed_at",
             "deleted",
             "schema_version"
         ]
@@ -42,10 +42,6 @@ fn clean_schema_conversion_adds_mirror_metadata_not_user_table_system_columns() 
     assert_eq!(
         schema.field_with_name("op").unwrap().data_type(),
         &DataType::Int16
-    );
-    assert_eq!(
-        schema.field_with_name("changed_at").unwrap().data_type(),
-        &DataType::Timestamp(TimeUnit::Microsecond, None)
     );
     assert_eq!(
         schema.field_with_name("deleted").unwrap().data_type(),
@@ -60,7 +56,6 @@ fn clean_schema_conversion_adds_mirror_metadata_not_user_table_system_columns() 
 fn cold_metadata_columns_have_clean_contract_names() {
     assert_eq!(ColdMetadataColumn::Seq.name(), "seq");
     assert_eq!(ColdMetadataColumn::Op.name(), "op");
-    assert_eq!(ColdMetadataColumn::ChangedAt.name(), "changed_at");
     assert_eq!(ColdMetadataColumn::Deleted.name(), "deleted");
     assert_eq!(ColdMetadataColumn::SchemaVersion.name(), "schema_version");
 }
@@ -100,7 +95,7 @@ fn postgres_type_parser_supports_mvp_types_and_common_catalog_aliases() {
         ),
     ] {
         assert_eq!(
-            PgType::from_postgres_name(type_name).unwrap().arrow_type(),
+            arrow_data_type(PgType::from_postgres_name(type_name).unwrap()),
             expected_arrow_type,
             "{type_name} should map to the expected Arrow type"
         );

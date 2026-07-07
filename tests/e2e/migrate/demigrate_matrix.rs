@@ -39,7 +39,7 @@ async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "demigrate_matrix").await?;
         let table = db.create_indexed_items_table("demigrate_items", 40).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
         db.insert_pending_flush_job(&table.relation, "").await?;
         assert_eq!(
@@ -50,7 +50,7 @@ async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_
         let deactivated = db
             .client
             .query_one(
-                "SELECT koldstore.demigrate_table($1::text::regclass, true, false)",
+                "SELECT koldstore.unmanage_table($1::text::regclass, true, false)",
                 &[&table.relation],
             )
             .await?;

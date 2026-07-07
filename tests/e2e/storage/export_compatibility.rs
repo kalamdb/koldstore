@@ -20,7 +20,7 @@ async fn export_query_reads_manifest_and_segments_from_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "export_compatibility").await?;
         let table = db.create_indexed_items_table("export_items", 12).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
         assert_eq!(db.flush_table(&table.relation).await?, 12);
 
         let export =

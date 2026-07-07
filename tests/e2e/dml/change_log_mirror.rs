@@ -24,12 +24,11 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
         db.client
             .execute(
                 r#"
-                SELECT koldstore.migrate_table(
-                  $1::text::regclass,
-                  'shared',
-                  $2,
-                  'rows:1000',
-                  NULL
+                SELECT koldstore.manage_table(
+                  table_name     => $1::text::regclass,
+                  storage        => $2,
+                  hot_row_limit  => 1000,
+                  min_flush_rows => 1
                 )
                 "#,
                 &[&relation, &db.storage_name],

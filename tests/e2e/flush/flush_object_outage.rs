@@ -25,7 +25,7 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
         let table = db
             .create_indexed_items_table("object_outage_items", 20)
             .await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
 
         let blocking_file = db.storage_root.join("blocked");
         std::fs::write(&blocking_file, b"not a directory")

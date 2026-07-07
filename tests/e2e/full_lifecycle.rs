@@ -11,7 +11,6 @@ use tokio_postgres::Client;
 const INITIAL_ROWS: i64 = 2_000;
 const SECOND_INSERT_ROWS: i64 = 2_000;
 const TOTAL_ROWS: i64 = INITIAL_ROWS + SECOND_INSERT_ROWS;
-const FLUSH_POLICY: &str = "rows:100";
 const FLUSH_POLICY_ROW_LIMIT: i64 = 100;
 const SOURCE_COLUMN_COUNT: usize = 50;
 const MAX_FLUSH_SECONDS: f64 = 120.0;
@@ -75,9 +74,9 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
     }
     {
         let _step = common::log_step_always(format!(
-            "pg{pg_version}: migrate table with flush policy {FLUSH_POLICY}"
+            "pg{pg_version}: manage table with hot_row_limit {FLUSH_POLICY_ROW_LIMIT}"
         ));
-        migrate_table(client, pg_version).await?;
+        manage_table(client, pg_version).await?;
     }
     {
         let _step = common::log_step_always(format!("pg{pg_version}: wait for migration jobs"));
@@ -90,7 +89,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
     }
     {
         let _step = common::log_step_always(format!("pg{pg_version}: verify flush policy stored"));
-        assert_flush_policy_registered(client, pg_version).await?;
+        assert_hot_row_limit_registered(client, pg_version).await?;
     }
 
     let first_flush_started = Instant::now();
@@ -243,7 +242,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         let _step = common::log_step_always(format!(
             "pg{pg_version}: verify cold storage covers all {TOTAL_ROWS} flushed rows"
         ));
-        let status = common::table_status(client, &relation).await?;
+        let status = common::describe_table(client, &relation).await?;
         assert_eq!(status.hot_rows, 0);
         assert_eq!(status.mirror_rows, 0);
         assert!(
@@ -258,7 +257,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
             "pg{pg_version}: verify merged SELECT returns all {TOTAL_ROWS} rows"
         ));
         assert_sample_rows_readable(client, pg_version).await?;
-        let status = common::table_status(client, &relation).await?;
+        let status = common::describe_table(client, &relation).await?;
         assert_eq!(status.hot_rows, 0, "merged read should see pruned hot heap");
         assert_eq!(
             status.mirror_rows, 0,
@@ -266,7 +265,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         );
         assert!(
             status.cold_row_count >= TOTAL_ROWS,
-            "table_status cold rows should cover flushed data, got {:?}",
+            "describe_table cold rows should cover flushed data, got {:?}",
             status
         );
     }
@@ -496,23 +495,22 @@ async fn insert_rows(
     Ok(())
 }
 
-async fn migrate_table(client: &Client, pg_version: u16) -> Result<()> {
+async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
     client
         .execute(
             r#"
-            SELECT koldstore.migrate_table(
-              $1::text::regclass,
-              'shared',
-              $2,
-              $3,
-              NULL,
-              'id'
+            SELECT koldstore.manage_table(
+              table_name     => $1::text::regclass,
+              storage        => $2,
+              hot_row_limit  => $3,
+              min_flush_rows => 1,
+              order_column   => 'id'
             )
             "#,
             &[
                 &relation(pg_version),
                 &storage_name(pg_version),
-                &FLUSH_POLICY,
+                &FLUSH_POLICY_ROW_LIMIT,
             ],
         )
         .await?;
@@ -580,7 +578,7 @@ async fn assert_change_log_mirror(
     common::assert_primary_key_columns_match(client, &relation, &mirror).await?;
 
     let mirror_columns = relation_columns(client, &mirror).await?;
-    let expected_mirror_columns = ["tenant_id", "id", "seq", "op", "changed_at", "commit_lsn"];
+    let expected_mirror_columns = ["tenant_id", "id", "seq", "op", "commit_lsn"];
     for column in expected_mirror_columns {
         assert!(
             mirror_columns.iter().any(|name| name == column),
@@ -599,11 +597,11 @@ async fn assert_change_log_mirror(
     Ok(())
 }
 
-async fn assert_flush_policy_registered(client: &Client, pg_version: u16) -> Result<()> {
+async fn assert_hot_row_limit_registered(client: &Client, pg_version: u16) -> Result<()> {
     let row = client
         .query_one(
             r#"
-            SELECT options->>'flush_policy'
+            SELECT (options->>'hot_row_limit')::bigint
             FROM koldstore.schemas
             WHERE table_oid = $1::text::regclass::oid
               AND active
@@ -613,10 +611,7 @@ async fn assert_flush_policy_registered(client: &Client, pg_version: u16) -> Res
             &[&relation(pg_version)],
         )
         .await?;
-    assert_eq!(
-        row.get::<_, Option<String>>(0).as_deref(),
-        Some(FLUSH_POLICY)
-    );
+    assert_eq!(row.get::<_, Option<i64>>(0), Some(FLUSH_POLICY_ROW_LIMIT));
     Ok(())
 }
 

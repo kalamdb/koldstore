@@ -68,7 +68,7 @@ async fn standard_hot_dml_on_managed_table_updates_change_log_mirror_on_pgrx() -
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "cold_dml_matrix").await?;
         let table = db.create_indexed_items_table("dml_items", 20).await?;
-        db.migrate_shared(&table.relation, "id").await?;
+        db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
 
         db.client

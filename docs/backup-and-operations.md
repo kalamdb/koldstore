@@ -19,7 +19,7 @@ deletion.
 
 ## Validation and Recovery
 
-`koldstore.table_status` summarizes hot rows, cold segment counts, manifest
+`koldstore.describe_table` summarizes hot rows, cold segment counts, manifest
 state, pending jobs, storage binding, and the last recorded error.
 `koldstore.backup_manifest` exports the local manifest identity required to
 match a PostgreSQL backup to cold files. `koldstore.validate_cold_storage`
