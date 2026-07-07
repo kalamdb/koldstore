@@ -105,6 +105,7 @@ fi
 install_ubuntu_deps() {
   local pg="$1"
   require_command sudo
+  bash "${ROOT_DIR}/scripts/ci/disable-broken-runner-apt-sources.sh"
   sudo apt-get update
   sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
   sudo install -d /usr/share/postgresql-common/pgdg
