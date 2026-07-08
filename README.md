@@ -17,6 +17,36 @@
 
 Reads use a PostgreSQL custom scan named `KoldMergeScan`. It reads hot heap rows, reads cold Parquet segments when needed, and merges by primary key so the newest visible row wins.
 
+## Why KoldStore?
+
+KoldStore extends PostgreSQL instead of replacing it. Applications keep using the same SQL, drivers, ORMs, transactions, replication, and operational tooling while PostgreSQL gains a transparent cold-storage layer for historical rows.
+
+- Built for PostgreSQL application tables, not only analytics or time-series workloads. KoldStore targets tables such as messages, notifications, audit logs, AI memory, user activity, and IoT events.
+- Reduces the primary PostgreSQL storage footprint by moving older rows from expensive database storage into lower-cost object storage.
+- Keeps the hot PostgreSQL working set smaller, which can reduce index size, VACUUM work, backup volume, and the amount of data scanned by common OLTP queries.
+- Preserves PostgreSQL's native heap storage. KoldStore does not require a custom table access method or a replacement database engine.
+- Uses open Apache Parquet files for archived data, so cold rows can be read by engines such as DuckDB, Spark, DataFusion, Polars, PyArrow, Trino, and ClickHouse.
+- Avoids vendor lock-in by storing historical data in open formats on storage you control.
+- Avoids partition explosion. Historical data can move to object storage without creating thousands or millions of PostgreSQL partitions.
+- Supports incremental adoption on existing tables, so applications do not need a schema redesign or database migration just to start moving old rows cold.
+- Works with bring-your-own storage backends, including local filesystem, Amazon S3-compatible storage, Google Cloud Storage, Azure Blob, and MinIO.
+- Optimizes for immutable historical data by writing cold rows into Parquet segments while recent changes stay in PostgreSQL-managed hot storage and metadata.
+- Creates a future analytics path: the same archived Parquet files can later feed data lake, analytics, or AI pipelines without exporting the data again.
+
+## Compared With Other Approaches
+
+- Does not replace PostgreSQL with another database.
+- Does not require changing PostgreSQL's table storage engine.
+- Does not force years of historical data to remain inside the PostgreSQL heap.
+- Does not rely on proprietary columnar storage formats.
+- Does not force users into time-series-only data models.
+- Does not require millions of PostgreSQL partitions to organize historical rows.
+- Does not lock archived data into a vendor-specific format.
+- Keeps the hot path close to normal PostgreSQL tables while adding cold storage only where it is enabled.
+- Reduces the operational pressure that historical rows put on backup size, VACUUM, indexes, and primary database storage.
+- Uses open Parquet files that modern analytics engines can read directly.
+- Can evolve into a full storage lifecycle layer while remaining transparent to applications.
+
 ## How It Works
 
 ```text

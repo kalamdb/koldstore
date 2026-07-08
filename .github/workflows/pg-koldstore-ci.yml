@@ -2,8 +2,8 @@ name: pg-koldstore-ci
 
 on:
   push:
-    branches: ["main", "001-pg-koldstore-hot-cold-storage"]
-  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
