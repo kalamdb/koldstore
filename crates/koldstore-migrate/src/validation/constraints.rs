@@ -55,9 +55,22 @@ pub enum MigrationConstraintError {
     /// Storage registration lookup failed.
     #[error("storage registration must exist before migration")]
     MissingStorage,
+    /// Non-primary-key unique constraints are unsafe once flush moves rows cold.
+    #[error(
+        "flush-enabled managed tables cannot preserve global uniqueness; koldstore enforces unique constraints on hot rows only: {constraints}"
+    )]
+    UnsupportedUniqueConstraints {
+        /// Human-readable unique constraint listing.
+        constraints: String,
+    },
     /// Foreign keys need explicit hot-only acceptance when flush is enabled.
-    #[error("foreign keys require options.allow_fk_hot_only = true when flush is enabled")]
-    ForeignKeyRequiresHotOnlyOverride,
+    #[error(
+        "flush-enabled managed tables cannot preserve global referential integrity; koldstore enforces foreign keys on hot rows only. Foreign keys: {foreign_keys}. Drop or relocate them, or set options.allow_fk_hot_only = true"
+    )]
+    ForeignKeyRequiresHotOnlyOverride {
+        /// Human-readable foreign-key listing.
+        foreign_keys: String,
+    },
 }
 
 /// PostgreSQL column shape needed for migration validation.
@@ -164,6 +177,21 @@ pub enum FkDirection {
     Outbound,
 }
 
+/// Non-primary-key unique constraint shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UniqueConstraintShape {
+    /// Constraint or unique-index name.
+    pub name: String,
+    /// Constrained columns in key order.
+    pub columns: Vec<String>,
+}
+
+impl UniqueConstraintShape {
+    fn display_label(&self) -> String {
+        format!("{} (columns: {})", self.name, self.columns.join(", "))
+    }
+}
+
 /// Foreign-key shape relevant to hot-only migration policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKeyShape {
@@ -171,6 +199,86 @@ pub struct ForeignKeyShape {
     pub name: String,
     /// FK direction.
     pub direction: FkDirection,
+    /// Local FK columns in key order.
+    pub columns: Vec<String>,
+    /// Referenced table for outbound FKs or referencing table for inbound FKs.
+    pub related_relation: Option<String>,
+}
+
+impl ForeignKeyShape {
+    fn display_label(&self) -> String {
+        let columns = self.columns.join(", ");
+        match (self.direction, self.related_relation.as_deref()) {
+            (FkDirection::Outbound, Some(related)) => {
+                format!("{} outbound (columns: {}) -> {related}", self.name, columns)
+            }
+            (FkDirection::Inbound, Some(related)) => {
+                format!("{} inbound from {related} (columns: {columns})", self.name)
+            }
+            (FkDirection::Outbound, None) => {
+                format!("{} outbound (columns: {columns})", self.name)
+            }
+            (FkDirection::Inbound, None) => {
+                format!("{} inbound (columns: {columns})", self.name)
+            }
+        }
+    }
+}
+
+/// Unique and foreign-key metadata probed before `manage_table`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManageTableConstraintsCatalog {
+    /// Non-primary-key unique constraints on the managed table.
+    pub unique_constraints: Vec<UniqueConstraintShape>,
+    /// Foreign keys involving the managed table.
+    pub foreign_keys: Vec<ForeignKeyShape>,
+}
+
+impl ManageTableConstraintsCatalog {
+    /// Validates hot/cold constraint policy for a managed table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when flush is enabled and unique or foreign-key constraints
+    /// cannot be preserved globally across hot and cold storage.
+    pub fn validate_hot_cold_policy(
+        &self,
+        flush_enabled: bool,
+        allow_fk_hot_only: bool,
+    ) -> ConstraintResult<()> {
+        if !flush_enabled {
+            return Ok(());
+        }
+        self.validate_unique_constraints()?;
+        self.validate_foreign_keys(allow_fk_hot_only)?;
+        Ok(())
+    }
+
+    fn validate_unique_constraints(&self) -> ConstraintResult<()> {
+        if self.unique_constraints.is_empty() {
+            return Ok(());
+        }
+        let constraints = self
+            .unique_constraints
+            .iter()
+            .map(UniqueConstraintShape::display_label)
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(MigrationConstraintError::UnsupportedUniqueConstraints { constraints })
+    }
+
+    fn validate_foreign_keys(&self, allow_fk_hot_only: bool) -> ConstraintResult<()> {
+        if self.foreign_keys.is_empty() || allow_fk_hot_only {
+            return Ok(());
+        }
+        let foreign_keys = self
+            .foreign_keys
+            .iter()
+            .map(ForeignKeyShape::display_label)
+            .collect::<Vec<_>>()
+            .join("; ");
+        Err(MigrationConstraintError::ForeignKeyRequiresHotOnlyOverride { foreign_keys })
+    }
 }
 
 /// Effective FK policy recorded by validation.
@@ -209,6 +317,8 @@ pub struct MigrationValidationInput {
     pub check_constraints: Vec<String>,
     /// Not-null columns to preserve.
     pub not_null_columns: Vec<String>,
+    /// Non-primary-key unique constraints on this table.
+    pub unique_constraints: Vec<UniqueConstraintShape>,
     /// Foreign keys involving this table.
     pub foreign_keys: Vec<ForeignKeyShape>,
 }
@@ -229,6 +339,7 @@ impl MigrationValidationInput {
             indexes: Vec::new(),
             check_constraints: Vec::new(),
             not_null_columns: vec!["id".to_string()],
+            unique_constraints: Vec::new(),
             foreign_keys: Vec::new(),
         }
     }
@@ -244,6 +355,11 @@ impl MigrationValidationInput {
         self.validate_columns()?;
         self.validate_indexes()?;
         self.validate_scope_and_storage()?;
+        ManageTableConstraintsCatalog {
+            unique_constraints: self.unique_constraints.clone(),
+            foreign_keys: self.foreign_keys.clone(),
+        }
+        .validate_hot_cold_policy(self.flush_enabled, self.allow_fk_hot_only)?;
         let fk_policy = self.validate_fk_policy()?;
 
         let indexed_columns = self
@@ -343,14 +459,6 @@ impl MigrationValidationInput {
     }
 
     fn validate_fk_policy(&self) -> ConstraintResult<FkPolicy> {
-        if !fk_policy_allowed(
-            !self.foreign_keys.is_empty(),
-            self.flush_enabled,
-            self.allow_fk_hot_only,
-        ) {
-            return Err(MigrationConstraintError::ForeignKeyRequiresHotOnlyOverride);
-        }
-
         Ok(if self.foreign_keys.is_empty() {
             FkPolicy::None
         } else if self.flush_enabled {

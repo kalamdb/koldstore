@@ -510,6 +510,85 @@ SELECT count(*) FROM activated
     })
 }
 
+/// Plans insertion of a completed empty-table migration backfill job.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_completed_empty_migration_job() -> Result<SqlStatement, MigrationJobError> {
+    SqlStatement::write(
+        "insert completed empty migration job",
+        r#"
+INSERT INTO koldstore.jobs (
+    id,
+    table_oid,
+    scope_key,
+    job_type,
+    status,
+    phase,
+    priority,
+    rows_processed,
+    payload,
+    last_heartbeat_at,
+    updated_at
+)
+VALUES (
+    $1::uuid,
+    $2::oid,
+    '',
+    'migrate_backfill',
+    'completed',
+    'finished',
+    100,
+    0,
+    jsonb_build_object(
+        'phase', 'finished',
+        'table_name', $3::text,
+        'table_type', $4::text,
+        'storage_id', $5::uuid,
+        'scope_column', $6::text,
+        'processed_rows', 0
+    ),
+    now(),
+    now()
+)
+"#,
+    )
+    .map_err(|error| MigrationJobError::Spi(error.to_string()))
+}
+
+/// Plans completion of an inline migration backfill job.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_complete_migration_backfill_job() -> Result<SqlStatement, MigrationJobError> {
+    SqlStatement::write(
+        "complete migration backfill job",
+        r#"
+UPDATE koldstore.jobs
+SET status = 'completed',
+    phase = 'finished',
+    rows_processed = $3::bigint,
+    batches_completed = GREATEST(batches_completed, CASE WHEN $3::bigint > 0 THEN 1 ELSE 0 END),
+    payload = jsonb_set(
+        jsonb_set(payload, '{phase}', '"finished"'::jsonb, true),
+        '{processed_rows}',
+        to_jsonb($3::bigint),
+        true
+    ),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    last_heartbeat_at = now(),
+    updated_at = now()
+WHERE id = $1::uuid
+  AND table_oid = $2::oid
+  AND job_type = 'migrate_backfill'
+"#,
+    )
+    .map_err(|error| MigrationJobError::Spi(error.to_string()))
+}
+
 fn normalized_table_name(table: &QualifiedTableName) -> String {
     match table.schema.as_deref() {
         Some(schema) => format!("{schema}.{}", table.name),

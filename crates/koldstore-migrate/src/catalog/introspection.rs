@@ -3,10 +3,14 @@
 //! Owns read-only catalog probe statements and JSON decoding helpers used when
 //! planning existing-table migration. SPI execution stays in `pg_koldstore`.
 
+use serde::Deserialize;
 use thiserror::Error;
 
 use koldstore_common::SqlStatement;
 
+use crate::constraints::{
+    FkDirection, ForeignKeyShape, ManageTableConstraintsCatalog, UniqueConstraintShape,
+};
 use crate::order::{CatalogColumn, CatalogPrimaryKey};
 use crate::plan::ExistingTableCatalog;
 use crate::register::{PrimaryKeyShapeCatalogRow, RegistryError};
@@ -24,6 +28,9 @@ pub enum IntrospectionError {
     /// Indexed-column catalog JSON could not be decoded.
     #[error("indexed column catalog decode failed: {0}")]
     IndexedColumnDecode(String),
+    /// Constraint catalog JSON could not be decoded.
+    #[error("constraint catalog decode failed: {0}")]
+    ConstraintDecode(String),
     /// SQL statement metadata could not be prepared.
     #[error("{0}")]
     Sql(String),
@@ -156,6 +163,165 @@ FROM ranked
     .map_err(Into::into)
 }
 
+/// Plans the unique/FK constraint probe used by `koldstore.manage_table`.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be prepared.
+pub fn plan_manage_table_constraints_probe() -> MigrationResult<SqlStatement> {
+    SqlStatement::read(
+        "manage table constraints",
+        r#"
+SELECT jsonb_build_object(
+    'unique_constraints', COALESCE((
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'name', entries.constraint_name,
+                'columns', entries.columns
+            )
+            ORDER BY entries.constraint_name
+        )
+        FROM (
+            SELECT
+                c.conname AS constraint_name,
+                jsonb_agg(a.attname ORDER BY key_position.ordinality) AS columns
+            FROM pg_constraint c
+            JOIN unnest(c.conkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
+            JOIN pg_attribute a
+              ON a.attrelid = c.conrelid
+             AND a.attnum = key_position.attnum
+            WHERE c.conrelid = $1::oid
+              AND c.contype = 'u'
+            GROUP BY c.conname
+            UNION ALL
+            SELECT
+                idx.relname AS constraint_name,
+                jsonb_agg(a.attname ORDER BY key_position.ordinality) AS columns
+            FROM pg_index i
+            JOIN pg_class idx ON idx.oid = i.indexrelid
+            JOIN unnest(i.indkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
+            JOIN pg_attribute a
+              ON a.attrelid = i.indrelid
+             AND a.attnum = key_position.attnum
+            WHERE i.indrelid = $1::oid
+              AND i.indisunique
+              AND NOT i.indisprimary
+              AND i.indexprs IS NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_constraint c
+                  WHERE c.conindid = i.indexrelid
+              )
+            GROUP BY idx.relname
+        ) AS entries
+    ), '[]'::jsonb),
+    'foreign_keys', COALESCE((
+        SELECT jsonb_agg(entry ORDER BY entry->>'name')
+        FROM (
+            SELECT jsonb_build_object(
+                'name', c.conname,
+                'direction', 'outbound',
+                'columns', (
+                    SELECT COALESCE(
+                        jsonb_agg(a.attname ORDER BY key_position.ordinality),
+                        '[]'::jsonb
+                    )
+                    FROM unnest(c.conkey) WITH ORDINALITY AS key_position(attnum, ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.conrelid
+                     AND a.attnum = key_position.attnum
+                ),
+                'related_relation', format('%I.%I', ref_ns.nspname, ref_class.relname)
+            ) AS entry
+            FROM pg_constraint c
+            JOIN pg_class ref_class ON ref_class.oid = c.confrelid
+            JOIN pg_namespace ref_ns ON ref_ns.oid = ref_class.relnamespace
+            WHERE c.conrelid = $1::oid
+              AND c.contype = 'f'
+            UNION ALL
+            SELECT jsonb_build_object(
+                'name', c.conname,
+                'direction', 'inbound',
+                'columns', (
+                    SELECT COALESCE(
+                        jsonb_agg(a.attname ORDER BY key_position.ordinality),
+                        '[]'::jsonb
+                    )
+                    FROM unnest(c.conkey) WITH ORDINALITY AS key_position(attnum, ordinality)
+                    JOIN pg_attribute a
+                      ON a.attrelid = c.conrelid
+                     AND a.attnum = key_position.attnum
+                ),
+                'related_relation', format('%I.%I', src_ns.nspname, src_class.relname)
+            ) AS entry
+            FROM pg_constraint c
+            JOIN pg_class src_class ON src_class.oid = c.conrelid
+            JOIN pg_namespace src_ns ON src_ns.oid = src_class.relnamespace
+            WHERE c.confrelid = $1::oid
+              AND c.contype = 'f'
+        ) AS fk_entries
+    ), '[]'::jsonb)
+)::text
+"#,
+    )
+    .map_err(|error| IntrospectionError::Sql(error.to_string()))
+    .map_err(Into::into)
+}
+
+/// Decodes unique/FK constraint probe JSON.
+///
+/// # Errors
+///
+/// Returns an error when JSON decoding fails.
+pub fn decode_manage_table_constraints_catalog(
+    json: &str,
+) -> Result<ManageTableConstraintsCatalog, IntrospectionError> {
+    #[derive(Deserialize)]
+    struct ConstraintWire {
+        name: String,
+        columns: Vec<String>,
+        #[serde(default)]
+        direction: Option<String>,
+        #[serde(default)]
+        related_relation: Option<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct CatalogWire {
+        #[serde(default)]
+        unique_constraints: Vec<ConstraintWire>,
+        #[serde(default)]
+        foreign_keys: Vec<ConstraintWire>,
+    }
+
+    let wire = serde_json::from_str::<CatalogWire>(json)
+        .map_err(|error| IntrospectionError::ConstraintDecode(error.to_string()))?;
+
+    Ok(ManageTableConstraintsCatalog {
+        unique_constraints: wire
+            .unique_constraints
+            .into_iter()
+            .map(|entry| UniqueConstraintShape {
+                name: entry.name,
+                columns: entry.columns,
+            })
+            .collect(),
+        foreign_keys: wire
+            .foreign_keys
+            .into_iter()
+            .map(|entry| ForeignKeyShape {
+                name: entry.name,
+                direction: match entry.direction.as_deref() {
+                    Some("inbound") => FkDirection::Inbound,
+                    _ => FkDirection::Outbound,
+                },
+                columns: entry.columns,
+                related_relation: entry.related_relation,
+            })
+            .collect(),
+    })
+}
+
 /// Decodes catalog probe JSON into migration planning metadata.
 ///
 /// # Errors
@@ -211,6 +377,34 @@ pub type PrimaryKeyShapeCatalogRows = Vec<PrimaryKeyShapeCatalogRow>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decodes_manage_table_constraint_catalog_payload() {
+        let catalog = decode_manage_table_constraints_catalog(
+            r#"{
+                "unique_constraints": [
+                    {"name": "users_email_key", "columns": ["email"]}
+                ],
+                "foreign_keys": [
+                    {
+                        "name": "items_user_id_fkey",
+                        "direction": "outbound",
+                        "columns": ["user_id"],
+                        "related_relation": "public.users"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(catalog.unique_constraints.len(), 1);
+        assert_eq!(catalog.unique_constraints[0].columns, vec!["email"]);
+        assert_eq!(catalog.foreign_keys[0].direction, FkDirection::Outbound);
+        assert_eq!(
+            catalog.foreign_keys[0].related_relation.as_deref(),
+            Some("public.users")
+        );
+    }
 
     #[test]
     fn decodes_empty_catalog_payloads() {

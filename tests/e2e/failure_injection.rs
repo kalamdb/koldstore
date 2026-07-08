@@ -41,7 +41,7 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
             )
             .await?;
 
-        db.insert_pending_flush_job(&table.relation, "").await?;
+        db.insert_pending_flush_job(&table.relation).await?;
         assert_eq!(db.flush_table(&table.relation).await?, 0);
 
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 32);

@@ -27,8 +27,8 @@ async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<(
         let table = db.create_indexed_items_table("job_items", 16).await?;
         db.manage_shared(&table.relation, "id").await?;
 
-        let first_insert = db.insert_pending_flush_job(&table.relation, "").await?;
-        let duplicate_insert = db.insert_pending_flush_job(&table.relation, "").await?;
+        let first_insert = db.insert_pending_flush_job(&table.relation).await?;
+        let duplicate_insert = db.insert_pending_flush_job(&table.relation).await?;
         assert_eq!(first_insert, 1);
         assert_eq!(duplicate_insert, 0);
         assert_eq!(

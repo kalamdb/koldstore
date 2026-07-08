@@ -7,11 +7,12 @@ use koldstore_migrate::rehydrate::DemigrateOptions;
 #[cfg(feature = "pg")]
 use koldstore_migrate::{introspection, DemigrateTableRequest, MigrateTableRequest};
 #[cfg(feature = "pg")]
-use serde::Deserialize;
-#[cfg(feature = "pg")]
 use uuid::Uuid;
 
 /// Manages a heap table with structured hot/cold flush settings.
+///
+/// SQL contract:
+/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 500, table_type default 'shared', scope_column default null, order_column default null, compression default null)`.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
@@ -73,6 +74,8 @@ fn manage_table_pg_impl(
     let primary_key_shape = primary_key_shape(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let options = migration_options(order_column, compression, structured_flush);
+    validate_manage_table_constraints(table_oid_u32, &options)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let job_id = Uuid::new_v4();
     let request = MigrateTableRequest {
         table_name: relation,
@@ -243,6 +246,32 @@ pub(crate) fn migration_catalog(
 }
 
 #[cfg(feature = "pg")]
+fn validate_manage_table_constraints(
+    table_oid: u32,
+    options: &ManageTableOptions,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    if !options.flush_enabled() {
+        return Ok(());
+    }
+
+    let json = pgrx::Spi::get_one_with_args::<String>(
+        &introspection::plan_manage_table_constraints_probe()
+            .map_err(|error| error.to_string())?
+            .sql,
+        &[DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid))],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or_else(|| "{\"unique_constraints\":[],\"foreign_keys\":[]}".to_string());
+    let catalog = introspection::decode_manage_table_constraints_catalog(&json)
+        .map_err(|error| error.to_string())?;
+    catalog
+        .validate_hot_cold_policy(options.flush_enabled(), options.allow_fk_hot_only())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
 fn primary_key_shape(table_oid: u32) -> Result<koldstore_common::PrimaryKeyShape, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -276,11 +305,40 @@ struct SchemaRegistrationInput<'a> {
 }
 
 #[cfg(feature = "pg")]
+fn execute_schema_registry_insert(
+    plan: &koldstore_migrate::register::SchemaRegistryPlan,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    let prepared = &plan.metadata;
+    pgrx::Spi::run_with_args(
+        &plan.statement.sql,
+        &[
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*plan.schema_id.as_bytes())),
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(prepared.table_oid)),
+            DatumWithOid::from(i32::try_from(prepared.version).unwrap_or(i32::MAX)),
+            DatumWithOid::from(prepared.active),
+            DatumWithOid::from(prepared.table_type.as_str()),
+            DatumWithOid::from(pgrx::JsonB(prepared.columns.clone())),
+            DatumWithOid::from(pgrx::JsonB(prepared.primary_key.clone())),
+            DatumWithOid::from(prepared.scope_column.as_deref()),
+            DatumWithOid::from(prepared.mirror_relation.as_deref().unwrap_or("")),
+            DatumWithOid::from(pgrx::JsonB(prepared.primary_key_shape.clone())),
+            DatumWithOid::from(prepared.initialization_state.as_str()),
+            DatumWithOid::from(pgrx::JsonB(prepared.indexed_columns.clone())),
+            DatumWithOid::from(pgrx::JsonB(prepared.type_matrix.clone())),
+            DatumWithOid::from(pgrx::JsonB(prepared.options.clone())),
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*prepared.storage_id.as_bytes())),
+        ],
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
 fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), String> {
     use koldstore_migrate::register::{
         plan_schema_registry_insert_with_id, schema_columns_from_catalog, RegistrationMetadata,
     };
-    use pgrx::datum::DatumWithOid;
 
     let options = input
         .options
@@ -303,47 +361,11 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
     };
     let plan = plan_schema_registry_insert_with_id(&metadata, Uuid::new_v4())
         .map_err(|error| error.to_string())?;
-    let prepared = &plan.metadata;
-
-    pgrx::Spi::run_with_args(
-        &plan.statement.sql,
-        &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*plan.schema_id.as_bytes())),
-            DatumWithOid::from(pgrx::pg_sys::Oid::from(prepared.table_oid)),
-            DatumWithOid::from(i32::try_from(prepared.version).unwrap_or(i32::MAX)),
-            DatumWithOid::from(prepared.active),
-            DatumWithOid::from(prepared.table_type.as_str()),
-            DatumWithOid::from(pgrx::JsonB(prepared.columns.clone())),
-            DatumWithOid::from(pgrx::JsonB(prepared.primary_key.clone())),
-            DatumWithOid::from(prepared.scope_column.as_deref()),
-            DatumWithOid::from(prepared.mirror_relation.as_deref().unwrap_or("")),
-            DatumWithOid::from(pgrx::JsonB(prepared.primary_key_shape.clone())),
-            DatumWithOid::from(prepared.initialization_state.as_str()),
-            DatumWithOid::from(pgrx::JsonB(prepared.indexed_columns.clone())),
-            DatumWithOid::from(pgrx::JsonB(prepared.type_matrix.clone())),
-            DatumWithOid::from(pgrx::JsonB(prepared.options.clone())),
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*prepared.storage_id.as_bytes())),
-        ],
-    )
-    .map_err(|error| error.to_string())?;
+    execute_schema_registry_insert(&plan)?;
     let table_oid = pgrx::pg_sys::Oid::from(input.table_oid);
     crate::catalog::cache::invalidate_table(table_oid);
     crate::spi::invalidate_all_prepared_plans();
     Ok(())
-}
-
-#[cfg(feature = "pg")]
-#[derive(Debug, Deserialize)]
-struct ActiveSchemaRefreshContext {
-    version: i32,
-    table_type: String,
-    storage_id: String,
-    scope_column: Option<String>,
-    mirror_relation: String,
-    primary_key: Vec<String>,
-    columns: Vec<koldstore_schema::SchemaColumn>,
-    indexed_columns: Vec<String>,
-    options: serde_json::Value,
 }
 
 #[cfg(feature = "pg")]
@@ -393,33 +415,13 @@ pub(crate) fn refresh_active_schema_if_changed(
 #[cfg(feature = "pg")]
 fn active_schema_refresh_context(
     table_oid: pgrx::pg_sys::Oid,
-) -> Result<Option<ActiveSchemaRefreshContext>, String> {
+) -> Result<Option<koldstore_migrate::ActiveSchemaRefreshContext>, String> {
     use pgrx::datum::DatumWithOid;
 
-    let json = pgrx::Spi::get_one_with_args::<String>(
-        r#"
-SELECT jsonb_build_object(
-    'version', version,
-    'table_type', table_type,
-    'storage_id', storage_id::text,
-    'scope_column', scope_column,
-    'mirror_relation', mirror_relation::text,
-    'primary_key', primary_key,
-    'columns', columns,
-    'indexed_columns', indexed_columns,
-    'options', options
-)::text
-FROM koldstore.schemas
-WHERE table_oid = $1::oid
-  AND active
-  AND initialization_state = 'complete'
-ORDER BY version DESC
-LIMIT 1
-"#,
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map_err(|error| error.to_string())?;
-
+    let statement = koldstore_catalog::queries::plan_active_schema_refresh_context_json()
+        .map_err(|error| error.to_string())?;
+    let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?;
     json.map(|json| serde_json::from_str(&json).map_err(|error| error.to_string()))
         .transpose()
 }
@@ -428,98 +430,20 @@ LIMIT 1
 fn insert_refreshed_schema_version(
     table_oid: pgrx::pg_sys::Oid,
     table_oid_u32: u32,
-    active: &ActiveSchemaRefreshContext,
+    active: &koldstore_migrate::ActiveSchemaRefreshContext,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     primary_key_shape: &koldstore_common::PrimaryKeyShape,
 ) -> Result<(), String> {
-    use koldstore_migrate::register::{capture_type_matrix, schema_columns_from_catalog};
+    use koldstore_migrate::{plan_schema_refresh, registration_metadata_for_refresh};
     use pgrx::datum::DatumWithOid;
 
-    let next_version = active
-        .version
-        .checked_add(1)
-        .ok_or_else(|| "schema version overflow".to_string())?;
-    let columns = schema_columns_from_catalog(&catalog.columns);
-    let type_matrix = capture_type_matrix(&columns);
-    let storage_id =
-        Uuid::parse_str(&active.storage_id).map_err(|error| format!("storage id: {error}"))?;
-
-    pgrx::Spi::connect_mut(|client| {
-        client
-            .update(
-                "UPDATE koldstore.schemas SET active = false, updated_at = now() WHERE table_oid = $1::oid AND active",
-                None,
-                &[DatumWithOid::from(table_oid)],
-            )
-            .map_err(|error| error.to_string())?;
-        client
-            .update(
-                r#"
-INSERT INTO koldstore.schemas (
-    id,
-    table_oid,
-    version,
-    active,
-    table_type,
-    columns,
-    primary_key,
-    scope_column,
-    mirror_relation,
-    primary_key_shape,
-    initialization_state,
-    indexed_columns,
-    type_matrix,
-    options,
-    storage_id
-)
-VALUES (
-    $1::uuid,
-    $2::oid,
-    $3::integer,
-    true,
-    $4::text,
-    $5::jsonb,
-    $6::jsonb,
-    $7::name,
-    $8::text::regclass,
-    $9::jsonb,
-    'complete',
-    $10::jsonb,
-    $11::jsonb,
-    $12::jsonb,
-    $13::uuid
-)
-"#,
-                None,
-                &[
-                    DatumWithOid::from(pgrx::Uuid::from_bytes(*Uuid::new_v4().as_bytes())),
-                    DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid_u32)),
-                    DatumWithOid::from(next_version),
-                    DatumWithOid::from(active.table_type.as_str()),
-                    DatumWithOid::from(pgrx::JsonB(
-                        serde_json::to_value(&columns).map_err(|error| error.to_string())?,
-                    )),
-                    DatumWithOid::from(pgrx::JsonB(serde_json::json!(
-                        catalog.primary_key.columns
-                    ))),
-                    DatumWithOid::from(active.scope_column.as_deref()),
-                    DatumWithOid::from(active.mirror_relation.as_str()),
-                    DatumWithOid::from(pgrx::JsonB(
-                        serde_json::to_value(primary_key_shape)
-                            .map_err(|error| error.to_string())?,
-                    )),
-                    DatumWithOid::from(pgrx::JsonB(serde_json::json!(
-                        catalog.indexed_columns
-                    ))),
-                    DatumWithOid::from(pgrx::JsonB(type_matrix)),
-                    DatumWithOid::from(pgrx::JsonB(active.options.clone())),
-                    DatumWithOid::from(pgrx::Uuid::from_bytes(*storage_id.as_bytes())),
-                ],
-            )
-            .map_err(|error| error.to_string())?;
-        Ok::<(), String>(())
-    })
-    .map_err(|error| error.to_string())?;
+    let metadata =
+        registration_metadata_for_refresh(table_oid_u32, active, catalog, primary_key_shape);
+    let refresh = plan_schema_refresh(metadata, active.version, Uuid::new_v4())
+        .map_err(|error| error.to_string())?;
+    crate::spi::update(&refresh.deactivate, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?;
+    execute_schema_registry_insert(&refresh.insert)?;
     Ok(())
 }
 
@@ -532,45 +456,13 @@ fn insert_completed_empty_migration_job(
     scope_column: Option<&str>,
     table: &koldstore_migrate::QualifiedTableName,
 ) -> Result<(), String> {
+    use koldstore_migrate::jobs::plan_completed_empty_migration_job;
     use pgrx::datum::DatumWithOid;
 
     let table_name = table.quoted();
-    pgrx::Spi::run_with_args(
-        r#"
-INSERT INTO koldstore.jobs (
-    id,
-    table_oid,
-    scope_key,
-    job_type,
-    status,
-    phase,
-    priority,
-    rows_processed,
-    payload,
-    last_heartbeat_at,
-    updated_at
-)
-VALUES (
-    $1::uuid,
-    $2::oid,
-    '',
-    'migrate_backfill',
-    'completed',
-    'finished',
-    100,
-    0,
-    jsonb_build_object(
-        'phase', 'finished',
-        'table_name', $3::text,
-        'table_type', $4::text,
-        'storage_id', $5::uuid,
-        'scope_column', $6::text,
-        'processed_rows', 0
-    ),
-    now(),
-    now()
-)
-"#,
+    let statement = plan_completed_empty_migration_job().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
         &[
             DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
             DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
@@ -580,7 +472,8 @@ VALUES (
             DatumWithOid::from(scope_column),
         ],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[cfg(feature = "pg")]
@@ -602,36 +495,20 @@ fn enqueue_migration_job(
 
 #[cfg(feature = "pg")]
 fn complete_migration_job(job_id: Uuid, table_oid: u32, processed_rows: i64) -> Result<(), String> {
+    use koldstore_migrate::jobs::plan_complete_migration_backfill_job;
     use pgrx::datum::DatumWithOid;
 
-    pgrx::Spi::run_with_args(
-        r#"
-UPDATE koldstore.jobs
-SET status = 'completed',
-    phase = 'finished',
-    rows_processed = $3::bigint,
-    batches_completed = GREATEST(batches_completed, CASE WHEN $3::bigint > 0 THEN 1 ELSE 0 END),
-    payload = jsonb_set(
-        jsonb_set(payload, '{phase}', '"finished"'::jsonb, true),
-        '{processed_rows}',
-        to_jsonb($3::bigint),
-        true
-    ),
-    lease_owner = NULL,
-    lease_expires_at = NULL,
-    last_heartbeat_at = now(),
-    updated_at = now()
-WHERE id = $1::uuid
-  AND table_oid = $2::oid
-  AND job_type = 'migrate_backfill'
-"#,
+    let statement = plan_complete_migration_backfill_job().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
         &[
             DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
             DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
             DatumWithOid::from(processed_rows),
         ],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[cfg(feature = "pg")]
@@ -680,12 +557,15 @@ fn run_existing_table_mirror_initialization_inline(
 }
 
 /// Unmanages a managed table through the SQL API.
+///
+/// SQL contract:
+/// `koldstore.unmanage_table(table_name regclass, rehydrate boolean default null, drop_cold boolean default null)`.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "unmanage_table", schema = "koldstore", security_definer)]
 pub fn unmanage_table_pg(
     table_name: pgrx::pg_sys::Oid,
-    rehydrate: Option<bool>,
-    drop_cold: Option<bool>,
+    rehydrate: pgrx::default!(Option<bool>, "NULL"),
+    drop_cold: pgrx::default!(Option<bool>, "NULL"),
 ) -> i64 {
     let options = DemigrateTableRequest {
         table_name: String::new(),

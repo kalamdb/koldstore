@@ -1,35 +1,46 @@
-//! Flush orchestration: prepare, batch write, and finalize.
+//! Flush orchestration SPI adapter for `koldstore.flush_table`.
 
 use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
 use koldstore_catalog::ManagedTableSnapshot;
+use koldstore_flush::{
+    manifest_paths, max_rows_per_file_from_policy, validate_flush_row_selection, FlushStats,
+    TableFlushBatchOutcome, TableFlushPreparedContext,
+};
 
 use super::jobs::{
     ensure_flush_job, mark_flush_job_completed, mark_flush_job_failed, mark_flush_job_running,
 };
 use super::segments::{
-    manifest_from_active_cold_segments, next_flush_batch_number, upsert_manifest_row,
-    write_flush_segment,
+    manifest_from_active_cold_segments, next_flush_batch_number, prune_flushed_hot_rows,
+    upsert_manifest_row, write_flush_segment,
 };
-use super::stats::{active_flush_policy, resolve_flush_stats};
+use super::stats::{flush_stats_for_rows, resolve_flush_stats};
 use super::write::{chunk_flush_write_input, flush_write_input, FlushWriteInput};
 
 pub(super) struct FlushPreparedContext {
-    pub job_id: uuid::Uuid,
-    pub force: bool,
-    pub relation: RelationContext,
-    pub storage: FlushStorageContext,
-    pub snapshot: ManagedTableSnapshot,
-    pub catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
-    pub max_rows_per_file: usize,
+    job_id: uuid::Uuid,
+    force: bool,
+    relation: RelationContext,
+    storage: FlushStorageContext,
+    snapshot: ManagedTableSnapshot,
+    catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
+    max_rows_per_file: usize,
 }
 
-pub(super) struct FlushBatchOutcome {
-    pub total_rows_flushed: i64,
-    pub last_max_seq: i64,
-    pub last_max_commit_seq: i64,
-    pub manifest: koldstore_manifest::Manifest,
-    pub manifest_path: String,
-    pub absolute_manifest_path: std::path::PathBuf,
+impl FlushPreparedContext {
+    fn as_table_flush_context(&self) -> TableFlushPreparedContext {
+        TableFlushPreparedContext {
+            job_id: self.job_id,
+            force: self.force,
+            namespace: self.relation.namespace.clone(),
+            table_name: self.relation.name.clone(),
+            base_path: self.storage.base_path.clone(),
+            schema_version: self.storage.schema_version,
+            compression: self.storage.compression.clone(),
+            primary_key_columns: self.snapshot.primary_key_columns.clone(),
+            max_rows_per_file: self.max_rows_per_file,
+        }
+    }
 }
 
 pub(super) fn prepare_flush_context(
@@ -44,10 +55,9 @@ pub(super) fn prepare_flush_context(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let catalog = crate::sql::migrate_pg::migration_catalog(table_oid.to_u32())?;
-    let max_rows_per_file = active_flush_policy(table_oid)?
-        .and_then(|policy| policy.max_rows_per_file)
-        .map(|value| usize::try_from(value).unwrap_or(usize::MAX))
-        .unwrap_or(usize::MAX);
+    let max_rows_per_file = max_rows_per_file_from_policy(
+        super::stats::active_flush_policy(table_oid)?.and_then(|policy| policy.max_rows_per_file),
+    );
     Ok(FlushPreparedContext {
         job_id,
         force,
@@ -62,7 +72,7 @@ pub(super) fn prepare_flush_context(
 pub(super) fn build_flush_write_input(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
-    stats: &super::stats::FlushStats,
+    stats: &FlushStats,
 ) -> Result<FlushWriteInput, String> {
     crate::merge_scan::pg::with_custom_scan_disabled(|| {
         flush_write_input(
@@ -79,17 +89,20 @@ pub(super) fn write_flush_batches(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
     write_input: &FlushWriteInput,
-) -> Result<FlushBatchOutcome, String> {
-    let prefix = format!("{}/{}", ctx.relation.namespace, ctx.relation.name);
-    let manifest_path = format!("{prefix}/manifest.json");
-    let absolute_manifest_path = std::path::Path::new(&ctx.storage.base_path).join(&manifest_path);
+) -> Result<TableFlushBatchOutcome, String> {
+    let table_ctx = ctx.as_table_flush_context();
+    let (manifest_path, absolute_manifest_path) = manifest_paths(
+        &table_ctx.namespace,
+        &table_ctx.table_name,
+        &table_ctx.base_path,
+    );
     let mut batch_number = next_flush_batch_number(table_oid)?;
     let mut total_rows_flushed = 0_i64;
     let mut last_max_seq = 0_i64;
     let mut last_max_commit_seq = 0_i64;
 
     for chunk in chunk_flush_write_input(write_input, ctx.max_rows_per_file) {
-        let chunk_stats = super::stats::flush_stats_for_rows(&chunk.rows)?;
+        let chunk_stats = flush_stats_for_rows(&chunk.rows)?;
         write_flush_segment(
             table_oid,
             &ctx.relation,
@@ -105,6 +118,11 @@ pub(super) fn write_flush_batches(
         last_max_commit_seq = chunk_stats.max_commit_seq;
         batch_number = batch_number.saturating_add(1);
     }
+    prune_flushed_hot_rows(
+        table_oid,
+        &ctx.snapshot.primary_key_columns,
+        &write_input.cleanup_rows,
+    )?;
     let manifest = manifest_from_active_cold_segments(
         table_oid,
         &ctx.relation,
@@ -112,7 +130,7 @@ pub(super) fn write_flush_batches(
         ctx.storage.schema_version,
     )?;
 
-    Ok(FlushBatchOutcome {
+    Ok(TableFlushBatchOutcome {
         total_rows_flushed,
         last_max_seq,
         last_max_commit_seq,
@@ -125,7 +143,7 @@ pub(super) fn write_flush_batches(
 pub(super) fn finalize_flush(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
-    outcome: &FlushBatchOutcome,
+    outcome: &TableFlushBatchOutcome,
 ) -> Result<(), String> {
     if let Some(parent) = outcome.absolute_manifest_path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
@@ -189,14 +207,7 @@ fn flush_prepared_table(
     }
 
     let write_input = build_flush_write_input(table_oid, ctx, &stats)?;
-    if i64::try_from(write_input.rows.len()).map_err(|error| error.to_string())? != stats.row_count
-    {
-        return Err(format!(
-            "flush row selection mismatch: stats reported {} rows but writer built {} rows",
-            stats.row_count,
-            write_input.rows.len()
-        ));
-    }
+    validate_flush_row_selection(stats.row_count, write_input.rows.len())?;
 
     let outcome = write_flush_batches(table_oid, ctx, &write_input)?;
     finalize_flush(table_oid, ctx, &outcome)

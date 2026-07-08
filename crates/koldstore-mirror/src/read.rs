@@ -73,6 +73,34 @@ LIMIT ${limit_param}::integer"#,
     ))
 }
 
+/// Plans mirror policy rows used by flush candidate selection.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied.
+pub fn plan_mirror_policy_rows(
+    mirror_table: &MirrorRelation,
+    primary_key: &[&str],
+) -> MirrorResult<MirrorStatement> {
+    let pk_json = pk_json_projection(primary_key)?;
+    Ok(MirrorStatement::read(
+        "select mirror policy rows",
+        format!(
+            r#"
+SELECT COALESCE(jsonb_agg(
+    jsonb_build_object(
+        'pk_json', jsonb_build_object({pk_json}),
+        'seq', mirror."seq"
+    )
+    ORDER BY mirror."seq"
+)::text, '[]')
+FROM {mirror} AS mirror
+"#,
+            mirror = mirror_table.quoted()
+        ),
+    ))
+}
+
 /// Plans aggregate stats over one mirror table.
 #[must_use]
 pub fn plan_mirror_stats(mirror_table: &MirrorRelation) -> MirrorStatement {

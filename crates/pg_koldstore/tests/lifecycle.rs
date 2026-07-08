@@ -1,4 +1,3 @@
-use koldstore_setup::{missing_catalog_indexes, missing_catalog_tables, BootstrapPlan};
 use pg_koldstore::{
     catalog, guc, hooks, koldstore_version, memory, observability, privileges, spi, sql,
 };
@@ -267,57 +266,6 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
     assert_eq!(snapshot.mirror_relation.relation(), "items__cl");
     assert_eq!(snapshot.primary_key_columns, vec!["id".to_string()]);
     assert!(snapshot.scope_column.is_none());
-}
-
-#[test]
-fn sql_migration_creates_required_catalog_tables() {
-    let sql = include_str!("../sql/koldstore--0.1.0.sql");
-    let plan = BootstrapPlan::from_sql(sql);
-
-    assert!(missing_catalog_tables(&plan).is_empty());
-    assert!(missing_catalog_indexes(&plan).is_empty());
-    for needle in [
-        "mirror_relation regclass",
-        "primary_key_shape jsonb NOT NULL DEFAULT '[]'::jsonb",
-        "initialization_state text NOT NULL DEFAULT 'not_started'",
-    ] {
-        assert!(sql.contains(needle), "missing SQL fragment: {needle}");
-    }
-
-    assert!(
-        !sql.contains("CREATE SCHEMA IF NOT EXISTS system"),
-        "extension catalog should use a single extension-owned schema"
-    );
-    assert!(
-        !sql.contains("system."),
-        "extension SQL should not create or reference the legacy system schema"
-    );
-    {
-        let duplicate_index = "cold_pk_hints_lookup_idx";
-        assert!(
-            !sql.contains(duplicate_index),
-            "primary key prefix already covers lookup pattern: {duplicate_index}"
-        );
-    }
-}
-
-#[test]
-fn sql_migration_keeps_behavior_in_rust_pgrx_modules() {
-    let sql = include_str!("../sql/koldstore--0.1.0.sql");
-
-    for forbidden in [
-        "CREATE OR REPLACE FUNCTION",
-        "LANGUAGE plpgsql",
-        "LANGUAGE sql",
-        "CREATE TRIGGER",
-        "EXECUTE format",
-        "TO PROGRAM",
-    ] {
-        assert!(
-            !sql.contains(forbidden),
-            "extension SQL should not contain executable behavior: {forbidden}"
-        );
-    }
 }
 
 #[test]

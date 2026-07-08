@@ -10,6 +10,8 @@ pub mod backfill;
 pub mod capture;
 #[path = "validation/constraints.rs"]
 pub mod constraints;
+#[path = "workflow/drop_table.rs"]
+pub mod drop_table;
 #[path = "catalog/introspection.rs"]
 pub mod introspection;
 pub mod jobs;
@@ -21,6 +23,8 @@ pub mod mirror;
 pub mod order;
 #[path = "workflow/plan.rs"]
 pub mod plan;
+#[path = "catalog/refresh.rs"]
+pub mod refresh;
 #[path = "catalog/register.rs"]
 pub mod register;
 #[path = "workflow/rehydrate.rs"]
@@ -36,6 +40,10 @@ pub use capture::{
     plan_mirror_capture, plan_mirror_capture_teardown, MirrorCaptureError, MirrorCapturePlan,
     MirrorCaptureResult,
 };
+pub use drop_table::{
+    plan_drop_table_cleanup, DropTableCleanupError, DropTableCleanupOutcome, DropTableCleanupPlan,
+    DropTableCleanupPolicy,
+};
 pub use koldstore_common::{FlushPolicy, ManageTableOptions, QualifiedTableName};
 pub use mirror::{
     mirror_relation_for_source, plan_change_log_mirror, plan_change_log_mirror_from_columns,
@@ -44,5 +52,9 @@ pub use mirror::{
 pub use plan::{
     plan_empty_table_migration, plan_existing_table_migration, EmptyTableMigrationPlan,
     ExistingTableCatalog, ExistingTableMigrationPlan, MigrationTableContext,
+};
+pub use refresh::{
+    plan_schema_refresh, registration_metadata_for_refresh, ActiveSchemaRefreshContext,
+    SchemaRefreshPlan,
 };
 pub use request::{DemigrateTableRequest, MigrateTableRequest, MigrationError, MigrationResult};

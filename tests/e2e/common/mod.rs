@@ -29,7 +29,7 @@ pub use db::{ManagedTable, TestDb};
 pub use describe_table::{
     assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
 };
-pub use log::{log, log_always, log_step, log_step_always, verbose_enabled};
+pub use log::{log, log_always, log_step, log_step_always, verbose_enabled, StepGuard};
 pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
     relation_size, row_count, row_count_from_sql, RelationSize,

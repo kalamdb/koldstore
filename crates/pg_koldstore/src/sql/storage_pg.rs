@@ -4,6 +4,9 @@
 use koldstore_storage::registration::*;
 
 /// Registers or updates a storage backend from SQL.
+///
+/// SQL contract:
+/// `koldstore.register_storage(name, storage_type, base_path, credentials, config, shared_path_template, user_path_template)`.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg(
@@ -27,6 +30,9 @@ pub fn register_storage_pg(
 }
 
 /// Registers or updates a storage backend from SQL using default path templates.
+///
+/// SQL contract:
+/// `koldstore.register_storage(name, storage_type, base_path, credentials, config)`.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg_with_default_templates(
@@ -92,6 +98,8 @@ fn register_storage_pg_impl(
 }
 
 /// Rotates storage credentials from SQL without changing backend paths.
+///
+/// SQL contract: `koldstore.alter_storage_credentials(name, credentials)`.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(
     name = "alter_storage_credentials",
@@ -113,6 +121,8 @@ pub fn alter_storage_credentials_pg(name: &str, credentials: pgrx::JsonB) {
 }
 
 /// Alters storage location/configuration from SQL without direct catalog DML.
+///
+/// SQL contract: `koldstore.alter_storage_location(name, base_path, config)`.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(
     name = "alter_storage_location",

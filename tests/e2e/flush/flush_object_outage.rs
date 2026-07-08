@@ -39,7 +39,7 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
                 &[&db.storage_name, &blocking_path],
             )
             .await?;
-        db.insert_pending_flush_job(&table.relation, "").await?;
+        db.insert_pending_flush_job(&table.relation).await?;
 
         assert_eq!(db.flush_table(&table.relation).await?, 0);
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 20);

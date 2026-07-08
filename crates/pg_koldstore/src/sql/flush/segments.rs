@@ -1,34 +1,23 @@
-//! Parquet segment writes and catalog bookkeeping for flush.
+//! Parquet segment writes and catalog bookkeeping SPI adapters for flush.
 
 use koldstore_catalog::decode::FlushStorageContext;
 use koldstore_common::QualifiedTableName;
-use koldstore_flush::cleanup::plan_clean_schema_cleanup;
-use serde::Deserialize;
+use koldstore_flush::{
+    cleanup::plan_clean_schema_cleanup, manifest_from_catalog_rows, plan_flush_cold_segment_insert,
+    plan_flush_pk_hint_insert, plan_manifest_row_upsert, CatalogManifestSegmentRow,
+};
 
 use super::stats::FlushStats;
 use super::write::FlushWriteChunk;
 
-#[derive(Debug, Deserialize)]
-struct CatalogManifestSegment {
-    object_path: String,
-    batch_number: i32,
-    min_seq: i64,
-    max_seq: i64,
-    min_commit_seq: i64,
-    max_commit_seq: i64,
-    row_count: i64,
-    byte_size: i64,
-    schema_version: i32,
-    column_stats: serde_json::Value,
-}
-
 pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> {
-    pgrx::Spi::get_one_with_args::<i32>(
-        "SELECT COALESCE(max(batch_number), 0) + 1 FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = ''",
-        &[pgrx::datum::DatumWithOid::from(table_oid)],
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "batch number lookup returned no rows".to_string())
+    use pgrx::datum::DatumWithOid;
+
+    let statement = koldstore_catalog::queries::plan_next_flush_batch_number()
+        .map_err(|error| error.to_string())?;
+    crate::spi::select_one::<i32>(&statement, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "batch number lookup returned no rows".to_string())
 }
 
 pub(super) fn write_parquet_segment(
@@ -63,112 +52,23 @@ pub(super) fn manifest_from_active_cold_segments(
     snapshot: &koldstore_catalog::ManagedTableSnapshot,
     schema_version: i32,
 ) -> Result<koldstore_manifest::Manifest, String> {
-    let rows = active_cold_segments_for_manifest(table_oid)?;
-    let mut manifest = koldstore_manifest::Manifest::new_shared(
-        relation.namespace.clone(),
-        relation.name.clone(),
-        u32::try_from(schema_version).map_err(|error| error.to_string())?,
-    );
-    for row in rows {
-        manifest.append_segment(manifest_segment_from_catalog_row(relation, snapshot, row)?);
-    }
-    Ok(manifest)
-}
-
-fn active_cold_segments_for_manifest(
-    table_oid: pgrx::pg_sys::Oid,
-) -> Result<Vec<CatalogManifestSegment>, String> {
     use pgrx::datum::DatumWithOid;
 
-    let json = pgrx::Spi::get_one_with_args::<String>(
-        r#"
-SELECT COALESCE(jsonb_agg(
-    jsonb_build_object(
-        'object_path', object_path,
-        'batch_number', batch_number,
-        'min_seq', min_seq,
-        'max_seq', max_seq,
-        'min_commit_seq', min_commit_seq,
-        'max_commit_seq', max_commit_seq,
-        'row_count', row_count,
-        'byte_size', byte_size,
-        'schema_version', schema_version,
-        'column_stats', column_stats
+    let statement = koldstore_catalog::queries::plan_active_cold_segments_for_manifest_json()
+        .map_err(|error| error.to_string())?;
+    let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| "[]".to_string());
+    let rows: Vec<CatalogManifestSegmentRow> =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    manifest_from_catalog_rows(
+        &relation.namespace,
+        &relation.name,
+        u32::try_from(schema_version).map_err(|error| error.to_string())?,
+        &snapshot.primary_key_columns,
+        rows,
     )
-    ORDER BY batch_number, segment_id
-)::text, '[]')
-FROM koldstore.cold_segments
-WHERE table_oid = $1::oid
-  AND scope_key = ''
-  AND status = 'active'
-"#,
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map_err(|error| error.to_string())?
-    .unwrap_or_else(|| "[]".to_string());
-
-    serde_json::from_str(&json).map_err(|error| error.to_string())
-}
-
-fn manifest_segment_from_catalog_row(
-    relation: &koldstore_catalog::decode::RelationContext,
-    snapshot: &koldstore_catalog::ManagedTableSnapshot,
-    row: CatalogManifestSegment,
-) -> Result<koldstore_manifest::ManifestSegment, String> {
-    let manifest_path = manifest_relative_segment_path(relation, &row.object_path);
-    let mut segment = koldstore_manifest::ManifestSegment::committed(
-        u32::try_from(row.batch_number).map_err(|error| error.to_string())?,
-        manifest_path,
-        row.min_seq..=row.max_seq,
-        row.min_commit_seq..=row.max_commit_seq,
-        u64::try_from(row.row_count).map_err(|error| error.to_string())?,
-        u64::try_from(row.byte_size).map_err(|error| error.to_string())?,
-        u32::try_from(row.schema_version).map_err(|error| error.to_string())?,
-    );
-    segment.column_stats = manifest_column_stats(row.column_stats);
-    segment
-        .bloom_filters
-        .push(koldstore_manifest::ManifestBloomFilter::bloom(
-            snapshot.primary_key_columns.clone(),
-            Some(0.01),
-        ));
-    segment.pk_filter = Some(koldstore_manifest::PkFilter::exact(vec![1]));
-    Ok(segment)
-}
-
-fn manifest_relative_segment_path(
-    relation: &koldstore_catalog::decode::RelationContext,
-    object_path: &str,
-) -> String {
-    let prefix = format!("{}/{}/", relation.namespace, relation.name);
-    object_path
-        .strip_prefix(&prefix)
-        .unwrap_or(object_path)
-        .to_string()
-}
-
-fn manifest_column_stats(
-    column_stats: serde_json::Value,
-) -> std::collections::BTreeMap<String, koldstore_manifest::ManifestColumnStats> {
-    let mut stats = std::collections::BTreeMap::new();
-    let Some(columns) = column_stats.as_object() else {
-        return stats;
-    };
-
-    for (column, value) in columns {
-        let Some(min) = value.get("min") else {
-            continue;
-        };
-        let Some(max) = value.get("max") else {
-            continue;
-        };
-        stats.insert(
-            column.clone(),
-            koldstore_manifest::ManifestColumnStats::new(min.clone(), max.clone()),
-        );
-    }
-
-    stats
+    .map_err(|error| error.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -214,11 +114,6 @@ pub(super) fn write_flush_segment(
         chunk_stats.max_seq,
         chunk_stats.max_commit_seq,
     )?;
-    prune_flushed_hot_rows(
-        table_oid,
-        &snapshot.primary_key_columns,
-        &chunk.cleanup_rows,
-    )?;
     Ok(())
 }
 
@@ -232,59 +127,30 @@ fn insert_cold_segment(
     byte_size: i64,
     schema_version: i32,
 ) -> Result<(), String> {
-    pgrx::Spi::run_with_args(
-        r#"
-INSERT INTO koldstore.cold_segments (
-    segment_id,
-    table_oid,
-    scope_key,
-    object_path,
-    batch_number,
-    min_seq,
-    max_seq,
-    min_commit_seq,
-    max_commit_seq,
-    row_count,
-    byte_size,
-    schema_version,
-    column_stats,
-    status
-)
-VALUES (
-    $1::uuid,
-    $2::oid,
-    '',
-    $3::text,
-    $4::integer,
-    $5::bigint,
-    $6::bigint,
-    $7::bigint,
-    $8::bigint,
-    $9::bigint,
-    $10::bigint,
-    $11::integer,
-    $12::jsonb,
-    'active'
-)
-"#,
+    use pgrx::datum::DatumWithOid;
+
+    let statement = plan_flush_cold_segment_insert().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
         &[
-            pgrx::datum::DatumWithOid::from(pgrx::Uuid::from_bytes(*segment_id.as_bytes())),
-            pgrx::datum::DatumWithOid::from(table_oid),
-            pgrx::datum::DatumWithOid::from(object_path),
-            pgrx::datum::DatumWithOid::from(batch_number),
-            pgrx::datum::DatumWithOid::from(stats.min_seq),
-            pgrx::datum::DatumWithOid::from(stats.max_seq),
-            pgrx::datum::DatumWithOid::from(stats.min_commit_seq),
-            pgrx::datum::DatumWithOid::from(stats.max_commit_seq),
-            pgrx::datum::DatumWithOid::from(stats.row_count),
-            pgrx::datum::DatumWithOid::from(byte_size),
-            pgrx::datum::DatumWithOid::from(schema_version),
-            pgrx::datum::DatumWithOid::from(pgrx::JsonB(serde_json::json!({
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*segment_id.as_bytes())),
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(object_path),
+            DatumWithOid::from(batch_number),
+            DatumWithOid::from(stats.min_seq),
+            DatumWithOid::from(stats.max_seq),
+            DatumWithOid::from(stats.min_commit_seq),
+            DatumWithOid::from(stats.max_commit_seq),
+            DatumWithOid::from(stats.row_count),
+            DatumWithOid::from(byte_size),
+            DatumWithOid::from(schema_version),
+            DatumWithOid::from(pgrx::JsonB(serde_json::json!({
                 "seq": {"min": stats.min_seq, "max": stats.max_seq}
             }))),
         ],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub(super) fn upsert_manifest_row(
@@ -294,44 +160,23 @@ pub(super) fn upsert_manifest_row(
     max_seq: i64,
     max_commit_seq: i64,
 ) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
     let generation = uuid::Uuid::new_v4().to_string();
-    pgrx::Spi::run_with_args(
-        r#"
-INSERT INTO koldstore.manifest (
-    table_oid,
-    scope_key,
-    manifest_path,
-    etag,
-    generation,
-    sync_state,
-    segment_count,
-    max_seq,
-    max_commit_seq,
-    last_error,
-    updated_at
-)
-VALUES ($1::oid, '', $2::text, NULL, $3::text, 'in_sync', $4::integer, $5::bigint, $6::bigint, NULL, now())
-ON CONFLICT (table_oid, scope_key)
-DO UPDATE SET
-    manifest_path = EXCLUDED.manifest_path,
-    generation = EXCLUDED.generation,
-    sync_state = 'in_sync',
-    segment_count = EXCLUDED.segment_count,
-    max_seq = EXCLUDED.max_seq,
-    max_commit_seq = EXCLUDED.max_commit_seq,
-    last_error = NULL,
-    updated_at = now()
-"#,
+    let statement = plan_manifest_row_upsert().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
         &[
-            pgrx::datum::DatumWithOid::from(table_oid),
-            pgrx::datum::DatumWithOid::from(manifest_path),
-            pgrx::datum::DatumWithOid::from(generation.as_str()),
-            pgrx::datum::DatumWithOid::from(segment_count),
-            pgrx::datum::DatumWithOid::from(max_seq),
-            pgrx::datum::DatumWithOid::from(max_commit_seq),
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(manifest_path),
+            DatumWithOid::from(generation.as_str()),
+            DatumWithOid::from(segment_count),
+            DatumWithOid::from(max_seq),
+            DatumWithOid::from(max_commit_seq),
         ],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn insert_cold_pk_hint(
@@ -341,32 +186,24 @@ fn insert_cold_pk_hint(
     latest_seq: i64,
     latest_commit_seq: i64,
 ) -> Result<(), String> {
-    pgrx::Spi::run_with_args(
-        r#"
-INSERT INTO koldstore.cold_pk_hints (
-    table_oid,
-    scope_key,
-    pk_hash,
-    segment_id,
-    hint_kind,
-    latest_seq,
-    latest_commit_seq
-)
-VALUES ($1::oid, '', decode(md5($2::text), 'hex'), $3::uuid, 'exact', $4::bigint, $5::bigint)
-ON CONFLICT DO NOTHING
-"#,
+    use pgrx::datum::DatumWithOid;
+
+    let statement = plan_flush_pk_hint_insert().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
         &[
-            pgrx::datum::DatumWithOid::from(table_oid),
-            pgrx::datum::DatumWithOid::from(seed),
-            pgrx::datum::DatumWithOid::from(pgrx::Uuid::from_bytes(*segment_id.as_bytes())),
-            pgrx::datum::DatumWithOid::from(latest_seq),
-            pgrx::datum::DatumWithOid::from(latest_commit_seq),
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(seed),
+            DatumWithOid::from(pgrx::Uuid::from_bytes(*segment_id.as_bytes())),
+            DatumWithOid::from(latest_seq),
+            DatumWithOid::from(latest_commit_seq),
         ],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
-fn prune_flushed_hot_rows(
+pub(super) fn prune_flushed_hot_rows(
     table_oid: pgrx::pg_sys::Oid,
     primary_key_columns: &[String],
     cleanup_rows: &[serde_json::Value],

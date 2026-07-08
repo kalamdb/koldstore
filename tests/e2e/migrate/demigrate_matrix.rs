@@ -41,7 +41,7 @@ async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_
         let table = db.create_indexed_items_table("demigrate_items", 40).await?;
         db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
-        db.insert_pending_flush_job(&table.relation, "").await?;
+        db.insert_pending_flush_job(&table.relation).await?;
         assert_eq!(
             common::active_job_count(&db.client, &table.relation).await?,
             1

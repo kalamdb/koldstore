@@ -1,11 +1,11 @@
 CREATE EXTENSION IF NOT EXISTS koldstore WITH SCHEMA public;
 
 SELECT koldstore.register_storage(
-  'bench-local',
-  'filesystem',
-  :'KOLDSTORE_BENCH_STORAGE_PATH',
-  '{}'::jsonb,
-  '{}'::jsonb
+  name         => 'bench-local',
+  storage_type => 'filesystem',
+  base_path    => :'KOLDSTORE_BENCH_STORAGE_PATH',
+  credentials  => '{}'::jsonb,
+  config       => '{}'::jsonb
 );
 
 SELECT *

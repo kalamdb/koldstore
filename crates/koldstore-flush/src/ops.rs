@@ -61,8 +61,6 @@ pub enum OpsError {
 pub struct TableStatusPlan {
     /// Table filter.
     pub table_name: TableName,
-    /// Optional scope filter.
-    pub scope_key: Option<ScopeKey>,
     /// Parameterized catalog statement.
     pub statement: SqlStatement,
 }
@@ -384,7 +382,7 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
 ///
 /// The caller supplies validated quoted table and mirror relation names. The
 /// returned JSON includes hot heap, mirror, and cold row accounting used by
-/// storage verification tests and operators.
+/// storage verification tests and operators. Counters are table-wide.
 ///
 /// # Errors
 ///
@@ -392,9 +390,7 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
 pub fn describe_table_plan(
     table: &QualifiedTableName,
     mirror: &QualifiedTableName,
-    scope_key: Option<ScopeKey>,
 ) -> Result<TableStatusPlan, OpsError> {
-    let scope_key = scope_key.as_ref().map(ScopeKey::as_str).unwrap_or("");
     let statement = SqlStatement::read_with_params(
         "table status",
         &format!(
@@ -407,14 +403,12 @@ SELECT jsonb_build_object(
         FROM koldstore.cold_segments cs
         WHERE cs.table_oid = $1::regclass::oid
           AND cs.status = 'active'
-          AND ($2::text = '' OR cs.scope_key = $2)
     ), 0),
     'cold_segment_count', COALESCE((
         SELECT count(*)::bigint
         FROM koldstore.cold_segments cs
         WHERE cs.table_oid = $1::regclass::oid
           AND cs.status = 'active'
-          AND ($2::text = '' OR cs.scope_key = $2)
     ), 0),
     'heap_size_bytes', pg_relation_size($1::regclass),
     'table_size_bytes', pg_table_size($1::regclass),
@@ -429,13 +423,12 @@ SELECT jsonb_build_object(
 FROM koldstore.schemas s
 LEFT JOIN koldstore.manifest m
   ON m.table_oid = s.table_oid
- AND ($2::text = '' OR m.scope_key = $2)
+ AND m.scope_key = ''
 LEFT JOIN LATERAL (
     SELECT count(*)::bigint AS pending_jobs
     FROM koldstore.jobs j
     WHERE j.table_oid = s.table_oid
       AND j.status IN ('pending', 'running')
-      AND ($2::text = '' OR j.scope_key = $2)
 ) j ON true
 LEFT JOIN LATERAL (
     SELECT jsonb_agg(
@@ -465,7 +458,6 @@ LEFT JOIN LATERAL (
             updated_at
         FROM koldstore.jobs
         WHERE table_oid = s.table_oid
-          AND ($2::text = '' OR scope_key = $2)
         ORDER BY updated_at DESC, id
         LIMIT 20
     ) AS job_snapshot
@@ -477,7 +469,7 @@ LIMIT 1
             table = table.quoted(),
             mirror = mirror.quoted(),
         ),
-        [SqlParamType::Oid, SqlParamType::Text],
+        [SqlParamType::Oid],
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 
@@ -485,11 +477,6 @@ LIMIT 1
         table_name: table
             .as_table_name()
             .map_err(|error| OpsError::Sql(error.to_string()))?,
-        scope_key: if scope_key.is_empty() {
-            None
-        } else {
-            Some(ScopeKey::new(scope_key).map_err(|error| OpsError::Sql(error.to_string()))?)
-        },
         statement,
     })
 }

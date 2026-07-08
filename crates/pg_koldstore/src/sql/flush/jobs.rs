@@ -1,4 +1,10 @@
-//! Flush job lifecycle helpers.
+//! Flush job lifecycle SPI adapters.
+
+use koldstore_flush::{
+    plan_insert_inline_flush_job, plan_lookup_active_inline_flush_job,
+    plan_mark_inline_flush_job_completed, plan_mark_inline_flush_job_failed,
+    plan_mark_inline_flush_job_running,
+};
 
 #[derive(serde::Deserialize)]
 struct PendingFlushJobWire {
@@ -10,26 +16,11 @@ struct PendingFlushJobWire {
 pub(super) fn ensure_flush_job(table_oid: pgrx::pg_sys::Oid) -> Result<(uuid::Uuid, bool), String> {
     use pgrx::datum::DatumWithOid;
 
-    let existing = pgrx::Spi::get_one_with_args::<String>(
-        r#"
-SELECT COALESCE((
-    SELECT jsonb_build_object(
-        'id', id::text,
-        'force', COALESCE((payload->>'force')::boolean, false)
-    )::text
-    FROM koldstore.jobs
-    WHERE table_oid = $1::oid
-      AND scope_key = ''
-      AND job_type = 'flush'
-      AND status IN ('pending', 'running')
-    ORDER BY updated_at, id
-    LIMIT 1
-), '')
-"#,
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map_err(|error| error.to_string())?;
-    if let Some(existing) = existing.filter(|value| !value.is_empty()) {
+    let lookup = plan_lookup_active_inline_flush_job().map_err(|error| error.to_string())?;
+    let existing = crate::spi::select_one::<String>(&lookup, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?
+        .filter(|value| !value.is_empty());
+    if let Some(existing) = existing {
         let wire: PendingFlushJobWire =
             serde_json::from_str(&existing).map_err(|error| error.to_string())?;
         return Ok((
@@ -39,27 +30,9 @@ SELECT COALESCE((
     }
 
     let job_id = uuid::Uuid::new_v4();
-    pgrx::Spi::run_with_args(
-        r#"
-INSERT INTO koldstore.jobs (
-    id,
-    table_oid,
-    scope_key,
-    job_type,
-    status,
-    phase,
-    payload
-)
-VALUES (
-    $1::uuid,
-    $2::oid,
-    '',
-    'flush',
-    'pending',
-    'pending',
-    jsonb_build_object('force', false)
-)
-"#,
+    let insert = plan_insert_inline_flush_job().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &insert,
         &[
             DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
             DatumWithOid::from(table_oid),
@@ -75,25 +48,16 @@ pub(super) fn mark_flush_job_running(
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
 
-    pgrx::Spi::run_with_args(
-        r#"
-UPDATE koldstore.jobs
-SET status = 'running',
-    phase = 'writing',
-    attempts = CASE WHEN attempts = 0 THEN 1 ELSE attempts END,
-    last_heartbeat_at = now(),
-    updated_at = now()
-WHERE id = $1::uuid
-  AND table_oid = $2::oid
-  AND job_type = 'flush'
-  AND status IN ('pending', 'running')
-"#,
+    let statement = plan_mark_inline_flush_job_running().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
         &[
             DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
             DatumWithOid::from(table_oid),
         ],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub(super) fn mark_flush_job_completed(
@@ -105,24 +69,9 @@ pub(super) fn mark_flush_job_completed(
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
 
-    pgrx::Spi::run_with_args(
-        r#"
-UPDATE koldstore.jobs
-SET status = 'completed',
-    phase = 'finished',
-    rows_processed = $3::bigint,
-    rows_flushed = $3::bigint,
-    checkpoint_seq = $4::bigint,
-    checkpoint_commit_seq = $5::bigint,
-    lease_owner = NULL,
-    lease_expires_at = NULL,
-    last_heartbeat_at = now(),
-    updated_at = now()
-WHERE id = $1::uuid
-  AND table_oid = $2::oid
-  AND job_type = 'flush'
-  AND status IN ('pending', 'running')
-"#,
+    let statement = plan_mark_inline_flush_job_completed().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
         &[
             DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
             DatumWithOid::from(table_oid),
@@ -131,7 +80,8 @@ WHERE id = $1::uuid
             DatumWithOid::from(checkpoint_commit_seq),
         ],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub(super) fn mark_flush_job_failed(
@@ -141,26 +91,15 @@ pub(super) fn mark_flush_job_failed(
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
 
-    pgrx::Spi::run_with_args(
-        r#"
-UPDATE koldstore.jobs
-SET status = 'error',
-    phase = 'failed',
-    error_trace = $3::text,
-    lease_owner = NULL,
-    lease_expires_at = NULL,
-    last_heartbeat_at = now(),
-    updated_at = now()
-WHERE id = $1::uuid
-  AND table_oid = $2::oid
-  AND job_type = 'flush'
-  AND status IN ('pending', 'running')
-"#,
+    let statement = plan_mark_inline_flush_job_failed().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
         &[
             DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
             DatumWithOid::from(table_oid),
             DatumWithOid::from(error_trace),
         ],
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }

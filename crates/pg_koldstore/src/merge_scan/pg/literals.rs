@@ -51,6 +51,44 @@ pub(super) unsafe fn typed_literal_sql(
     }
 }
 
+pub(super) unsafe fn literal_json_value(
+    expr: *mut pg_sys::Expr,
+    column: &koldstore_migrate::order::CatalogColumn,
+) -> Option<serde_json::Value> {
+    let expr = unwrap_relabel(expr);
+    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
+        return None;
+    }
+    let konst = expr.cast::<pg_sys::Const>();
+    if (*konst).constisnull {
+        return None;
+    }
+
+    match column.pg_type {
+        PgType::Text | PgType::Uuid => {
+            let text = (*konst).constvalue.cast_mut_ptr::<pg_sys::text>();
+            if text.is_null() {
+                return None;
+            }
+            let cstr = pg_sys::text_to_cstring(text);
+            if cstr.is_null() {
+                return None;
+            }
+            let value = CStr::from_ptr(cstr).to_str().ok()?.to_string();
+            pg_sys::pfree(cstr.cast());
+            Some(serde_json::Value::String(value))
+        }
+        PgType::Bool => match (*konst).consttype.to_u32() {
+            16 => Some(serde_json::Value::Bool((*konst).constvalue.value() != 0)),
+            _ => None,
+        },
+        PgType::Int2 | PgType::Int4 | PgType::Int8 => {
+            Some(serde_json::json!((*konst).constvalue.value() as i64))
+        }
+        _ => None,
+    }
+}
+
 pub(super) unsafe fn scalar_array_filter_sql(
     expr: *mut pg_sys::Expr,
     columns: &[koldstore_migrate::order::CatalogColumn],

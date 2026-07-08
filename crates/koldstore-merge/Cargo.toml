@@ -8,11 +8,17 @@ repository.workspace = true
 [dependencies]
 koldstore-common.workspace = true
 koldstore-mirror.workspace = true
+koldstore-parquet.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+koldstore-common.workspace = true
+koldstore-migrate.workspace = true
+koldstore-parquet.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

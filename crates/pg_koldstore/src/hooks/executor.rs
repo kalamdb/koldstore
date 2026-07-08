@@ -1,27 +1,13 @@
 //! DML hook and clean-schema mirror integration.
 
-use koldstore_common::{CommitSeq, MirrorOperation, ScopeKey, SeqId, TableKind};
+use koldstore_common::{scope, MirrorOperation, ScopeError, ScopeKey, TableKind};
+use koldstore_merge::ManagedDmlOperation;
 
-use koldstore_common::scope::{self, ScopeError};
-use koldstore_merge::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation};
-
-/// Manifest cache state written after hot DML dirties a managed scope.
-pub const HOT_DML_MANIFEST_SYNC_STATE: &str = "pending_write";
-
-/// Planned effect for one managed hot-DML operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ManagedDmlEffect {
-    /// Mirror sequence stamp for the hot row or tombstone effect.
-    pub stamp: DmlStamp,
-    /// Latest-state mirror operation to record.
-    pub mirror_operation: MirrorOperation,
-    /// Manifest sync state to record locally.
-    pub manifest_sync_state: &'static str,
-    /// Delete route when the operation is DELETE.
-    pub delete_decision: Option<DeleteDecision>,
-    /// Whether this path preserves the one-hot-row-per-PK invariant.
-    pub keeps_one_hot_row_per_pk: bool,
-}
+pub use koldstore_merge::{
+    extract_simple_pk_delete_predicate, plan_managed_delete_effect, plan_managed_insert_effect,
+    plan_managed_update_effect, simple_pk_delete_supported, ManagedDmlEffect, SimplePkPredicate,
+    HOT_DML_MANIFEST_SYNC_STATE,
+};
 
 /// Planned latest-state mirror effect for one user DML row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,12 +28,6 @@ pub const fn managed_dml_hook_names() -> &'static [&'static str] {
     &["INSERT", "UPDATE", "DELETE", "COPY"]
 }
 
-/// Returns whether standard SQL cold-only DELETE can use the exact local metadata path.
-#[must_use]
-pub const fn simple_pk_delete_supported(simple_pk_predicate: bool, exact_metadata: bool) -> bool {
-    simple_pk_predicate && exact_metadata
-}
-
 /// Enforces user-scope checks before managed DML touches heap rows or cold metadata.
 ///
 /// # Errors
@@ -66,84 +46,6 @@ pub fn enforce_dml_scope(
     Ok(active_scope)
 }
 
-/// Simple PK equality predicate extracted from a standard SQL DELETE.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SimplePkPredicate {
-    /// PK column name.
-    pub column: String,
-    /// PK value.
-    pub value: serde_json::Value,
-}
-
-impl SimplePkPredicate {
-    /// Creates a simple PK predicate.
-    #[must_use]
-    pub fn new(column: impl Into<String>, value: serde_json::Value) -> Self {
-        Self {
-            column: column.into(),
-            value,
-        }
-    }
-}
-
-/// Extracts a standard SQL cold-only DELETE route when exact local metadata is available.
-#[must_use]
-pub fn extract_simple_pk_delete_predicate(
-    predicates: &[SimplePkPredicate],
-    primary_key_columns: &[String],
-    exact_metadata: bool,
-) -> Option<SimplePkPredicate> {
-    if !exact_metadata || predicates.len() != 1 || primary_key_columns.len() != 1 {
-        return None;
-    }
-    let predicate = predicates.first()?;
-    if predicate.column == primary_key_columns[0] {
-        Some(predicate.clone())
-    } else {
-        None
-    }
-}
-
-/// Plans a managed INSERT effect.
-///
-pub fn plan_managed_insert_effect(seq: SeqId, commit_seq: CommitSeq) -> ManagedDmlEffect {
-    plan_effect(
-        seq,
-        commit_seq,
-        ManagedDmlOperation::Insert,
-        MirrorOperation::Insert,
-        None,
-    )
-}
-
-/// Plans a managed UPDATE effect.
-///
-pub fn plan_managed_update_effect(seq: SeqId, commit_seq: CommitSeq) -> ManagedDmlEffect {
-    plan_effect(
-        seq,
-        commit_seq,
-        ManagedDmlOperation::Update,
-        MirrorOperation::Update,
-        None,
-    )
-}
-
-/// Plans a managed DELETE effect from local cold PK metadata.
-///
-pub fn plan_managed_delete_effect(
-    seq: SeqId,
-    commit_seq: CommitSeq,
-    cold_may_contain_pk: bool,
-) -> ManagedDmlEffect {
-    plan_effect(
-        seq,
-        commit_seq,
-        ManagedDmlOperation::Delete,
-        MirrorOperation::Delete,
-        Some(delete_decision(cold_may_contain_pk)),
-    )
-}
-
 /// Plans the mirror state transition for a managed DML operation.
 #[must_use]
 pub const fn plan_mirror_capture_effect(operation: ManagedDmlOperation) -> MirrorCaptureEffect {
@@ -158,22 +60,5 @@ pub const fn plan_mirror_capture_effect(operation: ManagedDmlOperation) -> Mirro
         seq_expression: "SNOWFLAKE_ID()",
         commit_lsn_expression: "pg_current_wal_lsn()",
         transactional: true,
-    }
-}
-
-fn plan_effect(
-    seq: SeqId,
-    commit_seq: CommitSeq,
-    operation: ManagedDmlOperation,
-    mirror_operation: MirrorOperation,
-    delete_decision: Option<DeleteDecision>,
-) -> ManagedDmlEffect {
-    let stamp = DmlStamp::new(seq, commit_seq, operation);
-    ManagedDmlEffect {
-        stamp,
-        mirror_operation,
-        manifest_sync_state: HOT_DML_MANIFEST_SYNC_STATE,
-        delete_decision,
-        keeps_one_hot_row_per_pk: operation.keeps_one_hot_row_per_pk(),
     }
 }
