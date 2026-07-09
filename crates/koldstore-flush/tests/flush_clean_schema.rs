@@ -176,19 +176,24 @@ fn cleanup_deletes_mirror_and_hot_rows_in_one_atomic_statement() {
 
 #[test]
 fn seq_range_cleanup_deletes_by_max_seq_without_json() {
-    let plan = koldstore_flush::plan_seq_range_cleanup(
-        &table(),
-        &mirror(),
-        &["id".to_string()],
-        None,
-    )
-    .unwrap();
+    let plan =
+        koldstore_flush::plan_seq_range_cleanup(&table(), &mirror(), &["id".to_string()], None)
+            .unwrap();
 
     assert!(plan.statement.sql.contains("mirror.\"seq\" <= $1::bigint"));
     assert!(!plan.statement.sql.contains("jsonb_to_recordset"));
-    assert!(plan.statement.sql.contains("DELETE FROM \"koldstore\".\"items__cl\""));
-    assert!(plan.statement.sql.contains("DELETE FROM ONLY \"app\".\"items\""));
-    assert!(plan.statement.sql.contains("removed_mirror.\"op\" IN (1, 2)"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("DELETE FROM \"koldstore\".\"items__cl\""));
+    assert!(plan
+        .statement
+        .sql
+        .contains("DELETE FROM ONLY \"app\".\"items\""));
+    assert!(plan
+        .statement
+        .sql
+        .contains("removed_mirror.\"op\" IN (1, 2)"));
     assert_eq!(plan.statement.param_types, vec![SqlParamType::BigInt]);
 }
 

@@ -318,8 +318,8 @@ fn mirror_oldest_rows_cutoff(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let mirror = MirrorRelation::new(snapshot.mirror_relation);
-    let statement =
-        mirror_to_sql(plan_mirror_oldest_rows_max_seq(&mirror)).map_err(|error| error.to_string())?;
+    let statement = mirror_to_sql(plan_mirror_oldest_rows_max_seq(&mirror))
+        .map_err(|error| error.to_string())?;
     if let Some(max_seq) = crate::spi::execute_prepared(
         &statement,
         &[DatumWithOid::from(limit)],

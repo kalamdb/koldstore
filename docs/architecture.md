@@ -1,30 +1,52 @@
 # Architecture
 
-pg-koldstore is a PostgreSQL extension for normal heap tables. It differs from
-kalamdb internals by keeping PostgreSQL as the transaction, locking, and hot-row
-authority.
+pg-koldstore is a PostgreSQL extension for normal heap tables. PostgreSQL
+remains the transaction, locking, and hot-row authority. KoldStore adds a
+change-log mirror, cold Parquet segments, and a `KoldMergeScan` custom scan so
+SQL, MVCC, permissions, and RLS stay PostgreSQL-owned.
+
+## Workflow documentation
+
+These documents describe **what the code does today**, including serde
+boundaries at each step:
+
+| Workflow | Document |
+|----------|----------|
+| Register a table for hot/cold management | [manage-table](architecture/manage-table.md) |
+| Move mirror rows to Parquet and prune hot | [flushing-table](architecture/flushing-table.md) |
+| `SELECT` through hot + cold merge | [scanning-table](architecture/scanning-table.md) |
+| `INSERT` / `UPDATE` / `DELETE` capture | [dml-table](architecture/dml-table.md) |
+
+## Contributor layout
 
 See [crate architecture](architecture/crate-architecture.md) for the layered
-Rust crate layout and contributor guidance.
+Rust crate layout and dependency graph.
 
-## PostgreSQL Heap Plus Cold Segments
+## Supplementary notes
 
-Managed tables preserve the application primary key and add `_seq`,
-`_commit_seq`, and `_deleted`. Hot DML stays in the heap. Flush jobs publish
-cold Parquet segments and manifest records after PostgreSQL commits.
+- [Change-log mirror and transactions](architecture/change-log-mirror-and-transactions.md) — mirror contract and transaction boundaries (clean-schema default)
+- [Existing table migration](architecture/existing-table-migration-and-flush.md) — ordering rules for populated-table backfill (pointer to manage/flush workflows)
 
-## Custom Scan Instead of DataFusion
+## Core design choices
 
-kalamdb uses RocksDB/Raft/DataFusion internals. pg-koldstore uses PostgreSQL
-planner and executor hooks plus a `KoldstoreMergeScan` Custom Scan so SQL,
-MVCC, permissions, and RLS remain PostgreSQL-owned.
+### Clean-schema mirror (no heap system columns)
 
-## Manifest Compatibility
+Managed user tables keep application columns only. Sequence and delete state
+live in `koldstore.{table}__cl` and in cold Parquet metadata (`seq`, `deleted`).
+See [dml-table](architecture/dml-table.md).
 
-Cold files and manifests are shaped for kalamdb-compatible readers, but publish
-visibility is controlled by the PostgreSQL catalog and local manifest cache.
+### Custom scan instead of an external query engine
 
-## Operational Boundaries
+KoldMergeScan materializes a hot+cold winner set via SQL at scan start, then
+serves rows from a buffer. See [scanning-table](architecture/scanning-table.md).
+
+### Manifest and catalog
+
+`koldstore.manifest` tracks sync state and O(1) row counters. Object-store
+`manifest.json` is written on flush finalize. Cold segment metadata lives in
+`koldstore.cold_segments`. See [flushing-table](architecture/flushing-table.md).
+
+### Operational boundaries
 
 Object storage is not part of PostgreSQL WAL. Operators must back up cold
 artifacts together with PostgreSQL base backups and validate manifest identity
