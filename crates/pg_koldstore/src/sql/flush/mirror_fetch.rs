@@ -42,7 +42,7 @@ pub(super) fn fetch_mirror_batch(
 }
 
 fn decode_mirror_batch(
-    mut tuples: pgrx::spi::SpiTupleTable<'_>,
+    tuples: pgrx::spi::SpiTupleTable<'_>,
     columns: &[CatalogColumn],
 ) -> pgrx::spi::Result<Vec<FlushMirrorRow>> {
     // Column layout from plan_mirror_flush_selection_batch:
@@ -53,7 +53,7 @@ fn decode_mirror_batch(
     let seq_ordinal = columns.len() + 1;
     let op_ordinal = columns.len() + 2;
     let mut rows = Vec::with_capacity(tuples.len());
-    while let Some(tuple) = tuples.next() {
+    for tuple in tuples {
         rows.push(decode_mirror_row(&tuple, columns, seq_ordinal, op_ordinal)?);
     }
     Ok(rows)
