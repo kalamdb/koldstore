@@ -12,6 +12,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+koldstore-common.workspace = true
+
 [lints]
 workspace = true
 

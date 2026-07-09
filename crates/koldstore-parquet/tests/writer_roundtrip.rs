@@ -147,6 +147,10 @@ fn writer_options_build_native_parquet_properties_for_stats_and_bloom_filters() 
         properties.statistics_enabled(&id),
         parquet::file::properties::EnabledStatistics::None
     );
+    assert_eq!(
+        properties.max_row_group_row_count(),
+        Some(WriterOptions::default().row_group_size)
+    );
     assert!(properties.bloom_filter_properties(&id).is_some());
     assert!(properties.bloom_filter_properties(&created_at).is_none());
 }

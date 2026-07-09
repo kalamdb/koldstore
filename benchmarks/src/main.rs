@@ -97,7 +97,7 @@ async fn run_real_pgbench_suite(config: BenchmarkConfig) -> Result<()> {
                 "bench.koldstore_items",
                 config.rows,
             ),
-            max_overhead_ratio: Some(verdict::HOT_DML_MAX_OVERHEAD_RATIO),
+            max_overhead_ratio: Some(verdict::HOT_INSERT_MAX_OVERHEAD_RATIO),
         },
     )
     .await?;
@@ -280,6 +280,7 @@ fn keep_contract_helpers_referenced() {
     };
     let _thresholds = (
         verdict::HOT_DML_MAX_OVERHEAD_RATIO,
+        verdict::HOT_INSERT_MAX_OVERHEAD_RATIO,
         verdict::PK_LOOKUP_MIN_ROW_GROUP_SKIP_RATIO,
     );
     let _suite = suite::FULL_SUITE;

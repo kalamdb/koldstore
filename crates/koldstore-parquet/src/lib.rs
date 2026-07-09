@@ -1,5 +1,6 @@
 //! Arrow/Parquet schema, reader, writer, footer, and pruning helpers.
 
+pub mod batch_builder;
 pub mod footer;
 pub mod pg_type_codec;
 pub mod prune;
@@ -7,6 +8,10 @@ pub mod reader;
 pub mod schema;
 pub mod writer;
 
+pub use batch_builder::{
+    cleanup_row_json, pk_column_indices, CleanColdRecordBatchBuilder, ColdRecordBatch,
+    FlushColumnValue, FlushMirrorRow,
+};
 pub use footer::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
 pub use koldstore_common::canonical_postgres_type_name;
 pub use koldstore_schema::{PgIntegerArrayOid, PgType, SchemaError};
@@ -21,7 +26,7 @@ pub use reader::{
 };
 pub use schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
 pub use writer::{
-    plan_clean_cold_record, record_batch_from_clean_cold_records, CleanColdRecordPlan,
-    ParquetSegmentWriter, SegmentMetadataInput, SegmentWritePlan, StreamingRowGroupPlan,
-    WriterOptions,
+    plan_clean_cold_record, record_batch_from_clean_cold_records, write_parquet_segment_file,
+    CleanColdRecordPlan, ParquetSegmentWriter, SegmentMetadataInput, SegmentWritePlan,
+    StreamingRowGroupPlan, WriterOptions,
 };

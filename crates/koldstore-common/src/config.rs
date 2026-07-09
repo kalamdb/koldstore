@@ -6,6 +6,30 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Default minimum allowed `max_rows_per_file` unless lowered by GUC.
+pub const DEFAULT_MIN_MAX_ROWS_PER_FILE: u64 = 1_000;
+
+/// Validates `max_rows_per_file` against a configured floor.
+///
+/// # Errors
+///
+/// Returns an error when `value` is below `min_floor`.
+pub fn validate_max_rows_per_file(
+    value: u64,
+    min_floor: u64,
+    floor_override_hint: Option<&str>,
+) -> Result<(), String> {
+    if value >= min_floor {
+        return Ok(());
+    }
+
+    let mut message = format!("max_rows_per_file must be at least {min_floor} (got {value})");
+    if let Some(hint) = floor_override_hint {
+        message.push_str(&format!("; {hint}"));
+    }
+    Err(message)
+}
+
 /// Migration lifecycle marker written by the extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -237,7 +261,35 @@ pub fn hot_row_limit_from_options(options: &Value) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{FlushPolicy, ManageTableOptions, MigrationStatus, ParquetCompression};
+    use super::{
+        validate_max_rows_per_file, FlushPolicy, ManageTableOptions, MigrationStatus,
+        ParquetCompression, DEFAULT_MIN_MAX_ROWS_PER_FILE,
+    };
+
+    #[test]
+    fn validate_max_rows_per_file_accepts_values_at_or_above_floor() {
+        assert!(validate_max_rows_per_file(1_000, 1_000, None).is_ok());
+        assert!(validate_max_rows_per_file(5_000, 1_000, None).is_ok());
+    }
+
+    #[test]
+    fn validate_max_rows_per_file_rejects_values_below_floor() {
+        let error = validate_max_rows_per_file(1, DEFAULT_MIN_MAX_ROWS_PER_FILE, None).unwrap_err();
+        assert!(error.contains("must be at least 1000"));
+        assert!(error.contains("(got 1)"));
+    }
+
+    #[test]
+    fn validate_max_rows_per_file_includes_override_hint_when_provided() {
+        let error = validate_max_rows_per_file(
+            500,
+            1_000,
+            Some("lower the floor with SET koldstore.min_max_rows_per_file = 100"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("SET koldstore.min_max_rows_per_file = 100"));
+    }
 
     #[test]
     fn manage_table_options_round_trip_flush_fields() {

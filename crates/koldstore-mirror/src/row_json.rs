@@ -28,12 +28,3 @@ pub struct MirrorSelectionRow {
     #[serde(flatten)]
     pub fields: serde_json::Map<String, serde_json::Value>,
 }
-
-/// One mirror row used by flush policy evaluation.
-#[derive(Debug, Clone, Deserialize)]
-pub struct MirrorPolicyRowJson {
-    /// JSON primary-key identity.
-    pub pk_json: serde_json::Value,
-    /// Latest-state mirror sequence.
-    pub seq: i64,
-}

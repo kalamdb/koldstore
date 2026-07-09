@@ -14,17 +14,25 @@ fn should_log(always: bool) -> bool {
     always || verbose_enabled()
 }
 
+fn log_line(always: bool, message: impl AsRef<str>) {
+    if should_log(always) {
+        eprintln!(
+            "[{}] [e2e] {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            message.as_ref()
+        );
+    }
+}
+
 /// Logs a message when verbose mode is enabled.
 pub fn log(message: impl AsRef<str>) {
-    if verbose_enabled() {
-        eprintln!("[e2e] {}", message.as_ref());
-    }
+    log_line(false, message);
 }
 
 /// Always logs a message. Useful for high-signal scenario tests whose output
 /// nextest is configured to show on success.
 pub fn log_always(message: impl AsRef<str>) {
-    eprintln!("[e2e] {}", message.as_ref());
+    log_line(true, message);
 }
 
 /// Logs the start of a step and its elapsed time when the guard is dropped.
@@ -42,7 +50,7 @@ pub fn log_step_always(step: impl Into<String>) -> StepGuard {
 fn log_step_inner(step: impl Into<String>, always: bool) -> StepGuard {
     let step = step.into();
     if should_log(always) {
-        eprintln!("[e2e] {step} ...");
+        log_line(always, format!("{step} ..."));
     }
     StepGuard {
         step,
@@ -62,11 +70,27 @@ pub struct StepGuard {
 impl Drop for StepGuard {
     fn drop(&mut self) {
         if should_log(self.always) {
-            eprintln!(
-                "[e2e] {} finished in {:.3}s",
-                self.step,
-                self.started.elapsed().as_secs_f64()
+            log_line(
+                self.always,
+                format!(
+                    "{} finished in {:.3}s",
+                    self.step,
+                    self.started.elapsed().as_secs_f64()
+                ),
             );
         }
     }
+}
+
+/// Runs a synchronous action and logs elapsed wall time.
+pub fn timed_sync<T>(label: impl AsRef<str>, f: impl FnOnce() -> T) -> T {
+    let label = label.as_ref();
+    let started = Instant::now();
+    log_always(format!("{label}: start"));
+    let result = f();
+    log_always(format!(
+        "{label}: done in {:.3}s",
+        started.elapsed().as_secs_f64()
+    ));
+    result
 }

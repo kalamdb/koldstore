@@ -87,11 +87,11 @@ This example uses local filesystem storage so you can try the extension without 
 CREATE EXTENSION koldstore;
 
 SELECT koldstore.register_storage(
-  'local-dev',
-  'filesystem',
-  '/tmp/koldstore-demo',
-  '{}'::jsonb,
-  '{}'::jsonb
+  name         => 'local-dev',
+  storage_type => 'filesystem',
+  base_path    => '/tmp/koldstore-demo',
+  credentials  => '{}'::jsonb,
+  config       => '{}'::jsonb
 );
 
 CREATE SCHEMA IF NOT EXISTS app;
@@ -397,11 +397,11 @@ Example S3-compatible registration:
 
 ```sql
 SELECT koldstore.register_storage(
-  'local-minio',
-  's3',
-  's3://koldstore-test/',
-  '{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}'::jsonb,
-  '{"endpoint":"http://localhost:9000","region":"us-east-1","path_style":true}'::jsonb
+  name         => 'local-minio',
+  storage_type => 's3',
+  base_path    => 's3://koldstore-test/',
+  credentials  => '{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}'::jsonb,
+  config       => '{"endpoint":"http://localhost:9000","region":"us-east-1","path_style":true}'::jsonb
 );
 ```
 
@@ -421,7 +421,8 @@ SELECT koldstore.register_storage(
 
 - This is not production ready.
 - Cold storage is not WAL-protected. Back up PostgreSQL and the cold storage prefix together.
-- Foreign keys only see hot PostgreSQL rows after flush.
+- `UNIQUE` constraints and foreign keys are enforced on **hot rows only**. After flush, cold Parquet is not checked on normal `INSERT`/`UPDATE`, so duplicates and FK gaps across hot+cold are possible. See [Limitations](docs/limitations.md#unique-and-foreign-key-constraints).
+- `koldstore.manage_table` rejects non-PK `UNIQUE` constraints and foreign keys when `hot_row_limit` is set (flush enabled). Use hot-only management or drop those constraints first.
 - Primary-key value changes and primary-key definition changes on managed tables are not implemented.
 - PostgreSQL indexes cover hot rows only. Flushed rows live in Parquet, not in PostgreSQL-owned indexes.
 - If a query needs cold data and the cold storage backend is unavailable, the query errors instead of returning partial hot-only results.

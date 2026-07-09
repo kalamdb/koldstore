@@ -5,9 +5,8 @@ use std::io::Write;
 use std::sync::Arc;
 
 use crate::footer::ColumnStats;
-use crate::pg_type_codec::{json_bool, json_i16, json_i64, json_u32};
-use crate::schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
-use arrow_array::{ArrayRef, BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
+use crate::schema::{ColdMetadataColumn, PgColumn};
+use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use koldstore_common::dedupe_nonblank;
 use parquet::{
@@ -104,32 +103,45 @@ pub fn record_batch_from_clean_cold_records(
     columns: &[PgColumn],
     rows: &[CleanColdRecordPlan],
 ) -> Result<RecordBatch, String> {
-    let schema = Arc::new(build_clean_arrow_schema(columns).map_err(|error| error.to_string())?);
-    let mut arrays = Vec::<ArrayRef>::with_capacity(columns.len() + 4);
-    for column in columns {
-        arrays.push(array_for_pg_column(column, rows)?);
+    let mut builder = crate::batch_builder::CleanColdRecordBatchBuilder::new(columns, &[])?;
+    for row in rows {
+        builder.push_plan(row)?;
     }
-    arrays.push(Arc::new(Int64Array::from_iter(
-        rows.iter()
-            .map(|row| json_i64(row.values.get(ColdMetadataColumn::Seq.name())))
-            .collect::<Result<Vec<_>, _>>()?,
-    )));
-    arrays.push(Arc::new(Int16Array::from_iter(
-        rows.iter()
-            .map(|row| json_i16(row.values.get(ColdMetadataColumn::Op.name())))
-            .collect::<Result<Vec<_>, _>>()?,
-    )));
-    arrays.push(Arc::new(BooleanArray::from_iter(
-        rows.iter()
-            .map(|row| json_bool(row.values.get(ColdMetadataColumn::Deleted.name())))
-            .collect::<Result<Vec<_>, _>>()?,
-    )));
-    arrays.push(Arc::new(UInt32Array::from_iter(
-        rows.iter()
-            .map(|row| json_u32(row.values.get(ColdMetadataColumn::SchemaVersion.name())))
-            .collect::<Result<Vec<_>, _>>()?,
-    )));
-    RecordBatch::try_new(schema, arrays).map_err(|error| error.to_string())
+    Ok(builder.finish()?.batch)
+}
+
+/// Writes one cold segment Parquet file and returns its byte size.
+///
+/// # Errors
+///
+/// Returns an error when file creation, encoding, or metadata lookup fails.
+pub fn write_parquet_segment_file(
+    path: &std::path::Path,
+    batch: &RecordBatch,
+    primary_key_columns: &[String],
+    indexed_columns: &[String],
+    compression: &str,
+) -> Result<i64, String> {
+    let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions {
+            compression: compression.to_string(),
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(
+            [ColdMetadataColumn::Seq.name()]
+                .into_iter()
+                .chain(indexed_columns.iter().map(String::as_str)),
+        )
+        .with_bloom_filter_columns(primary_key_columns.iter().map(String::as_str)),
+    );
+    writer
+        .write_record_batch(file, batch)
+        .map_err(|error| error.to_string())?;
+    let len = std::fs::metadata(path)
+        .map_err(|error| error.to_string())?
+        .len();
+    i64::try_from(len).map_err(|error| error.to_string())
 }
 
 impl Default for WriterOptions {
@@ -175,6 +187,7 @@ impl WriterOptions {
     pub fn try_native_writer_properties(&self) -> Result<WriterProperties, String> {
         let mut builder = WriterProperties::builder()
             .set_compression(parquet_compression(&self.compression)?)
+            .set_max_row_group_row_count(Some(self.row_group_size.max(1)))
             .set_statistics_enabled(EnabledStatistics::None);
         for column in &self.statistics_columns {
             builder = builder.set_column_statistics_enabled(
@@ -285,6 +298,22 @@ impl ParquetSegmentWriter {
         }
     }
 
+    /// Writes one Arrow record batch to a native Parquet writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Parquet error if the schema, writer, or batch write fails.
+    pub fn write_record_batch<W>(
+        &self,
+        writer: W,
+        batch: &RecordBatch,
+    ) -> Result<Arc<parquet::file::metadata::ParquetMetaData>, ParquetError>
+    where
+        W: Write + Send,
+    {
+        self.write_record_batches(writer, batch.schema(), std::iter::once(batch.clone()))
+    }
+
     /// Writes Arrow record batches to a native Parquet writer.
     ///
     /// # Errors
@@ -383,18 +412,6 @@ pub struct SegmentWritePlan {
     pub bloom_filter_columns: Vec<String>,
     /// Whether native Parquet bloom filters will be written.
     pub writes_native_bloom_filters: bool,
-}
-
-fn array_for_pg_column(
-    column: &PgColumn,
-    rows: &[CleanColdRecordPlan],
-) -> Result<ArrayRef, String> {
-    let column_name = column.name.as_str();
-    let json_values = rows
-        .iter()
-        .map(|row| row.values.get(column_name))
-        .collect::<Vec<_>>();
-    crate::pg_type_codec::arrow_array_for_column(column, &json_values)
 }
 
 fn parquet_compression(codec: &str) -> Result<Compression, String> {

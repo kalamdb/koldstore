@@ -15,6 +15,7 @@ members = [
     "crates/pg_koldstore",
     "benchmarks",
     "tests/e2e",
+    "tests/examples",
     "tests/memory",
 ]
 default-members = [

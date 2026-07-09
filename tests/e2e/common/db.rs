@@ -261,23 +261,22 @@ impl TestDb {
         })
     }
 
-    /// Inserts one pending flush job for a relation/scope.
+    /// Inserts one pending flush job for a relation.
     ///
     /// # Errors
     ///
     /// Returns an error when the insert fails.
-    pub async fn insert_pending_flush_job(&self, relation: &str, scope_key: &str) -> Result<i64> {
+    pub async fn insert_pending_flush_job(&self, relation: &str) -> Result<i64> {
         let row = self
             .client
             .query_one(
                 r#"
                 SELECT koldstore.enqueue_flush_job(
-                  $1::text::regclass,
-                  $2,
-                  false
+                  table_name => $1::text::regclass,
+                  force      => false
                 )
                 "#,
-                &[&relation, &scope_key],
+                &[&relation],
             )
             .await?;
         Ok(row.get(0))

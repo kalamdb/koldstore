@@ -520,7 +520,7 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
 async fn enqueue_flush_job(client: &Client, pg_version: u16) -> Result<()> {
     let inserted = client
         .query_one(
-            "SELECT koldstore.enqueue_flush_job($1::text::regclass, NULL, true)",
+            "SELECT koldstore.enqueue_flush_job(table_name => $1::text::regclass, force => true)",
             &[&relation(pg_version)],
         )
         .await?

@@ -61,6 +61,8 @@ pub struct ChangeLogMirrorPlan {
     pub create_table: SqlStatement,
     /// Sequence cursor index for flush and change-feed scans.
     pub seq_index: SqlStatement,
+    /// Partial index over delete-marker rows for tombstone-only force flush.
+    pub tombstone_index: SqlStatement,
     /// Transactional DML capture function/triggers.
     pub capture: MirrorCapturePlan,
     /// Idempotent mirror drop used by rollback/demigration.
@@ -71,7 +73,7 @@ impl ChangeLogMirrorPlan {
     /// Statements required to create the mirror after collision checks pass.
     #[must_use]
     pub fn create_statements(&self) -> Vec<&SqlStatement> {
-        let mut statements = vec![&self.create_table, &self.seq_index];
+        let mut statements = vec![&self.create_table, &self.seq_index, &self.tombstone_index];
         statements.extend(self.capture.create_statements());
         statements
     }
@@ -115,6 +117,7 @@ pub fn plan_change_log_mirror_from_columns(
         collision_probe: mirror_sql(schema_plan.collision_probe)?,
         create_table: mirror_sql(schema_plan.create_table)?,
         seq_index: mirror_sql(schema_plan.seq_index)?,
+        tombstone_index: mirror_sql(schema_plan.tombstone_index)?,
         drop_table: mirror_sql(schema_plan.drop_table)?,
         capture,
     })

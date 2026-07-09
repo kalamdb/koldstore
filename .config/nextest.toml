@@ -2,3 +2,8 @@
 [[profile.default.overrides]]
 filter = 'test(full_lifecycle_wide_table_migrates_flushes_in_batches_and_queries_all_rows)'
 success-output = "immediate"
+
+[[profile.default.overrides]]
+filter = 'package(examples)'
+success-output = "immediate"
+slow-timeout = { period = "120s", terminate-after = 5, grace-period = "15s" }

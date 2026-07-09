@@ -16,5 +16,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+koldstore-common.workspace = true
+koldstore-flush.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true

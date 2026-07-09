@@ -22,11 +22,11 @@ SELECT koldstore_version();
 
 \echo '==> register MinIO storage (compose service: minio)'
 SELECT koldstore.register_storage(
-  'local-minio',
-  's3',
-  's3://koldstore-test/',
-  '{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}'::jsonb,
-  '{"endpoint":"http://minio:9000","region":"us-east-1","path_style":true}'::jsonb
+  name         => 'local-minio',
+  storage_type => 's3',
+  base_path    => 's3://koldstore-test/',
+  credentials  => '{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}'::jsonb,
+  config       => '{"endpoint":"http://minio:9000","region":"us-east-1","path_style":true}'::jsonb
 );
 
 \echo '==> recreate demo schema'

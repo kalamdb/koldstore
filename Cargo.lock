@@ -597,6 +597,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "examples"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "parquet",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1027,9 +1040,12 @@ dependencies = [
  "koldstore-common",
  "koldstore-jobs",
  "koldstore-manifest",
+ "koldstore-merge",
+ "koldstore-migrate",
  "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-schema",
+ "serde",
  "serde_json",
  "thiserror",
  "uuid",
@@ -1064,7 +1080,10 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "koldstore-common",
+ "koldstore-migrate",
  "koldstore-mirror",
+ "koldstore-parquet",
+ "serde",
  "serde_json",
  "thiserror",
 ]
@@ -1074,6 +1093,7 @@ name = "koldstore-migrate"
 version = "0.1.0"
 dependencies = [
  "koldstore-common",
+ "koldstore-flush",
  "koldstore-jobs",
  "koldstore-mirror",
  "koldstore-schema",

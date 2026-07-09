@@ -2,29 +2,35 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::time::{Duration, Instant};
 
-use koldstore_common::{quote_ident, QualifiedTableName};
+use koldstore_common::{dedupe_nonblank, quote_ident, QualifiedTableName};
+use koldstore_merge::scan::{
+    build_materialize_query as merge_materialize_query, MaterializeQueryParts, HOT_SEQ_SENTINEL,
+};
 use pgrx::pg_sys;
 
 use crate::merge_scan::path::CUSTOM_PATH_NAME;
+use crate::merge_scan::plan::{
+    prune_segment_stats, validate_prune_predicates_indexed, SegmentPrunePredicate, SegmentStatsHint,
+};
 
 mod literals;
 mod profile;
 mod tuple;
 
 use literals::{
-    list_node_pointers, scalar_array_filter_sql, sql_literal, typed_literal_sql, unwrap_relabel,
+    list_node_pointers, literal_json_value, scalar_array_filter_sql, sql_literal,
+    typed_literal_sql, unwrap_relabel,
 };
 
 use profile::{ColdReadProfile, SegmentReadProfile};
 use tuple::{copy_spi_datum, store_materialized_row, MaterializedRow};
 
 const CUSTOM_SCAN_NAME: &[u8] = b"KoldMergeScan\0";
-const HOT_SEQ: i64 = i64::MAX;
 const READER_PERMIT_RETRY_SLEEP: Duration = Duration::from_millis(10);
 const READER_PERMIT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -235,7 +241,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     })
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} catalog lookup failed: {error}"));
     let (cold_profile, cold_rows_json) =
-        match load_cold_rows_for_merge(table_oid, &snapshot, &catalog) {
+        match load_cold_rows_for_merge(table_oid, &snapshot, &catalog, qual) {
             Ok(result) => result,
             Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} cold read failed: {error}"),
         };
@@ -357,113 +363,136 @@ fn build_materialize_query(
         .map(|predicate| format!(" AND ({predicate})"))
         .unwrap_or_default();
 
-    Ok(format!(
-        r#"
-WITH hot AS (
-    SELECT
-        to_jsonb(hot) AS row_image,
-        jsonb_build_object({hot_pk}) AS pk_json,
-        {hot_seq}::bigint AS seq,
-        {hot_seq}::bigint AS commit_seq,
-        false AS deleted,
-        true AS from_hot
-    FROM ONLY {table} AS hot
-),
-candidates AS (
-    SELECT row_image, pk_json, seq, commit_seq, deleted, false AS from_hot
-    FROM jsonb_to_recordset('{cold_rows_json}'::jsonb) AS cold(
-        pk_json jsonb,
-        row_image jsonb,
-        seq bigint,
-        commit_seq bigint,
-        deleted boolean,
-        schema_version integer
-    )
-    UNION ALL
-    SELECT row_image, pk_json, seq, commit_seq, deleted, from_hot
-    FROM hot
-),
-winners AS (
-    SELECT DISTINCT ON (pk_json::text)
-        row_image,
-        deleted
-    FROM candidates
-    ORDER BY pk_json::text, seq DESC, commit_seq DESC, from_hot DESC
-)
-SELECT {projection}
-FROM winners
-WHERE NOT deleted{residual_where}
-"#,
-        hot_pk = hot_pk,
-        hot_seq = HOT_SEQ,
-        table = table.quoted(),
-        cold_rows_json = sql_literal(cold_rows_json),
-        projection = projection,
-        residual_where = residual_where,
-    ))
+    Ok(merge_materialize_query(&MaterializeQueryParts {
+        table_sql: table.quoted(),
+        hot_pk,
+        projection,
+        cold_rows_json: sql_literal(cold_rows_json),
+        residual_where,
+        hot_seq: HOT_SEQ_SENTINEL,
+    }))
 }
 
-fn active_cold_segment_paths(table_oid: pg_sys::Oid) -> Result<Vec<String>, String> {
-    let json = spi_query_one_string(
-        r#"
-SELECT COALESCE(jsonb_agg(object_path ORDER BY batch_number)::text, '[]')
-FROM koldstore.cold_segments
-WHERE table_oid = $1::oid
-  AND scope_key = ''
-  AND status = 'active'
-"#,
-        table_oid,
-    )?
-    .unwrap_or_else(|| "[]".to_string());
-    serde_json::from_str(&json).map_err(|error| error.to_string())
+#[derive(Debug)]
+struct ManifestSegmentStats {
+    manifest_path: String,
+    base_path: String,
+    manifest_read_ms: f64,
+    segments: Vec<SegmentStatsHint>,
+}
+
+fn active_manifest_segment_stats(
+    table_oid: pg_sys::Oid,
+) -> Result<Option<ManifestSegmentStats>, String> {
+    let manifest_started = Instant::now();
+    let Some(manifest_path) = optional_manifest_path(table_oid)? else {
+        return Ok(None);
+    };
+    let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
+    let segments = active_cold_segment_stats_from_catalog(table_oid)?;
+    Ok(Some(ManifestSegmentStats {
+        manifest_path,
+        base_path: storage.base_path,
+        manifest_read_ms: profile::elapsed_ms(manifest_started),
+        segments,
+    }))
+}
+
+fn active_cold_segment_stats_from_catalog(
+    table_oid: pg_sys::Oid,
+) -> Result<Vec<SegmentStatsHint>, String> {
+    use pgrx::datum::DatumWithOid;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct CatalogSegmentStatsRow {
+        object_path: String,
+        column_stats: serde_json::Value,
+    }
+
+    let statement = koldstore_catalog::queries::plan_active_cold_segment_stats_json()
+        .map_err(|error| error.to_string())?;
+    let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| "[]".to_string());
+    let rows: Vec<CatalogSegmentStatsRow> =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| SegmentStatsHint {
+            object_path: row.object_path,
+            column_stats: catalog_column_stats_map(row.column_stats),
+        })
+        .collect())
+}
+
+fn catalog_column_stats_map(
+    column_stats: serde_json::Value,
+) -> std::collections::BTreeMap<String, koldstore_parquet::ColumnStats> {
+    let mut stats = std::collections::BTreeMap::new();
+    let Some(columns) = column_stats.as_object() else {
+        return stats;
+    };
+    for (column, bounds) in columns {
+        let min = bounds
+            .get("min")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let max = bounds
+            .get("max")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        stats.insert(column.clone(), koldstore_parquet::ColumnStats { min, max });
+    }
+    stats
 }
 
 fn optional_manifest_path(table_oid: pg_sys::Oid) -> Result<Option<String>, String> {
-    spi_query_one_string(
-        r#"
-SELECT manifest_path
-FROM koldstore.manifest
-WHERE table_oid = $1::oid
-  AND sync_state = 'in_sync'
-ORDER BY generation DESC
-LIMIT 1
-"#,
-        table_oid,
-    )
-}
+    use pgrx::datum::DatumWithOid;
 
-fn spi_query_one_string(sql: &str, table_oid: pg_sys::Oid) -> Result<Option<String>, String> {
-    pgrx::Spi::connect(|client| {
-        let args = [pgrx::datum::DatumWithOid::from(table_oid)];
-        let tuples = client
-            .select(sql, Some(1), &args)
-            .map_err(|error| error.to_string())?;
-        if tuples.is_empty() {
-            return Ok(None);
-        }
-        tuples
-            .first()
-            .get_one::<String>()
-            .map_err(|error| error.to_string())
-    })
-    .map_err(|error| error.to_string())
+    let statement =
+        crate::catalog::queries::plan_in_sync_manifest_path().map_err(|error| error.to_string())?;
+    crate::spi::select_one(&statement, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())
 }
 
 fn load_cold_rows_for_merge(
     table_oid: pg_sys::Oid,
     snapshot: &koldstore_catalog::ManagedTableSnapshot,
     catalog: &koldstore_migrate::ExistingTableCatalog,
+    qual: *mut pg_sys::List,
 ) -> Result<(ColdReadProfile, String), String> {
     with_hook_disabled(|| {
-        let manifest_started = Instant::now();
-        let segment_paths = active_cold_segment_paths(table_oid)?;
-        let manifest_path = optional_manifest_path(table_oid)?;
+        unsafe { validate_filter_columns_indexed(qual, catalog)? };
+        let manifest_stats = active_manifest_segment_stats(table_oid)?;
+        let Some(manifest_stats) = manifest_stats else {
+            return Ok((
+                ColdReadProfile {
+                    manifest_path: "(none)".to_string(),
+                    manifest_read_ms: None,
+                    segments: vec![],
+                },
+                "[]".to_string(),
+            ));
+        };
+        let prune_predicates = unsafe { segment_prune_predicates(qual, &catalog.columns) };
+        let indexed_filter_columns = dedupe_nonblank(
+            catalog
+                .primary_key
+                .columns
+                .iter()
+                .map(String::as_str)
+                .chain(catalog.indexed_columns.iter().map(String::as_str)),
+        );
+        validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_columns)
+            .map_err(|error| error.to_string())?;
+        let segment_paths = prune_segment_stats(&manifest_stats.segments, &prune_predicates);
 
         if segment_paths.is_empty() {
             return Ok((
                 ColdReadProfile {
-                    manifest_path: manifest_path.unwrap_or_else(|| "(none)".to_string()),
-                    manifest_read_ms: Some(profile::elapsed_ms(manifest_started)),
+                    manifest_path: manifest_stats.manifest_path,
+                    manifest_read_ms: Some(manifest_stats.manifest_read_ms),
                     segments: vec![],
                 },
                 "[]".to_string(),
@@ -474,14 +503,6 @@ fn load_cold_rows_for_merge(
             return Err("cold reads are disabled by koldstore.cold_reads".to_string());
         }
 
-        let manifest_path = manifest_path.ok_or_else(|| {
-            "cold segments are present but no in-sync manifest was found".to_string()
-        })?;
-        let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
-        let manifest_file = std::path::Path::new(&storage.base_path).join(&manifest_path);
-        std::fs::read_to_string(&manifest_file)
-            .map_err(|error| format!("read manifest file {}: {error}", manifest_file.display()))?;
-        let manifest_read_ms = profile::elapsed_ms(manifest_started);
         let parquet_columns = catalog
             .columns
             .iter()
@@ -491,7 +512,7 @@ fn load_cold_rows_for_merge(
             .collect::<Vec<_>>();
 
         let (cold_rows_json, segments) = cold_rows_json_from_segments(
-            &storage.base_path,
+            &manifest_stats.base_path,
             &segment_paths,
             &parquet_columns,
             &snapshot.primary_key_columns,
@@ -499,8 +520,8 @@ fn load_cold_rows_for_merge(
 
         Ok((
             ColdReadProfile {
-                manifest_path,
-                manifest_read_ms: Some(manifest_read_ms),
+                manifest_path: manifest_stats.manifest_path,
+                manifest_read_ms: Some(manifest_stats.manifest_read_ms),
                 segments,
             },
             cold_rows_json,
@@ -510,17 +531,21 @@ fn load_cold_rows_for_merge(
 
 fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdReadProfile, String> {
     with_hook_disabled(|| {
-        let manifest_started = Instant::now();
-        let segment_paths = active_cold_segment_paths(table_oid)?;
-        let manifest_path =
-            optional_manifest_path(table_oid)?.unwrap_or_else(|| "(none)".to_string());
+        let Some(manifest_stats) = active_manifest_segment_stats(table_oid)? else {
+            return Ok(ColdReadProfile {
+                manifest_path: "(none)".to_string(),
+                manifest_read_ms: None,
+                segments: vec![],
+            });
+        };
         Ok(ColdReadProfile {
-            manifest_path,
-            manifest_read_ms: Some(profile::elapsed_ms(manifest_started)),
-            segments: segment_paths
+            manifest_path: manifest_stats.manifest_path,
+            manifest_read_ms: Some(manifest_stats.manifest_read_ms),
+            segments: manifest_stats
+                .segments
                 .into_iter()
-                .map(|object_path| SegmentReadProfile {
-                    object_path,
+                .map(|segment| SegmentReadProfile {
+                    object_path: segment.object_path,
                     row_count: 0,
                     read_ms: None,
                 })
@@ -726,6 +751,168 @@ unsafe fn residual_filter_sql(
     } else {
         Some(predicates.join(" AND "))
     }
+}
+
+unsafe fn segment_prune_predicates(
+    qual: *mut pg_sys::List,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> Vec<SegmentPrunePredicate> {
+    list_node_pointers(qual)
+        .into_iter()
+        .flat_map(|node| segment_prune_node_predicates(node.cast::<pg_sys::Expr>(), columns))
+        .collect()
+}
+
+unsafe fn validate_filter_columns_indexed(
+    qual: *mut pg_sys::List,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+) -> Result<(), String> {
+    let indexed = catalog
+        .primary_key
+        .columns
+        .iter()
+        .map(String::as_str)
+        .chain(catalog.indexed_columns.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    for column in filter_column_names(qual, &catalog.columns) {
+        if !indexed.contains(column.as_str()) {
+            return Err(format!(
+                "cold filter column `{column}` is not indexed; koldstore cold reads require WHERE filters on indexed columns"
+            ));
+        }
+    }
+    Ok(())
+}
+
+unsafe fn filter_column_names(
+    qual: *mut pg_sys::List,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> BTreeSet<String> {
+    list_node_pointers(qual)
+        .into_iter()
+        .flat_map(|node| filter_node_column_names(node.cast::<pg_sys::Expr>(), columns))
+        .collect()
+}
+
+unsafe fn filter_node_column_names(
+    expr: *mut pg_sys::Expr,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    if expr.is_null() {
+        return names;
+    }
+    match (*expr).type_ {
+        pg_sys::NodeTag::T_OpExpr => {
+            let op_expr = expr.cast::<pg_sys::OpExpr>();
+            for arg in list_node_pointers((*op_expr).args) {
+                collect_var_column_names(arg.cast::<pg_sys::Expr>(), columns, &mut names);
+            }
+        }
+        pg_sys::NodeTag::T_ScalarArrayOpExpr => {
+            let scalar = expr.cast::<pg_sys::ScalarArrayOpExpr>();
+            for arg in list_node_pointers((*scalar).args) {
+                collect_var_column_names(arg.cast::<pg_sys::Expr>(), columns, &mut names);
+            }
+        }
+        pg_sys::NodeTag::T_BoolExpr => {
+            let bool_expr = expr.cast::<pg_sys::BoolExpr>();
+            for arg in list_node_pointers((*bool_expr).args) {
+                names.extend(filter_node_column_names(
+                    arg.cast::<pg_sys::Expr>(),
+                    columns,
+                ));
+            }
+        }
+        _ => collect_var_column_names(expr, columns, &mut names),
+    }
+    names
+}
+
+unsafe fn collect_var_column_names(
+    expr: *mut pg_sys::Expr,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+    names: &mut BTreeSet<String>,
+) {
+    if let Some(column) = var_column(expr, columns) {
+        names.insert(column.name.clone());
+    }
+}
+
+unsafe fn segment_prune_node_predicates(
+    expr: *mut pg_sys::Expr,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> Vec<SegmentPrunePredicate> {
+    if expr.is_null() {
+        return Vec::new();
+    }
+    match (*expr).type_ {
+        pg_sys::NodeTag::T_OpExpr => segment_prune_op_expr(expr, columns).into_iter().collect(),
+        pg_sys::NodeTag::T_BoolExpr => {
+            let bool_expr = expr.cast::<pg_sys::BoolExpr>();
+            if (*bool_expr).boolop != pg_sys::BoolExprType::AND_EXPR {
+                return Vec::new();
+            }
+            list_node_pointers((*bool_expr).args)
+                .into_iter()
+                .flat_map(|node| {
+                    segment_prune_node_predicates(node.cast::<pg_sys::Expr>(), columns)
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+unsafe fn segment_prune_op_expr(
+    expr: *mut pg_sys::Expr,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> Option<SegmentPrunePredicate> {
+    let op_expr = expr.cast::<pg_sys::OpExpr>();
+    let opname = cstr_to_str(pg_sys::get_opname((*op_expr).opno))?;
+    if !matches!(opname, "=" | "<" | "<=" | ">" | ">=") {
+        return None;
+    }
+    let args = list_node_pointers((*op_expr).args);
+    if args.len() != 2 {
+        return None;
+    }
+
+    if let Some((column, literal)) = var_and_json_literal(args[0], args[1], columns) {
+        return prune_predicate_from_op(column, literal, opname, false);
+    }
+    if let Some((column, literal)) = var_and_json_literal(args[1], args[0], columns) {
+        return prune_predicate_from_op(column, literal, opname, true);
+    }
+    None
+}
+
+fn prune_predicate_from_op(
+    column: &koldstore_migrate::order::CatalogColumn,
+    literal: serde_json::Value,
+    opname: &str,
+    reversed: bool,
+) -> Option<SegmentPrunePredicate> {
+    match (opname, reversed) {
+        ("=", _) => Some(SegmentPrunePredicate::equality(&column.name, literal)),
+        (">" | ">=", false) | ("<" | "<=", true) => {
+            Some(SegmentPrunePredicate::lower_bound(&column.name, literal))
+        }
+        ("<" | "<=", false) | (">" | ">=", true) => {
+            Some(SegmentPrunePredicate::upper_bound(&column.name, literal))
+        }
+        _ => None,
+    }
+}
+
+unsafe fn var_and_json_literal(
+    column_expr: *mut std::ffi::c_void,
+    literal_expr: *mut std::ffi::c_void,
+    columns: &[koldstore_migrate::order::CatalogColumn],
+) -> Option<(&koldstore_migrate::order::CatalogColumn, serde_json::Value)> {
+    let column = var_column(column_expr.cast::<pg_sys::Expr>(), columns)?;
+    let literal = literal_json_value(literal_expr.cast::<pg_sys::Expr>(), column)?;
+    Some((column, literal))
 }
 
 unsafe fn residual_node_sql(

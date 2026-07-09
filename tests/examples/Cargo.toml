@@ -1,0 +1,38 @@
+[package]
+name = "examples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[test]]
+name = "chat_history"
+path = "chat_history.rs"
+
+[[test]]
+name = "ai_memory"
+path = "ai_memory.rs"
+
+[[test]]
+name = "iot_telemetry"
+path = "iot_telemetry.rs"
+
+[[test]]
+name = "audit_events"
+path = "audit_events.rs"
+
+[[test]]
+name = "game_events"
+path = "game_events.rs"
+
+[dev-dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-postgres.workspace = true
+
+[lints]
+workspace = true

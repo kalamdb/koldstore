@@ -252,7 +252,7 @@ pub fn json_i64(value: Option<&serde_json::Value>) -> Result<Option<i64>, String
     }
 }
 
-fn json_f32(value: Option<&serde_json::Value>) -> Result<Option<f32>, String> {
+pub fn json_f32(value: Option<&serde_json::Value>) -> Result<Option<f32>, String> {
     json_f64(value)?
         .map(|value| {
             if value.is_finite() && value >= f32::MIN as f64 && value <= f32::MAX as f64 {
@@ -264,7 +264,7 @@ fn json_f32(value: Option<&serde_json::Value>) -> Result<Option<f32>, String> {
         .transpose()
 }
 
-fn json_f64(value: Option<&serde_json::Value>) -> Result<Option<f64>, String> {
+pub fn json_f64(value: Option<&serde_json::Value>) -> Result<Option<f64>, String> {
     match value {
         None | Some(serde_json::Value::Null) => Ok(None),
         Some(serde_json::Value::Number(value)) => value
@@ -275,7 +275,7 @@ fn json_f64(value: Option<&serde_json::Value>) -> Result<Option<f64>, String> {
     }
 }
 
-fn json_string_cell(value: Option<&serde_json::Value>) -> Result<Option<String>, String> {
+pub fn json_string_cell(value: Option<&serde_json::Value>) -> Result<Option<String>, String> {
     match json_string_borrowed(value)? {
         None => Ok(None),
         Some(Cow::Borrowed(value)) => Ok(Some(value.to_string())),

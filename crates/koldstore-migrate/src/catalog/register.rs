@@ -506,6 +506,25 @@ pub fn plan_schema_registry_insert_with_id(
     })
 }
 
+/// Builds a schema registry insert plan from prepared metadata.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be prepared.
+pub fn plan_schema_registry_insert_prepared(
+    schema_id: Uuid,
+    metadata: PreparedRegistrationMetadata,
+) -> RegistryResult<SchemaRegistryPlan> {
+    let statement = SqlStatement::write("register managed table schema", REGISTER_SCHEMA_SQL)
+        .map_err(|error| RegistryError::Spi(error.to_string()))?;
+
+    Ok(SchemaRegistryPlan {
+        schema_id,
+        metadata,
+        statement,
+    })
+}
+
 /// Primary-key column shape as decoded from PostgreSQL catalog JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PrimaryKeyShapeCatalogRow {

@@ -13,9 +13,16 @@ koldstore-manifest.workspace = true
 koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-schema.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+koldstore-common.workspace = true
+koldstore-merge.workspace = true
+koldstore-migrate.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -22,6 +22,16 @@ pub const COLD_READS_GUC: &str = "koldstore.cold_reads";
 pub const MAX_OPEN_PARQUET_READERS_GUC: &str = "koldstore.max_open_parquet_readers";
 pub const MAX_RUNNING_JOBS_GUC: &str = "koldstore.max_running_jobs";
 pub const LOG_LEVEL_GUC: &str = "koldstore.log_level";
+/// GUC that sets the minimum allowed `max_rows_per_file` for managed tables.
+pub const MIN_MAX_ROWS_PER_FILE_GUC: &str = "koldstore.min_max_rows_per_file";
+
+/// Minimum accepted integer setting value for `min_max_rows_per_file`.
+pub const MIN_MIN_MAX_ROWS_PER_FILE: i32 = 1;
+/// Conservative hard cap for `min_max_rows_per_file`.
+pub const MAX_MIN_MAX_ROWS_PER_FILE: i32 = 1_000_000;
+
+/// Default minimum allowed `max_rows_per_file` for managed tables.
+pub const DEFAULT_MIN_MAX_ROWS_PER_FILE_SETTING: i32 = 1_000;
 
 /// Runtime mode for cold reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,4 +77,22 @@ pub const fn bounded_concurrency_limit(value: i32) -> i32 {
     } else {
         value
     }
+}
+
+/// Validates and clamps the configured `max_rows_per_file` floor.
+#[must_use]
+pub const fn bounded_min_max_rows_per_file(value: i32) -> i32 {
+    if value < MIN_MIN_MAX_ROWS_PER_FILE {
+        MIN_MIN_MAX_ROWS_PER_FILE
+    } else if value > MAX_MIN_MAX_ROWS_PER_FILE {
+        MAX_MIN_MAX_ROWS_PER_FILE
+    } else {
+        value
+    }
+}
+
+/// Default minimum allowed `max_rows_per_file` for managed tables.
+#[must_use]
+pub const fn default_min_max_rows_per_file() -> i32 {
+    DEFAULT_MIN_MAX_ROWS_PER_FILE_SETTING
 }

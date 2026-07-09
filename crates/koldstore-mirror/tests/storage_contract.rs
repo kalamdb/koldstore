@@ -55,7 +55,11 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
         .seq_index
         .sql
         .contains("ON \"koldstore\".\"items__cl\" (\"seq\")"));
-    assert_eq!(plan.create_statements().len(), 2);
+    assert!(plan
+        .tombstone_index
+        .sql
+        .contains("ON \"koldstore\".\"items__cl\" (\"seq\") WHERE \"op\" = 3"));
+    assert_eq!(plan.create_statements().len(), 3);
 }
 
 #[test]

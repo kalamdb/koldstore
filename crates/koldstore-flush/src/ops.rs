@@ -61,8 +61,6 @@ pub enum OpsError {
 pub struct TableStatusPlan {
     /// Table filter.
     pub table_name: TableName,
-    /// Optional scope filter.
-    pub scope_key: Option<ScopeKey>,
     /// Parameterized catalog statement.
     pub statement: SqlStatement,
 }
@@ -290,6 +288,66 @@ pub fn plan_mirror_flush_selection(
     base_columns: &[String],
     scope_column: Option<&str>,
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
+    plan_mirror_flush_selection_inner(
+        table,
+        mirror_table,
+        primary_key_columns,
+        base_columns,
+        scope_column,
+        None,
+        MirrorFlushPaging::Unbounded,
+    )
+}
+
+/// Plans one keyset-batched page of mirror-backed flush rows.
+///
+/// PERFORMANCE: Used by the streaming flush path. Returns one page of rows as a plain
+/// `SELECT` (no `jsonb_agg`); `pg_koldstore` decodes SPI heap tuples directly.
+///
+/// Bind parameters:
+/// - `$1` mirror `seq` upper bound (`max_seq`)
+/// - `$2` exclusive lower bound (`after_seq`)
+/// - `$3` page size limit
+///
+/// # Errors
+///
+/// Returns an error when identifiers are unsafe or statement metadata cannot be prepared.
+pub fn plan_mirror_flush_selection_batch(
+    table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key_columns: &[String],
+    base_columns: &[String],
+    scope_column: Option<&str>,
+    mirror_ops: Option<&[i16]>,
+) -> Result<MirrorFlushSelectionPlan, OpsError> {
+    plan_mirror_flush_selection_inner(
+        table,
+        mirror_table,
+        primary_key_columns,
+        base_columns,
+        scope_column,
+        mirror_ops,
+        MirrorFlushPaging::KeysetLimit,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MirrorFlushPaging {
+    /// Full selection up to `$1` max seq (tests / non-streaming callers).
+    Unbounded,
+    /// Keyset page: `$1` max seq, `$2` after seq, `$3` limit.
+    KeysetLimit,
+}
+
+fn plan_mirror_flush_selection_inner(
+    table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key_columns: &[String],
+    base_columns: &[String],
+    scope_column: Option<&str>,
+    mirror_ops: Option<&[i16]>,
+    paging: MirrorFlushPaging,
+) -> Result<MirrorFlushSelectionPlan, OpsError> {
     if primary_key_columns.is_empty() {
         return Err(OpsError::Sql(
             "flush selection requires primary key".to_string(),
@@ -328,11 +386,38 @@ pub fn plan_mirror_flush_selection(
         ),
         "(mirror.\"op\" = 3) AS deleted".to_string(),
     ]);
+
     let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];
-    let mut param_types = vec![SqlParamType::BigInt];
+    let (mut param_types, operation, limit_sql, scope_param) = match paging {
+        MirrorFlushPaging::Unbounded => (
+            vec![SqlParamType::BigInt],
+            "select mirror-backed flush rows",
+            "",
+            2_usize,
+        ),
+        MirrorFlushPaging::KeysetLimit => (
+            vec![
+                SqlParamType::BigInt,
+                SqlParamType::BigInt,
+                SqlParamType::BigInt,
+            ],
+            "select mirror-backed flush rows batch",
+            "\nLIMIT $3::bigint",
+            4_usize,
+        ),
+    };
+    if matches!(paging, MirrorFlushPaging::KeysetLimit) {
+        where_clauses.push("mirror.\"seq\" > $2::bigint".to_string());
+    }
+    if let Some(ops) = mirror_ops {
+        if !ops.is_empty() {
+            where_clauses.push(mirror_ops_where_clause(ops));
+        }
+    }
     if let Some(scope_column) = scope_column {
-        let predicate = koldstore_common::scope::scope_predicate_sql("mirror", scope_column, 2)
-            .map_err(|error| OpsError::Sql(error.to_string()))?;
+        let predicate =
+            koldstore_common::scope::scope_predicate_sql("mirror", scope_column, scope_param)
+                .map_err(|error| OpsError::Sql(error.to_string()))?;
         where_clauses.push(predicate);
         param_types.push(SqlParamType::Text);
     }
@@ -343,23 +428,36 @@ FROM {mirror} AS mirror
 LEFT JOIN ONLY {table} AS hot
   ON {join}
 WHERE {where_clause}
-ORDER BY mirror."seq" ASC
+ORDER BY mirror."seq" ASC{limit_sql}
 "#,
         select_columns = select_columns.join(", "),
         mirror = mirror_table.quoted(),
         table = table.quoted(),
         join = join,
         where_clause = where_clauses.join(" AND "),
+        limit_sql = limit_sql,
     );
-    let statement =
-        SqlStatement::read_with_params("select mirror-backed flush rows", &sql, param_types)
-            .map_err(|error| OpsError::Sql(error.to_string()))?;
+    let statement = SqlStatement::read_with_params(operation, &sql, param_types)
+        .map_err(|error| OpsError::Sql(error.to_string()))?;
 
     Ok(MirrorFlushSelectionPlan {
         table: table.clone(),
         mirror_table: mirror_table.clone(),
         statement,
     })
+}
+
+fn mirror_ops_where_clause(ops: &[i16]) -> String {
+    if ops.len() == 1 {
+        format!("mirror.\"op\" = {}", ops[0])
+    } else {
+        let literals = ops
+            .iter()
+            .map(i16::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("mirror.\"op\" IN ({literals})")
+    }
 }
 
 /// Parses the limited `koldstore_exec` command boundary.
@@ -384,7 +482,7 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
 ///
 /// The caller supplies validated quoted table and mirror relation names. The
 /// returned JSON includes hot heap, mirror, and cold row accounting used by
-/// storage verification tests and operators.
+/// storage verification tests and operators. Counters are table-wide.
 ///
 /// # Errors
 ///
@@ -392,29 +490,25 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
 pub fn describe_table_plan(
     table: &QualifiedTableName,
     mirror: &QualifiedTableName,
-    scope_key: Option<ScopeKey>,
 ) -> Result<TableStatusPlan, OpsError> {
-    let scope_key = scope_key.as_ref().map(ScopeKey::as_str).unwrap_or("");
     let statement = SqlStatement::read_with_params(
         "table status",
         &format!(
             r#"
 SELECT jsonb_build_object(
-    'hot_rows', (SELECT count(*)::bigint FROM ONLY {table}),
-    'mirror_rows', (SELECT count(*)::bigint FROM {mirror}),
-    'cold_row_count', COALESCE((
+    'hot_rows', COALESCE(m.hot_row_count, (SELECT count(*)::bigint FROM ONLY {table})),
+    'mirror_rows', COALESCE(NULLIF(m.mirror_row_count, 0), (SELECT count(*)::bigint FROM {mirror})),
+    'cold_row_count', COALESCE(m.cold_row_count, (
         SELECT sum(cs.row_count)::bigint
         FROM koldstore.cold_segments cs
         WHERE cs.table_oid = $1::regclass::oid
           AND cs.status = 'active'
-          AND ($2::text = '' OR cs.scope_key = $2)
     ), 0),
-    'cold_segment_count', COALESCE((
+    'cold_segment_count', COALESCE(NULLIF(m.segment_count, 0), (
         SELECT count(*)::bigint
         FROM koldstore.cold_segments cs
         WHERE cs.table_oid = $1::regclass::oid
           AND cs.status = 'active'
-          AND ($2::text = '' OR cs.scope_key = $2)
     ), 0),
     'heap_size_bytes', pg_relation_size($1::regclass),
     'table_size_bytes', pg_table_size($1::regclass),
@@ -429,13 +523,12 @@ SELECT jsonb_build_object(
 FROM koldstore.schemas s
 LEFT JOIN koldstore.manifest m
   ON m.table_oid = s.table_oid
- AND ($2::text = '' OR m.scope_key = $2)
+ AND m.scope_key = ''
 LEFT JOIN LATERAL (
     SELECT count(*)::bigint AS pending_jobs
     FROM koldstore.jobs j
     WHERE j.table_oid = s.table_oid
       AND j.status IN ('pending', 'running')
-      AND ($2::text = '' OR j.scope_key = $2)
 ) j ON true
 LEFT JOIN LATERAL (
     SELECT jsonb_agg(
@@ -465,7 +558,6 @@ LEFT JOIN LATERAL (
             updated_at
         FROM koldstore.jobs
         WHERE table_oid = s.table_oid
-          AND ($2::text = '' OR scope_key = $2)
         ORDER BY updated_at DESC, id
         LIMIT 20
     ) AS job_snapshot
@@ -477,7 +569,7 @@ LIMIT 1
             table = table.quoted(),
             mirror = mirror.quoted(),
         ),
-        [SqlParamType::Oid, SqlParamType::Text],
+        [SqlParamType::Oid],
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 
@@ -485,11 +577,6 @@ LIMIT 1
         table_name: table
             .as_table_name()
             .map_err(|error| OpsError::Sql(error.to_string()))?,
-        scope_key: if scope_key.is_empty() {
-            None
-        } else {
-            Some(ScopeKey::new(scope_key).map_err(|error| OpsError::Sql(error.to_string()))?)
-        },
         statement,
     })
 }
