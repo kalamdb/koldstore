@@ -265,7 +265,7 @@ ensure_cargo_pgrx
 if [[ "${SKIP_UNIT}" -eq 0 ]]; then
   ensure_cargo_nextest
   step "workspace non-E2E tests"
-  cargo nextest run --workspace --no-default-features --exclude e2e
+  cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples
 fi
 
 IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"

@@ -11,7 +11,7 @@ Date: 2026-07-04
 | `cargo clippy --workspace --all-targets --no-default-features` | PASS | Valid non-pgrx workspace clippy path. |
 | `cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg16` | PASS | Valid PG16 pgrx feature clippy path. |
 | `scripts/run-pgrx-matrix.sh --pg-versions 18 --skip-unit --skip-install --skip-e2e --download-missing --without-icu` | PASS | Initialized pgrx-managed PostgreSQL 18.4 locally without ICU and verified the `pg18` pgrx feature clippy path. |
-| `cargo nextest run --workspace --no-default-features --exclude e2e` | PASS | Workspace unit, integration, and doc tests passed; pgrx-backed E2E tests remain covered by the local E2E runner. |
+| `cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples` | PASS | Workspace unit, integration, and doc tests passed; pgrx-backed E2E and example scenarios remain covered by the local E2E/examples runners. |
 | `scripts/run-pgrx-matrix.sh --pg-versions 18 --skip-unit --skip-clippy` | PASS | Installed `koldstore` into pgrx-managed PostgreSQL 18 and ran all 50 E2E tests with `cargo nextest run -p e2e --test-threads 1`. |
 | `scripts/run-pg-e2e.sh` | PASS | Uses local pgrx PostgreSQL 16, installs `koldstore`, recreates `koldstore_pgrx_e2e`, and runs `cargo nextest run -p e2e --test-threads 1` serially against the pgrx-managed server with no ignored tests. No Docker dependency. |
 | `cargo pgrx install -p pg_koldstore --no-default-features --features pg16 --pg-config "$(cargo pgrx info pg-config 16)"` | PASS | Valid local pgrx extension install path. Direct `cargo pgrx test` is intentionally avoided because native pg-feature test binaries can link unresolved PostgreSQL backend symbols outside the server. |

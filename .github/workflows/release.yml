@@ -95,7 +95,7 @@ jobs:
       - run: cargo install cargo-nextest --locked
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      - run: cargo nextest run --workspace --no-default-features --exclude e2e
+      - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples
 
   pgrx_tests:
     name: "pgrx + E2E · PG${{ matrix.pg }}"
