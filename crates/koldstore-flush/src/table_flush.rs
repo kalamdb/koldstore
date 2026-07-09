@@ -1,11 +1,14 @@
 //! Synchronous `flush_table` orchestration helpers.
 //!
-//! Owns PG-free path planning and batch outcome shapes. SPI execution and file
-//! writes stay in `pg_koldstore`.
+//! Owns PG-free batch outcome shapes and max-rows policy resolution. Manifest
+//! path helpers live in `koldstore-manifest`. SPI execution and file writes stay
+//! in `pg_koldstore`.
 
 use std::path::PathBuf;
 
 use koldstore_manifest::Manifest;
+
+pub use koldstore_manifest::manifest_paths;
 
 /// Prepared context for one synchronous flush attempt.
 #[derive(Debug, Clone, PartialEq)]
@@ -39,21 +42,16 @@ pub struct TableFlushBatchOutcome {
     pub last_max_seq: i64,
     /// Last flushed `_commit_seq`.
     pub last_max_commit_seq: i64,
+    /// Mirror operations used to select and later prune this flush.
+    pub mirror_ops: Option<Vec<i16>>,
+    /// Sequence watermark used for conditional mirror/hot cleanup.
+    pub prune_max_seq: i64,
     /// Manifest assembled from active catalog segments.
     pub manifest: Manifest,
     /// Relative manifest path under the table prefix.
     pub manifest_path: String,
     /// Absolute manifest path on local/object-store mount.
     pub absolute_manifest_path: PathBuf,
-}
-
-/// Relative and absolute manifest paths for a managed table flush.
-#[must_use]
-pub fn manifest_paths(namespace: &str, table_name: &str, base_path: &str) -> (String, PathBuf) {
-    let prefix = format!("{namespace}/{table_name}");
-    let manifest_path = format!("{prefix}/manifest.json");
-    let absolute_manifest_path = PathBuf::from(base_path).join(&manifest_path);
-    (manifest_path, absolute_manifest_path)
 }
 
 /// Resolves the configured max rows per Parquet file from flush policy.

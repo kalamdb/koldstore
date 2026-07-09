@@ -174,6 +174,7 @@ fn sql_exposes_export_import_boundary() {
     assert!(export.statement.sql.contains("cs.scope_key = m.scope_key"));
     assert!(export.statement.sql.contains("cs.status = 'active'"));
     assert!(export.archive_manifest_path.ends_with("manifest.json"));
+    assert_eq!(export.archive_manifest_path, "app/items/manifest.json");
 
     assert_eq!(
         koldstore_flush::ops::classify_command("IMPORT TABLE app.items"),

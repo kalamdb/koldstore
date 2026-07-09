@@ -1,33 +1,102 @@
 //! PostgreSQL planner literal extraction for merge-scan filters.
+//!
+//! Supports both planner `Const` nodes and bound `PARAM_EXTERN` values so
+//! prepared/parameterized queries (`WHERE id = $1`) prune cold segments and
+//! push equality into the hot SPI load the same way as literal SQL.
 
 use std::ffi::CStr;
-use std::os::raw::c_int;
 
 use koldstore_common::escape_sql_literal;
-use koldstore_schema::{PgIntegerArrayOid, PgType};
+use koldstore_schema::PgType;
 use pgrx::pg_sys;
 
 pub(super) fn sql_literal(value: &str) -> String {
     escape_sql_literal(value)
 }
 
+/// Resolves a Const or bound Param into a typed SQL literal for SPI pushdown.
 pub(super) unsafe fn typed_literal_sql(
     expr: *mut pg_sys::Expr,
     column: &koldstore_migrate::order::CatalogColumn,
+    params: pg_sys::ParamListInfo,
 ) -> Option<String> {
-    let expr = unwrap_relabel(expr);
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
+    let Some((datum, isnull, _)) = const_or_param_datum(expr, params) else {
+        return None;
+    };
+    if isnull {
         return None;
     }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
+    datum_typed_sql(datum, column)
+}
 
+/// Resolves a Const or bound Param into a JSON value for prune/residual filters.
+pub(super) unsafe fn literal_json_value(
+    expr: *mut pg_sys::Expr,
+    column: &koldstore_migrate::order::CatalogColumn,
+    params: pg_sys::ParamListInfo,
+) -> Option<serde_json::Value> {
+    let Some((datum, isnull, _)) = const_or_param_datum(expr, params) else {
+        return None;
+    };
+    if isnull {
+        return None;
+    }
+    datum_json_value(datum, column)
+}
+
+unsafe fn const_or_param_datum(
+    expr: *mut pg_sys::Expr,
+    params: pg_sys::ParamListInfo,
+) -> Option<(pg_sys::Datum, bool, pg_sys::Oid)> {
+    let expr = unwrap_relabel(expr);
+    if expr.is_null() {
+        return None;
+    }
+    match (*expr).type_ {
+        pg_sys::NodeTag::T_Const => {
+            let konst = expr.cast::<pg_sys::Const>();
+            Some((
+                (*konst).constvalue,
+                (*konst).constisnull,
+                (*konst).consttype,
+            ))
+        }
+        pg_sys::NodeTag::T_Param => {
+            let param = expr.cast::<pg_sys::Param>();
+            if (*param).paramkind != pg_sys::ParamKind::PARAM_EXTERN {
+                return None;
+            }
+            let param_id = (*param).paramid;
+            if params.is_null() || param_id < 1 || param_id > (*params).numParams {
+                return None;
+            }
+            // Prefer the fetch hook (used by some ParamListInfo owners); otherwise
+            // read the inline params[] slot (libpq prepared statements).
+            if let Some(fetch) = (*params).paramFetch {
+                let mut workspace = pg_sys::ParamExternData::default();
+                let fetched = fetch(params, param_id, false, &mut workspace);
+                if fetched.is_null() {
+                    return None;
+                }
+                Some(((*fetched).value, (*fetched).isnull, (*fetched).ptype))
+            } else {
+                let slot = (*params).params.as_slice((*params).numParams as usize);
+                let entry = &slot[(param_id - 1) as usize];
+                Some((entry.value, entry.isnull, entry.ptype))
+            }
+        }
+        _ => None,
+    }
+}
+
+unsafe fn datum_typed_sql(
+    datum: pg_sys::Datum,
+    column: &koldstore_migrate::order::CatalogColumn,
+) -> Option<String> {
     let pg_type = column.pg_type;
     match pg_type {
         PgType::Text | PgType::Numeric | PgType::Uuid | PgType::Jsonb | PgType::TextArray => {
-            let text = (*konst).constvalue.cast_mut_ptr::<pg_sys::text>();
+            let text = datum.cast_mut_ptr::<pg_sys::text>();
             if text.is_null() {
                 return None;
             }
@@ -40,33 +109,35 @@ pub(super) unsafe fn typed_literal_sql(
             pg_sys::pfree(cstr.cast());
             Some(literal)
         }
-        PgType::Bool => match (*konst).consttype.to_u32() {
-            16 => Some(((*konst).constvalue.value() != 0).to_string()),
-            _ => None,
-        },
+        PgType::Bool => Some((datum.value() != 0).to_string()),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
-            pg_type.integer_sql_literal((*konst).constvalue.value() as i64)
+            pg_type.integer_sql_literal(datum.value() as i64)
         }
-        _ => const_literal_sql(expr),
+        _ => {
+            // Fall back to type output for timestamptz / other typed columns.
+            let mut typoutput = pg_sys::InvalidOid;
+            let mut typisvarlena = false;
+            // Use catalog OID when available; otherwise skip.
+            let oid = column_type_oid(pg_type)?;
+            pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
+            let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
+            if out.is_null() {
+                return None;
+            }
+            let text = CStr::from_ptr(out).to_str().ok()?.to_string();
+            pg_sys::pfree(out.cast());
+            Some(format!("'{}'", sql_literal(&text)))
+        }
     }
 }
 
-pub(super) unsafe fn literal_json_value(
-    expr: *mut pg_sys::Expr,
+unsafe fn datum_json_value(
+    datum: pg_sys::Datum,
     column: &koldstore_migrate::order::CatalogColumn,
 ) -> Option<serde_json::Value> {
-    let expr = unwrap_relabel(expr);
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
-        return None;
-    }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
-
     match column.pg_type {
         PgType::Text | PgType::Uuid => {
-            let text = (*konst).constvalue.cast_mut_ptr::<pg_sys::text>();
+            let text = datum.cast_mut_ptr::<pg_sys::text>();
             if text.is_null() {
                 return None;
             }
@@ -78,128 +149,22 @@ pub(super) unsafe fn literal_json_value(
             pg_sys::pfree(cstr.cast());
             Some(serde_json::Value::String(value))
         }
-        PgType::Bool => match (*konst).consttype.to_u32() {
-            16 => Some(serde_json::Value::Bool((*konst).constvalue.value() != 0)),
-            _ => None,
-        },
-        PgType::Int2 | PgType::Int4 | PgType::Int8 => {
-            Some(serde_json::json!((*konst).constvalue.value() as i64))
-        }
+        PgType::Bool => Some(serde_json::Value::Bool(datum.value() != 0)),
+        PgType::Int2 | PgType::Int4 | PgType::Int8 => Some(serde_json::json!(datum.value() as i64)),
         _ => None,
     }
 }
 
-pub(super) unsafe fn scalar_array_filter_sql(
-    expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
-) -> Option<String> {
-    let scalar = expr.cast::<pg_sys::ScalarArrayOpExpr>();
-    if !(*scalar).useOr {
-        return None;
-    }
-    let args = list_node_pointers((*scalar).args);
-    if args.len() != 2 {
-        return None;
-    }
-    let var = args[0].cast::<pg_sys::Expr>();
-    if var.is_null() || (*var).type_ != pg_sys::NodeTag::T_Var {
-        return None;
-    }
-    let var = var.cast::<pg_sys::Var>();
-    let attno = (*var).varattno;
-    if attno <= 0 {
-        return None;
-    }
-    let column = columns.get(usize::try_from(attno - 1).ok()?)?;
-    let values = array_literal_values(args[1].cast::<pg_sys::Expr>())?;
-    if values.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "(row_image ->> '{name}')::{type_name} IN ({values})",
-        name = sql_literal(&column.name),
-        type_name = column.catalog_type_name(),
-        values = values.join(", ")
-    ))
-}
-
-unsafe fn array_literal_values(expr: *mut pg_sys::Expr) -> Option<Vec<String>> {
-    if expr.is_null() {
-        return None;
-    }
-    match (*expr).type_ {
-        pg_sys::NodeTag::T_ArrayExpr => {
-            let array = expr.cast::<pg_sys::ArrayExpr>();
-            Some(
-                list_node_pointers((*array).elements)
-                    .into_iter()
-                    .filter_map(|node| const_literal_sql(node.cast::<pg_sys::Expr>()))
-                    .collect::<Vec<_>>(),
-            )
-        }
-        pg_sys::NodeTag::T_Const => const_array_literal_values(expr)
-            .or_else(|| const_literal_sql(expr).map(|value| vec![value])),
-        _ => None,
-    }
-}
-
-unsafe fn const_array_literal_values(expr: *mut pg_sys::Expr) -> Option<Vec<String>> {
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
-        return None;
-    }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
-    let array_oid = (*konst).consttype.to_u32();
-    let integer_array = PgIntegerArrayOid::from_oid(array_oid)?;
-    let element_pg_type = integer_array.element_type();
-    let element_oid = integer_array.element_oid();
-    let (elem_len, elem_byval, elem_align) = match integer_array {
-        PgIntegerArrayOid::Int2 => (2, true, b's' as std::os::raw::c_char),
-        PgIntegerArrayOid::Int4 => (4, true, b'i' as std::os::raw::c_char),
-        PgIntegerArrayOid::Int8 => (8, true, b'd' as std::os::raw::c_char),
+fn column_type_oid(pg_type: PgType) -> Option<pg_sys::Oid> {
+    // Keep in sync with koldstore_schema::PgType OID mapping for output fallback.
+    let oid = match pg_type {
+        PgType::Timestamptz => 1184u32,
+        PgType::Bytea => 17,
+        PgType::Float4 => 700,
+        PgType::Float8 => 701,
+        _ => return None,
     };
-    let array = (*konst).constvalue.cast_mut_ptr::<pg_sys::ArrayType>();
-    if array.is_null() {
-        return None;
-    }
-    let mut values: *mut pg_sys::Datum = std::ptr::null_mut();
-    let mut nulls: *mut bool = std::ptr::null_mut();
-    let mut count: c_int = 0;
-    pg_sys::deconstruct_array(
-        array,
-        pg_sys::Oid::from(element_oid),
-        elem_len,
-        elem_byval,
-        elem_align,
-        &mut values,
-        &mut nulls,
-        &mut count,
-    );
-    let count = usize::try_from(count).ok()?;
-    let mut result = Vec::with_capacity(count);
-    for index in 0..count {
-        if !nulls.is_null() && *nulls.add(index) {
-            continue;
-        }
-        let value = *values.add(index);
-        let sql = element_pg_type.integer_sql_literal(value.value() as i64)?;
-        result.push(sql);
-    }
-    Some(result)
-}
-
-unsafe fn const_literal_sql(expr: *mut pg_sys::Expr) -> Option<String> {
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
-        return None;
-    }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
-    let pg_type = PgType::from_integer_oid((*konst).consttype.to_u32())?;
-    pg_type.integer_sql_literal((*konst).constvalue.value() as i64)
+    Some(pg_sys::Oid::from(oid))
 }
 
 pub(super) unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {

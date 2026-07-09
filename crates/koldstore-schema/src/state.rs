@@ -19,3 +19,28 @@ pub enum MirrorInitializationState {
     /// Initialization failed and needs retry or rollback.
     Failed,
 }
+
+impl MirrorInitializationState {
+    /// Catalog / SQL spelling for this state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::Capturing => "capturing",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Parses a catalog spelling into a typed state.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "not_started" => Some(Self::NotStarted),
+            "capturing" => Some(Self::Capturing),
+            "complete" => Some(Self::Complete),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}

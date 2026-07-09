@@ -1,8 +1,10 @@
 //! Migrated-table schema registry (`koldstore.schemas`).
 //!
 //! Owns column sets, schema versions, type-matrix validation, and initialization
-//! state for managed tables. Must not depend on `pgrx`. SQL execution stays in
-//! `pg_koldstore`.
+//! state for managed tables. Keep separate from `koldstore-catalog`: this crate
+//! must stay free of cold-segment / manifest bookkeeping so migrate and parquet
+//! can depend on it without pulling catalog SQL. Must not depend on `pgrx`.
+//! SQL execution stays in `pg_koldstore`.
 
 pub mod evolution;
 pub mod pg_type;

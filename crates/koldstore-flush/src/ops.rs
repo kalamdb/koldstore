@@ -822,8 +822,9 @@ RETURNING id
 pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError> {
     match classify_command(command).ok_or(OpsError::UnsupportedCommand)? {
         OpsCommand::ExportTable { table_name } => {
+            let namespace = table_name.schema().unwrap_or("public");
             let archive_manifest_path =
-                format!("{}/manifest.json", table_name.as_str().replace('.', "/"));
+                koldstore_manifest::relative_manifest_path(namespace, table_name.relation());
             let statement = SqlStatement::read(
                 "export table archive",
                 "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE m.table_oid = $1::regclass::oid",

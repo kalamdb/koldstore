@@ -43,7 +43,7 @@ pub fn define_gucs() {
     GucRegistry::define_int_guc(
         c"koldstore.max_open_parquet_readers",
         c"Maximum open KoldStore Parquet readers.",
-        c"Caps concurrent Parquet reader slots across PostgreSQL backends using advisory locks.",
+        c"Caps concurrent open Parquet readers per PostgreSQL backend (fail-fast when exceeded).",
         &MAX_OPEN_PARQUET_READERS,
         settings::MIN_CONCURRENCY_LIMIT,
         settings::MAX_CONCURRENCY_LIMIT,
@@ -176,6 +176,20 @@ pub const USER_ID_GUC: &str = "koldstore.user_id";
 pub const ENABLE_MERGE_SCAN_GUC: &str = "koldstore.enable_merge_scan";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
+
+/// Whether the planner may inject KoldMergeScan paths.
+#[must_use]
+pub fn enable_merge_scan() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        ENABLE_MERGE_SCAN.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        true
+    }
+}
 
 /// Current cold-read mode.
 #[must_use]

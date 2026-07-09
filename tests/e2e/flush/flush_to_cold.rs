@@ -63,7 +63,7 @@ fn flush_to_cold_plan_writes_parquet_manifest_segments_and_pk_hints() {
         42,
         Some(ScopeKey::new("tenant-a").unwrap()),
         &batch,
-        "exact",
+        koldstore_catalog::HintKind::Exact,
     );
 
     assert_eq!(batch.live_rows, 2);
@@ -75,7 +75,9 @@ fn flush_to_cold_plan_writes_parquet_manifest_segments_and_pk_hints() {
     assert_eq!(segment.min_seq.get(), 1);
     assert_eq!(segment.max_commit_seq.get(), 12);
     assert_eq!(hints.len(), 2);
-    assert!(hints.iter().all(|hint| hint.hint_kind == "exact"));
+    assert!(hints
+        .iter()
+        .all(|hint| hint.hint_kind == koldstore_catalog::HintKind::Exact));
     assert!(hints
         .iter()
         .all(|hint| hint.scope_key.as_ref().unwrap().as_str() == "tenant-a"));

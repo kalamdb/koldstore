@@ -1,16 +1,16 @@
 //! Cold-segment file writes and manifest assembly for one flush chunk.
 //!
-//! Owns PG-free object-path planning, Parquet emission, and manifest segment
-//! construction. Catalog SPI inserts stay in `pg_koldstore`.
+//! Owns PG-free object-path planning, Parquet encoding, durable object publish,
+//! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
 
-use std::path::PathBuf;
-
-use koldstore_manifest::ManifestSegment;
-use koldstore_parquet::write_parquet_segment_file;
-
-use crate::segment_catalog::{
-    build_manifest_segment_from_catalog_row, indexed_column_stats_json, CatalogManifestSegmentRow,
+use koldstore_manifest::{table_object_prefix, CatalogManifestSegmentRow};
+use koldstore_parquet::{encode_parquet_segment_bytes, validate_parquet_bytes};
+use koldstore_storage::{
+    open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
+    ObjectStoreClient, StorageClient,
 };
+
+use crate::segment_catalog::indexed_column_stats_json;
 use crate::stats::FlushStats;
 use crate::write::FlushWriteChunk;
 
@@ -25,18 +25,19 @@ pub struct WrittenFlushSegment {
     pub byte_size: i64,
     /// Column stats JSON stored in `koldstore.cold_segments`.
     pub column_stats: serde_json::Value,
-    /// Catalog row shape for manifest assembly.
+    /// Catalog row shape for manifest assembly (single source of truth).
     pub catalog_row: CatalogManifestSegmentRow,
-    /// Manifest segment appended after flush.
-    pub manifest_segment: ManifestSegment,
 }
 
-/// Writes one Parquet segment file and assembles manifest/catalog metadata.
+/// Writes one Parquet segment via encode → validate → durable Create publish.
+///
+/// Final keys are never truncated in place. Crash before publish leaves at most
+/// a temp object under `{prefix}/.tmp/…`; crash after publish but before catalog
+/// commit leaves an unreferenced final that recovery can quarantine.
 ///
 /// # Errors
 ///
-/// Returns an error when directories cannot be created, Parquet encoding fails,
-/// or manifest assembly fails.
+/// Returns an error when encoding, validation, or durable publish fails.
 #[allow(clippy::too_many_arguments)]
 pub fn write_flush_segment_file(
     namespace: &str,
@@ -50,23 +51,79 @@ pub fn write_flush_segment_file(
     chunk: &FlushWriteChunk,
     chunk_stats: &FlushStats,
 ) -> Result<WrittenFlushSegment, String> {
-    let prefix = format!("{namespace}/{table_name}");
-    let object_path = format!("{prefix}/batch-{batch_number}.parquet");
-    let absolute_segment_path = PathBuf::from(base_path).join(&object_path);
-    // Parent directory is created once per table flush by the caller when possible;
-    // keep create_dir_all here as a safe fallback for the first segment.
-    if let Some(parent) = absolute_segment_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
+    let client = open_filesystem_client(base_path).map_err(|error| error.to_string())?;
+    write_flush_segment_with_client(
+        &client,
+        namespace,
+        table_name,
+        compression,
+        primary_key_columns,
+        indexed_columns,
+        schema_version,
+        batch_number,
+        chunk,
+        chunk_stats,
+    )
+}
 
-    let column_stats = indexed_column_stats_json(&chunk.cold_batch.indexed_bounds, chunk_stats);
-    let byte_size = write_parquet_segment_file(
-        &absolute_segment_path,
+/// Same as [`write_flush_segment_file`] but uses an existing storage client.
+///
+/// # Errors
+///
+/// Returns an error when encoding, validation, or durable publish fails.
+#[allow(clippy::too_many_arguments)]
+pub fn write_flush_segment_with_client(
+    client: &ObjectStoreClient,
+    namespace: &str,
+    table_name: &str,
+    compression: &str,
+    primary_key_columns: &[String],
+    indexed_columns: &[String],
+    schema_version: i32,
+    batch_number: i32,
+    chunk: &FlushWriteChunk,
+    chunk_stats: &FlushStats,
+) -> Result<WrittenFlushSegment, String> {
+    let prefix = table_object_prefix(namespace, table_name);
+    let object_path = format!("{prefix}/batch-{batch_number}.parquet");
+    let writer_id = uuid::Uuid::new_v4().to_string();
+    let temp_key = temp_object_key(
+        &prefix,
+        &writer_id,
+        &unique_temp_file_name(&format!("batch-{batch_number}.parquet")),
+    );
+
+    let bytes = encode_parquet_segment_bytes(
         &chunk.cold_batch.batch,
         primary_key_columns,
         indexed_columns,
         compression,
     )?;
+    let validation = validate_parquet_bytes(&bytes)?;
+    let expected_rows = u64::try_from(chunk_stats.row_count.max(0)).unwrap_or(0);
+    if validation.row_count != expected_rows {
+        return Err(format!(
+            "parquet row count {} does not match flush chunk stats {}",
+            validation.row_count, chunk_stats.row_count
+        ));
+    }
+
+    let published = publish_immutable_object(client, &temp_key, &object_path, &bytes)
+        .map_err(|error| error.to_string())?;
+    // Defense in depth: re-fetch final and confirm it is still a readable Parquet file.
+    let final_bytes = client
+        .get(&published.final_key)
+        .map_err(|error| error.to_string())?;
+    if final_bytes.as_slice() != bytes.as_slice() {
+        return Err(format!(
+            "published object `{}` content diverged from encoded payload",
+            published.final_key
+        ));
+    }
+    validate_parquet_bytes(&final_bytes)?;
+
+    let column_stats = indexed_column_stats_json(&chunk.cold_batch.indexed_bounds, chunk_stats);
+    let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
     let catalog_row = CatalogManifestSegmentRow {
         object_path: object_path.clone(),
         batch_number,
@@ -79,13 +136,6 @@ pub fn write_flush_segment_file(
         schema_version,
         column_stats: column_stats.clone(),
     };
-    let manifest_segment = build_manifest_segment_from_catalog_row(
-        namespace,
-        table_name,
-        primary_key_columns,
-        catalog_row.clone(),
-    )
-    .map_err(|error| error.to_string())?;
 
     Ok(WrittenFlushSegment {
         segment_id: uuid::Uuid::new_v4(),
@@ -93,6 +143,5 @@ pub fn write_flush_segment_file(
         byte_size,
         column_stats,
         catalog_row,
-        manifest_segment,
     })
 }

@@ -272,6 +272,10 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
     assert_eq!(snapshot.table_oid, 42);
     assert_eq!(snapshot.schema_version, 3);
     assert!(snapshot.active);
+    assert_eq!(
+        snapshot.initialization_state,
+        koldstore_schema::MirrorInitializationState::Complete
+    );
     assert_eq!(snapshot.mirror_relation.relation(), "items__cl");
     assert_eq!(snapshot.primary_key_columns, vec!["id".to_string()]);
     assert!(snapshot.scope_column.is_none());

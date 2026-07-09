@@ -952,7 +952,7 @@ fn log_merge_scan_profile(id: i64, plan: &str) {
                 parquet_rows += rows;
             }
         }
-        if let Some(ms_part) = parts.iter().find(|part| part.ends_with(" ms")) {
+        if let Some(ms_part) = parts.iter().rev().find(|part| part.ends_with(" ms")) {
             if let Ok(ms) = ms_part.trim_end_matches(" ms").parse::<f64>() {
                 parquet_ms += ms;
             }

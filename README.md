@@ -4,14 +4,7 @@
 
 **Status: early development - not production ready.** The extension builds and the core flow works, but recovery, export/import, and background flush behavior are still being hardened.
 
-<p align="center">
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.96%2B-orange.svg" alt="Rust 1.96+" /></a>
-  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
-  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml"><img src="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/pg-koldstore-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kalamdb/pg-kalam/pg-koldstore-ci.yml?branch=main&amp;label=tests" alt="Tests" /></a>
-  <a href="https://github.com/kalamdb/pg-kalam/releases"><img src="https://img.shields.io/github/v/release/kalamdb/pg-kalam?display_name=tag&amp;label=extension" alt="Extension Version" /></a>
-  <a href="https://github.com/kalamdb/pg-kalam/actions/workflows/release.yml"><img src="https://github.com/kalamdb/pg-kalam/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
-</p>
+
 
 `pg-koldstore` is a PostgreSQL extension named `koldstore`. You create a normal heap table, migrate it into KoldStore management, and keep querying that table with regular SQL. KoldStore keeps recent rows in PostgreSQL and writes flushed rows to Parquet files on filesystem, S3/MinIO, GCS, or Azure Blob storage.
 
@@ -33,51 +26,82 @@ KoldStore extends PostgreSQL instead of replacing it. Applications keep using th
 - Optimizes for immutable historical data by writing cold rows into Parquet segments while recent changes stay in PostgreSQL-managed hot storage and metadata.
 - Creates a future analytics path: the same archived Parquet files can later feed data lake, analytics, or AI pipelines without exporting the data again.
 
+
+
 ## Compared With Other Approaches
 
-- Does not replace PostgreSQL with another database.
-- Does not require changing PostgreSQL's table storage engine.
-- Does not force years of historical data to remain inside the PostgreSQL heap.
-- Does not rely on proprietary columnar storage formats.
-- Does not force users into time-series-only data models.
-- Does not require millions of PostgreSQL partitions to organize historical rows.
-- Does not lock archived data into a vendor-specific format.
-- Keeps the hot path close to normal PostgreSQL tables while adding cold storage only where it is enabled.
-- Reduces the operational pressure that historical rows put on backup size, VACUUM, indexes, and primary database storage.
-- Uses open Parquet files that modern analytics engines can read directly.
-- Can evolve into a full storage lifecycle layer while remaining transparent to applications.
+
+| Approach                            | What you keep                                 | Tradeoff                                                         |
+| ----------------------------------- | --------------------------------------------- | ---------------------------------------------------------------- |
+| **KoldStore**                       | Same PostgreSQL table, SQL, drivers, and ORMs | Older rows move to open Parquet; hot heap stays small            |
+| Bigger PostgreSQL disk / partitions | Familiar ops                                  | Historical rows still inflate heap, indexes, VACUUM, and backups |
+| Time-series or analytics DB         | Columnar scan performance                     | New system, new query model, app migration                       |
+| Custom table AM / fork              | Deeper engine control                         | Leaves stock PostgreSQL storage and tooling                      |
+| Proprietary archive tier            | Managed cold storage                          | Vendor format lock-in; harder to read with DuckDB/Spark/etc.     |
+
+
+KoldStore is for application tables that grow forever but are still queried through normal SQL. It is not a replacement database and not a time-series-only product.
+
+### Storage comparison
+
+After older rows are flushed, PostgreSQL keeps a smaller hot working set. Cold data lives in zstd Parquet outside the primary heap (filesystem / S3-compatible / GCS / Azure).
+
+The harness ([`tests/storage/`](tests/storage/)) uses a wide (~50 column) table from [`tests/storage/schema.sql`](tests/storage/schema.sql). Local sample: **100,000 rows**, `hot_row_limit = 10000`, `max_rows_per_file = 10000` (91,000 rows flushed, zstd Parquet). Numbers vary by machine; re-run for your hardware.
+
+How to read the table (Postgres-oriented):
+
+- **Hot-only queries** are timed **before flush**, so both heaps still hold all 100k rows — that isolates `KoldMergeScan` overhead vs a plain index lookup, not “smaller heap wins.”
+- **Hot+cold queries** and **`VACUUM (FULL, ANALYZE)`** are timed **after flush**, when the managed heap is the hot working set only.
+- **Dead tuples** come from `pg_stat_user_tables.n_dead_tup` after the same update/delete sample, **before flush** — so both sides match here. The maintenance win shows up in post-flush VACUUM time / heap size, not in that pre-flush counter.
+- Autovacuum counters are **not** shown: this harness finishes in seconds, so `autovacuum_count` stays 0 on both sides and would be misleading.
+- **Backup size / restore time** are TODO until the harness measures `pg_dump` / `pg_restore` (or basebackup) of the PostgreSQL database only — cold Parquet is outside the cluster and would be protected separately.
+
+| Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |
+| --- | --- | --- | --- |
+| insert speed† | 71k ops/s | 27k ops/s | — |
+| update speed† | 71k ops/s | 21k ops/s | — |
+| delete speed† | 1.3M ops/s | 40k ops/s | — |
+| query hot only (before flush) | 1.6k ops/s | 1.5k ops/s | — |
+| query with hot+cold (after flush) | 1.6k ops/s | 780 ops/s | — |
+| VACUUM time (after flush) | 1.08 s | 143 ms | **87%** |
+| dead tuples after workload | 2000 (live=100000) | 2000 (live=100000) | — |
+| index storage | 7.12 MiB | 1.27 MiB | **82%** |
+| table storage | 55.81 MiB | 5.61 MiB (+ 5.53 MiB cold Parquet) | **90%** |
+| total PG backup size | TODO | TODO | — |
+| restore time | TODO | TODO | — |
+
+PostgreSQL heap + index after flush: **62.94 MiB → 6.88 MiB** (**89% smaller**). `SELECT` on the managed table still returns all 100k rows (hot heap ∪ cold Parquet via `KoldMergeScan`).
+
+† DML is slower under KoldStore because `manage_table` installs capture triggers that maintain the latest-state change-log mirror (`koldstore.<table>__cl`: one row per PK with `seq` / `op`). That is the cost of flush cutoffs and change cursors. The payoff is a smaller hot heap/indexes, cheaper VACUUM, and (planned) `changes_since` so sync/cache consumers can follow changes **without** a second CDC pipeline (no Debezium, logical-replication slot, or extra app-owned triggers). Hot+cold PK lookups open matching Parquet segments, then prune row groups with column-chunk min/max and native Parquet bloom filters on the PK.
+
+```bash
+KOLDSTORE_E2E_PREPARE_ONLY=1 scripts/run-pg-e2e.sh 16
+# Release extension for fair hot+cold timings (debug builds are much slower):
+cargo pgrx install -p pg_koldstore --release --no-default-features --features pg16 \
+  --pg-config "$(cargo pgrx info pg-config 16)"
+cargo pgrx stop pg16 && cargo pgrx start pg16
+# Table above: 100k rows / 10k hot. Optional larger demo: set ROWS=1000000.
+KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 \
+  cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
+```
 
 ## How It Works
 
-```text
-Application SQL
-    |
-    v
-Normal PostgreSQL table
-    |  AFTER ROW capture triggers
-    v
-koldstore.<table>__cl mirror
-    |  flush_table()
-    v
-Parquet segment + manifest.json
+You keep using a normal PostgreSQL table. KoldStore tracks latest-state changes, flushes older rows to Parquet, and merges hot + cold rows on read so applications do not change their SQL.
 
-SELECT from the original table -> Custom Scan (KoldMergeScan)
-```
+1. `manage_table` registers the table and creates a small change-log mirror.
+2. `flush_table` moves older rows to Parquet and prunes them from the hot heap when safe.
+3. `SELECT` on the original table uses `KoldMergeScan` so the newest visible row wins.
 
-The user table stays clean. Management creates a companion latest-state mirror table in the `koldstore` schema. For `app.messages`, that mirror is `koldstore.messages__cl`.
+Details live in the architecture docs:
 
-The mirror stores one row per primary key with KoldStore metadata:
+- [Architecture overview](docs/architecture.md)
+- [Manage table](docs/architecture/manage-table.md)
+- [Flushing](docs/architecture/flushing-table.md)
+- [Scanning](docs/architecture/scanning-table.md)
+- [DML capture](docs/architecture/dml-table.md)
 
 
-| Column              | Purpose                                                    |
-| ------------------- | ---------------------------------------------------------- |
-| primary key columns | Same shape as the source table primary key                 |
-| `seq`               | Latest-state conflict-free sequence used for flush cutoffs and change cursors |
-| `op`                | `1 = insert`, `2 = update`, `3 = delete`                   |
-| `commit_lsn`        | Optional PostgreSQL LSN for diagnostics                    |
-
-
-Flush writes the mirror-selected rows to a Parquet batch, updates `manifest.json`, records segment metadata in `koldstore.cold_segments`, and prunes flushed rows from the hot heap when safe.
 
 ## Quick Start
 
@@ -423,10 +447,46 @@ SELECT koldstore.register_storage(
 - Cold storage is not WAL-protected. Back up PostgreSQL and the cold storage prefix together.
 - `UNIQUE` constraints and foreign keys are enforced on **hot rows only**. After flush, cold Parquet is not checked on normal `INSERT`/`UPDATE`, so duplicates and FK gaps across hot+cold are possible. See [Limitations](docs/limitations.md#unique-and-foreign-key-constraints).
 - `koldstore.manage_table` rejects non-PK `UNIQUE` constraints and foreign keys when `hot_row_limit` is set (flush enabled). Use hot-only management or drop those constraints first.
-- Primary-key value changes and primary-key definition changes on managed tables are not implemented.
+- Primary-key value changes and primary-key definition changes on managed tables are not implemented yet (On the roadmap)
 - PostgreSQL indexes cover hot rows only. Flushed rows live in Parquet, not in PostgreSQL-owned indexes.
 - If a query needs cold data and the cold storage backend is unavailable, the query errors instead of returning partial hot-only results.
 - Export/import, compaction, and richer cold-storage policies are still being built.
+
+
+
+## In Development
+
+### Change cursors (`changes_since`)
+
+Managing a table already creates a **latest-state change-log mirror** (`koldstore.<table>__cl`): one row per primary key with a monotonic `seq` and `op` (`INSERT` / `UPDATE` / `DELETE`). KoldStore installs the capture triggers once at `manage_table` so flush can cut by `seq` and scans know which keys are still hot. The mirror is **not** an append-only history of every intermediate update (a later `UPDATE` overwrites the previous mirror row for that PK).
+
+That same mirror is the foundation for **incremental sync / catch-up consumers** without standing up a separate CDC stack. Downstream jobs should not need Debezium, logical replication slots, WAL decoding plugins, or additional application triggers just to answer “what changed since cursor X?” — the cursor metadata is already maintained for flush.
+
+Planned SQL surface:
+
+```sql
+-- Resume from the last seq you processed.
+SELECT *
+FROM koldstore.changes_since(
+  table_name => 'app.messages',
+  since_seq  => 332882280164896768,
+  limit_rows => 1000
+);
+```
+
+That returns the latest state per primary key with `seq > since_seq` (including deletes), ordered by `seq`, so sync jobs, caches, search indexes, and downstream services can poll incrementally instead of rescanning the whole table. The merge library already implements the cursor logic; the public SQL function is not exposed yet.
+
+Until then you can inspect the hot mirror directly (same semantics for keys still in the hot working set):
+
+```sql
+SELECT id, seq, op
+FROM koldstore.messages__cl
+WHERE seq > 332882280164896768
+ORDER BY seq
+LIMIT 1000;
+```
+
+Note: today’s `__cl` mirror is **latest-state**, not an append-only WAL of every intermediate update. `changes_since` is aimed at “catch me up to current state since this cursor,” not full temporal audit replay. Cold-flushed keys are represented through flush/manifest metadata; the public cursor API will document how hot + cold changes are unified.
 
 
 
@@ -438,9 +498,11 @@ Useful local commands:
 cargo test --workspace
 cargo pgrx install -p pg_koldstore --no-default-features --features pg16
 scripts/run-pg-e2e.sh 16
+cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
 ```
 
 Project docs:
+
 - [SQL API](docs/sql-api.md)
 - [Architecture overview](docs/architecture.md)
 - [Limitations](docs/limitations.md)

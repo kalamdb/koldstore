@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use koldstore_catalog::HintKind;
 use koldstore_common::{CommitSeq, SeqId, StablePkHash, TableName};
 use koldstore_flush::job::{
     conditional_cleanup_allowed, plan_cold_pk_hint_updates, FlushBatchBuilder, FlushBatchInput,
@@ -49,7 +50,7 @@ fn bench_flush_metadata(c: &mut Criterion) {
         b.iter(|| black_box(&plan).column_stats(["created_day", "priority"]))
     });
     c.bench_function("cold_pk_hint_update_generation", |b| {
-        b.iter(|| plan_cold_pk_hint_updates(42, None, black_box(&plan), "exact"))
+        b.iter(|| plan_cold_pk_hint_updates(42, None, black_box(&plan), HintKind::Exact))
     });
 }
 

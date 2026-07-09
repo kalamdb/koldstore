@@ -56,9 +56,9 @@ impl MigrationStatus {
 #[serde(rename_all = "snake_case")]
 pub enum ParquetCompression {
     /// Snappy compression.
-    #[default]
     Snappy,
-    /// Zstandard compression.
+    /// Zstandard compression (default for cold segments).
+    #[default]
     Zstd,
     /// No compression.
     Uncompressed,

@@ -226,8 +226,18 @@ fn table_has_rows(table: &koldstore_migrate::QualifiedTableName) -> Result<bool,
     .map(|value| value.unwrap_or(false))
 }
 
+/// Returns the migration catalog, preferring the backend-local cache used by merge scan.
 #[cfg(feature = "pg")]
 pub(crate) fn migration_catalog(
+    table_oid: u32,
+) -> Result<koldstore_migrate::ExistingTableCatalog, String> {
+    crate::catalog::cache::cached_migration_catalog(pgrx::pg_sys::Oid::from(table_oid))
+        .map(|catalog| (*catalog).clone())
+}
+
+/// Loads the migration catalog via SPI introspection (uncached).
+#[cfg(feature = "pg")]
+pub(crate) fn load_migration_catalog(
     table_oid: u32,
 ) -> Result<koldstore_migrate::ExistingTableCatalog, String> {
     use pgrx::datum::DatumWithOid;
@@ -397,7 +407,9 @@ pub(crate) fn refresh_active_schema_if_changed(
     let Some(active) = active_schema_refresh_context(table_oid)? else {
         return Ok(false);
     };
-    let catalog = migration_catalog(table_oid_u32)?;
+    // Always re-introspect: the merge-scan migration catalog cache can still
+    // hold the pre-ALTER shape, which would hide unsupported type additions.
+    let catalog = load_migration_catalog(table_oid_u32)?;
     let current_columns = catalog
         .columns
         .iter()
@@ -439,7 +451,7 @@ fn active_schema_refresh_context(
 ) -> Result<Option<koldstore_migrate::ActiveSchemaRefreshContext>, String> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = koldstore_catalog::queries::plan_active_schema_refresh_context_json()
+    let statement = koldstore_migrate::plan_active_schema_refresh_context_json()
         .map_err(|error| error.to_string())?;
     let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?;
@@ -688,11 +700,13 @@ fn migration_options(
     {
         options = options.with_order_column(order_column);
     }
-    if let Some(compression) = compression.map(str::trim).filter(|codec| !codec.is_empty()) {
-        let codec = ParquetCompression::parse(compression)
-            .unwrap_or_else(|| pgrx::error!("unsupported compression codec `{compression}`"));
-        options = options.with_compression(codec);
-    }
+    let codec = match compression.map(str::trim).filter(|codec| !codec.is_empty()) {
+        Some(compression) => ParquetCompression::parse(compression)
+            .unwrap_or_else(|| pgrx::error!("unsupported compression codec `{compression}`")),
+        // Persist the writer default so describe/flush paths do not rely on COALESCE alone.
+        None => ParquetCompression::Zstd,
+    };
+    options = options.with_compression(codec);
     if let Some((hot_row_limit, min_flush_rows, max_rows_per_file)) = structured_flush {
         options = options.with_flush(hot_row_limit, min_flush_rows, max_rows_per_file);
     }
@@ -739,12 +753,24 @@ mod tests {
     }
 
     #[test]
+    fn migration_options_default_compression_to_zstd() {
+        let options = migration_options(None, None, None);
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({
+                "compression": "zstd"
+            })
+        );
+    }
+
+    #[test]
     fn migration_options_include_structured_flush_settings() {
         let options = migration_options(None, None, Some((10_000, 1_000, 500)));
 
         assert_eq!(
             options.to_value(),
             serde_json::json!({
+                "compression": "zstd",
                 "hot_row_limit": 10_000,
                 "min_flush_rows": 1_000,
                 "max_rows_per_file": 500
@@ -756,6 +782,11 @@ mod tests {
     fn migration_options_skip_blank_values() {
         let options = migration_options(Some(" "), Some(""), None);
 
-        assert_eq!(options.to_value(), serde_json::json!({}));
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({
+                "compression": "zstd"
+            })
+        );
     }
 }

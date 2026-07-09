@@ -8,14 +8,21 @@ repository.workspace = true
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 koldstore-common.workspace = true
 koldstore-schema.workspace = true
+object_store.workspace = true
 parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+koldstore-storage.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

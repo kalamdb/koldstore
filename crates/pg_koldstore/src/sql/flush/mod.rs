@@ -56,7 +56,7 @@ fn enqueue_flush_job_pg_impl(table_oid: pgrx::pg_sys::Oid, force: bool) -> Resul
     Ok(if inserted.is_some() { 1 } else { 0 })
 }
 
-/// Enqueues a segment recovery job through the SQL API.
+/// Discovers and recovers orphaned segment objects through the SQL API.
 ///
 /// SQL contract:
 /// `koldstore.recover_segments(table_name regclass, dry_run boolean default false)`.
@@ -72,18 +72,42 @@ pub fn recover_segments_pg(
 
 #[cfg(feature = "pg")]
 fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Result<i64, String> {
-    use pgrx::datum::DatumWithOid;
+    use std::collections::HashSet;
 
-    let table_name = crate::catalog::resolve::qualified_relation_name(table_oid)?;
-    let table_name = TableName::parse(&table_name).map_err(|error| error.to_string())?;
-    let plan =
-        recover_segments_plan(Some(table_name), dry_run).map_err(|error| error.to_string())?;
-    let inserted = crate::spi::update_one::<pgrx::Uuid>(
-        &plan.statement,
-        &[DatumWithOid::from(table_oid), DatumWithOid::from(dry_run)],
+    use koldstore_flush::recovery::{
+        apply_recovery_plan, discover_orphan_objects, plan_recovery_actions,
+    };
+    use koldstore_manifest::{
+        relative_manifest_path, table_object_prefix, try_load_manifest_with_client,
+    };
+
+    let relation = crate::catalog::resolve::relation_context(table_oid)?;
+    let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
+    let client = koldstore_storage::open_client_from_catalog_fields(
+        &storage.storage_type,
+        &storage.base_path,
+        &storage.credentials,
+        &storage.config,
     )
     .map_err(|error| error.to_string())?;
-    Ok(if inserted.is_some() { 1 } else { 0 })
+    let prefix = table_object_prefix(&relation.namespace, &relation.name);
+    let manifest_path = relative_manifest_path(&relation.namespace, &relation.name);
+    let mut referenced = HashSet::from([manifest_path.clone()]);
+    if let Some(manifest) = try_load_manifest_with_client(&client, &manifest_path)? {
+        referenced.extend(
+            manifest
+                .segments
+                .into_iter()
+                .map(|segment| format!("{prefix}/{}", segment.path.trim_start_matches('/'))),
+        );
+    }
+    let objects = discover_orphan_objects(&client, &prefix, &referenced)?;
+    let recovery = plan_recovery_actions(objects);
+    let count = i64::try_from(recovery.actions.len()).map_err(|error| error.to_string())?;
+    if !dry_run {
+        apply_recovery_plan(&client, &recovery)?;
+    }
+    Ok(count)
 }
 
 /// Flushes one managed table scope from SQL.

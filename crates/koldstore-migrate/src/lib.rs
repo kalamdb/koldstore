@@ -54,7 +54,7 @@ pub use plan::{
     ExistingTableCatalog, ExistingTableMigrationPlan, MigrationTableContext,
 };
 pub use refresh::{
-    plan_schema_refresh, registration_metadata_for_refresh, ActiveSchemaRefreshContext,
-    SchemaRefreshPlan,
+    plan_active_schema_refresh_context_json, plan_schema_refresh,
+    registration_metadata_for_refresh, ActiveSchemaRefreshContext, SchemaRefreshPlan,
 };
 pub use request::{DemigrateTableRequest, MigrateTableRequest, MigrationError, MigrationResult};

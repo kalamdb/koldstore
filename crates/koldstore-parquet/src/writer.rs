@@ -1,4 +1,9 @@
 //! Parquet writer surface.
+//!
+//! Encodes Arrow [`RecordBatch`]es with native Parquet writer properties
+//! (zstd, per-column statistics, PK bloom filters). Durable object publication
+//! lives in `koldstore-storage`; this module owns encoding and footer validation
+//! only so a failed encode never touches a final object key.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -8,12 +13,14 @@ use crate::footer::ColumnStats;
 use crate::schema::{ColdMetadataColumn, PgColumn};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
+use bytes::Bytes;
 use koldstore_common::dedupe_nonblank;
 use parquet::{
     arrow::ArrowWriter,
     basic::{Compression, ZstdLevel},
     errors::ParquetError,
     file::properties::{EnabledStatistics, WriterProperties},
+    file::reader::{FileReader, SerializedFileReader},
     schema::types::ColumnPath,
 };
 use serde_json::json;
@@ -110,19 +117,22 @@ pub fn record_batch_from_clean_cold_records(
     Ok(builder.finish()?.batch)
 }
 
-/// Writes one cold segment Parquet file and returns its byte size.
+/// Encodes one cold segment to Parquet bytes and validates the footer.
+///
+/// Prefer this over writing directly to a final filesystem path: callers publish
+/// the returned bytes through `koldstore-storage` so partial encodes never become
+/// visible cold objects.
 ///
 /// # Errors
 ///
-/// Returns an error when file creation, encoding, or metadata lookup fails.
-pub fn write_parquet_segment_file(
-    path: &std::path::Path,
+/// Returns an error when encoding fails or the encoded bytes fail footer
+/// validation (truncated / missing magic / unreadable metadata).
+pub fn encode_parquet_segment_bytes(
     batch: &RecordBatch,
     primary_key_columns: &[String],
     indexed_columns: &[String],
     compression: &str,
-) -> Result<i64, String> {
-    let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
+) -> Result<Vec<u8>, String> {
     let writer = ParquetSegmentWriter::new(
         WriterOptions {
             compression: compression.to_string(),
@@ -131,24 +141,84 @@ pub fn write_parquet_segment_file(
         .with_statistics_columns(
             [ColdMetadataColumn::Seq.name()]
                 .into_iter()
+                .chain(primary_key_columns.iter().map(String::as_str))
                 .chain(indexed_columns.iter().map(String::as_str)),
         )
         .with_bloom_filter_columns(primary_key_columns.iter().map(String::as_str)),
     );
-    writer
-        .write_record_batch(file, batch)
+    let bytes = writer
+        .encode_record_batch(batch)
         .map_err(|error| error.to_string())?;
-    let len = std::fs::metadata(path)
-        .map_err(|error| error.to_string())?
-        .len();
-    i64::try_from(len).map_err(|error| error.to_string())
+    validate_parquet_bytes(&bytes)?;
+    Ok(bytes)
+}
+
+/// Validates that `bytes` are a complete, readable Parquet file.
+///
+/// Checks the 4-byte magic, footer length, and that metadata can be opened.
+///
+/// # Errors
+///
+/// Returns an error when the payload is truncated, missing magic, or has an
+/// unreadable footer.
+pub fn validate_parquet_bytes(bytes: &[u8]) -> Result<ParquetValidation, String> {
+    const MAGIC: &[u8] = b"PAR1";
+    if bytes.len() < 8 {
+        return Err(format!(
+            "parquet payload too small ({} bytes); missing footer",
+            bytes.len()
+        ));
+    }
+    if &bytes[..4] != MAGIC {
+        return Err("parquet payload missing PAR1 magic header".to_string());
+    }
+    if &bytes[bytes.len() - 4..] != MAGIC {
+        return Err("parquet payload missing PAR1 magic footer".to_string());
+    }
+    let footer_len = u32::from_le_bytes(
+        bytes[bytes.len() - 8..bytes.len() - 4]
+            .try_into()
+            .map_err(|_| "parquet footer length slice".to_string())?,
+    ) as usize;
+    if footer_len == 0 || bytes.len() < footer_len + 8 {
+        return Err(format!(
+            "parquet footer length {footer_len} is inconsistent with payload size {}",
+            bytes.len()
+        ));
+    }
+
+    let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
+        .map_err(|error| format!("parquet footer: {error}"))?;
+    let metadata = reader.metadata();
+    let row_count = metadata.file_metadata().num_rows();
+    if row_count < 0 {
+        return Err("parquet footer reports negative row count".to_string());
+    }
+    Ok(ParquetValidation {
+        byte_size: u64::try_from(bytes.len()).map_err(|error| error.to_string())?,
+        row_count: u64::try_from(row_count).map_err(|error| error.to_string())?,
+        row_group_count: metadata.num_row_groups(),
+    })
+}
+
+/// Result of validating encoded Parquet bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParquetValidation {
+    /// Encoded byte size.
+    pub byte_size: u64,
+    /// Rows reported by the file footer.
+    pub row_count: u64,
+    /// Number of row groups in the file.
+    pub row_group_count: usize,
 }
 
 impl Default for WriterOptions {
     fn default() -> Self {
         Self {
             compression: "zstd".to_string(),
-            row_group_size: 64 * 1024,
+            // Keep row groups small enough that PK point lookups can skip most
+            // of a flush segment via bloom/min-max (default flush batch is 10k).
+            row_group_size: 1_024,
             statistics_columns: Vec::new(),
             bloom_filter_columns: Vec::new(),
             bloom_filter_false_positive_rate: Some(0.01),
@@ -181,13 +251,17 @@ impl WriterOptions {
 
     /// Builds native Parquet writer properties for stats, bloom metadata, and compression.
     ///
+    /// Bloom filters use parquet 59's `set_column_bloom_filter_max_ndv`, sized to
+    /// the configured row-group row count (library-recommended heuristic).
+    ///
     /// # Errors
     ///
     /// Returns an error when the configured compression codec is unsupported.
     pub fn try_native_writer_properties(&self) -> Result<WriterProperties, String> {
+        let row_group_size = self.row_group_size.max(1);
         let mut builder = WriterProperties::builder()
             .set_compression(parquet_compression(&self.compression)?)
-            .set_max_row_group_row_count(Some(self.row_group_size.max(1)))
+            .set_max_row_group_row_count(Some(row_group_size))
             .set_statistics_enabled(EnabledStatistics::None);
         for column in &self.statistics_columns {
             builder = builder.set_column_statistics_enabled(
@@ -197,7 +271,9 @@ impl WriterOptions {
         }
         for column in &self.bloom_filter_columns {
             let path = ColumnPath::from(column.as_str());
-            builder = builder.set_column_bloom_filter_enabled(path.clone(), true);
+            builder = builder
+                .set_column_bloom_filter_enabled(path.clone(), true)
+                .set_column_bloom_filter_max_ndv(path.clone(), row_group_size as u64);
             if let Some(false_positive_rate) = self.bloom_filter_false_positive_rate {
                 builder = builder.set_column_bloom_filter_fpp(path, false_positive_rate);
             }
@@ -206,7 +282,7 @@ impl WriterOptions {
     }
 }
 
-/// Segment writer placeholder.
+/// Segment writer.
 #[derive(Debug, Clone)]
 pub struct ParquetSegmentWriter {
     pub options: WriterOptions,
@@ -298,6 +374,22 @@ impl ParquetSegmentWriter {
         }
     }
 
+    /// Encodes one Arrow record batch to Parquet bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Parquet error if the schema, writer, or batch write fails.
+    pub fn encode_record_batch(&self, batch: &RecordBatch) -> Result<Vec<u8>, ParquetError> {
+        let mut buffer = Vec::with_capacity(estimate_buffer_capacity(batch));
+        let metadata =
+            self.write_record_batches(&mut buffer, batch.schema(), std::iter::once(batch.clone()))?;
+        debug_assert_eq!(
+            metadata.file_metadata().num_rows() as usize,
+            batch.num_rows()
+        );
+        Ok(buffer)
+    }
+
     /// Writes one Arrow record batch to a native Parquet writer.
     ///
     /// # Errors
@@ -315,6 +407,11 @@ impl ParquetSegmentWriter {
     }
 
     /// Writes Arrow record batches to a native Parquet writer.
+    ///
+    /// Row-group boundaries are controlled by
+    /// [`WriterProperties::max_row_group_row_count`] — `ArrowWriter::write`
+    /// already splits oversized batches, so callers must not also force
+    /// per-slice `flush()` (that would create needless tiny row groups).
     ///
     /// # Errors
     ///
@@ -341,6 +438,7 @@ impl ParquetSegmentWriter {
         for batch in batches {
             writer.write(&batch)?;
         }
+        // Finalize footer. Dropping without close() would leave an unreadable file.
         Ok(Arc::new(writer.close()?))
     }
 }
@@ -416,9 +514,15 @@ pub struct SegmentWritePlan {
 
 fn parquet_compression(codec: &str) -> Result<Compression, String> {
     match codec.trim().to_ascii_lowercase().as_str() {
-        "" | "snappy" => Ok(Compression::SNAPPY),
-        "zstd" => Ok(Compression::ZSTD(ZstdLevel::default())),
+        // Empty inherits the WriterOptions default (zstd), not snappy.
+        "" | "zstd" => Ok(Compression::ZSTD(ZstdLevel::default())),
+        "snappy" => Ok(Compression::SNAPPY),
         "uncompressed" | "none" => Ok(Compression::UNCOMPRESSED),
         other => Err(format!("unsupported parquet compression `{other}`")),
     }
+}
+
+fn estimate_buffer_capacity(batch: &RecordBatch) -> usize {
+    // Rough lower bound: avoid repeated realloc for small segments.
+    64 * 1024 + batch.num_rows().saturating_mul(64)
 }

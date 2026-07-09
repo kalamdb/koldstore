@@ -25,6 +25,10 @@ INSTALL_ARGS=(
   --features "$PG_FEATURE"
   --pg-config "$PG_CONFIG"
 )
+if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "true" ]]; then
+  # Needed for fair storage-comparison hot+cold timings vs README floors.
+  INSTALL_ARGS+=(--release)
+fi
 if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then
   INSTALL_ARGS+=(--sudo)
 fi

@@ -24,6 +24,7 @@ pg_test = []
 [dependencies]
 arrow-array.workspace = true
 arrow-schema.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 koldstore-catalog.workspace = true
 koldstore-common.workspace = true

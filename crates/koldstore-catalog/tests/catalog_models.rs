@@ -97,7 +97,7 @@ fn pk_lookup_prefers_exact_hints_over_may_contain_hints() {
 
     assert_eq!(
         ColdPkHint::lookup("abc", &[bloom.clone(), exact.clone()]),
-        PkLookup::Exact(exact)
+        PkLookup::Exact(&exact)
     );
     let may_contain = ColdPkHint::lookup("abc", std::slice::from_ref(&bloom));
     assert!(may_contain.can_write_idempotent_tombstone(true));

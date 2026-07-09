@@ -229,11 +229,17 @@ AS $$
 BEGIN
   -- Used by commit-time counter flush and maintenance paths. DML capture triggers should call
   -- koldstore.internal_record_row_count_delta instead (in-memory, no per-row manifest IO).
+  -- After a successful flush (`in_sync`), subsequent DML dirties the catalog sync_state to
+  -- `pending_write` so operators and flush eligibility see hot changes.
   PERFORM koldstore.internal_ensure_manifest_row(p_table_oid);
   UPDATE koldstore.manifest
   SET
     hot_row_count = GREATEST(0, hot_row_count + p_hot_delta),
     mirror_row_count = GREATEST(0, mirror_row_count + p_mirror_delta),
+    sync_state = CASE
+      WHEN sync_state = 'in_sync' THEN 'pending_write'
+      ELSE sync_state
+    END,
     updated_at = now()
   WHERE table_oid = p_table_oid
     AND scope_key = '';

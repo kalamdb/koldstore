@@ -197,7 +197,7 @@ create_deb_package() {
 Package: postgresql-${pg}-koldstore
 Version: ${version}
 Architecture: ${arch}
-Maintainer: pg-koldstore <https://github.com/pg-koldstore/pg-kalam>
+Maintainer: pg-koldstore <https://github.com/kalamdb/koldstore>
 Depends: postgresql-${pg}
 Section: database
 Priority: optional
@@ -263,7 +263,7 @@ cp -a ${stage_dir}/usr %{buildroot}/
 $(printf '%s\n' "${rpm_files}")
 
 %changelog
-* $(date -u '+%a %b %d %Y') pg-koldstore <https://github.com/pg-koldstore/pg-kalam> - ${version}-1
+* $(date -u '+%a %b %d %Y') pg-koldstore <https://github.com/kalamdb/koldstore> - ${version}-1
 - Release ${version} for PostgreSQL ${pg}
 EOF
   rpmbuild -bb \

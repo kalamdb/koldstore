@@ -43,6 +43,9 @@ pub struct SegmentStatsHint {
     pub object_path: String,
     /// Segment-level min/max stats by column.
     pub column_stats: BTreeMap<String, koldstore_parquet::ColumnStats>,
+    /// Object byte size when known (enables bounded footer range GETs on S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_size: Option<u64>,
 }
 
 /// Min/max predicate proven safe for segment-level candidate pruning.
@@ -112,6 +115,19 @@ pub fn prune_segment_stats(
     segments: &[SegmentStatsHint],
     predicates: &[SegmentPrunePredicate],
 ) -> Vec<String> {
+    prune_segment_stats_hints(segments, predicates)
+        .into_iter()
+        .map(|segment| segment.object_path)
+        .collect()
+}
+
+/// Like [`prune_segment_stats`], but keeps full segment hints (including
+/// `byte_size` for footer-bounded ObjectStore reads).
+#[must_use]
+pub fn prune_segment_stats_hints(
+    segments: &[SegmentStatsHint],
+    predicates: &[SegmentPrunePredicate],
+) -> Vec<SegmentStatsHint> {
     segments
         .iter()
         .filter(|segment| {
@@ -119,7 +135,7 @@ pub fn prune_segment_stats(
                 .iter()
                 .all(|predicate| segment_may_match_predicate(segment, predicate))
         })
-        .map(|segment| segment.object_path.clone())
+        .cloned()
         .collect()
 }
 

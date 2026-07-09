@@ -70,7 +70,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.user_id` | string | empty | Active user-scope id for user-scoped managed tables. Required for scoped reads and writes. |
 | `koldstore.cold_reads` | string | `auto` | `auto`, `on`, or `off`. `off` fails cold scans when active cold segments are required. |
 | `koldstore.enable_merge_scan` | bool | `on` | Allows the planner to replace managed-table heap scans with `KoldMergeScan`. |
-| `koldstore.max_open_parquet_readers` | int | `32` | Global advisory-lock slot count for Parquet readers opened by cold scans. Clamped to `1..=1024`. |
+| `koldstore.max_open_parquet_readers` | int | `32` | Per-backend open Parquet reader cap for cold scans (fail-fast when exceeded). Clamped to `1..=1024`. |
 | `koldstore.max_running_jobs` | int | `4` | Maximum concurrently claimed KoldStore jobs. Clamped to `1..=1024`. |
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |

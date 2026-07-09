@@ -82,4 +82,16 @@ impl SyncState {
                 | (Self::Error, Self::Syncing)
         )
     }
+
+    /// Dirties an in-sync catalog row after hot DML.
+    ///
+    /// Mirrors `koldstore.internal_bump_row_counts`: only `in_sync` becomes
+    /// `pending_write`; other states are left unchanged.
+    #[must_use]
+    pub const fn after_hot_dml(self) -> Self {
+        match self {
+            Self::InSync => Self::PendingWrite,
+            other => other,
+        }
+    }
 }

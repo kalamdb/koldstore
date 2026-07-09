@@ -8,11 +8,13 @@ description = "Hot-to-cold flush workflow for pg-koldstore"
 
 [dependencies]
 koldstore-common.workspace = true
+koldstore-catalog.workspace = true
 koldstore-jobs.workspace = true
 koldstore-manifest.workspace = true
 koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-schema.workspace = true
+koldstore-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -23,6 +25,7 @@ koldstore-common.workspace = true
 koldstore-merge.workspace = true
 koldstore-migrate.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
