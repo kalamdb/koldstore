@@ -16,6 +16,12 @@ pub struct MirrorSchemaPlan {
     pub create_table: MirrorStatement,
     /// Sequence cursor index for scans.
     pub seq_index: MirrorStatement,
+    /// Partial index over delete-marker rows, keyed by `seq`.
+    ///
+    /// PERFORMANCE: keeps force-flush tombstone-only selection (stats +
+    /// mirror-op-filtered fetch) index-backed instead of scanning every live
+    /// mirror row to find the handful of pending deletes.
+    pub tombstone_index: MirrorStatement,
     /// Idempotent mirror drop.
     pub drop_table: MirrorStatement,
 }
@@ -23,8 +29,8 @@ pub struct MirrorSchemaPlan {
 impl MirrorSchemaPlan {
     /// Statements required to create mirror storage after collision checks pass.
     #[must_use]
-    pub fn create_statements(&self) -> [&MirrorStatement; 2] {
-        [&self.create_table, &self.seq_index]
+    pub fn create_statements(&self) -> [&MirrorStatement; 3] {
+        [&self.create_table, &self.seq_index, &self.tombstone_index]
     }
 }
 
@@ -69,6 +75,8 @@ pub fn plan_mirror_schema(
         ddl_columns.join(",\n    ")
     );
     let seq_index_name = quote_ident(&format!("{}_seq_idx", mirror_table.relation()));
+    let tombstone_index_name =
+        quote_ident(&format!("{}_tombstone_seq_idx", mirror_table.relation()));
 
     Ok(MirrorSchemaPlan {
         collision_probe: MirrorStatement::read(
@@ -82,6 +90,12 @@ pub fn plan_mirror_schema(
         seq_index: MirrorStatement::write(
             "create change-log mirror seq index",
             format!("CREATE INDEX IF NOT EXISTS {seq_index_name} ON {quoted_mirror} (\"seq\")"),
+        ),
+        tombstone_index: MirrorStatement::write(
+            "create change-log mirror tombstone index",
+            format!(
+                "CREATE INDEX IF NOT EXISTS {tombstone_index_name} ON {quoted_mirror} (\"seq\") WHERE \"op\" = 3"
+            ),
         ),
         drop_table: plan_drop_mirror_table(mirror_table),
     })

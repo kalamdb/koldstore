@@ -57,7 +57,8 @@ each scenario is still running (same style as `tests/e2e/full_lifecycle.rs`):
 
 - scenario sizing and cold storage root at startup
 - insert milestones every 10k rows (`seed messages: 10000 / 50000 rows written`)
-- step timing via `log_step` (`[examples] seed ... finished in 12.3s`)
+- step timing via `log_step` (`[timestamp] [e2e] [examples] seed ... finished in 12.3s`)
+- per-query timing for flush, merge-scan PK checks, overlay INSERT/DELETE (`timed_async`)
 - flush row counts and on-disk Parquet/manifest paths after each wave
 
 Note: nextest's `success-output = "immediate"` only dumps captured logs **after** a
@@ -68,7 +69,7 @@ test finishes. Live streaming requires `--no-capture` (enabled by the script).
 - Local pgrx-managed PostgreSQL with `koldstore` installed (the script prepares this automatically)
 - `cargo-nextest`
 
-Flush policy limits in the tests are scaled down from the production values documented in each example README so flushes complete in reasonable time while preserving the same behavior.
+Flush policy limits in the tests are scaled down from the production values documented in each example README so flushes complete in reasonable time while preserving the same behavior. Example Parquet files are capped at 1,000 rows/file: small enough to exercise multi-file cold reads, but not so tiny that writer setup dominates every flush.
 
 **Notes (v1):**
 

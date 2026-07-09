@@ -36,6 +36,11 @@ fn guc_definitions_include_public_and_internal_settings() {
         && guc.default_value == "info"));
     assert!(gucs
         .iter()
+        .any(|guc| guc.name == "koldstore.min_max_rows_per_file"
+            && !guc.internal
+            && guc.default_value == "1000"));
+    assert!(gucs
+        .iter()
         .any(|guc| guc.name == "koldstore.internal_system_write" && guc.internal));
     assert!(gucs
         .iter()
@@ -51,6 +56,10 @@ fn application_roles_cannot_set_internal_gucs() {
     assert!(privileges::can_set_guc(
         privileges::RoleClass::Application,
         "koldstore.max_open_parquet_readers",
+    ));
+    assert!(privileges::can_set_guc(
+        privileges::RoleClass::Application,
+        "koldstore.min_max_rows_per_file",
     ));
     assert!(!privileges::can_set_guc(
         privileges::RoleClass::Application,

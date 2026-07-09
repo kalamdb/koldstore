@@ -1,6 +1,6 @@
 use koldstore_common::SqlParamType;
 use koldstore_flush::cleanup::plan_clean_schema_cleanup;
-use koldstore_flush::ops::plan_mirror_flush_selection;
+use koldstore_flush::ops::{plan_mirror_flush_selection, plan_mirror_flush_selection_batch};
 use koldstore_migrate::QualifiedTableName;
 
 fn table() -> QualifiedTableName {
@@ -76,6 +76,46 @@ fn user_scoped_flush_selection_filters_by_application_scope_column() {
 }
 
 #[test]
+fn batched_flush_selection_pages_by_seq_with_limit() {
+    let plan = plan_mirror_flush_selection_batch(
+        &table(),
+        &mirror(),
+        &["id".to_string()],
+        &["id".to_string(), "body".to_string()],
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert!(plan.statement.sql.contains("mirror.\"seq\" > $2::bigint"));
+    assert!(plan.statement.sql.contains("LIMIT $3::bigint"));
+    assert!(!plan.statement.sql.contains("jsonb_agg"));
+    assert_eq!(
+        plan.statement.param_types,
+        vec![
+            SqlParamType::BigInt,
+            SqlParamType::BigInt,
+            SqlParamType::BigInt
+        ]
+    );
+}
+
+#[test]
+fn batched_flush_selection_can_filter_mirror_ops() {
+    let plan = plan_mirror_flush_selection_batch(
+        &table(),
+        &mirror(),
+        &["id".to_string()],
+        &["id".to_string(), "body".to_string()],
+        None,
+        Some(&[3]),
+    )
+    .unwrap();
+
+    assert!(plan.statement.sql.contains("mirror.\"op\" = 3"));
+}
+
+#[test]
 fn cleanup_removes_only_selected_mirror_rows_after_manifest_commit() {
     let plan = plan_clean_schema_cleanup(&table(), &mirror(), &["id".to_string()]).unwrap();
 
@@ -107,6 +147,8 @@ fn cleanup_removes_only_selected_mirror_rows_after_manifest_commit() {
         .sql
         .contains("removed_mirror.\"seq\" = selected.\"seq\""));
     assert!(plan.statement.sql.contains("$1::jsonb"));
+    assert!(plan.statement.sql.contains("mirror_pruned"));
+    assert!(plan.statement.sql.contains("hot_pruned"));
     assert_eq!(plan.statement.param_types, vec![SqlParamType::Jsonb]);
     assert!(!plan.statement.sql.contains("\"_deleted\""));
     assert!(!plan
@@ -130,4 +172,35 @@ fn cleanup_deletes_mirror_and_hot_rows_in_one_atomic_statement() {
             < sql.find("DELETE FROM ONLY").expect("base-table cleanup"),
         "mirror rows must be removed before base rows in the unified cleanup statement"
     );
+}
+
+#[test]
+fn seq_range_cleanup_deletes_by_max_seq_without_json() {
+    let plan = koldstore_flush::plan_seq_range_cleanup(
+        &table(),
+        &mirror(),
+        &["id".to_string()],
+        None,
+    )
+    .unwrap();
+
+    assert!(plan.statement.sql.contains("mirror.\"seq\" <= $1::bigint"));
+    assert!(!plan.statement.sql.contains("jsonb_to_recordset"));
+    assert!(plan.statement.sql.contains("DELETE FROM \"koldstore\".\"items__cl\""));
+    assert!(plan.statement.sql.contains("DELETE FROM ONLY \"app\".\"items\""));
+    assert!(plan.statement.sql.contains("removed_mirror.\"op\" IN (1, 2)"));
+    assert_eq!(plan.statement.param_types, vec![SqlParamType::BigInt]);
+}
+
+#[test]
+fn seq_range_cleanup_can_filter_mirror_ops() {
+    let plan = koldstore_flush::plan_seq_range_cleanup(
+        &table(),
+        &mirror(),
+        &["id".to_string()],
+        Some(&[3]),
+    )
+    .unwrap();
+
+    assert!(plan.statement.sql.contains("mirror.\"op\" = 3"));
 }

@@ -50,7 +50,7 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
             0
         );
         assert_eq!(
-            common::manifest_count(&db.client, &table.relation).await?,
+            common::published_manifest_count(&db.client, &table.relation).await?,
             0
         );
         assert_eq!(

@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 500, table_type default 'shared', scope_column default null, order_column default null, compression default null)`.
+/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, order_column default null, compression default null)`.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
@@ -21,7 +21,7 @@ pub fn manage_table_pg(
     storage: &str,
     hot_row_limit: Option<i64>,
     min_flush_rows: pgrx::default!(i64, 1000),
-    max_rows_per_file: pgrx::default!(i64, 500),
+    max_rows_per_file: pgrx::default!(i64, 1000),
     table_type: pgrx::default!(&str, "'shared'"),
     scope_column: pgrx::default!(Option<&str>, "NULL"),
     order_column: pgrx::default!(Option<&str>, "NULL"),
@@ -30,11 +30,11 @@ pub fn manage_table_pg(
     let structured_flush = hot_row_limit.map(|hot_row_limit| {
         let hot_row_limit = positive_i64(hot_row_limit, "hot_row_limit");
         let min_flush_rows = positive_i64(min_flush_rows, "min_flush_rows");
-        let max_rows_per_file = positive_i64(max_rows_per_file, "max_rows_per_file");
+        let max_rows_per_file = validated_max_rows_per_file(max_rows_per_file);
         (
             hot_row_limit as u64,
             min_flush_rows as u64,
-            max_rows_per_file as u64,
+            max_rows_per_file,
         )
     });
     manage_table_pg_impl(
@@ -133,6 +133,12 @@ fn manage_table_pg_impl(
             &empty_plan.table,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+        refresh_managed_table_row_counters(
+            table_oid_u32,
+            &empty_plan.table,
+            &mirror_plan.mirror_table,
+        )
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         return pgrx::Uuid::from_bytes(*job_id.as_bytes());
     }
 
@@ -176,8 +182,23 @@ fn manage_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     complete_migration_job(job_id, table_oid_u32, processed_rows)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    refresh_managed_table_row_counters(table_oid_u32, &plan.table, &mirror_plan.mirror_table)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
     pgrx::Uuid::from_bytes(*job_id.as_bytes())
+}
+
+#[cfg(feature = "pg")]
+fn refresh_managed_table_row_counters(
+    table_oid: u32,
+    table: &koldstore_common::QualifiedTableName,
+    mirror: &koldstore_common::QualifiedTableName,
+) -> Result<(), String> {
+    crate::sql::flush::counters::refresh_table_row_counters(
+        pgrx::pg_sys::Oid::from(table_oid),
+        table,
+        mirror,
+    )
 }
 
 #[cfg(feature = "pg")]
@@ -684,6 +705,20 @@ fn positive_i64(value: i64, field: &str) -> i64 {
         pgrx::error!("{field} must be greater than zero");
     }
     value
+}
+
+#[cfg(feature = "pg")]
+fn validated_max_rows_per_file(value: i64) -> u64 {
+    let value = positive_i64(value, "max_rows_per_file");
+    let min_floor = u64::try_from(crate::guc::min_max_rows_per_file())
+        .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
+    let hint = format!(
+        "lower the floor for testing with SET {} = <value>",
+        crate::settings::MIN_MAX_ROWS_PER_FILE_GUC
+    );
+    koldstore_common::validate_max_rows_per_file(value as u64, min_floor, Some(&hint))
+        .unwrap_or_else(|error| pgrx::error!("{error}"));
+    value as u64
 }
 
 #[cfg(all(test, feature = "pg"))]

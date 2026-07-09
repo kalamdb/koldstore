@@ -21,8 +21,9 @@ pub mod table_kind;
 pub mod table_name;
 
 pub use config::{
-    flush_enabled_from_options, hot_row_limit_from_options, FlushPolicy, ManageTableOptions,
-    MigrationStatus, ParquetCompression,
+    flush_enabled_from_options, hot_row_limit_from_options, validate_max_rows_per_file,
+    FlushPolicy, ManageTableOptions, MigrationStatus, ParquetCompression,
+    DEFAULT_MIN_MAX_ROWS_PER_FILE,
 };
 pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};

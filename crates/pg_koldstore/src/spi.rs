@@ -291,6 +291,83 @@ pub fn select_json_one(
         .map_err(|error| map_spi_error(&statement.operation, &error.to_string()))
 }
 
+/// Executes a read/write statement from a transaction callback where no executor
+/// portal or snapshot is active.
+///
+/// `RegisterXactCallback` handlers must push a transaction snapshot and connect
+/// with `SPI_OPT_NONATOMIC` before calling SPI.
+///
+/// # Errors
+///
+/// Returns an error if the statement is not read/write or SPI execution fails.
+#[cfg(feature = "pg")]
+pub fn update_in_xact_callback(
+    statement: &SpiStatement,
+    args: &[pgrx::datum::DatumWithOid],
+) -> SpiResult<SpiRows> {
+    use std::ffi::CString;
+    use std::os::raw::c_char;
+
+    require_read_write(statement)?;
+
+    let sql = CString::new(statement.sql.trim())
+        .map_err(|error| map_spi_error(&statement.operation, &error.to_string()))?;
+
+    let mut argtypes = Vec::with_capacity(args.len());
+    let mut datums = Vec::with_capacity(args.len());
+    let mut nulls = Vec::with_capacity(args.len());
+    for arg in args {
+        argtypes.push(arg.oid());
+        match arg.datum() {
+            Some(datum) => {
+                datums.push(datum.sans_lifetime());
+                nulls.push(' ' as c_char);
+            }
+            None => {
+                datums.push(pgrx::pg_sys::Datum::from(0usize));
+                nulls.push('n' as c_char);
+            }
+        }
+    }
+
+    struct XactCallbackSpiGuard;
+    impl Drop for XactCallbackSpiGuard {
+        fn drop(&mut self) {
+            unsafe {
+                pgrx::pg_sys::PopActiveSnapshot();
+                let _ = pgrx::pg_sys::SPI_finish();
+            }
+        }
+    }
+
+    unsafe {
+        pgrx::Spi::check_status(pgrx::pg_sys::SPI_connect_ext(
+            pgrx::pg_sys::SPI_OPT_NONATOMIC as i32,
+        ))
+        .map_err(|error| map_spi_error(&statement.operation, &error.to_string()))?;
+
+        pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
+        let _guard = XactCallbackSpiGuard;
+
+        pgrx::pg_sys::SPI_tuptable = std::ptr::null_mut();
+        let status_code = pgrx::pg_sys::SPI_execute_with_args(
+            sql.as_ptr(),
+            args.len() as i32,
+            argtypes.as_mut_ptr(),
+            datums.as_mut_ptr(),
+            nulls.as_ptr(),
+            false,
+            0,
+        );
+        pgrx::Spi::check_status(status_code)
+            .map_err(|error| map_spi_error(&statement.operation, &error.to_string()))?;
+
+        Ok(SpiRows {
+            rows_affected: pgrx::pg_sys::SPI_processed,
+        })
+    }
+}
+
 /// Executes a read/write parameterized statement and returns processed rows.
 ///
 /// # Errors

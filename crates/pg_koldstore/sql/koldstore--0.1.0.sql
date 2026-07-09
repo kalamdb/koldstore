@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS koldstore.manifest (
   segment_count integer NOT NULL DEFAULT 0,
   max_seq bigint NOT NULL DEFAULT 0,
   max_commit_seq bigint NOT NULL DEFAULT 0,
+  -- PERFORMANCE: O(1) row accounting for describe/flush logging (see table_counters.rs).
+  hot_row_count bigint NOT NULL DEFAULT 0,
+  mirror_row_count bigint NOT NULL DEFAULT 0,
+  cold_row_count bigint NOT NULL DEFAULT 0,
   last_error text,
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (table_oid, scope_key)
@@ -194,6 +198,93 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_pk_hints (
 
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_seq AS bigint;
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_commit_seq AS bigint;
+
+-- PERFORMANCE: maintain O(1) row counters on koldstore.manifest (see table_counters.rs).
+CREATE OR REPLACE FUNCTION koldstore.internal_ensure_manifest_row(p_table_oid oid)
+RETURNS void
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = pg_catalog, koldstore
+AS $$
+  INSERT INTO koldstore.manifest (
+    table_oid,
+    scope_key,
+    manifest_path,
+    sync_state
+  )
+  VALUES (p_table_oid, '', 'pending', 'pending_write')
+  ON CONFLICT (table_oid, scope_key) DO NOTHING;
+$$;
+
+CREATE OR REPLACE FUNCTION koldstore.internal_bump_row_counts(
+  p_table_oid oid,
+  p_hot_delta bigint,
+  p_mirror_delta bigint
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, koldstore
+AS $$
+BEGIN
+  -- Used by commit-time counter flush and maintenance paths. DML capture triggers should call
+  -- koldstore.internal_record_row_count_delta instead (in-memory, no per-row manifest IO).
+  PERFORM koldstore.internal_ensure_manifest_row(p_table_oid);
+  UPDATE koldstore.manifest
+  SET
+    hot_row_count = GREATEST(0, hot_row_count + p_hot_delta),
+    mirror_row_count = GREATEST(0, mirror_row_count + p_mirror_delta),
+    updated_at = now()
+  WHERE table_oid = p_table_oid
+    AND scope_key = '';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION koldstore.internal_apply_flush_row_counts(
+  p_table_oid oid,
+  p_mirror_pruned bigint,
+  p_hot_pruned bigint,
+  p_cold_rows_added bigint
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, koldstore
+AS $$
+BEGIN
+  PERFORM koldstore.internal_ensure_manifest_row(p_table_oid);
+  UPDATE koldstore.manifest
+  SET
+    mirror_row_count = GREATEST(0, mirror_row_count - p_mirror_pruned),
+    hot_row_count = GREATEST(0, hot_row_count - p_hot_pruned),
+    cold_row_count = GREATEST(0, cold_row_count + p_cold_rows_added),
+    updated_at = now()
+  WHERE table_oid = p_table_oid
+    AND scope_key = '';
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION koldstore.internal_refresh_row_counts(
+  p_table_oid oid,
+  p_hot_rows bigint,
+  p_mirror_rows bigint
+)
+RETURNS void
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, koldstore
+AS $$
+BEGIN
+  PERFORM koldstore.internal_ensure_manifest_row(p_table_oid);
+  UPDATE koldstore.manifest
+  SET
+    hot_row_count = GREATEST(0, p_hot_rows),
+    mirror_row_count = GREATEST(0, p_mirror_rows),
+    updated_at = now()
+  WHERE table_oid = p_table_oid
+    AND scope_key = '';
+END;
+$$;
 
 REVOKE ALL ON
   koldstore.storage,

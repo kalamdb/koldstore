@@ -73,34 +73,6 @@ LIMIT ${limit_param}::integer"#,
     ))
 }
 
-/// Plans mirror policy rows used by flush candidate selection.
-///
-/// # Errors
-///
-/// Returns an error when no primary-key columns are supplied.
-pub fn plan_mirror_policy_rows(
-    mirror_table: &MirrorRelation,
-    primary_key: &[&str],
-) -> MirrorResult<MirrorStatement> {
-    let pk_json = pk_json_projection(primary_key)?;
-    Ok(MirrorStatement::read(
-        "select mirror policy rows",
-        format!(
-            r#"
-SELECT COALESCE(jsonb_agg(
-    jsonb_build_object(
-        'pk_json', jsonb_build_object({pk_json}),
-        'seq', mirror."seq"
-    )
-    ORDER BY mirror."seq"
-)::text, '[]')
-FROM {mirror} AS mirror
-"#,
-            mirror = mirror_table.quoted()
-        ),
-    ))
-}
-
 /// Plans aggregate stats over one mirror table.
 #[must_use]
 pub fn plan_mirror_stats(mirror_table: &MirrorRelation) -> MirrorStatement {
@@ -116,6 +88,84 @@ pub fn plan_mirror_stats(mirror_table: &MirrorRelation) -> MirrorStatement {
 )::text
 FROM {mirror}"#,
             mirror = mirror_table.quoted()
+        ),
+    )
+}
+
+/// Plans aggregate stats over the oldest `limit` mirror rows by `seq`.
+///
+/// Bind parameters:
+/// - `$1` row limit
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be prepared.
+pub fn plan_mirror_oldest_rows_stats(mirror_table: &MirrorRelation) -> MirrorStatement {
+    MirrorStatement::read_with_params(
+        "select mirror oldest rows stats",
+        format!(
+            r#"SELECT jsonb_build_object(
+    'row_count', count(*)::bigint,
+    'min_seq', COALESCE(min("seq"), 0),
+    'max_seq', COALESCE(max("seq"), 0),
+    'min_commit_seq', COALESCE(min("seq"), 0),
+    'max_commit_seq', COALESCE(max("seq"), 0)
+)::text
+FROM (
+    SELECT "seq"
+    FROM {mirror}
+    ORDER BY "seq" ASC
+    LIMIT $1::bigint
+) oldest"#,
+            mirror = mirror_table.quoted()
+        ),
+        [SqlParamType::BigInt],
+    )
+}
+
+/// Plans the `max(seq)` among the oldest `limit` mirror rows.
+///
+/// PERFORMANCE: Prefer this over [`plan_mirror_oldest_rows_stats`] when the
+/// caller already knows `row_count` (for example from manifest counters). A
+/// single index-backed `ORDER BY seq LIMIT N` lookup returns only the cutoff
+/// seq instead of aggregating the page.
+///
+/// Bind parameters:
+/// - `$1` row limit
+#[must_use]
+pub fn plan_mirror_oldest_rows_max_seq(mirror_table: &MirrorRelation) -> MirrorStatement {
+    MirrorStatement::read_with_params(
+        "select mirror oldest rows max seq",
+        format!(
+            r#"SELECT "seq"::bigint
+FROM {mirror}
+ORDER BY "seq" ASC
+LIMIT 1 OFFSET ($1::bigint - 1)"#,
+            mirror = mirror_table.quoted()
+        ),
+        [SqlParamType::BigInt],
+    )
+}
+
+/// Plans aggregate stats over mirror rows with one operation code.
+///
+/// Used by force-flush tombstone selection without scanning the full mirror into JSON.
+#[must_use]
+pub fn plan_mirror_op_stats(mirror_table: &MirrorRelation, op: i16) -> MirrorStatement {
+    MirrorStatement::read(
+        "select mirror op stats",
+        format!(
+            r#"SELECT jsonb_build_object(
+    'row_count', count(*)::bigint,
+    'min_seq', COALESCE(min("seq"), 0),
+    'max_seq', COALESCE(max("seq"), 0),
+    'min_commit_seq', COALESCE(min("seq"), 0),
+    'max_commit_seq', COALESCE(max("seq"), 0)
+)::text
+FROM {mirror}
+WHERE "op" = {op}"#,
+            mirror = mirror_table.quoted(),
+            op = op
         ),
     )
 }

@@ -5,26 +5,38 @@
 //! enqueue and SPI execution stay in `pg_koldstore`.
 
 pub mod cleanup;
+pub mod encode;
 pub mod job;
 pub mod ops;
 pub mod policy;
 pub mod recovery;
 pub mod segment_catalog;
+pub mod segment_write;
 pub mod stats;
+pub mod table_counters;
 pub mod table_flush;
 pub mod table_jobs;
 pub mod worker;
 pub mod write;
 
+pub use cleanup::{
+    plan_clean_schema_cleanup, plan_seq_range_cleanup, plan_typed_clean_schema_cleanup,
+    CleanSchemaCleanupPlan, CleanupCatalogColumn,
+};
+pub use encode::{stream_flush_chunks, StreamEncodeInput, StreamEncodeOutcome};
 pub use koldstore_jobs::{JobId, JobStatus, JobType, LeaseEpoch, StaleLeaseAction};
 pub use ops::*;
+pub use policy::policy_flush_row_count;
 pub use segment_catalog::{
-    manifest_from_catalog_rows, plan_flush_cold_segment_insert, plan_flush_pk_hint_insert,
-    plan_manifest_row_upsert, CatalogManifestSegmentRow, SegmentCatalogError,
+    build_manifest_segment_from_catalog_row, indexed_column_stats_json, load_manifest_from_path,
+    manifest_from_catalog_rows, plan_flush_segments_batch_insert, plan_manifest_row_upsert,
+    write_manifest_to_path, CatalogManifestSegmentRow, SegmentCatalogError,
 };
-pub use stats::{
-    decode_mirror_policy_rows, flush_stats_for_rows, resolve_flush_stats,
-    validate_flush_row_selection, FlushStats,
+pub use segment_write::{write_flush_segment_file, WrittenFlushSegment};
+pub use stats::{validate_flush_row_selection, FlushStats, ResolvedFlushSelection};
+pub use table_counters::{
+    plan_apply_flush_row_count_deltas, plan_bump_table_row_counts, plan_read_table_row_counters,
+    plan_refresh_table_row_counters, TableRowCounters, FLUSH_MIRROR_FETCH_BATCH_SIZE,
 };
 pub use table_flush::{
     manifest_paths, max_rows_per_file_from_policy, TableFlushBatchOutcome,
@@ -35,7 +47,4 @@ pub use table_jobs::{
     plan_mark_inline_flush_job_completed, plan_mark_inline_flush_job_failed,
     plan_mark_inline_flush_job_running, TableFlushJobError,
 };
-pub use write::{
-    chunk_flush_write_input, plan_flush_cleanup_row, plan_flush_cold_record,
-    plan_flush_write_input, FlushWriteChunk, FlushWriteInput,
-};
+pub use write::FlushWriteChunk;

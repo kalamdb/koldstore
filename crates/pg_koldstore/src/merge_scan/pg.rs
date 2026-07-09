@@ -7,7 +7,7 @@ use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
 use std::time::{Duration, Instant};
 
-use koldstore_common::{quote_ident, QualifiedTableName};
+use koldstore_common::{dedupe_nonblank, quote_ident, QualifiedTableName};
 use koldstore_merge::scan::{
     build_materialize_query as merge_materialize_query, MaterializeQueryParts, HOT_SEQ_SENTINEL,
 };
@@ -15,8 +15,7 @@ use pgrx::pg_sys;
 
 use crate::merge_scan::path::CUSTOM_PATH_NAME;
 use crate::merge_scan::plan::{
-    prune_segment_stats, validate_prune_predicate_stats, validate_prune_predicates_indexed,
-    SegmentPrunePredicate, SegmentStatsHint,
+    prune_segment_stats, validate_prune_predicates_indexed, SegmentPrunePredicate, SegmentStatsHint,
 };
 
 mod literals;
@@ -390,36 +389,7 @@ fn active_manifest_segment_stats(
         return Ok(None);
     };
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
-    let manifest_file = std::path::Path::new(&storage.base_path).join(&manifest_path);
-    let contents = std::fs::read_to_string(&manifest_file)
-        .map_err(|error| format!("read manifest file {}: {error}", manifest_file.display()))?;
-    let manifest = serde_json::from_str::<koldstore_manifest::Manifest>(&contents)
-        .map_err(|error| format!("parse manifest file {}: {error}", manifest_file.display()))?;
-    let prefix = manifest_path
-        .strip_suffix("/manifest.json")
-        .unwrap_or("")
-        .to_string();
-    let segments = manifest
-        .segments
-        .into_iter()
-        .filter(|segment| segment.status == koldstore_manifest::SegmentStatus::Committed)
-        .map(|segment| SegmentStatsHint {
-            object_path: manifest_segment_object_path(&prefix, &segment.path),
-            column_stats: segment
-                .column_stats
-                .into_iter()
-                .map(|(column, stats)| {
-                    (
-                        column,
-                        koldstore_parquet::ColumnStats {
-                            min: stats.min,
-                            max: stats.max,
-                        },
-                    )
-                })
-                .collect(),
-        })
-        .collect();
+    let segments = active_cold_segment_stats_from_catalog(table_oid)?;
     Ok(Some(ManifestSegmentStats {
         manifest_path,
         base_path: storage.base_path,
@@ -428,12 +398,53 @@ fn active_manifest_segment_stats(
     }))
 }
 
-fn manifest_segment_object_path(prefix: &str, segment_path: &str) -> String {
-    if prefix.is_empty() || segment_path.contains('/') {
-        segment_path.to_string()
-    } else {
-        format!("{prefix}/{segment_path}")
+fn active_cold_segment_stats_from_catalog(
+    table_oid: pg_sys::Oid,
+) -> Result<Vec<SegmentStatsHint>, String> {
+    use pgrx::datum::DatumWithOid;
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    struct CatalogSegmentStatsRow {
+        object_path: String,
+        column_stats: serde_json::Value,
     }
+
+    let statement = koldstore_catalog::queries::plan_active_cold_segment_stats_json()
+        .map_err(|error| error.to_string())?;
+    let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| "[]".to_string());
+    let rows: Vec<CatalogSegmentStatsRow> =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| SegmentStatsHint {
+            object_path: row.object_path,
+            column_stats: catalog_column_stats_map(row.column_stats),
+        })
+        .collect())
+}
+
+fn catalog_column_stats_map(
+    column_stats: serde_json::Value,
+) -> std::collections::BTreeMap<String, koldstore_parquet::ColumnStats> {
+    let mut stats = std::collections::BTreeMap::new();
+    let Some(columns) = column_stats.as_object() else {
+        return stats;
+    };
+    for (column, bounds) in columns {
+        let min = bounds
+            .get("min")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let max = bounds
+            .get("max")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        stats.insert(column.clone(), koldstore_parquet::ColumnStats { min, max });
+    }
+    stats
 }
 
 fn optional_manifest_path(table_oid: pg_sys::Oid) -> Result<Option<String>, String> {
@@ -465,9 +476,15 @@ fn load_cold_rows_for_merge(
             ));
         };
         let prune_predicates = unsafe { segment_prune_predicates(qual, &catalog.columns) };
-        validate_prune_predicates_indexed(&prune_predicates, &catalog.indexed_columns)
-            .map_err(|error| error.to_string())?;
-        validate_prune_predicate_stats(&manifest_stats.segments, &prune_predicates)
+        let indexed_filter_columns = dedupe_nonblank(
+            catalog
+                .primary_key
+                .columns
+                .iter()
+                .map(String::as_str)
+                .chain(catalog.indexed_columns.iter().map(String::as_str)),
+        );
+        validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_columns)
             .map_err(|error| error.to_string())?;
         let segment_paths = prune_segment_stats(&manifest_stats.segments, &prune_predicates);
 
@@ -751,9 +768,11 @@ unsafe fn validate_filter_columns_indexed(
     catalog: &koldstore_migrate::ExistingTableCatalog,
 ) -> Result<(), String> {
     let indexed = catalog
-        .indexed_columns
+        .primary_key
+        .columns
         .iter()
         .map(String::as_str)
+        .chain(catalog.indexed_columns.iter().map(String::as_str))
         .collect::<BTreeSet<_>>();
     for column in filter_column_names(qual, &catalog.columns) {
         if !indexed.contains(column.as_str()) {

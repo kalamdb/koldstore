@@ -48,7 +48,7 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
             0
         );
         assert_eq!(
-            common::manifest_count(&db.client, &table.relation).await?,
+            common::published_manifest_count(&db.client, &table.relation).await?,
             0
         );
         assert_eq!(

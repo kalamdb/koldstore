@@ -201,6 +201,30 @@ pub async fn manifest_count(client: &Client, relation: &str) -> Result<i64> {
     Ok(row.get(0))
 }
 
+/// Counts published cold manifests (`sync_state = 'in_sync'`) for a relation.
+///
+/// Row-counter maintenance may create a placeholder manifest row with
+/// `manifest_path = 'pending'` before any flush succeeds; this helper ignores
+/// those rows and only counts object-store-visible manifests.
+///
+/// # Errors
+///
+/// Returns an error when the catalog query fails.
+pub async fn published_manifest_count(client: &Client, relation: &str) -> Result<i64> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT count(*)
+            FROM koldstore.manifest
+            WHERE table_oid = $1::text::regclass::oid
+              AND sync_state = 'in_sync'
+            "#,
+            &[&relation],
+        )
+        .await?;
+    Ok(row.get(0))
+}
+
 /// Asserts that active cold metadata exists for a flushed relation.
 ///
 /// # Errors

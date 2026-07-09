@@ -229,6 +229,7 @@ AS $$
 BEGIN
     IF TG_OP = 'INSERT' THEN
         {insert_upsert}
+        PERFORM koldstore.internal_record_row_count_delta(TG_RELID, 1, 1);
         RETURN NEW;
     ELSIF TG_OP = 'UPDATE' THEN
         {pk_update_guard}
@@ -236,6 +237,7 @@ BEGIN
         RETURN NEW;
     ELSIF TG_OP = 'DELETE' THEN
         {delete_upsert}
+        PERFORM koldstore.internal_record_row_count_delta(TG_RELID, -1, 0);
         RETURN OLD;
     END IF;
 

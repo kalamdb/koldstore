@@ -1,17 +1,17 @@
-//! PostgreSQL flush SQL entrypoints.
+//! PostgreSQL flush SQL entrypoints and SPI adapters.
 
 pub use koldstore_flush::ops::*;
 
+#[cfg(feature = "pg")]
+pub(crate) mod counters;
 #[cfg(feature = "pg")]
 mod execute;
 #[cfg(feature = "pg")]
 mod jobs;
 #[cfg(feature = "pg")]
-mod segments;
+mod mirror_fetch;
 #[cfg(feature = "pg")]
-mod stats;
-#[cfg(feature = "pg")]
-mod write;
+mod spi;
 
 #[cfg(feature = "pg")]
 use koldstore_common::TableName;

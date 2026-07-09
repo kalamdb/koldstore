@@ -15,7 +15,7 @@ use support::{
 };
 
 const MIN_FLUSH_ROWS: i64 = 300;
-const MAX_ROWS_PER_FILE: i64 = 150;
+const MAX_ROWS_PER_FILE: i64 = 1_000;
 
 #[tokio::test]
 async fn ai_memory_large_sessions_flush_in_batches_and_audit_cold_history() -> Result<()> {
@@ -113,7 +113,14 @@ async fn ai_memory_large_sessions_flush_in_batches_and_audit_cold_history_inner(
 
     let focus_workspace = config.scope_id("workspace", 1);
     set_scope(&db.client, &focus_workspace).await?;
-    let overlay_ids = support::fresh_overlay_ids(next_id + 10_000, 3);
+    let overlay_ids = support::scoped_overlay_ids_from_cold(
+        &db.client,
+        &relation,
+        "workspace_id",
+        &focus_workspace,
+        3,
+    )
+    .await?;
     assert_cold_then_delete_overlay(
         &db.client,
         &relation,
@@ -153,27 +160,46 @@ async fn ai_memory_large_sessions_flush_in_batches_and_audit_cold_history_inner(
     )
     .await?;
 
-    set_scope(&db.client, &focus_workspace).await?;
+    {
+        let _step = log_step("post-flush session + audit queries");
+        support::timed_async(
+            format!("set scope after parquet verify ({focus_workspace})"),
+            set_scope(&db.client, &focus_workspace),
+        )
+        .await?;
 
-    let current = query_current_session(
-        &db.client,
-        &relation,
-        &focus_workspace,
-        &config.scope_id("session", 1),
-    )
-    .await?;
-    assert!(!current.is_empty());
+        let current = support::timed_async(
+            "query current session",
+            query_current_session(
+                &db.client,
+                &relation,
+                &focus_workspace,
+                &config.scope_id("session", 1),
+            ),
+        )
+        .await?;
+        assert!(!current.is_empty());
 
-    let audit = query_audit_window(&db.client, &relation, &focus_workspace).await?;
-    assert!(!audit.is_empty());
+        let audit = support::timed_async(
+            "query audit window",
+            query_audit_window(&db.client, &relation, &focus_workspace),
+        )
+        .await?;
+        assert!(!audit.is_empty());
+    }
 
-    assert_merge_scan_uses_cold(
-        &db.client,
-        &relation,
-        &format!("workspace_id = '{focus_workspace}' AND created_at < timestamptz '2025-02-01'"),
-        1,
-    )
-    .await?;
+    {
+        let _step = log_step("EXPLAIN merge scan uses cold for audit window");
+        assert_merge_scan_uses_cold(
+            &db.client,
+            &relation,
+            &format!(
+                "workspace_id = '{focus_workspace}' AND created_at < timestamptz '2025-02-01'"
+            ),
+            1,
+        )
+        .await?;
+    }
 
     for &id in &overlay_ids {
         assert_eq!(
@@ -231,7 +257,7 @@ async fn seed_session_events_parallel(
             let relation = relation.clone();
             let progress = progress.clone();
             async move {
-                let scopes_per_client = (scopes + clients - 1) / clients;
+                let scopes_per_client = scopes.div_ceil(clients);
                 let scope_start = client_idx * scopes_per_client;
                 let scope_end = (scope_start + scopes_per_client).min(scopes);
                 for scope_idx in scope_start..scope_end {
@@ -292,7 +318,7 @@ async fn concurrent_session_bursts(
             let relation = relation.clone();
             let progress = progress.clone();
             async move {
-                let scopes_per_client = (scopes + clients - 1) / clients;
+                let scopes_per_client = scopes.div_ceil(clients);
                 let scope_start = client_idx * scopes_per_client;
                 let scope_end = (scope_start + scopes_per_client).min(scopes);
                 for scope_idx in scope_start..scope_end {

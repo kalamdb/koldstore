@@ -7,6 +7,7 @@ pub mod memory;
 pub mod merge_scan;
 pub mod observability;
 pub mod privileges;
+pub mod row_counter_cache;
 pub mod settings;
 pub mod spi;
 pub mod sql;
@@ -43,4 +44,5 @@ pub extern "C" fn _PG_init() {
     observability::init_tracing();
     guc::define_gucs();
     hooks::register_hooks();
+    row_counter_cache::register_xact_callbacks();
 }

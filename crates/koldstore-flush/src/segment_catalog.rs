@@ -9,8 +9,11 @@ use koldstore_common::SqlStatement;
 use koldstore_manifest::{
     Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment, PkFilter,
 };
+use koldstore_parquet::ColdMetadataColumn;
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::stats::FlushStats;
 
 /// Catalog row shape returned by [`plan_active_cold_segments_for_manifest_json`].
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -76,6 +79,20 @@ pub fn manifest_from_catalog_rows(
     Ok(manifest)
 }
 
+/// Builds one manifest segment from an active cold-segment catalog row.
+///
+/// # Errors
+///
+/// Returns an error when segment metadata cannot be converted into manifest form.
+pub fn build_manifest_segment_from_catalog_row(
+    namespace: &str,
+    table_name: &str,
+    primary_key_columns: &[String],
+    row: CatalogManifestSegmentRow,
+) -> std::result::Result<ManifestSegment, SegmentCatalogError> {
+    manifest_segment_from_catalog_row(namespace, table_name, primary_key_columns, row)
+}
+
 fn manifest_segment_from_catalog_row(
     namespace: &str,
     table_name: &str,
@@ -135,61 +152,130 @@ fn manifest_column_stats(column_stats: serde_json::Value) -> BTreeMap<String, Ma
     stats
 }
 
-/// Plans `koldstore.cold_segments` insertion during inline flush.
-///
-/// # Errors
-///
-/// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_flush_cold_segment_insert() -> std::result::Result<SqlStatement, SegmentCatalogError> {
-    SqlStatement::write(
-        "flush insert cold segment",
-        r#"
-INSERT INTO koldstore.cold_segments (
-    segment_id,
-    table_oid,
-    scope_key,
-    object_path,
-    batch_number,
-    min_seq,
-    max_seq,
-    min_commit_seq,
-    max_commit_seq,
-    row_count,
-    byte_size,
-    schema_version,
-    column_stats,
-    status
-)
-VALUES (
-    $1::uuid,
-    $2::oid,
-    '',
-    $3::text,
-    $4::integer,
-    $5::bigint,
-    $6::bigint,
-    $7::bigint,
-    $8::bigint,
-    $9::bigint,
-    $10::bigint,
-    $11::integer,
-    $12::jsonb,
-    'active'
-)
-"#,
-    )
-    .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
+/// Builds indexed column stats JSON for one flushed segment chunk.
+#[must_use]
+pub fn indexed_column_stats_json(
+    indexed_bounds: &BTreeMap<String, (serde_json::Value, serde_json::Value)>,
+    stats: &FlushStats,
+) -> serde_json::Value {
+    let mut values = serde_json::Map::new();
+    values.insert(
+        ColdMetadataColumn::Seq.name().to_string(),
+        serde_json::json!({"min": stats.min_seq, "max": stats.max_seq}),
+    );
+    for (column, bounds) in indexed_bounds {
+        values.insert(
+            column.clone(),
+            serde_json::json!({
+                "min": bounds.0,
+                "max": bounds.1,
+            }),
+        );
+    }
+    serde_json::Value::Object(values)
 }
 
-/// Plans `koldstore.cold_pk_hints` insertion during inline flush.
+/// Loads a manifest JSON file from the object-store mount when present.
+#[must_use]
+pub fn load_manifest_from_path(path: &std::path::Path) -> Option<Manifest> {
+    let contents = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+/// Writes a manifest JSON file to the object-store mount.
+///
+/// # Errors
+///
+/// Returns an error when parent directories cannot be created or the write fails.
+pub fn write_manifest_to_path(path: &std::path::Path, manifest: &Manifest) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(
+        path,
+        serde_json::to_vec(manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Plans a combined multi-row `koldstore.cold_segments` + `koldstore.cold_pk_hints`
+/// insert for every segment written by one `flush_table` call.
+///
+/// PERFORMANCE: one SPI round trip for the *entire* flush instead of one (or two)
+/// round trips per segment. Per-segment columns are bound as native PostgreSQL
+/// arrays (`uuid[]`, `text[]`, `bigint[]`, ...) and expanded with `unnest`, so no
+/// JSON encoding/decoding is involved even though many rows are inserted at once.
+/// The CTE ensures the pk-hint rows only insert after their segment rows commit
+/// within the same statement.
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_flush_pk_hint_insert() -> std::result::Result<SqlStatement, SegmentCatalogError> {
+pub fn plan_flush_segments_batch_insert() -> std::result::Result<SqlStatement, SegmentCatalogError>
+{
     SqlStatement::write(
-        "flush insert cold pk hint",
+        "flush insert cold segments and pk hints batch",
         r#"
+WITH inserted_segments AS (
+    INSERT INTO koldstore.cold_segments (
+        segment_id,
+        table_oid,
+        scope_key,
+        object_path,
+        batch_number,
+        min_seq,
+        max_seq,
+        min_commit_seq,
+        max_commit_seq,
+        row_count,
+        byte_size,
+        schema_version,
+        column_stats,
+        status
+    )
+    SELECT
+        u.segment_id,
+        $1::oid,
+        '',
+        u.object_path,
+        u.batch_number,
+        u.min_seq,
+        u.max_seq,
+        u.min_commit_seq,
+        u.max_commit_seq,
+        u.row_count,
+        u.byte_size,
+        u.schema_version,
+        u.column_stats,
+        'active'
+    FROM unnest(
+        $2::uuid[],
+        $3::text[],
+        $4::integer[],
+        $5::bigint[],
+        $6::bigint[],
+        $7::bigint[],
+        $8::bigint[],
+        $9::bigint[],
+        $10::bigint[],
+        $11::integer[],
+        $12::jsonb[]
+    ) AS u(
+        segment_id,
+        object_path,
+        batch_number,
+        min_seq,
+        max_seq,
+        min_commit_seq,
+        max_commit_seq,
+        row_count,
+        byte_size,
+        schema_version,
+        column_stats
+    )
+    RETURNING segment_id, object_path, max_seq, max_commit_seq
+)
 INSERT INTO koldstore.cold_pk_hints (
     table_oid,
     scope_key,
@@ -199,7 +285,8 @@ INSERT INTO koldstore.cold_pk_hints (
     latest_seq,
     latest_commit_seq
 )
-VALUES ($1::oid, '', decode(md5($2::text), 'hex'), $3::uuid, 'exact', $4::bigint, $5::bigint)
+SELECT $1::oid, '', decode(md5(inserted_segments.object_path), 'hex'), inserted_segments.segment_id, 'exact', inserted_segments.max_seq, inserted_segments.max_commit_seq
+FROM inserted_segments
 ON CONFLICT DO NOTHING
 "#,
     )

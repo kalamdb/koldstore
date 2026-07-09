@@ -4,8 +4,8 @@ use koldstore_merge::scan::exec::{
     ColdAvailability, FilterPlan, ScanResourceCounters,
 };
 use koldstore_merge::scan::plan::{
-    prune_segment_stats, validate_prune_predicate_stats, validate_prune_predicates_indexed,
-    MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
+    prune_segment_stats, validate_prune_predicates_indexed, MergeMetadataAttnums, MergeScanPlan,
+    SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -235,20 +235,18 @@ fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
 }
 
 #[test]
-fn indexed_prune_predicates_require_manifest_stats() {
+fn indexed_prune_predicates_keep_segments_without_manifest_stats() {
     let segments = vec![SegmentStatsHint {
         object_path: "app/items/batch-1.parquet".to_string(),
         column_stats: BTreeMap::new(),
     }];
-    let err = validate_prune_predicate_stats(
+    let selected = prune_segment_stats(
         &segments,
         &[SegmentPrunePredicate::equality(
             "created_at",
             json!("2026-01-01"),
         )],
-    )
-    .unwrap_err();
+    );
 
-    assert!(err.to_string().contains("created_at"));
-    assert!(err.to_string().contains("min/max"));
+    assert_eq!(selected, vec!["app/items/batch-1.parquet".to_string()]);
 }

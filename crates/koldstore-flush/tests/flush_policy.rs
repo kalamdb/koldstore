@@ -1,7 +1,4 @@
-use koldstore_common::SeqId;
-use koldstore_flush::policy::{
-    flush_rows_for_excess, select_mirror_flush_candidates, FlushPolicy, MirrorPolicyRow,
-};
+use koldstore_flush::policy::{flush_rows_for_excess, policy_flush_row_count, FlushPolicy};
 
 #[test]
 fn structured_schema_options_load_hot_row_limit_policy() {
@@ -26,49 +23,22 @@ fn flush_rows_for_excess_honors_min_flush_rows_threshold() {
 }
 
 #[test]
-fn row_limit_policy_selects_oldest_excess_mirror_rows_by_seq() {
-    let rows = (1..=5)
-        .rev()
-        .map(|seq| MirrorPolicyRow {
-            pk_json: serde_json::json!({ "id": seq }),
-            seq: SeqId::new(seq).unwrap(),
-        })
-        .collect::<Vec<_>>();
-
-    let selected = select_mirror_flush_candidates(
-        &FlushPolicy {
-            hot_row_limit: Some(3),
-            min_flush_rows: None,
-            max_rows_per_file: None,
-        },
-        &rows,
-    );
-
-    assert_eq!(
-        selected.iter().map(|row| row.seq.get()).collect::<Vec<_>>(),
-        vec![1, 2]
-    );
+fn policy_flush_row_count_honors_hot_row_limit_and_min_flush_rows() {
+    let policy = FlushPolicy {
+        hot_row_limit: Some(25_000),
+        min_flush_rows: Some(300),
+        max_rows_per_file: None,
+    };
+    assert_eq!(policy_flush_row_count(50_000, &policy), 24_900);
+    assert_eq!(policy_flush_row_count(25_000, &policy), 0);
 }
 
 #[test]
-fn row_limit_policy_with_min_flush_rows_flushes_oldest_excess_in_chunks() {
-    let rows = (1..=11_250)
-        .map(|seq| MirrorPolicyRow {
-            pk_json: serde_json::json!({ "id": seq }),
-            seq: SeqId::new(seq).unwrap(),
-        })
-        .collect::<Vec<_>>();
-
-    let selected = select_mirror_flush_candidates(
-        &FlushPolicy {
-            hot_row_limit: Some(10_000),
-            min_flush_rows: Some(1_000),
-            max_rows_per_file: Some(500),
-        },
-        &rows,
-    );
-
-    assert_eq!(selected.len(), 1_000);
-    assert_eq!(selected.first().unwrap().seq.get(), 1);
-    assert_eq!(selected.last().unwrap().seq.get(), 1_000);
+fn policy_flush_row_count_chunks_large_excess_like_row_selection_did() {
+    let policy = FlushPolicy {
+        hot_row_limit: Some(10_000),
+        min_flush_rows: Some(1_000),
+        max_rows_per_file: Some(500),
+    };
+    assert_eq!(policy_flush_row_count(11_250, &policy), 1_000);
 }

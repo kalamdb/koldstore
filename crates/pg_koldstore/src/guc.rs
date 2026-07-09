@@ -24,6 +24,9 @@ static ENABLE_MERGE_SCAN: GucSetting<bool> = GucSetting::<bool>::new(true);
 static INTERNAL_SYSTEM_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static INTERNAL_FLUSH_CLEANUP: GucSetting<bool> = GucSetting::<bool>::new(false);
+#[cfg(feature = "pg")]
+static MIN_MAX_ROWS_PER_FILE: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::default_min_max_rows_per_file());
 
 /// Defines pg-koldstore configuration variables.
 #[cfg(feature = "pg")]
@@ -89,6 +92,16 @@ pub fn define_gucs() {
         GucContext::Suset,
         flags,
     );
+    GucRegistry::define_int_guc(
+        c"koldstore.min_max_rows_per_file",
+        c"Minimum allowed max_rows_per_file for managed tables.",
+        c"Rejects manage_table and flush settings below this floor. Lower temporarily for tests with SET koldstore.min_max_rows_per_file = <value>.",
+        &MIN_MAX_ROWS_PER_FILE,
+        settings::MIN_MIN_MAX_ROWS_PER_FILE,
+        settings::MAX_MIN_MAX_ROWS_PER_FILE,
+        GucContext::Userset,
+        flags,
+    );
 }
 
 /// No-op placeholder for non-PostgreSQL tests.
@@ -139,6 +152,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::LOG_LEVEL_GUC,
             internal: false,
             default_value: settings::DEFAULT_LOG_LEVEL,
+        },
+        GucDefinition {
+            name: settings::MIN_MAX_ROWS_PER_FILE_GUC,
+            internal: false,
+            default_value: "1000",
         },
         GucDefinition {
             name: INTERNAL_SYSTEM_WRITE_GUC,
@@ -202,5 +220,19 @@ pub fn max_running_jobs() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_MAX_RUNNING_JOBS
+    }
+}
+
+/// Current minimum allowed `max_rows_per_file` for managed tables.
+#[must_use]
+pub fn min_max_rows_per_file() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_min_max_rows_per_file(MIN_MAX_ROWS_PER_FILE.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::default_min_max_rows_per_file()
     }
 }

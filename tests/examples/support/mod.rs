@@ -7,7 +7,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use parquet::file::reader::{FileReader, SerializedFileReader};
@@ -25,6 +25,32 @@ pub fn log_always(message: impl AsRef<str>) {
 #[must_use]
 pub fn log_step(step: impl Into<String>) -> e2e::StepGuard {
     e2e::log_step_always(format!("[examples] {}", step.into()))
+}
+
+/// Runs an async action and logs elapsed wall time on success or failure.
+pub async fn timed_async<T, E: std::fmt::Display>(
+    label: impl Into<String>,
+    action: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let label = label.into();
+    let started = Instant::now();
+    log_always(format!("{label}: start"));
+    match action.await {
+        Ok(value) => {
+            log_always(format!(
+                "{label}: ok in {:.3}s",
+                started.elapsed().as_secs_f64()
+            ));
+            Ok(value)
+        }
+        Err(error) => {
+            log_always(format!(
+                "{label}: failed in {:.3}s ({error})",
+                started.elapsed().as_secs_f64()
+            ));
+            Err(error)
+        }
+    }
 }
 
 /// Logs scenario sizing and filesystem layout at startup.
@@ -258,6 +284,7 @@ pub struct ManifestInfo {
 /// # Errors
 ///
 /// Returns an error when management or catalog assertions fail.
+#[allow(clippy::too_many_arguments)]
 pub async fn manage_user_scoped_with_policy(
     client: &Client,
     storage_name: &str,
@@ -326,27 +353,70 @@ pub async fn flush_table(
     ctx: Option<FlushCtx<'_>>,
 ) -> Result<i64> {
     let _step = ctx.map(|ctx| log_step(format!("{}: flush_table", ctx.label)));
-    let row = client
-        .query_one(
+    let label = ctx
+        .map(|ctx| ctx.label.to_string())
+        .unwrap_or_else(|| format!("flush_table {relation}"));
+    log_flush_inputs(client, relation, &label).await?;
+    let row = timed_async(
+        ctx.map(|ctx| format!("{}: koldstore.flush_table", ctx.label))
+            .unwrap_or_else(|| format!("flush_table {relation}")),
+        client.query_one(
             "SELECT koldstore.flush_table($1::text::regclass)::text",
             &[&relation],
-        )
-        .await?;
+        ),
+    )
+    .await?;
     let job_id: String = row.get(0);
-    let progress = client
-        .query_one(
+    let progress = timed_async(
+        format!("flush job rows_flushed lookup ({job_id})"),
+        client.query_one(
             "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
             &[&job_id],
-        )
-        .await?;
+        ),
+    )
+    .await?;
     let flushed: i64 = progress.get(0);
     if let Some(ctx) = ctx {
         log_always(format!("{}: flushed {} rows", ctx.label, flushed));
         if flushed > 0 {
-            log_cold_storage_snapshot(client, relation, ctx.storage_root, ctx.label).await?;
+            timed_async(
+                format!("{}: cold storage snapshot", ctx.label),
+                log_cold_storage_snapshot(client, relation, ctx.storage_root, ctx.label),
+            )
+            .await?;
         }
     }
     Ok(flushed)
+}
+
+async fn log_flush_inputs(client: &Client, relation: &str, label: &str) -> Result<()> {
+    // PERFORMANCE: read O(1) counters from koldstore.manifest instead of COUNT(*) scans.
+    let row = timed_async(
+        format!("{label}: flush input metadata"),
+        client.query_one(
+            r#"
+            SELECT
+              COALESCE(m.hot_row_count, 0)::bigint AS hot_rows,
+              COALESCE(m.mirror_row_count, 0)::bigint AS mirror_rows,
+              COALESCE(m.segment_count, 0)::bigint AS cold_segments,
+              COALESCE(m.cold_row_count, 0)::bigint AS cold_rows
+            FROM koldstore.manifest m
+            WHERE m.table_oid = $1::text::regclass::oid
+              AND m.scope_key = ''
+            "#,
+            &[&relation],
+        ),
+    )
+    .await?;
+    let hot_rows: i64 = row.get(0);
+    let mirror_rows: i64 = row.get(1);
+    let cold_segments: i64 = row.get(2);
+    let cold_rows: i64 = row.get(3);
+    log_always(format!(
+        "{label}: flush input mirror_rows={mirror_rows} hot_rows={hot_rows} \
+         cold_segments={cold_segments} cold_rows={cold_rows}"
+    ));
+    Ok(())
 }
 
 /// Enqueues a force flush and runs it, returning flushed row count.
@@ -363,19 +433,36 @@ pub async fn force_flush_table(
     ctx: Option<FlushCtx<'_>>,
 ) -> Result<i64> {
     let _step = ctx.map(|ctx| log_step(format!("{}: force_flush_table", ctx.label)));
-    wait_for_jobs(client, relation).await?;
-    client
-        .execute(
+    timed_async(
+        ctx.map(|ctx| format!("{}: wait_for_jobs", ctx.label))
+            .unwrap_or_else(|| format!("wait_for_jobs {relation}")),
+        wait_for_jobs(client, relation),
+    )
+    .await?;
+    timed_async(
+        ctx.map(|ctx| format!("{}: enqueue force flush", ctx.label))
+            .unwrap_or_else(|| format!("enqueue force flush {relation}")),
+        client.execute(
             "SELECT koldstore.enqueue_flush_job(table_name => $1::text::regclass, force => true)",
             &[&relation],
-        )
-        .await?;
+        ),
+    )
+    .await?;
     let flushed = flush_table(client, relation, None).await?;
-    wait_for_jobs(client, relation).await?;
+    timed_async(
+        ctx.map(|ctx| format!("{}: wait_for_jobs after flush", ctx.label))
+            .unwrap_or_else(|| format!("wait_for_jobs after flush {relation}")),
+        wait_for_jobs(client, relation),
+    )
+    .await?;
     if let Some(ctx) = ctx {
         log_always(format!("{}: force-flushed {} rows", ctx.label, flushed));
         if flushed > 0 {
-            log_cold_storage_snapshot(client, relation, ctx.storage_root, ctx.label).await?;
+            timed_async(
+                format!("{}: cold storage snapshot", ctx.label),
+                log_cold_storage_snapshot(client, relation, ctx.storage_root, ctx.label),
+            )
+            .await?;
         }
     }
     Ok(flushed)
@@ -715,17 +802,167 @@ pub async fn assert_multi_tenant_visibility(
     Ok(())
 }
 
+/// Options for [`assert_cold_then_delete_overlay`].
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ColdDeleteOverlayOpts {
+    /// Insert fresh ids and `force => true` flush them into cold (slow: re-flushes the
+    /// full mirror). Default is false: reuse ids that prior flush waves already moved
+    /// to cold.
+    pub prime_dedicated_cold_rows: bool,
+    /// Run `EXPLAIN ANALYZE` on merge-scan visibility checks (doubles query cost).
+    pub profile_merge_scan: bool,
+}
+
+/// Picks the lowest primary keys for a tenant after multi-wave flush (already in cold).
+///
+/// # Errors
+///
+/// Returns an error when the scoped lookup returns fewer rows than requested.
+pub async fn scoped_overlay_ids_from_cold(
+    client: &Client,
+    relation: &str,
+    scope_column: &str,
+    scope_id: &str,
+    count: usize,
+) -> Result<Vec<i64>> {
+    set_scope(client, scope_id).await?;
+    let rows = client
+        .query(
+            &format!(
+                "SELECT id FROM {relation} WHERE {scope_column} = $1 ORDER BY id ASC LIMIT $2"
+            ),
+            &[
+                &scope_id,
+                &(i64::try_from(count).context("overlay id count")?),
+            ],
+        )
+        .await?;
+    anyhow::ensure!(
+        rows.len() == count,
+        "expected {count} scoped rows for overlay on {relation}, got {}",
+        rows.len()
+    );
+    Ok(rows.iter().map(|row| row.get(0)).collect())
+}
+
+async fn log_overlay_catalog_snapshot(client: &Client, relation: &str, label: &str) -> Result<()> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT
+              COALESCE(m.mirror_row_count, 0)::bigint,
+              COALESCE(m.hot_row_count, 0)::bigint,
+              COALESCE(m.cold_row_count, 0)::bigint,
+              COALESCE(m.segment_count, 0)::bigint
+            FROM koldstore.manifest m
+            WHERE m.table_oid = $1::text::regclass::oid
+              AND m.scope_key = ''
+            "#,
+            &[&relation],
+        )
+        .await?;
+    let mirror_rows: i64 = row.get(0);
+    let hot_rows: i64 = row.get(1);
+    let cold_rows: i64 = row.get(2);
+    let segments: i64 = row.get(3);
+    log_always(format!(
+        "cold-delete overlay [{label}]: mirror_rows={mirror_rows} hot_rows={hot_rows} \
+         cold_rows={cold_rows} cold_segments={segments}"
+    ));
+    Ok(())
+}
+
 /// Counts visible rows for a primary key (merge scan view).
 ///
 /// # Errors
 ///
 /// Returns an error when the query fails.
 pub async fn visible_pk_count(client: &Client, relation: &str, id: i64) -> Result<i64> {
-    scalar_count(
-        client,
-        &format!("SELECT count(*) FROM {relation} WHERE id = {id}"),
+    visible_pk_count_with_profile(client, relation, id, true).await
+}
+
+/// Like [`visible_pk_count`] but skips `EXPLAIN ANALYZE` when `profile` is false.
+///
+/// # Errors
+///
+/// Returns an error when the query fails.
+pub async fn visible_pk_count_with_profile(
+    client: &Client,
+    relation: &str,
+    id: i64,
+    profile: bool,
+) -> Result<i64> {
+    let sql = format!("SELECT count(*) FROM {relation} WHERE id = {id}");
+    if profile {
+        let plan = timed_async(
+            format!("merge scan visible_pk_count id={id}: EXPLAIN ANALYZE"),
+            e2e::explain_analyze(client, &sql),
+        )
+        .await?;
+        log_merge_scan_profile(id, &plan);
+    }
+    timed_async(
+        format!("merge scan visible_pk_count id={id}"),
+        scalar_count(client, &sql),
     )
     .await
+}
+
+/// Returns how many of `ids` are visible through merge scan (one query).
+///
+/// # Errors
+///
+/// Returns an error when the query fails.
+pub async fn visible_pk_batch_count(client: &Client, relation: &str, ids: &[i64]) -> Result<i64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    timed_async(
+        format!("merge scan visible_pk_batch_count ({} ids)", ids.len()),
+        async {
+            let row = client
+                .query_one(
+                    &format!("SELECT count(*)::bigint FROM {relation} WHERE id = ANY($1)"),
+                    &[&ids],
+                )
+                .await?;
+            Ok(row.get(0))
+        },
+    )
+    .await
+}
+
+fn log_merge_scan_profile(id: i64, plan: &str) {
+    let mut parquet_files = 0_usize;
+    let mut parquet_rows = 0_usize;
+    let mut parquet_ms = 0.0_f64;
+
+    for line in plan.lines() {
+        let Some((_, detail)) = line.split_once("Parquet segment:") else {
+            continue;
+        };
+        let detail = detail.trim();
+        if detail == "none" || detail.contains("(planned)") {
+            continue;
+        }
+        parquet_files += 1;
+        let parts = detail.split(", ").collect::<Vec<_>>();
+        if let Some(rows_part) = parts.iter().find(|part| part.ends_with(" rows")) {
+            if let Ok(rows) = rows_part.trim_end_matches(" rows").parse::<usize>() {
+                parquet_rows += rows;
+            }
+        }
+        if let Some(ms_part) = parts.iter().find(|part| part.ends_with(" ms")) {
+            if let Ok(ms) = ms_part.trim_end_matches(" ms").parse::<f64>() {
+                parquet_ms += ms;
+            }
+        }
+    }
+
+    log_always(format!(
+        "merge scan visible_pk_count id={id}: cold read parquet_files={parquet_files} \
+         parquet_rows={parquet_rows} parquet_read_ms={parquet_ms:.3}"
+    ));
 }
 
 /// Reads mirror op for a primary key, if present.
@@ -735,10 +972,35 @@ pub async fn visible_pk_count(client: &Client, relation: &str, id: i64) -> Resul
 /// Returns an error when the query fails.
 pub async fn mirror_op(client: &Client, relation: &str, id: i64) -> Result<Option<i16>> {
     let mirror = e2e::change_log_mirror_relation(relation);
-    let row = client
-        .query_opt(&format!("SELECT op FROM {mirror} WHERE id = $1"), &[&id])
-        .await?;
-    Ok(row.map(|row| row.get(0)))
+    timed_async(format!("mirror op lookup id={id}"), async {
+        let row = client
+            .query_opt(&format!("SELECT op FROM {mirror} WHERE id = $1"), &[&id])
+            .await?;
+        Ok(row.map(|row| row.get(0)))
+    })
+    .await
+}
+
+pub async fn assert_cold_then_delete_overlay(
+    client: &Client,
+    relation: &str,
+    scope_id: &str,
+    scope_column: &str,
+    ids: &[i64],
+    rematerialize_sql: &dyn Fn(i64) -> String,
+    flush_ctx: Option<FlushCtx<'_>>,
+) -> Result<()> {
+    assert_cold_then_delete_overlay_with_opts(
+        client,
+        relation,
+        scope_id,
+        scope_column,
+        ids,
+        rematerialize_sql,
+        flush_ctx,
+        ColdDeleteOverlayOpts::default(),
+    )
+    .await
 }
 
 /// Proves the durable flush → rematerialize → delete → flush path.
@@ -756,10 +1018,16 @@ pub async fn mirror_op(client: &Client, relation: &str, id: i64) -> Result<Optio
 /// and does not keep a separate hot tombstone row in the user table. Durability
 /// requires the tombstone flush in step 4.
 ///
+/// By default [`ColdDeleteOverlayOpts::prime_dedicated_cold_rows`] is false: pass
+/// ids that prior flush waves already moved to cold (see
+/// [`scoped_overlay_ids_from_cold`]) to avoid a ~60s force flush that re-writes
+/// the entire mirror.
+///
 /// # Errors
 ///
 /// Returns an error when insert, flush, delete, or visibility checks fail.
-pub async fn assert_cold_then_delete_overlay(
+#[allow(clippy::too_many_arguments)]
+pub async fn assert_cold_then_delete_overlay_with_opts(
     client: &Client,
     relation: &str,
     scope_id: &str,
@@ -767,7 +1035,9 @@ pub async fn assert_cold_then_delete_overlay(
     ids: &[i64],
     rematerialize_sql: &dyn Fn(i64) -> String,
     flush_ctx: Option<FlushCtx<'_>>,
+    opts: ColdDeleteOverlayOpts,
 ) -> Result<()> {
+    let overlay_started = Instant::now();
     let _step = log_step(format!(
         "cold-delete overlay on {relation} for scope {scope_id} ({} ids)",
         ids.len()
@@ -780,38 +1050,79 @@ pub async fn assert_cold_then_delete_overlay(
         "expected prior cold history before cold-then-delete coverage"
     );
     log_always(format!(
-        "cold-delete overlay: starting with {before_segments} active cold segments"
+        "cold-delete overlay: starting with {before_segments} active cold segments; \
+         prime_dedicated_cold_rows={} profile_merge_scan={}",
+        opts.prime_dedicated_cold_rows, opts.profile_merge_scan
     ));
+    log_overlay_catalog_snapshot(client, relation, "start").await?;
 
-    // Put the target ids themselves into cold first.
-    for &id in ids {
-        client.batch_execute(&rematerialize_sql(id)).await?;
-        anyhow::ensure!(
-            visible_pk_count(client, relation, id).await? == 1,
-            "id {id} must be visible after insert before cold flush"
+    let profile = opts.profile_merge_scan;
+    let mut phase_started = Instant::now();
+
+    if opts.prime_dedicated_cold_rows {
+        log_always(
+            "cold-delete overlay: priming dedicated ids via force flush \
+             (slow: force=true re-flushes the full mirror, not just overlay ids)",
         );
-    }
-    let cold_flush = flush_ctx.map(|ctx| FlushCtx {
-        label: "overlay-cold-flush",
-        storage_root: ctx.storage_root,
-    });
-    let first_flush = force_flush_table(client, relation, cold_flush).await?;
-    anyhow::ensure!(
-        first_flush > 0,
-        "expected cold flush of overlay ids, flushed {first_flush}"
-    );
-
-    for &id in ids {
-        // Rematerialize: hot heap was cleaned by flush, so INSERT recreates a hot row.
-        client.batch_execute(&rematerialize_sql(id)).await?;
+        for &id in ids {
+            timed_async(
+                format!("cold-delete overlay: insert overlay id {id}"),
+                client.batch_execute(&rematerialize_sql(id)),
+            )
+            .await?;
+            anyhow::ensure!(
+                visible_pk_count_with_profile(client, relation, id, profile).await? == 1,
+                "id {id} must be visible after insert before cold flush"
+            );
+        }
+        log_overlay_catalog_snapshot(client, relation, "before cold prime flush").await?;
+        let cold_flush = flush_ctx.map(|ctx| FlushCtx {
+            label: "overlay-cold-flush",
+            storage_root: ctx.storage_root,
+        });
+        let first_flush = force_flush_table(client, relation, cold_flush).await?;
         anyhow::ensure!(
-            visible_pk_count(client, relation, id).await? == 1,
+            first_flush > 0,
+            "expected cold flush of overlay ids, flushed {first_flush}"
+        );
+        log_always(format!(
+            "cold-delete overlay: dedicated cold prime flushed {first_flush} rows in {:.3}s",
+            phase_started.elapsed().as_secs_f64()
+        ));
+    } else {
+        log_always(
+            "cold-delete overlay: reusing ids already in cold (skipping dedicated insert + force prime)",
+        );
+        for &id in ids {
+            anyhow::ensure!(
+                visible_pk_count_with_profile(client, relation, id, profile).await? == 1,
+                "id {id} must be visible from cold before overlay rematerialize"
+            );
+        }
+        log_always(format!(
+            "cold-delete overlay: confirmed {} ids visible from cold in {:.3}s",
+            ids.len(),
+            phase_started.elapsed().as_secs_f64()
+        ));
+    }
+
+    phase_started = Instant::now();
+    for &id in ids {
+        timed_async(
+            format!("cold-delete overlay: rematerialize id {id}"),
+            client.batch_execute(&rematerialize_sql(id)),
+        )
+        .await?;
+        anyhow::ensure!(
+            visible_pk_count_with_profile(client, relation, id, profile).await? == 1,
             "id {id} must be visible after rematerialize from cold"
         );
 
-        let deleted = client
-            .execute(&format!("DELETE FROM {relation} WHERE id = $1"), &[&id])
-            .await?;
+        let deleted = timed_async(
+            format!("cold-delete overlay: DELETE id {id}"),
+            client.execute(&format!("DELETE FROM {relation} WHERE id = $1"), &[&id]),
+        )
+        .await?;
         anyhow::ensure!(deleted == 1, "DELETE id {id} affected {deleted} rows");
         anyhow::ensure!(
             mirror_op(client, relation, id).await? == Some(3),
@@ -821,8 +1132,13 @@ pub async fn assert_cold_then_delete_overlay(
             "cold-delete overlay: hot DELETE recorded for id {id}"
         ));
     }
+    log_always(format!(
+        "cold-delete overlay: rematerialize+delete phase finished in {:.3}s",
+        phase_started.elapsed().as_secs_f64()
+    ));
 
-    // Persist delete markers next to existing cold Parquet.
+    phase_started = Instant::now();
+    log_overlay_catalog_snapshot(client, relation, "before tombstone flush").await?;
     let tombstone_flush_ctx = flush_ctx.map(|ctx| FlushCtx {
         label: "overlay-tombstone-flush",
         storage_root: ctx.storage_root,
@@ -832,42 +1148,44 @@ pub async fn assert_cold_then_delete_overlay(
         tombstone_flush > 0,
         "expected tombstone flush after cold-then-hot deletes, flushed {tombstone_flush}"
     );
-
-    // Quiet-looking pause often happens here: each count is a merge scan over
-    // all active cold segments (can be 1000+ files on default example sizing).
     log_always(format!(
-        "cold-delete overlay: verifying {} deleted ids stay hidden via merge scan \
-         (over existing cold parquet history)",
+        "cold-delete overlay: tombstone flush wrote {tombstone_flush} rows in {:.3}s",
+        phase_started.elapsed().as_secs_f64()
+    ));
+
+    phase_started = Instant::now();
+    log_always(format!(
+        "cold-delete overlay: verifying {} deleted ids stay hidden (one batched merge scan)",
         ids.len()
     ));
+    let visible = visible_pk_batch_count(client, relation, ids).await?;
+    anyhow::ensure!(
+        visible == 0,
+        "expected all overlay ids hidden after tombstone flush, still visible: {visible}"
+    );
     for &id in ids {
-        let count = visible_pk_count(client, relation, id).await?;
-        anyhow::ensure!(
-            count == 0,
-            "id {id} must stay invisible after flush of delete markers over prior cold Parquet"
-        );
         log_always(format!(
-            "cold-delete overlay: id {id} hidden by merge scan (visible={count})"
+            "cold-delete overlay: id {id} hidden by merge scan (visible=0)"
         ));
     }
+    log_always(format!(
+        "cold-delete overlay: batched visibility check finished in {:.3}s",
+        phase_started.elapsed().as_secs_f64()
+    ));
 
     let after_segments = e2e::cold_segment_count(client, relation).await?;
     anyhow::ensure!(
         after_segments >= before_segments,
         "delete+flush must not remove prior cold parquet"
     );
+    log_overlay_catalog_snapshot(client, relation, "finish").await?;
     log_always(format!(
-        "cold-delete overlay: finished with {after_segments} active cold segments"
+        "cold-delete overlay: finished with {after_segments} active cold segments in {:.3}s total",
+        overlay_started.elapsed().as_secs_f64()
     ));
 
     let _ = scope_column;
     Ok(())
-}
-
-/// Allocates `limit` fresh ids starting at `start_id` for overlay tests.
-#[must_use]
-pub fn fresh_overlay_ids(start_id: i64, limit: i64) -> Vec<i64> {
-    (0..limit).map(|offset| start_id + offset).collect()
 }
 
 /// Asserts a merge-scan EXPLAIN for a filtered query lists cold sources.
@@ -881,11 +1199,19 @@ pub async fn assert_merge_scan_uses_cold(
     filter_sql: &str,
     min_parquet_segments: usize,
 ) -> Result<()> {
-    let plan = e2e::explain(
-        client,
-        &format!("SELECT * FROM {relation} WHERE {filter_sql}"),
+    let sql = format!("SELECT * FROM {relation} WHERE {filter_sql}");
+    let plan = timed_async(
+        format!("EXPLAIN merge scan cold reads on {relation}"),
+        e2e::explain(client, &sql),
     )
     .await?;
+    let planned_segments = plan
+        .lines()
+        .filter(|line| line.contains("Parquet segment:") && !line.contains("none"))
+        .count();
+    log_always(format!(
+        "EXPLAIN merge scan cold reads on {relation}: planned_parquet_segments={planned_segments}"
+    ));
     e2e::assert_kold_merge_scan_cold_reads(&plan, "manifest.json", min_parquet_segments)?;
     Ok(())
 }

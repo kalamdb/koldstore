@@ -56,6 +56,7 @@ SET koldstore.enable_merge_scan = on;
 SET koldstore.max_open_parquet_readers = 32;
 SET koldstore.max_running_jobs = 4;
 SET koldstore.log_level = 'info';
+SET koldstore.min_max_rows_per_file = 1000;
 ```
 
 Use PostgreSQL-native persistence for durable configuration, for example
@@ -72,6 +73,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.max_open_parquet_readers` | int | `32` | Global advisory-lock slot count for Parquet readers opened by cold scans. Clamped to `1..=1024`. |
 | `koldstore.max_running_jobs` | int | `4` | Maximum concurrently claimed KoldStore jobs. Clamped to `1..=1024`. |
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
+| `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
 
 ### Internal GUCs
 
@@ -164,7 +166,7 @@ SELECT koldstore.manage_table(
   storage           => 's3_archive',
   hot_row_limit     => 10000,
   min_flush_rows    => 1000,
-  max_rows_per_file => 500
+  max_rows_per_file => 1000
 );
 ```
 
@@ -179,7 +181,7 @@ Registers a heap table for KoldStore management with structured flush settings.
 | `storage` | required | Registered storage backend name |
 | `hot_row_limit` | required (`NULL` allowed) | Maximum mirror rows to keep hot; `NULL` for hot-only tables |
 | `min_flush_rows` | `1000` | Minimum excess rows required before a flush moves data cold |
-| `max_rows_per_file` | `500` | Maximum rows written into one Parquet segment per flush batch |
+| `max_rows_per_file` | `1000` | Maximum rows written into one Parquet segment per flush batch (minimum `1000` unless lowered via `koldstore.min_max_rows_per_file`) |
 | `table_type` | `'shared'` | `shared` or `user` |
 | `scope_column` | `NULL` | Required when `table_type => 'user'` |
 | `order_column` | `NULL` | Optional column used for migrate ordering hints |
@@ -197,9 +199,9 @@ on normal DML. See [Limitations](limitations.md#unique-and-foreign-key-constrain
 | Mirror rows | Flush result |
 |-------------|--------------|
 | 10,505 | No flush (`505` excess is below `min_flush_rows`) |
-| 11,000 | Flush `1,000` rows into `2` files (`max_rows_per_file = 500`) |
+| 11,000 | Flush `1,000` rows into `1` file (`max_rows_per_file = 1000`) |
 | 11,250 | Flush `1,000` rows, keep `10,250` hot |
-| 11,500 | Flush `1,500` rows into `3` files |
+| 11,500 | Flush `1,500` rows into `2` files |
 
 ### `koldstore.unmanage_table`
 

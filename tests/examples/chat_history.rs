@@ -15,7 +15,7 @@ use support::{
 };
 
 const MIN_FLUSH_ROWS: i64 = 400;
-const MAX_ROWS_PER_FILE: i64 = 100;
+const MAX_ROWS_PER_FILE: i64 = 1_000;
 
 #[tokio::test]
 async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback() -> Result<()> {
@@ -136,7 +136,9 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
     set_scope(&db.client, &focus_tenant).await?;
 
     // Flush → rematerialize → delete → flush: a previously cold PK deleted in hot.
-    let overlay_ids = support::fresh_overlay_ids(next_id + 10_000, 3);
+    let overlay_ids =
+        support::scoped_overlay_ids_from_cold(&db.client, &relation, "tenant_id", &focus_tenant, 3)
+            .await?;
     assert_cold_then_delete_overlay(
         &db.client,
         &relation,
@@ -316,7 +318,7 @@ async fn seed_messages_parallel(
             let relation = relation.clone();
             let progress = progress.clone();
             async move {
-                let scopes_per_client = (scopes + clients - 1) / clients;
+                let scopes_per_client = scopes.div_ceil(clients);
                 let scope_start = client_idx * scopes_per_client;
                 let scope_end = (scope_start + scopes_per_client).min(scopes);
                 for scope_idx in scope_start..scope_end {
@@ -373,7 +375,7 @@ async fn concurrent_burst_inserts(
             let relation = relation.clone();
             let progress = progress.clone();
             async move {
-                let scopes_per_client = (scopes + clients - 1) / clients;
+                let scopes_per_client = scopes.div_ceil(clients);
                 let scope_start = client_idx * scopes_per_client;
                 let scope_end = (scope_start + scopes_per_client).min(scopes);
                 for scope_idx in scope_start..scope_end {
