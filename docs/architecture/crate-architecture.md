@@ -127,3 +127,13 @@ When moving code between crates:
 - Extension SQL entrypoints: document user contract and delegating crate.
 
 See [ADR-001](../decisions/001-layered-crate-architecture.md) for rationale.
+
+## Runtime workflow docs
+
+End-to-end behavior (manage, flush, scan, DML) is documented separately from
+crate layout:
+
+- [manage-table.md](manage-table.md)
+- [flushing-table.md](flushing-table.md)
+- [scanning-table.md](scanning-table.md)
+- [dml-table.md](dml-table.md)

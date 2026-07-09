@@ -216,9 +216,8 @@ SELECT
 "#,
         table = table.quoted(),
     );
-    let statement =
-        SqlStatement::write_with_params(operation, &sql, [SqlParamType::Jsonb])
-            .map_err(|error| CleanupError::Spi(error.to_string()))?;
+    let statement = SqlStatement::write_with_params(operation, &sql, [SqlParamType::Jsonb])
+        .map_err(|error| CleanupError::Spi(error.to_string()))?;
 
     Ok(CleanSchemaCleanupPlan {
         table: table.clone(),
@@ -281,10 +280,7 @@ pub fn plan_seq_range_cleanup(
     let returning_columns = pk_columns
         .iter()
         .map(|column| format!("mirror.{column}"))
-        .chain([
-            "mirror.\"seq\"".to_string(),
-            "mirror.\"op\"".to_string(),
-        ])
+        .chain(["mirror.\"seq\"".to_string(), "mirror.\"op\"".to_string()])
         .collect::<Vec<_>>()
         .join(", ");
     let mut mirror_where = vec!["mirror.\"seq\" <= $1::bigint".to_string()];

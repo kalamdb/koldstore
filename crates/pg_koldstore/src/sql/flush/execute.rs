@@ -123,8 +123,7 @@ pub(super) fn stream_write_flush_batches(
     let mut written_segments: Vec<WrittenFlushSegment> = Vec::new();
 
     // Ensure the table cold prefix exists once before writing many segments.
-    std::fs::create_dir_all(&table_ctx.base_path)
-        .map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&table_ctx.base_path).map_err(|error| error.to_string())?;
     let table_prefix = PathBuf::from(&table_ctx.base_path)
         .join(&table_ctx.namespace)
         .join(&table_ctx.table_name);
