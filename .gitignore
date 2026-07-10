@@ -33,3 +33,6 @@ Thumbs.db
 .idea/
 
 /benchmarks/scripts/__pycache__
+
+# Release Docker build staging (created in CI / local experiments)
+docker-artifacts/

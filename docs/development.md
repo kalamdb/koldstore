@@ -34,6 +34,64 @@ For a single version, use `scripts/run-pg-e2e.sh 18` or `scripts/run-pgrx-matrix
 
 Every E2E test now calls a shared pgrx gate before running. The gate connects to the configured PostgreSQL port, verifies the server major version and listening port, and ensures `koldstore` is installed in the E2E database. If pgrx PostgreSQL is stopped or unreachable, the suite fails fast instead of letting contract-only tests pass.
 
+## MinIO / S3-backed E2E
+
+Most E2E fixtures use local filesystem cold storage. The `flush_minio` test exercises flush + merge-scan against a real S3-compatible MinIO endpoint. It is opt-in and skipped unless enabled:
+
+```bash
+# Start MinIO + create the koldstore-test bucket (Docker required):
+bash scripts/ci/start-minio.sh
+
+export KOLDSTORE_MINIO=1
+export KOLDSTORE_MINIO_ENDPOINT=http://127.0.0.1:9000
+export KOLDSTORE_MINIO_ACCESS_KEY=minioadmin
+export KOLDSTORE_MINIO_SECRET_KEY=minioadmin
+export KOLDSTORE_MINIO_BUCKET=koldstore-test
+
+scripts/run-pg-e2e.sh 16
+```
+
+CI starts MinIO before the pgrx E2E job so `flush_minio` runs on every PostgreSQL matrix entry.
+
+Low-level storage-client MinIO tests remain available as:
+
+```bash
+KOLDSTORE_MINIO=1 cargo test -p koldstore-storage --test storage_minio
+```
+
+## Published try-it Docker image
+
+Release builds can publish a PostgreSQL 16 image with prebuilt `koldstore` and
+`pg_cron` (no extension rebuild) to Docker Hub (`jamals86/pg-koldstore` by
+default). Enable `docker_push` on the Release workflow after setting
+`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
+
+```bash
+docker pull jamals86/pg-koldstore:latest
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
+# psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
+# koldstore + pg_cron are already created on first boot
+```
+
+Local source builds still use `docker/run.sh` / `docker/Dockerfile` (compiles the
+extension). The release image uses `docker/Dockerfile.release` and
+`docker/test-release-image.sh`.
+
+## pg_cron periodic flush (manual)
+
+Flush is on-demand unless you schedule it. To verify the README `pg_cron` recipe
+against local pgrx PostgreSQL (builds/installs `pg_cron` if needed, waits for a
+one-minute cron tick):
+
+```bash
+scripts/run-test-with-cron.sh
+scripts/run-test-with-cron.sh --pg-version 16
+scripts/run-test-with-cron.sh --skip-prepare   # reuse an already-prepared DB
+```
+
+This is intentionally outside the default E2E/CI loop because `pg_cron` needs
+`shared_preload_libraries` and a ~1–2 minute wait for the scheduler.
+
 ## Benchmark Thresholds
 
 Hot DML benchmark scenarios compare a plain heap table with an equivalent pg-koldstore managed table. The release threshold is at most 10 percent overhead for hot INSERT, UPDATE, and DELETE paths that do not require cold lookup. PK cold lookup pruning must skip at least 90 percent of row groups in the benchmark fixture.

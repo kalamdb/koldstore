@@ -1,0 +1,1 @@
+PostgreSQL 16 with the koldstore extension and pg_cron preinstalled so you can try pg-koldstore quickly without building from source.

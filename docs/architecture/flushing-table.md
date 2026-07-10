@@ -197,11 +197,19 @@ rows (`op = 3`) carry PK values from mirror only.
 2. `CleanColdRecordBatchBuilder::push_typed_row` per row
    - App columns + metadata: `seq`, `op`, `deleted`, `schema_version`
    - Tracks `indexed_bounds` as `serde_json::Value` min/max per indexed column
+     (manual pass; Parquet writer also records chunk stats on the same
+     columns — see planned change below)
 3. When chunk reaches `max_rows_per_file` → `FlushWriteChunk`
 4. Callback writes Parquet segment
 
 **No per-row cleanup JSON** is built in the encode loop. `cleanup_row_json` in
 `batch_builder.rs` exists for tests/legacy only.
+
+**Planned (ADR-002):** derive catalog `column_stats` from Parquet footer
+statistics after encode and drop `indexed_bounds` tracking so flush does not
+compute min/max twice. Catalog/manifest remains the segment-prune authority;
+in-file row-group prune already uses the footer. Details:
+[ADR-002: Footer-Derived Catalog Segment Stats](../decisions/002-footer-derived-catalog-stats.md).
 
 ### 4.4 Parquet write
 
@@ -219,12 +227,14 @@ rows (`op = 3`) carry PK values from mirror only.
    - Column statistics on `seq` + PK + indexed columns
    - Bloom filters on PK columns (`max_ndv` = row-group size)
    - Compression from storage context (default `zstd`)
-5. `column_stats` JSON for catalog:
+5. `column_stats` JSON for catalog (today from merged `indexed_bounds` +
+   `FlushStats.seq`; later from footer extraction per ADR-002):
    ```json
    { "seq": {"min": N, "max": M}, "created_at": {"min": "...", "max": "..."} }
    ```
-6. Assemble `ManifestSegment`s from `catalog_row`s once, then `manifest.append_segment_batch(...)`
-7. Collect `WrittenFlushSegment` (new `segment_id = Uuid::new_v4()`)
+6. `byte_size` from published object metadata (not recomputed by scanning rows)
+7. Assemble `ManifestSegment`s from `catalog_row`s once, then `manifest.append_segment_batch(...)`
+8. Collect `WrittenFlushSegment` (new `segment_id = Uuid::new_v4()`)
 
 Manifest finalize uses `write_manifest_with_client` and the same atomic put path
 (`publish_mutable_object`) so `manifest.json` is never truncate-written in place.

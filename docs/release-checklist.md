@@ -7,9 +7,14 @@
 - Run Rust unit and regression tests with `cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison`.
 - Run the supported PostgreSQL 15 through 18 pgrx matrix with `scripts/run-pgrx-matrix.sh`, which runs pgrx feature clippy, extension install, and E2E checks for each version.
 - Use `scripts/run-pgrx-matrix.sh --download-missing` when a supported PostgreSQL major is not already initialized in the local pgrx config; add `--without-icu` only for local downloaded builds on machines without ICU development packages.
-- Run MinIO-backed flush and merge tests.
+- Run MinIO-backed flush and merge tests (`flush_minio` via CI, or locally with `bash scripts/ci/start-minio.sh` then `KOLDSTORE_MINIO=1 scripts/run-pg-e2e.sh`).
 - Run memory and leak gates with `tests/memory/run_memory_checks.sh`.
 - Run benchmarks and confirm SC-002 and SC-006 thresholds.
 - Verify extension install, upgrade SQL, and `DROP EXTENSION` behavior.
 - Review backup/PITR documentation and object-store backup warnings.
 - Confirm SQL API, architecture, performance, and operations docs are updated.
+- To publish the try-it Docker image, run the Release workflow with `docker_push=true`
+  (requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets). The job reuses the
+  PG16 `ubuntu24.04` amd64 tarball, installs `pg_cron`, smoke-tests
+  `CREATE EXTENSION` / `pg_extension`, then pushes `jamals86/pg-koldstore`
+  (`:VERSION-pg16` and `:latest`).

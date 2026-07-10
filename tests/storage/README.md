@@ -51,10 +51,19 @@ row scale.
 Create the `koldstore-test` bucket, then run the opt-in storage tests:
 
 ```bash
+bash scripts/ci/start-minio.sh
 KOLDSTORE_MINIO=1 cargo test -p koldstore-storage --test storage_minio
 ```
 
-Defaults are `http://127.0.0.1:19000`, `minioadmin`/`minioadmin`, and bucket
-`koldstore-test`. Override them with `KOLDSTORE_MINIO_ENDPOINT`,
+Defaults are `http://127.0.0.1:9000` after `scripts/ci/start-minio.sh` (or
+`http://127.0.0.1:19000` for `docker/run.sh`), `minioadmin`/`minioadmin`, and
+bucket `koldstore-test`. Override them with `KOLDSTORE_MINIO_ENDPOINT`,
 `KOLDSTORE_MINIO_ACCESS_KEY`, `KOLDSTORE_MINIO_SECRET_KEY`, and
 `KOLDSTORE_MINIO_BUCKET`.
+
+For full PostgreSQL flush + merge-scan coverage against MinIO, enable the same
+env vars and run the E2E suite (see `docs/development.md`):
+
+```bash
+KOLDSTORE_MINIO=1 cargo nextest run -p e2e --test flush_minio --test-threads 1
+```

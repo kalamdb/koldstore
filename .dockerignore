@@ -1,7 +1,6 @@
 target/
 node_modules/
 .git/
-Dockerfile*
 .dockerignore
 *.log*
 .env
@@ -11,4 +10,6 @@ criterion/
 .pgrx/
 pgdata*/
 tests/tmp/
+# Local extract dir used by the release image build (CI creates it).
+# Keep the path buildable when present; do not ignore docker-artifacts/.
 

@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
+use koldstore_storage::{ObjectStoreClient, StorageClient};
 use tokio_postgres::Client;
 
 use super::catalog;
 use super::cluster::{PgTarget, PgrxServer};
+use super::minio::MinioConfig;
 
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -22,6 +24,20 @@ pub struct ManagedTable {
     pub title_index: String,
 }
 
+/// Cold storage backend used by a [`TestDb`] fixture.
+#[derive(Debug, Clone)]
+pub enum FixtureStorage {
+    /// Local filesystem root under `storage_root`.
+    Filesystem,
+    /// S3-compatible MinIO storage scoped to `object_prefix`.
+    Minio {
+        /// MinIO connection settings.
+        config: MinioConfig,
+        /// Per-fixture object-store prefix under the bucket.
+        object_prefix: String,
+    },
+}
+
 /// Isolated pgrx-backed test database fixture.
 #[derive(Debug)]
 pub struct TestDb {
@@ -33,8 +49,10 @@ pub struct TestDb {
     pub schema: String,
     /// Registered storage name.
     pub storage_name: String,
-    /// Filesystem storage root.
+    /// Filesystem storage root (empty for MinIO fixtures).
     pub storage_root: PathBuf,
+    /// Cold storage backend for this fixture.
+    pub storage: FixtureStorage,
 }
 
 impl TestDb {
@@ -69,6 +87,46 @@ impl TestDb {
             schema,
             storage_name,
             storage_root,
+            storage: FixtureStorage::Filesystem,
+        })
+    }
+
+    /// Starts a fixture that registers S3/MinIO storage for cold objects.
+    ///
+    /// Requires `KOLDSTORE_MINIO=1` (or `KOLDSTORE_MINIO_ENDPOINT`) and a reachable
+    /// MinIO with the configured bucket already created.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when MinIO is disabled/unreachable, or when PostgreSQL setup
+    /// / storage registration fails.
+    pub async fn start_minio(target: PgTarget, label: &str) -> Result<Self> {
+        let config = MinioConfig::require()?;
+        let server = PgrxServer::start(target).await?;
+        let schema = unique_identifier(label);
+        let storage_name = format!("{schema}_storage");
+        let object_prefix = schema.clone();
+        config
+            .probe(&object_prefix)
+            .context("MinIO must be reachable before S3-backed E2E fixtures start")?;
+
+        server
+            .client
+            .batch_execute(&format!("CREATE SCHEMA {schema};"))
+            .await
+            .with_context(|| format!("create schema {schema}"))?;
+        register_minio_storage(&server.client, &storage_name, &object_prefix, &config).await?;
+
+        Ok(Self {
+            target: server.target,
+            client: server.client,
+            schema,
+            storage_name,
+            storage_root: PathBuf::new(),
+            storage: FixtureStorage::Minio {
+                config,
+                object_prefix,
+            },
         })
     }
 
@@ -281,11 +339,109 @@ impl TestDb {
             .await?;
         Ok(row.get(0))
     }
+
+    /// Opens an object-store client for this fixture's MinIO prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the fixture is filesystem-backed or MinIO cannot open.
+    pub fn minio_client(&self) -> Result<ObjectStoreClient> {
+        match &self.storage {
+            FixtureStorage::Minio {
+                config,
+                object_prefix,
+            } => config.open_client(object_prefix),
+            FixtureStorage::Filesystem => {
+                anyhow::bail!("minio_client requires a MinIO-backed TestDb fixture")
+            }
+        }
+    }
+
+    /// Asserts catalog cold paths exist as objects in MinIO and returns their keys.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when catalog rows are missing or MinIO objects are absent.
+    pub async fn assert_minio_cold_artifacts(
+        &self,
+        relation: &str,
+        expected_rows: i64,
+    ) -> Result<(String, String)> {
+        let artifact = self
+            .client
+            .query_one(
+                r#"
+                SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size
+                FROM koldstore.manifest m
+                JOIN koldstore.cold_segments cs
+                  ON cs.table_oid = m.table_oid
+                 AND cs.scope_key = m.scope_key
+                WHERE m.table_oid = $1::text::regclass::oid
+                  AND m.sync_state = 'in_sync'
+                  AND cs.status = 'active'
+                ORDER BY cs.batch_number
+                LIMIT 1
+                "#,
+                &[&relation],
+            )
+            .await
+            .with_context(|| format!("load cold catalog rows for {relation}"))?;
+        let manifest_path = artifact.get::<_, String>(0);
+        let object_path = artifact.get::<_, String>(1);
+        assert_eq!(artifact.get::<_, i64>(2), expected_rows);
+        assert!(artifact.get::<_, i64>(3) > 0);
+
+        let client = self.minio_client()?;
+        let listing = client
+            .list("")
+            .context("list MinIO objects for fixture prefix")?;
+        let listing_text = listing
+            .iter()
+            .map(|object| object.key.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        super::assertions::assert_minio_listing_contains(&listing_text, &manifest_path)?;
+        super::assertions::assert_minio_listing_contains(&listing_text, &object_path)?;
+
+        let manifest_bytes = client
+            .get(&manifest_path)
+            .with_context(|| format!("get MinIO manifest {manifest_path}"))?;
+        anyhow::ensure!(
+            !manifest_bytes.is_empty(),
+            "MinIO manifest {manifest_path} is empty"
+        );
+        let parquet_bytes = client
+            .get(&object_path)
+            .with_context(|| format!("get MinIO parquet {object_path}"))?;
+        anyhow::ensure!(
+            !parquet_bytes.is_empty(),
+            "MinIO parquet {object_path} is empty"
+        );
+
+        Ok((manifest_path, object_path))
+    }
 }
 
 impl Drop for TestDb {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.storage_root);
+        if matches!(self.storage, FixtureStorage::Filesystem)
+            && !self.storage_root.as_os_str().is_empty()
+        {
+            let _ = std::fs::remove_dir_all(&self.storage_root);
+        }
+        if let FixtureStorage::Minio {
+            config,
+            object_prefix,
+        } = &self.storage
+        {
+            if let Ok(client) = config.open_client(object_prefix) {
+                if let Ok(objects) = client.list("") {
+                    for object in objects {
+                        let _ = client.delete(&object.key);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -311,6 +467,37 @@ async fn register_filesystem_storage(
             &[&storage_name, &root],
         )
         .await?;
+    Ok(())
+}
+
+async fn register_minio_storage(
+    client: &Client,
+    storage_name: &str,
+    object_prefix: &str,
+    config: &MinioConfig,
+) -> Result<()> {
+    let base_path = config.base_path_for_prefix(object_prefix);
+    let credentials = config.credentials_json().to_string();
+    let storage_config = config.config_json().to_string();
+    // tokio-postgres is not built with the `with-serde_json-1` feature, so pass
+    // JSON as SQL literals (same pattern as other E2E storage registrations).
+    let sql = format!(
+        r#"
+        SELECT koldstore.register_storage(
+          $1,
+          's3',
+          $2,
+          '{credentials}'::jsonb,
+          '{storage_config}'::jsonb
+        )
+        "#,
+        credentials = credentials.replace('\'', "''"),
+        storage_config = storage_config.replace('\'', "''"),
+    );
+    client
+        .execute(&sql, &[&storage_name, &base_path])
+        .await
+        .with_context(|| format!("register MinIO storage {storage_name} at {base_path}"))?;
     Ok(())
 }
 

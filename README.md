@@ -110,6 +110,24 @@ Details live in the architecture docs:
 
 
 
+## Try with Docker
+
+Published release images ship PostgreSQL 16 with `koldstore` and `pg_cron`
+already installed (no local Rust build):
+
+```bash
+docker pull jamals86/pg-koldstore:latest
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
+```
+
+Then connect and use the Quick Start SQL below:
+
+```bash
+psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
+```
+
+To build from this repo instead, use `docker/run.sh` (compiles the extension).
+
 ## Quick Start
 
 This example uses local filesystem storage so you can try the extension without S3 or Docker.
@@ -304,6 +322,13 @@ SELECT cron.schedule(
 Inspect or remove jobs with `cron.job` / `cron.unschedule(...)`. Pick an
 interval that matches how fast the hot set grows; `min_flush_rows` still gates
 whether a flush writes cold segments.
+
+To smoke-test this recipe against local pgrx PostgreSQL (installs `pg_cron` if
+needed and waits for one cron tick):
+
+```bash
+scripts/run-test-with-cron.sh
+```
 
 
 
