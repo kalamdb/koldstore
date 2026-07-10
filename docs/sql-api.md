@@ -285,10 +285,79 @@ executing the flush are intentionally separate operations.
 SELECT koldstore.describe_table(
   table_name => 'chat.messages'
 );
+
+SELECT jsonb_pretty(koldstore.describe_table(table_name => 'chat.messages'));
 ```
 
 Returns managed-table storage, mirror, cold-segment, manifest, and recent job
 state as JSONB. Counters are table-wide across scopes.
+
+Sample result after a small flush:
+
+```json
+{
+  "jobs": [
+    {
+      "id": "e30eb374-a9db-4ff1-97d3-72f8511dfc60",
+      "phase": "finished",
+      "status": "completed",
+      "job_type": "flush",
+      "updated_at": "2026-07-07T16:56:10.123456+03:00",
+      "rows_flushed": 12,
+      "checkpoint_seq": 332882280212668416,
+      "rows_processed": 12,
+      "checkpoint_commit_seq": 332882280212668416
+    },
+    {
+      "id": "2c2bcf44-d6ea-4b3e-b62c-cfaf18ad5225",
+      "phase": "finished",
+      "status": "completed",
+      "job_type": "migrate_backfill",
+      "updated_at": "2026-07-07T16:56:09.987654+03:00",
+      "rows_flushed": 0,
+      "checkpoint_seq": 0,
+      "rows_processed": 1012,
+      "checkpoint_commit_seq": 0
+    }
+  ],
+  "hot_rows": 1000,
+  "mirror_rows": 1000,
+  "cold_row_count": 12,
+  "cold_segment_count": 1,
+  "heap_size_bytes": 442368,
+  "table_size_bytes": 606208,
+  "index_size_bytes": 16384,
+  "manifest_state": "in_sync",
+  "manifest_max_seq": 332882280212668416,
+  "pending_jobs": 0,
+  "storage_binding": "4a3b2ab3-5ea8-4761-9e37-1a2f98b128e4",
+  "last_error": null
+}
+```
+
+Fields operators watch most often:
+
+| Field                | Meaning                                         |
+| -------------------- | ----------------------------------------------- |
+| `hot_rows`           | Rows still present in the PostgreSQL heap       |
+| `mirror_rows`        | Primary keys tracked in the `__cl` mirror       |
+| `cold_row_count`     | Rows already copied to active cold segments     |
+| `cold_segment_count` | Active Parquet segment count                    |
+| `manifest_state`     | `in_sync` means catalog and manifest agree      |
+| `manifest_max_seq`   | Highest mirror `seq` represented in cold data   |
+| `pending_jobs`       | Pending or running KoldStore jobs for the table |
+| `jobs`               | Recent job ids, phases, and progress counters   |
+| `last_error`         | Last manifest or storage error, if any          |
+
+For job-level progress, inspect `koldstore.jobs`:
+
+```sql
+SELECT job_type, status, phase, rows_processed, rows_flushed, error_trace
+FROM koldstore.jobs
+WHERE table_oid = 'chat.messages'::regclass
+ORDER BY created_at DESC
+LIMIT 5;
+```
 
 ### `koldstore.recover_segments`
 

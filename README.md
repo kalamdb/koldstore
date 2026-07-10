@@ -257,84 +257,60 @@ Cold files are written below the storage root using the table namespace and name
   batch-1.parquet
 ```
 
+### Schedule periodic flush with pg_cron
+
+Flush is on-demand today. Until the built-in smart scheduler lands, use
+[pg_cron](https://github.com/citusdata/pg_cron) to call `flush_table` on a
+schedule. Policy-aware flushes are safe to run often: when nothing is eligible,
+the job completes with `rows_flushed = 0`.
+
+Install and enable `pg_cron` (requires `shared_preload_libraries = 'pg_cron'`
+and a restart), then schedule a table:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_cron;
+
+-- Flush one managed table every 5 minutes.
+SELECT cron.schedule(
+  'koldstore-flush-messages',
+  '*/5 * * * *',
+  $$SELECT koldstore.flush_table(table_name => 'app.messages')$$
+);
+```
+
+To flush every active managed table:
+
+```sql
+SELECT cron.schedule(
+  'koldstore-flush-all',
+  '*/5 * * * *',
+  $$
+  SELECT koldstore.flush_table(table_name => s.table_oid)
+  FROM koldstore.schemas s
+  WHERE s.active
+  $$
+);
+```
+
+Inspect or remove jobs with `cron.job` / `cron.unschedule(...)`. Pick an
+interval that matches how fast the hot set grows; `min_flush_rows` still gates
+whether a flush writes cold segments.
+
 
 
 ## View Table And Management Stats
 
-Use `koldstore.describe_table` to see what is hot, what is cold, and whether anything is still pending.
+Use `koldstore.describe_table` for a quick hot/cold/manifest snapshot:
 
 ```sql
 SELECT jsonb_pretty(koldstore.describe_table(table_name => 'app.messages'));
 ```
 
-Sample result after the flush:
+After the sample flush you should see roughly `hot_rows = 1000`,
+`cold_row_count = 12`, and `manifest_state = 'in_sync'`.
 
-```json
-{
-  "jobs": [
-    {
-      "id": "e30eb374-a9db-4ff1-97d3-72f8511dfc60",
-      "phase": "finished",
-      "status": "completed",
-      "job_type": "flush",
-      "updated_at": "2026-07-07T16:56:10.123456+03:00",
-      "rows_flushed": 12,
-      "checkpoint_seq": 332882280212668416,
-      "rows_processed": 12,
-      "checkpoint_commit_seq": 332882280212668416
-    },
-    {
-      "id": "2c2bcf44-d6ea-4b3e-b62c-cfaf18ad5225",
-      "phase": "finished",
-      "status": "completed",
-      "job_type": "migrate_backfill",
-      "updated_at": "2026-07-07T16:56:09.987654+03:00",
-      "rows_flushed": 0,
-      "checkpoint_seq": 0,
-      "rows_processed": 1012,
-      "checkpoint_commit_seq": 0
-    }
-  ],
-  "hot_rows": 1000,
-  "mirror_rows": 1000,
-  "cold_row_count": 12,
-  "cold_segment_count": 1,
-  "heap_size_bytes": 442368,
-  "table_size_bytes": 606208,
-  "index_size_bytes": 16384,
-  "manifest_state": "in_sync",
-  "manifest_max_seq": 332882280212668416,
-  "pending_jobs": 0,
-  "storage_binding": "4a3b2ab3-5ea8-4761-9e37-1a2f98b128e4",
-  "last_error": null
-}
-```
-
-The fields to watch most often are:
-
-
-| Field                | Meaning                                         |
-| -------------------- | ----------------------------------------------- |
-| `hot_rows`           | Rows still present in the PostgreSQL heap       |
-| `mirror_rows`        | Primary keys tracked in the `__cl` mirror       |
-| `cold_row_count`     | Rows already copied to active cold segments     |
-| `cold_segment_count` | Active Parquet segment count                    |
-| `manifest_state`     | `in_sync` means catalog and manifest agree      |
-| `manifest_max_seq`   | Highest mirror `seq` represented in cold data   |
-| `pending_jobs`       | Pending or running KoldStore jobs for the table |
-| `jobs`               | Recent job ids, phases, and progress counters   |
-| `last_error`         | Last manifest or storage error, if any          |
-
-
-For job-level progress, inspect `koldstore.jobs`:
-
-```sql
-SELECT job_type, status, phase, rows_processed, rows_flushed, error_trace
-FROM koldstore.jobs
-WHERE table_oid = 'app.messages'::regclass
-ORDER BY created_at DESC
-LIMIT 5;
-```
+Field meanings, sample JSON, and job-progress queries are in
+[`koldstore.describe_table`](docs/sql-api.md#koldstoredescribe_table).
 
 
 
@@ -454,8 +430,22 @@ SELECT koldstore.register_storage(
 
 ## Roadmap
 
-Deferred storage policies, table-management APIs, merge-scan work, and other
-post-0.1 features are tracked in the [project roadmap](docs/roadmap.md).
+Planned after the 0.1 hot/cold baseline:
+
+- **Smart flush scheduler** — trigger flushes automatically from inside
+  KoldStore without relying on `pg_cron`
+- **Improve `KoldMergeScan`** — streaming execution, tighter cold lookups, and
+  broader planner pushdown
+- **Finish change-log APIs** — public `changes_since` / change-cursor SQL
+  surface on top of the `__cl` mirror
+- **Storage file type** — a datatype to upload and fetch files directly from
+  registered cold storage
+- **Import / export** — table-level archive import and export of managed data
+- **Backup / restore** — coordinated PostgreSQL + cold-storage backup and
+  restore workflows
+
+More deferred work (compaction, alter-table, schema evolution, and so on) is
+tracked in the [project roadmap](docs/roadmap.md).
 
 
 
