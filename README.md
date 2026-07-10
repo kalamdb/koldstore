@@ -4,6 +4,15 @@
 
 **Status: early development - not production ready.** The extension builds and the core flow works, but recovery, export/import, and background flush behavior are still being hardened.
 
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.96%2B-orange.svg" alt="Rust 1.96+" /></a>
+  <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
+  <a href="https://github.com/kalamdb/koldstore/actions/workflows/pg-koldstore-ci.yml"><img src="https://github.com/kalamdb/koldstore/actions/workflows/pg-koldstore-ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/kalamdb/koldstore/actions/workflows/pg-koldstore-ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/kalamdb/koldstore/pg-koldstore-ci.yml?branch=main&amp;label=tests" alt="Tests" /></a>
+  <a href="https://github.com/kalamdb/koldstore/releases"><img src="https://img.shields.io/github/v/release/kalamdb/koldstore?display_name=tag&amp;label=extension" alt="Extension Version" /></a>
+  <a href="https://github.com/kalamdb/koldstore/actions/workflows/release.yml"><img src="https://github.com/kalamdb/koldstore/actions/workflows/release.yml/badge.svg" alt="Release" /></a>
+</p>
+
 **Mission:** Let PostgreSQL run for years without babysitting data growth. Hand it cheap, expandable storage for history, keep the hot working set small, and stop letting cold rows that nobody needs slow the cluster down.
 
 `pg-koldstore` is a PostgreSQL extension named `koldstore`. You create a normal heap table, migrate it into KoldStore management, and keep querying that table with regular SQL. KoldStore keeps recent rows in PostgreSQL and writes flushed rows to Parquet files on filesystem, S3/MinIO, GCS, or Azure Blob storage.
