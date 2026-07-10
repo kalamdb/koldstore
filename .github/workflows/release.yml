@@ -3,10 +3,6 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      release_tag:
-        description: "Release tag to create/use (example: v0.1.0)"
-        required: true
-        default: "v0.1.0"
       run_pgrx_tests:
         description: "Run pgrx compile/install and local E2E checks before packaging"
         type: boolean
@@ -34,7 +30,7 @@ env:
 
 jobs:
   read_version:
-    name: Read Release Inputs
+    name: Read Version Metadata
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.version.outputs.tag }}
@@ -42,39 +38,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read and validate release tag
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read version from Cargo.toml
         id: version
         shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${{ inputs.release_tag }}"
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::release_tag must look like v0.1.0 or v0.1.0-rc.1"
-            exit 1
-          fi
-          VERSION="${TAG#v}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        run: python3 scripts/release-version.py github-outputs --github-output "$GITHUB_OUTPUT"
 
-      - name: Verify workspace version matches release tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          WORKSPACE_VERSION="$(python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          text = Path("Cargo.toml").read_text()
-          match = re.search(r"(?m)^\[workspace\.package\]\s*(?:\n[^\[]*)?^version\s*=\s*\"([^\"]+)\"", text)
-          if not match:
-              raise SystemExit("workspace.package.version not found")
-          print(match.group(1))
-          PY
-          )"
-          if [[ "$WORKSPACE_VERSION" != "${{ steps.version.outputs.version }}" ]]; then
-            echo "::error::release_tag ${{ steps.version.outputs.tag }} does not match workspace version ${WORKSPACE_VERSION}"
-            exit 1
-          fi
+      - name: Show release version
+        run: echo "Release tag ${{ steps.version.outputs.tag }} (version ${{ steps.version.outputs.version }})"
 
   rust_checks:
     name: Rust Checks

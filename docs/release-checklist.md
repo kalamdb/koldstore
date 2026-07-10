@@ -1,5 +1,7 @@
 # Release Checklist
 
+- Bump `[workspace.package].version` in `Cargo.toml` (the Release workflow reads
+  this and creates tag `v<version>` automatically).
 - Build the full workspace with `cargo check --workspace --all-targets --no-default-features`.
 - Run `cargo fmt --all` and `cargo clippy --workspace --all-targets --no-default-features`.
 - Run Rust unit and regression tests with `cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison`.
