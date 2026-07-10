@@ -2,19 +2,20 @@
 
 ## Benchmarks
 
-Run the full suite with:
+Storage-comparison results, methodology, and throughput trade-offs live in
+[benchmarks.md](benchmarks.md). Re-run with
+`scripts/run-storage-comparison.sh`.
+
+Additional suite:
 
 ```bash
 cargo run -p pg-koldstore-benchmarks -- --suite all
 ```
 
-The suite compares regular heap tables with managed tables for hot insert,
+That suite compares regular heap tables with managed tables for hot insert,
 update, delete, PK select hot-only, PK select cold-required, flush throughput,
-and demigration throughput.
-
-Storage comparison (`scripts/run-storage-comparison.sh`) times hot-only
-lookups before flush and hot+cold PK lookups after flush. The post-flush cold
-PK gap (Parquet open + merge setup vs B-tree) is the main read-path focus.
+and demigration throughput. The post-flush cold PK gap (Parquet open + merge
+setup vs B-tree) is the main read-path focus.
 
 ## Success Criteria
 

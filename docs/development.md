@@ -80,9 +80,11 @@ extension). The release image uses `docker/Dockerfile.release` and
 
 ## pg_cron periodic flush (manual)
 
-Flush is on-demand unless you schedule it. To verify the README `pg_cron` recipe
-against local pgrx PostgreSQL (builds/installs `pg_cron` if needed, waits for a
-one-minute cron tick):
+Flush is on-demand unless you schedule it. Operator recipe:
+[operations/scheduling.md](operations/scheduling.md).
+
+To verify that recipe against local pgrx PostgreSQL (builds/installs `pg_cron`
+if needed, waits for a one-minute cron tick):
 
 ```bash
 scripts/run-test-with-cron.sh
