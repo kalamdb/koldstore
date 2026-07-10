@@ -89,20 +89,20 @@ them.
 
 Every SQL-callable function the extension installs today:
 
-| Function | Returns |
-|----------|---------|
-| `snowflake_id()` | `bigint` |
-| `koldstore_version()` | `text` |
-| `koldstore_user_id()` | `text` |
-| `koldstore.register_storage(...)` | `uuid` |
-| `koldstore.alter_storage_credentials(...)` | `void` |
-| `koldstore.alter_storage_location(...)` | `uuid` |
-| `koldstore.manage_table(...)` | `uuid` |
-| `koldstore.unmanage_table(...)` | `bigint` |
-| `koldstore.enqueue_flush_job(...)` | `bigint` |
-| `koldstore.flush_table(...)` | `uuid` |
-| `koldstore.describe_table(...)` | `jsonb` |
-| `koldstore.recover_segments(...)` | `bigint` |
+| Function | Returns | Value |
+|----------|---------|-------|
+| `snowflake_id()` | `bigint` | Generated Snowflake-like id |
+| `koldstore_version()` | `text` | Extension version string |
+| `koldstore_user_id()` | `text` | Active `koldstore.user_id`, or `NULL` |
+| `koldstore.register_storage(...)` | `uuid` | Storage backend id (`koldstore.storage.id`) |
+| `koldstore.alter_storage_credentials(...)` | `void` | No value |
+| `koldstore.alter_storage_location(...)` | `uuid` | Storage backend id |
+| `koldstore.manage_table(...)` | `uuid` | Migration job id (`koldstore.jobs.id`) |
+| `koldstore.unmanage_table(...)` | `bigint` | Count of deactivated `koldstore.schemas` rows |
+| `koldstore.enqueue_flush_job(...)` | `bigint` | `1` if a job was inserted, else `0` |
+| `koldstore.flush_table(...)` | `uuid` | Flush job id |
+| `koldstore.describe_table(...)` | `jsonb` | Table status object (see below) |
+| `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
 
 ## Storage and Migration
 
@@ -135,6 +135,9 @@ SELECT koldstore.register_storage(
 
 `storage_type` must be one of `filesystem`, `s3`, `gcs`, or `azure`.
 
+**Returns:** `uuid` — the storage backend id (`koldstore.storage.id`). Upserts on
+`name`, so a re-register of an existing name returns the same id.
+
 ### `koldstore.alter_storage_credentials`
 
 ```sql
@@ -145,6 +148,8 @@ SELECT koldstore.alter_storage_credentials(
 ```
 
 Rotates credentials without rewriting existing cold object paths.
+
+**Returns:** `void` — no value. Errors if the storage name does not exist.
 
 ### `koldstore.alter_storage_location`
 
@@ -157,6 +162,9 @@ SELECT koldstore.alter_storage_location(
 ```
 
 Updates storage location/configuration without direct catalog DML.
+
+**Returns:** `uuid` — the storage backend id. Errors if the storage name does
+not exist.
 
 ### `koldstore.manage_table`
 
@@ -190,6 +198,10 @@ also available.
 | `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
 | `compression` | `NULL` | Optional Parquet compression name |
 | `target_file_size_mb` | `NULL` | Optional target Parquet segment size in MiB; stored for future size-aware flushing |
+
+**Returns:** `uuid` — the migration job id written to `koldstore.jobs` (empty
+tables get a completed migrate job; populated tables run mirror initialization
+inline and return that job id).
 
 Non-forced flush selection keeps the newest rows hot by mirror `seq` and always
 flushes the oldest eligible excess first. Example with `hot_row_limit = 10000`
@@ -227,6 +239,10 @@ SELECT koldstore.unmanage_table(
 );
 ```
 
+**Returns:** `bigint` — number of `koldstore.schemas` rows deactivated for the
+table (normally `1` when the table was actively managed, `0` if none were
+active).
+
 ## Flush and Cold Data
 
 ### `koldstore.enqueue_flush_job`
@@ -243,12 +259,14 @@ SELECT koldstore.enqueue_flush_job(
 ```
 
 Inserts a pending flush job when none is already active for the table.
-Returns `1` when a new job was inserted and `0` when an active flush job already
-exists. `force => true` stores `force` in the job payload so the next
-`flush_table` call flushes all pending mirror rows instead of applying the table
-flush policy. `force` defaults to `false`. Flush jobs are table-wide; user-scope
+`force => true` stores `force` in the job payload so the next `flush_table`
+call flushes all pending mirror rows instead of applying the table flush
+policy. `force` defaults to `false`. Flush jobs are table-wide; user-scope
 partitioning uses the managed table's `scope_column` and session
 `koldstore.user_id`, not an enqueue argument.
+
+**Returns:** `bigint` — `1` when a new job was inserted, `0` when an active
+flush job already exists.
 
 ### `koldstore.flush_table`
 
@@ -263,9 +281,8 @@ SELECT koldstore.flush_table(
 );
 ```
 
-Ensures a flush job exists, runs the current flush path synchronously, and
-returns the job id. Progress is visible in `koldstore.jobs` and
-`koldstore.describe_table(...)`.
+Ensures a flush job exists and runs the current flush path synchronously.
+Progress is visible in `koldstore.jobs` and `koldstore.describe_table(...)`.
 
 `force` defaults to `false`. Row selection behavior:
 
@@ -279,6 +296,8 @@ returns the job id. Progress is visible in `koldstore.jobs` and
 `enqueue_flush_job(..., force => true)` remains available when enqueueing and
 executing the flush are intentionally separate operations.
 
+**Returns:** `uuid` — the flush job id (`koldstore.jobs.id`).
+
 ### `koldstore.describe_table`
 
 ```sql
@@ -289,8 +308,9 @@ SELECT koldstore.describe_table(
 SELECT jsonb_pretty(koldstore.describe_table(table_name => 'chat.messages'));
 ```
 
-Returns managed-table storage, mirror, cold-segment, manifest, and recent job
-state as JSONB. Counters are table-wide across scopes.
+**Returns:** `jsonb` — managed-table storage, mirror, cold-segment, size,
+manifest, and recent job state. Counters are table-wide across scopes. Errors
+if the table is not actively managed.
 
 Sample result after a small flush:
 
@@ -335,19 +355,47 @@ Sample result after a small flush:
 }
 ```
 
-Fields operators watch most often:
+Top-level fields:
 
-| Field                | Meaning                                         |
-| -------------------- | ----------------------------------------------- |
-| `hot_rows`           | Rows still present in the PostgreSQL heap       |
-| `mirror_rows`        | Primary keys tracked in the `__cl` mirror       |
-| `cold_row_count`     | Rows already copied to active cold segments     |
-| `cold_segment_count` | Active Parquet segment count                    |
-| `manifest_state`     | `in_sync` means catalog and manifest agree      |
-| `manifest_max_seq`   | Highest mirror `seq` represented in cold data   |
-| `pending_jobs`       | Pending or running KoldStore jobs for the table |
-| `jobs`               | Recent job ids, phases, and progress counters   |
-| `last_error`         | Last manifest or storage error, if any          |
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `hot_rows` | `bigint` | Rows still present in the PostgreSQL heap |
+| `mirror_rows` | `bigint` | Primary keys tracked in the `__cl` mirror |
+| `cold_row_count` | `bigint` | Rows already copied to active cold segments |
+| `cold_segment_count` | `bigint` | Active Parquet segment count |
+| `heap_size_bytes` | `bigint` | `pg_relation_size(table)` — main heap fork only |
+| `table_size_bytes` | `bigint` | `pg_table_size(table)` — heap + TOAST + FSM/VM, **excluding indexes** |
+| `index_size_bytes` | `bigint` | `pg_indexes_size(table)` — all indexes on the table |
+| `manifest_state` | `text` | Catalog/manifest sync state; `in_sync` means they agree |
+| `manifest_max_seq` | `bigint` | Highest mirror `seq` represented in cold data |
+| `pending_jobs` | `bigint` | Jobs for this table with status `pending` or `running` |
+| `jobs` | `jsonb` | Up to 20 recent jobs, newest first (see below) |
+| `storage_binding` | `text` | Bound storage backend id as text |
+| `last_error` | `text` | Last manifest or storage error, or `null` |
+
+Each element of `jobs`:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `id` | `text` | Job uuid |
+| `job_type` | `text` | e.g. `flush`, `migrate_backfill` |
+| `status` | `text` | Job status (`pending`, `running`, `completed`, …) |
+| `phase` | `text` | Current or final phase |
+| `rows_processed` | `bigint` | Rows processed by the job |
+| `rows_flushed` | `bigint` | Rows written cold by the job |
+| `checkpoint_seq` | `bigint` | Mirror `seq` checkpoint |
+| `checkpoint_commit_seq` | `bigint` | Commit-seq checkpoint |
+| `updated_at` | `timestamptz` | Last job update time |
+
+Size notes:
+
+- `heap_size_bytes` + `index_size_bytes` is **not** the same as
+  `pg_total_relation_size(table)` (that also includes TOAST).
+- `table_size_bytes` excludes indexes; use
+  `table_size_bytes + index_size_bytes` for a closer total, or call
+  `pg_total_relation_size` directly when you need PostgreSQL’s total.
+- Percent-saved figures require a caller-held baseline; `describe_table` does
+  not store pre-flush sizes.
 
 For job-level progress, inspect `koldstore.jobs`:
 
@@ -372,8 +420,13 @@ SELECT koldstore.recover_segments(
 );
 ```
 
-Enqueues a segment recovery job. Returns `1` when a new job was inserted and `0`
-when an equivalent active job already exists. `dry_run` defaults to `false`.
+Discovers orphan cold objects under the table prefix that are not referenced by
+the current manifest, plans recovery actions for them, and applies the plan
+unless `dry_run => true`. `dry_run` defaults to `false`.
+
+**Returns:** `bigint` — number of recovery actions planned (orphan objects
+found). With `dry_run => true`, the count is still returned and no objects are
+changed.
 
 ## DML Boundaries
 
