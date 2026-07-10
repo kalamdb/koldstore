@@ -55,7 +55,7 @@ until docker exec -e PGPASSWORD="${PASSWORD}" "${CONTAINER_NAME}" \
   sleep 2
 done
 
-echo "==> checking shared_preload_libraries"
+echo "==> checking shared_preload_libraries (pg_cron only; koldstore is SQL-loaded)"
 preload="$(docker exec -e PGPASSWORD="${PASSWORD}" "${CONTAINER_NAME}" \
   psql -U postgres -d "${DATABASE}" -tAc "SHOW shared_preload_libraries" | tr -d '[:space:]')"
 case ",${preload}," in
@@ -65,19 +65,13 @@ case ",${preload}," in
     exit 1
     ;;
 esac
-case ",${preload}," in
-  *,koldstore,*) ;;
-  *)
-    echo "error: shared_preload_libraries missing koldstore (got '${preload}')" >&2
-    exit 1
-    ;;
-esac
 
 echo "==> CREATE EXTENSION is idempotent"
 docker exec -e PGPASSWORD="${PASSWORD}" "${CONTAINER_NAME}" \
   psql -U postgres -d "${DATABASE}" -v ON_ERROR_STOP=1 <<'SQL'
 CREATE EXTENSION IF NOT EXISTS koldstore;
 CREATE EXTENSION IF NOT EXISTS pg_cron;
+SELECT koldstore_version();
 SELECT extname FROM pg_extension WHERE extname IN ('koldstore', 'pg_cron') ORDER BY 1;
 SQL
 
