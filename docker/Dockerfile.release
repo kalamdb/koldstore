@@ -84,7 +84,7 @@ RUN set -eux; \
     chmod +x /usr/local/bin/release-entrypoint.sh; \
     conf_sample="$(pg_config --sharedir)/postgresql.conf.sample"; \
     printf "\n# pg-koldstore release image defaults\n" >> "${conf_sample}"; \
-    printf "shared_preload_libraries = 'pg_cron,koldstore'\n" >> "${conf_sample}"; \
+    printf "shared_preload_libraries = 'pg_cron'\n" >> "${conf_sample}"; \
     printf "cron.database_name = 'koldstore'\n" >> "${conf_sample}"
 
 STOPSIGNAL SIGINT

@@ -71,6 +71,7 @@ docker pull jamals86/pg-koldstore:latest
 docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
 # psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
 # koldstore + pg_cron are already created on first boot
+# shared_preload_libraries includes pg_cron (koldstore is SQL-loaded; use pg_cron to schedule flush)
 ```
 
 Local source builds still use `docker/run.sh` / `docker/Dockerfile` (compiles the
