@@ -61,6 +61,7 @@ fn plan() -> MergeScanPlan {
             min_seq: SeqId::new(10).unwrap(),
             max_seq: SeqId::new(30).unwrap(),
         }],
+        overlay_strategy: Default::default(),
     }
 }
 
@@ -187,6 +188,7 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
                     max: json!(10),
                 },
             )]),
+            byte_size: None,
         },
         SegmentStatsHint {
             object_path: "app/items/batch-2.parquet".to_string(),
@@ -197,10 +199,12 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
                     max: json!(99),
                 },
             )]),
+            byte_size: None,
         },
         SegmentStatsHint {
             object_path: "app/items/batch-missing-stats.parquet".to_string(),
             column_stats: BTreeMap::new(),
+            byte_size: None,
         },
     ];
 
@@ -239,6 +243,7 @@ fn indexed_prune_predicates_keep_segments_without_manifest_stats() {
     let segments = vec![SegmentStatsHint {
         object_path: "app/items/batch-1.parquet".to_string(),
         column_stats: BTreeMap::new(),
+        byte_size: None,
     }];
     let selected = prune_segment_stats(
         &segments,

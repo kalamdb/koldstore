@@ -117,12 +117,33 @@ pub fn assert_kold_merge_scan_executed_cold_reads(
     let timed_segments = plan
         .lines()
         .filter(|line| {
-            line.contains("Parquet segment:") && line.contains(" rows, ") && line.contains(" ms")
+            line.contains("Parquet segment:")
+                && line.contains(" rows")
+                && line.contains(" ms")
+                && !line.contains("(planned)")
         })
         .count();
     anyhow::ensure!(
         timed_segments >= min_parquet_segments,
         "expected at least {min_parquet_segments} timed parquet segment(s), got {timed_segments} in plan:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.lines()
+            .any(|line| line.contains("Parquet I/O:") && line.contains("footer-first")),
+        "expected footer-first Parquet I/O details in analyzed plan, got:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.lines().any(|line| line.contains("Row groups:")),
+        "expected row-group prune details in analyzed plan, got:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.lines().any(|line| line.contains("Bloom:")),
+        "expected bloom prune details in analyzed plan, got:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.lines()
+            .any(|line| line.contains("Manifest:") && line.contains("source=catalog")),
+        "expected catalog manifest source in analyzed plan, got:\n{plan}"
     );
     Ok(())
 }

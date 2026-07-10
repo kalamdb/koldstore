@@ -26,6 +26,31 @@ pub type ConstraintResult<T> = Result<T, MigrationConstraintError>;
 /// Migration validation error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MigrationConstraintError {
+    /// The table already has a managed schema registration.
+    #[error("table is already managed")]
+    AlreadyManaged,
+    /// A numeric manage-table policy value is not positive.
+    #[error("{field} must be greater than zero (got {value})")]
+    InvalidPolicyValue {
+        /// Operator-facing policy field.
+        field: &'static str,
+        /// Invalid value.
+        value: i64,
+    },
+    /// The requested Parquet compression codec is unsupported.
+    #[error("unsupported compression codec `{0}`")]
+    UnsupportedCompression(String),
+    /// The requested table ownership model is unsupported.
+    #[error("unsupported table type `{0}`")]
+    UnsupportedTableType(String),
+    /// The configured file row limit is below the runtime floor.
+    #[error("max_rows_per_file must be at least {minimum} (got {value})")]
+    MaxRowsPerFileBelowFloor {
+        /// Invalid row limit.
+        value: u64,
+        /// Runtime-configured minimum.
+        minimum: u64,
+    },
     /// Primary key is missing or malformed.
     #[error("managed tables require a primary key")]
     MissingPrimaryKey,
@@ -52,6 +77,12 @@ pub enum MigrationConstraintError {
     /// User-scoped migration is missing a scope column.
     #[error("user-scoped migration requires scope_column")]
     MissingScopeColumn,
+    /// User-scoped migration names a column absent from the table.
+    #[error("scope column `{0}` does not exist")]
+    ScopeColumnNotFound(String),
+    /// Explicit migration ordering names a column absent from the table.
+    #[error("migration order column `{0}` does not exist")]
+    MissingOrderColumn(String),
     /// Storage registration lookup failed.
     #[error("storage registration must exist before migration")]
     MissingStorage,
@@ -442,15 +473,27 @@ impl MigrationValidationInput {
     }
 
     fn validate_scope_and_storage(&self) -> ConstraintResult<()> {
-        if self.table_type == "user"
-            && self
+        if !matches!(self.table_type.as_str(), "shared" | "user") {
+            return Err(MigrationConstraintError::UnsupportedTableType(
+                self.table_type.clone(),
+            ));
+        }
+        if self.table_type == "user" {
+            let scope_column = self
                 .scope_column
                 .as_deref()
                 .map(str::trim)
                 .filter(|scope| !scope.is_empty())
-                .is_none()
-        {
-            return Err(MigrationConstraintError::MissingScopeColumn);
+                .ok_or(MigrationConstraintError::MissingScopeColumn)?;
+            if !self
+                .columns
+                .iter()
+                .any(|column| column.name == scope_column)
+            {
+                return Err(MigrationConstraintError::ScopeColumnNotFound(
+                    scope_column.to_string(),
+                ));
+            }
         }
         if !self.storage_exists {
             return Err(MigrationConstraintError::MissingStorage);

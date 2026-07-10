@@ -43,6 +43,9 @@ pub struct SegmentStatsHint {
     pub object_path: String,
     /// Segment-level min/max stats by column.
     pub column_stats: BTreeMap<String, koldstore_parquet::ColumnStats>,
+    /// Object byte size when known (enables bounded footer range GETs on S3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_size: Option<u64>,
 }
 
 /// Min/max predicate proven safe for segment-level candidate pruning.
@@ -112,6 +115,19 @@ pub fn prune_segment_stats(
     segments: &[SegmentStatsHint],
     predicates: &[SegmentPrunePredicate],
 ) -> Vec<String> {
+    prune_segment_stats_hints(segments, predicates)
+        .into_iter()
+        .map(|segment| segment.object_path)
+        .collect()
+}
+
+/// Like [`prune_segment_stats`], but keeps full segment hints (including
+/// `byte_size` for footer-bounded ObjectStore reads).
+#[must_use]
+pub fn prune_segment_stats_hints(
+    segments: &[SegmentStatsHint],
+    predicates: &[SegmentPrunePredicate],
+) -> Vec<SegmentStatsHint> {
     segments
         .iter()
         .filter(|segment| {
@@ -119,7 +135,7 @@ pub fn prune_segment_stats(
                 .iter()
                 .all(|predicate| segment_may_match_predicate(segment, predicate))
         })
-        .map(|segment| segment.object_path.clone())
+        .cloned()
         .collect()
 }
 
@@ -207,6 +223,15 @@ fn segment_may_match_predicate(
     true
 }
 
+/// How unflushed mirror rows participate in merge reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorOverlayStrategy {
+    /// Mask cold rows whose PK appears in the mirror (op 1/2/3).
+    #[default]
+    MirrorMask,
+}
+
 /// Serialized custom-plan identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MergeScanPlan {
@@ -230,6 +255,9 @@ pub struct MergeScanPlan {
     pub projection: Vec<String>,
     /// Visible cold segment hints.
     pub segment_hints: Vec<SegmentHint>,
+    /// Mirror overlay strategy applied at execution.
+    #[serde(default)]
+    pub overlay_strategy: MirrorOverlayStrategy,
 }
 
 impl MergeScanPlan {
@@ -252,6 +280,7 @@ impl MergeScanPlan {
             security_quals: Vec::new(),
             projection: Vec::new(),
             segment_hints: Vec::new(),
+            overlay_strategy: MirrorOverlayStrategy::MirrorMask,
         }
     }
 

@@ -1,5 +1,7 @@
 //! PostgreSQL type support matrix.
 
+use std::sync::OnceLock;
+
 use koldstore_common::canonical_postgres_type_name;
 use serde::{Deserialize, Serialize};
 
@@ -23,9 +25,27 @@ pub struct TypeMatrix {
 }
 
 impl TypeMatrix {
+    fn shared_postgres_15_default() -> &'static Self {
+        static DEFAULT: OnceLock<TypeMatrix> = OnceLock::new();
+        DEFAULT.get_or_init(Self::build_postgres_15_default)
+    }
+
     /// Returns the default PostgreSQL 15+ MVP type support matrix.
+    ///
+    /// PERFORMANCE: clones a process-wide default so callers that need owned
+    /// matrices avoid rebuilding entries on every call.
     #[must_use]
     pub fn postgres_15_default() -> Self {
+        Self::shared_postgres_15_default().clone()
+    }
+
+    /// Shared reference to the default MVP matrix (no clone).
+    #[must_use]
+    pub fn postgres_15_default_ref() -> &'static Self {
+        Self::shared_postgres_15_default()
+    }
+
+    fn build_postgres_15_default() -> Self {
         let supported = [
             "bool",
             "int2",

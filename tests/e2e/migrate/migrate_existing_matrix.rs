@@ -114,7 +114,7 @@ async fn run_existing_table_scenario(
 
     client
         .execute(
-            "SELECT koldstore.manage_table(table_name => $1::text::regclass, storage => 'local-minio', hot_row_limit => NULL, order_column => $2)",
+            "SELECT koldstore.manage_table(table_name => $1::text::regclass, storage => 'local-minio', hot_row_limit => NULL, migration_order_by => $2)",
             &[&relation, &scenario.primary_key],
         )
         .await?;

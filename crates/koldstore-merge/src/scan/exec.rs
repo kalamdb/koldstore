@@ -6,9 +6,6 @@ use thiserror::Error;
 use super::plan::MergeScanPlan;
 use crate::resolver::{resolve_rows, ResolvedRow};
 
-/// Scan-state cleanup hook placeholder.
-pub fn reset_scan_state() {}
-
 /// Availability of cold storage for a scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColdAvailability {
@@ -200,6 +197,7 @@ pub fn execute_merge_scan(
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FilterPlan {
     residual_eq: Vec<(String, String)>,
+    residual_in: Vec<(String, Vec<String>)>,
     security_eq: Vec<(String, String)>,
 }
 
@@ -218,6 +216,18 @@ impl FilterPlan {
         value: impl Into<String>,
     ) -> Self {
         self.residual_eq.push((column.into(), value.into()));
+        self
+    }
+
+    /// Adds a residual JSON `IN (...)` membership filter.
+    #[must_use]
+    pub fn with_required_json_in<I, S>(mut self, column: impl Into<String>, values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.residual_in
+            .push((column.into(), values.into_iter().map(Into::into).collect()));
         self
     }
 
@@ -241,24 +251,35 @@ pub fn execute_merge_scan_with_filters(
 ) -> Result<MergeScanResult, MergeScanError> {
     let mut result = execute_merge_scan(hot_rows, cold_rows)?;
     let before_residual = result.rows.len();
-    result
-        .rows
-        .retain(|row| row_matches(&row.row_image, &filters.residual_eq));
+    result.rows.retain(|row| {
+        row_matches_eq(&row.row_image, &filters.residual_eq)
+            && row_matches_in(&row.row_image, &filters.residual_in)
+    });
     result.filtered_rows = before_residual.saturating_sub(result.rows.len());
 
     let before_security = result.rows.len();
     result
         .rows
-        .retain(|row| row_matches(&row.row_image, &filters.security_eq));
+        .retain(|row| row_matches_eq(&row.row_image, &filters.security_eq));
     result.security_filtered_rows = before_security.saturating_sub(result.rows.len());
 
     Ok(result)
 }
 
-fn row_matches(row: &serde_json::Value, filters: &[(String, String)]) -> bool {
+fn row_matches_eq(row: &serde_json::Value, filters: &[(String, String)]) -> bool {
     filters.iter().all(|(column, expected)| {
         row.get(column)
             .is_some_and(|value| value_matches_expected(value, expected))
+    })
+}
+
+fn row_matches_in(row: &serde_json::Value, filters: &[(String, Vec<String>)]) -> bool {
+    filters.iter().all(|(column, expected_values)| {
+        row.get(column).is_some_and(|value| {
+            expected_values
+                .iter()
+                .any(|expected| value_matches_expected(value, expected))
+        })
     })
 }
 

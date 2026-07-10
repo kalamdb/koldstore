@@ -1,10 +1,14 @@
 //! Change-log mirror capture SQL plans.
+//!
+//! PERFORMANCE: capture uses `FOR EACH STATEMENT` triggers with transition
+//! tables so bulk `INSERT`/`UPDATE`/`DELETE` write the mirror in one set-based
+//! upsert instead of one PL/pgSQL call per row.
 
 use koldstore_common::{
     quote_ident, session::snowflake_id_call_expression, MirrorOperation, PrimaryKeyColumnShape,
     SqlStatement,
 };
-use koldstore_mirror::{plan_upsert_mirror_row, MirrorRelation};
+use koldstore_mirror::{quoted_pk_columns, MirrorRelation};
 use thiserror::Error;
 
 use crate::QualifiedTableName;
@@ -183,40 +187,43 @@ fn capture_function_sql(
         .iter()
         .map(|column| column.column().as_str())
         .collect();
-    let pk_values = |row_ref: &str| {
-        primary_key
-            .iter()
-            .map(|column| format!("{row_ref}.{}", quote_ident(column.column().as_str())))
-            .collect::<Vec<_>>()
+    let pk_columns =
+        quoted_pk_columns(&pk_names).map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
+    let insert_columns = {
+        let mut columns = pk_columns.clone();
+        columns.extend([
+            "\"seq\"".to_string(),
+            "\"op\"".to_string(),
+            "\"commit_lsn\"".to_string(),
+        ]);
+        columns.join(", ")
     };
-    let insert_upsert = plan_upsert_mirror_row(
-        &mirror,
-        &pk_names,
-        &pk_values("NEW"),
-        snowflake_id_call_expression(),
-        MirrorOperation::Insert,
-        "pg_current_wal_lsn()",
-    )
-    .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
-    let update_upsert = plan_upsert_mirror_row(
-        &mirror,
-        &pk_names,
-        &pk_values("NEW"),
-        snowflake_id_call_expression(),
-        MirrorOperation::Update,
-        "pg_current_wal_lsn()",
-    )
-    .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
-    let delete_upsert = plan_upsert_mirror_row(
-        &mirror,
-        &pk_names,
-        &pk_values("OLD"),
-        snowflake_id_call_expression(),
-        MirrorOperation::Delete,
-        "pg_current_wal_lsn()",
-    )
-    .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
-    let pk_update_guard = primary_key_update_guard(primary_key);
+    let pk_select_new = pk_columns
+        .iter()
+        .map(|column| format!("src.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let seq_expr = snowflake_id_call_expression();
+    let insert_select = format!(
+        "{pk_select_new}, {seq_expr}, {op}, pg_current_wal_lsn()",
+        op = MirrorOperation::Insert.code()
+    );
+    let update_select = format!(
+        "{pk_select_new}, {seq_expr}, {op}, pg_current_wal_lsn()",
+        op = MirrorOperation::Update.code()
+    );
+    let delete_select = format!(
+        "{pk_select_new}, {seq_expr}, {op}, pg_current_wal_lsn()",
+        op = MirrorOperation::Delete.code()
+    );
+    let conflict_columns = pk_columns.join(", ");
+    let upsert_tail = r#"
+        ON CONFLICT ({conflict_columns}) DO UPDATE
+        SET "seq" = EXCLUDED."seq",
+            "op" = EXCLUDED."op",
+            "commit_lsn" = EXCLUDED."commit_lsn""#
+        .replace("{conflict_columns}", &conflict_columns);
+    let pk_update_guard = primary_key_update_guard_statement(primary_key);
 
     Ok(format!(
         r#"
@@ -226,26 +233,40 @@ LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = pg_catalog, koldstore
 AS $$
+DECLARE
+    affected bigint;
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        {insert_upsert}
-        PERFORM koldstore.internal_record_row_count_delta(TG_RELID, 1, 1);
-        RETURN NEW;
+        INSERT INTO {mirror} ({insert_columns})
+        SELECT {insert_select}
+        FROM new_rows AS src
+        {upsert_tail};
+        GET DIAGNOSTICS affected = ROW_COUNT;
+        PERFORM koldstore.internal_record_row_count_delta(TG_RELID, affected, affected);
+        RETURN NULL;
     ELSIF TG_OP = 'UPDATE' THEN
         {pk_update_guard}
-        {update_upsert}
-        RETURN NEW;
+        INSERT INTO {mirror} ({insert_columns})
+        SELECT {update_select}
+        FROM new_rows AS src
+        {upsert_tail};
+        RETURN NULL;
     ELSIF TG_OP = 'DELETE' THEN
-        {delete_upsert}
-        PERFORM koldstore.internal_record_row_count_delta(TG_RELID, -1, 0);
-        RETURN OLD;
+        INSERT INTO {mirror} ({insert_columns})
+        SELECT {delete_select}
+        FROM old_rows AS src
+        {upsert_tail};
+        GET DIAGNOSTICS affected = ROW_COUNT;
+        PERFORM koldstore.internal_record_row_count_delta(TG_RELID, -affected, 0);
+        RETURN NULL;
     END IF;
 
     RAISE EXCEPTION 'unsupported pg-koldstore mirror capture operation %', TG_OP;
 END;
 $$
 "#,
-        function_name = function_name.quoted()
+        function_name = function_name.quoted(),
+        mirror = mirror.quoted(),
     ))
 }
 
@@ -272,12 +293,18 @@ fn capture_trigger_sql(
     source_table: &str,
     function_name: &QualifiedTableName,
 ) -> String {
+    let referencing = match operation {
+        MirrorOperation::Insert => "REFERENCING NEW TABLE AS new_rows",
+        MirrorOperation::Update => "REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows",
+        MirrorOperation::Delete => "REFERENCING OLD TABLE AS old_rows",
+    };
     format!(
         r#"
 DROP TRIGGER IF EXISTS {trigger_name} ON {source_table};
 CREATE TRIGGER {trigger_name}
 AFTER {operation} ON {source_table}
-FOR EACH ROW EXECUTE FUNCTION {function_name}()
+{referencing}
+FOR EACH STATEMENT EXECUTE FUNCTION {function_name}()
 "#,
         trigger_name = quote_ident(trigger_name),
         operation = operation.sql_trigger_event(),
@@ -285,17 +312,30 @@ FOR EACH ROW EXECUTE FUNCTION {function_name}()
     )
 }
 
-fn primary_key_update_guard(primary_key: &[PrimaryKeyColumnShape]) -> String {
-    let changed_predicate = primary_key
+fn primary_key_update_guard_statement(primary_key: &[PrimaryKeyColumnShape]) -> String {
+    let pk_match = primary_key
         .iter()
         .map(|column| {
             let name = quote_ident(column.column().as_str());
-            format!("OLD.{name} IS DISTINCT FROM NEW.{name}")
+            format!("old_src.{name} IS NOT DISTINCT FROM new_src.{name}")
         })
         .collect::<Vec<_>>()
-        .join(" OR ");
+        .join(" AND ");
 
+    // A non-PK UPDATE keeps every old primary key in the new transition table.
+    // If any old PK is missing from new_rows, the statement changed a PK value.
     format!(
-        "IF {changed_predicate} THEN\n            RAISE EXCEPTION 'pg-koldstore does not support primary-key updates on managed table %', TG_TABLE_NAME;\n        END IF;"
+        r#"
+        IF EXISTS (
+            SELECT 1
+            FROM old_rows AS old_src
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM new_rows AS new_src
+                WHERE {pk_match}
+            )
+        ) THEN
+            RAISE EXCEPTION 'pg-koldstore does not support primary-key updates on managed table %', TG_TABLE_NAME;
+        END IF;"#
     )
 }

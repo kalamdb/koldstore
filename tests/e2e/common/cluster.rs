@@ -330,9 +330,12 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
               SELECT 1
               FROM pg_proc migrate_proc
               JOIN pg_namespace migrate_ns ON migrate_ns.oid = migrate_proc.pronamespace
+              JOIN pg_proc migrate_args ON migrate_args.oid = migrate_proc.oid
               WHERE migrate_ns.nspname = 'koldstore'
                 AND migrate_proc.proname = 'manage_table'
                 AND migrate_proc.prorettype = 'uuid'::regtype
+                AND 'migration_order_by' = ANY (migrate_proc.proargnames)
+                AND 'target_file_size_mb' = ANY (migrate_proc.proargnames)
             )
             AND EXISTS (
               SELECT 1
@@ -341,6 +344,7 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
               WHERE flush_ns.nspname = 'koldstore'
                 AND flush_proc.proname = 'flush_table'
                 AND flush_proc.prorettype = 'uuid'::regtype
+                AND 'force' = ANY (flush_proc.proargnames)
             )
             "#,
             &[],

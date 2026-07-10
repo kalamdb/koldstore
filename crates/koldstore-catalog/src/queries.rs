@@ -1,4 +1,12 @@
-//! Pure SQL builders for pg-koldstore catalog lookups.
+//! Pure SQL builders for cross-runtime catalog **reads**.
+//!
+//! Ownership:
+//! - this module: relation resolve, managed snapshots, flush policy/storage,
+//!   cold-segment counts/stats, in-sync manifest scan context
+//! - `koldstore-migrate`: schema registry **writes** and migration-only reads
+//! - `koldstore-flush`: cold segment / manifest **writes**
+//!
+//! SPI execution stays in `pg_koldstore`.
 
 use koldstore_common::{SqlParamType, SqlResult, SqlStatement};
 
@@ -79,6 +87,9 @@ pub fn plan_active_flush_storage_context() -> SqlResult<SqlStatement> {
         r#"
 SELECT jsonb_build_object(
     'base_path', st.base_path,
+    'storage_type', st.storage_type,
+    'credentials', COALESCE(st.credentials, '{}'::jsonb),
+    'config', COALESCE(st.config, '{}'::jsonb),
     'schema_version', s.version,
     'compression', COALESCE(s.options->>'compression', 'zstd')
 )::text
@@ -124,37 +135,6 @@ LIMIT 1
     )
 }
 
-/// Builds the active managed-schema refresh context lookup.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata is invalid.
-pub fn plan_active_schema_refresh_context_json() -> SqlResult<SqlStatement> {
-    SqlStatement::read_with_params(
-        "resolve active schema refresh context",
-        r#"
-SELECT jsonb_build_object(
-    'version', version,
-    'table_type', table_type,
-    'storage_id', storage_id::text,
-    'scope_column', scope_column,
-    'mirror_relation', mirror_relation::text,
-    'primary_key', primary_key,
-    'columns', columns,
-    'indexed_columns', indexed_columns,
-    'options', options
-)::text
-FROM koldstore.schemas
-WHERE table_oid = $1::oid
-  AND active
-  AND initialization_state = 'complete'
-ORDER BY version DESC
-LIMIT 1
-"#,
-        [SqlParamType::Oid],
-    )
-}
-
 /// Builds the active flush-policy options lookup for a managed table.
 ///
 /// # Errors
@@ -175,51 +155,75 @@ LIMIT 1
     )
 }
 
-/// Builds an active cold-segment stats lookup for merge-scan pruning.
+/// Builds the latest published manifest scan context for merge-scan planning.
+///
+/// Returns one JSON text row with manifest path, generation, storage base path,
+/// and active shared-scope cold-segment stats when a published manifest exists.
+///
+/// `sync_state = 'pending_write'` after hot DML still exposes the last published
+/// cold segments; only the placeholder pre-flush row (`manifest_path = 'pending'`)
+/// is treated as hot-only.
 ///
 /// # Errors
 ///
 /// Returns an error when statement metadata is invalid.
-pub fn plan_active_cold_segment_stats_json() -> SqlResult<SqlStatement> {
+pub fn plan_in_sync_manifest_scan_context() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
-        "resolve active cold segment stats",
+        "resolve published manifest scan context",
         r#"
-SELECT COALESCE(
-    jsonb_agg(
-        jsonb_build_object(
-            'object_path', object_path,
-            'column_stats', column_stats
-        )
-        ORDER BY batch_number
-    )::text,
-    '[]'
-)
-FROM koldstore.cold_segments
-WHERE table_oid = $1::oid
-  AND scope_key = ''
-  AND status = 'active'
-"#,
-        [SqlParamType::Oid],
-    )
-}
-
-/// Builds the latest in-sync manifest path lookup for a managed table.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata is invalid.
-pub fn plan_in_sync_manifest_path() -> SqlResult<SqlStatement> {
-    SqlStatement::read_with_params(
-        "resolve in-sync manifest path",
-        r#"
-SELECT manifest_path
-FROM koldstore.manifest
-WHERE table_oid = $1::oid
-  AND sync_state = 'in_sync'
-ORDER BY generation DESC
+SELECT jsonb_build_object(
+  'manifest_path', m.manifest_path,
+  'generation', m.generation,
+  'base_path', st.base_path,
+  'storage_type', st.storage_type,
+  'credentials', COALESCE(st.credentials, '{}'::jsonb),
+  'config', COALESCE(st.config, '{}'::jsonb),
+  'segments', COALESCE((
+      SELECT jsonb_agg(
+          jsonb_build_object(
+              'object_path', cs.object_path,
+              'column_stats', COALESCE((
+                  SELECT jsonb_object_agg(
+                      css.column_name,
+                      jsonb_strip_nulls(jsonb_build_object(
+                          'min', CASE
+                              WHEN css.min_value IS NULL THEN NULL
+                              ELSE pg_catalog.convert_from(css.min_value, 'UTF8')::jsonb
+                          END,
+                          'max', CASE
+                              WHEN css.max_value IS NULL THEN NULL
+                              ELSE pg_catalog.convert_from(css.max_value, 'UTF8')::jsonb
+                          END
+                      ))
+                  )
+                  FROM koldstore.cold_segment_stats css
+                  WHERE css.segment_id = cs.segment_id
+                    AND css.table_oid = cs.table_oid
+                    AND css.scope_key = cs.scope_key
+                    AND css.column_name::text IN (
+                        SELECT pg_catalog.jsonb_array_elements_text($2::jsonb)
+                    )
+              ), '{}'::jsonb),
+              'byte_size', cs.byte_size
+          )
+          ORDER BY cs.batch_number
+      )
+      FROM koldstore.cold_segments cs
+      WHERE cs.table_oid = $1::oid
+        AND cs.scope_key = ''
+        AND cs.status = 'active'
+  ), '[]'::jsonb)
+)::text
+FROM koldstore.manifest m
+JOIN koldstore.schemas s ON s.table_oid = m.table_oid AND s.active AND s.initialization_state = 'complete'
+JOIN koldstore.storage st ON st.id = s.storage_id
+WHERE m.table_oid = $1::oid
+  AND m.manifest_path IS DISTINCT FROM 'pending'
+  AND COALESCE(m.generation, '') <> ''
+ORDER BY m.generation DESC
 LIMIT 1
 "#,
-        [SqlParamType::Oid],
+        [SqlParamType::Oid, SqlParamType::Jsonb],
     )
 }
 
@@ -232,6 +236,19 @@ pub fn plan_next_flush_batch_number() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "resolve next flush batch number",
         "SELECT COALESCE(max(batch_number), 0) + 1 FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = ''",
+        [SqlParamType::Oid],
+    )
+}
+
+/// Builds an active shared-scope cold-segment count lookup.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_active_cold_segment_count() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve active cold segment count",
+        "SELECT count(*)::bigint FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = '' AND status = 'active'",
         [SqlParamType::Oid],
     )
 }
@@ -267,4 +284,21 @@ WHERE table_oid = $1::oid
 "#,
         [SqlParamType::Oid],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_in_sync_manifest_scan_context;
+
+    #[test]
+    fn merge_scan_context_reads_only_requested_normalized_stats() {
+        let statement = plan_in_sync_manifest_scan_context().unwrap();
+
+        assert!(statement.sql.contains("koldstore.cold_segment_stats"));
+        assert!(statement
+            .sql
+            .contains("jsonb_array_elements_text($2::jsonb)"));
+        assert!(!statement.sql.contains("'column_stats', cs.column_stats"));
+        assert_eq!(statement.param_types.len(), 2);
+    }
 }

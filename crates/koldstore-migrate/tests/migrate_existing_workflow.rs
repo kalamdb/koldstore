@@ -77,7 +77,7 @@ fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
 }
 
 #[test]
-fn existing_table_migration_plan_accepts_explicit_order_column_from_options() {
+fn existing_table_migration_plan_accepts_explicit_migration_order_by_from_options() {
     let catalog = ExistingTableCatalog {
         primary_key: CatalogPrimaryKey::single("id"),
         indexed_columns: vec!["created_at".to_string()],
@@ -89,7 +89,7 @@ fn existing_table_migration_plan_accepts_explicit_order_column_from_options() {
 
     let plan = plan_existing_table_migration(
         &request(ManageTableOptions::from_value(&serde_json::json!({
-            "order_column": "created_at"
+            "migration_order_by": "created_at"
         }))),
         context(),
         catalog,

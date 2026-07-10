@@ -7,6 +7,7 @@ OUTPUT_JSON="${2:?usage: collect_db_stats.sh <mode> <output-json>}"
 : "${DATABASE_URL:=postgres}"
 : "${BENCH_SCHEMA:=${MODE//-/_}}"
 : "${KOLDSTORE_BENCH_STORAGE_PATH:=}"
+: "${MODE:=}"
 
 mkdir -p "$(dirname "$OUTPUT_JSON")"
 
@@ -15,7 +16,12 @@ if [[ -n "$KOLDSTORE_BENCH_STORAGE_PATH" && -d "$KOLDSTORE_BENCH_STORAGE_PATH" ]
   cold_storage_size_bytes="$(du -sk "$KOLDSTORE_BENCH_STORAGE_PATH" | awk '{ print $1 * 1024 }')"
 fi
 
-PGOPTIONS="-c search_path=${BENCH_SCHEMA},public,koldstore" \
+pgoptions="-c search_path=${BENCH_SCHEMA},public,koldstore"
+if [[ "$MODE" != baseline ]]; then
+  pgoptions="-c session_preload_libraries=koldstore ${pgoptions}"
+fi
+
+PGOPTIONS="$pgoptions" \
 psql "$DATABASE_URL" \
   -v ON_ERROR_STOP=1 \
   -v MODE="$MODE" \

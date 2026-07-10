@@ -32,8 +32,8 @@ VALUES (
   false,
   jsonb_build_object('source', 'pgbench', 'user_idx', (:user_idx)::int),
   jsonb_build_object('benchmark', 'insert_single'),
-  ARRAY['pgbench', 'single-insert'],
-  decode(md5('insert-single-' || (:user_idx)::text), 'hex'),
+  'pgbench,single-insert',
+  md5('insert-single-' || (:user_idx)::text),
   now(),
   now()
 );

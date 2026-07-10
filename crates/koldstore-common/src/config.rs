@@ -56,9 +56,9 @@ impl MigrationStatus {
 #[serde(rename_all = "snake_case")]
 pub enum ParquetCompression {
     /// Snappy compression.
-    #[default]
     Snappy,
-    /// Zstandard compression.
+    /// Zstandard compression (default for cold segments).
+    #[default]
     Zstd,
     /// No compression.
     Uncompressed,
@@ -99,6 +99,9 @@ pub struct FlushPolicy {
     /// Maximum rows written into one cold Parquet segment per flush batch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_rows_per_file: Option<u64>,
+    /// Preferred compressed Parquet segment size in megabytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_file_size_mb: Option<u64>,
 }
 
 impl FlushPolicy {
@@ -109,6 +112,7 @@ impl FlushPolicy {
             hot_row_limit: Some(hot_row_limit),
             min_flush_rows: Some(min_flush_rows),
             max_rows_per_file: Some(max_rows_per_file),
+            target_file_size_mb: None,
         }
     }
 
@@ -138,9 +142,12 @@ pub struct ManageTableOptions {
     /// Maximum rows written into one cold Parquet segment per flush batch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_rows_per_file: Option<u64>,
-    /// Explicit oldest-to-newest ordering column for populated-table backfill.
+    /// Preferred Parquet segment size in megabytes.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub order_column: Option<String>,
+    pub target_file_size_mb: Option<u64>,
+    /// Explicit oldest-to-newest ordering column for populated-table backfill.
+    #[serde(alias = "order_column", skip_serializing_if = "Option::is_none")]
+    pub migration_order_by: Option<String>,
     /// Parquet compression codec.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<ParquetCompression>,
@@ -193,6 +200,7 @@ impl ManageTableOptions {
             hot_row_limit: Some(hot_row_limit),
             min_flush_rows: self.min_flush_rows.filter(|value| *value > 0),
             max_rows_per_file: self.max_rows_per_file.filter(|value| *value > 0),
+            target_file_size_mb: self.target_file_size_mb.filter(|value| *value > 0),
         })
     }
 
@@ -210,10 +218,17 @@ impl ManageTableOptions {
         self
     }
 
+    /// Sets the preferred Parquet segment size in megabytes.
+    #[must_use]
+    pub fn with_target_file_size_mb(mut self, target_file_size_mb: u64) -> Self {
+        self.target_file_size_mb = Some(target_file_size_mb);
+        self
+    }
+
     /// Sets the explicit migration ordering column.
     #[must_use]
-    pub fn with_order_column(mut self, column: impl Into<String>) -> Self {
-        self.order_column = Some(column.into());
+    pub fn with_migration_order_by(mut self, column: impl Into<String>) -> Self {
+        self.migration_order_by = Some(column.into());
         self
     }
 
@@ -231,10 +246,10 @@ impl ManageTableOptions {
         self
     }
 
-    /// Returns a trimmed explicit order column when configured.
+    /// Returns a trimmed explicit migration ordering column when configured.
     #[must_use]
-    pub fn explicit_order_column(&self) -> Option<&str> {
-        self.order_column
+    pub fn explicit_migration_order_by(&self) -> Option<&str> {
+        self.migration_order_by
             .as_deref()
             .map(str::trim)
             .filter(|column| !column.is_empty())
@@ -314,14 +329,56 @@ mod tests {
     }
 
     #[test]
+    fn manage_table_options_persist_new_migration_and_file_size_names() {
+        let options = ManageTableOptions::default()
+            .with_migration_order_by("created_at")
+            .with_target_file_size_mb(256);
+
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({
+                "migration_order_by": "created_at",
+                "target_file_size_mb": 256,
+            })
+        );
+        assert_eq!(options.explicit_migration_order_by(), Some("created_at"));
+    }
+
+    #[test]
+    fn manage_table_options_decode_legacy_order_column() {
+        let options = ManageTableOptions::from_value(&serde_json::json!({
+            "order_column": "created_at"
+        }));
+
+        assert_eq!(options.explicit_migration_order_by(), Some("created_at"));
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({
+                "migration_order_by": "created_at",
+            })
+        );
+    }
+
+    #[test]
     fn flush_policy_from_value_ignores_unrelated_fields() {
         let policy = FlushPolicy::from_value(&serde_json::json!({
-            "order_column": "created_at",
+            "migration_order_by": "created_at",
             "hot_row_limit": 500,
         }))
         .unwrap();
 
         assert_eq!(policy.hot_row_limit, Some(500));
+    }
+
+    #[test]
+    fn flush_policy_preserves_optional_file_size_target() {
+        let policy = FlushPolicy::from_value(&serde_json::json!({
+            "hot_row_limit": 500,
+            "target_file_size_mb": 64,
+        }))
+        .unwrap();
+
+        assert_eq!(policy.target_file_size_mb, Some(64));
     }
 
     #[test]

@@ -422,7 +422,7 @@ impl RegistrationMetadata {
                     .expect("primary_key_shape validated"),
             )
             .unwrap_or_else(|_| Value::Array(vec![])),
-            initialization_state: initialization_state_name(self.initialization_state).to_string(),
+            initialization_state: self.initialization_state.as_str().to_string(),
             indexed_columns: serde_json::json!(self.indexed_columns),
             type_matrix,
             options,
@@ -737,15 +737,4 @@ fn options_object_mut(options: &mut Value) -> RegistryResult<&mut Map<String, Va
     options
         .as_object_mut()
         .ok_or_else(|| RegistryError::Spi("registry options must be a JSON object".to_string()))
-}
-
-/// Returns the catalog spelling for a mirror initialization state.
-#[must_use]
-pub fn initialization_state_name(state: MirrorInitializationState) -> &'static str {
-    match state {
-        MirrorInitializationState::NotStarted => "not_started",
-        MirrorInitializationState::Capturing => "capturing",
-        MirrorInitializationState::Complete => "complete",
-        MirrorInitializationState::Failed => "failed",
-    }
 }

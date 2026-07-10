@@ -5,7 +5,10 @@
 //! so this path no longer materializes per-row cleanup JSON.
 
 use koldstore_common::{QualifiedTableName, SqlStatement};
-use koldstore_parquet::{CleanColdRecordBatchBuilder, FlushMirrorRow, PgColumn};
+use koldstore_parquet::{
+    CleanColdRecordBatchBuilder, ColdMetadataColumn, ColdRecordBatch, FlushMirrorRow, PgColumn,
+    SegmentSplitPolicy, StreamingParquetSegmentWriter, WriterOptions,
+};
 
 use crate::ops::plan_mirror_flush_selection_batch;
 use crate::table_counters::FLUSH_MIRROR_FETCH_BATCH_SIZE;
@@ -32,8 +35,85 @@ pub struct StreamEncodeInput {
     pub max_seq: i64,
     /// Maximum rows per Parquet segment file.
     pub max_rows_per_file: usize,
+    /// Optional compressed-byte target for each Parquet segment.
+    pub target_file_size_bytes: Option<u64>,
+    /// Parquet compression codec.
+    pub compression: String,
+    /// Rows encoded per streaming row group.
+    pub row_group_size: usize,
     /// When set, mirror fetch is restricted to these operation codes.
     pub mirror_ops: Option<Vec<i16>>,
+}
+
+struct SegmentBuilder {
+    options: WriterOptions,
+    split_policy: SegmentSplitPolicy,
+    writer: Option<StreamingParquetSegmentWriter>,
+    batches: Vec<ColdRecordBatch>,
+    row_count: usize,
+}
+
+impl SegmentBuilder {
+    fn new(input: &StreamEncodeInput) -> Self {
+        let options = WriterOptions {
+            compression: input.compression.clone(),
+            row_group_size: input.row_group_size.max(1),
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(
+            [ColdMetadataColumn::Seq.name()]
+                .into_iter()
+                .chain(input.primary_key_columns.iter().map(String::as_str))
+                .chain(input.indexed_columns.iter().map(String::as_str)),
+        )
+        .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str));
+        Self {
+            options,
+            split_policy: SegmentSplitPolicy::new(
+                input.target_file_size_bytes,
+                input.max_rows_per_file,
+            ),
+            writer: None,
+            batches: Vec::new(),
+            row_count: 0,
+        }
+    }
+
+    fn remaining_rows(&self, max_rows_per_file: usize) -> usize {
+        max_rows_per_file.max(1).saturating_sub(self.row_count)
+    }
+
+    fn push_batch(&mut self, batch: ColdRecordBatch) -> Result<bool, String> {
+        let writer = if let Some(writer) = self.writer.as_mut() {
+            writer
+        } else {
+            self.writer.insert(
+                StreamingParquetSegmentWriter::try_new(batch.batch.schema(), self.options.clone())
+                    .map_err(|error| error.to_string())?,
+            )
+        };
+        writer
+            .write_batch(&batch.batch)
+            .map_err(|error| error.to_string())?;
+        self.row_count = self.row_count.saturating_add(batch.row_count);
+        self.batches.push(batch);
+        Ok(self
+            .split_policy
+            .should_close(writer.current_bytes(), self.row_count))
+    }
+
+    fn finish_segment(&mut self) -> Result<Option<FlushWriteChunk>, String> {
+        let Some(writer) = self.writer.take() else {
+            return Ok(None);
+        };
+        let parquet_bytes = writer.finish().map_err(|error| error.to_string())?;
+        let batches = std::mem::take(&mut self.batches);
+        self.row_count = 0;
+        Ok(Some(FlushWriteChunk::from_encoded_batches(
+            parquet_bytes,
+            &batches,
+        )))
+    }
 }
 
 /// Outcome of streaming mirror rows into Parquet segment chunks.
@@ -79,13 +159,13 @@ impl ChunkBuilder {
         self.batch_builder.row_count()
     }
 
-    fn take_chunk(&mut self) -> Result<FlushWriteChunk, String> {
+    fn take_batch(&mut self) -> Result<ColdRecordBatch, String> {
         let cold_batch = std::mem::replace(
             &mut self.batch_builder,
             CleanColdRecordBatchBuilder::new(&self.parquet_columns, &self.indexed_columns)?,
         )
         .finish()?;
-        Ok(FlushWriteChunk { cold_batch })
+        Ok(cold_batch)
     }
 }
 
@@ -117,6 +197,7 @@ where
     let mut rows_written = 0_usize;
     let mut max_seq = 0_i64;
     let mut chunk_builder = ChunkBuilder::new(&input.parquet_columns, &input.indexed_columns)?;
+    let mut segment_builder = SegmentBuilder::new(input);
 
     loop {
         let batch = fetch_batch(&selection.statement, input.max_seq, after_seq)?;
@@ -129,8 +210,18 @@ where
         for row in batch {
             chunk_builder.push_row(&row, &input.primary_key_columns, input.schema_version)?;
             rows_written += 1;
-            if chunk_builder.len() >= input.max_rows_per_file.max(1) {
-                write_chunk(chunk_builder.take_chunk()?)?;
+            let row_group_limit = input.row_group_size.max(1).min(
+                segment_builder
+                    .remaining_rows(input.max_rows_per_file)
+                    .max(1),
+            );
+            if chunk_builder.len() >= row_group_limit {
+                let cold_batch = chunk_builder.take_batch()?;
+                if segment_builder.push_batch(cold_batch)? {
+                    if let Some(chunk) = segment_builder.finish_segment()? {
+                        write_chunk(chunk)?;
+                    }
+                }
             }
         }
         if (batch_len as i64) < FLUSH_MIRROR_FETCH_BATCH_SIZE {
@@ -139,11 +230,93 @@ where
     }
 
     if chunk_builder.len() > 0 {
-        write_chunk(chunk_builder.take_chunk()?)?;
+        let cold_batch = chunk_builder.take_batch()?;
+        let _ = segment_builder.push_batch(cold_batch)?;
+    }
+    if let Some(chunk) = segment_builder.finish_segment()? {
+        write_chunk(chunk)?;
     }
 
     Ok(StreamEncodeOutcome {
         max_seq,
         rows_written,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use koldstore_parquet::{FlushColumnValue, PgType};
+
+    fn input(target_file_size_bytes: Option<u64>, max_rows_per_file: usize) -> StreamEncodeInput {
+        StreamEncodeInput {
+            table: QualifiedTableName::parse("app.items").unwrap(),
+            mirror: QualifiedTableName::parse("koldstore.items__cl").unwrap(),
+            primary_key_columns: vec!["id".to_string()],
+            base_column_names: vec!["id".to_string(), "body".to_string()],
+            parquet_columns: vec![
+                PgColumn::new("id", PgType::Int8, false),
+                PgColumn::new("body", PgType::Text, true),
+            ],
+            indexed_columns: vec!["id".to_string()],
+            schema_version: 1,
+            max_seq: 5,
+            max_rows_per_file,
+            target_file_size_bytes,
+            compression: "zstd".to_string(),
+            row_group_size: 1,
+            mirror_ops: None,
+        }
+    }
+
+    fn rows() -> Vec<FlushMirrorRow> {
+        (1..=5)
+            .map(|seq| FlushMirrorRow {
+                seq,
+                op: 1,
+                values: vec![
+                    FlushColumnValue::Int64(seq),
+                    FlushColumnValue::Utf8("payload".repeat(20)),
+                ],
+            })
+            .collect()
+    }
+
+    fn run(input: StreamEncodeInput) -> (StreamEncodeOutcome, Vec<usize>) {
+        let mut fetched = false;
+        let mut segment_rows = Vec::new();
+        let outcome = stream_flush_chunks(
+            &input,
+            |_, _, _| {
+                if fetched {
+                    Ok(Vec::new())
+                } else {
+                    fetched = true;
+                    Ok(rows())
+                }
+            },
+            |chunk| {
+                segment_rows.push(chunk.row_count());
+                Ok(())
+            },
+        )
+        .unwrap();
+        (outcome, segment_rows)
+    }
+
+    #[test]
+    fn row_cap_splits_only_the_selected_rows() {
+        let (outcome, segment_rows) = run(input(None, 2));
+
+        assert_eq!(outcome.rows_written, 5);
+        assert_eq!(segment_rows, vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn compressed_size_target_closes_segments_without_filling_past_selection() {
+        let (outcome, segment_rows) = run(input(Some(1), 100));
+
+        assert_eq!(outcome.rows_written, 5);
+        assert_eq!(segment_rows, vec![1, 1, 1, 1, 1]);
+    }
 }

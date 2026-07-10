@@ -155,7 +155,7 @@ impl PgType {
     /// Returns true when the type is supported by the MVP type matrix.
     #[must_use]
     pub fn is_mvp_supported(self) -> bool {
-        TypeMatrix::postgres_15_default()
+        TypeMatrix::postgres_15_default_ref()
             .support_for(self.catalog_type_name())
             .supported
     }

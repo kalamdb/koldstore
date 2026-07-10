@@ -6,5 +6,5 @@ SELECT koldstore.manage_table(
   max_rows_per_file => 10000,
   table_type        => 'user',
   scope_column      => 'workspace_id',
-  order_column      => 'created_at'
+  migration_order_by => 'created_at'
 );

@@ -56,6 +56,7 @@ fn bench_path_and_policy(c: &mut Criterion) {
             hot_row_limit: Some(10_000),
             min_flush_rows: None,
             max_rows_per_file: None,
+            target_file_size_mb: None,
         }),
         schema_version: 1,
     };

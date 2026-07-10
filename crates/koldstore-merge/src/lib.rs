@@ -40,12 +40,12 @@ pub use rls::{
     enforce_or_fail_closed, plan_security_quals, unsupported_rls_error, SecurityQualPlan,
 };
 pub use scan::{
-    begin_merge_scan, begin_merge_scan_with_plan, build_materialize_query, build_path_replacement,
+    begin_merge_scan, begin_merge_scan_with_plan, build_path_replacement,
     custom_scan_explain_label, evaluate_after_winner_resolution, execute_merge_scan,
-    execute_merge_scan_with_filters, prune_segment_stats, replace_heap_final_path,
-    reset_scan_state, ColdAvailability, FilterPlan, MaterializeQueryParts, MergeMetadataAttnums,
-    MergeScanError, MergeScanPlan, MergeScanResult, PathReplacementDecision, PlannerPath,
-    PlannerPathKind, ScanResourceCounters, ScanState, SegmentHint, SegmentPrunePredicate,
-    SegmentStatsHint, CUSTOM_PATH_NAME, HOT_SEQ_SENTINEL,
+    execute_merge_scan_with_filters, prune_segment_stats, prune_segment_stats_hints,
+    replace_heap_final_path, ColdAvailability, FilterPlan, MergeMetadataAttnums, MergeScanError,
+    MergeScanPlan, MergeScanResult, PathReplacementDecision, PlannerPath, PlannerPathKind,
+    ScanResourceCounters, ScanState, SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
+    CUSTOM_PATH_NAME, HOT_SEQ_SENTINEL,
 };
 pub use tombstone::{tombstone_required, TombstoneDecision};

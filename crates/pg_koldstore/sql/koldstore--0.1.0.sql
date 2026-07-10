@@ -124,6 +124,9 @@ CREATE TABLE IF NOT EXISTS koldstore.jobs (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
+-- SCALABILITY: completed/cancelled/cancelled jobs are retained forever today. Add a
+-- retention/purge policy before high-frequency flush in production, or this
+-- table grows without bound (one row per flush/migrate).
 
 CREATE INDEX IF NOT EXISTS jobs_pending_idx
   ON koldstore.jobs (table_oid, scope_key, status, updated_at)
@@ -169,6 +172,8 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   byte_size bigint NOT NULL,
   schema_version integer NOT NULL,
   column_stats jsonb NOT NULL DEFAULT '{}'::jsonb,
+  -- column_stats mirrors cold_segment_stats for cache-friendly segment loads.
+  -- Keep both in sync on flush; do not grow this with per-row payloads.
   status text NOT NULL CHECK (status IN ('pending', 'active', 'compacted', 'deleted')),
   manifest_etag text,
   created_xid xid,
@@ -185,16 +190,25 @@ CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx
   ON koldstore.cold_segments (table_oid, scope_key, min_commit_seq, max_commit_seq)
   WHERE status = 'active';
 
-CREATE TABLE IF NOT EXISTS koldstore.cold_pk_hints (
+CREATE TABLE IF NOT EXISTS koldstore.cold_segment_stats (
+  segment_id uuid NOT NULL REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,
   table_oid oid NOT NULL,
   scope_key text NOT NULL DEFAULT '',
-  pk_hash bytea NOT NULL,
-  segment_id uuid NOT NULL REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,
-  hint_kind text NOT NULL CHECK (hint_kind IN ('exact', 'bloom', 'range')),
-  latest_seq bigint NOT NULL,
-  latest_commit_seq bigint NOT NULL,
-  PRIMARY KEY (table_oid, scope_key, pk_hash, segment_id)
+  column_name name NOT NULL,
+  type_oid oid NOT NULL,
+  min_value bytea,
+  max_value bytea,
+  null_count bigint,
+  distinct_count bigint,
+  PRIMARY KEY (segment_id, column_name)
 );
+
+CREATE INDEX IF NOT EXISTS cold_segment_stats_lookup_idx
+  ON koldstore.cold_segment_stats (table_oid, scope_key, column_name, segment_id);
+
+-- NOTE: Do not add per-PK catalog tables (e.g. exact cold_pk_hints). Cold
+-- presence is discovered via cold_segment_stats / Parquet stats+bloom so catalog
+-- size stays O(segments × indexed columns), not O(flushed rows).
 
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_seq AS bigint;
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_commit_seq AS bigint;
@@ -229,11 +243,17 @@ AS $$
 BEGIN
   -- Used by commit-time counter flush and maintenance paths. DML capture triggers should call
   -- koldstore.internal_record_row_count_delta instead (in-memory, no per-row manifest IO).
+  -- After a successful flush (`in_sync`), subsequent DML dirties the catalog sync_state to
+  -- `pending_write` so operators and flush eligibility see hot changes.
   PERFORM koldstore.internal_ensure_manifest_row(p_table_oid);
   UPDATE koldstore.manifest
   SET
     hot_row_count = GREATEST(0, hot_row_count + p_hot_delta),
     mirror_row_count = GREATEST(0, mirror_row_count + p_mirror_delta),
+    sync_state = CASE
+      WHEN sync_state = 'in_sync' THEN 'pending_write'
+      ELSE sync_state
+    END,
     updated_at = now()
   WHERE table_oid = p_table_oid
     AND scope_key = '';
@@ -292,5 +312,5 @@ REVOKE ALL ON
   koldstore.manifest,
   koldstore.jobs,
   koldstore.cold_segments,
-  koldstore.cold_pk_hints
+  koldstore.cold_segment_stats
 FROM PUBLIC;

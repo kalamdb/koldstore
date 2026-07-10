@@ -290,7 +290,7 @@ pub async fn manage_user_scoped_with_policy(
     storage_name: &str,
     relation: &str,
     scope_column: &str,
-    order_column: &str,
+    migration_order_by: &str,
     hot_row_limit: i64,
     min_flush_rows: i64,
     max_rows_per_file: i64,
@@ -306,7 +306,7 @@ pub async fn manage_user_scoped_with_policy(
               max_rows_per_file => $5,
               table_type        => 'user',
               scope_column      => $6,
-              order_column      => $7
+              migration_order_by => $7
             )
             "#,
             &[
@@ -316,7 +316,7 @@ pub async fn manage_user_scoped_with_policy(
                 &min_flush_rows,
                 &max_rows_per_file,
                 &scope_column,
-                &order_column,
+                &migration_order_by,
             ],
         )
         .await?;
@@ -952,7 +952,7 @@ fn log_merge_scan_profile(id: i64, plan: &str) {
                 parquet_rows += rows;
             }
         }
-        if let Some(ms_part) = parts.iter().find(|part| part.ends_with(" ms")) {
+        if let Some(ms_part) = parts.iter().rev().find(|part| part.ends_with(" ms")) {
             if let Ok(ms) = ms_part.trim_end_matches(" ms").parse::<f64>() {
                 parquet_ms += ms;
             }

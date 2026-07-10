@@ -191,3 +191,289 @@ fn segment_column_stats_pruning_scans_when_metadata_is_missing_or_incomparable()
     assert!(RowGroupPruner.segment_column_may_overlap(&stats, "missing", &json!(30), &json!(40)));
     assert!(RowGroupPruner.segment_column_may_overlap(&stats, "score", &json!("30"), &json!("40")));
 }
+
+#[test]
+fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
+    use std::sync::Arc;
+
+    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use koldstore_parquet::{
+        read_clean_cold_rows_with_options, select_row_groups_for_pk_values, ParquetSegmentWriter,
+        PgColumn, PgType, WriterOptions,
+    };
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pk-prune.parquet");
+
+    // Three row groups of 2 ids each: [1,2], [3,4], [5,6].
+    let ids = vec![1_i64, 2, 3, 4, 5, 6];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("deleted", DataType::Boolean, false),
+        Field::new("schema_version", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(BooleanArray::from(vec![false; ids.len()])),
+            Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
+        ],
+    )
+    .unwrap();
+
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 2,
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "seq"])
+        .with_bloom_filter_columns(["id"]),
+    );
+    let file = std::fs::File::create(&path).unwrap();
+    let metadata = writer
+        .write_record_batches(file, schema, vec![batch])
+        .unwrap();
+    assert_eq!(metadata.num_row_groups(), 3);
+
+    let decision = select_row_groups_for_pk_values(&path, "id", &["4".to_string()]).unwrap();
+    assert_eq!(
+        decision.selected_row_groups,
+        vec![1],
+        "id=4 should keep only the middle row group"
+    );
+    assert_eq!(decision.skipped_row_groups, 2);
+
+    let columns = vec![PgColumn::new("id", PgType::Int8, false)];
+    let rows = read_clean_cold_rows_with_options(
+        &path,
+        &columns,
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_pk_values("id", ["4"]),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pk_json["id"], json!(4));
+}
+
+#[test]
+fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
+    use std::sync::Arc;
+
+    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use koldstore_parquet::{
+        read_clean_cold_rows_from_object_store, ParquetSegmentWriter, PgColumn, PgType,
+        WriterOptions,
+    };
+    use koldstore_storage::{ObjectStoreClient, StorageClient};
+
+    let ids = vec![1_i64, 2, 3, 4, 5, 6];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("deleted", DataType::Boolean, false),
+        Field::new("schema_version", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(BooleanArray::from(vec![false; ids.len()])),
+            Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
+        ],
+    )
+    .unwrap();
+
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 2,
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "seq"])
+        .with_bloom_filter_columns(["id"]),
+    );
+    let mut encoded = Vec::new();
+    writer
+        .write_record_batches(&mut encoded, schema, vec![batch])
+        .unwrap();
+
+    let client = ObjectStoreClient::in_memory();
+    let key = "segments/pk-prune.parquet";
+    client
+        .put(key, &encoded, koldstore_storage::PutPrecondition::Overwrite)
+        .unwrap();
+
+    let columns = vec![PgColumn::new("id", PgType::Int8, false)];
+    let rows = read_clean_cold_rows_from_object_store(
+        client.store(),
+        key,
+        &columns,
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_pk_values("id", ["4"]),
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pk_json["id"], json!(4));
+}
+#[test]
+fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
+    use std::sync::Arc;
+
+    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use koldstore_parquet::{
+        read_clean_cold_rows_from_object_store_with_stats, ObjectStoreReadStats,
+        ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
+    };
+    use koldstore_storage::{ObjectStoreClient, StorageClient};
+
+    let ids = vec![1_i64, 2, 3, 4, 5, 6];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("deleted", DataType::Boolean, false),
+        Field::new("schema_version", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(BooleanArray::from(vec![false; ids.len()])),
+            Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
+        ],
+    )
+    .unwrap();
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 2,
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "seq"])
+        .with_bloom_filter_columns(["id"]),
+    );
+    let mut encoded = Vec::new();
+    writer
+        .write_record_batches(&mut encoded, schema, vec![batch])
+        .unwrap();
+    let file_size = encoded.len() as u64;
+
+    let client = ObjectStoreClient::in_memory();
+    let key = "segments/pk-prune-stats.parquet";
+    client
+        .put(key, &encoded, koldstore_storage::PutPrecondition::Overwrite)
+        .unwrap();
+
+    let io = Arc::new(ObjectStoreReadStats::default());
+    let columns = vec![PgColumn::new("id", PgType::Int8, false)];
+    let rows = read_clean_cold_rows_from_object_store_with_stats(
+        client.store(),
+        key,
+        Some(file_size),
+        Some(Arc::clone(&io)),
+        &columns,
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_pk_values("id", ["4"]),
+    )
+    .unwrap()
+    .0;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pk_json["id"], json!(4));
+
+    let (range_calls, bytes_read) = io.snapshot();
+    assert!(
+        range_calls >= 1,
+        "footer/column data must go through ObjectStore range APIs"
+    );
+    assert!(
+        bytes_read < file_size,
+        "range reads ({bytes_read}) must be strictly less than full file ({file_size}); \
+         min/max prune should skip other row groups without downloading them"
+    );
+}
+
+#[test]
+fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
+    use std::sync::Arc;
+
+    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use koldstore_parquet::{
+        read_clean_cold_rows_from_object_store_with_size, BloomPruneMode, ParquetSegmentWriter,
+        PgColumn, PgType, WriterOptions,
+    };
+    use koldstore_storage::{ObjectStoreClient, StorageClient};
+
+    let ids = vec![1_i64, 2, 3, 4, 5, 6];
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("deleted", DataType::Boolean, false),
+        Field::new("schema_version", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(BooleanArray::from(vec![false; ids.len()])),
+            Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
+        ],
+    )
+    .unwrap();
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 2,
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "seq"])
+        .with_bloom_filter_columns(["id"]),
+    );
+    let mut encoded = Vec::new();
+    writer
+        .write_record_batches(&mut encoded, schema, vec![batch])
+        .unwrap();
+    let file_size = encoded.len() as u64;
+    let client = ObjectStoreClient::in_memory();
+    let key = "segments/profile.parquet";
+    client
+        .put(key, &encoded, koldstore_storage::PutPrecondition::Overwrite)
+        .unwrap();
+
+    let (_rows, profile) = read_clean_cold_rows_from_object_store_with_size(
+        client.store(),
+        key,
+        Some(file_size),
+        &[PgColumn::new("id", PgType::Int8, false)],
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_pk_values("id", ["4"]),
+    )
+    .unwrap();
+
+    assert!(profile.footer_first);
+    assert_eq!(profile.row_groups_total, 3);
+    assert_eq!(profile.row_groups_selected, vec![1]);
+    assert_eq!(profile.row_groups_skipped, 2);
+    assert!(profile.stats_pruned);
+    assert_eq!(profile.bloom, BloomPruneMode::SkippedAfterStats);
+    assert_eq!(profile.bloom_filters_fetched, 0);
+    assert!(profile.bytes_read < file_size);
+    assert!(profile.format_io_summary().contains("footer-first"));
+    assert!(profile.format_row_groups_summary().contains("selected=[1]"));
+    assert!(profile
+        .format_bloom_summary()
+        .contains("skipped_after_stats"));
+}

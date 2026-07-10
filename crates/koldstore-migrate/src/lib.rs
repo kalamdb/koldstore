@@ -8,8 +8,6 @@
 pub mod backfill;
 #[path = "sql/capture.rs"]
 pub mod capture;
-#[path = "validation/constraints.rs"]
-pub mod constraints;
 #[path = "workflow/drop_table.rs"]
 pub mod drop_table;
 #[path = "catalog/introspection.rs"]
@@ -19,8 +17,6 @@ pub mod jobs;
 pub mod lock;
 #[path = "sql/mirror.rs"]
 pub mod mirror;
-#[path = "validation/order.rs"]
-pub mod order;
 #[path = "workflow/plan.rs"]
 pub mod plan;
 #[path = "catalog/refresh.rs"]
@@ -35,6 +31,9 @@ pub mod request;
 pub mod rollback;
 #[path = "security/scope.rs"]
 pub mod scope;
+pub mod validation;
+
+pub use validation::{constraints, manage_table, order};
 
 pub use capture::{
     plan_mirror_capture, plan_mirror_capture_teardown, MirrorCaptureError, MirrorCapturePlan,
@@ -54,7 +53,7 @@ pub use plan::{
     ExistingTableCatalog, ExistingTableMigrationPlan, MigrationTableContext,
 };
 pub use refresh::{
-    plan_schema_refresh, registration_metadata_for_refresh, ActiveSchemaRefreshContext,
-    SchemaRefreshPlan,
+    plan_active_schema_refresh_context_json, plan_schema_refresh,
+    registration_metadata_for_refresh, ActiveSchemaRefreshContext, SchemaRefreshPlan,
 };
 pub use request::{DemigrateTableRequest, MigrateTableRequest, MigrationError, MigrationResult};

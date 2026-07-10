@@ -1,6 +1,15 @@
 //! Managed-table snapshot shapes for catalog caching.
+//!
+//! Runtime snapshots are assembled from `koldstore.schemas` rows. Schema
+//! registry *writes* stay in `koldstore-migrate`; this module owns the
+//! PG-free decode + in-process cache shape used by `pg_koldstore`.
+
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use koldstore_common::TableName;
+use koldstore_schema::MirrorInitializationState;
+use serde::Deserialize;
 
 /// Stable table-shape metadata for one managed table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,7 +21,7 @@ pub struct ManagedTableSnapshot {
     /// Whether this schema entry is active.
     pub active: bool,
     /// Mirror initialization state.
-    pub initialization_state: String,
+    pub initialization_state: MirrorInitializationState,
     /// Active change-log mirror relation.
     pub mirror_relation: TableName,
     /// Preserved primary-key columns.
@@ -24,20 +33,28 @@ pub struct ManagedTableSnapshot {
 }
 
 /// In-process cache keyed by table OID.
+///
+/// Entries are stored behind [`Arc`] so cache hits can share ownership without
+/// cloning the full snapshot on every lookup.
 #[derive(Debug, Default)]
 pub struct ManagedTableSnapshotCache {
-    entries: std::collections::HashMap<u32, ManagedTableSnapshot>,
+    entries: HashMap<u32, Arc<ManagedTableSnapshot>>,
 }
 
 impl ManagedTableSnapshotCache {
-    /// Returns a cached snapshot when present.
+    /// Returns a shared snapshot when present.
     #[must_use]
-    pub fn get(&self, table_oid: u32) -> Option<&ManagedTableSnapshot> {
-        self.entries.get(&table_oid)
+    pub fn get(&self, table_oid: u32) -> Option<Arc<ManagedTableSnapshot>> {
+        self.entries.get(&table_oid).cloned()
     }
 
     /// Stores or replaces a snapshot for a table OID.
     pub fn insert(&mut self, snapshot: ManagedTableSnapshot) {
+        self.entries.insert(snapshot.table_oid, Arc::new(snapshot));
+    }
+
+    /// Stores an already-shared snapshot.
+    pub fn insert_shared(&mut self, snapshot: Arc<ManagedTableSnapshot>) {
         self.entries.insert(snapshot.table_oid, snapshot);
     }
 
@@ -52,6 +69,20 @@ impl ManagedTableSnapshotCache {
     }
 }
 
+/// Decodes a stable managed-table snapshot from catalog JSON text.
+///
+/// Prefer this over [`decode_managed_table_snapshot`] when the SPI payload is
+/// already a JSON string — it avoids an intermediate `Value` clone.
+///
+/// # Errors
+///
+/// Returns an error when required fields are missing or invalid.
+pub fn decode_managed_table_snapshot_str(json: &str) -> Result<ManagedTableSnapshot, String> {
+    let wire: ManagedTableSnapshotWire =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    wire.try_into()
+}
+
 /// Decodes a stable managed-table snapshot from catalog JSON.
 ///
 /// # Errors
@@ -61,16 +92,16 @@ pub fn decode_managed_table_snapshot(
     value: &serde_json::Value,
 ) -> Result<ManagedTableSnapshot, String> {
     let wire: ManagedTableSnapshotWire =
-        serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        ManagedTableSnapshotWire::deserialize(value).map_err(|error| error.to_string())?;
     wire.try_into()
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Deserialize)]
 struct ManagedTableSnapshotWire {
     table_oid: i64,
     schema_version: i64,
     active: bool,
-    initialization_state: String,
+    initialization_state: MirrorInitializationState,
     mirror_relation: String,
     primary_key: Vec<String>,
     primary_key_shape: serde_json::Value,

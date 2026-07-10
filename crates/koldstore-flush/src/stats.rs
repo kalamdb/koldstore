@@ -1,9 +1,15 @@
-//! Flush statistics types.
+//! Flush statistics types and pure selection helpers.
 //!
 //! Row/seq bounds for one flush attempt. Policy selection prefers O(1) manifest
 //! counters plus an index-backed max-seq cutoff; force flush still uses mirror
-//! aggregates (see `koldstore-mirror::read` and
-//! `pg_koldstore::sql::flush::spi::resolve_flush_stats`).
+//! aggregates. SPI adapters in `pg_koldstore` supply the inputs.
+
+use koldstore_common::{FlushPolicy, MirrorOperation};
+
+use crate::policy::policy_flush_row_count;
+
+/// Cap for force-flush tombstone-only selection.
+pub const FORCE_TOMBSTONE_ONLY_CAP: i64 = 4_096;
 
 /// Aggregated mirror sequence bounds selected for one flush attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +65,21 @@ impl FlushStats {
             max_commit_seq: batch.max_seq,
         })
     }
+
+    /// Derives flush stats from one fully encoded segment chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the row count does not fit in `i64`.
+    pub fn from_write_chunk(chunk: &crate::write::FlushWriteChunk) -> Result<Self, String> {
+        Ok(Self {
+            row_count: i64::try_from(chunk.row_count).map_err(|error| error.to_string())?,
+            min_seq: chunk.min_seq,
+            max_seq: chunk.max_seq,
+            min_commit_seq: chunk.min_seq,
+            max_commit_seq: chunk.max_seq,
+        })
+    }
 }
 
 /// Resolved flush selection including optional mirror-op filters.
@@ -79,6 +100,58 @@ impl ResolvedFlushSelection {
             mirror_ops: None,
         }
     }
+}
+
+/// Resolves a normal (non-force) flush selection from policy math and cutoff.
+#[must_use]
+pub fn resolve_policy_flush_selection(
+    pending_rows: i64,
+    policy: Option<&FlushPolicy>,
+    cutoff: Option<(i64, i64)>,
+    full_mirror: FlushStats,
+) -> ResolvedFlushSelection {
+    if pending_rows == 0 {
+        return ResolvedFlushSelection::new(FlushStats::empty());
+    }
+    let Some(policy) = policy else {
+        return ResolvedFlushSelection::new(full_mirror);
+    };
+    let flush_count = policy_flush_row_count(pending_rows, policy);
+    if flush_count == 0 {
+        return ResolvedFlushSelection::new(FlushStats::empty());
+    }
+    let Some((selected_count, max_seq)) = cutoff else {
+        return ResolvedFlushSelection::new(FlushStats::empty());
+    };
+    if selected_count == 0 || max_seq == 0 {
+        return ResolvedFlushSelection::new(FlushStats::empty());
+    }
+    ResolvedFlushSelection::new(FlushStats {
+        row_count: selected_count,
+        min_seq: 0,
+        max_seq,
+        min_commit_seq: 0,
+        max_commit_seq: max_seq,
+    })
+}
+
+/// Resolves force-flush selection, preferring a small tombstone-only batch.
+#[must_use]
+pub fn resolve_force_flush_selection(
+    all: FlushStats,
+    delete_stats: FlushStats,
+) -> ResolvedFlushSelection {
+    if all.row_count == 0 {
+        return ResolvedFlushSelection::new(all);
+    }
+    let delete_code = MirrorOperation::Delete.code();
+    if delete_stats.row_count > 0 && delete_stats.row_count <= FORCE_TOMBSTONE_ONLY_CAP {
+        return ResolvedFlushSelection {
+            stats: delete_stats,
+            mirror_ops: Some(vec![delete_code]),
+        };
+    }
+    ResolvedFlushSelection::new(all)
 }
 
 /// Validates that flush row selection matches resolved stats.

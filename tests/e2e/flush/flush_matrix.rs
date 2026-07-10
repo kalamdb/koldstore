@@ -26,7 +26,7 @@ fn flush_matrix_covers_flush_manifest_metadata_and_hot_cleanup() {
         "batch-0.parquet",
         "manifest.json",
         "koldstore.cold_segments",
-        "koldstore.cold_pk_hints",
+        "koldstore.cold_segment_stats",
         "hot cleanup after manifest commit",
     ];
 
@@ -34,7 +34,7 @@ fn flush_matrix_covers_flush_manifest_metadata_and_hot_cleanup() {
         "koldstore.flush_table",
         "manifest.json",
         "koldstore.cold_segments",
-        "koldstore.cold_pk_hints",
+        "koldstore.cold_segment_stats",
         "hot cleanup after manifest commit",
     ] {
         assert!(workflow.contains(&required_step));

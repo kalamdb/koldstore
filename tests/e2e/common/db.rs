@@ -142,7 +142,7 @@ impl TestDb {
     /// # Errors
     ///
     /// Returns an error when management fails.
-    pub async fn manage_shared(&self, relation: &str, order_column: &str) -> Result<()> {
+    pub async fn manage_shared(&self, relation: &str, migration_order_by: &str) -> Result<()> {
         self.client
             .execute(
                 r#"
@@ -150,10 +150,10 @@ impl TestDb {
                   table_name     => $1::text::regclass,
                   storage        => $2,
                   hot_row_limit  => NULL,
-                  order_column   => $3
+                  migration_order_by => $3
                 )
                 "#,
-                &[&relation, &self.storage_name, &order_column],
+                &[&relation, &self.storage_name, &migration_order_by],
             )
             .await?;
         catalog::assert_system_columns_absent(&self.client, relation).await?;
@@ -184,7 +184,7 @@ impl TestDb {
                   hot_row_limit  => NULL,
                   table_type     => 'user',
                   scope_column   => $3,
-                  order_column   => 'id'
+                  migration_order_by => 'id'
                 )
                 "#,
                 &[&relation, &self.storage_name, &scope_column],

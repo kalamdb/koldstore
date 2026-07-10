@@ -38,4 +38,9 @@ fn mirror_initialization_state_serializes_as_schema_value() {
     let value = serde_json::to_value(MirrorInitializationState::Capturing).unwrap();
 
     assert_eq!(value, serde_json::json!("capturing"));
+    assert_eq!(MirrorInitializationState::Complete.as_str(), "complete");
+    assert_eq!(
+        MirrorInitializationState::parse("capturing"),
+        Some(MirrorInitializationState::Capturing)
+    );
 }

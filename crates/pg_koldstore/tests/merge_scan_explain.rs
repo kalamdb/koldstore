@@ -71,6 +71,7 @@ fn merge_scan_plan_serializes_complete_custom_private_payload() {
             min_seq: SeqId::new(10).unwrap(),
             max_seq: SeqId::new(30).unwrap(),
         }],
+        overlay_strategy: Default::default(),
     };
 
     let encoded = plan.serialize().unwrap();

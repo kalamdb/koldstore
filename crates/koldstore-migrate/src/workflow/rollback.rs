@@ -99,7 +99,6 @@ impl RollbackCleanup {
         }
 
         for sql in [
-            "DELETE FROM koldstore.cold_pk_hints WHERE table_oid = $1",
             "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1",
             "DELETE FROM koldstore.schemas WHERE table_oid = $1",

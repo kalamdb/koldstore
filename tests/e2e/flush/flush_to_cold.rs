@@ -5,14 +5,12 @@ use anyhow::Result;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 
 #[test]
-fn flush_to_cold_plan_writes_parquet_manifest_segments_and_pk_hints() {
+fn flush_to_cold_plan_writes_parquet_manifest_and_segments() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
     use koldstore_common::{CommitSeq, ScopeKey, SeqId, StablePkHash};
-    use koldstore_flush::job::{
-        plan_cold_pk_hint_updates, plan_cold_segment_insert, FlushBatchInput, HotRowCandidate,
-    };
+    use koldstore_flush::job::{plan_cold_segment_insert, FlushBatchInput, HotRowCandidate};
     use koldstore_parquet::{ColumnStats, SegmentFooterMetadata};
     use serde_json::json;
 
@@ -59,12 +57,6 @@ fn flush_to_cold_plan_writes_parquet_manifest_segments_and_pk_hints() {
         "manifest-etag-1",
     )
     .unwrap();
-    let hints = plan_cold_pk_hint_updates(
-        42,
-        Some(ScopeKey::new("tenant-a").unwrap()),
-        &batch,
-        "exact",
-    );
 
     assert_eq!(batch.live_rows, 2);
     assert_eq!(batch.tombstones_retained, 1);
@@ -74,11 +66,6 @@ fn flush_to_cold_plan_writes_parquet_manifest_segments_and_pk_hints() {
     assert_eq!(segment.scope_key.as_ref().unwrap().as_str(), "tenant-a");
     assert_eq!(segment.min_seq.get(), 1);
     assert_eq!(segment.max_commit_seq.get(), 12);
-    assert_eq!(hints.len(), 2);
-    assert!(hints.iter().all(|hint| hint.hint_kind == "exact"));
-    assert!(hints
-        .iter()
-        .all(|hint| hint.scope_key.as_ref().unwrap().as_str() == "tenant-a"));
 }
 
 #[tokio::test]

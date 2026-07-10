@@ -1,8 +1,11 @@
 //! Storage contracts for clean-schema change-log mirror tables.
 //!
-//! This crate owns the low-level mirror table API: relation naming, metadata
-//! columns, table DDL, and primitive read/write SQL fragments. PostgreSQL
-//! execution and higher-level workflows stay in `pg_koldstore`.
+//! Owns the low-level `__cl` mirror table API: relation naming, metadata
+//! columns, table DDL, and primitive read/write SQL fragments. Keep separate
+//! from `koldstore-catalog`: catalog resolves *which* mirror a managed table
+//! uses; this crate builds SQL *against* that mirror. Must stay a
+//! `koldstore-common`-only leaf so migrate/merge do not pull cold bookkeeping.
+//! PostgreSQL execution stays in `pg_koldstore`.
 
 pub mod columns;
 pub mod error;

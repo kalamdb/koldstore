@@ -42,10 +42,6 @@ fn flush_recovery_plan_deletes_orphan_temp_and_quarantines_unmanifested_final() 
 
 #[tokio::test]
 async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() -> Result<()> {
-    use koldstore_flush::recovery::{
-        plan_recovery_actions, ObjectPath, OrphanObject, RecoveryAction,
-    };
-
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "flush_recovery").await?;
         let table = db.create_indexed_items_table("recovery_items", 24).await?;
@@ -67,24 +63,51 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
                 &[&table.relation],
             )
             .await?;
-        let manifested_segment = manifest_row.get::<_, String>(1);
-        let orphan_temp = format!("{}/.tmp/writer/orphan.parquet.tmp", db.schema);
-        let orphan_final = format!("{}/orphan-final.parquet", db.schema);
+        let manifest_path = manifest_row.get::<_, String>(0);
+        let table_prefix = std::path::Path::new(&manifest_path)
+            .parent()
+            .expect("manifest path has table prefix")
+            .to_string_lossy();
+        let orphan_temp = format!("{table_prefix}/.tmp/writer/orphan.parquet.tmp");
+        let orphan_final = format!("{table_prefix}/orphan-final.parquet");
         if let Some(parent) = db.storage_root.join(&orphan_temp).parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(db.storage_root.join(&orphan_temp), b"temp")?;
         std::fs::write(db.storage_root.join(&orphan_final), b"final")?;
 
-        let plan = plan_recovery_actions([
-            OrphanObject::new(ObjectPath::parse(&orphan_temp)?, false),
-            OrphanObject::new(ObjectPath::parse(&orphan_final)?, false),
-            OrphanObject::new(ObjectPath::parse(&manifested_segment)?, true),
-        ]);
+        let dry_run: i64 = db
+            .client
+            .query_one(
+                "SELECT koldstore.recover_segments($1::text::regclass, true)",
+                &[&table.relation],
+            )
+            .await?
+            .get(0);
+        assert_eq!(dry_run, 2);
+        assert!(db.storage_root.join(&orphan_temp).exists());
+        assert!(db.storage_root.join(&orphan_final).exists());
 
-        assert_eq!(plan.actions.len(), 2);
-        assert_eq!(plan.actions[0].action, RecoveryAction::DeleteTemp);
-        assert_eq!(plan.actions[1].action, RecoveryAction::QuarantineFinal);
+        let recovered: i64 = db
+            .client
+            .query_one(
+                "SELECT koldstore.recover_segments($1::text::regclass, false)",
+                &[&table.relation],
+            )
+            .await?
+            .get(0);
+        assert_eq!(recovered, 2);
+        assert!(!db.storage_root.join(&orphan_temp).exists());
+        assert!(!db.storage_root.join(&orphan_final).exists());
+        let quarantine_prefix = "orphan-final.parquet.quarantine.";
+        assert!(
+            std::fs::read_dir(db.storage_root.join(table_prefix.as_ref()))?
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(quarantine_prefix))
+        );
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
     }
 

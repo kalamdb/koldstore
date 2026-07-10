@@ -68,9 +68,9 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | GUC | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `koldstore.user_id` | string | empty | Active user-scope id for user-scoped managed tables. Required for scoped reads and writes. |
-| `koldstore.cold_reads` | string | `auto` | `auto`, `on`, or `off`. `off` fails cold scans when active cold segments are required. |
-| `koldstore.enable_merge_scan` | bool | `on` | Allows the planner to replace managed-table heap scans with `KoldMergeScan`. |
-| `koldstore.max_open_parquet_readers` | int | `32` | Global advisory-lock slot count for Parquet readers opened by cold scans. Clamped to `1..=1024`. |
+| `koldstore.cold_reads` | string | `auto` | `auto`: cold eligible by catalog/cost; `on`: cold eligible without forcing unnecessary object reads; `off`: hot-only and ERROR when correctness requires cold segments. |
+| `koldstore.enable_merge_scan` | bool | `on` | Required for managed-table SELECT. When `off`, `KoldMergeScan` errors at execution instead of allowing an incorrect heap-only read. |
+| `koldstore.max_open_parquet_readers` | int | `32` | Per-backend open Parquet reader cap for cold scans (fail-fast when exceeded). Clamped to `1..=1024`. |
 | `koldstore.max_running_jobs` | int | `4` | Maximum concurrently claimed KoldStore jobs. Clamped to `1..=1024`. |
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
@@ -166,14 +166,17 @@ SELECT koldstore.manage_table(
   storage           => 's3_archive',
   hot_row_limit     => 10000,
   min_flush_rows    => 1000,
-  max_rows_per_file => 1000
+  max_rows_per_file => 1000,
+  target_file_size_mb => 256,
+  migration_order_by  => 'created_at'
 );
 ```
 
 Registers a heap table for KoldStore management with structured flush settings.
 `hot_row_limit` is required in the call (pass `NULL` for hot-only tables).
-`table_type` defaults to `shared`; optional `scope_column`, `order_column`, and
-`compression` arguments are also available.
+`table_type` defaults to `shared`; optional `scope_column`,
+`migration_order_by`, `compression`, and `target_file_size_mb` arguments are
+also available.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
@@ -184,8 +187,9 @@ Registers a heap table for KoldStore management with structured flush settings.
 | `max_rows_per_file` | `1000` | Maximum rows written into one Parquet segment per flush batch (minimum `1000` unless lowered via `koldstore.min_max_rows_per_file`) |
 | `table_type` | `'shared'` | `shared` or `user` |
 | `scope_column` | `NULL` | Required when `table_type => 'user'` |
-| `order_column` | `NULL` | Optional column used for migrate ordering hints |
+| `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
 | `compression` | `NULL` | Optional Parquet compression name |
+| `target_file_size_mb` | `NULL` | Optional target Parquet segment size in MiB; stored for future size-aware flushing |
 
 Non-forced flush selection keeps the newest rows hot by mirror `seq` and always
 flushes the oldest eligible excess first. Example with `hot_row_limit = 10000`
@@ -252,24 +256,28 @@ partitioning uses the managed table's `scope_column` and session
 SELECT koldstore.flush_table(
   table_name => 'chat.messages'
 );
+
+SELECT koldstore.flush_table(
+  table_name => 'chat.messages',
+  force      => true
+);
 ```
 
 Ensures a flush job exists, runs the current flush path synchronously, and
 returns the job id. Progress is visible in `koldstore.jobs` and
 `koldstore.describe_table(...)`.
 
-Row selection behavior:
+`force` defaults to `false`. Row selection behavior:
 
-- If the pending/running job payload has `force = true`, all pending mirror rows
-  are flushed.
+- If `force => true` is passed, or the pending/running job payload has
+  `force = true`, all pending mirror rows are flushed.
 - Otherwise, when a table flush policy is configured, only policy-selected rows
   are flushed. Tables managed through `manage_table` honor `hot_row_limit`,
   `min_flush_rows`, and `max_rows_per_file`.
 - When no flush policy is configured, all pending mirror rows are flushed.
 
-`flush_table` does not currently expose a SQL `force` argument. Use
-`enqueue_flush_job(..., force => true)` before `flush_table`, or call
-`flush_table` directly on tables without a policy.
+`enqueue_flush_job(..., force => true)` remains available when enqueueing and
+executing the flush are intentionally separate operations.
 
 ### `koldstore.describe_table`
 
@@ -277,10 +285,79 @@ Row selection behavior:
 SELECT koldstore.describe_table(
   table_name => 'chat.messages'
 );
+
+SELECT jsonb_pretty(koldstore.describe_table(table_name => 'chat.messages'));
 ```
 
 Returns managed-table storage, mirror, cold-segment, manifest, and recent job
 state as JSONB. Counters are table-wide across scopes.
+
+Sample result after a small flush:
+
+```json
+{
+  "jobs": [
+    {
+      "id": "e30eb374-a9db-4ff1-97d3-72f8511dfc60",
+      "phase": "finished",
+      "status": "completed",
+      "job_type": "flush",
+      "updated_at": "2026-07-07T16:56:10.123456+03:00",
+      "rows_flushed": 12,
+      "checkpoint_seq": 332882280212668416,
+      "rows_processed": 12,
+      "checkpoint_commit_seq": 332882280212668416
+    },
+    {
+      "id": "2c2bcf44-d6ea-4b3e-b62c-cfaf18ad5225",
+      "phase": "finished",
+      "status": "completed",
+      "job_type": "migrate_backfill",
+      "updated_at": "2026-07-07T16:56:09.987654+03:00",
+      "rows_flushed": 0,
+      "checkpoint_seq": 0,
+      "rows_processed": 1012,
+      "checkpoint_commit_seq": 0
+    }
+  ],
+  "hot_rows": 1000,
+  "mirror_rows": 1000,
+  "cold_row_count": 12,
+  "cold_segment_count": 1,
+  "heap_size_bytes": 442368,
+  "table_size_bytes": 606208,
+  "index_size_bytes": 16384,
+  "manifest_state": "in_sync",
+  "manifest_max_seq": 332882280212668416,
+  "pending_jobs": 0,
+  "storage_binding": "4a3b2ab3-5ea8-4761-9e37-1a2f98b128e4",
+  "last_error": null
+}
+```
+
+Fields operators watch most often:
+
+| Field                | Meaning                                         |
+| -------------------- | ----------------------------------------------- |
+| `hot_rows`           | Rows still present in the PostgreSQL heap       |
+| `mirror_rows`        | Primary keys tracked in the `__cl` mirror       |
+| `cold_row_count`     | Rows already copied to active cold segments     |
+| `cold_segment_count` | Active Parquet segment count                    |
+| `manifest_state`     | `in_sync` means catalog and manifest agree      |
+| `manifest_max_seq`   | Highest mirror `seq` represented in cold data   |
+| `pending_jobs`       | Pending or running KoldStore jobs for the table |
+| `jobs`               | Recent job ids, phases, and progress counters   |
+| `last_error`         | Last manifest or storage error, if any          |
+
+For job-level progress, inspect `koldstore.jobs`:
+
+```sql
+SELECT job_type, status, phase, rows_processed, rows_flushed, error_trace
+FROM koldstore.jobs
+WHERE table_oid = 'chat.messages'::regclass
+ORDER BY created_at DESC
+LIMIT 5;
+```
 
 ### `koldstore.recover_segments`
 

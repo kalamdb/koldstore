@@ -1,9 +1,12 @@
 //! Active schema refresh planning for managed tables.
+//!
+//! Owns the migration-only schema refresh **read** planner and registration
+//! metadata assembly. Cross-runtime catalog reads stay in `koldstore-catalog`.
 
 use serde::Deserialize;
 use uuid::Uuid;
 
-use koldstore_common::{PrimaryKeyShape, SqlStatement};
+use koldstore_common::{PrimaryKeyShape, SqlParamType, SqlResult, SqlStatement};
 use koldstore_schema::{MirrorInitializationState, SchemaColumn};
 
 use crate::plan::ExistingTableCatalog;
@@ -12,6 +15,37 @@ use crate::register::{
     RegistrationMetadata, RegistryError, RegistryResult, SchemaRegistryPlan,
 };
 use crate::rehydrate::plan_catalog_deactivation;
+
+/// Builds the active managed-schema refresh context lookup.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_active_schema_refresh_context_json() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve active schema refresh context",
+        r#"
+SELECT jsonb_build_object(
+    'version', version,
+    'table_type', table_type,
+    'storage_id', storage_id::text,
+    'scope_column', scope_column,
+    'mirror_relation', mirror_relation::text,
+    'primary_key', primary_key,
+    'columns', columns,
+    'indexed_columns', indexed_columns,
+    'options', options
+)::text
+FROM koldstore.schemas
+WHERE table_oid = $1::oid
+  AND active
+  AND initialization_state = 'complete'
+ORDER BY version DESC
+LIMIT 1
+"#,
+        [SqlParamType::Oid],
+    )
+}
 
 /// Active schema row loaded before refresh planning.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -57,6 +91,7 @@ pub fn registration_metadata_for_refresh(
     catalog: &ExistingTableCatalog,
     primary_key_shape: &PrimaryKeyShape,
 ) -> RegistrationMetadata {
+    let columns = schema_columns_from_catalog(&catalog.columns);
     RegistrationMetadata {
         table_oid,
         table_type: active.table_type.clone(),
@@ -67,9 +102,9 @@ pub fn registration_metadata_for_refresh(
         initialization_state: MirrorInitializationState::Complete,
         active: true,
         primary_key: catalog.primary_key.columns.clone(),
-        columns: schema_columns_from_catalog(&catalog.columns),
+        type_matrix: capture_type_matrix(&columns),
+        columns,
         indexed_columns: catalog.indexed_columns.clone(),
-        type_matrix: capture_type_matrix(&schema_columns_from_catalog(&catalog.columns)),
         options: serde_json::from_value(active.options.clone()).unwrap_or_default(),
     }
 }

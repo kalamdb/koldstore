@@ -7,9 +7,11 @@ repository.workspace = true
 
 [dependencies]
 chrono.workspace = true
+koldstore-catalog.workspace = true
 koldstore-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

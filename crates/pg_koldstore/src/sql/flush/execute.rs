@@ -3,18 +3,22 @@
 //! Owns PostgreSQL-specific job locking and SPI wiring. Flush workflow logic
 //! lives in `koldstore-flush`.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
 use koldstore_catalog::ManagedTableSnapshot;
 use koldstore_common::{dedupe_nonblank, QualifiedTableName};
 use koldstore_flush::{
-    load_manifest_from_path, manifest_paths, max_rows_per_file_from_policy,
-    plan_apply_flush_row_count_deltas, stream_flush_chunks, validate_flush_row_selection,
-    write_flush_segment_file, write_manifest_to_path, FlushStats, FlushWriteChunk,
-    ResolvedFlushSelection, StreamEncodeInput, TableFlushBatchOutcome, TableFlushPreparedContext,
-    WrittenFlushSegment,
+    manifest_paths, max_rows_per_file_from_policy, plan_apply_flush_row_count_deltas,
+    stream_flush_chunks, validate_flush_row_selection, write_flush_segment_with_client, FlushStats,
+    FlushWriteChunk, ResolvedFlushSelection, StreamEncodeInput, TableFlushBatchOutcome,
+    TableFlushPreparedContext, WrittenFlushSegment,
 };
+use koldstore_manifest::{
+    build_manifest_segment_from_catalog_row, try_load_manifest_with_client,
+    write_manifest_with_client,
+};
+use koldstore_storage::open_client_from_catalog_fields;
 
 use super::jobs::{
     ensure_flush_job, mark_flush_job_completed, mark_flush_job_failed, mark_flush_job_running,
@@ -22,7 +26,7 @@ use super::jobs::{
 use super::mirror_fetch::fetch_mirror_batch;
 use super::spi::{
     active_cold_segment_count, manifest_from_active_cold_segments, next_flush_batch_number,
-    persist_flush_segments_batch, prune_flushed_hot_rows, resolve_flush_stats, upsert_manifest_row,
+    persist_flush_segment, prune_flushed_hot_rows, resolve_flush_stats, upsert_manifest_row,
 };
 
 pub(super) struct FlushPreparedContext {
@@ -30,10 +34,11 @@ pub(super) struct FlushPreparedContext {
     force: bool,
     relation: RelationContext,
     storage: FlushStorageContext,
-    snapshot: ManagedTableSnapshot,
+    snapshot: Arc<ManagedTableSnapshot>,
     catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
     indexed_columns: Vec<String>,
     max_rows_per_file: usize,
+    target_file_size_bytes: Option<u64>,
 }
 
 impl FlushPreparedContext {
@@ -48,15 +53,17 @@ impl FlushPreparedContext {
             compression: self.storage.compression.clone(),
             primary_key_columns: self.snapshot.primary_key_columns.clone(),
             max_rows_per_file: self.max_rows_per_file,
+            target_file_size_bytes: self.target_file_size_bytes,
         }
     }
 }
 
 pub(super) fn prepare_flush_context(
     table_oid: pgrx::pg_sys::Oid,
+    force: bool,
 ) -> Result<FlushPreparedContext, String> {
     crate::sql::job_lock_pg::lock_table_job(table_oid)?;
-    let (job_id, force) = ensure_flush_job(table_oid)?;
+    let (job_id, force) = ensure_flush_job(table_oid, force)?;
     mark_flush_job_running(job_id, table_oid)?;
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
@@ -73,8 +80,8 @@ pub(super) fn prepare_flush_context(
     );
     let min_floor = u64::try_from(crate::guc::min_max_rows_per_file())
         .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
-    let configured =
-        super::spi::active_flush_policy(table_oid)?.and_then(|policy| policy.max_rows_per_file);
+    let policy = super::spi::active_flush_policy(table_oid)?;
+    let configured = policy.and_then(|policy| policy.max_rows_per_file);
     if let Some(value) = configured {
         let hint = format!(
             "lower the floor for testing with SET {} = <value>",
@@ -83,6 +90,14 @@ pub(super) fn prepare_flush_context(
         koldstore_common::validate_max_rows_per_file(value, min_floor, Some(&hint))?;
     }
     let max_rows_per_file = max_rows_per_file_from_policy(configured, min_floor)?;
+    let target_file_size_bytes = policy
+        .and_then(|policy| policy.target_file_size_mb)
+        .map(|megabytes| {
+            megabytes
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| format!("target_file_size_mb {megabytes} is too large"))
+        })
+        .transpose()?;
     Ok(FlushPreparedContext {
         job_id,
         force,
@@ -92,6 +107,7 @@ pub(super) fn prepare_flush_context(
         catalog_columns: catalog.columns,
         indexed_columns,
         max_rows_per_file,
+        target_file_size_bytes,
     })
 }
 
@@ -109,25 +125,26 @@ pub(super) fn stream_write_flush_batches(
     );
     let schema_version =
         u32::try_from(ctx.storage.schema_version).map_err(|error| error.to_string())?;
-    let mut manifest = load_manifest_from_path(&absolute_manifest_path).unwrap_or_else(|| {
-        koldstore_manifest::Manifest::new_shared(
-            table_ctx.namespace.clone(),
-            table_ctx.table_name.clone(),
-            schema_version,
-        )
-    });
+    let client = open_client_from_catalog_fields(
+        &ctx.storage.storage_type,
+        &ctx.storage.base_path,
+        &ctx.storage.credentials,
+        &ctx.storage.config,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut manifest =
+        try_load_manifest_with_client(&client, &manifest_path)?.unwrap_or_else(|| {
+            koldstore_manifest::Manifest::new_shared(
+                table_ctx.namespace.clone(),
+                table_ctx.table_name.clone(),
+                schema_version,
+            )
+        });
     let mut batch_number = next_flush_batch_number(table_oid)?;
     let mut total_rows_flushed = 0_i64;
     let mut last_max_seq = 0_i64;
     let mut last_max_commit_seq = 0_i64;
     let mut written_segments: Vec<WrittenFlushSegment> = Vec::new();
-
-    // Ensure the table cold prefix exists once before writing many segments.
-    std::fs::create_dir_all(&table_ctx.base_path).map_err(|error| error.to_string())?;
-    let table_prefix = PathBuf::from(&table_ctx.base_path)
-        .join(&table_ctx.namespace)
-        .join(&table_ctx.table_name);
-    std::fs::create_dir_all(&table_prefix).map_err(|error| error.to_string())?;
 
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
     let table = QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
@@ -152,6 +169,9 @@ pub(super) fn stream_write_flush_batches(
         schema_version,
         max_seq: stats.max_seq,
         max_rows_per_file: ctx.max_rows_per_file,
+        target_file_size_bytes: ctx.target_file_size_bytes,
+        compression: ctx.storage.compression.clone(),
+        row_group_size: koldstore_parquet::WriterOptions::default().row_group_size,
         mirror_ops: selection.mirror_ops.clone(),
     };
     let catalog_columns = ctx.catalog_columns.clone();
@@ -164,8 +184,9 @@ pub(super) fn stream_write_flush_batches(
             },
             |chunk| {
                 write_streamed_chunk(
+                    &client,
                     ctx,
-                    &mut manifest,
+                    table_oid,
                     &mut batch_number,
                     &mut total_rows_flushed,
                     &mut last_max_seq,
@@ -178,16 +199,22 @@ pub(super) fn stream_write_flush_batches(
     })?;
 
     validate_flush_row_selection(stats.row_count, stream_outcome.rows_written)?;
+    let pending_manifest_segments = written_segments
+        .iter()
+        .map(|written| {
+            build_manifest_segment_from_catalog_row(
+                &ctx.relation.namespace,
+                &ctx.relation.name,
+                &ctx.snapshot.primary_key_columns,
+                &written.catalog_row,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let _ = manifest.append_segment_batch(pending_manifest_segments);
 
-    persist_flush_segments_batch(table_oid, &written_segments)?;
-
-    let (mirror_pruned, hot_pruned) = prune_flushed_hot_rows(
-        table_oid,
-        &ctx.snapshot.primary_key_columns,
-        stream_outcome.max_seq,
-        selection.mirror_ops.as_deref(),
-    )?;
-    apply_flush_row_count_deltas(table_oid, mirror_pruned, hot_pruned, total_rows_flushed)?;
+    // Segments + PK hints are cataloged per Parquet file during streaming so
+    // peak hint memory stays near one segment instead of the full flush.
 
     let catalog_segments = active_cold_segment_count(table_oid)?;
     if manifest.segments.len() as i64 != catalog_segments {
@@ -203,6 +230,8 @@ pub(super) fn stream_write_flush_batches(
         total_rows_flushed,
         last_max_seq,
         last_max_commit_seq,
+        mirror_ops: selection.mirror_ops.clone(),
+        prune_max_seq: stream_outcome.max_seq,
         manifest,
         manifest_path,
         absolute_manifest_path,
@@ -211,8 +240,9 @@ pub(super) fn stream_write_flush_batches(
 
 #[allow(clippy::too_many_arguments)]
 fn write_streamed_chunk(
+    client: &koldstore_storage::ObjectStoreClient,
     ctx: &FlushPreparedContext,
-    manifest: &mut koldstore_manifest::Manifest,
+    table_oid: pgrx::pg_sys::Oid,
     batch_number: &mut i32,
     total_rows_flushed: &mut i64,
     last_max_seq: &mut i64,
@@ -220,11 +250,11 @@ fn write_streamed_chunk(
     written_segments: &mut Vec<WrittenFlushSegment>,
     chunk: FlushWriteChunk,
 ) -> Result<(), String> {
-    let chunk_stats = FlushStats::from_cold_batch(&chunk.cold_batch)?;
-    let written = write_flush_segment_file(
+    let chunk_stats = FlushStats::from_write_chunk(&chunk)?;
+    let written = write_flush_segment_with_client(
+        client,
         &ctx.relation.namespace,
         &ctx.relation.name,
-        &ctx.storage.base_path,
         &ctx.storage.compression,
         &ctx.snapshot.primary_key_columns,
         &ctx.indexed_columns,
@@ -233,10 +263,16 @@ fn write_streamed_chunk(
         &chunk,
         &chunk_stats,
     )?;
-    manifest.append_segment(written.manifest_segment.clone());
+    persist_flush_segment(table_oid, &written)?;
     *total_rows_flushed = total_rows_flushed.saturating_add(chunk_stats.row_count);
     *last_max_seq = chunk_stats.max_seq;
     *last_max_commit_seq = chunk_stats.max_commit_seq;
+    pgrx::log!(
+        "koldstore flush: wrote+cataloged segment batch={} rows={} total_rows={}",
+        *batch_number,
+        chunk_stats.row_count,
+        *total_rows_flushed
+    );
     *batch_number = batch_number.saturating_add(1);
     written_segments.push(written);
     Ok(())
@@ -269,13 +305,47 @@ pub(super) fn finalize_flush(
     ctx: &FlushPreparedContext,
     outcome: &TableFlushBatchOutcome,
 ) -> Result<(), String> {
-    write_manifest_to_path(&outcome.absolute_manifest_path, &outcome.manifest)?;
+    let client = open_client_from_catalog_fields(
+        &ctx.storage.storage_type,
+        &ctx.storage.base_path,
+        &ctx.storage.credentials,
+        &ctx.storage.config,
+    )
+    .map_err(|error| error.to_string())?;
+    pgrx::log!(
+        "koldstore flush: writing manifest path={} segments={} rows={}",
+        outcome.manifest_path,
+        outcome.manifest.segments.len(),
+        outcome.total_rows_flushed
+    );
+    write_manifest_with_client(&client, &outcome.manifest_path, &outcome.manifest)?;
     upsert_manifest_row(
         table_oid,
         &outcome.manifest_path,
         outcome.manifest.segments.len() as i32,
         outcome.manifest.max_seq,
         outcome.manifest.max_commit_seq,
+    )?;
+    pgrx::log!(
+        "koldstore flush: pruning hot/mirror rows through seq={}",
+        outcome.prune_max_seq
+    );
+    let (mirror_pruned, hot_pruned) = prune_flushed_hot_rows(
+        table_oid,
+        &ctx.snapshot.primary_key_columns,
+        outcome.prune_max_seq,
+        outcome.mirror_ops.as_deref(),
+    )?;
+    pgrx::log!(
+        "koldstore flush: pruned mirror_rows={} hot_rows={}",
+        mirror_pruned,
+        hot_pruned
+    );
+    apply_flush_row_count_deltas(
+        table_oid,
+        mirror_pruned,
+        hot_pruned,
+        outcome.total_rows_flushed,
     )?;
     mark_flush_job_completed(
         ctx.job_id,
@@ -288,12 +358,15 @@ pub(super) fn finalize_flush(
     Ok(())
 }
 
-pub(super) fn flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid) -> Result<pgrx::Uuid, String> {
-    let mut ctx = prepare_flush_context(table_oid)?;
+pub(super) fn flush_table_pg_impl(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+) -> Result<pgrx::Uuid, String> {
+    let mut ctx = prepare_flush_context(table_oid, force)?;
     let job_uuid = pgrx::Uuid::from_bytes(*ctx.job_id.as_bytes());
     match crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid) {
         Ok(true) => {
-            ctx = prepare_flush_context(table_oid).inspect_err(|error| {
+            ctx = prepare_flush_context(table_oid, force).inspect_err(|error| {
                 let _ = mark_flush_job_failed(ctx.job_id, table_oid, error);
             })?;
         }
@@ -323,6 +396,13 @@ fn flush_prepared_table(
         return Ok(());
     }
 
+    pgrx::log!(
+        "koldstore flush: starting table={} rows={} max_seq={} force={}",
+        ctx.relation.name,
+        selection.stats.row_count,
+        selection.stats.max_seq,
+        ctx.force
+    );
     let outcome = stream_write_flush_batches(table_oid, ctx, &selection)?;
     finalize_flush(table_oid, ctx, &outcome)
 }

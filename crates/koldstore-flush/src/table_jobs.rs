@@ -68,7 +68,7 @@ VALUES (
     'flush',
     'pending',
     'pending',
-    jsonb_build_object('force', false)
+    jsonb_build_object('force', $3::boolean)
 )
 "#,
     )
@@ -155,4 +155,18 @@ WHERE id = $1::uuid
 "#,
     )
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_insert_inline_flush_job;
+
+    #[test]
+    fn inline_flush_job_insert_persists_requested_force_value() {
+        let statement = plan_insert_inline_flush_job().unwrap();
+
+        assert!(statement
+            .sql
+            .contains("jsonb_build_object('force', $3::boolean)"));
+    }
 }

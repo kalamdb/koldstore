@@ -6,5 +6,5 @@ SELECT koldstore.manage_table(
   max_rows_per_file => 50000,
   table_type        => 'user',
   scope_column      => 'game_id',
-  order_column      => 'created_at'
+  migration_order_by => 'created_at'
 );

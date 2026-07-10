@@ -4,9 +4,10 @@ This document describes the synchronous `koldstore.flush_table` path: how mirror
 rows become Parquet segments, how the catalog and manifest are updated, and how
 hot/mirror rows are pruned after a successful write.
 
-**SQL entrypoint:** `koldstore.flush_table(table_name regclass) → uuid`  
-**Orchestrator:** `crates/pg_koldstore/src/sql/flush/execute.rs`  
-**PG-free logic:** `crates/koldstore-flush/`, `crates/koldstore-parquet/`
+**SQL entrypoint:** `koldstore.flush_table(table_name regclass) → uuid`
+**Orchestrator:** `crates/pg_koldstore/src/sql/flush/execute.rs` (SPI + locks only)
+**PG-free logic:** `crates/koldstore-flush/` (selection, encode, segment write, catalog plans),
+`crates/koldstore-manifest/` (manifest assembly + JSON I/O), `crates/koldstore-parquet/`
 
 Related: `koldstore.enqueue_flush_job(force => true)` sets the force flag on a
 pending job; `flush_table` then runs it inline.
@@ -28,11 +29,13 @@ flowchart TD
   G -->|yes| H["mark_completed(0)"]
   G -->|no| I["stream_write_flush_batches"]
   I --> J["stream_flush_chunks\nSPI fetch → Arrow → Parquet"]
-  J --> K["persist_flush_segments_batch"]
-  K --> L["prune_flushed_hot_rows\nseq-range DELETE"]
-  L --> M["apply_flush_row_count_deltas"]
-  M --> N["manifest reconcile if needed"]
-  N --> O["finalize_flush\nmanifest.json + catalog"]
+  J --> K["persist_flush_segment\n(per Parquet file + segment stats)"]
+  K --> L["manifest reconcile if needed"]
+  L --> M["write manifest object"]
+  M --> N["upsert manifest catalog row"]
+  N --> O["prune_flushed_hot_rows\nseq-range DELETE"]
+  O --> P["apply_flush_row_count_deltas"]
+  P --> Q["mark job completed"]
 ```
 
 Internal mirror/hot SQL runs under `with_custom_scan_disabled` so the flush path
@@ -70,7 +73,7 @@ The `force` flag comes from an existing job payload (e.g. prior
 | Field | Source |
 |-------|--------|
 | `RelationContext` | namespace, table name |
-| `FlushStorageContext` | `base_path`, `compression`, `schema_version` |
+| `FlushStorageContext` | `storage_type`, `base_path`, credentials/config, compression, schema version |
 | `ManagedTableSnapshot` | mirror relation, PK columns |
 | Catalog columns | `migration_catalog` |
 | `indexed_columns` | PK ∪ catalog indexed columns (deduped) |
@@ -86,8 +89,9 @@ still returned.
 
 ## Phase 2 — Stats resolution (what to flush)
 
-`resolve_flush_stats` (`spi.rs`) returns
-`ResolvedFlushSelection { stats: FlushStats, mirror_ops: Option<Vec<i16>> }`.
+`resolve_flush_stats` (`spi.rs`) gathers SPI inputs, then delegates pure selection to
+`koldstore-flush::stats::{resolve_policy_flush_selection, resolve_force_flush_selection}`.
+It returns `ResolvedFlushSelection { stats: FlushStats, mirror_ops: Option<Vec<i16>> }`.
 
 ### Path A — Force flush (`force = true`)
 
@@ -146,9 +150,8 @@ If `selection.stats.row_count == 0`:
 ### 4.1 Setup
 
 - Manifest paths: `{base_path}/{namespace}/{table}/manifest.json`
-- Load existing manifest from disk: `serde_json::from_str<Manifest>` or new shared manifest
+- Open the configured filesystem/S3 client and load the existing manifest object, or create a new shared manifest
 - `next_flush_batch_number` from `koldstore.cold_segments`
-- Create table prefix directories once
 - Build `StreamEncodeInput` (columns, Parquet schema, `max_seq`, optional `mirror_ops`)
 
 ### 4.2 Mirror fetch (SPI → typed rows)
@@ -205,16 +208,26 @@ rows (`op = 3`) carry PK values from mirror only.
 `write_flush_segment_file` (`segment_write.rs`):
 
 1. Path: `{namespace}/{table}/batch-{n}.parquet`
-2. `write_parquet_segment_file` — Arrow `RecordBatch` → native Parquet
-   - Column statistics on `seq` + indexed columns
-   - Bloom filters on PK columns
+2. Encode in memory via `encode_parquet_segment_bytes` (Arrow `RecordBatch` →
+   native Parquet), then `validate_parquet_bytes` (magic + footer open)
+3. Durable publish through `koldstore-storage`:
+   - temp key under `{prefix}/.tmp/{writer_id}/…`
+   - `PutMode::Create` / `copy_if_not_exists` to the final key
+   - size validation; never truncate a final key in place
+   - filesystem backends use `LocalFileSystem::with_fsync(true)`
+4. Writer properties:
+   - Column statistics on `seq` + PK + indexed columns
+   - Bloom filters on PK columns (`max_ndv` = row-group size)
    - Compression from storage context (default `zstd`)
-3. `column_stats` JSON for catalog:
+5. `column_stats` JSON for catalog:
    ```json
    { "seq": {"min": N, "max": M}, "created_at": {"min": "...", "max": "..."} }
    ```
-4. In-memory `manifest.append_segment(...)`
-5. Collect `WrittenFlushSegment` (new `segment_id = Uuid::new_v4()`)
+6. Assemble `ManifestSegment`s from `catalog_row`s once, then `manifest.append_segment_batch(...)`
+7. Collect `WrittenFlushSegment` (new `segment_id = Uuid::new_v4()`)
+
+Manifest finalize uses `write_manifest_with_client` and the same atomic put path
+(`publish_mutable_object`) so `manifest.json` is never truncate-written in place.
 
 ### 4.5 Validation
 
@@ -222,20 +235,23 @@ rows (`op = 3`) carry PK values from mirror only.
 
 ---
 
-## Phase 5 — Catalog batch insert
+## Phase 5 — Catalog insert (per segment)
 
-`persist_flush_segments_batch` — **one SPI round trip** for all segments:
+During streaming, each Parquet file is cataloged immediately via
+`persist_flush_segment`:
 
-- Native PostgreSQL arrays: `uuid[]`, `text[]`, `integer[]`, `bigint[]`, `jsonb[]`
-- `INSERT … SELECT FROM unnest(…)` into `koldstore.cold_segments`
-- CTE inserts matching `koldstore.cold_pk_hints` (`pk_hash = md5(object_path)`)
+1. One SPI insert for `koldstore.cold_segments` + `cold_segment_stats`
+   (native arrays / `unnest`)
+2. No per-PK catalog rows — prune with `cold_segment_stats` / Parquet
+   row-group stats and bloom filters so catalog size stays O(segments ×
+   indexed columns)
 
 `column_stats` crosses SPI as `pgrx::JsonB` per segment (already
 `serde_json::Value` in Rust).
 
 ---
 
-## Phase 6 — Seq-range cleanup
+## Phase 6 — Seq-range cleanup (after manifest publish)
 
 `prune_flushed_hot_rows` (`spi.rs`) — **production path uses seq-range DELETE,
 not JSON cleanup**.
@@ -267,7 +283,7 @@ SELECT count(removed_mirror), count(deleted_hot)
 
 ---
 
-## Phase 7 — Manifest counter deltas
+## Phase 7 — Manifest counter deltas (after cleanup)
 
 `apply_flush_row_count_deltas` → `koldstore.internal_apply_flush_row_counts`:
 
@@ -302,6 +318,12 @@ Guards against drift between streamed manifest and catalog truth.
 | Upsert `koldstore.manifest` | native SPI: path, generation UUID, segment_count, max_seq |
 | Complete job | native SPI bigints |
 | Invalidate cache | `catalog::cache::invalidate_table` |
+
+The durable ordering is: publish final segments → insert segment catalog rows →
+write manifest object → upsert manifest row → prune mirror/hot rows → apply row
+count deltas → mark the job complete. Cleanup never runs before the manifest
+visibility boundary succeeds, so a manifest write failure leaves hot data
+authoritative and retryable.
 
 ### `manifest.json` shape (`koldstore-manifest`)
 

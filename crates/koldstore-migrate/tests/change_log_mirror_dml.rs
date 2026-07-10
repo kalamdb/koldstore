@@ -34,9 +34,12 @@ fn mirror_capture_upserts_insert_update_delete_latest_state() {
     assert!(sql.contains("IF TG_OP = 'INSERT' THEN"));
     assert!(sql.contains("ELSIF TG_OP = 'UPDATE' THEN"));
     assert!(sql.contains("ELSIF TG_OP = 'DELETE' THEN"));
-    assert!(sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 1, pg_current_wal_lsn())"));
-    assert!(sql.contains("VALUES (NEW.\"id\", public.snowflake_id(), 2, pg_current_wal_lsn())"));
-    assert!(sql.contains("VALUES (OLD.\"id\", public.snowflake_id(), 3, pg_current_wal_lsn())"));
+    assert!(sql.contains("FROM new_rows AS src"));
+    assert!(sql.contains("FROM old_rows AS src"));
+    assert!(sql.contains("public.snowflake_id()"));
+    assert!(sql.contains(", 1, pg_current_wal_lsn()"));
+    assert!(sql.contains(", 2, pg_current_wal_lsn()"));
+    assert!(sql.contains(", 3, pg_current_wal_lsn()"));
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(sql.contains("SET search_path = pg_catalog, koldstore"));
     assert!(sql.contains("\"seq\" = EXCLUDED.\"seq\""));
@@ -56,7 +59,8 @@ fn mirror_capture_reinsert_uses_insert_upsert_to_replace_tombstone() {
         .split("ELSIF TG_OP = 'UPDATE' THEN")
         .next()
         .expect("insert branch exists");
-    assert!(insert_branch.contains("VALUES (NEW.\"id\", public.snowflake_id(), 1"));
+    assert!(insert_branch.contains("FROM new_rows AS src"));
+    assert!(insert_branch.contains(", 1, pg_current_wal_lsn()"));
     assert!(insert_branch.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(insert_branch.contains("\"op\" = EXCLUDED.\"op\""));
 }
@@ -66,16 +70,17 @@ fn mirror_capture_preserves_composite_pk_in_conflict_and_row_values() {
     let plan = capture_plan(vec![pk_column("tenant_id", 1), pk_column("id", 2)]);
     let sql = &plan.function.sql;
 
-    assert!(sql.contains("INSERT INTO \"koldstore\".\"messages__cl\" (\"tenant_id\", \"id\", \"seq\", \"op\", \"commit_lsn\")"));
-    assert!(sql.contains("VALUES (NEW.\"tenant_id\", NEW.\"id\", public.snowflake_id(), 1"));
-    assert!(sql.contains("VALUES (OLD.\"tenant_id\", OLD.\"id\", public.snowflake_id(), 3"));
+    assert!(sql.contains(
+        "INSERT INTO \"koldstore\".\"messages__cl\" (\"tenant_id\", \"id\", \"seq\", \"op\", \"commit_lsn\")"
+    ));
+    assert!(sql.contains("src.\"tenant_id\", src.\"id\", public.snowflake_id()"));
     assert!(sql.contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE"));
-    assert!(sql.contains("OLD.\"tenant_id\" IS DISTINCT FROM NEW.\"tenant_id\""));
-    assert!(sql.contains("OLD.\"id\" IS DISTINCT FROM NEW.\"id\""));
+    assert!(sql.contains("old_src.\"tenant_id\" IS NOT DISTINCT FROM new_src.\"tenant_id\""));
+    assert!(sql.contains("old_src.\"id\" IS NOT DISTINCT FROM new_src.\"id\""));
 }
 
 #[test]
-fn mirror_capture_installs_transactional_after_row_triggers() {
+fn mirror_capture_installs_statement_level_after_triggers() {
     let plan = capture_plan(vec![pk_column("id", 1)]);
     let trigger_sql = plan
         .trigger_statements()
@@ -88,8 +93,12 @@ fn mirror_capture_installs_transactional_after_row_triggers() {
     assert!(trigger_sql.contains("AFTER INSERT ON \"public\".\"messages\""));
     assert!(trigger_sql.contains("AFTER UPDATE ON \"public\".\"messages\""));
     assert!(trigger_sql.contains("AFTER DELETE ON \"public\".\"messages\""));
+    assert!(trigger_sql.contains("REFERENCING NEW TABLE AS new_rows"));
+    assert!(trigger_sql.contains("REFERENCING OLD TABLE AS old_rows NEW TABLE AS new_rows"));
+    assert!(trigger_sql.contains("REFERENCING OLD TABLE AS old_rows"));
     assert!(trigger_sql
-        .contains("FOR EACH ROW EXECUTE FUNCTION \"koldstore\".\"messages__cl_capture\"()"));
+        .contains("FOR EACH STATEMENT EXECUTE FUNCTION \"koldstore\".\"messages__cl_capture\"()"));
+    assert!(!trigger_sql.contains("FOR EACH ROW"));
     assert!(!trigger_sql.contains("CONCURRENTLY"));
     assert!(!plan.function.sql.contains("COMMIT"));
 }
@@ -133,7 +142,9 @@ fn mirror_capture_rejects_primary_key_updates_to_prevent_stale_mirror_rows() {
     let plan = capture_plan(vec![pk_column("id", 1)]);
     let sql = &plan.function.sql;
 
-    assert!(sql.contains("OLD.\"id\" IS DISTINCT FROM NEW.\"id\""));
+    assert!(sql.contains("FROM old_rows AS old_src"));
+    assert!(sql.contains("FROM new_rows AS new_src"));
+    assert!(sql.contains("old_src.\"id\" IS NOT DISTINCT FROM new_src.\"id\""));
     assert!(sql.contains(
         "RAISE EXCEPTION 'pg-koldstore does not support primary-key updates on managed table %'"
     ));

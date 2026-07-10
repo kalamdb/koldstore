@@ -6,6 +6,7 @@ use std::{
     num::NonZeroUsize,
 };
 
+use koldstore_catalog::HintKind;
 use koldstore_common::{
     compare_json_values, CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey, SeqId,
     StablePkHash,
@@ -20,15 +21,6 @@ use uuid::Uuid;
 
 /// Manifest sync state alias used by flush orchestration.
 pub use koldstore_manifest::SyncState as ManifestSyncState;
-
-/// Manifest sync states used by flush jobs.
-pub const FLUSH_STATES: &[&str] = &[
-    SyncState::PendingWrite.as_str(),
-    SyncState::Syncing.as_str(),
-    SyncState::InSync.as_str(),
-    SyncState::Stale.as_str(),
-    SyncState::Error.as_str(),
-];
 
 /// Returns whether a managed table can be selected for flush.
 #[must_use]
@@ -343,10 +335,10 @@ pub enum FlushJobPhase {
     WriteParquetTemp,
     /// Temp object is being copied/validated as final.
     PublishFinalObject,
-    /// Manifest is being committed as the cold visibility boundary.
-    PublishManifest,
-    /// PostgreSQL catalog rows are being committed after manifest visibility.
+    /// PostgreSQL segment catalog rows are committed before manifest visibility.
     CommitCatalog,
+    /// Manifest object and manifest catalog row become the visibility boundary.
+    PublishManifest,
     /// Hot heap rows are being conditionally cleaned up.
     CleanupHotRows,
     /// Job finished.
@@ -362,8 +354,8 @@ impl FlushJobPhase {
             Self::ScanHotRows => "scan_hot_rows",
             Self::WriteParquetTemp => "write_parquet_temp",
             Self::PublishFinalObject => "publish_final_object",
-            Self::PublishManifest => "publish_manifest",
             Self::CommitCatalog => "commit_catalog",
+            Self::PublishManifest => "publish_manifest",
             Self::CleanupHotRows => "cleanup_hot_rows",
             Self::Finished => "finished",
         }
@@ -378,8 +370,8 @@ pub const fn flush_execution_phases() -> &'static [FlushJobPhase] {
         FlushJobPhase::ScanHotRows,
         FlushJobPhase::WriteParquetTemp,
         FlushJobPhase::PublishFinalObject,
-        FlushJobPhase::PublishManifest,
         FlushJobPhase::CommitCatalog,
+        FlushJobPhase::PublishManifest,
         FlushJobPhase::CleanupHotRows,
         FlushJobPhase::Finished,
     ]
@@ -703,8 +695,8 @@ pub struct ColdPkHintUpdate {
     pub scope_key: Option<ScopeKey>,
     /// Stable logical PK hash.
     pub pk_hash: StablePkHash,
-    /// Hint kind: `exact`, `bloom`, or `range`.
-    pub hint_kind: String,
+    /// Hint kind: exact, bloom, or range.
+    pub hint_kind: HintKind,
     /// Latest known cold `_seq`.
     pub latest_seq: SeqId,
     /// Latest known cold `_commit_seq`.
@@ -768,7 +760,7 @@ pub fn plan_cold_pk_hint_updates(
     table_oid: u32,
     scope_key: Option<ScopeKey>,
     batch: &FlushBatchPlan,
-    hint_kind: &str,
+    hint_kind: HintKind,
 ) -> Vec<ColdPkHintUpdate> {
     batch
         .rows
@@ -778,7 +770,7 @@ pub fn plan_cold_pk_hint_updates(
             table_oid,
             scope_key: scope_key.clone(),
             pk_hash: row.pk_hash.clone(),
-            hint_kind: hint_kind.to_string(),
+            hint_kind,
             latest_seq: row.seq,
             latest_commit_seq: row.commit_seq,
         })
@@ -797,14 +789,6 @@ pub fn conditional_cleanup_allowed(
         && watermark.includes(flushed_candidate)
         && flushed_candidate.seq == current_seq
         && flushed_candidate.commit_seq == current_commit_seq
-}
-
-/// Returns the next manifest sync state after a successful flush.
-#[must_use]
-pub const fn successful_flush_state(remaining_hot_rows: bool) -> &'static str {
-    SyncState::Syncing
-        .finish_success(remaining_hot_rows)
-        .as_str()
 }
 
 /// Returns whether a bounded flush batch should continue.

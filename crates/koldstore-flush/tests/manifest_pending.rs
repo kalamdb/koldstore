@@ -1,23 +1,17 @@
+//! Sync-state ownership lives in `koldstore-manifest`; flush re-exports it as
+//! `ManifestSyncState` for job-phase callers.
+
 use koldstore_flush::job::ManifestSyncState;
+use koldstore_manifest::SyncState;
 
 #[test]
-fn manifest_cache_state_transitions_cover_flush_lifecycle() {
-    assert_eq!(ManifestSyncState::PendingWrite.as_str(), "pending_write");
+fn flush_manifest_sync_state_is_manifest_crate_sync_state() {
+    assert_eq!(
+        ManifestSyncState::PendingWrite.as_str(),
+        SyncState::PendingWrite.as_str()
+    );
     assert_eq!(
         ManifestSyncState::PendingWrite.start_flush(),
-        ManifestSyncState::Syncing
+        SyncState::Syncing
     );
-    assert_eq!(
-        ManifestSyncState::Syncing.finish_success(false),
-        ManifestSyncState::InSync
-    );
-    assert_eq!(
-        ManifestSyncState::Syncing.finish_success(true),
-        ManifestSyncState::PendingWrite
-    );
-    assert_eq!(
-        ManifestSyncState::Syncing.finish_error(),
-        ManifestSyncState::Error
-    );
-    assert_eq!(ManifestSyncState::Stale.as_str(), "stale");
 }

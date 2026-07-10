@@ -132,6 +132,7 @@ path = "full_lifecycle.rs"
 [dev-dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+koldstore-catalog.workspace = true
 koldstore-common.workspace = true
 koldstore-flush.workspace = true
 koldstore-merge.workspace = true

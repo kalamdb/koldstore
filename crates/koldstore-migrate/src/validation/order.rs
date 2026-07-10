@@ -16,8 +16,10 @@ pub struct CatalogColumn {
     pub catalog_type_name: String,
     /// Whether the column participates in the primary key.
     pub is_primary_key: bool,
-    /// Whether PostgreSQL marks the column as identity/generated.
+    /// Whether PostgreSQL marks the column as an identity column.
     pub identity: bool,
+    /// Whether PostgreSQL computes the column from a generation expression.
+    pub generated: bool,
     /// Default expression, when catalog metadata exposes one.
     pub default_expr: Option<String>,
 }
@@ -28,6 +30,8 @@ struct CatalogColumnWire {
     type_name: String,
     is_primary_key: bool,
     identity: bool,
+    #[serde(default)]
+    generated: bool,
     #[serde(default)]
     default_expr: Option<String>,
 }
@@ -42,6 +46,7 @@ impl TryFrom<CatalogColumnWire> for CatalogColumn {
             catalog_type_name: wire.type_name,
             is_primary_key: wire.is_primary_key,
             identity: wire.identity,
+            generated: wire.generated,
             default_expr: wire.default_expr,
         })
     }
@@ -57,6 +62,7 @@ impl Serialize for CatalogColumn {
             type_name: self.catalog_type_name.clone(),
             is_primary_key: self.is_primary_key,
             identity: self.identity,
+            generated: self.generated,
             default_expr: self.default_expr.clone(),
         }
         .serialize(serializer)
@@ -118,6 +124,7 @@ impl CatalogColumn {
             catalog_type_name: catalog_type_name.into(),
             is_primary_key: false,
             identity: false,
+            generated: false,
             default_expr: None,
         }
     }

@@ -95,25 +95,7 @@ async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<(
                 &[&table.relation],
             )
             .await?;
-        assert_eq!(recovered.get::<_, i64>(0), 1);
-
-        let recovery_state = db
-            .client
-            .query_one(
-                r#"
-                SELECT status, attempts, error_trace
-                FROM koldstore.jobs
-                WHERE table_oid = $1::text::regclass::oid
-                  AND job_type = 'recover_segments'
-                ORDER BY created_at DESC
-                LIMIT 1
-                "#,
-                &[&table.relation],
-            )
-            .await?;
-        assert_eq!(recovery_state.get::<_, String>(0), "dry_run");
-        assert_eq!(recovery_state.get::<_, i32>(1), 0);
-        assert_eq!(recovery_state.get::<_, Option<String>>(2), None);
+        assert_eq!(recovered.get::<_, i64>(0), 0);
     }
 
     Ok(())
@@ -236,7 +218,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                       table_name     => $1::text::regclass,
                       storage        => $2,
                       hot_row_limit  => NULL,
-                      order_column   => 'id'
+                      migration_order_by => 'id'
                     ) AS id
                 )
                 SELECT

@@ -12,7 +12,7 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 | Migrate | `koldstore-migrate` | `pg_koldstore::sql::ddl`, `migrate::*` |
 | Merge scan | `koldstore-merge` | `pg_koldstore::merge_scan` |
 | DML | `koldstore-mirror` | `pg_koldstore::sql::dml`, `hooks::*` |
-| Flush / jobs | `koldstore-flush`, `koldstore-jobs` | `pg_koldstore::sql::ops` |
+| Flush / jobs | `koldstore-flush`, `koldstore-jobs`, `koldstore-manifest` | `pg_koldstore::sql::flush` |
 | Storage | `koldstore-storage` | storage registration wrappers |
 | Schema | `koldstore-schema` | schema registry SQL execution |
 
@@ -20,11 +20,19 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 
 - **setup** (`koldstore-setup`): DDL plans for internal objects in
   `koldstore--0.1.0.sql` — `storage`, `schemas`, `manifest`, `jobs`,
-  `cold_segments`, `cold_pk_hints`, sequences, types, indexes, grants.
+  `cold_segments`, `cold_segment_stats`, sequences, types, indexes, grants.
 - **schema** (`koldstore-schema`): `koldstore.schemas` registry — column sets,
   versions, type matrix, initialization state for migrated tables.
 - **catalog** (`koldstore-catalog`): cold bookkeeping — segments, PK hints,
   managed table meta, flush policy config, manifest rows, query/decode/cache.
+
+**Do not merge schema and catalog.** Schema stays a leaf used by migrate and
+parquet; catalog depends on schema one-way for typed init state. Combining them
+would force migrate/parquet to pull cold-segment SQL and decode helpers.
+
+**Do not merge mirror and catalog.** Mirror owns `__cl` DML/DDL SQL (common-only
+leaf for migrate/merge). Catalog owns cold bookkeeping and may *look up*
+`mirror_relation` from `koldstore.schemas`, but does not build mirror upserts.
 
 ## Dependency Graph
 
@@ -45,10 +53,12 @@ flowchart BT
     pg[pg_koldstore]
 
     catalog --> common
+    catalog --> schema
     schema --> common
     storage --> common
     parquet --> common
     manifest --> common
+    manifest --> catalog
     manifest --> storage
     mirror --> common
     merge --> common
@@ -65,7 +75,6 @@ flowchart BT
     flush --> storage
     flush --> jobs
     migrate --> common
-    migrate --> catalog
     migrate --> schema
     migrate --> mirror
     migrate --> parquet
@@ -101,11 +110,11 @@ flowchart BT
 | Migrated-table schema/version | `koldstore-schema` |
 | Object-store access | `koldstore-storage` |
 | Parquet read/write | `koldstore-parquet` |
-| Manifest lifecycle | `koldstore-manifest` |
+| Manifest lifecycle (model, assembly, JSON I/O, paths, sync state, publish plan) | `koldstore-manifest` |
 | Mirror SQL / DML statements | `koldstore-mirror` |
 | Hot+cold merge logic | `koldstore-merge` |
 | Job lease/phase framework | `koldstore-jobs` |
-| Flush workflow | `koldstore-flush` |
+| Flush workflow (selection, encode, segment write, catalog SQL plans, cleanup) | `koldstore-flush` |
 | Migration workflow | `koldstore-migrate` |
 | SPI, hooks, custom scan, `#[pg_extern]` | `pg_koldstore` |
 

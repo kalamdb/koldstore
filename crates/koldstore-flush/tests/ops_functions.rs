@@ -70,10 +70,8 @@ fn operational_functions_build_parameterized_catalog_plans() {
         .sql
         .contains("cs.scope_key = m.scope_key"));
     assert!(validation.statement.sql.contains("cs.status = 'active'"));
-    assert!(validation
-        .statement
-        .sql
-        .contains("h.segment_id = cs.segment_id"));
+    assert!(validation.statement.sql.contains("cs.column_stats"));
+    assert!(!validation.statement.sql.contains("cold_pk_hints"));
 
     let recovery = koldstore_flush::ops::recover_segments_plan(Some(table), false).unwrap();
     assert!(!recovery.request.dry_run);
@@ -174,6 +172,7 @@ fn sql_exposes_export_import_boundary() {
     assert!(export.statement.sql.contains("cs.scope_key = m.scope_key"));
     assert!(export.statement.sql.contains("cs.status = 'active'"));
     assert!(export.archive_manifest_path.ends_with("manifest.json"));
+    assert_eq!(export.archive_manifest_path, "app/items/manifest.json");
 
     assert_eq!(
         koldstore_flush::ops::classify_command("IMPORT TABLE app.items"),

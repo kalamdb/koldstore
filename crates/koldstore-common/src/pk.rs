@@ -470,4 +470,12 @@ impl StablePkHash {
     pub fn as_hex(&self) -> &str {
         &self.0
     }
+
+    /// Returns the raw 32-byte SHA-256 digest.
+    ///
+    /// Prefer this over hex round-trips when binding `bytea` parameters.
+    #[must_use]
+    pub fn to_bytes(&self) -> Vec<u8> {
+        hex::decode(&self.0).expect("StablePkHash always stores valid hex")
+    }
 }

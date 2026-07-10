@@ -184,7 +184,7 @@ fn flush_phase_order_defers_heap_cleanup_until_manifest_and_catalog_are_committe
     assert_eq!(phases[0], FlushJobPhase::Claimed);
     assert!(phases
         .windows(2)
-        .any(|window| window == [FlushJobPhase::PublishManifest, FlushJobPhase::CommitCatalog]));
+        .any(|window| window == [FlushJobPhase::CommitCatalog, FlushJobPhase::PublishManifest]));
     assert!(!can_cleanup_hot_rows(FlushJobPhase::PublishManifest));
     assert!(!can_cleanup_hot_rows(FlushJobPhase::CommitCatalog));
     assert!(can_cleanup_hot_rows(FlushJobPhase::CleanupHotRows));

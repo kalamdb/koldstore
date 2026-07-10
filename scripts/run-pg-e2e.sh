@@ -25,6 +25,11 @@ INSTALL_ARGS=(
   --features "$PG_FEATURE"
   --pg-config "$PG_CONFIG"
 )
+if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "true" ]]; then
+  # release-pg: optimized + panic=unwind (plain --release uses panic=abort and
+  # aborts on PostgreSQL ereport/longjmp from extension hooks).
+  INSTALL_ARGS+=(--profile release-pg)
+fi
 if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then
   INSTALL_ARGS+=(--sudo)
 fi
