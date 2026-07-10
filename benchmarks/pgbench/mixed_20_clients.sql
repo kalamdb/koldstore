@@ -1,5 +1,5 @@
 \set op random(1, 100)
-\set id random(1, 100000)
+\set id random(1, :max_id)
 \set user_idx random(0, 2499)
 \set conversation_idx random(0, 9999)
 \if :op <= 60
@@ -41,8 +41,8 @@ VALUES (
   false,
   jsonb_build_object('source', 'pgbench', 'workload', 'mixed'),
   jsonb_build_object('benchmark', 'mixed_20_clients'),
-  ARRAY['pgbench', 'mixed'],
-  decode(md5('mixed-' || (:user_idx)::text), 'hex'),
+  'pgbench,mixed',
+  md5('mixed-' || (:user_idx)::text),
   now(),
   now()
 );

@@ -32,8 +32,8 @@ SELECT
   false,
   jsonb_build_object('source', 'pgbench', 'batch_row', s),
   jsonb_build_object('benchmark', 'insert_batch', 'batch_size', (:batch_size)::int),
-  ARRAY['pgbench', 'batch-insert'],
-  decode(md5('insert-batch-' || (:user_idx + s)::text), 'hex'),
+  'pgbench,batch-insert',
+  md5('insert-batch-' || (:user_idx + s)::text),
   now(),
   now()
 FROM generate_series(1, :batch_size) AS s;

@@ -8,16 +8,20 @@ SELECT koldstore.register_storage(
   config       => '{}'::jsonb
 );
 
+-- HOT_ROW_LIMIT empty => NULL (no retention policy; flush_table archives all mirror rows).
+-- MIN_FLUSH_ROWS / MAX_ROWS_PER_FILE are required non-null args (defaults apply only when omitted).
 SELECT *
 FROM koldstore.manage_table(
-  table_name     => 'bench_events'::regclass,
-  storage        => 'bench-local',
-  hot_row_limit  => NULL,
-  order_column   => 'created_at',
-  compression    => :'KOLDSTORE_BENCH_COMPRESSION'
+  table_name        => 'bench_events'::regclass,
+  storage           => 'bench-local',
+  hot_row_limit     => NULLIF(TRIM(:'HOT_ROW_LIMIT'), '')::bigint,
+  min_flush_rows    => TRIM(:'MIN_FLUSH_ROWS')::bigint,
+  max_rows_per_file => TRIM(:'MAX_ROWS_PER_FILE')::bigint,
+  order_column      => 'created_at',
+  compression       => :'KOLDSTORE_BENCH_COMPRESSION'
 );
 
 -- Benchmark note:
---   The harness may prune flushed hot rows after manifest verification when it
---   is collecting storage-only snapshots for cold modes. That prune is owned by
---   the benchmark runner, not by this migration step.
+--   hot+cold modes set HOT_ROW_LIMIT and call flush_table so excess rows move to
+--   Parquet while the newest hot_row_limit rows stay in the heap.
+--   cold-only modes leave HOT_ROW_LIMIT empty so flush_table archives everything.

@@ -86,11 +86,15 @@ pub(super) fn load_cold_rows_for_merge(
             options = options.with_pk_values(column, values);
         }
 
-        let (cold_rows, segment_profiles) = cold_rows_from_segments(
-            &manifest_stats.base_path,
+        let client = open_client_from_catalog_fields(
             &manifest_stats.storage_type,
+            &manifest_stats.base_path,
             &manifest_stats.credentials,
             &manifest_stats.config,
+        )
+        .map_err(|error| error.to_string())?;
+        let (cold_rows, segment_profiles) = cold_rows_from_segments(
+            &client,
             &segments,
             &parquet_columns,
             &snapshot.primary_key_columns,
@@ -180,10 +184,7 @@ fn pk_equality_values(
 }
 
 fn cold_rows_from_segments(
-    base_path: &str,
-    storage_type: &str,
-    credentials: &serde_json::Value,
-    config: &serde_json::Value,
+    client: &koldstore_storage::ObjectStoreClient,
     segment_hints: &[SegmentStatsHint],
     columns: &[PgColumn],
     primary_key_columns: &[String],
@@ -192,8 +193,6 @@ fn cold_rows_from_segments(
     // One ObjectStore client for all segments (filesystem or S3). Parquet reads
     // are footer-first with range GETs — no full-object download. Known
     // `byte_size` enables bounded footer ranges (avoids suffix GETs on S3).
-    let client = open_client_from_catalog_fields(storage_type, base_path, credentials, config)
-        .map_err(|error| error.to_string())?;
     let store = client.store();
     let mut rows = Vec::new();
     let mut segments = Vec::with_capacity(segment_hints.len());

@@ -113,15 +113,12 @@ pub fn publish_immutable_object(
     ensure_object_bytes(client, temp_key, bytes)?;
 
     // 2. Idempotent retry: byte-identical final already present.
-    match try_reuse_identical_final(client, final_key, bytes)? {
-        Some(published) => {
-            let _ = client.delete(temp_key);
-            return Ok(PublishedObject {
-                temp_key: temp_key.to_string(),
-                ..published
-            });
-        }
-        None => {}
+    if let Some(published) = try_reuse_identical_final(client, final_key, bytes)? {
+        let _ = client.delete(temp_key);
+        return Ok(PublishedObject {
+            temp_key: temp_key.to_string(),
+            ..published
+        });
     }
 
     // 3. Publish final with Create-if-absent semantics.

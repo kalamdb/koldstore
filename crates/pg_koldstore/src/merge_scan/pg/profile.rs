@@ -147,11 +147,7 @@ pub(super) fn explain_cold_read_profile(es: *mut pg_sys::ExplainState, profile: 
     }
 
     if !profile.projected_columns.is_empty() {
-        explain_property(
-            es,
-            "Cold projection",
-            &profile.projected_columns.join(", "),
-        );
+        explain_property(es, "Cold projection", &profile.projected_columns.join(", "));
     }
 
     if profile.segments.is_empty() {
@@ -160,7 +156,11 @@ pub(super) fn explain_cold_read_profile(es: *mut pg_sys::ExplainState, profile: 
     }
 
     for segment in &profile.segments {
-        explain_property(es, "Parquet segment", &format_segment_line(segment, executed));
+        explain_property(
+            es,
+            "Parquet segment",
+            &format_segment_line(segment, executed),
+        );
         if let Some(parquet) = &segment.parquet {
             explain_property(es, "  Parquet I/O", &format_parquet_io(parquet));
             explain_property(es, "  Row groups", &format_row_groups(parquet));
@@ -171,12 +171,10 @@ pub(super) fn explain_cold_read_profile(es: *mut pg_sys::ExplainState, profile: 
 
 fn format_segment_line(segment: &SegmentReadProfile, executed: bool) -> String {
     let mut parts = vec![segment.object_path.clone()];
-    if let Some(size) = segment.byte_size.or_else(|| {
-        segment
-            .parquet
-            .as_ref()
-            .and_then(|p| p.file_size)
-    }) {
+    if let Some(size) = segment
+        .byte_size
+        .or_else(|| segment.parquet.as_ref().and_then(|p| p.file_size))
+    {
         parts.push(format!("{size} bytes"));
     }
     if executed {

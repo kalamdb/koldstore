@@ -46,8 +46,8 @@ SELECT
     'tenant-' || (g % 25)::text,
     'priority-' || (g % 10)::text,
     (ARRAY['chat', 'storage', 'billing', 'search'])[1 + (g % 4)]
-  ],
-  decode(md5('binary-hash-' || g::text), 'hex'),
+  ]::text,
+  md5('binary-hash-' || g::text),
   now() - ((g % 365)::text || ' days')::interval - ((g % 86400)::text || ' seconds')::interval,
   now() - ((g % 30)::text || ' days')::interval
 FROM generate_series(1, :BENCH_ROWS) AS g;

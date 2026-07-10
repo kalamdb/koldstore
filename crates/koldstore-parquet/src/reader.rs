@@ -416,7 +416,8 @@ pub async fn read_clean_cold_rows_from_object_store_async(
     primary_key_columns: &[String],
     options: &ParquetReadOptions,
 ) -> Result<(Vec<CleanColdRow>, ParquetReadProfile), String> {
-    let io = stats.unwrap_or_else(|| Arc::new(crate::object_reader::ObjectStoreReadStats::default()));
+    let io =
+        stats.unwrap_or_else(|| Arc::new(crate::object_reader::ObjectStoreReadStats::default()));
     let mut reader = ObjectStoreParquetReader::from_key(store, object_path)?;
     if let Some(size) = file_size {
         reader = reader.with_file_size(size);
@@ -426,8 +427,7 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         .await
         .map_err(|error| error.to_string())?;
 
-    let application_columns =
-        application_columns_for_read(columns, primary_key_columns, options)?;
+    let application_columns = application_columns_for_read(columns, primary_key_columns, options)?;
 
     let total_row_groups = builder.metadata().num_row_groups();
     let mut selected_row_groups = options
@@ -736,8 +736,7 @@ where
 {
     let mut builder =
         ParquetRecordBatchReaderBuilder::try_new(reader).map_err(|error| error.to_string())?;
-    let application_columns =
-        application_columns_for_read(columns, primary_key_columns, options)?;
+    let application_columns = application_columns_for_read(columns, primary_key_columns, options)?;
 
     let mut effective = options.clone();
     if effective.row_groups.is_none() {
@@ -758,9 +757,11 @@ where
                 for rg_index in selected {
                     match builder.get_row_group_column_bloom_filter(rg_index, column_idx) {
                         Ok(Some(bloom)) => {
-                            if pk.values.iter().any(|value| {
-                                bloom_may_contain(&bloom, physical_type, value)
-                            }) {
+                            if pk
+                                .values
+                                .iter()
+                                .any(|value| bloom_may_contain(&bloom, physical_type, value))
+                            {
                                 refined.push(rg_index);
                             }
                         }

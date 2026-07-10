@@ -306,7 +306,8 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
 
     let client = ObjectStoreClient::in_memory();
     let key = "segments/pk-prune.parquet";
-    client.put(key, &encoded, koldstore_storage::PutPrecondition::Overwrite)
+    client
+        .put(key, &encoded, koldstore_storage::PutPrecondition::Overwrite)
         .unwrap();
 
     let columns = vec![PgColumn::new("id", PgType::Int8, false)];
@@ -472,5 +473,7 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     assert!(profile.bytes_read < file_size);
     assert!(profile.format_io_summary().contains("footer-first"));
     assert!(profile.format_row_groups_summary().contains("selected=[1]"));
-    assert!(profile.format_bloom_summary().contains("skipped_after_stats"));
+    assert!(profile
+        .format_bloom_summary()
+        .contains("skipped_after_stats"));
 }

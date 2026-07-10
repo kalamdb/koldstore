@@ -20,9 +20,7 @@ pub(super) unsafe fn typed_literal_sql(
     column: &koldstore_migrate::order::CatalogColumn,
     params: pg_sys::ParamListInfo,
 ) -> Option<String> {
-    let Some((datum, isnull, _)) = const_or_param_datum(expr, params) else {
-        return None;
-    };
+    let (datum, isnull, _) = const_or_param_datum(expr, params)?;
     if isnull {
         return None;
     }
@@ -35,9 +33,7 @@ pub(super) unsafe fn literal_json_value(
     column: &koldstore_migrate::order::CatalogColumn,
     params: pg_sys::ParamListInfo,
 ) -> Option<serde_json::Value> {
-    let Some((datum, isnull, _)) = const_or_param_datum(expr, params) else {
-        return None;
-    };
+    let (datum, isnull, _) = const_or_param_datum(expr, params)?;
     if isnull {
         return None;
     }
@@ -95,7 +91,8 @@ unsafe fn datum_typed_sql(
 ) -> Option<String> {
     let pg_type = column.pg_type;
     match pg_type {
-        PgType::Text | PgType::Numeric | PgType::Uuid | PgType::Jsonb | PgType::TextArray => {
+        // varlena text-like types only — UUID is fixed 16 bytes, not text.
+        PgType::Text | PgType::Numeric | PgType::Jsonb | PgType::TextArray => {
             let text = datum.cast_mut_ptr::<pg_sys::text>();
             if text.is_null() {
                 return None;
@@ -113,11 +110,14 @@ unsafe fn datum_typed_sql(
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
             pg_type.integer_sql_literal(datum.value() as i64)
         }
-        _ => {
-            // Fall back to type output for timestamptz / other typed columns.
+        PgType::Uuid
+        | PgType::Timestamptz
+        | PgType::Bytea
+        | PgType::Float4
+        | PgType::Float8 => {
+            // Fixed-length / typed output via the type's output function.
             let mut typoutput = pg_sys::InvalidOid;
             let mut typisvarlena = false;
-            // Use catalog OID when available; otherwise skip.
             let oid = column_type_oid(pg_type)?;
             pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
             let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
@@ -136,7 +136,7 @@ unsafe fn datum_json_value(
     column: &koldstore_migrate::order::CatalogColumn,
 ) -> Option<serde_json::Value> {
     match column.pg_type {
-        PgType::Text | PgType::Uuid => {
+        PgType::Text => {
             let text = datum.cast_mut_ptr::<pg_sys::text>();
             if text.is_null() {
                 return None;
@@ -149,6 +149,19 @@ unsafe fn datum_json_value(
             pg_sys::pfree(cstr.cast());
             Some(serde_json::Value::String(value))
         }
+        PgType::Uuid => {
+            let mut typoutput = pg_sys::InvalidOid;
+            let mut typisvarlena = false;
+            let oid = column_type_oid(PgType::Uuid)?;
+            pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
+            let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
+            if out.is_null() {
+                return None;
+            }
+            let value = CStr::from_ptr(out).to_str().ok()?.to_string();
+            pg_sys::pfree(out.cast());
+            Some(serde_json::Value::String(value))
+        }
         PgType::Bool => Some(serde_json::Value::Bool(datum.value() != 0)),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => Some(serde_json::json!(datum.value() as i64)),
         _ => None,
@@ -158,6 +171,7 @@ unsafe fn datum_json_value(
 fn column_type_oid(pg_type: PgType) -> Option<pg_sys::Oid> {
     // Keep in sync with koldstore_schema::PgType OID mapping for output fallback.
     let oid = match pg_type {
+        PgType::Uuid => 2950u32,
         PgType::Timestamptz => 1184u32,
         PgType::Bytea => 17,
         PgType::Float4 => 700,

@@ -36,7 +36,7 @@ BENCHMARK_LABELS = {
     "batch_update": "Batch update",
     "single_delete": "Single delete",
     "batch_delete": "Batch delete",
-    "mixed_20_clients": "Mixed 20 clients",
+    "mixed_20_clients": "Mixed workload",
 }
 ROW_ESTIMATES = {
     "single_hot_query": 50,
@@ -107,16 +107,15 @@ def main() -> None:
             "pgbench latency percentiles are derived from pgbench per-transaction logs.",
             "Rows processed are estimates based on each benchmark's LIMIT or batch size.",
             "Memory and CPU fields are approximate process measurements from ps/pgrep.",
-            "Baseline and extension hot-only run the full pgbench workload suite.",
-            "Extension hot+cold and cold-only are storage-focused modes: the harness verifies flush output, "
-            "prunes flushed hot rows for the size snapshot, and skips long pgbench workloads.",
-            "Cold storage snapshots reflect benchmark-managed prune-after-flush, so they measure storage savings "
-            "instead of catalog-check overhead on still-hot rows.",
-            "DML benchmarks are marked N/A for cold-only mode when workloads are enabled; in storage-only modes they are not run.",
-            "Size snapshots are taken after setup and compaction. For flushed storage modes this means "
-            "seed + indexes + flush + verified prune + compaction.",
-            "Hot heap/table/index sizes come from PostgreSQL pg_relation_size, pg_table_size, and pg_indexes_size; "
-            "only cold storage size comes from the local cold-storage directory.",
+            "Baseline: plain PostgreSQL heap (no extension).",
+            "Extension hot-only: managed + mirrored, no flush — measures merge-scan/DML overhead on a full hot heap.",
+            "Extension hot+cold: flush keeps BENCH_HOT_LIMIT newest rows hot and moves the rest to zstd Parquet.",
+            "Extension cold-only: flush archives all rows; DML is N/A; queries exercise cold Parquet reads.",
+            "Query workloads run in every mode so TPS/latency columns are real measurements, not placeholders.",
+            "Size snapshots are taken after setup and compaction (post-flush for cold modes).",
+            "Hot heap/table/index sizes come from PostgreSQL pg_relation_size / pg_table_size / pg_indexes_size; "
+            "cold storage size is the local cold-storage directory (du).",
+            "Storage savings % compares each mode's PostgreSQL heap+index footprint to baseline.",
             "GitHub Actions results are useful for trend checks, not absolute machine performance numbers.",
         ],
         "benchmarks": benchmark_results,
@@ -233,7 +232,7 @@ def load_size_stats(results_dir: Path) -> list[dict[str, Any]]:
             path = results_dir / "raw" / mode / "db.after.json"
         if path.exists():
             payload = read_json(path)
-            if isinstance(payload, dict):
+            if isinstance(payload, dict) and payload.get("mode"):
                 payload.setdefault(
                     "measurement_note",
                     "Size snapshot taken after setup. Flushed storage modes include verified prune + compaction before the snapshot.",
@@ -294,24 +293,72 @@ def render_markdown(summary: dict[str, Any]) -> str:
         "",
         f"Generated: `{summary['generated_at']}`",
         "",
-        "## PostgreSQL pgbench Comparison",
+        "## How to read this report",
         "",
-        "| Benchmark | Baseline TPS | Hot-only TPS | Hot+cold TPS | Cold-only TPS | Hot-only p95 change |",
-        "|---|---:|---:|---:|---:|---:|",
+        "- **Baseline** = plain PostgreSQL (no extension).",
+        "- **Hot-only** = managed/mirrored, all rows hot; merge scan OFF (normal Index/Seq Scan; mirror overhead only).",
+        "- **Hot+cold** = newest hot rows kept in heap; older rows in Parquet (merge-scan path).",
+        "- **Cold-only** = archive tier; 1 hot sentinel + rest in Parquet; DML is N/A.",
+        "- TPS badges: green = faster than baseline, red = >20% slower.",
+        "- p95 badges: green = lower latency than baseline; red = >20% higher (positive overhead %).",
+        "",
+        "## Query throughput (TPS)",
+        "",
+        "| Benchmark | Baseline TPS | Hot-only TPS | Hot+cold TPS | Cold-only TPS | Hot-only p95 | Hot+cold p95 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
     ]
     by_benchmark = index_benchmarks(summary["benchmarks"])
-    for benchmark, label in BENCHMARK_LABELS.items():
+    query_benchmarks = [
+        "single_hot_query",
+        "batch_hot_query",
+        "hot_cold_query",
+        "cold_only_query",
+        "cold_miss_query",
+    ]
+    dml_benchmarks = [
+        name for name in BENCHMARK_LABELS if name not in query_benchmarks
+    ]
+
+    for benchmark in query_benchmarks:
+        label = BENCHMARK_LABELS[benchmark]
         baseline = by_benchmark.get((benchmark, "baseline"))
         hot = by_benchmark.get((benchmark, "extension-hot"))
         hot_cold = by_benchmark.get((benchmark, "extension-hot-cold"))
         cold = by_benchmark.get((benchmark, "extension-cold-only"))
         lines.append(
-            "| {} | {} | {} | {} | {} | {} |".format(
+            "| {} | {} | {} | {} | {} | {} | {} |".format(
                 label,
                 baseline_tps_cell(baseline),
                 tps_comparison_cell(baseline, hot),
                 tps_comparison_cell(baseline, hot_cold),
                 tps_comparison_cell(baseline, cold),
+                latency_comparison_cell(baseline, hot),
+                latency_comparison_cell(baseline, hot_cold),
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "## DML throughput (TPS)",
+            "",
+            "*(cold-only is archive/read-only — DML marked N/A)*",
+            "",
+            "| Benchmark | Baseline TPS | Hot-only TPS | Hot+cold TPS | Hot-only p95 change |",
+            "|---|---:|---:|---:|---:|",
+        ]
+    )
+    for benchmark in dml_benchmarks:
+        label = BENCHMARK_LABELS[benchmark]
+        baseline = by_benchmark.get((benchmark, "baseline"))
+        hot = by_benchmark.get((benchmark, "extension-hot"))
+        hot_cold = by_benchmark.get((benchmark, "extension-hot-cold"))
+        lines.append(
+            "| {} | {} | {} | {} | {} |".format(
+                label,
+                baseline_tps_cell(baseline),
+                tps_comparison_cell(baseline, hot),
+                tps_comparison_cell(baseline, hot_cold),
                 latency_comparison_cell(baseline, hot),
             )
         )
@@ -319,19 +366,23 @@ def render_markdown(summary: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "## Size Comparison",
+            "## Size comparison",
             "",
-            "*(snapshot taken after setup and compaction; flushed storage modes include verified prune-before-snapshot)*",
+            "*(snapshot after setup + compaction; flushed modes include policy prune)*",
             "",
-            "| Mode | Hot heap (PG) | Hot table total (PG) | Hot indexes (PG) | Cold storage | Dead tuples est. | Extension metadata |",
-            "|---|---:|---:|---:|---:|---:|---:|",
+            "| Mode | Hot heap (PG) | Hot table (PG) | Hot indexes (PG) | Cold Parquet | Live tuples | Ext. metadata | PG heap+idx vs baseline |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     sizes_by_mode = {size["mode"]: size for size in summary["sizes"]}
+    baseline_size = sizes_by_mode.get("baseline")
+    baseline_pg_total = pg_hot_total_bytes(baseline_size) if baseline_size else None
+
     for mode in MODES:
         size = sizes_by_mode.get(mode)
+        mode_total = pg_hot_total_bytes(size) if size else None
         lines.append(
-            "| {} | {} | {} | {} | {} | {} | {} |".format(
+            "| {} | {} | {} | {} | {} | {} | {} | {} |".format(
                 MODE_LABELS.get(mode, mode),
                 bytes_cell(
                     size.get("heap_size_bytes", size.get("table_size_bytes")) if size else None
@@ -339,15 +390,16 @@ def render_markdown(summary: dict[str, Any]) -> str:
                 bytes_cell(size.get("table_size_bytes") if size else None),
                 bytes_cell(size.get("index_size_bytes") if size else None),
                 bytes_cell(size.get("cold_storage_size_bytes") if size else None),
-                integer_cell(size.get("dead_tuples_estimate") if size else None),
+                integer_cell(size.get("live_tuples_estimate") if size else None),
                 bytes_cell(size.get("extension_metadata_size_bytes") if size else None),
+                storage_savings_cell(baseline_pg_total, mode_total, mode == "baseline"),
             )
         )
 
     lines.extend(
         [
             "",
-            "## System Comparison",
+            "## System comparison",
             "",
             "| Mode | Avg memory | Peak memory | CPU approx |",
             "|---|---:|---:|---:|",
@@ -385,7 +437,7 @@ def render_markdown(summary: dict[str, Any]) -> str:
             "is read-only by design. The following were skipped:"
         )
         for entry in na_entries:
-            lines.append(f"- `{entry['benchmark']}`")
+            lines.append(f"- `{entry['mode']}` / `{entry['benchmark']}`")
 
     lines.extend(["", "## Notes", ""])
     for note in summary["notes"]:
@@ -550,8 +602,35 @@ def latency_comparison_cell(
     ext_p95 = extension.get("latency_p95_ms") or 0
     if base_p95 <= 0:
         return "no baseline [[neutral:—]]"
-    change_pct = ((base_p95 - ext_p95) / base_p95) * 100.0
-    return f"{ext_p95:.3f} ms {change_badge(change_pct)}"
+    # Positive overhead => extension is slower (higher p95) than baseline.
+    overhead_pct = ((ext_p95 - base_p95) / base_p95) * 100.0
+    return f"{ext_p95:.3f} ms {latency_overhead_badge(overhead_pct)}"
+
+
+def pg_hot_total_bytes(size: dict[str, Any] | None) -> int | None:
+    if not size:
+        return None
+    table = size.get("table_size_bytes")
+    indexes = size.get("index_size_bytes")
+    if table is None and indexes is None:
+        return None
+    return int(table or 0) + int(indexes or 0)
+
+
+def storage_savings_cell(
+    baseline_total: int | None,
+    mode_total: int | None,
+    is_baseline: bool,
+) -> str:
+    if mode_total is None:
+        return "not collected [[neutral:n/a]]"
+    if is_baseline:
+        return f"{bytes_cell(mode_total)} [[neutral:baseline]]"
+    if baseline_total is None or baseline_total <= 0:
+        return f"{bytes_cell(mode_total)} [[neutral:no baseline]]"
+    saved_pct = ((baseline_total - mode_total) / baseline_total) * 100.0
+    # For storage, positive savings (smaller footprint) is good.
+    return f"{bytes_cell(mode_total)} {change_badge(saved_pct)}"
 
 
 def change_badge(change_pct: float) -> str:
@@ -560,6 +639,16 @@ def change_badge(change_pct: float) -> str:
         return f"[[good:{label}]]"
     if change_pct < -20.0:
         return f"[[bad:{label}]]"
+    return f"[[neutral:{label}]]"
+
+
+def latency_overhead_badge(overhead_pct: float) -> str:
+    """Badge for latency overhead where positive means slower than baseline."""
+    label = f"{overhead_pct:+.1f}%"
+    if overhead_pct > 20.0:
+        return f"[[bad:{label}]]"
+    if overhead_pct < -5.0:
+        return f"[[good:{label}]]"
     return f"[[neutral:{label}]]"
 
 
@@ -622,7 +711,10 @@ def relative_to_results(path: str | None, results_dir: Path) -> str | None:
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return {}
+    return json.loads(text)
 
 
 if __name__ == "__main__":

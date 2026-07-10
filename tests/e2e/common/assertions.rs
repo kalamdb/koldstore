@@ -128,7 +128,8 @@ pub fn assert_kold_merge_scan_executed_cold_reads(
         "expected at least {min_parquet_segments} timed parquet segment(s), got {timed_segments} in plan:\n{plan}"
     );
     anyhow::ensure!(
-        plan.lines().any(|line| line.contains("Parquet I/O:") && line.contains("footer-first")),
+        plan.lines()
+            .any(|line| line.contains("Parquet I/O:") && line.contains("footer-first")),
         "expected footer-first Parquet I/O details in analyzed plan, got:\n{plan}"
     );
     anyhow::ensure!(

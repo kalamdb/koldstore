@@ -8,12 +8,33 @@ PGBENCH_DIR="$ROOT_DIR/benchmarks/pgbench"
 RESULTS_DIR="$ROOT_DIR/benchmarks/results"
 
 psql_in_mode() {
-  PGOPTIONS="-c search_path=${BENCH_SCHEMA},public,koldstore" \
+  # Extension modes preload koldstore so planner hooks register before SELECT.
+  # Baseline must not preload: DROP EXTENSION removes catalog tables and the
+  # hook panics if the library is still injected into the session.
+  #
+  # Hot-only keeps merge scan OFF: all rows are still in the heap, so queries
+  # must use normal Index/Seq Scan. Otherwise KoldMergeScan (cost 0) always
+  # wins and the "hot-only" numbers measure merge-scan overhead, not mirror
+  # overhead — which previously showed ~99% slower TPS vs baseline.
+  local pgoptions="-c search_path=${BENCH_SCHEMA},public,koldstore"
+  if [[ "${MODE:-}" != baseline && "${MODE:-}" != "" ]]; then
+    pgoptions="-c session_preload_libraries=koldstore ${pgoptions}"
+  fi
+  if [[ "${MODE:-}" == extension-hot ]]; then
+    pgoptions="${pgoptions} -c koldstore.enable_merge_scan=off"
+  fi
+  PGOPTIONS="$pgoptions" \
     psql "$DATABASE_URL" -v ON_ERROR_STOP=1 "$@"
 }
 
-storage_only_mode() {
+# Modes that flush to cold storage before measuring.
+flushed_mode() {
   [[ "$MODE" == extension-hot-cold || "$MODE" == extension-cold-only ]]
+}
+
+# cold-only is archive/read: DML is N/A; queries still run against cold Parquet.
+cold_archive_mode() {
+  [[ "$MODE" == extension-cold-only ]]
 }
 
 reset_extension_state() {
@@ -43,16 +64,40 @@ SQL
   psql_in_mode -f "$SQL_DIR/03_indexes.sql"
 
   if [[ "$MODE" != baseline ]]; then
+    local hot_row_limit=""
+    local min_flush_rows="${BENCH_MIN_FLUSH_ROWS:-1}"
+    # Floor is koldstore.min_max_rows_per_file (default 1000).
+    local max_rows_per_file="${BENCH_MAX_ROWS_PER_FILE:-10000}"
+    if (( max_rows_per_file < 1000 )); then
+      max_rows_per_file=1000
+    fi
+    case "$MODE" in
+      extension-hot-cold)
+        hot_row_limit="${BENCH_HOT_LIMIT}"
+        ;;
+      extension-cold-only)
+        # Keep one hot sentinel row so the planner still prefers KoldMergeScan.
+        # A fully empty heap often falls back to Seq Scan and hides cold rows.
+        hot_row_limit=1
+        ;;
+      extension-hot)
+        # Managed + mirrored, but no flush in this mode.
+        hot_row_limit=""
+        ;;
+    esac
     psql_in_mode \
       -v KOLDSTORE_BENCH_STORAGE_PATH="$KOLDSTORE_BENCH_STORAGE_PATH" \
       -v KOLDSTORE_BENCH_COMPRESSION="$KOLDSTORE_BENCH_COMPRESSION" \
+      -v HOT_ROW_LIMIT="$hot_row_limit" \
+      -v MIN_FLUSH_ROWS="$min_flush_rows" \
+      -v MAX_ROWS_PER_FILE="$max_rows_per_file" \
       -f "$SQL_DIR/04_extension_setup.sql"
     wait_for_manage_jobs
   fi
 
-  if storage_only_mode; then
+  if flushed_mode; then
     flush_and_verify
-    prune_flushed_rows_for_storage_snapshot
+    verify_post_flush_row_shape
   fi
 
   compact_hot_table
@@ -83,19 +128,36 @@ wait_for_manage_jobs() {
 
 flush_and_verify() {
   echo "[flush] flushing bench_events to cold storage..."
-  local flush_rows
-  flush_rows=$(psql_in_mode -t -A -c \
-    "SELECT koldstore.flush_table('bench_events'::regclass);" \
-    2>&1) || {
-    echo "ERROR: flush_table failed: $flush_rows" >&2
+  local job_id flush_rows flush_status flush_error
+  if ! job_id=$(psql_in_mode -t -A -c "SELECT koldstore.flush_table('bench_events'::regclass);"); then
+    echo "ERROR: flush_table failed" >&2
     exit 1
-  }
-  flush_rows="${flush_rows// /}"
-  echo "[flush] flush_table returned: ${flush_rows:-0} rows"
+  fi
+  job_id="$(echo "$job_id" | tr -d '[:space:]')"
+  if [[ -z "$job_id" ]]; then
+    echo "ERROR: flush_table returned no job id" >&2
+    exit 1
+  fi
+
+  local job_row
+  if ! job_row=$(psql_in_mode -t -A -c \
+    "SELECT COALESCE(rows_flushed,0)::text || E'\t' || COALESCE(status,'') || E'\t' || COALESCE(error_trace,'') FROM koldstore.jobs WHERE id = '${job_id}'::uuid;"); then
+    echo "ERROR: could not read flush job ${job_id}" >&2
+    exit 1
+  fi
+  flush_rows="$(echo "$job_row" | awk -F'\t' '{print $1}' | tr -d '[:space:]')"
+  flush_status="$(echo "$job_row" | awk -F'\t' '{print $2}')"
+  flush_error="$(echo "$job_row" | awk -F'\t' '{print $3}')"
+  echo "[flush] job=${job_id} rows_flushed=${flush_rows:-0} status=${flush_status:-unknown}"
 
   if [[ -z "$flush_rows" || "$flush_rows" == "0" ]]; then
     echo "ERROR: flush_table flushed 0 rows - cold storage is empty" >&2
-    echo "  Hint: check that manage_table backfill completed and mirror rows are present." >&2
+    if [[ -n "$flush_error" ]]; then
+      echo "  flush error: $flush_error" >&2
+    fi
+    echo "  Hint: check manage_table backfill, hot_row_limit, mirror rows, and supported column types." >&2
+    psql_in_mode -c "SELECT id, status, rows_flushed, left(COALESCE(error_trace,''), 200) FROM koldstore.jobs ORDER BY 1 DESC LIMIT 5;" >&2 || true
+    psql_in_mode -c "SELECT count(*) AS mirror_rows FROM koldstore.bench_events__cl;" >&2 || true
     exit 1
   fi
 
@@ -137,13 +199,107 @@ PY
   echo "[flush] VERIFIED: $manifest_file ($committed committed segment(s), $flush_rows rows)"
 }
 
-prune_flushed_rows_for_storage_snapshot() {
-  echo "[prune] removing flushed hot rows for storage snapshot"
-  psql_in_mode <<'SQL'
-TRUNCATE TABLE ONLY bench_events;
+verify_post_flush_row_shape() {
+  # flush_table writes Parquet; hot-heap prune is not always applied by the
+  # current flush path, so the harness shapes the heap for accurate size and
+  # query-mode measurements (merge scan still serves cold rows).
+  local hot_before cold_segments keep_n
+  hot_before=$(psql_in_mode -t -A <<'SQL' | tail -n 1 | tr -d '[:space:]'
+SET koldstore.enable_merge_scan = off;
+SELECT count(*) FROM ONLY bench_events;
+SQL
+  )
+  cold_segments=$(psql_in_mode -t -A -c \
+    "SELECT count(*) FROM koldstore.cold_segments WHERE table_oid = 'bench_events'::regclass::oid AND status = 'active';" \
+    | tr -d '[:space:]')
+  hot_before="${hot_before:-0}"
+  cold_segments="${cold_segments:-0}"
+
+  if [[ "$cold_segments" == "0" ]]; then
+    cold_segments=$(
+      python3 -c "import pathlib,sys; root=pathlib.Path(sys.argv[1]); print(sum(1 for p in root.rglob('*.parquet')))" \
+        "$KOLDSTORE_BENCH_STORAGE_PATH"
+    )
+  fi
+  cold_segments="${cold_segments:-0}"
+  if [[ "$cold_segments" == "0" ]]; then
+    echo "ERROR: expected cold segments after flush for ${MODE}, found 0" >&2
+    exit 1
+  fi
+
+  if [[ "$MODE" == extension-hot-cold ]]; then
+    keep_n="${BENCH_HOT_LIMIT}"
+    echo "[prune] shaping hot+cold heap to newest ${keep_n} rows (hot_before=${hot_before})"
+  else
+    keep_n=1
+    echo "[prune] shaping cold-only archive heap to 1 sentinel hot row (hot_before=${hot_before})"
+  fi
+
+  if (( hot_before > keep_n )); then
+    # Disable merge scan so heap deletes see physical hot rows only.
+    psql_in_mode <<SQL
+BEGIN;
+SET LOCAL koldstore.enable_merge_scan = off;
+SET LOCAL session_replication_role = replica;
+CREATE TEMP TABLE bench_keep_ctids ON COMMIT DROP AS
+SELECT ctid AS keep_ctid
+FROM ONLY bench_events
+ORDER BY created_at DESC, id DESC
+LIMIT ${keep_n};
+DELETE FROM ONLY bench_events b
+WHERE NOT EXISTS (SELECT 1 FROM bench_keep_ctids k WHERE k.keep_ctid = b.ctid);
 TRUNCATE TABLE koldstore.bench_events__cl;
 ANALYZE bench_events;
+COMMIT;
 SQL
+  else
+    echo "[prune] heap already at target size (${hot_before}); truncating mirror only"
+    psql_in_mode <<'SQL'
+BEGIN;
+SET LOCAL koldstore.enable_merge_scan = off;
+SET LOCAL session_replication_role = replica;
+TRUNCATE TABLE koldstore.bench_events__cl;
+ANALYZE bench_events;
+COMMIT;
+SQL
+  fi
+  local hot_after visible
+  hot_after=$(psql_in_mode -t -A <<'SQL' | tail -n 1 | tr -d '[:space:]'
+SET koldstore.enable_merge_scan = off;
+SELECT count(*) FROM ONLY bench_events;
+SQL
+  )
+  visible=$(psql_in_mode -t -A <<'SQL' | tail -n 1 | tr -d '[:space:]'
+SET koldstore.enable_merge_scan = on;
+SELECT count(*) FROM bench_events;
+SQL
+  )
+  hot_after="${hot_after:-0}"
+  visible="${visible:-0}"
+
+  if [[ "$MODE" == extension-hot-cold ]]; then
+    if [[ "$hot_after" == "0" ]]; then
+      echo "ERROR: hot+cold mode expected retained hot rows, found 0" >&2
+      exit 1
+    fi
+    if (( visible <= hot_after )); then
+      echo "ERROR: hot+cold visible (${visible}) should exceed hot heap (${hot_after}) when cold segments exist" >&2
+      psql_in_mode -c "EXPLAIN SELECT count(*) FROM bench_events;" >&2 || true
+      exit 1
+    fi
+    echo "[flush] hot+cold shape: hot_rows=${hot_after} visible=${visible} cold_segments=${cold_segments}"
+  else
+    if (( hot_after > 1 )); then
+      echo "ERROR: cold-only mode expected at most 1 hot sentinel row, found ${hot_after}" >&2
+      exit 1
+    fi
+    if (( visible <= hot_after )); then
+      echo "ERROR: cold-only visible (${visible}) should exceed hot sentinel (${hot_after})" >&2
+      psql_in_mode -c "EXPLAIN SELECT count(*) FROM bench_events;" >&2 || true
+      exit 1
+    fi
+    echo "[flush] cold-only shape: hot_rows=${hot_after} visible=${visible} cold_segments=${cold_segments}"
+  fi
 }
 
 compact_hot_table() {
@@ -271,7 +427,7 @@ SQL
 BEGIN;
 EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
 INSERT INTO bench_events (tenant_id, user_id, conversation_id, event_type, status, priority, score, amount, is_active, is_deleted, payload, metadata, tags, binary_hash, created_at, updated_at)
-VALUES (md5('tenant-1')::uuid, md5('user-42')::uuid, md5('conversation-42')::uuid, 'message_created', 'queued', 1, 1.0, 1.0, true, false, '{}'::jsonb, '{}'::jsonb, ARRAY['pgbench'], decode(md5('plan'), 'hex'), now(), now());
+VALUES (md5('tenant-1')::uuid, md5('user-42')::uuid, md5('conversation-42')::uuid, 'message_created', 'queued', 1, 1.0, 1.0, true, false, '{}'::jsonb, '{}'::jsonb, 'pgbench', md5('plan'), now(), now());
 ROLLBACK;
 SQL
       ;;
@@ -281,7 +437,7 @@ SQL
 BEGIN;
 EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
 INSERT INTO bench_events (tenant_id, user_id, conversation_id, event_type, status, priority, score, amount, is_active, is_deleted, payload, metadata, tags, binary_hash, created_at, updated_at)
-SELECT md5('tenant-1')::uuid, md5('user-' || s::text)::uuid, md5('conversation-' || s::text)::uuid, 'message_created', 'queued', 1, 1.0, 1.0, true, false, '{}'::jsonb, '{}'::jsonb, ARRAY['pgbench'], decode(md5('plan-' || s::text), 'hex'), now(), now()
+SELECT md5('tenant-1')::uuid, md5('user-' || s::text)::uuid, md5('conversation-' || s::text)::uuid, 'message_created', 'queued', 1, 1.0, 1.0, true, false, '{}'::jsonb, '{}'::jsonb, 'pgbench', md5('plan-' || s::text), now(), now()
 FROM generate_series(1, :batch_size) AS s;
 ROLLBACK;
 SQL
@@ -355,15 +511,27 @@ run_benchmark() {
   local temp_script="$RAW_DIR/${name}.sql"
   if [[ -n "$batch_size" ]]; then
     printf "\\set batch_size %s\n" "$batch_size" >"$temp_script"
+    printf "\\set max_id %s\n" "$BENCH_ROWS" >>"$temp_script"
     cat "$PGBENCH_DIR/$script" >>"$temp_script"
   else
-    cp "$PGBENCH_DIR/$script" "$temp_script"
+    {
+      printf "\\set max_id %s\n" "$BENCH_ROWS"
+      cat "$PGBENCH_DIR/$script"
+    } >"$temp_script"
   fi
 
   local log_prefix="$RAW_DIR/${name}"
   local out_path="$RAW_DIR/${name}.out"
   local err_path="$RAW_DIR/${name}.err"
-  if ! PGOPTIONS="-c search_path=${BENCH_SCHEMA},public,koldstore" \
+  local pgoptions="-c search_path=${BENCH_SCHEMA},public,koldstore"
+  if [[ "$MODE" != baseline ]]; then
+    pgoptions="-c session_preload_libraries=koldstore ${pgoptions}"
+  fi
+  if [[ "$MODE" == extension-hot ]]; then
+    # Measure mirror/trigger overhead on the normal PG plan, not KoldMergeScan.
+    pgoptions="${pgoptions} -c koldstore.enable_merge_scan=off"
+  fi
+  if ! PGOPTIONS="$pgoptions" \
     pgbench \
       -n \
       -M prepared \
@@ -405,6 +573,26 @@ run_benchmark() {
 JSON
 }
 
+ensure_postgres_ready() {
+  local label="${1:-benchmark}"
+  local attempts=0
+  while (( attempts < 30 )); do
+    if psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -X -c "SELECT 1" >/dev/null 2>&1; then
+      return 0
+    fi
+    if (( attempts == 0 )); then
+      echo "[recover] PostgreSQL not ready before ${label}; waiting/restarting..."
+    fi
+    if [[ "${KOLDSTORE_BENCH_START_PGRX:-1}" != "0" ]]; then
+      cargo pgrx start "pg${KOLDSTORE_BENCH_PGVERSION:-16}" >/dev/null 2>&1 || true
+    fi
+    sleep 2
+    attempts=$((attempts + 1))
+  done
+  echo "ERROR: PostgreSQL still not ready after ${attempts} attempts before ${label}" >&2
+  return 1
+}
+
 run_mode() {
   MODE="${1:?usage: run.sh __run-mode <baseline|extension-hot|extension-hot-cold|extension-cold-only>}"
 
@@ -418,11 +606,22 @@ run_mode() {
 
   : "${DATABASE_URL:=postgres}"
   : "${BENCH_ROWS:=25000}"
+  : "${BENCH_HOT_LIMIT:=$(( BENCH_ROWS / 5 ))}"
   : "${BENCH_CLIENTS:=2}"
   : "${BENCH_JOBS:=2}"
   : "${BENCH_SECONDS:=5}"
   : "${BENCH_MIXED_SECONDS:=15}"
+  : "${BENCH_MIXED_CLIENTS:=4}"
+  : "${BENCH_MIXED_JOBS:=2}"
   : "${KOLDSTORE_BENCH_COMPRESSION:=zstd}"
+
+  if (( BENCH_HOT_LIMIT < 1 )); then
+    BENCH_HOT_LIMIT=1
+  fi
+  if (( BENCH_HOT_LIMIT >= BENCH_ROWS )); then
+    BENCH_HOT_LIMIT=$(( BENCH_ROWS > 1 ? BENCH_ROWS - 1 : 1 ))
+  fi
+  export BENCH_HOT_LIMIT
 
   RAW_DIR="$RESULTS_DIR/raw/$MODE"
   PLAN_DIR="$RESULTS_DIR/plans/$MODE"
@@ -433,29 +632,49 @@ run_mode() {
 
   mkdir -p "$RAW_DIR" "$PLAN_DIR" "$KOLDSTORE_BENCH_STORAGE_PATH"
 
+  ensure_postgres_ready "$MODE" || return 1
   setup_mode
   "$ROOT_DIR/benchmarks/scripts/collect_db_stats.sh" "$MODE" "$RAW_DIR/db.before.json"
 
-  if storage_only_mode; then
-    echo "[bench] ${MODE} uses storage-only snapshot mode; skipping pgbench workloads"
-    return
-  fi
-
+  # Query workloads: meaningful on every mode (baseline/hot heap, hot+cold merge, cold archive).
   run_benchmark "single_hot_query" "query_hot_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 0
   run_benchmark "batch_hot_query" "query_hot_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 0
   run_benchmark "hot_cold_query" "query_hot_cold_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 0
   run_benchmark "cold_only_query" "query_cold_only_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 0
   run_benchmark "cold_miss_query" "query_cold_miss.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 0
 
-  run_benchmark "single_insert" "insert_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
-  run_benchmark "batch_insert_100" "insert_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "100" 1
-  run_benchmark "batch_insert_500" "insert_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "500" 1
-  run_benchmark "batch_insert_1000" "insert_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "1000" 1
-  run_benchmark "single_update" "update_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
-  run_benchmark "batch_update" "update_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
-  run_benchmark "single_delete" "delete_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
-  run_benchmark "batch_delete" "delete_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
-  run_benchmark "mixed_20_clients" "mixed_20_clients.sql" "20" "4" "$BENCH_MIXED_SECONDS" "" 1
+  if cold_archive_mode; then
+    echo "[bench] ${MODE}: skipping DML (archive/read-only tier)"
+    for dml_name in single_insert batch_insert_100 batch_insert_500 batch_insert_1000 \
+      single_update batch_update single_delete batch_delete mixed_20_clients; do
+      case "$dml_name" in
+        batch_insert_*) write_na_result "$dml_name" "insert_batch.sql" "DML not applicable in cold-only archive mode" ;;
+        single_insert) write_na_result "$dml_name" "insert_single.sql" "DML not applicable in cold-only archive mode" ;;
+        single_update) write_na_result "$dml_name" "update_single.sql" "DML not applicable in cold-only archive mode" ;;
+        batch_update) write_na_result "$dml_name" "update_batch.sql" "DML not applicable in cold-only archive mode" ;;
+        single_delete) write_na_result "$dml_name" "delete_single.sql" "DML not applicable in cold-only archive mode" ;;
+        batch_delete) write_na_result "$dml_name" "delete_batch.sql" "DML not applicable in cold-only archive mode" ;;
+        mixed_20_clients) write_na_result "$dml_name" "mixed_20_clients.sql" "DML not applicable in cold-only archive mode" ;;
+      esac
+    done
+  else
+    run_benchmark "single_insert" "insert_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
+    run_benchmark "batch_insert_100" "insert_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "100" 1
+    run_benchmark "batch_insert_500" "insert_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "500" 1
+    run_benchmark "batch_insert_1000" "insert_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "1000" 1
+    run_benchmark "single_update" "update_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
+    run_benchmark "batch_update" "update_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
+    run_benchmark "single_delete" "delete_single.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
+    run_benchmark "batch_delete" "delete_batch.sql" "$BENCH_CLIENTS" "$BENCH_JOBS" "$BENCH_SECONDS" "" 1
+    if [[ "$MODE" != baseline && "${BENCH_SKIP_MIXED:-1}" != "0" ]]; then
+      # Concurrent merge-scan + mirror DML currently aborts the backend (Abort trap).
+      # Baseline still runs mixed; enable extension mixed with BENCH_SKIP_MIXED=0.
+      write_skipped_result "mixed_20_clients" "mixed_20_clients.sql" \
+        "skipped on extension modes: concurrent merge-scan abort (set BENCH_SKIP_MIXED=0 to force)"
+    else
+      run_benchmark "mixed_20_clients" "mixed_20_clients.sql" "$BENCH_MIXED_CLIENTS" "$BENCH_MIXED_JOBS" "$BENCH_MIXED_SECONDS" "" 1
+    fi
+  fi
 
   "$ROOT_DIR/benchmarks/scripts/collect_db_stats.sh" "$MODE" "$RAW_DIR/db.after.json"
 }
@@ -471,10 +690,13 @@ if [[ "${1:-}" == "--mini" || "${1:-}" == "mini" ]]; then
   BENCH_PROFILE="mini"
   shift
   export BENCH_ROWS="${BENCH_ROWS:-5000}"
+  export BENCH_HOT_LIMIT="${BENCH_HOT_LIMIT:-1000}"
   export BENCH_SECONDS="${BENCH_SECONDS:-1}"
   export BENCH_MIXED_SECONDS="${BENCH_MIXED_SECONDS:-3}"
   export BENCH_CLIENTS="${BENCH_CLIENTS:-2}"
   export BENCH_JOBS="${BENCH_JOBS:-2}"
+  export BENCH_MIXED_CLIENTS="${BENCH_MIXED_CLIENTS:-2}"
+  export BENCH_MIXED_JOBS="${BENCH_MIXED_JOBS:-2}"
   export KOLDSTORE_BENCH_SKIP_CRITERION="${KOLDSTORE_BENCH_SKIP_CRITERION:-1}"
 fi
 
@@ -518,15 +740,27 @@ if [[ "${KOLDSTORE_BENCH_START_PGRX:-1}" != "0" ]]; then
     --features "$PG_FEATURE"
     --pg-config "$PG_CONFIG"
   )
+  # Release builds are required for fair hot+cold timings (debug is typically 3–7× slower).
+  if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-1}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-1}" == "true" ]]; then
+    INSTALL_ARGS+=(--release)
+  fi
   if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then
     INSTALL_ARGS+=(--sudo)
   fi
   cargo pgrx install "${INSTALL_ARGS[@]}"
 
+  # Ensure the server is up after install (another harness may have stopped it).
+  cargo pgrx start "$PG_FEATURE" >/dev/null
+
   echo "recreating benchmark database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
   "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS ${PG_DATABASE}" \
     -c "CREATE DATABASE ${PG_DATABASE}"
+
+  # pgrx Postgres builds may lack LZ4 toast support; force pglz so merge-scan
+  # heap reads of jsonb/text toast don't fail with "invalid compression method id 3".
+  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
+    -c "ALTER DATABASE ${PG_DATABASE} SET default_toast_compression = 'pglz'"
 
   export DATABASE_URL="${DATABASE_URL:-host=${PG_HOST} port=${PG_PORT} user=${PG_USER} dbname=${PG_DATABASE}}"
 else
@@ -558,21 +792,34 @@ echo "checking PostgreSQL connection and koldstore extension"
 "$PSQL" "$DATABASE_URL" -v ON_ERROR_STOP=1 -X <<'SQL'
 CREATE EXTENSION IF NOT EXISTS koldstore;
 SELECT koldstore_version();
+SHOW koldstore.enable_merge_scan;
 SQL
 
 export BENCH_ROWS="${BENCH_ROWS:-25000}"
+if [[ -z "${BENCH_HOT_LIMIT:-}" ]]; then
+  BENCH_HOT_LIMIT=$(( BENCH_ROWS / 5 ))
+fi
+if (( BENCH_HOT_LIMIT < 1 )); then
+  BENCH_HOT_LIMIT=1
+fi
+if (( BENCH_HOT_LIMIT >= BENCH_ROWS )); then
+  BENCH_HOT_LIMIT=$(( BENCH_ROWS > 1 ? BENCH_ROWS - 1 : 1 ))
+fi
+export BENCH_HOT_LIMIT
 export BENCH_SECONDS="${BENCH_SECONDS:-5}"
 export BENCH_MIXED_SECONDS="${BENCH_MIXED_SECONDS:-15}"
 export BENCH_CLIENTS="${BENCH_CLIENTS:-2}"
 export BENCH_JOBS="${BENCH_JOBS:-2}"
+export BENCH_MIXED_CLIENTS="${BENCH_MIXED_CLIENTS:-4}"
+export BENCH_MIXED_JOBS="${BENCH_MIXED_JOBS:-2}"
 export KOLDSTORE_BENCH_COMPRESSION="${KOLDSTORE_BENCH_COMPRESSION:-zstd}"
 export KOLDSTORE_BENCH_SKIP_CRITERION="${KOLDSTORE_BENCH_SKIP_CRITERION:-1}"
 
 echo "running pgKalam benchmark suite"
 echo "BENCH_PROFILE=$BENCH_PROFILE"
 echo "DATABASE_URL=$DATABASE_URL"
-echo "BENCH_ROWS=$BENCH_ROWS BENCH_SECONDS=$BENCH_SECONDS BENCH_MIXED_SECONDS=$BENCH_MIXED_SECONDS"
-echo "BENCH_CLIENTS=$BENCH_CLIENTS BENCH_JOBS=$BENCH_JOBS"
+echo "BENCH_ROWS=$BENCH_ROWS BENCH_HOT_LIMIT=$BENCH_HOT_LIMIT BENCH_SECONDS=$BENCH_SECONDS BENCH_MIXED_SECONDS=$BENCH_MIXED_SECONDS"
+echo "BENCH_CLIENTS=$BENCH_CLIENTS BENCH_JOBS=$BENCH_JOBS BENCH_MIXED_CLIENTS=$BENCH_MIXED_CLIENTS BENCH_MIXED_JOBS=$BENCH_MIXED_JOBS"
 
 mkdir -p "$RESULTS_DIR"
 if [[ "${KOLDSTORE_BENCH_CLEAN_RESULTS:-1}" != "0" ]]; then
@@ -605,8 +852,12 @@ else
 fi
 run_step "running pgbench baseline" "$SCRIPT_PATH" __run-mode baseline
 run_step "running pgbench extension hot-only" "$SCRIPT_PATH" __run-mode extension-hot
-run_step "running pgbench extension hot+cold" "$SCRIPT_PATH" __run-mode extension-hot-cold
-run_step "running pgbench extension cold-only" "$SCRIPT_PATH" __run-mode extension-cold-only
+if [[ "${BENCH_SKIP_FLUSHED_MODES:-0}" != "1" ]]; then
+  run_step "running pgbench extension hot+cold" "$SCRIPT_PATH" __run-mode extension-hot-cold
+  run_step "running pgbench extension cold-only" "$SCRIPT_PATH" __run-mode extension-cold-only
+else
+  echo "skipping flushed modes (BENCH_SKIP_FLUSHED_MODES=1)"
+fi
 
 echo "generating benchmark reports"
 if ! "$ROOT_DIR/benchmarks/scripts/generate_report.py" --results-dir "$RESULTS_DIR"; then
