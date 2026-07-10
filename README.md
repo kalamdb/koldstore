@@ -436,6 +436,8 @@ Planned after the 0.1 hot/cold baseline:
   KoldStore without relying on `pg_cron`
 - **Improve `KoldMergeScan`** — streaming execution, tighter cold lookups, and
   broader planner pushdown
+- **Deleted index in manifest** — track flushed delete markers in the
+  object-store manifest for tombstone routing and faster cold PK lookups
 - **Finish change-log APIs** — public `changes_since` / change-cursor SQL
   surface on top of the `__cl` mirror
 - **Storage file type** — a datatype to upload and fetch files directly from
