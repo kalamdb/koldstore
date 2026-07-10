@@ -4,13 +4,13 @@ Require docker
 
 Set Shell bash
 Set Width 1250
-Set Height 850
+Set Height 750
 Set FontSize 15
-Set TypingSpeed 12ms
+Set TypingSpeed 5ms
 Set Theme "Catppuccin Frappe"
 Set WindowBar Colorful
 Set BorderRadius 7
-Set Margin 5
+Set Margin 0
 Set MarginFill "#1e1e2e"
 Set CursorBlink false
 

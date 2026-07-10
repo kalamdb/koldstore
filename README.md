@@ -29,10 +29,6 @@ Your table remains a normal PostgreSQL heap table. KoldStore keeps the active wo
   />
 </p>
 
-<p align="center">
-  <img src="docs/assets/architecture.svg" alt="KoldStore architecture: one PostgreSQL table, hot heap plus Parquet cold storage merged by KoldMergeScan" width="900" />
-</p>
-
 ```text
 Hot rows  → PostgreSQL heap
 Old rows  → Parquet / object storage
