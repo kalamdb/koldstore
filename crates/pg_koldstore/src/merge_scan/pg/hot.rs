@@ -239,16 +239,38 @@ unsafe fn column_type_meta(
             "projected {column_count} columns but SPI tupdesc has {natts}"
         ));
     }
-    let attrs = (*tupdesc).attrs.as_slice(natts);
     let mut meta = Vec::with_capacity(column_count);
-    for attr in attrs.iter().take(column_count) {
-        let mut typlen: i16 = 0;
-        let mut typbyval = false;
-        let mut typalign: std::os::raw::c_char = 0;
-        pg_sys::get_typlenbyvalalign(attr.atttypid, &mut typlen, &mut typbyval, &mut typalign);
-        meta.push(ColumnTypeMeta { typlen, typbyval });
+    for index in 0..column_count {
+        meta.push(column_type_meta_at(tupdesc, natts, index)?);
     }
     Ok(meta)
+}
+
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+unsafe fn column_type_meta_at(
+    tupdesc: pg_sys::TupleDesc,
+    natts: usize,
+    index: usize,
+) -> Result<ColumnTypeMeta, String> {
+    let attr = &(*tupdesc).attrs.as_slice(natts)[index];
+    let mut typlen: i16 = 0;
+    let mut typbyval = false;
+    let mut typalign: std::os::raw::c_char = 0;
+    pg_sys::get_typlenbyvalalign(attr.atttypid, &mut typlen, &mut typbyval, &mut typalign);
+    Ok(ColumnTypeMeta { typlen, typbyval })
+}
+
+#[cfg(feature = "pg18")]
+unsafe fn column_type_meta_at(
+    tupdesc: pg_sys::TupleDesc,
+    natts: usize,
+    index: usize,
+) -> Result<ColumnTypeMeta, String> {
+    let attr = &(*tupdesc).compact_attrs.as_slice(natts)[index];
+    Ok(ColumnTypeMeta {
+        typlen: attr.attlen,
+        typbyval: attr.attbyval,
+    })
 }
 
 unsafe fn materialize_spi_tuple(
