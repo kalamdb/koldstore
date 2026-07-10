@@ -28,6 +28,7 @@ path = "game_events.rs"
 [dev-dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+koldstore-storage.workspace = true
 parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
