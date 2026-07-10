@@ -215,8 +215,8 @@ fi
 
 if [[ "${SKIP_UNIT}" -eq 0 ]]; then
   ensure_cargo_nextest
-  step "cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples"
-  cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples
+  step "cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison"
+  cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
 fi
 
 IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"

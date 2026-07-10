@@ -3,6 +3,10 @@
 Compares a plain PostgreSQL heap table with the same wide table under KoldStore
 management.
 
+This package is excluded from the default workspace `cargo nextest` run (same as
+`e2e` / `examples`) because it needs a prepared pgrx PostgreSQL. Use
+`scripts/run-storage-comparison.sh`.
+
 Schema: [`schema.sql`](schema.sql)
 
 Order of measurement:

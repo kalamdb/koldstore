@@ -5,8 +5,10 @@
 ```bash
 cargo fmt --all
 cargo check --workspace --all-targets --no-default-features
-cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples
+cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
 ```
+
+`e2e`, `examples`, and `storage-comparison` need a running pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh`, and `scripts/run-storage-comparison.sh`.
 
 The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, `pg17`, or `pg18` feature when `cargo pgrx` is configured.
 
