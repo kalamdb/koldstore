@@ -222,6 +222,30 @@ rpm_arch_name() {
   esac
 }
 
+# RPM Version allows only [0-9A-Za-z.]. Semver pre-releases (e.g. 0.1.2-beta.1)
+# must be split: Version=0.1.2, Release=beta.1%{?dist}.
+parse_rpm_version_fields() {
+  local full="$1"
+  local version_no_build="${full%%+*}"
+
+  if [[ "${version_no_build}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-(.+)$ ]]; then
+    RPM_EPOCH_VERSION="${BASH_REMATCH[1]}"
+    RPM_EPOCH_RELEASE="${BASH_REMATCH[2]}"
+  elif [[ "${version_no_build}" =~ ^([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+    RPM_EPOCH_VERSION="${BASH_REMATCH[1]}"
+    RPM_EPOCH_RELEASE="1"
+  else
+    echo "error: unsupported version for rpm packaging: ${full}" >&2
+    return 1
+  fi
+
+  if [[ "${full}" == *"+"* ]]; then
+    local build_meta="${full#*+}"
+    build_meta="${build_meta//-/.}"
+    RPM_EPOCH_RELEASE="${RPM_EPOCH_RELEASE}.${build_meta}"
+  fi
+}
+
 create_rpm_package() {
   local version="$1"
   local pg="$2"
@@ -231,6 +255,10 @@ create_rpm_package() {
   require_command rpmbuild
   local rpm_arch
   rpm_arch="$(rpm_arch_name "${arch}")"
+  local rpm_version rpm_release
+  parse_rpm_version_fields "${version}" || return 1
+  rpm_version="${RPM_EPOCH_VERSION}"
+  rpm_release="${RPM_EPOCH_RELEASE}"
   local dist_dir="dist/${version}"
   local out
   out="$(artifact_basename "${version}" "${pg}" "${distro}" "${arch}" "rpm")"
@@ -242,11 +270,11 @@ create_rpm_package() {
   rpm_files="$(discover_rpm_file_entries "${stage_dir}")"
   cat >"${spec}" <<EOF
 Name:           postgresql${pg}-koldstore
-Version:        ${version}
-Release:        1%{?dist}
+Version:        ${rpm_version}
+Release:        ${rpm_release}%{?dist}
 Summary:        pg-koldstore hot/cold storage extension for PostgreSQL ${pg}
 License:        Apache-2.0
-URL:            https://github.com/pg-koldstore/pg-kalam
+URL:            https://github.com/kalamdb/koldstore
 Requires:       postgresql${pg}-server
 BuildArch:      ${rpm_arch}
 
@@ -263,7 +291,7 @@ cp -a ${stage_dir}/usr %{buildroot}/
 $(printf '%s\n' "${rpm_files}")
 
 %changelog
-* $(date -u '+%a %b %d %Y') pg-koldstore <https://github.com/kalamdb/koldstore> - ${version}-1
+* $(date -u '+%a %b %d %Y') pg-koldstore <https://github.com/kalamdb/koldstore> - ${rpm_version}-${rpm_release}
 - Release ${version} for PostgreSQL ${pg}
 EOF
   rpmbuild -bb \
@@ -272,7 +300,7 @@ EOF
     "${spec}"
   mkdir -p "${dist_dir}"
   rm -f "${dist_dir}/${out}"
-  cp "${topdir}/RPMS/${rpm_arch}/"postgresql"${pg}"-koldstore-"${version}"-*.rpm "${dist_dir}/${out}"
+  cp "${topdir}/RPMS/${rpm_arch}/"postgresql"${pg}"-koldstore-"${rpm_version}"-"${rpm_release}"*.rpm "${dist_dir}/${out}"
   rm -rf "${topdir}"
   echo "created ${dist_dir}/${out}"
 }
