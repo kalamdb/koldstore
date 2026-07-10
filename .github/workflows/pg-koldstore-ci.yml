@@ -70,6 +70,9 @@ jobs:
       - name: Compile pg_koldstore for PostgreSQL ${{ matrix.pg }}
         run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER} -- -D warnings
 
+      - name: Start MinIO for S3-backed E2E
+        run: bash scripts/ci/start-minio.sh
+
       - name: Start pgrx PostgreSQL ${{ matrix.pg }} and install koldstore
         run: bash scripts/run-pg-e2e.sh "${PG_VER}"
         env:
@@ -78,6 +81,12 @@ jobs:
 
       - name: Run E2E tests (cargo nextest -p e2e) on PostgreSQL ${{ matrix.pg }}
         run: cargo nextest run -p e2e --test-threads 1
+        env:
+          KOLDSTORE_MINIO: "1"
+          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+          KOLDSTORE_MINIO_BUCKET: koldstore-test
 
   memory:
     runs-on: ubuntu-latest

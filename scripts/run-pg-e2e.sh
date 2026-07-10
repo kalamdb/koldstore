@@ -67,6 +67,11 @@ if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
 fi
 
 echo "running pg-koldstore E2E tests against pgrx PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT}"
+if [[ "${KOLDSTORE_MINIO:-}" == "1" || -n "${KOLDSTORE_MINIO_ENDPOINT:-}" ]]; then
+  echo "MinIO-backed E2E enabled (KOLDSTORE_MINIO / KOLDSTORE_MINIO_ENDPOINT)"
+else
+  echo "MinIO-backed E2E skipped (set KOLDSTORE_MINIO=1 to enable flush_minio)"
+fi
 if ! cargo nextest --version >/dev/null 2>&1; then
   echo "error: cargo-nextest is required; install with: cargo install cargo-nextest --locked" >&2
   exit 1

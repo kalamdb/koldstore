@@ -18,6 +18,10 @@ name = "flush_to_cold"
 path = "flush/flush_to_cold.rs"
 
 [[test]]
+name = "flush_minio"
+path = "flush/flush_minio.rs"
+
+[[test]]
 name = "flush_recovery"
 path = "flush/flush_recovery.rs"
 
@@ -131,6 +135,7 @@ path = "full_lifecycle.rs"
 
 [dev-dependencies]
 anyhow.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 koldstore-catalog.workspace = true
 koldstore-common.workspace = true

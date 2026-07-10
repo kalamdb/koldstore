@@ -22,6 +22,13 @@ boundaries at each step:
 See [crate architecture](architecture/crate-architecture.md) for the layered
 Rust crate layout and dependency graph.
 
+## Decisions
+
+| ADR | Topic |
+|-----|--------|
+| [ADR-001](decisions/001-layered-crate-architecture.md) | Layered crate architecture |
+| [ADR-002](decisions/002-footer-derived-catalog-stats.md) | Footer-derived catalog segment stats (accepted, deferred) |
+
 ## Supplementary notes
 
 - [Change-log mirror and transactions](architecture/change-log-mirror-and-transactions.md) — mirror contract and transaction boundaries (clean-schema default)

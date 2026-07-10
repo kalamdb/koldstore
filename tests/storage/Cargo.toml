@@ -12,6 +12,7 @@ path = "pg_vs_koldstore.rs"
 [dev-dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+koldstore-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

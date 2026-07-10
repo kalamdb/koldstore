@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1
+#
+# Release runtime — PostgreSQL 16 + prebuilt koldstore + pg_cron.
+# Does not compile the extension; copy artifacts from the release tarball.
+#
+# Build context: repository root, with extracted extension files in
+# docker-artifacts/ (koldstore.so, koldstore.control, koldstore--*.sql).
+#
+#   docker build -f docker/Dockerfile.release -t pg-koldstore:16 .
+#
+# Base is Ubuntu 24.04 + PGDG PostgreSQL so the prebuilt ubuntu24.04 amd64
+# package matches the runtime glibc (official postgres:16-bookworm would not).
+
+ARG PG_MAJOR=16
+ARG OCI_IMAGE_DESCRIPTION="PostgreSQL 16 with the koldstore extension and pg_cron preinstalled for trying pg-koldstore quickly."
+
+FROM ubuntu:24.04
+
+ARG PG_MAJOR
+ARG OCI_IMAGE_DESCRIPTION
+
+LABEL org.opencontainers.image.title="pg-koldstore" \
+      org.opencontainers.image.description="${OCI_IMAGE_DESCRIPTION}" \
+      org.opencontainers.image.vendor="kalamdb"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PG_MAJOR=${PG_MAJOR} \
+    PATH=/usr/lib/postgresql/${PG_MAJOR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PGDATA=/var/lib/postgresql/data \
+    LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates \
+      curl \
+      gnupg \
+      gosu \
+      locales \
+      lsb-release \
+      libnss-wrapper \
+      tzdata; \
+    echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen; \
+    locale-gen; \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+      | gpg --batch --yes --dearmor -o /usr/share/keyrings/postgresql.gpg; \
+    echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+      > /etc/apt/sources.list.d/pgdg.list; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      "postgresql-${PG_MAJOR}" \
+      "postgresql-${PG_MAJOR}-cron" \
+      "postgresql-client-${PG_MAJOR}"; \
+    # Drop the package-manager cluster; the official entrypoint owns PGDATA.
+    if command -v pg_dropcluster >/dev/null 2>&1; then \
+      pg_dropcluster --stop "${PG_MAJOR}" main || true; \
+    fi; \
+    rm -rf /var/lib/postgresql/"${PG_MAJOR}" /var/lib/apt/lists/*; \
+    mkdir -p /var/lib/postgresql/data /docker-entrypoint-initdb.d /var/run/postgresql; \
+    chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql; \
+    chmod 2777 /var/run/postgresql
+
+# Official entrypoint (handles initdb, POSTGRES_* env, init scripts).
+COPY --from=postgres:16-bookworm /usr/local/bin/docker-entrypoint.sh /usr/local/bin/
+COPY --from=postgres:16-bookworm /usr/local/bin/docker-ensure-initdb.sh /usr/local/bin/
+
+COPY docker-artifacts/koldstore.so /tmp/koldstore/koldstore.so
+COPY docker-artifacts/koldstore.control /tmp/koldstore/koldstore.control
+COPY docker-artifacts/koldstore--*.sql /tmp/koldstore/
+
+COPY docker/release-init/ /docker-entrypoint-initdb.d/
+COPY docker/release-entrypoint.sh /usr/local/bin/release-entrypoint.sh
+
+RUN set -eux; \
+    EXTDIR="$(pg_config --sharedir)/extension"; \
+    LIBDIR="$(pg_config --pkglibdir)"; \
+    install -d "${EXTDIR}" "${LIBDIR}"; \
+    install -m 0644 /tmp/koldstore/koldstore.control "${EXTDIR}/"; \
+    install -m 0644 /tmp/koldstore/koldstore--*.sql "${EXTDIR}/"; \
+    install -m 0755 /tmp/koldstore/koldstore.so "${LIBDIR}/koldstore.so"; \
+    rm -rf /tmp/koldstore; \
+    chmod +x /usr/local/bin/release-entrypoint.sh; \
+    conf_sample="$(pg_config --sharedir)/postgresql.conf.sample"; \
+    printf "\n# pg-koldstore release image defaults\n" >> "${conf_sample}"; \
+    printf "shared_preload_libraries = 'pg_cron,koldstore'\n" >> "${conf_sample}"; \
+    printf "cron.database_name = 'koldstore'\n" >> "${conf_sample}"
+
+STOPSIGNAL SIGINT
+EXPOSE 5432
+VOLUME /var/lib/postgresql/data
+
+ENTRYPOINT ["release-entrypoint.sh"]
+CMD ["postgres"]

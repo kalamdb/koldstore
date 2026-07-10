@@ -628,6 +628,7 @@ name = "e2e"
 version = "0.1.2-beta.1"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
  "koldstore-catalog",
  "koldstore-common",
@@ -2716,6 +2717,7 @@ version = "0.1.2-beta.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "koldstore-storage",
  "serde",
  "serde_json",
  "tokio",

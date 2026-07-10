@@ -18,6 +18,16 @@ on:
         type: boolean
         required: false
         default: true
+      docker_push:
+        description: "Build, smoke-test, and push PostgreSQL 16 + koldstore Docker image to Docker Hub"
+        type: boolean
+        required: false
+        default: false
+      docker_repo:
+        description: "Docker Hub repo (owner/name) for the try-it PostgreSQL image"
+        type: string
+        required: false
+        default: "jamals86/pg-koldstore"
 
 permissions:
   contents: write
@@ -27,6 +37,9 @@ env:
   RUST_VERSION: "1.96.0"
   PGRX_VERSION: "0.19.1"
   CARGO_PROFILE: release-pg-dist
+  DOCKER_PG_MAJOR: "16"
+  DOCKER_PG_DISTRO: "ubuntu24.04"
+  DOCKER_PG_ARCH: "amd64"
 
 jobs:
   read_version:
@@ -129,10 +142,18 @@ jobs:
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
         run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
 
+      - name: Start MinIO for S3-backed E2E
+        run: bash scripts/ci/start-minio.sh
+
       - name: Run E2E tests on PostgreSQL ${{ matrix.pg }}
         run: bash scripts/run-pg-e2e.sh "${PG_VER}"
         env:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+          KOLDSTORE_MINIO: "1"
+          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+          KOLDSTORE_MINIO_BUCKET: koldstore-test
 
   build_linux_ubuntu:
     name: "Package · PG${{ matrix.pg }} · ${{ matrix.distro }} · ${{ matrix.arch }}"
@@ -446,3 +467,161 @@ jobs:
             dist/${{ needs.read_version.outputs.version }}/*.zip
             dist/${{ needs.read_version.outputs.version }}/SHA256SUMS
           fail_on_unmatched_files: true
+
+  # Publish PostgreSQL 16 + prebuilt koldstore + pg_cron to Docker Hub.
+  docker_pg:
+    name: Push PG Docker image (Docker Hub)
+    runs-on: ubuntu-24.04
+    needs:
+      - read_version
+      - build_linux_ubuntu
+    if: >-
+      ${{
+        inputs.docker_push &&
+        always() &&
+        !cancelled() &&
+        !failure() &&
+        needs.build_linux_ubuntu.result == 'success'
+      }}
+    env:
+      DOCKER_REPO_INPUT: ${{ inputs.docker_repo }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Docker Hub secrets
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DOCKERHUB_USERNAME}" ]]; then
+            echo "::error::DOCKERHUB_USERNAME repository secret is not configured." >&2
+            exit 1
+          fi
+          if [[ -z "${DOCKERHUB_TOKEN}" ]]; then
+            echo "::error::DOCKERHUB_TOKEN repository secret is not configured." >&2
+            exit 1
+          fi
+
+      - name: Set Docker image variables
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.read_version.outputs.version }}"
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          DOCKER_REPO="${DOCKER_REPO_INPUT:-jamals86/pg-koldstore}"
+          if [[ ! "${DOCKER_REPO}" =~ ^[A-Za-z0-9]+([._-][A-Za-z0-9]+)*\/[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$ ]]; then
+            echo "::error::Invalid docker_repo '${DOCKER_REPO}'. Expected owner/name." >&2
+            exit 1
+          fi
+          CANDIDATE_TAG="${VERSION}-pg${DOCKER_PG_MAJOR}-ci-${SHORT_SHA}"
+          DESCRIPTION="$(tr '\n' ' ' < docker/image-description.txt | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+          {
+            echo "docker_repo=${DOCKER_REPO}"
+            echo "candidate_tag=${CANDIDATE_TAG}"
+            echo "version_tag=${VERSION}-pg${DOCKER_PG_MAJOR}"
+            echo "latest_tag=latest"
+            echo "description=${DESCRIPTION}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Docker Hub repo: ${DOCKER_REPO}"
+          echo "Candidate tag: ${CANDIDATE_TAG}"
+
+      - name: Download PG${{ env.DOCKER_PG_MAJOR }} package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pkg-pg${{ env.DOCKER_PG_MAJOR }}-${{ env.DOCKER_PG_DISTRO }}-${{ env.DOCKER_PG_ARCH }}
+          path: pkg-download/
+
+      - name: Prepare docker-artifacts from release tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ needs.read_version.outputs.version }}"
+          TARBALL="$(find pkg-download -type f -name "pg_koldstore-v${VERSION}-pg${DOCKER_PG_MAJOR}-${DOCKER_PG_DISTRO}-${DOCKER_PG_ARCH}.tar.gz" | head -n 1)"
+          if [[ -z "${TARBALL}" ]]; then
+            echo "::error::Expected tarball pg_koldstore-v${VERSION}-pg${DOCKER_PG_MAJOR}-${DOCKER_PG_DISTRO}-${DOCKER_PG_ARCH}.tar.gz not found." >&2
+            find pkg-download -type f | sort >&2 || true
+            exit 1
+          fi
+
+          mkdir -p tarball-extract docker-artifacts
+          tar -xzf "${TARBALL}" -C tarball-extract
+
+          SO="$(find tarball-extract -type f -name 'koldstore.so' | head -n 1)"
+          CONTROL="$(find tarball-extract -type f -name 'koldstore.control' | head -n 1)"
+          if [[ -z "${SO}" || -z "${CONTROL}" ]]; then
+            echo "::error::koldstore.so / koldstore.control missing from tarball." >&2
+            find tarball-extract -type f | sort >&2 || true
+            exit 1
+          fi
+
+          cp "${SO}" docker-artifacts/koldstore.so
+          cp "${CONTROL}" docker-artifacts/koldstore.control
+          find "$(dirname "${CONTROL}")" -type f -name 'koldstore--*.sql' -exec cp {} docker-artifacts/ \;
+
+          echo "=== docker-artifacts ==="
+          ls -lh docker-artifacts/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push candidate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.release
+          push: true
+          platforms: linux/amd64
+          build-args: |
+            PG_MAJOR=${{ env.DOCKER_PG_MAJOR }}
+            OCI_IMAGE_DESCRIPTION=${{ steps.vars.outputs.description }}
+          labels: |
+            org.opencontainers.image.title=pg-koldstore
+            org.opencontainers.image.description=${{ steps.vars.outputs.description }}
+            org.opencontainers.image.version=${{ needs.read_version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: |
+            ${{ steps.vars.outputs.docker_repo }}:${{ steps.vars.outputs.candidate_tag }}
+
+      - name: Smoke-test candidate image
+        id: smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.vars.outputs.docker_repo }}:${{ steps.vars.outputs.candidate_tag }}"
+          docker pull "${IMAGE}"
+          chmod +x docker/test-release-image.sh
+          ./docker/test-release-image.sh "${IMAGE}" 2>&1 | tee pg-docker-smoke.txt
+
+      - name: Upload Docker smoke-test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pg-docker-smoke
+          path: pg-docker-smoke.txt
+          if-no-files-found: ignore
+
+      - name: Promote validated image tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          REPO="${{ steps.vars.outputs.docker_repo }}"
+          CANDIDATE="${{ steps.vars.outputs.candidate_tag }}"
+          VERSION_TAG="${{ steps.vars.outputs.version_tag }}"
+          LATEST_TAG="${{ steps.vars.outputs.latest_tag }}"
+
+          docker buildx imagetools create \
+            -t "${REPO}:${VERSION_TAG}" \
+            -t "${REPO}:${LATEST_TAG}" \
+            "${REPO}:${CANDIDATE}"
+
+          echo "::notice::Published ${REPO}:${VERSION_TAG} and ${REPO}:${LATEST_TAG}"

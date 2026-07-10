@@ -9,8 +9,10 @@ until after that baseline is stable.
 - **Smart flush scheduler** — built-in scheduling that triggers flushes
   automatically without relying on `pg_cron` (operators can keep using
   `pg_cron` + `koldstore.flush_table` until this lands).
-- **Improve `KoldMergeScan`** — remaining streaming polish, bounded-memory
-  execution, rescans, tighter cold lookups, and broader planner pushdown.
+- **Improve `KoldMergeScan`** — prioritize cold PK point-lookup latency
+  (backend footer/reader cache, cold-native emit without JSON merge), then
+  remaining streaming polish, bounded-memory execution, rescans, and broader
+  planner pushdown. See [performance](performance.md).
 - **Finish change-log APIs** — public `changes_since` / change-cursor SQL on
   top of the latest-state `__cl` mirror (see README “In Development”).
 - **Storage file datatype** — upload and fetch files directly from registered
@@ -21,6 +23,12 @@ until after that baseline is stable.
 
 ## Storage layout and pruning
 
+- **Footer-derived catalog segment stats** — stop hand-maintaining
+  `indexed_bounds` during encode; after Parquet write, extract min/max from
+  footer chunk statistics into `column_stats` (catalog still owns
+  prune-before-open). Accepted in
+  [ADR-002](decisions/002-footer-derived-catalog-stats.md); schedule after
+  cold PK scan wins. `byte_size` already comes from publish metadata only.
 - Operator-configurable `pruning_columns` and `bloom_filter_columns`.
 - Segment compaction and small-file combining.
 - Size-aware segment writing based on `target_file_size_mb`.
