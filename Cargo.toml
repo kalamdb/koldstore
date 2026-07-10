@@ -106,13 +106,22 @@ inherits = "release"
 opt-level = "z"
 lto = true
 
-# PostgreSQL extension profile: same size compression as release-dist, but panic
-# must unwind for pgrx/PostgreSQL longjmp compatibility.
-# Use with: cargo pgrx package --profile release-pg
+# PostgreSQL extension profile: optimized like release, but panic must unwind
+# for pgrx/PostgreSQL longjmp (ereport) compatibility. Plain `cargo build
+# --release` / `cargo pgrx install --release` use panic=abort and will abort the
+# backend on extension ERROR paths.
+# Use with: cargo pgrx install --profile release-pg
+#           cargo pgrx package --profile release-pg-dist
 [profile.release-pg]
-inherits = "release-dist"
+inherits = "release"
 panic = "unwind"
 strip = true
+
+# Smallest packaged binaries (inherits release-pg unwind + size opts).
+[profile.release-pg-dist]
+inherits = "release-pg"
+opt-level = "z"
+lto = true
 
 [profile.bench]
 inherits = "release"

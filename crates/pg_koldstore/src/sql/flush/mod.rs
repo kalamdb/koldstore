@@ -112,10 +112,14 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 
 /// Flushes one managed table scope from SQL.
 ///
-/// SQL contract: `koldstore.flush_table(table_name regclass)`.
+/// SQL contract:
+/// `koldstore.flush_table(table_name regclass, force boolean default false)`.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
-pub fn flush_table_pg(table_name: pgrx::pg_sys::Oid) -> pgrx::Uuid {
-    execute::flush_table_pg_impl(table_name)
+pub fn flush_table_pg(
+    table_name: pgrx::pg_sys::Oid,
+    force: pgrx::default!(bool, false),
+) -> pgrx::Uuid {
+    execute::flush_table_pg_impl(table_name, force)
         .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
 }

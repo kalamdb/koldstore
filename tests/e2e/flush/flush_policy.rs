@@ -14,6 +14,7 @@ fn flush_policy_e2e_contract_selects_row_limit_candidates() {
             hot_row_limit: Some(1),
             min_flush_rows: None,
             max_rows_per_file: None,
+            target_file_size_mb: None,
         },
     );
 

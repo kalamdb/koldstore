@@ -29,7 +29,7 @@ flowchart TD
   G -->|yes| H["mark_completed(0)"]
   G -->|no| I["stream_write_flush_batches"]
   I --> J["stream_flush_chunks\nSPI fetch → Arrow → Parquet"]
-  J --> K["persist_flush_segments_batch"]
+  J --> K["persist_flush_segment\n(per Parquet file + segment stats)"]
   K --> L["manifest reconcile if needed"]
   L --> M["write manifest object"]
   M --> N["upsert manifest catalog row"]
@@ -235,13 +235,16 @@ Manifest finalize uses `write_manifest_with_client` and the same atomic put path
 
 ---
 
-## Phase 5 — Catalog batch insert
+## Phase 5 — Catalog insert (per segment)
 
-`persist_flush_segments_batch` — **one SPI round trip** for all segments:
+During streaming, each Parquet file is cataloged immediately via
+`persist_flush_segment`:
 
-- Native PostgreSQL arrays: `uuid[]`, `text[]`, `integer[]`, `bigint[]`, `jsonb[]`
-- `INSERT … SELECT FROM unnest(…)` into `koldstore.cold_segments`
-- CTE inserts matching `koldstore.cold_pk_hints` (`pk_hash = md5(object_path)`)
+1. One SPI insert for `koldstore.cold_segments` + `cold_segment_stats`
+   (native arrays / `unnest`)
+2. No per-PK catalog rows — prune with `cold_segment_stats` / Parquet
+   row-group stats and bloom filters so catalog size stays O(segments ×
+   indexed columns)
 
 `column_stats` crosses SPI as `pgrx::JsonB` per segment (already
 `serde_json::Value` in Rust).

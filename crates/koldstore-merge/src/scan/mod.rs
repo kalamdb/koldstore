@@ -20,5 +20,5 @@ pub use path::{
 };
 pub use plan::{
     prune_segment_stats, prune_segment_stats_hints, MergeMetadataAttnums, MergeScanPlan,
-    SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
+    MirrorOverlayStrategy, SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
 };

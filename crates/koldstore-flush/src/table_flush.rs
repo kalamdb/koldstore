@@ -31,6 +31,8 @@ pub struct TableFlushPreparedContext {
     pub primary_key_columns: Vec<String>,
     /// Maximum rows per Parquet segment.
     pub max_rows_per_file: usize,
+    /// Optional compressed-byte target per Parquet segment.
+    pub target_file_size_bytes: Option<u64>,
 }
 
 /// Outcome of writing one or more flush batches.

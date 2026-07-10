@@ -71,7 +71,7 @@ pub fn define_gucs() {
     GucRegistry::define_bool_guc(
         c"koldstore.enable_merge_scan",
         c"Enables KoldStore merge scans.",
-        c"Allows the planner to replace managed-table heap scans with KoldMergeScan.",
+        c"Required for managed-table SELECT. When off, KoldMergeScan errors instead of allowing an incorrect heap-only read.",
         &ENABLE_MERGE_SCAN,
         GucContext::Userset,
         flags,

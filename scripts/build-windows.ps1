@@ -24,7 +24,7 @@ $Formats = "zip"
 $ExtensionCrate = "pg_koldstore"
 $ExtensionSqlName = "koldstore"
 $PgrxVersion = if ($env:PGRX_VERSION) { $env:PGRX_VERSION } else { "0.19.1" }
-$CargoProfile = if ($env:CARGO_PROFILE) { $env:CARGO_PROFILE } else { "release-pg" }
+$CargoProfile = if ($env:CARGO_PROFILE) { $env:CARGO_PROFILE } else { "release-pg-dist" }
 
 function Get-ArtifactBaseName {
   param(

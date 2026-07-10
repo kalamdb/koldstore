@@ -118,14 +118,11 @@ pub(super) fn manifest_from_active_cold_segments(
     .map_err(|error| error.to_string())
 }
 
-/// Catalogs every segment written by one `flush_table` call in a single SPI
-/// round trip.
+/// Catalogs every segment written by one `flush_table` call.
 ///
-/// PERFORMANCE: previously each segment cost its own SPI round trip (even after
-/// combining the `cold_segments` and `cold_pk_hints` inserts). A flush that writes
-/// dozens of segments now issues exactly one multi-row `INSERT ... SELECT FROM
-/// unnest(...)` regardless of segment count, using native PostgreSQL arrays
-/// instead of JSON so per-row values stay typed end to end.
+/// Segment rows + normalized `cold_segment_stats` go in one SPI round trip.
+/// Exact per-PK catalog hints are intentionally not written: prune with
+/// `cold_segment_stats` / Parquet stats so catalog size stays O(segments).
 ///
 /// # Errors
 ///
@@ -154,7 +151,8 @@ pub(super) fn persist_flush_segments_batch(
     let mut column_stats = Vec::with_capacity(segments.len());
     for segment in segments {
         let row = &segment.catalog_row;
-        segment_ids.push(pgrx::Uuid::from_bytes(*segment.segment_id.as_bytes()));
+        let segment_id = pgrx::Uuid::from_bytes(*segment.segment_id.as_bytes());
+        segment_ids.push(segment_id);
         object_paths.push(row.object_path.clone());
         batch_numbers.push(row.batch_number);
         min_seqs.push(row.min_seq);
@@ -187,6 +185,16 @@ pub(super) fn persist_flush_segments_batch(
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+/// Catalogs one written segment immediately (segment row + column stats).
+///
+/// Prefer this during streaming flush so catalog work tracks Parquet publish.
+pub(super) fn persist_flush_segment(
+    table_oid: pgrx::pg_sys::Oid,
+    segment: &WrittenFlushSegment,
+) -> Result<(), String> {
+    persist_flush_segments_batch(table_oid, std::slice::from_ref(segment))
 }
 
 pub(super) fn upsert_manifest_row(

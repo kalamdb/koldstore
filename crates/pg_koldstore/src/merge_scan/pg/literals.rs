@@ -110,11 +110,7 @@ unsafe fn datum_typed_sql(
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
             pg_type.integer_sql_literal(datum.value() as i64)
         }
-        PgType::Uuid
-        | PgType::Timestamptz
-        | PgType::Bytea
-        | PgType::Float4
-        | PgType::Float8 => {
+        PgType::Uuid | PgType::Timestamptz | PgType::Bytea | PgType::Float4 | PgType::Float8 => {
             // Fixed-length / typed output via the type's output function.
             let mut typoutput = pg_sys::InvalidOid;
             let mut typisvarlena = false;

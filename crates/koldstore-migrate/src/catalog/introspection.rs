@@ -85,6 +85,7 @@ SELECT COALESCE(
             'type_name', format_type(a.atttypid, a.atttypmod),
             'is_primary_key', pk.attname IS NOT NULL,
             'identity', a.attidentity <> '',
+            'generated', a.attgenerated <> '',
             'default_expr', pg_get_expr(d.adbin, d.adrelid)
         )
         ORDER BY a.attnum

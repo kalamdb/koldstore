@@ -93,6 +93,12 @@ pub const REQUIRED_CATALOG_INDEXES: &[CatalogIndexSpec] = &[
         unique: false,
         purpose: "commit-sequence pruning for active cold data",
     },
+    CatalogIndexSpec {
+        name: "cold_segment_stats_lookup_idx",
+        table: "koldstore.cold_segment_stats",
+        unique: false,
+        purpose: "predicate-column stats lookup for active segments",
+    },
 ];
 
 /// Returns required catalog indexes missing from a parsed bootstrap plan.

@@ -17,22 +17,30 @@ Order of measurement:
 TODO rows in the printed table (not measured yet): total PG backup size, restore time.
 Autovacuum counters are not printed: this harness is too short for autovacuum to run.
 ```bash
-# Requires a running pgrx server with koldstore installed.
-# Use a --release extension for fair hot+cold timings (debug builds are ~3–7× slower):
+# Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot):
+scripts/run-storage-comparison.sh
+scripts/run-storage-comparison.sh --rows 1000000 --hot-limit 50000
+
+# Or prepare manually, then run the test directly:
+# Use release-pg for fair hot+cold timings (debug is ~3–7× slower; plain --release
+# uses panic=abort and breaks PostgreSQL ereport/longjmp from extension hooks):
 KOLDSTORE_E2E_PREPARE_ONLY=1 scripts/run-pg-e2e.sh 16
-cargo pgrx install -p pg_koldstore --release --no-default-features --features pg16 \
+cargo pgrx install -p pg_koldstore --profile release-pg --no-default-features --features pg16 \
   --pg-config "$(cargo pgrx info pg-config 16)"
 cargo pgrx stop pg16 && cargo pgrx start pg16
-
-# Default / README table scale (100k rows, 10k hot):
-KOLDSTORE_STORAGE_ROWS=100000 \
-KOLDSTORE_STORAGE_HOT_LIMIT=10000 \
-cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
+KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 \
+  cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
 ```
 
 The harness prints a markdown comparison table and asserts that after flush,
 PostgreSQL heap and index bytes for the managed table are smaller than the
-unmanaged baseline.
+unmanaged baseline. Progress lines are always logged for seed / flush / vacuum
+phases so large runs do not look hung.
+
+Visibility after flush is checked with point lookups plus `describe_table`
+hot+cold counters — not `SELECT count(*)` through `KoldMergeScan`, which still
+materializes the full result set and will OOM / drop the session at multi-million
+row scale.
 
 ## MinIO integration tests
 

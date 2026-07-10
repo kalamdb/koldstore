@@ -37,5 +37,6 @@ pub use schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
 pub use writer::{
     encode_parquet_segment_bytes, plan_clean_cold_record, record_batch_from_clean_cold_records,
     validate_parquet_bytes, CleanColdRecordPlan, ParquetSegmentWriter, ParquetValidation,
-    SegmentMetadataInput, SegmentWritePlan, StreamingRowGroupPlan, WriterOptions,
+    SegmentMetadataInput, SegmentSplitPolicy, SegmentWritePlan, StreamingParquetSegmentWriter,
+    StreamingRowGroupPlan, WriterOptions,
 };

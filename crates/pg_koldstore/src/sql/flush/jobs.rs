@@ -13,7 +13,10 @@ struct PendingFlushJobWire {
     force: bool,
 }
 
-pub(super) fn ensure_flush_job(table_oid: pgrx::pg_sys::Oid) -> Result<(uuid::Uuid, bool), String> {
+pub(super) fn ensure_flush_job(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+) -> Result<(uuid::Uuid, bool), String> {
     use pgrx::datum::DatumWithOid;
 
     let lookup = plan_lookup_active_inline_flush_job().map_err(|error| error.to_string())?;
@@ -25,7 +28,7 @@ pub(super) fn ensure_flush_job(table_oid: pgrx::pg_sys::Oid) -> Result<(uuid::Uu
             serde_json::from_str(&existing).map_err(|error| error.to_string())?;
         return Ok((
             uuid::Uuid::parse_str(&wire.id).map_err(|error| error.to_string())?,
-            wire.force,
+            force || wire.force,
         ));
     }
 
@@ -36,10 +39,11 @@ pub(super) fn ensure_flush_job(table_oid: pgrx::pg_sys::Oid) -> Result<(uuid::Uu
         &[
             DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
             DatumWithOid::from(table_oid),
+            DatumWithOid::from(force),
         ],
     )
     .map_err(|error| error.to_string())?;
-    Ok((job_id, false))
+    Ok((job_id, force))
 }
 
 pub(super) fn mark_flush_job_running(

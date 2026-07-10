@@ -38,8 +38,8 @@ pub const REQUIRED_CATALOG_TABLES: &[CatalogTableSpec] = &[
         purpose: "cold object segment catalog for active and retained data",
     },
     CatalogTableSpec {
-        name: "koldstore.cold_pk_hints",
-        purpose: "primary-key lookup hints that avoid unnecessary cold scans",
+        name: "koldstore.cold_segment_stats",
+        purpose: "normalized per-column segment statistics for predicate pruning",
     },
 ];
 

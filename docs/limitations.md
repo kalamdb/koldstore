@@ -21,7 +21,7 @@ accounting, not for proving that a unique value is absent from cold storage on
 
 | Constraint | Hot rows | Cold rows | Normal DML checks cold? |
 |------------|----------|-----------|-------------------------|
-| Primary key | Yes | Logical winner via merge | PK tombstone paths use local `cold_pk_hints`; not a full UNIQUE layer |
+| Primary key | Yes | Logical winner via merge | Cold presence via `cold_segment_stats` + Parquet; not a full UNIQUE layer |
 | `UNIQUE` (non-PK) | Yes | No | No |
 | Foreign keys | Yes | No | No |
 

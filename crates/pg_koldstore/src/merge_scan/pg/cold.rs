@@ -29,13 +29,19 @@ pub(super) fn load_cold_rows_for_merge(
 ) -> Result<(ColdReadProfile, Vec<ColdRow>), String> {
     with_hook_disabled(|| {
         unsafe { validate_filter_columns_indexed(qual, catalog)? };
+        let prune_predicates = unsafe { segment_prune_predicates(qual, &catalog.columns, params) };
+        let predicate_columns = dedupe_nonblank(
+            prune_predicates
+                .iter()
+                .map(|predicate| predicate.column.as_str()),
+        );
         let manifest_started = Instant::now();
-        let Some(manifest_stats) = crate::catalog::cache::cached_manifest_segment_stats(table_oid)?
+        let Some(manifest_stats) =
+            crate::catalog::cache::cached_manifest_segment_stats(table_oid, &predicate_columns)?
         else {
             return Ok((ColdReadProfile::empty("(none)"), Vec::new()));
         };
         let manifest_read_ms = elapsed_ms(manifest_started);
-        let prune_predicates = unsafe { segment_prune_predicates(qual, &catalog.columns, params) };
         let indexed_filter_columns = dedupe_nonblank(
             catalog
                 .primary_key
@@ -48,6 +54,7 @@ pub(super) fn load_cold_rows_for_merge(
             .map_err(|error| error.to_string())?;
         let segments_considered = manifest_stats.segments.len();
         let segments = prune_segment_stats_hints(&manifest_stats.segments, &prune_predicates);
+        let segments_pruned_min_max = segments_considered.saturating_sub(segments.len());
 
         let projection = projection_column_names(projected_columns, &snapshot.primary_key_columns);
         let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
@@ -59,6 +66,7 @@ pub(super) fn load_cold_rows_for_merge(
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: Some(manifest_read_ms),
             segments_considered,
+            segments_pruned_min_max,
             segments_opened: segments.len(),
             pk_probe: pk_probe.clone(),
             projected_columns: projection.clone(),
@@ -109,7 +117,8 @@ pub(super) fn load_cold_rows_for_merge(
 /// Planned cold profile for EXPLAIN without opening Parquet files.
 pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdReadProfile, String> {
     with_hook_disabled(|| {
-        let Some(manifest_stats) = crate::catalog::cache::cached_manifest_segment_stats(table_oid)?
+        let Some(manifest_stats) =
+            crate::catalog::cache::cached_manifest_segment_stats(table_oid, &[])?
         else {
             return Ok(ColdReadProfile::empty("(none)"));
         };
@@ -120,6 +129,7 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: Some(0.0),
             segments_considered: manifest_stats.segments.len(),
+            segments_pruned_min_max: 0,
             segments_opened: manifest_stats.segments.len(),
             pk_probe: None,
             projected_columns: Vec::new(),

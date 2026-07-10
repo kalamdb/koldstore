@@ -32,7 +32,7 @@ pub enum TableCounterError {
 ///
 /// Keeps peak memory bounded. Rows are decoded directly from SPI heap tuples (no `jsonb_agg`).
 /// Tune with care when changing flush latency or memory trade-offs.
-pub const FLUSH_MIRROR_FETCH_BATCH_SIZE: i64 = 8_192;
+pub const FLUSH_MIRROR_FETCH_BATCH_SIZE: i64 = 32_768;
 
 /// Plans a read of cached row counters from `koldstore.manifest`.
 ///

@@ -61,6 +61,7 @@ fn plan() -> MergeScanPlan {
             min_seq: SeqId::new(10).unwrap(),
             max_seq: SeqId::new(30).unwrap(),
         }],
+        overlay_strategy: Default::default(),
     }
 }
 

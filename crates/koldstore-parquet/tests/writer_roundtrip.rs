@@ -1,7 +1,7 @@
 use koldstore_parquet::{
     plan_clean_cold_record, record_batch_from_clean_cold_records, ColumnStats, FooterSummary,
     ParquetSegmentWriter, PgColumn, PgType, RowGroupStats, SegmentFooterMetadata,
-    SegmentMetadataInput, WriterOptions,
+    SegmentMetadataInput, SegmentSplitPolicy, StreamingParquetSegmentWriter, WriterOptions,
 };
 use std::sync::Arc;
 
@@ -132,6 +132,50 @@ fn writer_plan_bounds_streaming_row_groups_by_configured_row_group_size() {
     assert_eq!(plan.row_group_count, 3);
     assert_eq!(plan.max_rows_in_memory, 2);
     assert_eq!(plan.total_rows, 5);
+}
+
+#[test]
+fn segment_split_policy_closes_at_compressed_byte_boundary() {
+    let policy = SegmentSplitPolicy::new(Some(1_024), 10_000);
+
+    assert!(!policy.should_close(1_023, 999));
+    assert!(policy.should_close(1_024, 999));
+    assert!(policy.should_close(1_025, 999));
+}
+
+#[test]
+fn segment_split_policy_closes_at_row_cap_before_size_target() {
+    let policy = SegmentSplitPolicy::new(Some(1_024), 3);
+
+    assert!(!policy.should_close(100, 2));
+    assert!(policy.should_close(100, 3));
+}
+
+#[test]
+fn segment_split_policy_without_size_target_uses_only_row_cap() {
+    let policy = SegmentSplitPolicy::new(None, 3);
+
+    assert!(!policy.should_close(u64::MAX, 2));
+    assert!(policy.should_close(0, 3));
+}
+
+#[test]
+fn streaming_segment_writer_reports_compressed_bytes_before_close() {
+    let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+    )
+    .unwrap();
+    let mut writer =
+        StreamingParquetSegmentWriter::try_new(schema, WriterOptions::default()).unwrap();
+
+    writer.write_batch(&batch).unwrap();
+
+    assert!(writer.current_bytes() > 0);
+    let bytes = writer.finish().unwrap();
+    let validation = koldstore_parquet::validate_parquet_bytes(&bytes).unwrap();
+    assert_eq!(validation.row_count, 3);
 }
 
 #[test]

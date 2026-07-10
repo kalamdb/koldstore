@@ -33,15 +33,21 @@ fn cold_chunk(rows: usize) -> FlushWriteChunk {
     .unwrap();
     let mut indexed_bounds = std::collections::BTreeMap::new();
     indexed_bounds.insert("id".to_string(), (json!(1), json!(rows)));
-    FlushWriteChunk {
-        cold_batch: ColdRecordBatch {
-            batch,
-            row_count: rows,
-            indexed_bounds,
-            min_seq: 1,
-            max_seq: rows as i64,
-        },
-    }
+    let cold_batch = ColdRecordBatch {
+        batch,
+        row_count: rows,
+        indexed_bounds,
+        min_seq: 1,
+        max_seq: rows as i64,
+    };
+    let parquet_bytes = koldstore_parquet::encode_parquet_segment_bytes(
+        &cold_batch.batch,
+        &["id".to_string()],
+        &["id".to_string()],
+        "zstd",
+    )
+    .unwrap();
+    FlushWriteChunk::from_encoded_batches(parquet_bytes, &[cold_batch])
 }
 
 #[test]
@@ -49,7 +55,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     let root = tempfile::tempdir().unwrap();
     let client = open_filesystem_client(root.path().to_str().unwrap()).unwrap();
     let chunk = cold_chunk(5);
-    let stats = FlushStats::from_cold_batch(&chunk.cold_batch).unwrap();
+    let stats = FlushStats::from_write_chunk(&chunk).unwrap();
 
     let written = write_flush_segment_with_client(
         &client,
@@ -104,7 +110,7 @@ fn flush_segment_publish_rejects_corrupt_existing_final() {
         .unwrap();
 
     let chunk = cold_chunk(3);
-    let stats = FlushStats::from_cold_batch(&chunk.cold_batch).unwrap();
+    let stats = FlushStats::from_write_chunk(&chunk).unwrap();
     let err = write_flush_segment_with_client(
         &client,
         "app",

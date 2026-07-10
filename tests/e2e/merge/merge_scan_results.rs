@@ -199,3 +199,112 @@ async fn flushed_table_prunes_hot_rows_and_keeps_cold_payload_for_merge_reads() 
 
     Ok(())
 }
+
+#[tokio::test]
+async fn merge_scan_preserves_native_hot_plan_and_masks_preflush_deletes() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "merge_scan_overlay").await?;
+        let table = db
+            .create_indexed_items_table("merge_overlay_items", 8)
+            .await?;
+        db.manage_shared(&table.relation, "id").await?;
+        db.flush_table(&table.relation).await?;
+
+        // Point lookup should keep a native hot child under KoldMergeScan.
+        // After flush the hot heap is empty, so Seq Scan can beat Index Scan;
+        // insert one hot row and re-check that an index child is selectable.
+        let planned = common::explain(
+            &db.client,
+            &format!("SELECT title FROM {} WHERE id = 1", table.relation),
+        )
+        .await?;
+        common::assert_kold_merge_scan_explain(&planned)?;
+        anyhow::ensure!(
+            planned.contains("Hot Plan:"),
+            "expected Hot Plan in EXPLAIN, got:\n{planned}"
+        );
+        anyhow::ensure!(
+            planned.contains("Seq Scan")
+                || planned.contains("Index Scan")
+                || planned.contains("Bitmap Heap Scan"),
+            "expected native hot child plan in EXPLAIN, got:\n{planned}"
+        );
+
+        db.client
+            .batch_execute(&format!(
+                r#"
+                INSERT INTO {} (id, account_id, title, qty, category)
+                VALUES (1000, 1, 'hot-index', 1, 'hot');
+                SET enable_seqscan = off;
+                "#,
+                table.relation
+            ))
+            .await?;
+        let planned_hot = common::explain(
+            &db.client,
+            &format!("SELECT title FROM {} WHERE id = 1000", table.relation),
+        )
+        .await?;
+        db.client.batch_execute("SET enable_seqscan = on").await?;
+        anyhow::ensure!(
+            planned_hot.contains("Hot Plan:") && planned_hot.contains("Index Scan"),
+            "expected Hot Plan: Index Scan for hot PK lookup, got:\n{planned_hot}"
+        );
+
+        // Committed delete of a previously cold PK must be invisible before flush.
+        // Rematerialize into hot first so DELETE writes a mirror tombstone (op=3);
+        // a cold-only DELETE that matches zero heap rows does not fire triggers.
+        db.client
+            .batch_execute(&format!(
+                r#"
+                INSERT INTO {relation} (id, account_id, title, qty, category)
+                VALUES (2, 1, 'rematerialized', 2, 'hot')
+                ON CONFLICT (id) DO UPDATE
+                SET title = EXCLUDED.title, qty = EXCLUDED.qty, category = EXCLUDED.category;
+                DELETE FROM {relation} WHERE id = 2;
+                "#,
+                relation = table.relation
+            ))
+            .await?;
+        let count: i64 = db
+            .client
+            .query_one(
+                &format!("SELECT count(*) FROM {} WHERE id = 2", table.relation),
+                &[],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(
+            count == 0,
+            "cold row must stay invisible after committed delete before flush, count={count}"
+        );
+
+        let analyzed = common::explain_analyze(
+            &db.client,
+            &format!("SELECT count(*) FROM {}", table.relation),
+        )
+        .await?;
+        anyhow::ensure!(
+            analyzed.contains("Mirror Tombstones"),
+            "expected Mirror Tombstones in EXPLAIN ANALYZE, got:\n{analyzed}"
+        );
+
+        // enable_merge_scan=off must error on managed SELECT, not heap-only.
+        db.client
+            .batch_execute("SET koldstore.enable_merge_scan = off")
+            .await?;
+        let err = db
+            .client
+            .query_one(&format!("SELECT count(*) FROM {}", table.relation), &[])
+            .await;
+        anyhow::ensure!(
+            err.is_err(),
+            "enable_merge_scan=off must error on managed SELECT"
+        );
+        db.client
+            .batch_execute("SET koldstore.enable_merge_scan = on")
+            .await?;
+    }
+
+    Ok(())
+}

@@ -4,7 +4,7 @@
 //! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
 
 use koldstore_manifest::{table_object_prefix, CatalogManifestSegmentRow};
-use koldstore_parquet::{encode_parquet_segment_bytes, validate_parquet_bytes};
+use koldstore_parquet::validate_parquet_bytes;
 use koldstore_storage::{
     open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
     ObjectStoreClient, StorageClient,
@@ -76,9 +76,9 @@ pub fn write_flush_segment_with_client(
     client: &ObjectStoreClient,
     namespace: &str,
     table_name: &str,
-    compression: &str,
-    primary_key_columns: &[String],
-    indexed_columns: &[String],
+    _compression: &str,
+    _primary_key_columns: &[String],
+    _indexed_columns: &[String],
     schema_version: i32,
     batch_number: i32,
     chunk: &FlushWriteChunk,
@@ -93,13 +93,8 @@ pub fn write_flush_segment_with_client(
         &unique_temp_file_name(&format!("batch-{batch_number}.parquet")),
     );
 
-    let bytes = encode_parquet_segment_bytes(
-        &chunk.cold_batch.batch,
-        primary_key_columns,
-        indexed_columns,
-        compression,
-    )?;
-    let validation = validate_parquet_bytes(&bytes)?;
+    let bytes = &chunk.parquet_bytes;
+    let validation = validate_parquet_bytes(bytes)?;
     let expected_rows = u64::try_from(chunk_stats.row_count.max(0)).unwrap_or(0);
     if validation.row_count != expected_rows {
         return Err(format!(
@@ -108,7 +103,7 @@ pub fn write_flush_segment_with_client(
         ));
     }
 
-    let published = publish_immutable_object(client, &temp_key, &object_path, &bytes)
+    let published = publish_immutable_object(client, &temp_key, &object_path, bytes)
         .map_err(|error| error.to_string())?;
     // Defense in depth: re-fetch final and confirm it is still a readable Parquet file.
     let final_bytes = client
@@ -122,7 +117,7 @@ pub fn write_flush_segment_with_client(
     }
     validate_parquet_bytes(&final_bytes)?;
 
-    let column_stats = indexed_column_stats_json(&chunk.cold_batch.indexed_bounds, chunk_stats);
+    let column_stats = indexed_column_stats_json(&chunk.indexed_bounds, chunk_stats);
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
     let catalog_row = CatalogManifestSegmentRow {
         object_path: object_path.clone(),

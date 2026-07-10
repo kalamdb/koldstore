@@ -5,13 +5,22 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::time::Instant;
 
-use koldstore_parquet::ParquetReadProfile;
+use koldstore_parquet::{BloomPruneMode, ParquetReadProfile};
 use pgrx::pg_sys;
 
 const EXPLAIN_PROFILE_LIMIT: usize = 64;
 
+/// Scan metadata retained across EndCustomScan for EXPLAIN ANALYZE rendering.
+#[derive(Debug, Clone)]
+pub(super) struct ExplainScanMeta {
+    pub(super) cold_profile: ColdReadProfile,
+    pub(super) hot_plan_label: String,
+    pub(super) mirror_tombstones: usize,
+    pub(super) mirror_live_overrides: usize,
+}
+
 thread_local! {
-    static EXPLAIN_PROFILES: RefCell<HashMap<usize, ColdReadProfile>> = RefCell::new(HashMap::new());
+    static EXPLAIN_PROFILES: RefCell<HashMap<usize, ExplainScanMeta>> = RefCell::new(HashMap::new());
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +44,8 @@ pub(super) struct ColdReadProfile {
     pub(super) manifest_read_ms: Option<f64>,
     /// Segments considered before catalog min/max prune.
     pub(super) segments_considered: usize,
+    /// Segments rejected by normalized catalog min/max statistics.
+    pub(super) segments_pruned_min_max: usize,
     /// Segments opened after catalog prune.
     pub(super) segments_opened: usize,
     /// PK equality probe pushed into Parquet row-group prune, when present.
@@ -52,6 +63,7 @@ impl ColdReadProfile {
             base_path: String::new(),
             manifest_read_ms: None,
             segments_considered: 0,
+            segments_pruned_min_max: 0,
             segments_opened: 0,
             pk_probe: None,
             projected_columns: Vec::new(),
@@ -64,10 +76,10 @@ pub(super) fn elapsed_ms(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.0
 }
 
-pub(super) fn remember_explain_profile(node_key: usize, profile: ColdReadProfile) {
+pub(super) fn remember_explain_profile(node_key: usize, meta: ExplainScanMeta) {
     EXPLAIN_PROFILES.with(|profiles| {
         let mut profiles = profiles.borrow_mut();
-        profiles.insert(node_key, profile);
+        profiles.insert(node_key, meta);
         if profiles.len() <= EXPLAIN_PROFILE_LIMIT {
             return;
         }
@@ -77,7 +89,7 @@ pub(super) fn remember_explain_profile(node_key: usize, profile: ColdReadProfile
     });
 }
 
-pub(super) fn saved_explain_profile(node_key: usize) -> Option<ColdReadProfile> {
+pub(super) fn saved_explain_profile(node_key: usize) -> Option<ExplainScanMeta> {
     EXPLAIN_PROFILES.with(|profiles| profiles.borrow().get(&node_key).cloned())
 }
 
@@ -133,10 +145,25 @@ pub(super) fn explain_cold_read_profile(es: *mut pg_sys::ExplainState, profile: 
         es,
         "Cold segments",
         &format!(
-            "considered={}, opened={}",
-            profile.segments_considered, profile.segments_opened
+            "considered={}, pruned_min_max={}, pruned_bloom={}, opened={}",
+            profile.segments_considered,
+            profile.segments_pruned_min_max,
+            profile.segments_pruned_by_bloom(),
+            profile.segments_opened
         ),
     );
+
+    let (row_groups_total, row_groups_selected, row_groups_skipped, bloom_filters_fetched) =
+        profile.row_group_totals();
+    if row_groups_total > 0 || bloom_filters_fetched > 0 {
+        explain_property(
+            es,
+            "Cold row groups",
+            &format!(
+                "total={row_groups_total}, selected={row_groups_selected}, skipped={row_groups_skipped}, bloom_filters_fetched={bloom_filters_fetched}"
+            ),
+        );
+    }
 
     if let Some((column, values)) = &profile.pk_probe {
         explain_property(
@@ -166,6 +193,32 @@ pub(super) fn explain_cold_read_profile(es: *mut pg_sys::ExplainState, profile: 
             explain_property(es, "  Row groups", &format_row_groups(parquet));
             explain_property(es, "  Bloom", &format_bloom(parquet));
         }
+    }
+}
+
+impl ColdReadProfile {
+    fn segments_pruned_by_bloom(&self) -> usize {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .filter(|parquet| {
+                parquet.bloom == BloomPruneMode::Applied && parquet.row_groups_selected.is_empty()
+            })
+            .count()
+    }
+
+    fn row_group_totals(&self) -> (usize, usize, usize, usize) {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .fold((0, 0, 0, 0), |totals, parquet| {
+                (
+                    totals.0 + parquet.row_groups_total,
+                    totals.1 + parquet.row_groups_selected.len(),
+                    totals.2 + parquet.row_groups_skipped,
+                    totals.3 + parquet.bloom_filters_fetched,
+                )
+            })
     }
 }
 

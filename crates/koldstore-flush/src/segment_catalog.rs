@@ -4,7 +4,6 @@
 //! module owns parameterized catalog write plans only. SPI execution stays in
 //! `pg_koldstore`.
 
-use koldstore_catalog::HintKind;
 use koldstore_common::SqlStatement;
 use koldstore_manifest::SyncState;
 use koldstore_parquet::ColdMetadataColumn;
@@ -57,23 +56,47 @@ pub fn indexed_column_stats_json(
     serde_json::Value::Object(values)
 }
 
-/// Plans a combined multi-row `koldstore.cold_segments` + `koldstore.cold_pk_hints`
-/// insert for every segment written by one `flush_table` call.
+/// Plans combined multi-row segment and normalized-stat inserts.
 ///
-/// PERFORMANCE: one SPI round trip for the *entire* flush instead of one (or two)
-/// round trips per segment. Per-segment columns are bound as native PostgreSQL
-/// arrays and expanded with `unnest`.
+/// Segment prune metadata lives in `koldstore.cold_segment_stats` (and the
+/// mirrored `column_stats` jsonb). Exact per-PK catalog rows are not written.
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
 pub fn plan_flush_segments_batch_insert() -> Result<SqlStatement, SegmentCatalogError> {
-    let exact = HintKind::Exact.as_str();
     SqlStatement::write(
-        "flush insert cold segments and pk hints batch",
-        &format!(
-            r#"
-WITH inserted_segments AS (
+        "flush insert cold segments batch",
+        r#"
+WITH segment_input AS (
+    SELECT *
+    FROM unnest(
+        $2::uuid[],
+        $3::text[],
+        $4::integer[],
+        $5::bigint[],
+        $6::bigint[],
+        $7::bigint[],
+        $8::bigint[],
+        $9::bigint[],
+        $10::bigint[],
+        $11::integer[],
+        $12::jsonb[]
+    ) AS u(
+        segment_id,
+        object_path,
+        batch_number,
+        min_seq,
+        max_seq,
+        min_commit_seq,
+        max_commit_seq,
+        row_count,
+        byte_size,
+        schema_version,
+        column_stats
+    )
+),
+inserted_segments AS (
     INSERT INTO koldstore.cold_segments (
         segment_id,
         table_oid,
@@ -105,47 +128,47 @@ WITH inserted_segments AS (
         u.schema_version,
         u.column_stats,
         'active'
-    FROM unnest(
-        $2::uuid[],
-        $3::text[],
-        $4::integer[],
-        $5::bigint[],
-        $6::bigint[],
-        $7::bigint[],
-        $8::bigint[],
-        $9::bigint[],
-        $10::bigint[],
-        $11::integer[],
-        $12::jsonb[]
-    ) AS u(
-        segment_id,
-        object_path,
-        batch_number,
-        min_seq,
-        max_seq,
-        min_commit_seq,
-        max_commit_seq,
-        row_count,
-        byte_size,
-        schema_version,
-        column_stats
-    )
-    RETURNING segment_id, object_path, max_seq, max_commit_seq
+    FROM segment_input u
+    RETURNING segment_id, table_oid, scope_key, column_stats
 )
-INSERT INTO koldstore.cold_pk_hints (
+INSERT INTO koldstore.cold_segment_stats (
+    segment_id,
     table_oid,
     scope_key,
-    pk_hash,
-    segment_id,
-    hint_kind,
-    latest_seq,
-    latest_commit_seq
+    column_name,
+    type_oid,
+    min_value,
+    max_value
 )
-SELECT $1::oid, '', decode(md5(inserted_segments.object_path), 'hex'), inserted_segments.segment_id, '{exact}', inserted_segments.max_seq, inserted_segments.max_commit_seq
-FROM inserted_segments
-ON CONFLICT DO NOTHING
-"#
+SELECT
+    cs.segment_id,
+    cs.table_oid,
+    cs.scope_key,
+    stat.column_name::name,
+    COALESCE(
+        (
+            SELECT attribute.atttypid
+            FROM pg_catalog.pg_attribute attribute
+            WHERE attribute.attrelid = cs.table_oid
+              AND attribute.attname = stat.column_name::name
+              AND attribute.attnum > 0
+              AND NOT attribute.attisdropped
         ),
+        'pg_catalog.int8'::regtype::oid
+    ),
+    pg_catalog.convert_to((stat.bounds->'min')::text, 'UTF8'),
+    pg_catalog.convert_to((stat.bounds->'max')::text, 'UTF8')
+FROM inserted_segments cs
+CROSS JOIN LATERAL pg_catalog.jsonb_each(cs.column_stats)
+    AS stat(column_name, bounds)
+ON CONFLICT (segment_id, column_name)
+DO UPDATE SET
+    table_oid = EXCLUDED.table_oid,
+    scope_key = EXCLUDED.scope_key,
+    type_oid = EXCLUDED.type_oid,
+    min_value = EXCLUDED.min_value,
+    max_value = EXCLUDED.max_value
+"#,
     )
     .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
 }
@@ -189,4 +212,19 @@ DO UPDATE SET
         ),
     )
     .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_flush_segments_batch_insert;
+
+    #[test]
+    fn flush_insert_persists_normalized_stats_without_pk_hints() {
+        let statement = plan_flush_segments_batch_insert().unwrap();
+
+        assert!(statement.sql.contains("koldstore.cold_segment_stats"));
+        assert!(statement.sql.contains("jsonb_each"));
+        assert!(!statement.sql.contains("koldstore.cold_pk_hints"));
+        assert!(!statement.sql.contains("md5(inserted_segments.object_path)"));
+    }
 }

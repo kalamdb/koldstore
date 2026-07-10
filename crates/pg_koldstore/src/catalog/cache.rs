@@ -17,12 +17,16 @@ use crate::spi::{
 };
 
 #[cfg(feature = "pg")]
+type SegmentStatsCacheKey = (u32, Vec<String>);
+#[cfg(feature = "pg")]
+type SegmentStatsCache = std::collections::HashMap<SegmentStatsCacheKey, Arc<CachedSegmentStats>>;
+
+#[cfg(feature = "pg")]
 thread_local! {
     static MANAGED_TABLE_CACHE: std::cell::RefCell<ManagedTableSnapshotCache> =
         std::cell::RefCell::new(ManagedTableSnapshotCache::default());
-    static SEGMENT_STATS_CACHE: std::cell::RefCell<
-        std::collections::HashMap<u32, Arc<CachedSegmentStats>>
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+    static SEGMENT_STATS_CACHE: std::cell::RefCell<SegmentStatsCache> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
     static MIGRATION_CATALOG_CACHE: std::cell::RefCell<
         std::collections::HashMap<u32, Arc<koldstore_migrate::ExistingTableCatalog>>
     > = std::cell::RefCell::new(std::collections::HashMap::new());
@@ -56,7 +60,9 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
         cache.borrow_mut().invalidate(key);
     });
     SEGMENT_STATS_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&key);
+        cache
+            .borrow_mut()
+            .retain(|(table_oid, _), _| *table_oid != key);
     });
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().remove(&key);
@@ -138,18 +144,24 @@ pub fn managed_table_snapshot(
 #[cfg(feature = "pg")]
 pub fn cached_manifest_segment_stats(
     table_oid: pgrx::pg_sys::Oid,
+    predicate_columns: &[String],
 ) -> Result<Option<Arc<CachedSegmentStats>>, String> {
     let key = table_oid.to_u32();
-    if let Some(cached) = SEGMENT_STATS_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+    let mut columns = predicate_columns.to_vec();
+    columns.sort();
+    columns.dedup();
+    let cache_key = (key, columns);
+    if let Some(cached) = SEGMENT_STATS_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
+    {
         return Ok(Some(cached));
     }
 
-    let Some(loaded) = load_manifest_segment_stats(table_oid)? else {
+    let Some(loaded) = load_manifest_segment_stats(table_oid, &cache_key.1)? else {
         return Ok(None);
     };
     let shared = Arc::new(loaded);
     SEGMENT_STATS_CACHE.with(|cache| {
-        cache.borrow_mut().insert(key, Arc::clone(&shared));
+        cache.borrow_mut().insert(cache_key, Arc::clone(&shared));
     });
     Ok(Some(shared))
 }
@@ -171,13 +183,17 @@ fn load_managed_table_snapshot(
 #[cfg(feature = "pg")]
 fn load_manifest_segment_stats(
     table_oid: pgrx::pg_sys::Oid,
+    predicate_columns: &[String],
 ) -> Result<Option<CachedSegmentStats>, String> {
     let statement = koldstore_catalog::queries::plan_in_sync_manifest_scan_context()
         .map_err(|error| error.to_string())?;
     require_read_only(&statement).map_err(|error| error.to_string())?;
     let json = execute_prepared(
         &statement,
-        &[pgrx::datum::DatumWithOid::from(table_oid)],
+        &[
+            pgrx::datum::DatumWithOid::from(table_oid),
+            pgrx::datum::DatumWithOid::from(pgrx::JsonB(serde_json::json!(predicate_columns))),
+        ],
         first_row::<String>,
     )
     .map_err(|error| error.to_string())?;

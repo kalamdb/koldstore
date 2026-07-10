@@ -139,7 +139,7 @@ pub fn plan_existing_table_migration(
     let base = plan_empty_table_migration(request, context)?;
     let explicit_order_column = request
         .options
-        .explicit_order_column()
+        .explicit_migration_order_by()
         .map(ToString::to_string);
     let ordering = choose_migration_ordering(&MigrationOrderingRequest {
         primary_key: catalog.primary_key,

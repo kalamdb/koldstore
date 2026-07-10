@@ -229,20 +229,20 @@ pub async fn published_manifest_count(client: &Client, relation: &str) -> Result
 ///
 /// # Errors
 ///
-/// Returns an error when cold segment or PK hint metadata is absent.
+/// Returns an error when cold segment or segment-stats metadata is absent.
 pub async fn assert_cold_metadata_present(client: &Client, relation: &str) -> Result<()> {
     let row = client
         .query_one(
             r#"
             SELECT
               count(DISTINCT cs.segment_id),
-              count(DISTINCT h.pk_hash),
+              count(DISTINCT st.column_name),
               COALESCE(sum(cs.byte_size), 0)::bigint
             FROM koldstore.cold_segments cs
-            LEFT JOIN koldstore.cold_pk_hints h
-              ON h.table_oid = cs.table_oid
-             AND h.scope_key = cs.scope_key
-             AND h.segment_id = cs.segment_id
+            LEFT JOIN koldstore.cold_segment_stats st
+              ON st.segment_id = cs.segment_id
+             AND st.table_oid = cs.table_oid
+             AND st.scope_key = cs.scope_key
             WHERE cs.table_oid = $1::text::regclass::oid
               AND cs.status = 'active'
             "#,
@@ -255,11 +255,11 @@ pub async fn assert_cold_metadata_present(client: &Client, relation: &str) -> Re
     );
     anyhow::ensure!(
         row.get::<_, i64>(1) > 0,
-        "expected cold PK hint metadata for {relation}"
+        "expected cold_segment_stats prune metadata for {relation}"
     );
     anyhow::ensure!(
         row.get::<_, i64>(2) > 0,
-        "expected positive cold segment byte size for {relation}"
+        "expected positive cold byte_size for {relation}"
     );
     Ok(())
 }

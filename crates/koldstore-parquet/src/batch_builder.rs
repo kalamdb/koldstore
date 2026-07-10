@@ -542,3 +542,42 @@ fn update_indexed_bounds(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_rows_track_indexed_bounds_without_per_pk_catalog_hints() {
+        let columns = [
+            PgColumn::new("tenant_id", PgType::Int8, false),
+            PgColumn::new("event_id", PgType::Text, false),
+        ];
+        let primary_key = ["tenant_id".to_string(), "event_id".to_string()];
+        let mut builder = CleanColdRecordBatchBuilder::new(&columns, &primary_key).unwrap();
+
+        builder
+            .push_typed_row(
+                &[
+                    FlushColumnValue::Int64(7),
+                    FlushColumnValue::Utf8("evt-1".to_string()),
+                ],
+                &primary_key,
+                42,
+                1,
+                1,
+            )
+            .unwrap();
+
+        let batch = builder.finish().unwrap();
+        assert_eq!(batch.row_count, 1);
+        assert_eq!(
+            batch.indexed_bounds.get("tenant_id"),
+            Some(&(serde_json::json!(7), serde_json::json!(7)))
+        );
+        assert_eq!(
+            batch.indexed_bounds.get("event_id"),
+            Some(&(serde_json::json!("evt-1"), serde_json::json!("evt-1")))
+        );
+    }
+}

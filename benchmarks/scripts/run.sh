@@ -740,9 +740,9 @@ if [[ "${KOLDSTORE_BENCH_START_PGRX:-1}" != "0" ]]; then
     --features "$PG_FEATURE"
     --pg-config "$PG_CONFIG"
   )
-  # Release builds are required for fair hot+cold timings (debug is typically 3–7× slower).
+  # release-pg: optimized + panic=unwind (plain --release aborts on ereport/longjmp).
   if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-1}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-1}" == "true" ]]; then
-    INSTALL_ARGS+=(--release)
+    INSTALL_ARGS+=(--profile release-pg)
   fi
   if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then
     INSTALL_ARGS+=(--sudo)

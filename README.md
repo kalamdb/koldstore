@@ -4,7 +4,7 @@
 
 **Status: early development - not production ready.** The extension builds and the core flow works, but recovery, export/import, and background flush behavior are still being hardened.
 
-
+**Mission:** Let PostgreSQL run for years without babysitting data growth. Hand it cheap, expandable storage for history, keep the hot working set small, and stop letting cold rows that nobody needs slow the cluster down.
 
 `pg-koldstore` is a PostgreSQL extension named `koldstore`. You create a normal heap table, migrate it into KoldStore management, and keep querying that table with regular SQL. KoldStore keeps recent rows in PostgreSQL and writes flushed rows to Parquet files on filesystem, S3/MinIO, GCS, or Azure Blob storage.
 
@@ -46,43 +46,41 @@ KoldStore is for application tables that grow forever but are still queried thro
 
 After older rows are flushed, PostgreSQL keeps a smaller hot working set. Cold data lives in zstd Parquet outside the primary heap (filesystem / S3-compatible / GCS / Azure).
 
-The harness ([`tests/storage/`](tests/storage/)) uses a wide (~50 column) table from [`tests/storage/schema.sql`](tests/storage/schema.sql). Local sample: **100,000 rows**, `hot_row_limit = 10000`, `max_rows_per_file = 10000` (91,000 rows flushed, zstd Parquet). Numbers vary by machine; re-run for your hardware.
+The harness ([`tests/storage/`](tests/storage/)) uses a wide (~50 column) table from [`tests/storage/schema.sql`](tests/storage/schema.sql). Sample below: **10,000,000 rows**, `hot_row_limit = 100000`, `max_rows_per_file = 1000000` (~9.9M rows flushed, zstd Parquet). Numbers vary by machine; re-run for your hardware.
 
 How to read the table (Postgres-oriented):
 
-- **Hot-only queries** are timed **before flush**, so both heaps still hold all 100k rows — that isolates `KoldMergeScan` overhead vs a plain index lookup, not “smaller heap wins.”
+- **Hot-only queries** are timed **before flush**, so both heaps still hold all 10M rows — that isolates `KoldMergeScan` overhead vs a plain index lookup, not “smaller heap wins.”
 - **Hot+cold queries** and **`VACUUM (FULL, ANALYZE)`** are timed **after flush**, when the managed heap is the hot working set only.
 - **Dead tuples** come from `pg_stat_user_tables.n_dead_tup` after the same update/delete sample, **before flush** — so both sides match here. The maintenance win shows up in post-flush VACUUM time / heap size, not in that pre-flush counter.
-- Autovacuum counters are **not** shown: this harness finishes in seconds, so `autovacuum_count` stays 0 on both sides and would be misleading.
+- Autovacuum counters are **not** shown: this harness is too short for autovacuum to run, so `autovacuum_count` stays 0 on both sides and would be misleading.
 - **Backup size / restore time** are TODO until the harness measures `pg_dump` / `pg_restore` (or basebackup) of the PostgreSQL database only — cold Parquet is outside the cluster and would be protected separately.
 
 | Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |
 | --- | --- | --- | --- |
-| insert speed† | 71k ops/s | 27k ops/s | — |
-| update speed† | 71k ops/s | 21k ops/s | — |
-| delete speed† | 1.3M ops/s | 40k ops/s | — |
-| query hot only (before flush) | 1.6k ops/s | 1.5k ops/s | — |
-| query with hot+cold (after flush) | 1.6k ops/s | 780 ops/s | — |
-| VACUUM time (after flush) | 1.08 s | 143 ms | **87%** |
-| dead tuples after workload | 2000 (live=100000) | 2000 (live=100000) | — |
-| index storage | 7.12 MiB | 1.27 MiB | **82%** |
-| table storage | 55.81 MiB | 5.61 MiB (+ 5.53 MiB cold Parquet) | **90%** |
+| insert speed† | 69k ops/s | 23k ops/s | — |
+| update speed† | 6.8k ops/s | 5.5k ops/s | — |
+| delete speed† | 1.0M ops/s | 38k ops/s | — |
+| query hot only (before flush) | 1.6k ops/s | 1.3k ops/s | — |
+| query with hot+cold (after flush) | 1.5k ops/s | 127 ops/s‡ | — |
+| VACUUM time (after flush) | 131 s | 6.4 s | **95%** |
+| dead tuples after workload | 2000 (live≈10M) | 2000 (live≈10M) | — |
+| index storage | 415 MiB | 11.4 MiB | **97%** |
+| table storage | 5.45 GiB | 61 MiB (+ 597 MiB cold Parquet) | **99%** |
 | total PG backup size | TODO | TODO | — |
 | restore time | TODO | TODO | — |
 
-PostgreSQL heap + index after flush: **62.94 MiB → 6.88 MiB** (**89% smaller**). `SELECT` on the managed table still returns all 100k rows (hot heap ∪ cold Parquet via `KoldMergeScan`).
+PostgreSQL heap + index after flush: **5.85 GiB → 72 MiB** (**99% smaller**). Point lookups on hot and cold PKs still return the same rows as the unmanaged baseline (`KoldMergeScan`).
 
-† DML is slower under KoldStore because `manage_table` installs capture triggers that maintain the latest-state change-log mirror (`koldstore.<table>__cl`: one row per PK with `seq` / `op`). That is the cost of flush cutoffs and change cursors. The payoff is a smaller hot heap/indexes, cheaper VACUUM, and (planned) `changes_since` so sync/cache consumers can follow changes **without** a second CDC pipeline (no Debezium, logical-replication slot, or extra app-owned triggers). Hot+cold PK lookups open matching Parquet segments, then prune row groups with column-chunk min/max and native Parquet bloom filters on the PK.
+† DML is slower under KoldStore because `manage_table` installs capture triggers that maintain the latest-state change-log mirror (`koldstore.<table>__cl`: one row per PK with `seq` / `op`). That is the cost of flush cutoffs and change cursors. The payoff is a smaller hot heap/indexes, cheaper VACUUM, and (planned) `changes_since` so sync/cache consumers can follow changes **without** a second CDC pipeline (no Debezium, logical-replication slot, or extra app-owned triggers).
+
+‡ Hot+cold PK lookups open matching Parquet segments (min/max prune + row-group stats / bloom). At this scale each surviving segment is ~1M wide rows, so footer open + merge-scan setup dominates vs a pure B-tree probe; streaming execution and tighter segment sizing are follow-ups.
 
 ```bash
-KOLDSTORE_E2E_PREPARE_ONLY=1 scripts/run-pg-e2e.sh 16
-# Release extension for fair hot+cold timings (debug builds are much slower):
-cargo pgrx install -p pg_koldstore --release --no-default-features --features pg16 \
-  --pg-config "$(cargo pgrx info pg-config 16)"
-cargo pgrx stop pg16 && cargo pgrx start pg16
-# Table above: 100k rows / 10k hot. Optional larger demo: set ROWS=1000000.
-KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 \
-  cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
+# Table above: 10M rows / 100k hot (~30 min on a laptop; release-pg extension).
+scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000
+# Faster local smoke (defaults: 100k rows / 10k hot):
+scripts/run-storage-comparison.sh
 ```
 
 ## How It Works
@@ -146,7 +144,7 @@ SELECT koldstore.manage_table(
   hot_row_limit     => 1000,
   min_flush_rows    => 1,
   max_rows_per_file => 500,
-  order_column      => 'id'
+  migration_order_by => 'id'
 ) AS manage_job_id;
 ```
 
@@ -398,7 +396,7 @@ SELECT koldstore.manage_table(
   hot_row_limit  => 1000,
   table_type     => 'user',
   scope_column   => 'user_id',
-  order_column   => 'id'
+  migration_order_by => 'id'
 );
 
 SET koldstore.user_id = 'user-123';
@@ -454,6 +452,13 @@ SELECT koldstore.register_storage(
 
 
 
+## Roadmap
+
+Deferred storage policies, table-management APIs, merge-scan work, and other
+post-0.1 features are tracked in the [project roadmap](docs/roadmap.md).
+
+
+
 ## In Development
 
 ### Change cursors (`changes_since`)
@@ -498,7 +503,7 @@ Useful local commands:
 cargo test --workspace
 cargo pgrx install -p pg_koldstore --no-default-features --features pg16
 scripts/run-pg-e2e.sh 16
-cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
+scripts/run-storage-comparison.sh
 ```
 
 Project docs:

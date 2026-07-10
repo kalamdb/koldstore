@@ -65,6 +65,21 @@ impl FlushStats {
             max_commit_seq: batch.max_seq,
         })
     }
+
+    /// Derives flush stats from one fully encoded segment chunk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the row count does not fit in `i64`.
+    pub fn from_write_chunk(chunk: &crate::write::FlushWriteChunk) -> Result<Self, String> {
+        Ok(Self {
+            row_count: i64::try_from(chunk.row_count).map_err(|error| error.to_string())?,
+            min_seq: chunk.min_seq,
+            max_seq: chunk.max_seq,
+            min_commit_seq: chunk.min_seq,
+            max_commit_seq: chunk.max_seq,
+        })
+    }
 }
 
 /// Resolved flush selection including optional mirror-op filters.

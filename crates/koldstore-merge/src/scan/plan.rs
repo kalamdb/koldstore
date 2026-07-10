@@ -223,6 +223,15 @@ fn segment_may_match_predicate(
     true
 }
 
+/// How unflushed mirror rows participate in merge reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorOverlayStrategy {
+    /// Mask cold rows whose PK appears in the mirror (op 1/2/3).
+    #[default]
+    MirrorMask,
+}
+
 /// Serialized custom-plan identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MergeScanPlan {
@@ -246,6 +255,9 @@ pub struct MergeScanPlan {
     pub projection: Vec<String>,
     /// Visible cold segment hints.
     pub segment_hints: Vec<SegmentHint>,
+    /// Mirror overlay strategy applied at execution.
+    #[serde(default)]
+    pub overlay_strategy: MirrorOverlayStrategy,
 }
 
 impl MergeScanPlan {
@@ -268,6 +280,7 @@ impl MergeScanPlan {
             security_quals: Vec::new(),
             projection: Vec::new(),
             segment_hints: Vec::new(),
+            overlay_strategy: MirrorOverlayStrategy::MirrorMask,
         }
     }
 

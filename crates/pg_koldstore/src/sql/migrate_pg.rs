@@ -1,7 +1,7 @@
 //! PostgreSQL table management and unmanagement SQL entrypoints.
 
 #[cfg(feature = "pg")]
-use koldstore_common::{ManageTableOptions, MigrationStatus, ParquetCompression};
+use koldstore_common::{ManageTableOptions, MigrationStatus};
 #[cfg(feature = "pg")]
 use koldstore_migrate::rehydrate::DemigrateOptions;
 #[cfg(feature = "pg")]
@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, order_column default null, compression default null)`.
+/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null)`.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
@@ -24,27 +24,21 @@ pub fn manage_table_pg(
     max_rows_per_file: pgrx::default!(i64, 1000),
     table_type: pgrx::default!(&str, "'shared'"),
     scope_column: pgrx::default!(Option<&str>, "NULL"),
-    order_column: pgrx::default!(Option<&str>, "NULL"),
+    migration_order_by: pgrx::default!(Option<&str>, "NULL"),
     compression: pgrx::default!(Option<&str>, "NULL"),
+    target_file_size_mb: pgrx::default!(Option<i64>, "NULL"),
 ) -> pgrx::Uuid {
-    let structured_flush = hot_row_limit.map(|hot_row_limit| {
-        let hot_row_limit = positive_i64(hot_row_limit, "hot_row_limit");
-        let min_flush_rows = positive_i64(min_flush_rows, "min_flush_rows");
-        let max_rows_per_file = validated_max_rows_per_file(max_rows_per_file);
-        (
-            hot_row_limit as u64,
-            min_flush_rows as u64,
-            max_rows_per_file,
-        )
-    });
     manage_table_pg_impl(
         table_name,
         table_type,
         storage,
         scope_column,
-        order_column,
+        migration_order_by,
         compression,
-        structured_flush,
+        target_file_size_mb,
+        hot_row_limit,
+        min_flush_rows,
+        max_rows_per_file,
     )
 }
 
@@ -55,9 +49,12 @@ fn manage_table_pg_impl(
     table_type: &str,
     storage_name: &str,
     scope_column: Option<&str>,
-    order_column: Option<&str>,
+    migration_order_by: Option<&str>,
     compression: Option<&str>,
-    structured_flush: Option<(u64, u64, u64)>,
+    target_file_size_mb: Option<i64>,
+    hot_row_limit: Option<i64>,
+    min_flush_rows: i64,
+    max_rows_per_file: i64,
 ) -> pgrx::Uuid {
     let table_oid_u32 = table_oid.to_u32();
     let table_oid = pgrx::pg_sys::Oid::from(table_oid_u32);
@@ -66,15 +63,34 @@ fn manage_table_pg_impl(
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let storage_id = crate::catalog::resolve::storage_id_by_name(storage_name)
-        .unwrap_or_else(|error| pgrx::error!("storage lookup failed: {error}"))
-        .unwrap_or_else(|| pgrx::error!("storage `{storage_name}` is not registered"));
+        .unwrap_or_else(|error| pgrx::error!("storage lookup failed: {error}"));
     let catalog = migration_catalog(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let registry_catalog = catalog.clone();
-    let primary_key_shape = primary_key_shape(table_oid_u32)
+    let constraints = manage_table_constraints_catalog(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let options = migration_options(order_column, compression, structured_flush);
-    validate_manage_table_constraints(table_oid_u32, &options)
+    let already_managed = table_is_already_managed(table_oid)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let validation =
+        koldstore_migrate::manage_table::validate_manage_table(manage_table_validation_context(
+            table_type,
+            scope_column,
+            storage_id.is_some(),
+            already_managed,
+            migration_order_by,
+            compression,
+            target_file_size_mb,
+            hot_row_limit,
+            min_flush_rows,
+            max_rows_per_file,
+            &catalog,
+            constraints,
+        ))
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let options = validation.options;
+    let storage_id = storage_id
+        .unwrap_or_else(|| unreachable!("validated storage registration must have an id"));
+    let primary_key_shape = primary_key_shape(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let job_id = Uuid::new_v4();
     let request = MigrateTableRequest {
@@ -277,15 +293,10 @@ pub(crate) fn load_migration_catalog(
 }
 
 #[cfg(feature = "pg")]
-fn validate_manage_table_constraints(
+fn manage_table_constraints_catalog(
     table_oid: u32,
-    options: &ManageTableOptions,
-) -> Result<(), String> {
+) -> Result<koldstore_migrate::constraints::ManageTableConstraintsCatalog, String> {
     use pgrx::datum::DatumWithOid;
-
-    if !options.flush_enabled() {
-        return Ok(());
-    }
 
     let json = pgrx::Spi::get_one_with_args::<String>(
         &introspection::plan_manage_table_constraints_probe()
@@ -295,11 +306,82 @@ fn validate_manage_table_constraints(
     )
     .map_err(|error| error.to_string())?
     .unwrap_or_else(|| "{\"unique_constraints\":[],\"foreign_keys\":[]}".to_string());
-    let catalog = introspection::decode_manage_table_constraints_catalog(&json)
-        .map_err(|error| error.to_string())?;
-    catalog
-        .validate_hot_cold_policy(options.flush_enabled(), options.allow_fk_hot_only())
-        .map_err(|error| error.to_string())
+    introspection::decode_manage_table_constraints_catalog(&json).map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
+fn table_is_already_managed(table_oid: pgrx::pg_sys::Oid) -> Result<bool, String> {
+    use pgrx::datum::DatumWithOid;
+
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM koldstore.schemas WHERE table_oid = $1::oid)",
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map(|value| value.unwrap_or(false))
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "pg")]
+#[allow(clippy::too_many_arguments)]
+fn manage_table_validation_context<'a>(
+    table_type: &str,
+    scope_column: Option<&str>,
+    storage_exists: bool,
+    already_managed: bool,
+    migration_order_by: Option<&'a str>,
+    compression: Option<&'a str>,
+    target_file_size_mb: Option<i64>,
+    hot_row_limit: Option<i64>,
+    min_flush_rows: i64,
+    max_rows_per_file: i64,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
+) -> koldstore_migrate::manage_table::ManageTableValidationContext<'a> {
+    use koldstore_migrate::constraints::{ColumnDefinition, MigrationValidationInput};
+
+    let columns = catalog
+        .columns
+        .iter()
+        .map(|column| {
+            ColumnDefinition::typed(
+                column.name.clone(),
+                column.pg_type,
+                column.catalog_type_name().to_string(),
+                true,
+                column.generated,
+            )
+        })
+        .collect();
+    let min_max_rows_per_file = u64::try_from(crate::guc::min_max_rows_per_file())
+        .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
+
+    koldstore_migrate::manage_table::ManageTableValidationContext {
+        migration: MigrationValidationInput {
+            table_type: table_type.to_string(),
+            scope_column: scope_column.map(str::to_string),
+            storage_exists,
+            flush_enabled: hot_row_limit.is_some(),
+            allow_fk_hot_only: false,
+            columns,
+            primary_key: catalog.primary_key.columns.clone(),
+            expression_primary_key: false,
+            indexes: Vec::new(),
+            check_constraints: Vec::new(),
+            not_null_columns: catalog.primary_key.columns.clone(),
+            unique_constraints: constraints.unique_constraints,
+            foreign_keys: constraints.foreign_keys,
+        },
+        already_managed,
+        migration_order_by,
+        compression,
+        policy: koldstore_migrate::manage_table::ManageTablePolicyInput {
+            hot_row_limit,
+            min_flush_rows,
+            max_rows_per_file,
+            target_file_size_mb,
+            min_max_rows_per_file,
+        },
+    }
 }
 
 #[cfg(feature = "pg")]
@@ -685,108 +767,4 @@ fn execute_demigration_statements(
     }
 
     Ok(deactivated)
-}
-
-#[cfg(feature = "pg")]
-fn migration_options(
-    order_column: Option<&str>,
-    compression: Option<&str>,
-    structured_flush: Option<(u64, u64, u64)>,
-) -> ManageTableOptions {
-    let mut options = ManageTableOptions::default();
-    if let Some(order_column) = order_column
-        .map(str::trim)
-        .filter(|column| !column.is_empty())
-    {
-        options = options.with_order_column(order_column);
-    }
-    let codec = match compression.map(str::trim).filter(|codec| !codec.is_empty()) {
-        Some(compression) => ParquetCompression::parse(compression)
-            .unwrap_or_else(|| pgrx::error!("unsupported compression codec `{compression}`")),
-        // Persist the writer default so describe/flush paths do not rely on COALESCE alone.
-        None => ParquetCompression::Zstd,
-    };
-    options = options.with_compression(codec);
-    if let Some((hot_row_limit, min_flush_rows, max_rows_per_file)) = structured_flush {
-        options = options.with_flush(hot_row_limit, min_flush_rows, max_rows_per_file);
-    }
-    options
-}
-
-#[cfg(feature = "pg")]
-fn positive_i64(value: i64, field: &str) -> i64 {
-    if value <= 0 {
-        pgrx::error!("{field} must be greater than zero");
-    }
-    value
-}
-
-#[cfg(feature = "pg")]
-fn validated_max_rows_per_file(value: i64) -> u64 {
-    let value = positive_i64(value, "max_rows_per_file");
-    let min_floor = u64::try_from(crate::guc::min_max_rows_per_file())
-        .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
-    let hint = format!(
-        "lower the floor for testing with SET {} = <value>",
-        crate::settings::MIN_MAX_ROWS_PER_FILE_GUC
-    );
-    koldstore_common::validate_max_rows_per_file(value as u64, min_floor, Some(&hint))
-        .unwrap_or_else(|error| pgrx::error!("{error}"));
-    value as u64
-}
-
-#[cfg(all(test, feature = "pg"))]
-mod tests {
-    use super::migration_options;
-
-    #[test]
-    fn migration_options_include_ordering_and_compression_when_provided() {
-        let options = migration_options(Some("created_at"), Some("zstd"), None);
-
-        assert_eq!(
-            options.to_value(),
-            serde_json::json!({
-                "order_column": "created_at",
-                "compression": "zstd"
-            })
-        );
-    }
-
-    #[test]
-    fn migration_options_default_compression_to_zstd() {
-        let options = migration_options(None, None, None);
-        assert_eq!(
-            options.to_value(),
-            serde_json::json!({
-                "compression": "zstd"
-            })
-        );
-    }
-
-    #[test]
-    fn migration_options_include_structured_flush_settings() {
-        let options = migration_options(None, None, Some((10_000, 1_000, 500)));
-
-        assert_eq!(
-            options.to_value(),
-            serde_json::json!({
-                "compression": "zstd",
-                "hot_row_limit": 10_000,
-                "min_flush_rows": 1_000,
-                "max_rows_per_file": 500
-            })
-        );
-    }
-
-    #[test]
-    fn migration_options_skip_blank_values() {
-        let options = migration_options(Some(" "), Some(""), None);
-
-        assert_eq!(
-            options.to_value(),
-            serde_json::json!({
-                "compression": "zstd"
-            })
-        );
-    }
 }

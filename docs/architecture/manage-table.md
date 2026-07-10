@@ -62,8 +62,9 @@ Those happen on the first `koldstore.flush_table` call.
 | `max_rows_per_file` | 1000 | Parquet segment size cap (GUC floor applies) |
 | `table_type` | `shared` | `shared` or `user` |
 | `scope_column` | null | Required for `user` tables |
-| `order_column` | null | Explicit ordering for existing-table backfill |
+| `migration_order_by` | null | Explicit ordering for existing-table backfill |
 | `compression` | null | `snappy`, `zstd`, or `uncompressed` |
+| `target_file_size_mb` | null | Optional target Parquet segment size in MiB |
 
 When `hot_row_limit` is set, the triple `(hot_row_limit, min_flush_rows,
 max_rows_per_file)` is validated and stored in `ManageTableOptions` as a
@@ -138,7 +139,7 @@ columns are added (clean-schema contract).
 
 `plan_existing_table_migration` chooses backfill order:
 
-1. Explicit `order_column` if orderable (integer, bigint, timestamp, timestamptz, date)
+1. Explicit `migration_order_by` if orderable (integer, bigint, timestamp, timestamptz, date)
 2. Else single-column PK with identity or `nextval()` default
 3. Else error: *existing table migration requires an auto-increment primary key or explicit order column*
 
@@ -193,7 +194,7 @@ When the heap already has rows:
    - Loops `plan_mirror_initialization_batch` until no candidates
    - Each batch: scan hot rows missing mirror rows, `INSERT … ON CONFLICT DO NOTHING`
    - `op = 1`, `seq = SNOWFLAKE_ID()`, `commit_lsn = pg_current_wal_lsn()`
-   - `ORDER BY <order_column> ASC, ctid ASC`, `FOR KEY SHARE SKIP LOCKED`
+   - `ORDER BY <migration_order_by> ASC, ctid ASC`, `FOR KEY SHARE SKIP LOCKED`
    - Capture triggers are already live; concurrent DML is captured separately
 
 5. **Activate schema** — `plan_activate_managed_schema`:
@@ -247,7 +248,8 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
   "hot_row_limit": 10000,
   "min_flush_rows": 1000,
   "max_rows_per_file": 1000,
-  "order_column": "created_at",
+  "migration_order_by": "created_at",
+  "target_file_size_mb": 256,
   "compression": "zstd",
   "backfill_batch_size": 10000,
   "allow_fk_hot_only": true,

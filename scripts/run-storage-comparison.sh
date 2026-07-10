@@ -17,37 +17,59 @@ Usage:
   scripts/run-storage-comparison.sh [options]
 
 Options:
-  -h, --help    Show this help text
+  --rows N          Total rows seeded per table (default: 100000)
+  --hot-limit N     Rows kept hot after flush (default: 10000)
+  --pg-version N    PostgreSQL major version (default: 16)
+  --prepare-only    Prepare pgrx + extension only, skip the test
+  -h, --help        Show this help text
 
-Environment:
-  KOLDSTORE_STORAGE_PGVERSION=16   PostgreSQL major version (default: 16)
-  KOLDSTORE_STORAGE_ROWS=100000    Total rows seeded per table (default: 100000)
-  KOLDSTORE_STORAGE_HOT_LIMIT=10000 Rows kept hot after flush (default: 10000)
-  KOLDSTORE_STORAGE_PREPARE_ONLY=1 Prepare pgrx + extension only, skip the test
+Environment overrides (used when the matching flag is omitted):
+  KOLDSTORE_STORAGE_ROWS
+  KOLDSTORE_STORAGE_HOT_LIMIT
+  KOLDSTORE_STORAGE_PGVERSION / KOLDSTORE_E2E_PGVERSION
+  KOLDSTORE_STORAGE_PREPARE_ONLY
 
-The harness prints a markdown comparison table. Use a release extension build
-for fair hot+cold timings (debug builds are ~3–7× slower).
+The harness prints a markdown comparison table. Use the `release-pg` extension
+profile for fair hot+cold timings (debug builds are ~3–7× slower; plain
+`--release` uses `panic=abort` and breaks PostgreSQL ereport/longjmp).
 
 Examples:
   scripts/run-storage-comparison.sh
-  KOLDSTORE_STORAGE_ROWS=1000000 scripts/run-storage-comparison.sh
-  KOLDSTORE_STORAGE_PREPARE_ONLY=1 scripts/run-storage-comparison.sh
+  scripts/run-storage-comparison.sh --rows 1000000
+  scripts/run-storage-comparison.sh --rows 1000000 --hot-limit 50000
+  scripts/run-storage-comparison.sh --prepare-only
 EOF
 }
 
-case "${1:-}" in
-  -h|--help|help)
-    usage
-    exit 0
-    ;;
-  "")
-    ;;
-  *)
-    echo "unknown option: $1" >&2
-    usage >&2
-    exit 1
-    ;;
-esac
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --rows)
+      ROWS="${2:?missing value for --rows}"
+      shift 2
+      ;;
+    --hot-limit)
+      HOT_LIMIT="${2:?missing value for --hot-limit}"
+      shift 2
+      ;;
+    --pg-version)
+      PG_VERSION="${2:?missing value for --pg-version}"
+      shift 2
+      ;;
+    --prepare-only)
+      PREPARE_ONLY=1
+      shift
+      ;;
+    -h|--help|help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
 
 echo "preparing pgrx PostgreSQL ${PG_VERSION} for storage comparison (release extension)"
 KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \

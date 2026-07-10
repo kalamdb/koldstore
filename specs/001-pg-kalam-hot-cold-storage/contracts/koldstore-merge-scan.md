@@ -42,12 +42,27 @@ KoldstoreMergeScan MUST classify quals before cold pruning or pushdown.
 |------------|-------------------------|--------|
 | PK equality / PK IN | yes | Identifies candidate keys. |
 | Scope column equality from `koldstore.user_id` | yes | Security and path partitioning. |
-| `_seq` and `_commit_seq` ranges | yes | Version/commit metadata exists in segment and row-group stats. |
+| `seq` ranges | yes | Version metadata exists in segment and row-group stats. |
 | Immutable partition columns recorded as cold stats | maybe | Only when schema marks the column immutable after insert. |
 | Mutable app columns | no, residual only | Filtering cold rows before winner selection can hide an older row while a newer hot/cold winner fails the predicate. |
 | RLS quals | must be enforced | Translate only safe quals; otherwise evaluate in PostgreSQL after fetching required columns or fail closed for security. |
 
 Default rule: if a qual is not proven safe for pruning, it is a residual PostgreSQL expression evaluated after hot/cold winner resolution.
+
+### Mirror overlay
+
+Unflushed mirror rows participate immediately:
+
+- `op` 1/2 → skip cold for that PK; hot child returns the live row
+- `op` 3 → skip cold for that PK; row is invisible
+- no mirror row → cold version may be visible
+
+Committed deletes must never require a later flush to become invisible.
+
+### Sequence vs commit cursor
+
+`seq` is a row-version / effect identity. It is not a commit-order cursor.
+Change-feed APIs must not claim gap-free commit ordering from `seq` alone.
 
 ## Plan Phase
 

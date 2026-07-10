@@ -1,8 +1,10 @@
-//! Cold PK hint models.
+//! Cold PK hint models (legacy / unused on the flush write path).
 //!
-//! Owns the typed catalog row and lookup semantics for `koldstore.cold_pk_hints`.
-//! Flush write planners in `koldstore-flush` reuse [`HintKind`] so SQL literals
-//! stay aligned with this enum.
+//! Exact per-PK catalog rows were removed from flush: they recreated heap-scale
+//! bloat in PostgreSQL. Segment prune uses `koldstore.cold_segment_stats` and
+//! Parquet stats/bloom instead. This module remains for typed `HintKind` /
+//! planning helpers until cold-only DML APIs are redesigned around may-contain
+//! segment stats.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

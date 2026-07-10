@@ -218,7 +218,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                       table_name     => $1::text::regclass,
                       storage        => $2,
                       hot_row_limit  => NULL,
-                      order_column   => 'id'
+                      migration_order_by => 'id'
                     ) AS id
                 )
                 SELECT

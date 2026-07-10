@@ -11,7 +11,7 @@ set -euo pipefail
 : "${PGRX_VERSION:=0.19.1}"
 : "${EXTENSION_CRATE:=pg_koldstore}"
 : "${EXTENSION_SQL_NAME:=koldstore}"
-: "${CARGO_PROFILE:=release-pg}"
+: "${CARGO_PROFILE:=release-pg-dist}"
 
 build_release_root_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd

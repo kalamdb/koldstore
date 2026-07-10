@@ -613,7 +613,7 @@ pub fn validate_cold_storage_plan(
 ) -> Result<ValidateColdStoragePlan, OpsError> {
     let statement = SqlStatement::read(
         "validate cold storage",
-        "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.column_stats, h.pk_hash FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' LEFT JOIN koldstore.cold_pk_hints h ON h.table_oid = cs.table_oid AND h.scope_key = cs.scope_key AND h.segment_id = cs.segment_id WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
+        "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.column_stats FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 

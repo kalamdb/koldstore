@@ -20,7 +20,7 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 
 - **setup** (`koldstore-setup`): DDL plans for internal objects in
   `koldstore--0.1.0.sql` — `storage`, `schemas`, `manifest`, `jobs`,
-  `cold_segments`, `cold_pk_hints`, sequences, types, indexes, grants.
+  `cold_segments`, `cold_segment_stats`, sequences, types, indexes, grants.
 - **schema** (`koldstore-schema`): `koldstore.schemas` registry — column sets,
   versions, type matrix, initialization state for migrated tables.
 - **catalog** (`koldstore-catalog`): cold bookkeeping — segments, PK hints,

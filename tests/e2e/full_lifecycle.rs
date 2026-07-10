@@ -504,7 +504,7 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
               storage        => $2,
               hot_row_limit  => $3,
               min_flush_rows => 1,
-              order_column   => 'id'
+              migration_order_by => 'id'
             )
             "#,
             &[

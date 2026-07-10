@@ -17,7 +17,7 @@ FROM koldstore.manage_table(
   hot_row_limit     => NULLIF(TRIM(:'HOT_ROW_LIMIT'), '')::bigint,
   min_flush_rows    => TRIM(:'MIN_FLUSH_ROWS')::bigint,
   max_rows_per_file => TRIM(:'MAX_ROWS_PER_FILE')::bigint,
-  order_column      => 'created_at',
+  migration_order_by => 'created_at',
   compression       => :'KOLDSTORE_BENCH_COMPRESSION'
 );
 

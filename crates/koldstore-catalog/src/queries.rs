@@ -182,7 +182,28 @@ SELECT jsonb_build_object(
       SELECT jsonb_agg(
           jsonb_build_object(
               'object_path', cs.object_path,
-              'column_stats', cs.column_stats,
+              'column_stats', COALESCE((
+                  SELECT jsonb_object_agg(
+                      css.column_name,
+                      jsonb_strip_nulls(jsonb_build_object(
+                          'min', CASE
+                              WHEN css.min_value IS NULL THEN NULL
+                              ELSE pg_catalog.convert_from(css.min_value, 'UTF8')::jsonb
+                          END,
+                          'max', CASE
+                              WHEN css.max_value IS NULL THEN NULL
+                              ELSE pg_catalog.convert_from(css.max_value, 'UTF8')::jsonb
+                          END
+                      ))
+                  )
+                  FROM koldstore.cold_segment_stats css
+                  WHERE css.segment_id = cs.segment_id
+                    AND css.table_oid = cs.table_oid
+                    AND css.scope_key = cs.scope_key
+                    AND css.column_name::text IN (
+                        SELECT pg_catalog.jsonb_array_elements_text($2::jsonb)
+                    )
+              ), '{}'::jsonb),
               'byte_size', cs.byte_size
           )
           ORDER BY cs.batch_number
@@ -202,7 +223,7 @@ WHERE m.table_oid = $1::oid
 ORDER BY m.generation DESC
 LIMIT 1
 "#,
-        [SqlParamType::Oid],
+        [SqlParamType::Oid, SqlParamType::Jsonb],
     )
 }
 
@@ -263,4 +284,21 @@ WHERE table_oid = $1::oid
 "#,
         [SqlParamType::Oid],
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_in_sync_manifest_scan_context;
+
+    #[test]
+    fn merge_scan_context_reads_only_requested_normalized_stats() {
+        let statement = plan_in_sync_manifest_scan_context().unwrap();
+
+        assert!(statement.sql.contains("koldstore.cold_segment_stats"));
+        assert!(statement
+            .sql
+            .contains("jsonb_array_elements_text($2::jsonb)"));
+        assert!(!statement.sql.contains("'column_stats', cs.column_stats"));
+        assert_eq!(statement.param_types.len(), 2);
+    }
 }

@@ -6,7 +6,7 @@ SELECT koldstore.manage_table(
   max_rows_per_file => 500,
   table_type        => 'user',
   scope_column      => 'tenant_id',
-  order_column      => 'created_at'
+  migration_order_by => 'created_at'
 );
 
 -- Example tests scale these limits down while keeping the same semantics.

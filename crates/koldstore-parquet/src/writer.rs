@@ -6,8 +6,8 @@
 //! only so a failed encode never touches a final object key.
 
 use std::collections::BTreeMap;
-use std::io::Write;
-use std::sync::Arc;
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 
 use crate::footer::ColumnStats;
 use crate::schema::{ColdMetadataColumn, PgColumn};
@@ -33,6 +33,118 @@ pub struct WriterOptions {
     pub statistics_columns: Vec<String>,
     pub bloom_filter_columns: Vec<String>,
     pub bloom_filter_false_positive_rate: Option<f64>,
+}
+
+/// Independent file-packing limits applied after flush eligibility is resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentSplitPolicy {
+    target_file_size_bytes: Option<u64>,
+    max_rows_per_file: usize,
+}
+
+impl SegmentSplitPolicy {
+    /// Creates a split policy from an optional compressed-byte target and row cap.
+    #[must_use]
+    pub const fn new(target_file_size_bytes: Option<u64>, max_rows_per_file: usize) -> Self {
+        Self {
+            target_file_size_bytes,
+            max_rows_per_file,
+        }
+    }
+
+    /// Returns whether the current segment should close.
+    ///
+    /// The byte target is deliberately independent from row eligibility. Callers
+    /// only apply this policy to rows already selected for the current flush.
+    #[must_use]
+    pub fn should_close(self, current_bytes: u64, current_rows: usize) -> bool {
+        current_rows >= self.max_rows_per_file.max(1)
+            || self
+                .target_file_size_bytes
+                .is_some_and(|target| current_bytes >= target)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SharedWriteBuffer {
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriteBuffer {
+    fn into_bytes(self) -> Result<Vec<u8>, ParquetError> {
+        let bytes = self.bytes.lock().map_err(|_| {
+            ParquetError::General("parquet output buffer lock poisoned".to_string())
+        })?;
+        Ok(bytes.clone())
+    }
+}
+
+impl Write for SharedWriteBuffer {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        let mut bytes = self
+            .bytes
+            .lock()
+            .map_err(|_| io::Error::other("parquet output buffer lock poisoned"))?;
+        bytes.extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Incremental Parquet encoder exposing compressed bytes at row-group boundaries.
+pub struct StreamingParquetSegmentWriter {
+    writer: ArrowWriter<SharedWriteBuffer>,
+    output: SharedWriteBuffer,
+}
+
+impl StreamingParquetSegmentWriter {
+    /// Opens a streaming segment writer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when writer properties or the Arrow writer are invalid.
+    pub fn try_new(schema: SchemaRef, options: WriterOptions) -> Result<Self, ParquetError> {
+        let output = SharedWriteBuffer::default();
+        let writer = ArrowWriter::try_new(
+            output.clone(),
+            schema,
+            Some(
+                options
+                    .try_native_writer_properties()
+                    .map_err(ParquetError::General)?,
+            ),
+        )?;
+        Ok(Self { writer, output })
+    }
+
+    /// Writes and flushes one bounded row group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when Parquet encoding or row-group flush fails.
+    pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<(), ParquetError> {
+        self.writer.write(batch)?;
+        self.writer.flush()
+    }
+
+    /// Returns compressed bytes emitted so far, excluding the final footer.
+    #[must_use]
+    pub fn current_bytes(&self) -> u64 {
+        u64::try_from(self.writer.bytes_written()).unwrap_or(u64::MAX)
+    }
+
+    /// Closes the writer and returns the complete Parquet object.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when footer encoding fails or the output lock is poisoned.
+    pub fn finish(self) -> Result<Vec<u8>, ParquetError> {
+        self.writer.close()?;
+        self.output.into_bytes()
+    }
 }
 
 /// Planned clean-schema cold record.
