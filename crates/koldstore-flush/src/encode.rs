@@ -43,6 +43,10 @@ pub struct StreamEncodeInput {
     pub row_group_size: usize,
     /// When set, mirror fetch is restricted to these operation codes.
     pub mirror_ops: Option<Vec<i16>>,
+    /// Optional user-scope column on the managed table (filters via hot join).
+    pub scope_column: Option<String>,
+    /// Optional scope value to flush (paired with `scope_column`).
+    pub scope_value: Option<String>,
 }
 
 struct SegmentBuilder {
@@ -180,7 +184,7 @@ pub fn stream_flush_chunks<F, W>(
     mut write_chunk: W,
 ) -> Result<StreamEncodeOutcome, String>
 where
-    F: FnMut(&SqlStatement, i64, i64) -> Result<Vec<FlushMirrorRow>, String>,
+    F: FnMut(&SqlStatement, i64, i64, Option<&str>) -> Result<Vec<FlushMirrorRow>, String>,
     W: FnMut(FlushWriteChunk) -> Result<(), String>,
 {
     let selection = plan_mirror_flush_selection_batch(
@@ -188,7 +192,7 @@ where
         &input.mirror,
         &input.primary_key_columns,
         &input.base_column_names,
-        None,
+        input.scope_column.as_deref(),
         input.mirror_ops.as_deref(),
     )
     .map_err(|error| error.to_string())?;
@@ -200,7 +204,12 @@ where
     let mut segment_builder = SegmentBuilder::new(input);
 
     loop {
-        let batch = fetch_batch(&selection.statement, input.max_seq, after_seq)?;
+        let batch = fetch_batch(
+            &selection.statement,
+            input.max_seq,
+            after_seq,
+            input.scope_value.as_deref(),
+        )?;
         if batch.is_empty() {
             break;
         }
@@ -266,6 +275,8 @@ mod tests {
             compression: "zstd".to_string(),
             row_group_size: 1,
             mirror_ops: None,
+            scope_column: None,
+            scope_value: None,
         }
     }
 
@@ -287,7 +298,7 @@ mod tests {
         let mut segment_rows = Vec::new();
         let outcome = stream_flush_chunks(
             &input,
-            |_, _, _| {
+            |_, _, _, _| {
                 if fetched {
                     Ok(Vec::new())
                 } else {

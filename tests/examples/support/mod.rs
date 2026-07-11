@@ -141,7 +141,7 @@ pub async fn log_cold_storage_snapshot(
     storage_root: &Path,
     label: &str,
 ) -> Result<()> {
-    let segments = load_cold_segments(client, relation).await?;
+    let segments = load_segments(client, relation).await?;
     let manifests = load_manifests(client, relation).await?;
     log_always(format!(
         "{label}: cold storage root {} ({} segments, {} manifests)",
@@ -150,7 +150,7 @@ pub async fn log_cold_storage_snapshot(
         manifests.len()
     ));
 
-    let sample = |segment: &ColdSegmentInfo| {
+    let sample = |segment: &SegmentInfo| {
         log_always(format!(
             "{label}:   segment batch={} rows={} bytes={} file={}",
             segment.batch_number,
@@ -261,7 +261,7 @@ impl ExampleConfig {
 /// Snapshot of cold segment catalog rows used by examples.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub struct ColdSegmentInfo {
+pub struct SegmentInfo {
     pub scope_key: String,
     pub object_path: String,
     pub row_count: i64,
@@ -398,7 +398,7 @@ async fn log_flush_inputs(client: &Client, relation: &str, label: &str) -> Resul
             SELECT
               COALESCE(m.hot_row_count, 0)::bigint AS hot_rows,
               COALESCE(m.mirror_row_count, 0)::bigint AS mirror_rows,
-              COALESCE(m.segment_count, 0)::bigint AS cold_segments,
+              COALESCE(m.segment_count, 0)::bigint AS segments,
               COALESCE(m.cold_row_count, 0)::bigint AS cold_rows
             FROM koldstore.manifest m
             WHERE m.table_oid = $1::text::regclass::oid
@@ -410,11 +410,11 @@ async fn log_flush_inputs(client: &Client, relation: &str, label: &str) -> Resul
     .await?;
     let hot_rows: i64 = row.get(0);
     let mirror_rows: i64 = row.get(1);
-    let cold_segments: i64 = row.get(2);
+    let segments: i64 = row.get(2);
     let cold_rows: i64 = row.get(3);
     log_always(format!(
         "{label}: flush input mirror_rows={mirror_rows} hot_rows={hot_rows} \
-         cold_segments={cold_segments} cold_rows={cold_rows}"
+         segments={segments} cold_rows={cold_rows}"
     ));
     Ok(())
 }
@@ -596,14 +596,14 @@ pub async fn assert_indexes_exist(
 /// # Errors
 ///
 /// Returns an error when the catalog query fails.
-pub async fn load_cold_segments(client: &Client, relation: &str) -> Result<Vec<ColdSegmentInfo>> {
+pub async fn load_segments(client: &Client, relation: &str) -> Result<Vec<SegmentInfo>> {
     let rows = client
         .query(
             r#"
             SELECT scope_key, object_path, row_count, byte_size, batch_number
-            FROM koldstore.cold_segments
+            FROM koldstore.segments
             WHERE table_oid = $1::text::regclass::oid
-              AND status = 'active'
+              AND status = 'published'
             ORDER BY scope_key, batch_number
             "#,
             &[&relation],
@@ -611,7 +611,7 @@ pub async fn load_cold_segments(client: &Client, relation: &str) -> Result<Vec<C
         .await?;
     Ok(rows
         .into_iter()
-        .map(|row| ColdSegmentInfo {
+        .map(|row| SegmentInfo {
             scope_key: row.get(0),
             object_path: row.get(1),
             row_count: row.get(2),
@@ -674,7 +674,7 @@ pub async fn assert_parquet_and_manifest(
     ));
     e2e::assert_cold_metadata_present(client, relation).await?;
 
-    let segments = load_cold_segments(client, relation).await?;
+    let segments = load_segments(client, relation).await?;
     anyhow::ensure!(
         segments.len() as i64 >= min_segments,
         "expected at least {min_segments} cold segments for {relation}, got {}",
@@ -867,7 +867,7 @@ async fn log_overlay_catalog_snapshot(client: &Client, relation: &str, label: &s
     let segments: i64 = row.get(3);
     log_always(format!(
         "cold-delete overlay [{label}]: mirror_rows={mirror_rows} hot_rows={hot_rows} \
-         cold_rows={cold_rows} cold_segments={segments}"
+         cold_rows={cold_rows} segments={segments}"
     ));
     Ok(())
 }

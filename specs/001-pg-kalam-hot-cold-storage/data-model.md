@@ -20,7 +20,7 @@ The PostgreSQL heap is the hot store and keeps at most one row per logical prima
 koldstore.storage
   -> system.schemas
   -> koldstore.manifest
-  -> koldstore.cold_segments
+  -> koldstore.segments
   -> koldstore.cold_pk_hints
   -> koldstore.row_events
 
@@ -151,7 +151,7 @@ Local cache and scheduler state; object-store `manifest.json` remains the cold s
 
 Normal DML only marks `pending_write`; it does not rewrite object-store manifests.
 
-## Cold Segment (`koldstore.cold_segments`)
+## Cold Segment (`koldstore.segments`)
 
 | Column | Type | Notes |
 |--------|------|-------|
@@ -239,8 +239,8 @@ The manifest is the visibility boundary for object-store files. Temp files and u
 |----------|-------|
 | app table | existing primary key preserved. |
 | app table | optional hot filter indexes based on workload. |
-| `koldstore.cold_segments` | `(table_oid, scope_key, status)`. |
-| `koldstore.cold_segments` | `(table_oid, min_commit_seq, max_commit_seq)`. |
+| `koldstore.segments` | `(table_oid, scope_key, status)`. |
+| `koldstore.segments` | `(table_oid, min_commit_seq, max_commit_seq)`. |
 | `koldstore.cold_pk_hints` | `(table_oid, scope_key, pk_hash)`. |
 | `koldstore.row_events` | `(table_oid, scope_key, commit_seq)`. |
 | `koldstore.manifest` | `(table_oid, scope_key)`. |

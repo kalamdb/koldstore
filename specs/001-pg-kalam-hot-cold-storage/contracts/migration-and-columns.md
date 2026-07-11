@@ -102,7 +102,7 @@ Rules:
 4. Backfill existing rows with monotonic `_seq`, `_commit_seq`, and `_deleted = false`.
 5. Preserve the application primary key and existing hot indexes.
 6. Register table metadata, logical PK, scope, storage binding, flush policy, type matrix, and indexed columns in `system.schemas`.
-7. Build local cold metadata tables as empty (`koldstore.cold_segments`, `koldstore.cold_pk_hints`, `koldstore.row_events`).
+7. Build local cold metadata tables as empty (`koldstore.segments`, `koldstore.cold_pk_hints`, `koldstore.row_events`).
 8. Enable planner hook participation, DML triggers/hooks, RLS policy wiring, and flush scheduling.
 
 Migration MUST NOT rewrite the primary key to `(pk..., _seq)`.
@@ -127,7 +127,7 @@ To avoid object-store reads on every DML, pg-koldstore maintains local metadata:
 
 | Table | Purpose |
 |-------|---------|
-| `koldstore.cold_segments` | Segment-level commit, seq, stats, schema, status, object path. |
+| `koldstore.segments` | Segment-level commit, seq, stats, schema, status, object path. |
 | `koldstore.cold_pk_hints` | Exact PK hashes when configured, or compact may-contain filters per segment/scope. |
 
 Behavior:

@@ -107,7 +107,7 @@ fn pk_lookup_prefers_exact_hints_over_may_contain_hints() {
 
 #[test]
 fn active_segment_visibility_only_includes_active_segments() {
-    assert!(SegmentVisibility::Active.is_query_visible());
-    assert!(!SegmentVisibility::Pending.is_query_visible());
+    assert!(SegmentVisibility::Published.is_query_visible());
+    assert!(!SegmentVisibility::Staged.is_query_visible());
     assert!(!SegmentVisibility::Deleted.is_query_visible());
 }

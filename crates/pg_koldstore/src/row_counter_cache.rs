@@ -1,8 +1,9 @@
 //! Backend-local row counter deltas flushed to `koldstore.manifest` on commit.
 //!
 //! PERFORMANCE: DML capture triggers call `internal_record_row_count_delta`, which
-//! only updates this in-memory map. One manifest UPDATE per touched table runs on
-//! transaction commit (not once per row), so heavy write workloads avoid hot-path IO.
+//! only updates this in-memory map (and process-local [`koldstore_flush::ScopeCounters`]
+//! for flush initiation). One manifest UPDATE per touched table runs on transaction
+//! commit (not once per row), so heavy write workloads avoid hot-path IO.
 
 #[cfg(feature = "pg")]
 use std::cell::RefCell;
@@ -19,8 +20,16 @@ thread_local! {
 }
 
 /// Records hot/mirror counter deltas for one managed table in backend memory.
+///
+/// Positive `mirror_delta` also bumps process-local [`koldstore_flush::ScopeCounters`]
+/// keyed by `(table_oid, Optional<scope>)` so pre-flush can upsert `koldstore.pending`.
 #[cfg(feature = "pg")]
-pub fn record_delta(table_oid: pg_sys::Oid, hot_delta: i64, mirror_delta: i64) {
+pub fn record_delta(
+    table_oid: pg_sys::Oid,
+    hot_delta: i64,
+    mirror_delta: i64,
+    scope_key: Option<&str>,
+) {
     if hot_delta == 0 && mirror_delta == 0 {
         return;
     }
@@ -31,6 +40,13 @@ pub fn record_delta(table_oid: pg_sys::Oid, hot_delta: i64, mirror_delta: i64) {
         entry.0 = entry.0.saturating_add(hot_delta);
         entry.1 = entry.1.saturating_add(mirror_delta);
     });
+
+    if mirror_delta > 0 {
+        let delta = u64::try_from(mirror_delta).unwrap_or(0);
+        let key = koldstore_common::ScopeCounterKey::from_optional_scope(table_oid, scope_key)
+            .unwrap_or_else(|_| koldstore_common::ScopeCounterKey::shared(table_oid));
+        koldstore_flush::ScopeCounters::bump(key, delta);
+    }
 }
 
 /// Applies pending counter deltas to `koldstore.manifest` at transaction pre-commit.
@@ -105,7 +121,13 @@ unsafe extern "C-unwind" fn row_counter_xact_callback(
 }
 
 #[cfg(not(feature = "pg"))]
-pub fn record_delta(_table_oid: u32, _hot_delta: i64, _mirror_delta: i64) {}
+pub fn record_delta(
+    _table_oid: u32,
+    _hot_delta: i64,
+    _mirror_delta: i64,
+    _scope_key: Option<&str>,
+) {
+}
 
 #[cfg(not(feature = "pg"))]
 pub fn flush_pending_deltas() {}

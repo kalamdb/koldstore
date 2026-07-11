@@ -25,8 +25,10 @@ use super::jobs::{
 };
 use super::mirror_fetch::fetch_mirror_batch;
 use super::spi::{
-    active_cold_segment_count, manifest_from_active_cold_segments, next_flush_batch_number,
-    persist_flush_segment, prune_flushed_hot_rows, resolve_flush_stats, upsert_manifest_row,
+    active_flush_policy, active_segment_count, delete_pending_for_scopes,
+    manifest_from_active_segments, next_flush_batch_number, persist_flush_segment,
+    prune_flushed_hot_rows, resolve_flush_stats, select_flushable_pending, sync_pending_from_counters,
+    upsert_manifest_row,
 };
 
 pub(super) struct FlushPreparedContext {
@@ -173,14 +175,22 @@ pub(super) fn stream_write_flush_batches(
         compression: ctx.storage.compression.clone(),
         row_group_size: koldstore_parquet::WriterOptions::default().row_group_size,
         mirror_ops: selection.mirror_ops.clone(),
+        scope_column: None,
+        scope_value: None,
     };
     let catalog_columns = ctx.catalog_columns.clone();
 
     let stream_outcome = crate::merge_scan::pg::with_custom_scan_disabled(|| {
         stream_flush_chunks(
             &encode_input,
-            |statement, max_seq, after_seq| {
-                fetch_mirror_batch(&catalog_columns, statement, max_seq, after_seq)
+            |statement, max_seq, after_seq, scope_value| {
+                fetch_mirror_batch(
+                    &catalog_columns,
+                    statement,
+                    max_seq,
+                    after_seq,
+                    scope_value,
+                )
             },
             |chunk| {
                 write_streamed_chunk(
@@ -216,9 +226,9 @@ pub(super) fn stream_write_flush_batches(
     // Segments + PK hints are cataloged per Parquet file during streaming so
     // peak hint memory stays near one segment instead of the full flush.
 
-    let catalog_segments = active_cold_segment_count(table_oid)?;
+    let catalog_segments = active_segment_count(table_oid)?;
     if manifest.segments.len() as i64 != catalog_segments {
-        manifest = manifest_from_active_cold_segments(
+        manifest = manifest_from_active_segments(
             table_oid,
             &ctx.relation,
             &ctx.snapshot,
@@ -390,19 +400,44 @@ fn flush_prepared_table(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
 ) -> Result<(), String> {
+    // Sync approximate counters into one pending row per scope, then flush only
+    // scopes that exceeded the table hot-row threshold (or all when force / no policy).
+    let pending = sync_pending_from_counters(table_oid, ctx.storage.schema_version, ctx.force)?;
+    let policy = active_flush_policy(table_oid)?;
+    let flushable = select_flushable_pending(&pending, policy.as_ref(), ctx.force);
+    if flushable.is_empty() {
+        mark_flush_job_completed(ctx.job_id, table_oid, 0, 0, 0)?;
+        return Ok(());
+    }
+
+    // Pending already decided these scopes should flush. Honor the caller's
+    // force flag for mirror selection — do not pass force=true here. Force
+    // selection prefers a tombstone-only batch when deletes exist, which
+    // under-flushes mixed insert/update/delete mirrors on normal flush_table.
     let selection = resolve_flush_stats(table_oid, ctx.force)?;
     if selection.stats.row_count == 0 {
+        let scopes: Vec<String> = flushable.iter().map(|row| row.scope_key.clone()).collect();
+        delete_pending_for_scopes(table_oid, &scopes)?;
         mark_flush_job_completed(ctx.job_id, table_oid, 0, 0, 0)?;
         return Ok(());
     }
 
     pgrx::log!(
-        "koldstore flush: starting table={} rows={} max_seq={} force={}",
+        "koldstore flush: starting table={} rows={} max_seq={} force={} flushable_pending={}",
         ctx.relation.name,
         selection.stats.row_count,
         selection.stats.max_seq,
-        ctx.force
+        ctx.force,
+        flushable.len()
     );
     let outcome = stream_write_flush_batches(table_oid, ctx, &selection)?;
-    finalize_flush(table_oid, ctx, &outcome)
+    let scopes: Vec<String> = flushable.iter().map(|row| row.scope_key.clone()).collect();
+    finalize_flush(table_oid, ctx, &outcome)?;
+    delete_pending_for_scopes(table_oid, &scopes)?;
+    let plans = flushable
+        .iter()
+        .map(|row| row.to_plan(table_oid.to_u32()))
+        .collect::<Result<Vec<_>, _>>()?;
+    koldstore_flush::consume_pending_plans(&plans);
+    Ok(())
 }

@@ -196,7 +196,7 @@ SELECT jsonb_build_object(
                           END
                       ))
                   )
-                  FROM koldstore.cold_segment_stats css
+                  FROM koldstore.segment_stats css
                   WHERE css.segment_id = cs.segment_id
                     AND css.table_oid = cs.table_oid
                     AND css.scope_key = cs.scope_key
@@ -208,10 +208,10 @@ SELECT jsonb_build_object(
           )
           ORDER BY cs.batch_number
       )
-      FROM koldstore.cold_segments cs
+      FROM koldstore.segments cs
       WHERE cs.table_oid = $1::oid
         AND cs.scope_key = ''
-        AND cs.status = 'active'
+        AND cs.status = 'published'
   ), '[]'::jsonb)
 )::text
 FROM koldstore.manifest m
@@ -235,7 +235,7 @@ LIMIT 1
 pub fn plan_next_flush_batch_number() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "resolve next flush batch number",
-        "SELECT COALESCE(max(batch_number), 0) + 1 FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = ''",
+        "SELECT COALESCE(max(batch_number), 0) + 1 FROM koldstore.segments WHERE table_oid = $1::oid AND scope_key = ''",
         [SqlParamType::Oid],
     )
 }
@@ -245,10 +245,10 @@ pub fn plan_next_flush_batch_number() -> SqlResult<SqlStatement> {
 /// # Errors
 ///
 /// Returns an error when statement metadata is invalid.
-pub fn plan_active_cold_segment_count() -> SqlResult<SqlStatement> {
+pub fn plan_active_segment_count() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "resolve active cold segment count",
-        "SELECT count(*)::bigint FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = '' AND status = 'active'",
+        "SELECT count(*)::bigint FROM koldstore.segments WHERE table_oid = $1::oid AND scope_key = '' AND status = 'published'",
         [SqlParamType::Oid],
     )
 }
@@ -258,7 +258,7 @@ pub fn plan_active_cold_segment_count() -> SqlResult<SqlStatement> {
 /// # Errors
 ///
 /// Returns an error when statement metadata is invalid.
-pub fn plan_active_cold_segments_for_manifest_json() -> SqlResult<SqlStatement> {
+pub fn plan_active_segments_for_manifest_json() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "resolve active cold segments for manifest",
         r#"
@@ -277,10 +277,10 @@ SELECT COALESCE(jsonb_agg(
     )
     ORDER BY batch_number, segment_id
 )::text, '[]')
-FROM koldstore.cold_segments
+FROM koldstore.segments
 WHERE table_oid = $1::oid
   AND scope_key = ''
-  AND status = 'active'
+  AND status = 'published'
 "#,
         [SqlParamType::Oid],
     )
@@ -294,7 +294,7 @@ mod tests {
     fn merge_scan_context_reads_only_requested_normalized_stats() {
         let statement = plan_in_sync_manifest_scan_context().unwrap();
 
-        assert!(statement.sql.contains("koldstore.cold_segment_stats"));
+        assert!(statement.sql.contains("koldstore.segment_stats"));
         assert!(statement
             .sql
             .contains("jsonb_array_elements_text($2::jsonb)"));

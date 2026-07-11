@@ -23,7 +23,7 @@ pub struct WrittenFlushSegment {
     pub object_path: String,
     /// Final on-disk byte size.
     pub byte_size: i64,
-    /// Column stats JSON stored in `koldstore.cold_segments`.
+    /// Column stats JSON stored in `koldstore.segments`.
     pub column_stats: serde_json::Value,
     /// Catalog row shape for manifest assembly (single source of truth).
     pub catalog_row: CatalogManifestSegmentRow,

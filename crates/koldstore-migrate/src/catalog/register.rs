@@ -96,7 +96,7 @@ pub enum RegistryError {
     #[error("primary_key_shape cannot be empty")]
     MissingPrimaryKeyShape,
     /// User-scoped table metadata is missing its scope column.
-    #[error("user-scoped table requires scope_column")]
+    #[error("user-scoped manage_table requires scope_column")]
     MissingScopeColumn,
     /// SPI statement metadata could not be prepared.
     #[error("{0}")]

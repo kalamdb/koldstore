@@ -75,7 +75,7 @@ pub enum MigrationConstraintError {
     #[error("expression index `{0}` is not supported")]
     ExpressionIndex(String),
     /// User-scoped migration is missing a scope column.
-    #[error("user-scoped migration requires scope_column")]
+    #[error("user-scoped manage_table requires scope_column")]
     MissingScopeColumn,
     /// User-scoped migration names a column absent from the table.
     #[error("scope column `{0}` does not exist")]

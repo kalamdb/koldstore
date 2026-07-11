@@ -51,7 +51,7 @@ serves rows from a buffer. See [scanning-table](architecture/scanning-table.md).
 
 `koldstore.manifest` tracks sync state and O(1) row counters. Object-store
 `manifest.json` is written on flush finalize. Cold segment metadata lives in
-`koldstore.cold_segments`. See [flushing-table](architecture/flushing-table.md).
+`koldstore.segments`. See [flushing-table](architecture/flushing-table.md).
 
 ### Operational boundaries
 

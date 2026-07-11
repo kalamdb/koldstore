@@ -52,7 +52,7 @@
 - [X] T027 [P] Implement object-store backend factory and shared/user path templates for filesystem, S3, GCS, and Azure in `/Users/jamal/git/pg-kalam/crates/koldstore-storage/src/backend.rs`
 - [X] T028 [P] Implement backend-safe conditional put/copy/delete helpers without assuming atomic rename in `/Users/jamal/git/pg-kalam/crates/koldstore-storage/src/publish.rs`
 - [X] T029 Implement `_PG_init`, extension version SQL, schema creation, hook registration shell, and extension lifecycle checks in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/lib.rs`
-- [X] T030 Implement SQL catalog DDL for `koldstore.storage`, `system.schemas`, `koldstore.manifest`, `system.jobs`, `koldstore.cold_segments`, `koldstore.cold_pk_hints`, and `koldstore.row_events` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
+- [X] T030 Implement SQL catalog DDL for `koldstore.storage`, `system.schemas`, `koldstore.manifest`, `system.jobs`, `koldstore.segments`, `koldstore.cold_pk_hints`, and `koldstore.row_events` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/sql/koldstore--0.1.0.sql`
 - [X] T031 Implement pgrx GUC definitions for `koldstore.user_id`, `koldstore.enable_merge_scan`, `koldstore.internal_system_write`, and `koldstore.internal_flush_cleanup` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/guc.rs`
 - [X] T032 Implement privilege checks that prevent application roles from setting internal GUCs or reading storage credentials in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/security/privileges.rs`
 - [X] T033 Implement PostgreSQL advisory-lock-backed transaction commit-order allocation for `_commit_seq` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/hooks/xact.rs`
@@ -175,7 +175,7 @@
 - [X] T089 [P] [US3] Add failing Parquet writer/read round-trip tests for `_seq`, `_commit_seq`, `_deleted`, PK columns, stats, bloom metadata, and kalamdb-compatible layout in `/Users/jamal/git/pg-kalam/crates/koldstore-parquet/tests/writer_roundtrip.rs`
 - [X] T090 [P] [US3] Add failing manifest publish tests for temp object, final object validation, manifest commit as visibility boundary, and no atomic rename assumption in `/Users/jamal/git/pg-kalam/crates/koldstore-manifest/tests/publish_protocol.rs`
 - [X] T091 [P] [US3] Add failing SQL regression test that DML marks `koldstore.manifest.sync_state = 'pending_write'` without rewriting object-store `manifest.json` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/tests/manifest_pending.rs`
-- [X] T092 [P] [US3] Add failing integration test for `koldstore.flush_table` writing Parquet, manifest, `koldstore.cold_segments`, and `koldstore.cold_pk_hints` in `/Users/jamal/git/pg-kalam/tests/e2e/flush_to_cold.rs`
+- [X] T092 [P] [US3] Add failing integration test for `koldstore.flush_table` writing Parquet, manifest, `koldstore.segments`, and `koldstore.cold_pk_hints` in `/Users/jamal/git/pg-kalam/tests/e2e/flush_to_cold.rs`
 - [X] T093 [P] [US3] Add failing crash/recovery test for orphan temp objects and unmanifested final objects in `/Users/jamal/git/pg-kalam/tests/e2e/flush_recovery.rs`
 - [X] T094 [P] [US3] Add failing object-store outage test that leaves hot data authoritative and records retry/error job state in `/Users/jamal/git/pg-kalam/tests/e2e/flush_object_outage.rs`
 - [X] T095 [P] [US3] Add failing PostgreSQL 15/16/17/18 E2E matrix test for flush, manifest, metadata, and hot cleanup in `/Users/jamal/git/pg-kalam/tests/e2e/flush_matrix.rs`
@@ -189,7 +189,7 @@
 - [X] T100 [US3] Implement local `koldstore.manifest` cache state transitions `pending_write`, `syncing`, `in_sync`, `stale`, and `error` in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
 - [X] T101 [US3] Implement `koldstore.set_flush_policy`, `koldstore.flush_table`, and `koldstore.flush_pending` SQL functions in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/sql/ops.rs`
 - [X] T102 [US3] Implement bounded hot-row scan and latest-version/tombstone resolution for flush batches in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
-- [X] T103 [US3] Implement `koldstore.cold_segments` insertion after manifest commit with min/max `_seq`, min/max `_commit_seq`, row count, byte size, stats, schema version, and manifest identity in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
+- [X] T103 [US3] Implement `koldstore.segments` insertion after manifest commit with min/max `_seq`, min/max `_commit_seq`, row count, byte size, stats, schema version, and manifest identity in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
 - [X] T104 [US3] Implement local `koldstore.cold_pk_hints` update after successful flush using exact hashes when configured and bloom/range hints otherwise in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
 - [X] T105 [US3] Implement hot cleanup after manifest commit, including live-row removal and tombstone retention while older cold segments may contain the PK in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/cleanup.rs`
 - [X] T106 [US3] Implement built-in background worker registration and SQL/pg_cron fallback boundaries in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/worker.rs`

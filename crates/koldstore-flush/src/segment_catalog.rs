@@ -2,7 +2,7 @@
 //!
 //! Manifest assembly and filesystem I/O live in `koldstore-manifest`. This
 //! module owns parameterized catalog write plans only. SPI execution stays in
-//! `pg_koldstore`.
+//! `pg_koldstore`. Pending flush reservations live in `pending_catalog`.
 
 use koldstore_common::SqlStatement;
 use koldstore_manifest::SyncState;
@@ -58,7 +58,7 @@ pub fn indexed_column_stats_json(
 
 /// Plans combined multi-row segment and normalized-stat inserts.
 ///
-/// Segment prune metadata lives in `koldstore.cold_segment_stats` (and the
+/// Segment prune metadata lives in `koldstore.segment_stats` (and the
 /// mirrored `column_stats` jsonb). Exact per-PK catalog rows are not written.
 ///
 /// # Errors
@@ -97,7 +97,7 @@ WITH segment_input AS (
     )
 ),
 inserted_segments AS (
-    INSERT INTO koldstore.cold_segments (
+    INSERT INTO koldstore.segments (
         segment_id,
         table_oid,
         scope_key,
@@ -127,11 +127,11 @@ inserted_segments AS (
         u.byte_size,
         u.schema_version,
         u.column_stats,
-        'active'
+        'published'
     FROM segment_input u
     RETURNING segment_id, table_oid, scope_key, column_stats
 )
-INSERT INTO koldstore.cold_segment_stats (
+INSERT INTO koldstore.segment_stats (
     segment_id,
     table_oid,
     scope_key,
@@ -222,9 +222,11 @@ mod tests {
     fn flush_insert_persists_normalized_stats_without_pk_hints() {
         let statement = plan_flush_segments_batch_insert().unwrap();
 
-        assert!(statement.sql.contains("koldstore.cold_segment_stats"));
+        assert!(statement.sql.contains("koldstore.segment_stats"));
         assert!(statement.sql.contains("jsonb_each"));
         assert!(!statement.sql.contains("koldstore.cold_pk_hints"));
         assert!(!statement.sql.contains("md5(inserted_segments.object_path)"));
+        assert!(statement.sql.contains("'published'"));
+        assert!(!statement.sql.contains("'pending'"));
     }
 }

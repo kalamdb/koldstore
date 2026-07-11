@@ -8,8 +8,11 @@ pub mod cleanup;
 pub mod encode;
 pub mod job;
 pub mod ops;
+pub mod pending_catalog;
 pub mod policy;
+pub mod pre_flush;
 pub mod recovery;
+pub mod scope_counters;
 pub mod segment_catalog;
 pub mod segment_write;
 pub mod stats;
@@ -26,7 +29,16 @@ pub use cleanup::{
 pub use encode::{stream_flush_chunks, StreamEncodeInput, StreamEncodeOutcome};
 pub use koldstore_jobs::{JobId, JobStatus, JobType, LeaseEpoch, StaleLeaseAction};
 pub use ops::*;
+pub use pending_catalog::{
+    materialize_pending_upserts, plan_delete_pending, plan_delete_pending_for_scopes,
+    plan_list_pending, plan_upsert_pending, PendingCatalogError, PendingUpsert,
+};
 pub use policy::policy_flush_row_count;
+pub use pre_flush::{
+    consume_pending_plans, flush_pending_threshold, pending_is_flushable, plan_pending_segments,
+    PendingSegmentPlan, PreFlushInput,
+};
+pub use scope_counters::ScopeCounters;
 pub use segment_catalog::{
     indexed_column_stats_json, plan_flush_segments_batch_insert, plan_manifest_row_upsert,
     SegmentCatalogError,

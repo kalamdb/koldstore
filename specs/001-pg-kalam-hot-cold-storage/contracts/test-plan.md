@@ -69,7 +69,7 @@ Mandatory verification gates before MVP release.
 - [ ] Flush writes Parquet final object and commits manifest as visibility boundary.
 - [ ] No test assumes portable atomic rename.
 - [ ] Interrupted flush leaves no manifest reference to corrupt/unvalidated objects.
-- [ ] `koldstore.cold_segments` contains min/max `_seq` and `_commit_seq`.
+- [ ] `koldstore.segments` contains min/max `_seq` and `_commit_seq`.
 - [ ] Cold PK hints are updated after successful flush.
 - [ ] Hot cleanup runs only after manifest commit.
 - [ ] Tombstones retained while older cold rows may exist.

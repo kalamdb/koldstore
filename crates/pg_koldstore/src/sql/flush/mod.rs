@@ -123,3 +123,28 @@ pub fn flush_table_pg(
     execute::flush_table_pg_impl(table_name, force)
         .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
 }
+
+/// Runs pre-flush only: syncs counters into `koldstore.pending` reservations.
+///
+/// SQL contract:
+/// `koldstore.pre_flush_table(table_name regclass, force boolean default false)`.
+///
+/// Returns the number of pending reservation rows after the call.
+/// Does not write Parquet or prune hot/mirror rows — call [`flush_table_pg`] to drain.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "pre_flush_table", schema = "koldstore", security_definer)]
+pub fn pre_flush_table_pg(
+    table_name: pgrx::pg_sys::Oid,
+    force: pgrx::default!(bool, false),
+) -> i64 {
+    pre_flush_table_pg_impl(table_name, force)
+        .unwrap_or_else(|error| pgrx::error!("pre-flush table failed: {error}"))
+}
+
+#[cfg(feature = "pg")]
+fn pre_flush_table_pg_impl(table_oid: pgrx::pg_sys::Oid, force: bool) -> Result<i64, String> {
+    crate::sql::job_lock_pg::lock_table_job(table_oid)?;
+    let _ = crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid)?;
+    let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
+    spi::ensure_pending_for_flush(table_oid, storage.schema_version, force)
+}

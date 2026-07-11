@@ -37,7 +37,7 @@ pub(super) struct SegmentReadProfile {
 #[derive(Debug, Clone)]
 pub(super) struct ColdReadProfile {
     pub(super) manifest_path: String,
-    /// Always catalog (`koldstore.manifest` + `cold_segments`), never object-store JSON.
+    /// Always catalog (`koldstore.manifest` + `segments`), never object-store JSON.
     pub(super) manifest_source: &'static str,
     pub(super) storage_type: String,
     pub(super) base_path: String,

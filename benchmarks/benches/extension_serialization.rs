@@ -57,6 +57,7 @@ fn bench_path_and_policy(c: &mut Criterion) {
             min_flush_rows: None,
             max_rows_per_file: None,
             target_file_size_mb: None,
+            segment_row_threshold: None,
         }),
         schema_version: 1,
     };
@@ -70,7 +71,7 @@ fn bench_path_and_policy(c: &mut Criterion) {
 
 fn bench_query_mode_decision(c: &mut Criterion) {
     let request = QueryRequest {
-        has_cold_segments: true,
+        has_segments: true,
         overlaps_hot_range: true,
         overlaps_cold_range: true,
         cold_api_enabled: true,
@@ -179,7 +180,7 @@ fn should_flush_by_policy(meta: &ManagedTableMeta, pending_rows: u64) -> bool {
 
 #[derive(Debug, Clone, Copy)]
 struct QueryRequest {
-    has_cold_segments: bool,
+    has_segments: bool,
     overlaps_hot_range: bool,
     overlaps_cold_range: bool,
     cold_api_enabled: bool,
@@ -194,7 +195,7 @@ enum QueryMode {
 }
 
 fn decide_query_mode(request: QueryRequest) -> QueryMode {
-    if !request.cold_api_enabled || !request.has_cold_segments {
+    if !request.cold_api_enabled || !request.has_segments {
         return if request.overlaps_hot_range {
             QueryMode::HotOnly
         } else {

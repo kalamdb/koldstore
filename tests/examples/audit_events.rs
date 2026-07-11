@@ -183,7 +183,7 @@ async fn audit_events_immutable_history_hot_recent_and_cold_regulator_export_inn
     )
     .await?;
 
-    let segments = support::load_cold_segments(&db.client, &relation).await?;
+    let segments = support::load_segments(&db.client, &relation).await?;
     assert!(segments.iter().all(|s| s.byte_size > 0 && s.row_count > 0));
     let manifests = support::load_manifests(&db.client, &relation).await?;
     assert!(!manifests.is_empty());

@@ -262,7 +262,7 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
         "post-churn force flush should move additional rows cold, flushed {post_flushed}"
     );
 
-    let segments = support::load_cold_segments(&db.client, &relation).await?;
+    let segments = support::load_segments(&db.client, &relation).await?;
     assert!(
         segments
             .iter()

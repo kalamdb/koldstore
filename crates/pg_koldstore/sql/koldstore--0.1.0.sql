@@ -158,7 +158,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_table_work_idx
   ON koldstore.jobs (table_oid)
   WHERE job_type IN ('flush', 'migrate_backfill') AND status IN ('pending', 'running');
 
-CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
+-- Approximate flush reservations (one row per live table/scope). Not cold files.
+CREATE TABLE IF NOT EXISTS koldstore.pending (
+  table_oid oid NOT NULL,
+  scope_key text NOT NULL DEFAULT '',
+  row_count bigint NOT NULL CHECK (row_count >= 0),
+  schema_version integer NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (table_oid, scope_key)
+);
+
+CREATE TABLE IF NOT EXISTS koldstore.segments (
   segment_id uuid PRIMARY KEY,
   table_oid oid NOT NULL,
   scope_key text NOT NULL DEFAULT '',
@@ -172,26 +182,28 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   byte_size bigint NOT NULL,
   schema_version integer NOT NULL,
   column_stats jsonb NOT NULL DEFAULT '{}'::jsonb,
-  -- column_stats mirrors cold_segment_stats for cache-friendly segment loads.
+  -- column_stats mirrors segment_stats for cache-friendly segment loads.
   -- Keep both in sync on flush; do not grow this with per-row payloads.
-  status text NOT NULL CHECK (status IN ('pending', 'active', 'compacted', 'deleted')),
+  status text NOT NULL CHECK (status IN (
+    'staged', 'published', 'superseded', 'deleting', 'deleted', 'orphaned'
+  )),
   manifest_etag text,
   created_xid xid,
   created_lsn pg_lsn,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx
-  ON koldstore.cold_segments (table_oid, scope_key, min_seq, max_seq)
-  INCLUDE (segment_id, object_path, min_commit_seq, max_commit_seq, row_count, byte_size, schema_version, manifest_etag)
-  WHERE status = 'active';
+-- Partial key only: merge/manifest loads need heap columns (column_stats, batch_number).
+CREATE INDEX IF NOT EXISTS segments_published_scope_seq_idx
+  ON koldstore.segments (table_oid, scope_key, min_seq, max_seq)
+  WHERE status = 'published';
 
-CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx
-  ON koldstore.cold_segments (table_oid, scope_key, min_commit_seq, max_commit_seq)
-  WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS segments_published_commit_idx
+  ON koldstore.segments (table_oid, scope_key, min_commit_seq, max_commit_seq)
+  WHERE status = 'published';
 
-CREATE TABLE IF NOT EXISTS koldstore.cold_segment_stats (
-  segment_id uuid NOT NULL REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,
+CREATE TABLE IF NOT EXISTS koldstore.segment_stats (
+  segment_id uuid NOT NULL REFERENCES koldstore.segments(segment_id) ON DELETE CASCADE,
   table_oid oid NOT NULL,
   scope_key text NOT NULL DEFAULT '',
   column_name name NOT NULL,
@@ -203,11 +215,11 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segment_stats (
   PRIMARY KEY (segment_id, column_name)
 );
 
-CREATE INDEX IF NOT EXISTS cold_segment_stats_lookup_idx
-  ON koldstore.cold_segment_stats (table_oid, scope_key, column_name, segment_id);
+CREATE INDEX IF NOT EXISTS segment_stats_lookup_idx
+  ON koldstore.segment_stats (table_oid, scope_key, column_name, segment_id);
 
 -- NOTE: Do not add per-PK catalog tables (e.g. exact cold_pk_hints). Cold
--- presence is discovered via cold_segment_stats / Parquet stats+bloom so catalog
+-- presence is discovered via segment_stats / Parquet stats+bloom so catalog
 -- size stays O(segments × indexed columns), not O(flushed rows).
 
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_seq AS bigint;
@@ -311,6 +323,7 @@ REVOKE ALL ON
   koldstore.schemas,
   koldstore.manifest,
   koldstore.jobs,
-  koldstore.cold_segments,
-  koldstore.cold_segment_stats
+  koldstore.pending,
+  koldstore.segments,
+  koldstore.segment_stats
 FROM PUBLIC;

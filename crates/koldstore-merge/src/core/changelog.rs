@@ -1,5 +1,6 @@
 //! Latest-state change-feed cursor helpers.
 
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use koldstore_common::{ChangeSource, MirrorChange, SeqId};
@@ -43,10 +44,14 @@ pub fn changes_since(
             change.scope_key.as_ref().map_or("", |scope| scope.as_str()),
             change.pk_json
         );
-        match latest_by_pk.get(&key) {
-            Some(existing) if !change_beats(change, existing) => {}
-            _ => {
-                latest_by_pk.insert(key, change.clone());
+        match latest_by_pk.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                if change_beats(change, occupied.get()) {
+                    *occupied.get_mut() = change.clone();
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(change.clone());
             }
         }
     }

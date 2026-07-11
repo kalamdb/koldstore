@@ -527,19 +527,17 @@ fn update_indexed_bounds(
     column: &str,
     value: &serde_json::Value,
 ) -> Result<(), String> {
-    match bounds.get_mut(column) {
-        None => {
-            bounds.insert(column.to_string(), (value.clone(), value.clone()));
-        }
-        Some((min, max)) => {
+    bounds
+        .entry(column.to_string())
+        .and_modify(|(min, max)| {
             if compare_json_values(value, min).is_some_and(|ordering| ordering.is_lt()) {
                 *min = value.clone();
             }
             if compare_json_values(value, max).is_some_and(|ordering| ordering.is_gt()) {
                 *max = value.clone();
             }
-        }
-    }
+        })
+        .or_insert_with(|| (value.clone(), value.clone()));
     Ok(())
 }
 

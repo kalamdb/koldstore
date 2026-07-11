@@ -103,7 +103,7 @@ System column guards, hot INSERT/UPDATE/DELETE stamping, transaction-scoped `_co
 
 ### Phase E - Cold Path
 
-Parquet writer/reader, object-store publish protocol, manifest model, `koldstore.cold_segments`, `koldstore.cold_pk_hints`, safe qualifier pruning.
+Parquet writer/reader, object-store publish protocol, manifest model, `koldstore.segments`, `koldstore.cold_pk_hints`, safe qualifier pruning.
 
 ### Phase F - Flush and Recovery
 

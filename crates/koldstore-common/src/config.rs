@@ -102,6 +102,11 @@ pub struct FlushPolicy {
     /// Preferred compressed Parquet segment size in megabytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_file_size_mb: Option<u64>,
+    /// In-memory counter threshold per `(table, Optional<scope>)` before pre-flush
+    /// creates a `pending` segment. When unset, falls back to `max_rows_per_file`
+    /// then `min_flush_rows` then `hot_row_limit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_row_threshold: Option<u64>,
 }
 
 impl FlushPolicy {
@@ -113,6 +118,7 @@ impl FlushPolicy {
             min_flush_rows: Some(min_flush_rows),
             max_rows_per_file: Some(max_rows_per_file),
             target_file_size_mb: None,
+            segment_row_threshold: None,
         }
     }
 
@@ -120,6 +126,16 @@ impl FlushPolicy {
     #[must_use]
     pub fn enabled(&self) -> bool {
         self.hot_row_limit.is_some_and(|limit| limit > 0)
+    }
+
+    /// Effective per-scope (or shared) counter threshold for pending-segment creation.
+    #[must_use]
+    pub fn segment_row_threshold(&self) -> Option<u64> {
+        self.segment_row_threshold
+            .or(self.max_rows_per_file)
+            .or(self.min_flush_rows)
+            .or(self.hot_row_limit)
+            .filter(|value| *value > 0)
     }
 
     /// Loads a flush policy from persisted schema options JSON.
@@ -145,6 +161,9 @@ pub struct ManageTableOptions {
     /// Preferred Parquet segment size in megabytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_file_size_mb: Option<u64>,
+    /// Per-scope (or shared) in-memory counter threshold for pending-segment creation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_row_threshold: Option<u64>,
     /// Explicit oldest-to-newest ordering column for populated-table backfill.
     #[serde(alias = "order_column", skip_serializing_if = "Option::is_none")]
     pub migration_order_by: Option<String>,
@@ -201,6 +220,7 @@ impl ManageTableOptions {
             min_flush_rows: self.min_flush_rows.filter(|value| *value > 0),
             max_rows_per_file: self.max_rows_per_file.filter(|value| *value > 0),
             target_file_size_mb: self.target_file_size_mb.filter(|value| *value > 0),
+            segment_row_threshold: self.segment_row_threshold.filter(|value| *value > 0),
         })
     }
 

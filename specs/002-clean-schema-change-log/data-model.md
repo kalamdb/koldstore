@@ -23,7 +23,7 @@ koldstore.storage
   -> koldstore.schemas / managed table metadata
   -> per-table change-log mirror
   -> koldstore.manifest
-  -> koldstore.cold_segments
+  -> koldstore.segments
   -> koldstore.cold_pk_hints
   -> latest-state changes_since from mirror + cold metadata
 

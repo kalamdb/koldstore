@@ -154,7 +154,7 @@ ORDER BY c.relname;
 \echo '==> flush completion check'
 SELECT
   'completed' AS current_demo_state,
-  'A completed flush has completed jobs, manifest sync_state = in_sync, segment_count > 0, active cold_segments, and manifest.json in MinIO.' AS how_to_verify;
+  'A completed flush has completed jobs, manifest sync_state = in_sync, segment_count > 0, active segments, and manifest.json in MinIO.' AS how_to_verify;
 
 \echo '==> recent mirror-backed changes include normal insert/update/delete'
 SELECT op, deleted, count(*) AS events

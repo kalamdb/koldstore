@@ -25,7 +25,7 @@ pub enum MigrationError {
     #[error("invalid scope_column `{0}`")]
     InvalidScopeColumn(String),
     /// User-scoped clean-schema tables must use an application-owned scope column.
-    #[error("user-scoped clean-schema migration requires scope_column")]
+    #[error("user-scoped manage_table requires scope_column")]
     MissingScopeColumn,
     /// SQL statement metadata could not be prepared.
     #[error("{0}")]

@@ -753,8 +753,9 @@ if [[ "${KOLDSTORE_BENCH_START_PGRX:-1}" != "0" ]]; then
   cargo pgrx start "$PG_FEATURE" >/dev/null
 
   echo "recreating benchmark database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
+  # WITH (FORCE) clears leftover sessions (e.g. pg_cron) that block DROP.
   "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-    -c "DROP DATABASE IF EXISTS ${PG_DATABASE}" \
+    -c "DROP DATABASE IF EXISTS ${PG_DATABASE} WITH (FORCE)" \
     -c "CREATE DATABASE ${PG_DATABASE}"
 
   # pgrx Postgres builds may lack LZ4 toast support; force pglz so merge-scan

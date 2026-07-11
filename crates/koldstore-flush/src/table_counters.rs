@@ -1,8 +1,13 @@
 //! O(1) per-table row counters stored on `koldstore.manifest`.
 //!
 //! These counters avoid repeated `COUNT(*)` scans over hot heaps and mirrors during
-//! flush logging, `describe_table`, and operator diagnostics. DML capture triggers
-//! bump hot counts; flush finalization applies mirror/hot prune and cold deltas.
+//! flush logging, `describe_table`, and operator diagnostics. They are **not** the
+//! flush-initiation signal: DML bumps process-local [`crate::scope_counters::ScopeCounters`]
+//! and pre-flush creates `pending` segments. Manifest counters remain for O(1)
+//! diagnostics and durable reconcile seeds after restart.
+//!
+//! DML capture triggers bump hot/mirror counts at commit; flush finalization applies
+//! mirror/hot prune and cold deltas.
 
 use koldstore_common::SqlStatement;
 use thiserror::Error;

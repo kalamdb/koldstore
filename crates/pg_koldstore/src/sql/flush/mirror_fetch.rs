@@ -20,6 +20,7 @@ pub(super) fn fetch_mirror_batch(
     statement: &SqlStatement,
     max_seq: i64,
     after_seq: i64,
+    scope_value: Option<&str>,
 ) -> Result<Vec<FlushMirrorRow>, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -29,13 +30,17 @@ pub(super) fn fetch_mirror_batch(
         statement.param_types.clone(),
     )
     .map_err(|error| error.to_string())?;
+    let mut args: Vec<DatumWithOid<'_>> = vec![
+        DatumWithOid::from(max_seq),
+        DatumWithOid::from(after_seq),
+        DatumWithOid::from(FLUSH_MIRROR_FETCH_BATCH_SIZE),
+    ];
+    if let Some(scope_value) = scope_value {
+        args.push(DatumWithOid::from(scope_value));
+    }
     crate::spi::execute_prepared(
         &spi_statement,
-        &[
-            DatumWithOid::from(max_seq),
-            DatumWithOid::from(after_seq),
-            DatumWithOid::from(FLUSH_MIRROR_FETCH_BATCH_SIZE),
-        ],
+        &args,
         |tuples| decode_mirror_batch(tuples, columns),
     )
     .map_err(|error| error.to_string())

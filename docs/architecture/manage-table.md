@@ -308,7 +308,7 @@ Serde: `#[serde(rename_all = "snake_case")]` on job phase enums.
 | `koldstore.manifest` | counters from live counts | same |
 | Mirror table `__cl` | created | created + backfilled |
 | Capture triggers | installed | installed |
-| `koldstore.cold_segments` | — | not touched |
+| `koldstore.segments` | — | not touched |
 | Object-store Parquet / `manifest.json` | — | not touched |
 
 ---

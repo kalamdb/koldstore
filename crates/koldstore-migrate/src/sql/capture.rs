@@ -242,7 +242,12 @@ BEGIN
         FROM new_rows AS src
         {upsert_tail};
         GET DIAGNOSTICS affected = ROW_COUNT;
-        PERFORM koldstore.internal_record_row_count_delta(TG_RELID, affected, affected);
+        PERFORM koldstore.internal_record_row_count_delta(
+            TG_RELID,
+            affected,
+            affected,
+            nullif(current_setting('koldstore.user_id', true), '')
+        );
         RETURN NULL;
     ELSIF TG_OP = 'UPDATE' THEN
         {pk_update_guard}
@@ -257,7 +262,12 @@ BEGIN
         FROM old_rows AS src
         {upsert_tail};
         GET DIAGNOSTICS affected = ROW_COUNT;
-        PERFORM koldstore.internal_record_row_count_delta(TG_RELID, -affected, 0);
+        PERFORM koldstore.internal_record_row_count_delta(
+            TG_RELID,
+            -affected,
+            0,
+            nullif(current_setting('koldstore.user_id', true), '')
+        );
         RETURN NULL;
     END IF;
 

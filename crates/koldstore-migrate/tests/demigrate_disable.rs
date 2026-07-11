@@ -39,7 +39,8 @@ fn migration_rollback_cleanup_removes_partial_catalog_rows_and_mirror_only() {
             .collect::<Vec<_>>(),
         vec![
             "DROP TABLE IF EXISTS \"koldstore\".\"items__cl\"",
-            "DELETE FROM koldstore.cold_segments WHERE table_oid = $1",
+            "DELETE FROM koldstore.pending WHERE table_oid = $1",
+            "DELETE FROM koldstore.segments WHERE table_oid = $1",
             "DELETE FROM koldstore.manifest WHERE table_oid = $1",
             "DELETE FROM koldstore.schemas WHERE table_oid = $1",
         ]

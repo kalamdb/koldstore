@@ -1,3 +1,1 @@
-{
-  "feature_directory": "specs/002-clean-schema-change-log"
-}
+{"feature_directory": "specs/003-column-id-lifecycle"}

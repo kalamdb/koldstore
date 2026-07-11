@@ -628,10 +628,10 @@ async fn fetch_cold_flush_batches(client: &Client, pg_version: u16) -> Result<Co
         .query(
             r#"
             SELECT batch_number, row_count
-            FROM koldstore.cold_segments
+            FROM koldstore.segments
             WHERE table_oid = $1::text::regclass::oid
               AND scope_key = ''
-              AND status = 'active'
+              AND status = 'published'
             ORDER BY batch_number
             "#,
             &[&relation(pg_version)],

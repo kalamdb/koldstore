@@ -1,7 +1,7 @@
 //! Cold PK hint models (legacy / unused on the flush write path).
 //!
 //! Exact per-PK catalog rows were removed from flush: they recreated heap-scale
-//! bloat in PostgreSQL. Segment prune uses `koldstore.cold_segment_stats` and
+//! bloat in PostgreSQL. Segment prune uses `koldstore.segment_stats` and
 //! Parquet stats/bloom instead. This module remains for typed `HintKind` /
 //! planning helpers until cold-only DML APIs are redesigned around may-contain
 //! segment stats.

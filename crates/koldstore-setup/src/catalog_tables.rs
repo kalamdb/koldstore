@@ -34,11 +34,15 @@ pub const REQUIRED_CATALOG_TABLES: &[CatalogTableSpec] = &[
         purpose: "flush and migration work queue with lease fencing",
     },
     CatalogTableSpec {
-        name: "koldstore.cold_segments",
+        name: "koldstore.pending",
+        purpose: "approximate flush reservations per table/scope (not cold files)",
+    },
+    CatalogTableSpec {
+        name: "koldstore.segments",
         purpose: "cold object segment catalog for active and retained data",
     },
     CatalogTableSpec {
-        name: "koldstore.cold_segment_stats",
+        name: "koldstore.segment_stats",
         purpose: "normalized per-column segment statistics for predicate pruning",
     },
 ];

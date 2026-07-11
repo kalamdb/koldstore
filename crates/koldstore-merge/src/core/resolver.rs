@@ -1,5 +1,6 @@
 //! Hot/cold winner resolution.
 
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, SeqId};
@@ -55,10 +56,14 @@ pub fn resolve_rows(hot: &[HotRow], cold: &[ColdRow]) -> Vec<ResolvedRow> {
             deleted: row.deleted,
             row_image: row.row_image.clone(),
         };
-        match winners.get(&key) {
-            Some(existing) if !candidate.beats(existing) => {}
-            _ => {
-                winners.insert(key, candidate);
+        match winners.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                if candidate.beats(occupied.get()) {
+                    *occupied.get_mut() = candidate;
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(candidate);
             }
         }
     }
@@ -72,10 +77,14 @@ pub fn resolve_rows(hot: &[HotRow], cold: &[ColdRow]) -> Vec<ResolvedRow> {
             deleted: row.deleted,
             row_image: row.row_image.clone(),
         };
-        match winners.get(&key) {
-            Some(existing) if !candidate.beats(existing) => {}
-            _ => {
-                winners.insert(key, candidate);
+        match winners.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                if candidate.beats(occupied.get()) {
+                    *occupied.get_mut() = candidate;
+                }
+            }
+            Entry::Vacant(vacant) => {
+                vacant.insert(candidate);
             }
         }
     }

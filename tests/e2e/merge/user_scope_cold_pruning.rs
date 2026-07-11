@@ -54,10 +54,10 @@ async fn user_scope_cold_segment_lookup_is_index_backed_on_pgrx() -> Result<()> 
             &format!(
                 r#"
                 SELECT object_path
-                FROM koldstore.cold_segments
+                FROM koldstore.segments
                 WHERE table_oid = '{}'::regclass::oid
                   AND scope_key = 'user-a'
-                  AND status = 'active'
+                  AND status = 'published'
                   AND min_seq <= 5
                   AND max_seq >= 5
                 ORDER BY min_seq, max_seq
@@ -69,8 +69,8 @@ async fn user_scope_cold_segment_lookup_is_index_backed_on_pgrx() -> Result<()> 
         common::assertions::assert_catalog_index_plan_uses_any(
             &plan,
             &[
-                "cold_segments_active_scope_seq_idx",
-                "cold_segments_active_commit_idx",
+                "segments_published_scope_seq_idx",
+                "segments_published_commit_idx",
             ],
         )?;
         assert!(plan.contains("scope_key = 'user-a'::text"), "{plan}");
@@ -82,10 +82,10 @@ async fn user_scope_cold_segment_lookup_is_index_backed_on_pgrx() -> Result<()> 
             .query(
                 r#"
                 SELECT object_path
-                FROM koldstore.cold_segments
+                FROM koldstore.segments
                 WHERE table_oid = $1::text::regclass::oid
                   AND scope_key = 'user-a'
-                  AND status = 'active'
+                  AND status = 'published'
                 "#,
                 &[&table.relation],
             )

@@ -530,9 +530,9 @@ async fn relation_sizes(
             .query_one(
                 r#"
                 SELECT COALESCE(sum(byte_size), 0)::bigint
-                FROM koldstore.cold_segments
+                FROM koldstore.segments
                 WHERE table_oid = $1::text::regclass::oid
-                  AND status = 'active'
+                  AND status = 'published'
                 "#,
                 &[&managed],
             )

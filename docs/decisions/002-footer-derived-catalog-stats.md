@@ -11,8 +11,8 @@ Accepted (deferred implementation)
 ## Context
 
 On flush, KoldStore publishes per-segment `column_stats` (min/max for `seq`,
-primary-key, and indexed columns) into `koldstore.cold_segments` /
-`cold_segment_stats` so `KoldMergeScan` can prune whole Parquet files **before**
+primary-key, and indexed columns) into `koldstore.segments` /
+`segment_stats` so `KoldMergeScan` can prune whole Parquet files **before**
 opening them.
 
 Today those bounds are computed twice on the write path:

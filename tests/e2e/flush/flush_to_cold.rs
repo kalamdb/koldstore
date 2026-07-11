@@ -10,7 +10,7 @@ fn flush_to_cold_plan_writes_parquet_manifest_and_segments() {
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
     use koldstore_common::{CommitSeq, ScopeKey, SeqId, StablePkHash};
-    use koldstore_flush::job::{plan_cold_segment_insert, FlushBatchInput, HotRowCandidate};
+    use koldstore_flush::job::{plan_segment_insert, FlushBatchInput, HotRowCandidate};
     use koldstore_parquet::{ColumnStats, SegmentFooterMetadata};
     use serde_json::json;
 
@@ -49,7 +49,7 @@ fn flush_to_cold_plan_writes_parquet_manifest_and_segments() {
         )],
     )
     .unwrap();
-    let segment = plan_cold_segment_insert(
+    let segment = plan_segment_insert(
         42,
         Some(ScopeKey::new("tenant-a").unwrap()),
         "app/items/batch-0.parquet",
@@ -61,7 +61,7 @@ fn flush_to_cold_plan_writes_parquet_manifest_and_segments() {
     assert_eq!(batch.live_rows, 2);
     assert_eq!(batch.tombstones_retained, 1);
     assert_eq!(segment.object_path, "app/items/batch-0.parquet");
-    assert_eq!(segment.status, "active");
+    assert_eq!(segment.status, "published");
     assert_eq!(segment.manifest_etag, "manifest-etag-1");
     assert_eq!(segment.scope_key.as_ref().unwrap().as_str(), "tenant-a");
     assert_eq!(segment.min_seq.get(), 1);
@@ -87,12 +87,12 @@ async fn flush_to_cold_writes_catalog_manifest_and_parquet_on_pgrx() -> Result<(
                 r#"
                 SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size
                 FROM koldstore.manifest m
-                JOIN koldstore.cold_segments cs
+                JOIN koldstore.segments cs
                   ON cs.table_oid = m.table_oid
                  AND cs.scope_key = m.scope_key
                 WHERE m.table_oid = $1::text::regclass::oid
                   AND m.sync_state = 'in_sync'
-                  AND cs.status = 'active'
+                  AND cs.status = 'published'
                 ORDER BY cs.batch_number
                 LIMIT 1
                 "#,

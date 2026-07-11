@@ -83,7 +83,7 @@ Change-feed APIs must not claim gap-free commit ordering from `seq` alone.
 1. Initialize hot child plan.
 2. Capture active PostgreSQL snapshot.
 3. Load managed table metadata from `system.schemas`.
-4. Load visible `koldstore.cold_segments` rows for the snapshot.
+4. Load visible `koldstore.segments` rows for the snapshot.
 5. Prune segments with safe PK/scope/_seq/_commit_seq predicates.
 6. Open cold streams through `koldstore-parquet` direct Arrow/Parquet reader.
 7. Initialize merge resolver state from `koldstore-merge`.
@@ -144,7 +144,7 @@ Required capabilities:
 
 - Object-store backed async Parquet stream.
 - Projection by needed columns.
-- Segment pruning from manifest / `koldstore.cold_segments`.
+- Segment pruning from manifest / `koldstore.segments`.
 - Row-group pruning by PK bloom filters and `_seq` / `_commit_seq` stats.
 - Footer and metadata reads before column chunk reads.
 
@@ -154,7 +154,7 @@ This mirrors kalamdb's direct reader pattern in `kalamdb-filestore/src/parquet/r
 
 Include a cold segment only when:
 
-- `koldstore.cold_segments.status = 'active'`
+- `koldstore.segments.status = 'active'`
 - the segment catalog row is visible to the PostgreSQL snapshot
 - the manifest generation recorded for the segment is the current committed generation for that scope
 - the segment is not superseded by a visible compaction/deletion row

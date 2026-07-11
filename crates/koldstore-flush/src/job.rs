@@ -655,9 +655,9 @@ impl ColumnStatsAccumulator {
     }
 }
 
-/// Planned `koldstore.cold_segments` catalog insertion after manifest commit.
+/// Planned `koldstore.segments` catalog insertion after manifest commit.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ColdSegmentCatalogInsert {
+pub struct SegmentCatalogInsert {
     /// Managed table oid.
     pub table_oid: u32,
     /// Optional user-scope key.
@@ -729,15 +729,15 @@ impl FlushFailurePlan {
     }
 }
 
-/// Plans `koldstore.cold_segments` insertion from published footer metadata.
-pub fn plan_cold_segment_insert(
+/// Plans `koldstore.segments` insertion from published footer metadata.
+pub fn plan_segment_insert(
     table_oid: u32,
     scope_key: Option<ScopeKey>,
     object_path: impl Into<String>,
     metadata: SegmentFooterMetadata,
     manifest_etag: impl Into<String>,
-) -> Result<ColdSegmentCatalogInsert> {
-    Ok(ColdSegmentCatalogInsert {
+) -> Result<SegmentCatalogInsert> {
+    Ok(SegmentCatalogInsert {
         table_oid,
         scope_key,
         object_path: object_path.into(),
@@ -749,7 +749,7 @@ pub fn plan_cold_segment_insert(
         byte_size: metadata.byte_size,
         schema_version: metadata.schema_version,
         column_stats: metadata.column_stats,
-        status: "active",
+        status: "published",
         manifest_etag: manifest_etag.into(),
     })
 }

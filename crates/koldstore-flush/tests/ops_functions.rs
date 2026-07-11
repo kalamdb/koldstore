@@ -64,12 +64,12 @@ fn operational_functions_build_parameterized_catalog_plans() {
     assert_eq!(backup.scope_key.unwrap().as_str(), "tenant-a");
 
     let validation = koldstore_flush::ops::validate_cold_storage_plan(Some(table.clone())).unwrap();
-    assert!(validation.statement.sql.contains("koldstore.cold_segments"));
+    assert!(validation.statement.sql.contains("koldstore.segments"));
     assert!(validation
         .statement
         .sql
         .contains("cs.scope_key = m.scope_key"));
-    assert!(validation.statement.sql.contains("cs.status = 'active'"));
+    assert!(validation.statement.sql.contains("cs.status = 'published'"));
     assert!(validation.statement.sql.contains("cs.column_stats"));
     assert!(!validation.statement.sql.contains("cold_pk_hints"));
 
@@ -170,7 +170,7 @@ fn sql_exposes_export_import_boundary() {
     );
     assert!(export.statement.sql.contains("koldstore.manifest"));
     assert!(export.statement.sql.contains("cs.scope_key = m.scope_key"));
-    assert!(export.statement.sql.contains("cs.status = 'active'"));
+    assert!(export.statement.sql.contains("cs.status = 'published'"));
     assert!(export.archive_manifest_path.ends_with("manifest.json"));
     assert_eq!(export.archive_manifest_path, "app/items/manifest.json");
 

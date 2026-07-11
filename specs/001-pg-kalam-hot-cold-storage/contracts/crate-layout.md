@@ -119,7 +119,7 @@ Serializable catalog row models and validation logic.
 src/
   schema_registry.rs
   table_meta.rs
-  cold_segments.rs
+  segments.rs
   cold_pk_hints.rs
   row_events.rs
   type_matrix.rs

@@ -54,7 +54,7 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
                 r#"
                 SELECT m.manifest_path, cs.object_path
                 FROM koldstore.manifest m
-                JOIN koldstore.cold_segments cs
+                JOIN koldstore.segments cs
                   ON cs.table_oid = m.table_oid
                  AND cs.scope_key = m.scope_key
                 WHERE m.table_oid = $1::text::regclass::oid

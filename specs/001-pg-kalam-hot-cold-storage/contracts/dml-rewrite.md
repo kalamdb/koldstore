@@ -41,7 +41,7 @@ DML management
 | `DELETE WHERE pk = ?` | no | yes / maybe | `koldstore.delete_row` inserts a PK-only tombstone without reading cold data. Standard SQL support requires exact local cold PK metadata. |
 | `DELETE WHERE pk = ?` | no | no | No-op. |
 
-The normal DML path may use local PostgreSQL metadata tables (`koldstore.cold_segments`, `koldstore.cold_pk_hints`) but MUST NOT scan Parquet or call object storage.
+The normal DML path may use local PostgreSQL metadata tables (`koldstore.segments`, `koldstore.cold_pk_hints`) but MUST NOT scan Parquet or call object storage.
 
 ## Commit-Time Stamping
 

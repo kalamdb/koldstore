@@ -93,11 +93,11 @@ This standard is added to [`AGENTS.md`](AGENTS.md) so it is enforced going forwa
 
 Grounded in [`crates/pg_koldstore/sql/koldstore--0.1.0.sql`](crates/pg_koldstore/sql/koldstore--0.1.0.sql):
 
-- setup owns the DDL that creates every internal object: `koldstore.storage`, `koldstore.schemas`, `koldstore.manifest`, `koldstore.jobs`, `koldstore.cold_segments`, `koldstore.cold_pk_hints`, the `global_seq`/`global_commit_seq` sequences, composite types, indexes, and grants. It is the install/bootstrap planner.
+- setup owns the DDL that creates every internal object: `koldstore.storage`, `koldstore.schemas`, `koldstore.manifest`, `koldstore.jobs`, `koldstore.segments`, `koldstore.cold_pk_hints`, the `global_seq`/`global_commit_seq` sequences, composite types, indexes, and grants. It is the install/bootstrap planner.
 - schema owns the `koldstore.schemas` registry: `SchemaColumn`, `SchemaRegistryEntry`, `type_matrix`, schema versions, and `initialization_state` for migrated tables. This is "storing the schema changes for migrated tables".
-- catalog owns cold-data bookkeeping: `cold_segments`, `cold_pk_hints`, managed table meta, flush policy config, manifest catalog rows, plus PG-free query/decode/cache access.
+- catalog owns cold-data bookkeeping: `segments`, `cold_pk_hints`, managed table meta, flush policy config, manifest catalog rows, plus PG-free query/decode/cache access.
 
-Concretely, [`crates/koldstore-catalog/src/schema_registry.rs`](crates/koldstore-catalog/src/schema_registry.rs) and [`crates/koldstore-catalog/src/type_matrix.rs`](crates/koldstore-catalog/src/type_matrix.rs) move into `koldstore-schema`; [`crates/koldstore-catalog/src/cold_segments.rs`](crates/koldstore-catalog/src/cold_segments.rs), [`crates/koldstore-catalog/src/cold_pk_hints.rs`](crates/koldstore-catalog/src/cold_pk_hints.rs), and [`crates/koldstore-catalog/src/table_meta.rs`](crates/koldstore-catalog/src/table_meta.rs) stay in `koldstore-catalog`.
+Concretely, [`crates/koldstore-catalog/src/schema_registry.rs`](crates/koldstore-catalog/src/schema_registry.rs) and [`crates/koldstore-catalog/src/type_matrix.rs`](crates/koldstore-catalog/src/type_matrix.rs) move into `koldstore-schema`; [`crates/koldstore-catalog/src/segments.rs`](crates/koldstore-catalog/src/segments.rs), [`crates/koldstore-catalog/src/cold_pk_hints.rs`](crates/koldstore-catalog/src/cold_pk_hints.rs), and [`crates/koldstore-catalog/src/table_meta.rs`](crates/koldstore-catalog/src/table_meta.rs) stay in `koldstore-catalog`.
 
 ## Target Architecture
 
@@ -197,7 +197,7 @@ Rename [`crates/koldstore-core`](crates/koldstore-core) to `koldstore-common`. O
 
 Keep as explicit crate. Owns cold metadata models plus PG-free access helpers.
 
-- Keep: `cold_segments`, `cold_pk_hints`, `table_meta` (managed table meta, `FlushPolicy` config, FK policy).
+- Keep: `segments`, `cold_pk_hints`, `table_meta` (managed table meta, `FlushPolicy` config, FK policy).
 - Absorb PG-free SQL builders from [`crates/pg_koldstore/src/catalog/queries.rs`](crates/pg_koldstore/src/catalog/queries.rs).
 - Absorb PG-free decoding from [`crates/pg_koldstore/src/catalog/decode.rs`](crates/pg_koldstore/src/catalog/decode.rs).
 - Absorb PG-free cache shapes from [`crates/pg_koldstore/src/catalog/cache.rs`](crates/pg_koldstore/src/catalog/cache.rs).

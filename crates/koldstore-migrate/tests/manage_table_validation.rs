@@ -138,6 +138,37 @@ fn configured_migration_order_by_must_exist() {
 }
 
 #[test]
+fn user_table_without_scope_column_is_rejected() {
+    let mut context = valid_context();
+    context.migration.table_type = "user".to_string();
+    context.migration.scope_column = None;
+    context.migration.columns.push(ColumnDefinition::new(
+        "tenant_id",
+        "text",
+        false,
+    ));
+
+    assert_eq!(
+        validate_manage_table(context).unwrap_err(),
+        MigrationConstraintError::MissingScopeColumn
+    );
+
+    let mut blank = valid_context();
+    blank.migration.table_type = "user".to_string();
+    blank.migration.scope_column = Some("   ".to_string());
+    blank.migration.columns.push(ColumnDefinition::new(
+        "tenant_id",
+        "text",
+        false,
+    ));
+
+    assert_eq!(
+        validate_manage_table(blank).unwrap_err(),
+        MigrationConstraintError::MissingScopeColumn
+    );
+}
+
+#[test]
 fn user_scope_column_must_exist() {
     let mut context = valid_context();
     context.migration.table_type = "user".to_string();

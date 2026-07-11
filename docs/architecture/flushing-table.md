@@ -151,7 +151,7 @@ If `selection.stats.row_count == 0`:
 
 - Manifest paths: `{base_path}/{namespace}/{table}/manifest.json`
 - Open the configured filesystem/S3 client and load the existing manifest object, or create a new shared manifest
-- `next_flush_batch_number` from `koldstore.cold_segments`
+- `next_flush_batch_number` from `koldstore.segments`
 - Build `StreamEncodeInput` (columns, Parquet schema, `max_seq`, optional `mirror_ops`)
 
 ### 4.2 Mirror fetch (SPI → typed rows)
@@ -250,9 +250,9 @@ Manifest finalize uses `write_manifest_with_client` and the same atomic put path
 During streaming, each Parquet file is cataloged immediately via
 `persist_flush_segment`:
 
-1. One SPI insert for `koldstore.cold_segments` + `cold_segment_stats`
+1. One SPI insert for `koldstore.segments` + `segment_stats`
    (native arrays / `unnest`)
-2. No per-PK catalog rows — prune with `cold_segment_stats` / Parquet
+2. No per-PK catalog rows — prune with `segment_stats` / Parquet
    row-group stats and bloom filters so catalog size stays O(segments ×
    indexed columns)
 
@@ -311,9 +311,9 @@ Four native `bigint` SPI parameters — no JSON.
 
 ## Phase 8 — Manifest reconciliation
 
-If in-memory `manifest.segments.len() != active_cold_segment_count`:
+If in-memory `manifest.segments.len() != active_segment_count`:
 
-- Rebuild from catalog: `plan_active_cold_segments_for_manifest_json`
+- Rebuild from catalog: `plan_active_segments_for_manifest_json`
 - SQL → `jsonb_agg` text → `Vec<CatalogManifestSegmentRow>` → `Manifest`
 
 Guards against drift between streamed manifest and catalog truth.

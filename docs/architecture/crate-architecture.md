@@ -14,25 +14,32 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 | DML | `koldstore-mirror` | `pg_koldstore::sql::dml`, `hooks::*` |
 | Flush / jobs | `koldstore-flush`, `koldstore-jobs`, `koldstore-manifest` | `pg_koldstore::sql::flush` |
 | Storage | `koldstore-storage` | storage registration wrappers |
-| Schema | `koldstore-schema` | schema registry SQL execution |
+| Schema | `koldstore-schema` | pure type matrix / evolution policy (leaf) |
+| Catalog | `koldstore-catalog` | versioned schema access + cold segment bookkeeping |
 
 ## Setup vs Schema vs Catalog
 
 - **setup** (`koldstore-setup`): DDL plans for internal objects in
   `koldstore--0.1.0.sql` — `storage`, `schemas`, `manifest`, `jobs`,
-  `cold_segments`, `cold_segment_stats`, sequences, types, indexes, grants.
-- **schema** (`koldstore-schema`): `koldstore.schemas` registry — column sets,
-  versions, type matrix, initialization state for migrated tables.
-- **catalog** (`koldstore-catalog`): cold bookkeeping — segments, PK hints,
-  managed table meta, flush policy config, manifest rows, query/decode/cache.
+  `segments`, `segment_stats`, sequences, types, indexes, grants.
+- **schema** (`koldstore-schema`): PostgreSQL-free **type/evolution leaf** —
+  `PgType`, type matrix, and pure schema-evolution policy helpers. Does **not**
+  own the caller-facing versioned schema registry API.
+- **catalog** (`koldstore-catalog`): **owns versioned schema access** (active /
+  historical schema versions, columns with stable `column_id`,
+  `next_column_id`) **and** cold bookkeeping (segments, lifecycle, PK hints,
+  managed table meta, query/decode/cache). Callers (migrate, flush, extension)
+  use catalog for schema versions and segments; there must not be a second
+  registry API in `koldstore-schema`.
 
-**Do not merge schema and catalog.** Schema stays a leaf used by migrate and
-parquet; catalog depends on schema one-way for typed init state. Combining them
-would force migrate/parquet to pull cold-segment SQL and decode helpers.
+**Do not fully merge schema and catalog crates.** Keep `koldstore-schema` as a
+thin type/evolution leaf so parquet/migrate type checks do not pull cold-segment
+SQL. **Do** concentrate versioned schema **access** in catalog so there is one
+obvious home for versions + segments (see feature `003-column-id-lifecycle`).
 
 **Do not merge mirror and catalog.** Mirror owns `__cl` DML/DDL SQL (common-only
 leaf for migrate/merge). Catalog owns cold bookkeeping and may *look up*
-`mirror_relation` from `koldstore.schemas`, but does not build mirror upserts.
+`mirror_relation` from managed schema metadata, but does not build mirror upserts.
 
 ## Dependency Graph
 
@@ -104,18 +111,18 @@ flowchart BT
 
 | Change | Crate |
 |--------|-------|
-| Shared identifier, seq, row model | `koldstore-common` |
-| Internal metadata table model | `koldstore-catalog` or `koldstore-schema` |
+| Shared identifier, seq, row model, `ColumnId`, scope counter key | `koldstore-common` |
+| Versioned schema access + cold segment / lifecycle models | `koldstore-catalog` |
 | Internal table DDL plan | `koldstore-setup` |
-| Migrated-table schema/version | `koldstore-schema` |
+| PgType / type matrix / pure evolution policy | `koldstore-schema` |
 | Object-store access | `koldstore-storage` |
-| Parquet read/write | `koldstore-parquet` |
+| Parquet read/write / footer stats | `koldstore-parquet` |
 | Manifest lifecycle (model, assembly, JSON I/O, paths, sync state, publish plan) | `koldstore-manifest` |
 | Mirror SQL / DML statements | `koldstore-mirror` |
 | Hot+cold merge logic | `koldstore-merge` |
 | Job lease/phase framework | `koldstore-jobs` |
-| Flush workflow (selection, encode, segment write, catalog SQL plans, cleanup) | `koldstore-flush` |
-| Migration workflow | `koldstore-migrate` |
+| Flush workflow (counters, pre-flush, selection, encode, segment write, catalog SQL plans, cleanup) | `koldstore-flush` |
+| Migration workflow (calls catalog schema APIs) | `koldstore-migrate` |
 | SPI, hooks, custom scan, `#[pg_extern]` | `pg_koldstore` |
 
 ## Cleanup Policy

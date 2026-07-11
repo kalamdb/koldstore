@@ -415,8 +415,9 @@ fn plan_mirror_flush_selection_inner(
         }
     }
     if let Some(scope_column) = scope_column {
+        // Scope lives on the managed heap; mirror only has PK + seq/op.
         let predicate =
-            koldstore_common::scope::scope_predicate_sql("mirror", scope_column, scope_param)
+            koldstore_common::scope::scope_predicate_sql("hot", scope_column, scope_param)
                 .map_err(|error| OpsError::Sql(error.to_string()))?;
         where_clauses.push(predicate);
         param_types.push(SqlParamType::Text);
@@ -500,15 +501,15 @@ SELECT jsonb_build_object(
     'mirror_rows', COALESCE(NULLIF(m.mirror_row_count, 0), (SELECT count(*)::bigint FROM {mirror})),
     'cold_row_count', COALESCE(m.cold_row_count, (
         SELECT sum(cs.row_count)::bigint
-        FROM koldstore.cold_segments cs
+        FROM koldstore.segments cs
         WHERE cs.table_oid = $1::regclass::oid
-          AND cs.status = 'active'
+          AND cs.status = 'published'
     ), 0),
     'cold_segment_count', COALESCE(NULLIF(m.segment_count, 0), (
         SELECT count(*)::bigint
-        FROM koldstore.cold_segments cs
+        FROM koldstore.segments cs
         WHERE cs.table_oid = $1::regclass::oid
-          AND cs.status = 'active'
+          AND cs.status = 'published'
     ), 0),
     'heap_size_bytes', pg_relation_size($1::regclass),
     'table_size_bytes', pg_table_size($1::regclass),
@@ -613,7 +614,7 @@ pub fn validate_cold_storage_plan(
 ) -> Result<ValidateColdStoragePlan, OpsError> {
     let statement = SqlStatement::read(
         "validate cold storage",
-        "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.column_stats FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
+        "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.column_stats FROM koldstore.manifest m LEFT JOIN koldstore.segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'published' WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 
@@ -827,7 +828,7 @@ pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError>
                 koldstore_manifest::relative_manifest_path(namespace, table_name.relation());
             let statement = SqlStatement::read(
                 "export table archive",
-                "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE m.table_oid = $1::regclass::oid",
+                "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size FROM koldstore.manifest m LEFT JOIN koldstore.segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'published' WHERE m.table_oid = $1::regclass::oid",
             )
             .map_err(|error| OpsError::Sql(error.to_string()))?;
             Ok(KoldstoreExecPlan {

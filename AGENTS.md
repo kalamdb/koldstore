@@ -15,6 +15,9 @@
 - Split large files by feature or responsibility when they become hard to scan.
 - Split crates only when there is a clear ownership, dependency, testing, or reuse boundary.
 - Favor small, composable modules over large catch-all modules.
+- use swap_remove instead of pop for Vec.
+- borrow instead of clone when possible.
+- ask the map once with entry
 
 ## Crate Architecture
 

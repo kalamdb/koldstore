@@ -63,16 +63,18 @@ pub(crate) fn refresh_table_row_counters(
     Ok(())
 }
 
-/// SQL contract: `koldstore.internal_record_row_count_delta(table_oid, hot_delta, mirror_delta)`.
+/// SQL contract: `koldstore.internal_record_row_count_delta(table_oid, hot_delta, mirror_delta, scope_key)`.
 ///
 /// PERFORMANCE: Updates backend-local counter deltas only. Manifest rows are updated once per
 /// touched table on transaction commit (see `row_counter_cache.rs`), not once per DML row.
+/// Positive mirror deltas also bump process-local scope counters for pending-segment flush.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "internal_record_row_count_delta", schema = "koldstore")]
 fn internal_record_row_count_delta(
     table_oid: pgrx::pg_sys::Oid,
     hot_delta: i64,
     mirror_delta: i64,
+    scope_key: pgrx::default!(Option<&str>, "NULL"),
 ) {
-    crate::row_counter_cache::record_delta(table_oid, hot_delta, mirror_delta);
+    crate::row_counter_cache::record_delta(table_oid, hot_delta, mirror_delta, scope_key);
 }

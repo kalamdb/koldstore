@@ -373,12 +373,12 @@ impl TestDb {
                 r#"
                 SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size
                 FROM koldstore.manifest m
-                JOIN koldstore.cold_segments cs
+                JOIN koldstore.segments cs
                   ON cs.table_oid = m.table_oid
                  AND cs.scope_key = m.scope_key
                 WHERE m.table_oid = $1::text::regclass::oid
                   AND m.sync_state = 'in_sync'
-                  AND cs.status = 'active'
+                  AND cs.status = 'published'
                 ORDER BY cs.batch_number
                 LIMIT 1
                 "#,

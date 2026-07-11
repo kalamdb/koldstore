@@ -69,10 +69,10 @@ pub struct ManifestSegment {
 }
 
 impl ManifestSegment {
-    /// Creates a committed segment with required metadata.
+    /// Creates a published segment with required metadata.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
-    pub fn committed(
+    pub fn published(
         batch: u32,
         path: impl Into<String>,
         seq_range: RangeInclusive<i64>,
@@ -99,11 +99,34 @@ impl ManifestSegment {
             pk_filter: None,
             column_stats: BTreeMap::new(),
             bloom_filters: Vec::new(),
-            status: SegmentStatus::Committed,
+            status: SegmentStatus::Published,
             checksum: None,
             etag: None,
             created_at: Some(Utc::now()),
         }
+    }
+
+    /// Alias for [`Self::published`] (legacy call-site name during cutover).
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn committed(
+        batch: u32,
+        path: impl Into<String>,
+        seq_range: RangeInclusive<i64>,
+        commit_range: RangeInclusive<i64>,
+        row_count: u64,
+        byte_size: u64,
+        schema_version: u32,
+    ) -> Self {
+        Self::published(
+            batch,
+            path,
+            seq_range,
+            commit_range,
+            row_count,
+            byte_size,
+            schema_version,
+        )
     }
 }
 
@@ -122,13 +145,25 @@ impl ManifestColumnStats {
     }
 }
 
-/// Segment status in object-store manifest.
+/// Segment status in object-store manifest (aligned with catalog lifecycle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SegmentStatus {
-    Committed,
-    Compacted,
+    Pending,
+    Staged,
+    Published,
+    Superseded,
+    Deleting,
     Deleted,
+    Orphaned,
+}
+
+impl SegmentStatus {
+    /// Returns whether this segment is query-visible in the current snapshot.
+    #[must_use]
+    pub const fn is_query_visible(self) -> bool {
+        matches!(self, Self::Published)
+    }
 }
 
 /// PK filter metadata.

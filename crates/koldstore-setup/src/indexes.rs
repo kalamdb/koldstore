@@ -82,22 +82,22 @@ pub const REQUIRED_CATALOG_INDEXES: &[CatalogIndexSpec] = &[
         purpose: "single active flush or migration job per table",
     },
     CatalogIndexSpec {
-        name: "cold_segments_active_scope_seq_idx",
-        table: "koldstore.cold_segments",
+        name: "segments_published_scope_seq_idx",
+        table: "koldstore.segments",
         unique: false,
-        purpose: "merge scans by table, scope, and sequence range",
+        purpose: "merge scans by table, scope, and sequence range (published segments)",
     },
     CatalogIndexSpec {
-        name: "cold_segments_active_commit_idx",
-        table: "koldstore.cold_segments",
+        name: "segments_published_commit_idx",
+        table: "koldstore.segments",
         unique: false,
-        purpose: "commit-sequence pruning for active cold data",
+        purpose: "commit-sequence pruning for published cold data",
     },
     CatalogIndexSpec {
-        name: "cold_segment_stats_lookup_idx",
-        table: "koldstore.cold_segment_stats",
+        name: "segment_stats_lookup_idx",
+        table: "koldstore.segment_stats",
         unique: false,
-        purpose: "predicate-column stats lookup for active segments",
+        purpose: "predicate-column stats lookup for published segments",
     },
 ];
 

@@ -12,7 +12,7 @@ fn export_contract_mentions_kalamdb_compatible_manifest_and_parquet() {
 
     assert_eq!(export.archive_manifest_path, "app/items/manifest.json");
     assert!(export.statement.sql.contains("koldstore.manifest"));
-    assert!(export.statement.sql.contains("koldstore.cold_segments"));
+    assert!(export.statement.sql.contains("koldstore.segments"));
 }
 
 #[tokio::test]

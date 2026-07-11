@@ -12,6 +12,7 @@ pub mod pg_type_name;
 pub mod pk;
 pub mod row;
 pub mod scope;
+pub mod scope_counter_key;
 pub mod seq;
 pub mod session;
 pub mod snowflake;
@@ -41,6 +42,7 @@ pub use scope::{
     active_scope_for_table, enforce_row_scope, normalize_scope, require_user_scope, scope_matches,
     scope_predicate_sql, ScopeError, ScopeSqlError,
 };
+pub use scope_counter_key::ScopeCounterKey;
 pub use seq::{CommitSeq, ScopeKey, SeqId};
 pub use session::{
     normalize_user_id, primary_key_default_clause, snowflake_default_expression,

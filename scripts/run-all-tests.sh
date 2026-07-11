@@ -195,7 +195,7 @@ prepare_benchmark_database() {
   cargo_pgrx_install_koldstore "${pg_feature}" "${pg_config}"
 
   "${psql}" -h "${host}" -p "${port}" -d postgres -v ON_ERROR_STOP=1 \
-    -c "DROP DATABASE IF EXISTS ${database}" \
+    -c "DROP DATABASE IF EXISTS ${database} WITH (FORCE)" \
     -c "CREATE DATABASE ${database}"
 
   BENCHMARK_DATABASE_URL="host=${host} port=${port} user=${user} dbname=${database}"

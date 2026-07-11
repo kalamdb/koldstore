@@ -4,9 +4,12 @@ use koldstore_catalog::{decode::RelationContext, ManagedTableSnapshot};
 use koldstore_common::QualifiedTableName;
 use koldstore_flush::policy::FlushPolicy;
 use koldstore_flush::{
-    cleanup::plan_seq_range_cleanup, manifest_from_catalog_rows, plan_flush_segments_batch_insert,
-    plan_manifest_row_upsert, policy_flush_row_count, CatalogManifestSegmentRow, FlushStats,
-    ResolvedFlushSelection, WrittenFlushSegment,
+    cleanup::plan_seq_range_cleanup, flush_pending_threshold, manifest_from_catalog_rows,
+    materialize_pending_upserts, pending_is_flushable, plan_delete_pending_for_scopes,
+    plan_flush_segments_batch_insert, plan_list_pending, plan_manifest_row_upsert,
+    plan_pending_segments, plan_upsert_pending, policy_flush_row_count, CatalogManifestSegmentRow,
+    FlushStats, PendingSegmentPlan, PendingUpsert, PreFlushInput, ResolvedFlushSelection,
+    WrittenFlushSegment,
 };
 use koldstore_mirror::{
     mirror_to_sql, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats, plan_mirror_stats,
@@ -83,17 +86,17 @@ pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i3
         .ok_or_else(|| "batch number lookup returned no rows".to_string())
 }
 
-pub(super) fn active_cold_segment_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+pub(super) fn active_segment_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = koldstore_catalog::queries::plan_active_cold_segment_count()
+    let statement = koldstore_catalog::queries::plan_active_segment_count()
         .map_err(|error| error.to_string())?;
     crate::spi::select_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "cold segment count lookup returned no rows".to_string())
 }
 
-pub(super) fn manifest_from_active_cold_segments(
+pub(super) fn manifest_from_active_segments(
     table_oid: pgrx::pg_sys::Oid,
     relation: &RelationContext,
     snapshot: &ManagedTableSnapshot,
@@ -101,7 +104,7 @@ pub(super) fn manifest_from_active_cold_segments(
 ) -> Result<koldstore_manifest::Manifest, String> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = koldstore_catalog::queries::plan_active_cold_segments_for_manifest_json()
+    let statement = koldstore_catalog::queries::plan_active_segments_for_manifest_json()
         .map_err(|error| error.to_string())?;
     let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?
@@ -120,9 +123,9 @@ pub(super) fn manifest_from_active_cold_segments(
 
 /// Catalogs every segment written by one `flush_table` call.
 ///
-/// Segment rows + normalized `cold_segment_stats` go in one SPI round trip.
+/// Segment rows + normalized `segment_stats` go in one SPI round trip.
 /// Exact per-PK catalog hints are intentionally not written: prune with
-/// `cold_segment_stats` / Parquet stats so catalog size stays O(segments).
+/// `segment_stats` / Parquet stats so catalog size stays O(segments).
 ///
 /// # Errors
 ///
@@ -364,4 +367,162 @@ fn mirror_op_stats(table_oid: pgrx::pg_sys::Oid, op: i16) -> Result<FlushStats, 
         .ok_or_else(|| "mirror op stats lookup returned no rows".to_string())?;
     let stats: MirrorSeqStats = serde_json::from_str(&json).map_err(|error| error.to_string())?;
     Ok(stats.into())
+}
+
+/// Syncs in-memory counters into `koldstore.pending` rows (create or update).
+///
+/// Returns every pending reservation for the table after sync. Callers apply the
+/// hot-row threshold when deciding which rows to flush.
+pub(super) fn sync_pending_from_counters(
+    table_oid: pgrx::pg_sys::Oid,
+    schema_version: i32,
+    force: bool,
+) -> Result<Vec<PendingRow>, String> {
+    let durable_count = mirror_pending_row_count(table_oid)?.max(0) as u64;
+    let durable = if durable_count > 0 {
+        vec![("".to_string(), durable_count)]
+    } else {
+        Vec::new()
+    };
+    let policy = active_flush_policy(table_oid)?;
+    let plans = plan_pending_segments(PreFlushInput {
+        table_oid: table_oid.to_u32(),
+        policy: policy.as_ref(),
+        force,
+        durable_by_scope: &durable,
+    });
+    if !plans.is_empty() {
+        let upserts = materialize_pending_upserts(schema_version, &plans);
+        upsert_pending(table_oid, &upserts)?;
+    }
+    list_pending(table_oid)
+}
+
+/// Catalog pending reservation row used for flush selection.
+#[derive(Debug, Clone)]
+pub(super) struct PendingRow {
+    pub scope_key: String,
+    pub row_count: u64,
+}
+
+impl PendingRow {
+    pub(super) fn to_plan(&self, table_oid: u32) -> Result<PendingSegmentPlan, String> {
+        let key = koldstore_common::ScopeCounterKey::from_optional_scope(
+            table_oid,
+            if self.scope_key.is_empty() {
+                None
+            } else {
+                Some(self.scope_key.as_str())
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(PendingSegmentPlan {
+            key,
+            row_count: self.row_count,
+        })
+    }
+}
+
+/// Returns pending rows that should flush under the table policy.
+pub(super) fn select_flushable_pending(
+    pending: &[PendingRow],
+    policy: Option<&FlushPolicy>,
+    force: bool,
+) -> Vec<PendingRow> {
+    let threshold = flush_pending_threshold(policy);
+    pending
+        .iter()
+        .filter(|row| pending_is_flushable(row.row_count, threshold, force))
+        .cloned()
+        .collect()
+}
+
+fn list_pending(table_oid: pgrx::pg_sys::Oid) -> Result<Vec<PendingRow>, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let statement = plan_list_pending().map_err(|error| error.to_string())?;
+    let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|| "[]".to_string());
+    let rows: Vec<serde_json::Value> =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    let mut pending = Vec::with_capacity(rows.len());
+    for row in rows {
+        let scope_key = row
+            .get("scope_key")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .to_string();
+        let row_count = row
+            .get("row_count")
+            .and_then(|value| value.as_i64())
+            .unwrap_or(0)
+            .max(0) as u64;
+        pending.push(PendingRow {
+            scope_key,
+            row_count,
+        });
+    }
+    Ok(pending)
+}
+
+fn upsert_pending(table_oid: pgrx::pg_sys::Oid, upserts: &[PendingUpsert]) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    if upserts.is_empty() {
+        return Ok(());
+    }
+
+    let mut scope_keys = Vec::with_capacity(upserts.len());
+    let mut row_counts = Vec::with_capacity(upserts.len());
+    let mut schema_versions = Vec::with_capacity(upserts.len());
+    for upsert in upserts {
+        scope_keys.push(upsert.scope_key.clone());
+        row_counts.push(upsert.row_count);
+        schema_versions.push(upsert.schema_version);
+    }
+
+    let statement = plan_upsert_pending().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
+        &[
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(scope_keys),
+            DatumWithOid::from(row_counts),
+            DatumWithOid::from(schema_versions),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(super) fn delete_pending_for_scopes(
+    table_oid: pgrx::pg_sys::Oid,
+    scope_keys: &[String],
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    if scope_keys.is_empty() {
+        return Ok(());
+    }
+    let statement = plan_delete_pending_for_scopes().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
+        &[
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(scope_keys.to_vec()),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Sync counters into `koldstore.pending` and return reservation count.
+pub(super) fn ensure_pending_for_flush(
+    table_oid: pgrx::pg_sys::Oid,
+    schema_version: i32,
+    force: bool,
+) -> Result<i64, String> {
+    let pending = sync_pending_from_counters(table_oid, schema_version, force)?;
+    Ok(pending.len() as i64)
 }

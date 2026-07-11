@@ -62,7 +62,7 @@ An administrator configures a flush policy. Eligible hot rows are written to obj
 
 1. Normal DML marks the affected scope `pending_write` but does not rewrite `manifest.json`.
 2. Flush writes Parquet through a backend-safe publish protocol and commits visibility through `manifest.json`.
-3. `koldstore.cold_segments` and local cold PK hints are updated after manifest commit.
+3. `koldstore.segments` and local cold PK hints are updated after manifest commit.
 4. Hot live rows are removed only after Parquet and manifest commit succeed.
 5. Hot tombstones are retained while any cold segment may contain an older version of the same PK.
 
@@ -200,7 +200,7 @@ Operators inspect status, validate cold storage, and export/import managed table
 - **FR-021**: `manifest.json` MUST be the object-store visibility boundary for committed cold segments.
 - **FR-022**: Publish MUST NOT rely on portable atomic rename; backend-safe temp/final/manifest commit and recovery are required.
 - **FR-023**: DML MUST mark local manifest state `pending_write` without rewriting object-store manifest.
-- **FR-024**: Flush MUST update `koldstore.cold_segments`, local cold PK hints, and `koldstore.manifest` after manifest commit.
+- **FR-024**: Flush MUST update `koldstore.segments`, local cold PK hints, and `koldstore.manifest` after manifest commit.
 
 ### Query
 
