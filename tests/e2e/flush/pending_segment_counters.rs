@@ -88,7 +88,10 @@ async fn pending_segment_counters_pre_flush_then_flush_on_pgrx() -> Result<()> {
         );
         for row in &pending_rows {
             let row_count: i64 = row.get(1);
-            assert!(row_count > 0, "pending reservation must carry a row estimate");
+            assert!(
+                row_count > 0,
+                "pending reservation must carry a row estimate"
+            );
         }
 
         let segment_pending: i64 = db
@@ -166,7 +169,10 @@ async fn pending_below_hot_row_limit_is_retained_until_force() -> Result<()> {
             )
             .await?
             .get(0);
-        assert_eq!(reserved, 1, "expected one pending reservation after pre_flush");
+        assert_eq!(
+            reserved, 1,
+            "expected one pending reservation after pre_flush"
+        );
 
         // Non-force flush with rows below hot_row_limit should not drain pending.
         let _ = db
@@ -182,7 +188,10 @@ async fn pending_below_hot_row_limit_is_retained_until_force() -> Result<()> {
             "below-threshold pending must remain after non-force flush"
         );
         let published = count_segments(&db.client, &table.relation, "published").await?;
-        assert_eq!(published, 0, "below-threshold flush must not publish segments");
+        assert_eq!(
+            published, 0,
+            "below-threshold flush must not publish segments"
+        );
 
         let force_job: String = db
             .client

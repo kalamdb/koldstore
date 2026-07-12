@@ -1,13 +1,52 @@
 //! Versioned schema access owned by the catalog crate.
 //!
-//! Stub for feature `003-column-id-lifecycle` (US1). Will provide
-//! `active_schema` / `schema_at` / `next_column_id` allocation helpers so
-//! migrate, flush, and the extension call one catalog API for schema versions
-//! (with `koldstore-schema` remaining a type/evolution leaf only).
-//!
-//! No runtime behavior yet — Phase 1 setup stub only.
+//! SQL plans for loading these values live in [`crate::queries`]; SPI execution
+//! remains in the extension crate.
 
-/// Placeholder so the module compiles and stays referenced until US1 lands.
-#[derive(Debug, Default, Clone, Copy)]
-#[allow(dead_code)] // Phase 1 stub; wired in US1
-pub struct SchemaVersionsStub;
+use serde_json::Value;
+
+use koldstore_common::ColumnId;
+
+use crate::SchemaVersion;
+
+/// Decodes one complete schema-version JSON row.
+///
+/// # Errors
+///
+/// Returns an error when required fields are absent or a column type is invalid.
+pub fn decode_schema_version(value: &Value) -> Result<SchemaVersion, String> {
+    serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+}
+
+/// Returns the active schema with the highest version number.
+#[must_use]
+pub fn active_schema(versions: &[SchemaVersion]) -> Option<&SchemaVersion> {
+    versions
+        .iter()
+        .filter(|schema| schema.active)
+        .max_by_key(|schema| schema.version)
+}
+
+/// Returns a specific historical schema version.
+#[must_use]
+pub fn schema_at(versions: &[SchemaVersion], version: u32) -> Option<&SchemaVersion> {
+    versions.iter().find(|schema| schema.version == version)
+}
+
+/// Allocates `next` and advances the durable high-water mark.
+///
+/// Column identifiers are never derived from the currently active columns, so
+/// dropping a column cannot make its identifier reusable.
+///
+/// # Panics
+///
+/// Panics only when the `u64` column-id space is exhausted.
+#[must_use]
+pub fn allocate_column_id(next: ColumnId) -> (ColumnId, ColumnId) {
+    let new_next = next
+        .get()
+        .checked_add(1)
+        .and_then(|value| ColumnId::new(value).ok())
+        .expect("column id space exhausted");
+    (next, new_next)
+}

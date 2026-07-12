@@ -35,21 +35,21 @@ fn backend_config_validates_supported_storage_urls() {
 #[test]
 fn backend_safe_publish_actions_never_use_rename() {
     let actions = backend_safe_publish_actions(
-        "scope/.tmp/writer/batch-0.parquet.tmp",
-        "scope/batch-0.parquet",
+        "scope/.tmp/writer/segment-0000.parquet.tmp",
+        "scope/segment-0000.parquet",
         "scope/manifest.json",
     );
 
     assert_eq!(
         actions,
         vec![
-            PublishAction::PutTemp("scope/.tmp/writer/batch-0.parquet.tmp".to_string()),
+            PublishAction::PutTemp("scope/.tmp/writer/segment-0000.parquet.tmp".to_string()),
             PublishAction::CopyTempToFinal {
-                temp: "scope/.tmp/writer/batch-0.parquet.tmp".to_string(),
-                final_path: "scope/batch-0.parquet".to_string(),
+                temp: "scope/.tmp/writer/segment-0000.parquet.tmp".to_string(),
+                final_path: "scope/segment-0000.parquet".to_string(),
             },
-            PublishAction::ValidateFinal("scope/batch-0.parquet".to_string()),
-            PublishAction::DeleteTemp("scope/.tmp/writer/batch-0.parquet.tmp".to_string()),
+            PublishAction::ValidateFinal("scope/segment-0000.parquet".to_string()),
+            PublishAction::DeleteTemp("scope/.tmp/writer/segment-0000.parquet.tmp".to_string()),
             PublishAction::PutManifest("scope/manifest.json".to_string()),
         ]
     );
@@ -58,7 +58,7 @@ fn backend_safe_publish_actions_never_use_rename() {
 #[test]
 fn in_memory_put_get_delete_roundtrip() {
     let client = ObjectStoreClient::in_memory();
-    let key = "app/items/batch-1.parquet";
+    let key = "app/items/segment-0001.parquet";
     let payload = b"parquet-bytes-not-really";
 
     let put = client
@@ -108,9 +108,9 @@ fn publish_immutable_is_idempotent_when_final_already_matches() {
     let temp = temp_object_key(
         "app/items",
         "writer-a",
-        &unique_temp_file_name("batch-0.parquet"),
+        &unique_temp_file_name("segment-0000.parquet"),
     );
-    let final_key = "app/items/batch-0.parquet";
+    let final_key = "app/items/segment-0000.parquet";
 
     let first = publish_immutable_object(&client, &temp, final_key, bytes).unwrap();
     assert!(!first.reused_existing);
@@ -123,7 +123,7 @@ fn publish_immutable_is_idempotent_when_final_already_matches() {
     let temp2 = temp_object_key(
         "app/items",
         "writer-b",
-        &unique_temp_file_name("batch-0.parquet"),
+        &unique_temp_file_name("segment-0000.parquet"),
     );
     let second = publish_immutable_object(&client, &temp2, final_key, bytes).unwrap();
     assert!(second.reused_existing);
@@ -135,7 +135,7 @@ fn publish_immutable_rejects_existing_final_with_mismatched_size() {
     let client = ObjectStoreClient::in_memory();
     client
         .put(
-            "app/items/batch-1.parquet",
+            "app/items/segment-0001.parquet",
             b"short",
             PutPrecondition::CreateIfAbsent,
         )
@@ -144,12 +144,12 @@ fn publish_immutable_rejects_existing_final_with_mismatched_size() {
     let temp = temp_object_key(
         "app/items",
         "writer",
-        &unique_temp_file_name("batch-1.parquet"),
+        &unique_temp_file_name("segment-0001.parquet"),
     );
     let err = publish_immutable_object(
         &client,
         &temp,
-        "app/items/batch-1.parquet",
+        "app/items/segment-0001.parquet",
         b"much-longer-payload",
     )
     .unwrap_err();
@@ -161,7 +161,7 @@ fn publish_immutable_rejects_same_size_different_content() {
     let client = ObjectStoreClient::in_memory();
     client
         .put(
-            "app/items/batch-2.parquet",
+            "app/items/segment-0002.parquet",
             b"AAAA",
             PutPrecondition::CreateIfAbsent,
         )
@@ -170,13 +170,16 @@ fn publish_immutable_rejects_same_size_different_content() {
     let temp = temp_object_key(
         "app/items",
         "writer",
-        &unique_temp_file_name("batch-2.parquet"),
+        &unique_temp_file_name("segment-0002.parquet"),
     );
-    let err =
-        publish_immutable_object(&client, &temp, "app/items/batch-2.parquet", b"BBBB").unwrap_err();
+    let err = publish_immutable_object(&client, &temp, "app/items/segment-0002.parquet", b"BBBB")
+        .unwrap_err();
     assert!(matches!(err, StorageClientError::Validation { .. }));
     // Corrupt/wrong final must remain untouched.
-    assert_eq!(client.get("app/items/batch-2.parquet").unwrap(), b"AAAA");
+    assert_eq!(
+        client.get("app/items/segment-0002.parquet").unwrap(),
+        b"AAAA"
+    );
 }
 
 #[test]
@@ -203,12 +206,16 @@ fn rejects_object_store_reserved_staging_key_suffix() {
 fn filesystem_client_put_get_survives_reopen() {
     let root = tempfile::tempdir().unwrap();
     let client = open_filesystem_client(root.path().to_str().unwrap()).unwrap();
-    let key = "ns/tbl/batch-9.parquet";
+    let key = "ns/tbl/segment-0009.parquet";
     let payload = b"durable-on-disk-bytes";
 
     publish_immutable_object(
         &client,
-        &temp_object_key("ns/tbl", "w1", &unique_temp_file_name("batch-9.parquet")),
+        &temp_object_key(
+            "ns/tbl",
+            "w1",
+            &unique_temp_file_name("segment-0009.parquet"),
+        ),
         key,
         payload,
     )
@@ -234,10 +241,10 @@ fn publish_mutable_manifest_overwrite_is_atomic_and_readable() {
 fn list_prefix_combinations_return_only_matching_keys() {
     let client = ObjectStoreClient::in_memory();
     for key in [
-        "a/t/batch-0.parquet",
-        "a/t/batch-1.parquet",
-        "a/u/batch-0.parquet",
-        "b/t/batch-0.parquet",
+        "a/t/segment-0000.parquet",
+        "a/t/segment-0001.parquet",
+        "a/u/segment-0000.parquet",
+        "b/t/segment-0000.parquet",
     ] {
         client
             .put(key, b"x", PutPrecondition::CreateIfAbsent)
@@ -251,8 +258,8 @@ fn list_prefix_combinations_return_only_matching_keys() {
 
 #[test]
 fn temp_object_key_avoids_hash_digit_staging_pattern() {
-    let key = temp_object_key("app/items", "writer-1", "batch-0.parquet.abc.tmp");
-    assert_eq!(key, "app/items/.tmp/writer-1/batch-0.parquet.abc.tmp");
+    let key = temp_object_key("app/items", "writer-1", "segment-0000.parquet.abc.tmp");
+    assert_eq!(key, "app/items/.tmp/writer-1/segment-0000.parquet.abc.tmp");
     assert!(!key.split('/').any(|part| {
         part.rsplit_once('#').is_some_and(|(_, suffix)| {
             !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())

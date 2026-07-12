@@ -11,7 +11,7 @@ fn merge_scan_outage_requires_error_not_partial_hot_only_results() {
 
     let error = begin_merge_scan(
         42,
-        vec!["app/items/batch-0.parquet".to_string()],
+        vec!["app/items/segment-0000.parquet".to_string()],
         ColdAvailability::Unavailable,
     )
     .unwrap_err();

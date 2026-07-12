@@ -1,4 +1,6 @@
-use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
+use koldstore_common::{
+    ColdRow, ColumnId, CommitSeq, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId,
+};
 use koldstore_merge::scan::exec::{
     begin_merge_scan, begin_merge_scan_with_plan, execute_merge_scan_with_filters,
     ColdAvailability, FilterPlan, ScanResourceCounters,
@@ -56,7 +58,7 @@ fn plan() -> MergeScanPlan {
         segment_hints: vec![SegmentHint {
             segment_id: "segment-1".to_string(),
             scope_key: None,
-            object_path: "app/items/batch-1.parquet".to_string(),
+            object_path: "app/items/segment-0001.parquet".to_string(),
             selected_row_groups: vec![1],
             min_seq: SeqId::new(10).unwrap(),
             max_seq: SeqId::new(30).unwrap(),
@@ -73,7 +75,7 @@ fn scoped_segments_are_filtered_before_cold_streams_open() {
         SegmentHint {
             segment_id: "segment-user-a".to_string(),
             scope_key: Some(ScopeKey::new("user-a").unwrap()),
-            object_path: "app/items/user-a/batch-1.parquet".to_string(),
+            object_path: "app/items/user-a/segment-0001.parquet".to_string(),
             selected_row_groups: vec![0],
             min_seq: SeqId::new(1).unwrap(),
             max_seq: SeqId::new(10).unwrap(),
@@ -81,7 +83,7 @@ fn scoped_segments_are_filtered_before_cold_streams_open() {
         SegmentHint {
             segment_id: "segment-user-b".to_string(),
             scope_key: Some(ScopeKey::new("user-b").unwrap()),
-            object_path: "app/items/user-b/batch-1.parquet".to_string(),
+            object_path: "app/items/user-b/segment-0001.parquet".to_string(),
             selected_row_groups: vec![1],
             min_seq: SeqId::new(1).unwrap(),
             max_seq: SeqId::new(10).unwrap(),
@@ -89,7 +91,7 @@ fn scoped_segments_are_filtered_before_cold_streams_open() {
         SegmentHint {
             segment_id: "segment-shared".to_string(),
             scope_key: None,
-            object_path: "app/items/shared/batch-1.parquet".to_string(),
+            object_path: "app/items/shared/segment-0001.parquet".to_string(),
             selected_row_groups: vec![2],
             min_seq: SeqId::new(1).unwrap(),
             max_seq: SeqId::new(10).unwrap(),
@@ -100,7 +102,7 @@ fn scoped_segments_are_filtered_before_cold_streams_open() {
 
     assert_eq!(
         state.visible_segments,
-        vec!["app/items/user-a/batch-1.parquet"]
+        vec!["app/items/user-a/segment-0001.parquet"]
     );
     assert_eq!(state.selected_row_groups, vec![0]);
     assert_eq!(state.resources.object_store_handles, 1);
@@ -111,7 +113,10 @@ fn begin_merge_scan_loads_metadata_prunes_segments_and_opens_cold_streams() {
     let state = begin_merge_scan_with_plan(&plan(), ColdAvailability::Available).unwrap();
 
     assert_eq!(state.table_oid, 42);
-    assert_eq!(state.visible_segments, vec!["app/items/batch-1.parquet"]);
+    assert_eq!(
+        state.visible_segments,
+        vec!["app/items/segment-0001.parquet"]
+    );
     assert_eq!(state.selected_row_groups, vec![1]);
     assert!(state.snapshot_captured);
     assert!(state.cold_streams_open);
@@ -124,8 +129,8 @@ fn direct_begin_merge_scan_tracks_each_cold_segment_handle() {
     let state = begin_merge_scan(
         42,
         vec![
-            "app/items/batch-1.parquet".to_string(),
-            "app/items/batch-2.parquet".to_string(),
+            "app/items/segment-0001.parquet".to_string(),
+            "app/items/segment-0002.parquet".to_string(),
         ],
         ColdAvailability::Available,
     )
@@ -173,16 +178,20 @@ fn scan_state_cleanup_releases_resources_and_rescan_resets_merge_state() {
 
     state.rescan(&plan(), ColdAvailability::Available).unwrap();
     assert!(state.cold_streams_open);
-    assert_eq!(state.visible_segments, vec!["app/items/batch-1.parquet"]);
+    assert_eq!(
+        state.visible_segments,
+        vec!["app/items/segment-0001.parquet"]
+    );
 }
 
 #[test]
 fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
+    let qty_id = ColumnId::new(3).unwrap();
     let segments = vec![
         SegmentStatsHint {
-            object_path: "app/items/batch-1.parquet".to_string(),
+            object_path: "app/items/segment-0001.parquet".to_string(),
             column_stats: BTreeMap::from([(
-                "qty".to_string(),
+                qty_id,
                 koldstore_parquet::ColumnStats {
                     min: json!(1),
                     max: json!(10),
@@ -191,9 +200,9 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
             byte_size: None,
         },
         SegmentStatsHint {
-            object_path: "app/items/batch-2.parquet".to_string(),
+            object_path: "app/items/segment-0002.parquet".to_string(),
             column_stats: BTreeMap::from([(
-                "qty".to_string(),
+                qty_id,
                 koldstore_parquet::ColumnStats {
                     min: json!(50),
                     max: json!(99),
@@ -202,7 +211,7 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
             byte_size: None,
         },
         SegmentStatsHint {
-            object_path: "app/items/batch-missing-stats.parquet".to_string(),
+            object_path: "app/items/segment-missing-stats.parquet".to_string(),
             column_stats: BTreeMap::new(),
             byte_size: None,
         },
@@ -211,6 +220,7 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
     let selected = prune_segment_stats(
         &segments,
         &[SegmentPrunePredicate::closed_range(
+            qty_id,
             "qty",
             json!(20),
             json!(60),
@@ -220,8 +230,8 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
     assert_eq!(
         selected,
         vec![
-            "app/items/batch-2.parquet".to_string(),
-            "app/items/batch-missing-stats.parquet".to_string(),
+            "app/items/segment-0002.parquet".to_string(),
+            "app/items/segment-missing-stats.parquet".to_string(),
         ]
     );
 }
@@ -229,7 +239,11 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
 #[test]
 fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
     let err = validate_prune_predicates_indexed(
-        &[SegmentPrunePredicate::equality("status", json!("open"))],
+        &[SegmentPrunePredicate::equality(
+            ColumnId::new(2).unwrap(),
+            "status",
+            json!("open"),
+        )],
         &["created_at".to_string()],
     )
     .unwrap_err();
@@ -241,17 +255,18 @@ fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
 #[test]
 fn indexed_prune_predicates_keep_segments_without_manifest_stats() {
     let segments = vec![SegmentStatsHint {
-        object_path: "app/items/batch-1.parquet".to_string(),
+        object_path: "app/items/segment-0001.parquet".to_string(),
         column_stats: BTreeMap::new(),
         byte_size: None,
     }];
     let selected = prune_segment_stats(
         &segments,
         &[SegmentPrunePredicate::equality(
+            ColumnId::new(4).unwrap(),
             "created_at",
             json!("2026-01-01"),
         )],
     );
 
-    assert_eq!(selected, vec!["app/items/batch-1.parquet".to_string()]);
+    assert_eq!(selected, vec!["app/items/segment-0001.parquet".to_string()]);
 }

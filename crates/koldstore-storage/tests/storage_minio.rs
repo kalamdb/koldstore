@@ -66,14 +66,14 @@ fn minio_immutable_publish_is_idempotent_and_rejects_mismatch() {
         return;
     };
     let prefix = prefix();
-    let final_key = format!("{prefix}/batch-0.parquet");
-    let first_temp = temp_object_key(&prefix, "writer-1", "batch-0.parquet.tmp");
+    let final_key = format!("{prefix}/segment-0000.parquet");
+    let first_temp = temp_object_key(&prefix, "writer-1", "segment-0000.parquet.tmp");
     let first = publish_immutable_object(&client, &first_temp, &final_key, b"same").unwrap();
     assert!(!first.reused_existing);
-    let second_temp = temp_object_key(&prefix, "writer-2", "batch-0.parquet.tmp");
+    let second_temp = temp_object_key(&prefix, "writer-2", "segment-0000.parquet.tmp");
     let second = publish_immutable_object(&client, &second_temp, &final_key, b"same").unwrap();
     assert!(second.reused_existing);
-    let mismatch_temp = temp_object_key(&prefix, "writer-3", "batch-0.parquet.tmp");
+    let mismatch_temp = temp_object_key(&prefix, "writer-3", "segment-0000.parquet.tmp");
     assert!(matches!(
         publish_immutable_object(&client, &mismatch_temp, &final_key, b"diff"),
         Err(StorageClientError::Validation { .. })
@@ -100,7 +100,7 @@ fn minio_recovery_quarantines_final_and_deletes_temp() {
     };
     let prefix = prefix();
     let temp = format!("{prefix}/.tmp/writer/segment.tmp");
-    let final_key = format!("{prefix}/batch-9.parquet");
+    let final_key = format!("{prefix}/segment-0009.parquet");
     client
         .put(&temp, b"temporary", PutPrecondition::Overwrite)
         .unwrap();

@@ -1,10 +1,10 @@
+use koldstore_catalog::SchemaColumn;
 use koldstore_common::{
-    ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    ColumnId, ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
     PrimaryKeyColumnShape, PrimaryKeyShape,
 };
 use koldstore_migrate::{mirror, register, QualifiedTableName};
 use koldstore_schema::MirrorInitializationState;
-use koldstore_schema::SchemaColumn;
 use uuid::Uuid;
 
 fn pk_shape() -> PrimaryKeyShape {
@@ -65,9 +65,10 @@ fn registry_metadata_records_clean_schema_mirror_without_system_columns() {
         active: true,
         primary_key: vec!["id".to_string()],
         columns: vec![
-            SchemaColumn::app("id", "bigint", false),
-            SchemaColumn::app("body", "text", false),
+            SchemaColumn::app(ColumnId::new(1).unwrap(), "id", "bigint", false),
+            SchemaColumn::app(ColumnId::new(2).unwrap(), "body", "text", false),
         ],
+        next_column_id: ColumnId::new(3).unwrap(),
         indexed_columns: Vec::new(),
         type_matrix: serde_json::Value::Null,
         options: ManageTableOptions::from_value(&serde_json::json!({ "hot_row_limit": 1000 })),

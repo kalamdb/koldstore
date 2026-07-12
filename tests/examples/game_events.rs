@@ -97,6 +97,7 @@ async fn game_events_tournament_spike_parallel_matches_and_anticheat_scan_inner(
     assert!(!match_events.is_empty());
 
     let mut waves = flush_waves(&db.client, &relation, 1, Some(flush("seed"))).await?;
+    support::assert_policy_flush_progress(&db.client, &relation, "seed", &waves).await?;
     for wave in 0..2 {
         concurrent_match_bursts(
             &target,
@@ -107,18 +108,13 @@ async fn game_events_tournament_spike_parallel_matches_and_anticheat_scan_inner(
             wave,
         )
         .await?;
-        waves.extend(
-            flush_waves(
-                &db.client,
-                &relation,
-                1,
-                Some(flush(match wave {
-                    0 => "burst-1",
-                    _ => "burst-2",
-                })),
-            )
-            .await?,
-        );
+        let label = match wave {
+            0 => "burst-1",
+            _ => "burst-2",
+        };
+        let burst = flush_waves(&db.client, &relation, 1, Some(flush(label))).await?;
+        support::assert_policy_flush_progress(&db.client, &relation, label, &burst).await?;
+        waves.extend(burst);
     }
     {
         let _step = log_step("concurrent hot UPDATE/DELETE");

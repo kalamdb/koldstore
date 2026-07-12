@@ -5,11 +5,10 @@ use koldstore_common::QualifiedTableName;
 use koldstore_flush::policy::FlushPolicy;
 use koldstore_flush::{
     cleanup::plan_seq_range_cleanup, flush_pending_threshold, manifest_from_catalog_rows,
-    materialize_pending_upserts, pending_is_flushable, plan_delete_pending_for_scopes,
-    plan_flush_segments_batch_insert, plan_list_pending, plan_manifest_row_upsert,
-    plan_pending_segments, plan_upsert_pending, policy_flush_row_count, CatalogManifestSegmentRow,
-    FlushStats, PendingSegmentPlan, PendingUpsert, PreFlushInput, ResolvedFlushSelection,
-    WrittenFlushSegment,
+    materialize_pending_upserts, plan_delete_pending_for_scopes, plan_flush_segments_batch_insert,
+    plan_list_pending, plan_manifest_row_upsert, plan_pending_segments, plan_upsert_pending,
+    policy_flush_row_count, CatalogManifestSegmentRow, FlushStats, PendingSegmentPlan,
+    PendingUpsert, PreFlushInput, ResolvedFlushSelection, WrittenFlushSegment,
 };
 use koldstore_mirror::{
     mirror_to_sql, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats, plan_mirror_stats,
@@ -226,6 +225,31 @@ pub(super) fn upsert_manifest_row(
     Ok(())
 }
 
+/// Promotes all `staged` segments for a table to query-visible `published`.
+///
+/// Used after the manifest object and catalog row are durable for this flush.
+pub(super) fn promote_all_staged_segments_to_published(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    // Empty uuid array means "no specific ids" — promote every staged row for
+    // the table under the flush advisory lock.
+    let statement = koldstore_common::SqlStatement::write(
+        "flush promote all staged segments published",
+        r#"
+UPDATE koldstore.segments
+SET status = 'published'
+WHERE table_oid = $1::oid
+  AND status = 'staged'
+"#,
+    )
+    .map_err(|error| error.to_string())?;
+    crate::spi::update(&statement, &[DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub(super) fn prune_flushed_hot_rows(
     table_oid: pgrx::pg_sys::Oid,
     primary_key_columns: &[String],
@@ -430,10 +454,17 @@ pub(super) fn select_flushable_pending(
     force: bool,
 ) -> Vec<PendingRow> {
     let threshold = flush_pending_threshold(policy);
-    pending
+    let pairs: Vec<(String, u64)> = pending
         .iter()
-        .filter(|row| pending_is_flushable(row.row_count, threshold, force))
-        .cloned()
+        .map(|row| (row.scope_key.clone(), row.row_count))
+        .collect();
+    let selected = koldstore_flush::select_flushable_pending_rows(&pairs, threshold, force);
+    selected
+        .into_iter()
+        .map(|(scope_key, row_count)| PendingRow {
+            scope_key,
+            row_count,
+        })
         .collect()
 }
 

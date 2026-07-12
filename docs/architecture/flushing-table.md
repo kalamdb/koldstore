@@ -18,23 +18,35 @@ All flushes are **table-wide** (`scope_key = ''` in catalog).
 
 ## Overview
 
+Normative initiation path (User scoped and Shared unscoped share one mechanism):
+
+```text
+DML → mirror row → in-memory counter (table_id, Optional<scope>)
+Operator flush_table / enqueue
+  → pre-flush upserts koldstore.pending from counters
+  → select flushable pending (row_count > hot_row_limit, or all when force)
+  → write Parquet (status=staged) → manifest → promote published → prune → clear pending
+```
+
 ```mermaid
 flowchart TD
   A["flush_table_pg"] --> B["lock_table_job"]
   B --> C["ensure_flush_job + mark_running"]
   C --> D["prepare_flush_context"]
   D --> E["refresh_active_schema_if_changed?"]
-  E --> F["resolve_flush_stats"]
+  E --> PF["pre-flush: counters → koldstore.pending"]
+  PF --> F["resolve_flush_stats / select flushable pending"]
   F --> G{row_count == 0?}
   G -->|yes| H["mark_completed(0)"]
   G -->|no| I["stream_write_flush_batches"]
   I --> J["stream_flush_chunks\nSPI fetch → Arrow → Parquet"]
-  J --> K["persist_flush_segment\n(per Parquet file + segment stats)"]
+  J --> K["persist_flush_segment\n(status=staged + segment stats)"]
   K --> L["manifest reconcile if needed"]
   L --> M["write manifest object"]
   M --> N["upsert manifest catalog row"]
-  N --> O["prune_flushed_hot_rows\nseq-range DELETE"]
-  O --> P["apply_flush_row_count_deltas"]
+  N --> P0["promote staged → published"]
+  P0 --> O["prune_flushed_hot_rows\nseq-range DELETE"]
+  O --> P["apply_flush_row_count_deltas + clear pending"]
   P --> Q["mark job completed"]
 ```
 
@@ -196,26 +208,17 @@ rows (`op = 3`) carry PK values from mirror only.
 1. Fetch page of up to 8192 rows (`FLUSH_MIRROR_FETCH_BATCH_SIZE`)
 2. `CleanColdRecordBatchBuilder::push_typed_row` per row
    - App columns + metadata: `seq`, `op`, `deleted`, `schema_version`
-   - Tracks `indexed_bounds` as `serde_json::Value` min/max per indexed column
-     (manual pass; Parquet writer also records chunk stats on the same
-     columns — see planned change below)
 3. When chunk reaches `max_rows_per_file` → `FlushWriteChunk`
-4. Callback writes Parquet segment
+4. Callback writes Parquet segment; catalog `column_stats` come from the
+   Parquet footer after encode (ADR-002), keyed by `column_id`
 
 **No per-row cleanup JSON** is built in the encode loop. `cleanup_row_json` in
 `batch_builder.rs` exists for tests/legacy only.
-
-**Planned (ADR-002):** derive catalog `column_stats` from Parquet footer
-statistics after encode and drop `indexed_bounds` tracking so flush does not
-compute min/max twice. Catalog/manifest remains the segment-prune authority;
-in-file row-group prune already uses the footer. Details:
-[ADR-002: Footer-Derived Catalog Segment Stats](../decisions/002-footer-derived-catalog-stats.md).
-
 ### 4.4 Parquet write
 
 `write_flush_segment_file` (`segment_write.rs`):
 
-1. Path: `{namespace}/{table}/batch-{n}.parquet`
+1. Path: `{namespace}/{table}/segment-{NNNN}.parquet` (zero-padded, width ≥ 4)
 2. Encode in memory via `encode_parquet_segment_bytes` (Arrow `RecordBatch` →
    native Parquet), then `validate_parquet_bytes` (magic + footer open)
 3. Durable publish through `koldstore-storage`:
@@ -227,10 +230,10 @@ in-file row-group prune already uses the footer. Details:
    - Column statistics on `seq` + PK + indexed columns
    - Bloom filters on PK columns (`max_ndv` = row-group size)
    - Compression from storage context (default `zstd`)
-5. `column_stats` JSON for catalog (today from merged `indexed_bounds` +
-   `FlushStats.seq`; later from footer extraction per ADR-002):
+5. `column_stats` JSON for catalog (footer-derived after encode per ADR-002;
+   keys are `column_id` strings, not column names):
    ```json
-   { "seq": {"min": N, "max": M}, "created_at": {"min": "...", "max": "..."} }
+   { "2": {"min": N, "max": M}, "3": {"min": "...", "max": "..."} }
    ```
 6. `byte_size` from published object metadata (not recomputed by scanning rows)
 7. Assemble `ManifestSegment`s from `catalog_row`s once, then `manifest.append_segment_batch(...)`

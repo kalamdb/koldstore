@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use koldstore_common::ColumnId;
+
 /// PostgreSQL relation identity resolved from `pg_class`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationContext {
@@ -129,28 +131,34 @@ pub fn manifest_scan_segment_stats(
     })
 }
 
-/// Extracts `{column: (min, max)}` pairs from catalog column-stats JSON.
+/// Extracts `{column_id: (min, max)}` pairs from catalog column-stats JSON.
 ///
 /// Columns missing either `min` or `max` are skipped. Used by manifest assembly
 /// and merge-scan segment pruning so both paths share one walk.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error when an object key is not a positive numeric `ColumnId`.
 pub fn column_stats_min_max_map(
     column_stats: &serde_json::Value,
-) -> BTreeMap<String, (serde_json::Value, serde_json::Value)> {
+) -> Result<BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>, String> {
     let mut stats = BTreeMap::new();
     let Some(columns) = column_stats.as_object() else {
-        return stats;
+        return Ok(stats);
     };
-    for (column, value) in columns {
+    for (column_id, value) in columns {
+        let column_id = column_id
+            .parse::<ColumnId>()
+            .map_err(|_| format!("invalid column_stats ColumnId key `{column_id}`"))?;
         let Some(min) = value.get("min") else {
             continue;
         };
         let Some(max) = value.get("max") else {
             continue;
         };
-        stats.insert(column.clone(), (min.clone(), max.clone()));
+        stats.insert(column_id, (min.clone(), max.clone()));
     }
-    stats
+    Ok(stats)
 }
 
 /// Decodes a flush storage context JSON payload.
@@ -226,6 +234,8 @@ fn optional_u64(value: &serde_json::Value, field: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use koldstore_common::ColumnId;
+
     use super::{column_stats_min_max_map, flush_storage_context, in_sync_manifest_scan_context};
 
     #[test]
@@ -236,7 +246,7 @@ mod tests {
             "base_path": "/tmp/koldstore",
             "segments": [
                 {
-                    "object_path": "ns/table/batch-1.parquet",
+                    "object_path": "ns/table/segment-0001.parquet",
                     "column_stats": {"seq": {"min": 1, "max": 100}}
                 }
             ]
@@ -248,7 +258,10 @@ mod tests {
         assert_eq!(context.base_path, "/tmp/koldstore");
         assert_eq!(context.storage_type, "filesystem");
         assert_eq!(context.segments.len(), 1);
-        assert_eq!(context.segments[0].object_path, "ns/table/batch-1.parquet");
+        assert_eq!(
+            context.segments[0].object_path,
+            "ns/table/segment-0001.parquet"
+        );
         assert_eq!(context.segments[0].byte_size, None);
         assert_eq!(
             context.segments[0].column_stats,
@@ -265,7 +278,7 @@ mod tests {
             "storage_type": "s3",
             "segments": [
                 {
-                    "object_path": "ns/table/batch-1.parquet",
+                    "object_path": "ns/table/segment-0001.parquet",
                     "column_stats": {"id": {"min": 1, "max": 10}},
                     "byte_size": 4096
                 }
@@ -278,16 +291,23 @@ mod tests {
     #[test]
     fn column_stats_min_max_map_skips_incomplete_bounds() {
         let value = serde_json::json!({
-            "seq": {"min": 1, "max": 100},
-            "partial": {"min": 1},
-            "other": {"max": 9}
+            "1": {"min": 1, "max": 100},
+            "2": {"min": 1},
+            "3": {"max": 9}
         });
-        let stats = column_stats_min_max_map(&value);
+        let stats = column_stats_min_max_map(&value).unwrap();
         assert_eq!(stats.len(), 1);
         assert_eq!(
-            stats.get("seq"),
+            stats.get(&ColumnId::new(1).unwrap()),
             Some(&(serde_json::json!(1), serde_json::json!(100)))
         );
+    }
+
+    #[test]
+    fn column_stats_min_max_map_rejects_name_keys() {
+        let error = column_stats_min_max_map(&serde_json::json!({"status": {"min": 1, "max": 2}}))
+            .unwrap_err();
+        assert!(error.contains("invalid column_stats ColumnId key `status`"));
     }
 
     #[test]

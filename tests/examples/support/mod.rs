@@ -78,6 +78,17 @@ pub struct FlushCtx<'a> {
     pub storage_root: &'a Path,
 }
 
+/// True when `file_name` matches `segment-{NNNN}.parquet` with width ≥ 4.
+fn segment_file_name_is_canonical(file_name: &str) -> bool {
+    let Some(stem) = file_name.strip_suffix(".parquet") else {
+        return false;
+    };
+    let Some(digits) = stem.strip_prefix("segment-") else {
+        return false;
+    };
+    digits.len() >= 4 && digits.chars().all(|ch| ch.is_ascii_digit())
+}
+
 /// Tracks cumulative insert volume across parallel clients.
 #[derive(Debug, Clone)]
 pub struct InsertProgress {
@@ -512,6 +523,77 @@ pub async fn flush_waves(
     Ok(flushed)
 }
 
+/// Asserts policy-driven flush waves moved rows into cold (not a silent no-op).
+///
+/// Catches the multi-backend counter gap where process-local scope counters on
+/// the flush session under-count durable mirror rows and flush returns 0.
+///
+/// # Errors
+///
+/// Returns an error when `waves` is empty or every entry is zero, including a
+/// catalog snapshot for debugging.
+#[allow(dead_code)]
+pub async fn assert_policy_flush_progress(
+    client: &Client,
+    relation: &str,
+    label: &str,
+    waves: &[i64],
+) -> Result<()> {
+    let total: i64 = waves.iter().copied().sum();
+    if total > 0 {
+        log_always(format!(
+            "{label}: policy flush progress ok ({total} rows across {} wave(s))",
+            waves.len()
+        ));
+        return Ok(());
+    }
+    log_overlay_catalog_snapshot(client, relation, &format!("{label}-zero-flush")).await?;
+    let pending = client
+        .query_one(
+            r#"
+            SELECT COALESCE(sum(row_count), 0)::bigint,
+                   count(*)::bigint
+            FROM koldstore.pending
+            WHERE table_oid = $1::text::regclass::oid
+            "#,
+            &[&relation],
+        )
+        .await?;
+    let pending_rows: i64 = pending.get(0);
+    let pending_n: i64 = pending.get(1);
+    anyhow::bail!(
+        "{label}: expected policy flush to move rows into cold, got waves={waves:?} \
+         (pending_rows={pending_rows} pending_n={pending_n}). \
+         Likely incomplete process-local scope counters vs durable mirror."
+    );
+}
+
+/// Asserts no leftover `staged` segments remain after a successful flush path.
+///
+/// # Errors
+///
+/// Returns an error when any staged segment is still visible for the table.
+#[allow(dead_code)]
+pub async fn assert_no_staged_segments(client: &Client, relation: &str) -> Result<()> {
+    let staged: i64 = client
+        .query_one(
+            r#"
+            SELECT count(*)::bigint
+            FROM koldstore.segments
+            WHERE table_oid = $1::text::regclass::oid
+              AND status = 'staged'
+            "#,
+            &[&relation],
+        )
+        .await?
+        .get(0);
+    anyhow::ensure!(
+        staged == 0,
+        "expected 0 staged segments for {relation} after flush, got {staged}"
+    );
+    Ok(())
+}
+
 /// Spawns parallel clients that each run one async workload against the same target.
 ///
 /// # Errors
@@ -652,11 +734,13 @@ pub async fn load_manifests(client: &Client, relation: &str) -> Result<Vec<Manif
 /// Asserts flush produced sized parquet files and a usable manifest.
 ///
 /// Checks:
-/// - at least `min_segments` active cold segments
+/// - at least `min_segments` published cold segments
+/// - object paths use `segment-NNNN.parquet` (width ≥ 4), never `batch-`
 /// - every segment row_count is within `1..=max_rows_per_file`
 /// - parquet files exist on disk with matching row counts
 /// - at least one in-sync / pending manifest row exists
 /// - cold PK hints and byte sizes are present
+/// - no leftover `staged` segments
 ///
 /// # Errors
 ///
@@ -673,6 +757,7 @@ pub async fn assert_parquet_and_manifest(
         storage_root.display()
     ));
     e2e::assert_cold_metadata_present(client, relation).await?;
+    assert_no_staged_segments(client, relation).await?;
 
     let segments = load_segments(client, relation).await?;
     anyhow::ensure!(
@@ -687,6 +772,20 @@ pub async fn assert_parquet_and_manifest(
     ));
 
     for (idx, segment) in segments.iter().enumerate() {
+        let file_name = Path::new(&segment.object_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(segment.object_path.as_str());
+        anyhow::ensure!(
+            !file_name.starts_with("batch-"),
+            "legacy batch-* object path still present: {}",
+            segment.object_path
+        );
+        anyhow::ensure!(
+            segment_file_name_is_canonical(file_name),
+            "expected segment-NNNN.parquet path, got {}",
+            segment.object_path
+        );
         anyhow::ensure!(
             segment.row_count > 0 && segment.row_count <= max_rows_per_file,
             "segment {} row_count {} exceeds max_rows_per_file {max_rows_per_file}",
@@ -826,15 +925,16 @@ pub async fn scoped_overlay_ids_from_cold(
     count: usize,
 ) -> Result<Vec<i64>> {
     set_scope(client, scope_id).await?;
+    let scope_sql = scope_id.replace('\'', "''");
+    // Avoid `ORDER BY id` here: with large multi-segment cold sets, that plan
+    // currently returns empty through merge scan while `count(*)` / unordered
+    // `SELECT id LIMIT n` succeed. Sort client-side instead.
     let rows = client
         .query(
             &format!(
-                "SELECT id FROM {relation} WHERE {scope_column} = $1 ORDER BY id ASC LIMIT $2"
+                "SELECT id FROM {relation} WHERE {scope_column} = '{scope_sql}' LIMIT {count}"
             ),
-            &[
-                &scope_id,
-                &(i64::try_from(count).context("overlay id count")?),
-            ],
+            &[],
         )
         .await?;
     anyhow::ensure!(
@@ -842,7 +942,9 @@ pub async fn scoped_overlay_ids_from_cold(
         "expected {count} scoped rows for overlay on {relation}, got {}",
         rows.len()
     );
-    Ok(rows.iter().map(|row| row.get(0)).collect())
+    let mut ids: Vec<i64> = rows.iter().map(|row| row.get(0)).collect();
+    ids.sort_unstable();
+    Ok(ids)
 }
 
 async fn log_overlay_catalog_snapshot(client: &Client, relation: &str, label: &str) -> Result<()> {

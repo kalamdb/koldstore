@@ -38,6 +38,10 @@ impl Diagnostic {
 /// Typed errors for pure pg-koldstore logic.
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum KoldstoreError {
+    /// A stable column identifier was invalid.
+    #[error("invalid column id: {0}")]
+    InvalidColumnId(u64),
+
     /// A sequence-like value was invalid.
     #[error("invalid sequence value for {field}: {value}")]
     InvalidSequence { field: &'static str, value: i64 },

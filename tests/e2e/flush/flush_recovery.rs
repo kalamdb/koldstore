@@ -16,15 +16,15 @@ fn flush_recovery_plan_deletes_orphan_temp_and_quarantines_unmanifested_final() 
 
     let plan = plan_recovery_actions([
         OrphanObject::new(
-            ObjectPath::parse("app/items/.tmp/writer/batch-0.parquet.tmp").unwrap(),
+            ObjectPath::parse("app/items/.tmp/writer/segment-0000.parquet.tmp").unwrap(),
             false,
         ),
         OrphanObject::new(
-            ObjectPath::parse("app/items/batch-0.parquet").unwrap(),
+            ObjectPath::parse("app/items/segment-0000.parquet").unwrap(),
             false,
         ),
         OrphanObject::new(
-            ObjectPath::parse("app/items/batch-1.parquet").unwrap(),
+            ObjectPath::parse("app/items/segment-0001.parquet").unwrap(),
             true,
         ),
     ]);

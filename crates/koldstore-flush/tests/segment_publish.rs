@@ -1,5 +1,6 @@
 //! Flush segment publish durability: encode → Create publish → readable final.
 
+use koldstore_common::ColumnId;
 use koldstore_flush::{write_flush_segment_with_client, FlushStats, FlushWriteChunk};
 use koldstore_parquet::{
     plan_clean_cold_record, record_batch_from_clean_cold_records, ColdRecordBatch, PgColumn, PgType,
@@ -8,6 +9,10 @@ use koldstore_storage::{open_filesystem_client, StorageClient, StorageClientErro
 use serde_json::json;
 
 fn cold_chunk(rows: usize) -> FlushWriteChunk {
+    let columns = [
+        PgColumn::new(ColumnId::new(1).unwrap(), "id", PgType::Int8, false),
+        PgColumn::new(ColumnId::new(2).unwrap(), "body", PgType::Text, true),
+    ];
     let plans: Vec<_> = (1..=rows as i64)
         .map(|id| {
             plan_clean_cold_record(
@@ -23,20 +28,10 @@ fn cold_chunk(rows: usize) -> FlushWriteChunk {
             .unwrap()
         })
         .collect();
-    let batch = record_batch_from_clean_cold_records(
-        &[
-            PgColumn::new("id", PgType::Int8, false),
-            PgColumn::new("body", PgType::Text, true),
-        ],
-        &plans,
-    )
-    .unwrap();
-    let mut indexed_bounds = std::collections::BTreeMap::new();
-    indexed_bounds.insert("id".to_string(), (json!(1), json!(rows)));
+    let batch = record_batch_from_clean_cold_records(&columns, &plans).unwrap();
     let cold_batch = ColdRecordBatch {
         batch,
         row_count: rows,
-        indexed_bounds,
         min_seq: 1,
         max_seq: rows as i64,
     };
@@ -47,7 +42,7 @@ fn cold_chunk(rows: usize) -> FlushWriteChunk {
         "zstd",
     )
     .unwrap();
-    FlushWriteChunk::from_encoded_batches(parquet_bytes, &[cold_batch])
+    FlushWriteChunk::from_encoded_batches(parquet_bytes, &[cold_batch], &columns[..1]).unwrap()
 }
 
 #[test]
@@ -71,7 +66,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     )
     .unwrap();
 
-    assert_eq!(written.object_path, "app/items/batch-0.parquet");
+    assert_eq!(written.object_path, "app/items/segment-0000.parquet");
     assert!(written.byte_size > 0);
     let bytes = client.get(&written.object_path).unwrap();
     assert_eq!(bytes.len() as i64, written.byte_size);
@@ -103,7 +98,7 @@ fn flush_segment_publish_rejects_corrupt_existing_final() {
     let client = open_filesystem_client(root.path().to_str().unwrap()).unwrap();
     client
         .put(
-            "app/items/batch-1.parquet",
+            "app/items/segment-0001.parquet",
             b"not-parquet",
             koldstore_storage::PutPrecondition::CreateIfAbsent,
         )
@@ -129,7 +124,7 @@ fn flush_segment_publish_rejects_corrupt_existing_final() {
         "unexpected error: {err}"
     );
     assert_eq!(
-        client.get("app/items/batch-1.parquet").unwrap(),
+        client.get("app/items/segment-0001.parquet").unwrap(),
         b"not-parquet"
     );
 }

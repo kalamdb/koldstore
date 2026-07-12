@@ -160,6 +160,27 @@ impl PgType {
             .supported
     }
 
+    /// Returns true when `new` is the same type or a safe cold-storage promotion.
+    #[must_use]
+    pub const fn is_compatible_with(self, new: Self) -> bool {
+        matches!(
+            (self, new),
+            (Self::Int2, Self::Int2 | Self::Int4 | Self::Int8)
+                | (Self::Int4, Self::Int4 | Self::Int8)
+                | (Self::Int8, Self::Int8)
+                | (Self::Float4, Self::Float4 | Self::Float8)
+                | (Self::Float8, Self::Float8)
+                | (Self::Bool, Self::Bool)
+                | (Self::Text, Self::Text)
+                | (Self::Numeric, Self::Numeric)
+                | (Self::Uuid, Self::Uuid)
+                | (Self::Jsonb, Self::Jsonb)
+                | (Self::TextArray, Self::TextArray)
+                | (Self::Bytea, Self::Bytea)
+                | (Self::Timestamptz, Self::Timestamptz)
+        )
+    }
+
     /// Returns true when the type can provide oldest-to-newest migration ordering.
     #[must_use]
     pub fn is_orderable(self) -> bool {

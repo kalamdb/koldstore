@@ -55,6 +55,8 @@ struct SegmentBuilder {
     writer: Option<StreamingParquetSegmentWriter>,
     batches: Vec<ColdRecordBatch>,
     row_count: usize,
+    /// Application columns that should publish footer-derived catalog stats.
+    stats_columns: Vec<PgColumn>,
 }
 
 impl SegmentBuilder {
@@ -71,6 +73,18 @@ impl SegmentBuilder {
                 .chain(input.indexed_columns.iter().map(String::as_str)),
         )
         .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str));
+        let stats_names: std::collections::BTreeSet<&str> = input
+            .primary_key_columns
+            .iter()
+            .chain(input.indexed_columns.iter())
+            .map(String::as_str)
+            .collect();
+        let stats_columns = input
+            .parquet_columns
+            .iter()
+            .filter(|column| stats_names.contains(column.name.as_str()))
+            .cloned()
+            .collect();
         Self {
             options,
             split_policy: SegmentSplitPolicy::new(
@@ -80,6 +94,7 @@ impl SegmentBuilder {
             writer: None,
             batches: Vec::new(),
             row_count: 0,
+            stats_columns,
         }
     }
 
@@ -116,7 +131,8 @@ impl SegmentBuilder {
         Ok(Some(FlushWriteChunk::from_encoded_batches(
             parquet_bytes,
             &batches,
-        )))
+            &self.stats_columns,
+        )?))
     }
 }
 
@@ -255,6 +271,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use koldstore_common::ColumnId;
     use koldstore_parquet::{FlushColumnValue, PgType};
 
     fn input(target_file_size_bytes: Option<u64>, max_rows_per_file: usize) -> StreamEncodeInput {
@@ -264,8 +281,8 @@ mod tests {
             primary_key_columns: vec!["id".to_string()],
             base_column_names: vec!["id".to_string(), "body".to_string()],
             parquet_columns: vec![
-                PgColumn::new("id", PgType::Int8, false),
-                PgColumn::new("body", PgType::Text, true),
+                PgColumn::new(ColumnId::new(1).unwrap(), "id", PgType::Int8, false),
+                PgColumn::new(ColumnId::new(2).unwrap(), "body", PgType::Text, true),
             ],
             indexed_columns: vec!["id".to_string()],
             schema_version: 1,

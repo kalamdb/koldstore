@@ -38,11 +38,9 @@ pub(super) fn fetch_mirror_batch(
     if let Some(scope_value) = scope_value {
         args.push(DatumWithOid::from(scope_value));
     }
-    crate::spi::execute_prepared(
-        &spi_statement,
-        &args,
-        |tuples| decode_mirror_batch(tuples, columns),
-    )
+    crate::spi::execute_prepared(&spi_statement, &args, |tuples| {
+        decode_mirror_batch(tuples, columns)
+    })
     .map_err(|error| error.to_string())
 }
 

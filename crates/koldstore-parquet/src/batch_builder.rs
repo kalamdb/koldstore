@@ -4,7 +4,6 @@
 //! from SPI. Avoids per-row `BTreeMap` retention plus a second full-table scan
 //! when converting planned rows to Parquet.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow_array::builder::{
@@ -13,7 +12,6 @@ use arrow_array::builder::{
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::SchemaRef;
-use koldstore_common::compare_json_values;
 use koldstore_schema::PgType;
 
 use crate::pg_type_codec::{json_bool, json_f32, json_f64, json_i16, json_i64, json_string_cell};
@@ -149,8 +147,6 @@ pub struct ColdRecordBatch {
     pub max_seq: i64,
     /// Number of logical rows encoded.
     pub row_count: usize,
-    /// Running min/max for indexed columns (non-delete rows only).
-    pub indexed_bounds: BTreeMap<String, (serde_json::Value, serde_json::Value)>,
 }
 
 enum TypedColumnBuilder {
@@ -255,7 +251,6 @@ pub struct CleanColdRecordBatchBuilder {
     deleted_builder: BooleanBuilder,
     schema_version_builder: UInt32Builder,
     indexed_columns: Vec<String>,
-    indexed_bounds: BTreeMap<String, (serde_json::Value, serde_json::Value)>,
     min_seq: Option<i64>,
     max_seq: Option<i64>,
     row_count: usize,
@@ -298,7 +293,6 @@ impl CleanColdRecordBatchBuilder {
             deleted_builder: BooleanBuilder::new(),
             schema_version_builder: UInt32Builder::new(),
             indexed_columns: indexed_columns.to_vec(),
-            indexed_bounds: BTreeMap::new(),
             min_seq: None,
             max_seq: None,
             row_count: 0,
@@ -354,30 +348,6 @@ impl CleanColdRecordBatchBuilder {
         self.min_seq = Some(self.min_seq.map_or(seq, |current| current.min(seq)));
         self.max_seq = Some(self.max_seq.map_or(seq, |current| current.max(seq)));
         self.row_count += 1;
-
-        for column_name in &self.indexed_columns {
-            if deleted && !primary_key_columns.iter().any(|pk| pk == column_name) {
-                continue;
-            }
-            let Some(column) = self
-                .columns
-                .iter()
-                .find(|column| column.name == *column_name)
-            else {
-                continue;
-            };
-            let column_index = self
-                .columns
-                .iter()
-                .position(|entry| entry.name == column.name)
-                .expect("indexed column is present");
-            let value = &column_values[column_index];
-            if matches!(value, FlushColumnValue::Null) {
-                continue;
-            }
-            let json = flush_value_to_json(value);
-            update_indexed_bounds(&mut self.indexed_bounds, column_name, &json)?;
-        }
         Ok(())
     }
 
@@ -414,16 +384,6 @@ impl CleanColdRecordBatchBuilder {
         self.min_seq = Some(self.min_seq.map_or(seq, |current| current.min(seq)));
         self.max_seq = Some(self.max_seq.map_or(seq, |current| current.max(seq)));
         self.row_count += 1;
-
-        for column_name in &self.indexed_columns {
-            let Some(value) = row.values.get(column_name) else {
-                continue;
-            };
-            if value.is_null() {
-                continue;
-            }
-            update_indexed_bounds(&mut self.indexed_bounds, column_name, value)?;
-        }
         Ok(())
     }
 
@@ -451,7 +411,6 @@ impl CleanColdRecordBatchBuilder {
             min_seq: self.min_seq.expect("row_count > 0"),
             max_seq: self.max_seq.expect("row_count > 0"),
             row_count: self.row_count,
-            indexed_bounds: self.indexed_bounds,
         })
     }
 }
@@ -504,52 +463,16 @@ fn plan_value_to_flush_cell(
     }
 }
 
-fn flush_value_to_json(value: &FlushColumnValue) -> serde_json::Value {
-    match value {
-        FlushColumnValue::Null => serde_json::Value::Null,
-        FlushColumnValue::Bool(value) => serde_json::json!(value),
-        FlushColumnValue::Int16(value) => serde_json::json!(value),
-        FlushColumnValue::Int32(value) => serde_json::json!(value),
-        FlushColumnValue::Int64(value) => serde_json::json!(value),
-        FlushColumnValue::Float32(value) => serde_json::json!(value),
-        FlushColumnValue::Float64(value) => serde_json::json!(value),
-        FlushColumnValue::Utf8(value) => serde_json::Value::String(value.clone()),
-        FlushColumnValue::TimestamptzMicros(value) => {
-            let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(*value)
-                .unwrap_or_else(chrono::Utc::now);
-            serde_json::Value::String(timestamp.to_rfc3339())
-        }
-    }
-}
-
-fn update_indexed_bounds(
-    bounds: &mut BTreeMap<String, (serde_json::Value, serde_json::Value)>,
-    column: &str,
-    value: &serde_json::Value,
-) -> Result<(), String> {
-    bounds
-        .entry(column.to_string())
-        .and_modify(|(min, max)| {
-            if compare_json_values(value, min).is_some_and(|ordering| ordering.is_lt()) {
-                *min = value.clone();
-            }
-            if compare_json_values(value, max).is_some_and(|ordering| ordering.is_gt()) {
-                *max = value.clone();
-            }
-        })
-        .or_insert_with(|| (value.clone(), value.clone()));
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use koldstore_common::ColumnId;
 
     #[test]
-    fn typed_rows_track_indexed_bounds_without_per_pk_catalog_hints() {
+    fn typed_rows_build_cold_batch_without_encode_time_bounds() {
         let columns = [
-            PgColumn::new("tenant_id", PgType::Int8, false),
-            PgColumn::new("event_id", PgType::Text, false),
+            PgColumn::new(ColumnId::new(1).unwrap(), "tenant_id", PgType::Int8, false),
+            PgColumn::new(ColumnId::new(2).unwrap(), "event_id", PgType::Text, false),
         ];
         let primary_key = ["tenant_id".to_string(), "event_id".to_string()];
         let mut builder = CleanColdRecordBatchBuilder::new(&columns, &primary_key).unwrap();
@@ -569,13 +492,7 @@ mod tests {
 
         let batch = builder.finish().unwrap();
         assert_eq!(batch.row_count, 1);
-        assert_eq!(
-            batch.indexed_bounds.get("tenant_id"),
-            Some(&(serde_json::json!(7), serde_json::json!(7)))
-        );
-        assert_eq!(
-            batch.indexed_bounds.get("event_id"),
-            Some(&(serde_json::json!("evt-1"), serde_json::json!("evt-1")))
-        );
+        assert_eq!(batch.min_seq, 42);
+        assert_eq!(batch.max_seq, 42);
     }
 }

@@ -20,10 +20,10 @@ Each scenario directory contains reference SQL (`schema.sql`, `manage_table.sql`
 
 Deep coverage common to every scenario:
 
-- multi-wave flush cycles and force flush
-- small Parquet files bounded by `max_rows_per_file`, verified on disk
-- `koldstore.manifest` + `segments` checks including multi-tenant scopes
-- application indexes
+- multi-wave flush cycles and force flush, with **non-zero policy flush** assertions (fails fast if flush returns 0 while mirror has rows — multi-backend counter regression)
+- small Parquet files bounded by `max_rows_per_file`, verified on disk as `segment-NNNN.parquet` (never `batch-*`)
+- `koldstore.manifest` + published `segments` checks; no leftover `staged` rows after flush
+- multi-tenant scopes via application indexes + RLS / `koldstore.user_id`
 - concurrent insert / update / delete clients
 - cold-then-delete overlay (flush → rematerialize hot → `DELETE` → flush delete markers → merge scan hides row, prior Parquet remains)
 

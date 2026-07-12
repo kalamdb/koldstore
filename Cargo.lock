@@ -1407,6 +1407,7 @@ version = "0.1.2-beta.1"
 dependencies = [
  "chrono",
  "koldstore-catalog",
+ "koldstore-common",
  "koldstore-storage",
  "serde",
  "serde_json",
@@ -1436,6 +1437,7 @@ dependencies = [
 name = "koldstore-migrate"
 version = "0.1.2-beta.1"
 dependencies = [
+ "koldstore-catalog",
  "koldstore-common",
  "koldstore-flush",
  "koldstore-jobs",

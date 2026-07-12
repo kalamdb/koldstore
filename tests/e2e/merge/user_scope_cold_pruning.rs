@@ -17,7 +17,7 @@ fn user_scope_cold_pruning_filters_segments_before_stream_open() {
         SegmentHint {
             segment_id: "segment-a".to_string(),
             scope_key: Some(ScopeKey::new("user-a").unwrap()),
-            object_path: "app/notes/user-a/batch-1.parquet".to_string(),
+            object_path: "app/notes/user-a/segment-0001.parquet".to_string(),
             selected_row_groups: vec![0],
             min_seq: SeqId::new(1).unwrap(),
             max_seq: SeqId::new(2).unwrap(),
@@ -25,7 +25,7 @@ fn user_scope_cold_pruning_filters_segments_before_stream_open() {
         SegmentHint {
             segment_id: "segment-b".to_string(),
             scope_key: Some(ScopeKey::new("user-b").unwrap()),
-            object_path: "app/notes/user-b/batch-1.parquet".to_string(),
+            object_path: "app/notes/user-b/segment-0001.parquet".to_string(),
             selected_row_groups: vec![1],
             min_seq: SeqId::new(1).unwrap(),
             max_seq: SeqId::new(2).unwrap(),
@@ -36,7 +36,7 @@ fn user_scope_cold_pruning_filters_segments_before_stream_open() {
 
     assert_eq!(
         state.visible_segments,
-        vec!["app/notes/user-a/batch-1.parquet"]
+        vec!["app/notes/user-a/segment-0001.parquet"]
     );
     assert_eq!(state.selected_row_groups, vec![0]);
     assert_eq!(state.resources.object_store_handles, 1);

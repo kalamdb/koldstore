@@ -171,7 +171,7 @@ Cold files are written below the storage root using the table namespace and name
 ```text
 /tmp/koldstore-demo/app/messages/
   manifest.json
-  batch-1.parquet
+  segment-0001.parquet
 ```
 
 Schedule periodic flush with [pg_cron](operations/scheduling.md).
@@ -205,7 +205,7 @@ Sample output:
 Custom Scan (KoldMergeScan) on messages (actual rows=1 loops=1)
   Filter: (title = 'message-000007'::text)
   Manifest: app/messages/manifest.json, 0.479 ms
-  Parquet segment: app/messages/batch-1.parquet, 12 rows, 0.485 ms
+  Parquet segment: app/messages/segment-0001.parquet, 12 rows, 0.485 ms
  Planning Time: 0.025 ms
  Execution Time: 7.884 ms
 ```

@@ -65,7 +65,10 @@ impl ScopeCounters {
 
     /// Keys at or above `threshold` for `table_oid`.
     #[must_use]
-    pub fn keys_at_or_above_threshold(table_oid: u32, threshold: u64) -> Vec<(ScopeCounterKey, u64)> {
+    pub fn keys_at_or_above_threshold(
+        table_oid: u32,
+        threshold: u64,
+    ) -> Vec<(ScopeCounterKey, u64)> {
         if threshold == 0 {
             return Vec::new();
         }
@@ -130,6 +133,29 @@ impl ScopeCounters {
             };
             map.insert(key, *count);
         }
+    }
+
+    /// Raises in-memory coverage to a durable table-wide floor.
+    ///
+    /// Writer backends bump process-local counters; the flush backend may only
+    /// see a partial subset (for example late arrivals on the flush session).
+    /// When the local sum is below `durable_total`, replace this table's keys
+    /// with a single shared counter so pre-flush still observes the full mirror.
+    pub fn ensure_durable_floor(table_oid: u32, durable_total: u64) {
+        if durable_total == 0 {
+            return;
+        }
+        let mut map = counters().lock().expect("scope counter lock");
+        let sum: u64 = map
+            .iter()
+            .filter(|(key, _)| key.table_oid == table_oid)
+            .map(|(_, count)| *count)
+            .sum();
+        if sum >= durable_total {
+            return;
+        }
+        map.retain(|key, _| key.table_oid != table_oid);
+        map.insert(ScopeCounterKey::shared(table_oid), durable_total);
     }
 
     /// Clears all counters. Intended for unit/integration tests only.

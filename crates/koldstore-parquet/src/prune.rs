@@ -10,7 +10,7 @@ use std::fs::File;
 use std::path::Path;
 
 use bytes::Bytes;
-use koldstore_common::{compare_json_values, CommitSeq, SeqId};
+use koldstore_common::{compare_json_values, ColumnId, CommitSeq, SeqId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Type as ParquetPhysicalType;
 use parquet::bloom_filter::Sbbf;
@@ -140,12 +140,12 @@ impl RowGroupPruner {
     #[must_use]
     pub fn segment_column_may_overlap(
         &self,
-        column_stats: &BTreeMap<String, ColumnStats>,
-        column: &str,
+        column_stats: &BTreeMap<ColumnId, ColumnStats>,
+        column_id: ColumnId,
         min: &serde_json::Value,
         max: &serde_json::Value,
     ) -> bool {
-        let Some(stats) = column_stats.get(column) else {
+        let Some(stats) = column_stats.get(&column_id) else {
             return true;
         };
         if min.is_null() || max.is_null() || stats.min.is_null() || stats.max.is_null() {
@@ -262,22 +262,55 @@ where
     })
 }
 
-/// Min/max prune from already-loaded footer metadata (no I/O).
-pub(crate) fn select_row_groups_from_metadata(
+/// Resolves an application column by its required Parquet field id.
+///
+/// # Errors
+///
+/// Returns an error when the identifier exceeds Parquet's i32 field-id range,
+/// is absent, or appears more than once.
+pub fn column_index_by_field_id(
+    schema: &SchemaDescriptor,
+    column_id: ColumnId,
+) -> Result<usize, String> {
+    let field_id = i32::try_from(column_id.get())
+        .map_err(|_| format!("column_id {column_id} exceeds the Parquet field-id range"))?;
+    let mut matches = schema
+        .columns()
+        .iter()
+        .enumerate()
+        .filter(|(_, descriptor)| {
+            let info = descriptor.self_type().get_basic_info();
+            info.has_id() && info.id() == field_id
+        })
+        .map(|(index, _)| index);
+    let Some(index) = matches.next() else {
+        return Err(format!(
+            "parquet schema missing application column_id {column_id}"
+        ));
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "parquet schema contains duplicate application column_id {column_id}"
+        ));
+    }
+    Ok(index)
+}
+
+pub(crate) fn select_row_groups_from_metadata_by_field_id(
     metadata: &ParquetMetaData,
     schema: &SchemaDescriptor,
-    column: &str,
+    column_id: ColumnId,
     values: &[String],
 ) -> Result<(Vec<usize>, usize), String> {
     if values.is_empty() {
         return Ok((Vec::new(), 0));
     }
-    let column_index = column_index(schema, column)?;
+    let column_index = column_index_by_field_id(schema, column_id)?;
     let mut selected = Vec::new();
     let mut skipped = 0usize;
     for rg_index in 0..metadata.num_row_groups() {
-        let col = metadata.row_group(rg_index).column(column_index);
-        if row_group_may_contain_pk_values(col.statistics(), values) {
+        let column = metadata.row_group(rg_index).column(column_index);
+        if row_group_may_contain_pk_values(column.statistics(), values) {
             selected.push(rg_index);
         } else {
             skipped += 1;

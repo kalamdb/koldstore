@@ -1,6 +1,7 @@
+use koldstore_catalog::SchemaColumn;
 use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_common::{
-    ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    ColumnId, ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
     PrimaryKeyColumnShape, PrimaryKeyShape,
 };
 use koldstore_migrate::register::{
@@ -8,7 +9,6 @@ use koldstore_migrate::register::{
     RegistrationMetadata, INITIAL_SCHEMA_VERSION,
 };
 use koldstore_schema::MirrorInitializationState;
-use koldstore_schema::SchemaColumn;
 use uuid::Uuid;
 
 fn pk_shape() -> PrimaryKeyShape {
@@ -37,10 +37,11 @@ fn metadata() -> RegistrationMetadata {
         active: true,
         primary_key: vec!["id".to_string()],
         columns: vec![
-            SchemaColumn::app("id", "bigint", false),
-            SchemaColumn::app("title", "text", false),
-            SchemaColumn::app("user_id", "text", false),
+            SchemaColumn::app(ColumnId::new(1).unwrap(), "id", "bigint", false),
+            SchemaColumn::app(ColumnId::new(2).unwrap(), "title", "text", false),
+            SchemaColumn::app(ColumnId::new(3).unwrap(), "user_id", "text", false),
         ],
+        next_column_id: ColumnId::new(4).unwrap(),
         indexed_columns: vec!["id".to_string(), "created_at".to_string()],
         type_matrix: serde_json::json!({"postgres": 16}),
         options: ManageTableOptions::from_value(&serde_json::json!({
@@ -224,7 +225,7 @@ fn schema_registry_plan_uses_parameterized_upsert_sql() {
 
     for placeholder in [
         "$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8", "$9", "$10", "$11", "$12", "$13", "$14",
-        "$15",
+        "$15", "$16",
     ] {
         assert!(
             plan.statement.sql.contains(placeholder),

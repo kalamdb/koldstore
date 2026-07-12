@@ -10,6 +10,59 @@
 
 use koldstore_common::{SqlParamType, SqlResult, SqlStatement};
 
+/// Builds the complete active schema-version lookup for a managed table.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_active_schema_version() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve active schema version",
+        r#"
+SELECT jsonb_build_object(
+    'id', id,
+    'table_oid', table_oid::bigint,
+    'version', version,
+    'columns', columns,
+    'next_column_id', next_column_id,
+    'active', active
+)::text
+FROM koldstore.schemas
+WHERE table_oid = $1::oid
+  AND active
+ORDER BY version DESC
+LIMIT 1
+"#,
+        [SqlParamType::Oid],
+    )
+}
+
+/// Builds a complete historical schema-version lookup.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_schema_version_at() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve schema version",
+        r#"
+SELECT jsonb_build_object(
+    'id', id,
+    'table_oid', table_oid::bigint,
+    'version', version,
+    'columns', columns,
+    'next_column_id', next_column_id,
+    'active', active
+)::text
+FROM koldstore.schemas
+WHERE table_oid = $1::oid
+  AND version = $2
+LIMIT 1
+"#,
+        [SqlParamType::Oid, SqlParamType::Integer],
+    )
+}
+
 /// Builds a relation name lookup by PostgreSQL OID.
 ///
 /// # Errors
@@ -184,7 +237,7 @@ SELECT jsonb_build_object(
               'object_path', cs.object_path,
               'column_stats', COALESCE((
                   SELECT jsonb_object_agg(
-                      css.column_name,
+                      css.column_id::text,
                       jsonb_strip_nulls(jsonb_build_object(
                           'min', CASE
                               WHEN css.min_value IS NULL THEN NULL
@@ -200,8 +253,8 @@ SELECT jsonb_build_object(
                   WHERE css.segment_id = cs.segment_id
                     AND css.table_oid = cs.table_oid
                     AND css.scope_key = cs.scope_key
-                    AND css.column_name::text IN (
-                        SELECT pg_catalog.jsonb_array_elements_text($2::jsonb)
+                    AND css.column_id IN (
+                        SELECT pg_catalog.jsonb_array_elements_text($2::jsonb)::bigint
                     )
               ), '{}'::jsonb),
               'byte_size', cs.byte_size
@@ -240,7 +293,9 @@ pub fn plan_next_flush_batch_number() -> SqlResult<SqlStatement> {
     )
 }
 
-/// Builds an active shared-scope cold-segment count lookup.
+/// Builds a cold-segment count for flush manifest reconciliation.
+///
+/// Includes `staged` (written this flush, not yet promoted) and `published`.
 ///
 /// # Errors
 ///
@@ -248,12 +303,15 @@ pub fn plan_next_flush_batch_number() -> SqlResult<SqlStatement> {
 pub fn plan_active_segment_count() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "resolve active cold segment count",
-        "SELECT count(*)::bigint FROM koldstore.segments WHERE table_oid = $1::oid AND scope_key = '' AND status = 'published'",
+        "SELECT count(*)::bigint FROM koldstore.segments WHERE table_oid = $1::oid AND scope_key = '' AND status IN ('staged', 'published')",
         [SqlParamType::Oid],
     )
 }
 
-/// Builds an active cold-segment manifest row lookup for flush finalization.
+/// Builds cold-segment rows for flush manifest finalization.
+///
+/// Includes `staged` and `published` so a flush that just inserted staged rows
+/// can assemble a complete manifest before promoting to `published`.
 ///
 /// # Errors
 ///
@@ -280,7 +338,7 @@ SELECT COALESCE(jsonb_agg(
 FROM koldstore.segments
 WHERE table_oid = $1::oid
   AND scope_key = ''
-  AND status = 'published'
+  AND status IN ('staged', 'published')
 "#,
         [SqlParamType::Oid],
     )
@@ -288,7 +346,11 @@ WHERE table_oid = $1::oid
 
 #[cfg(test)]
 mod tests {
-    use super::plan_in_sync_manifest_scan_context;
+    use koldstore_common::SqlParamType;
+
+    use super::{
+        plan_active_schema_version, plan_in_sync_manifest_scan_context, plan_schema_version_at,
+    };
 
     #[test]
     fn merge_scan_context_reads_only_requested_normalized_stats() {
@@ -300,5 +362,22 @@ mod tests {
             .contains("jsonb_array_elements_text($2::jsonb)"));
         assert!(!statement.sql.contains("'column_stats', cs.column_stats"));
         assert_eq!(statement.param_types.len(), 2);
+    }
+
+    #[test]
+    fn schema_version_queries_return_complete_catalog_rows() {
+        let active = plan_active_schema_version().unwrap();
+        let historical = plan_schema_version_at().unwrap();
+
+        for statement in [&active, &historical] {
+            assert!(statement.sql.contains("'columns', columns"));
+            assert!(statement.sql.contains("'next_column_id', next_column_id"));
+            assert!(statement.sql.contains("'version', version"));
+        }
+        assert_eq!(active.param_types, vec![SqlParamType::Oid]);
+        assert_eq!(
+            historical.param_types,
+            vec![SqlParamType::Oid, SqlParamType::Integer]
+        );
     }
 }

@@ -8,7 +8,7 @@ use serde_json::json;
 #[test]
 fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
     let rows = vec![CatalogManifestSegmentRow {
-        object_path: "app/items/batch-1.parquet".to_string(),
+        object_path: "app/items/segment-0001.parquet".to_string(),
         batch_number: 1,
         min_seq: 1,
         max_seq: 10,
@@ -17,7 +17,7 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
         row_count: 10,
         byte_size: 128,
         schema_version: 2,
-        column_stats: json!({"id": {"min": 1, "max": 10}}),
+        column_stats: json!({"1": {"min": 1, "max": 10}}),
     }];
 
     let manifest = manifest_from_catalog_rows(
@@ -30,7 +30,7 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
     .unwrap();
 
     assert_eq!(manifest.segments.len(), 1);
-    assert_eq!(manifest.segments[0].path, "batch-1.parquet");
+    assert_eq!(manifest.segments[0].path, "segment-0001.parquet");
     assert_eq!(manifest.max_seq, 10);
     assert_eq!(
         manifest.segments[0]
@@ -40,8 +40,8 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
         Some(vec![1, 2])
     );
     assert_eq!(
-        manifest_relative_segment_path("app", "items", "app/items/batch-2.parquet"),
-        "batch-2.parquet"
+        manifest_relative_segment_path("app", "items", "app/items/segment-0002.parquet"),
+        "segment-0002.parquet"
     );
 }
 
@@ -57,7 +57,7 @@ fn manifest_paths_and_round_trip_io() {
         "notes",
         &["id".to_string()],
         &CatalogManifestSegmentRow {
-            object_path: "app/notes/batch-1.parquet".to_string(),
+            object_path: "app/notes/segment-0001.parquet".to_string(),
             batch_number: 1,
             min_seq: 5,
             max_seq: 5,
@@ -94,7 +94,7 @@ fn pending_write_sync_state_matches_hot_dml_constant() {
 fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
     let rows = vec![
         CatalogManifestSegmentRow {
-            object_path: "app/items/batch-1.parquet".to_string(),
+            object_path: "app/items/segment-0001.parquet".to_string(),
             batch_number: 1,
             min_seq: 1,
             max_seq: 10,
@@ -106,7 +106,7 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
             column_stats: json!({}),
         },
         CatalogManifestSegmentRow {
-            object_path: "app/items/batch-2.parquet".to_string(),
+            object_path: "app/items/segment-0002.parquet".to_string(),
             batch_number: 2,
             min_seq: 11,
             max_seq: 20,
@@ -121,8 +121,8 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
     let manifest =
         manifest_from_catalog_rows("app", "items", 1, &["id".to_string()], rows).unwrap();
     assert_eq!(manifest.segments.len(), 2);
-    assert_eq!(manifest.segments[0].path, "batch-1.parquet");
-    assert_eq!(manifest.segments[1].path, "batch-2.parquet");
+    assert_eq!(manifest.segments[0].path, "segment-0001.parquet");
+    assert_eq!(manifest.segments[1].path, "segment-0002.parquet");
     assert_eq!(manifest.max_seq, 20);
     assert_eq!(manifest.max_commit_seq, 20);
 }

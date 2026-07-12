@@ -66,7 +66,7 @@ fn merge_scan_plan_serializes_complete_custom_private_payload() {
         segment_hints: vec![SegmentHint {
             segment_id: "segment-1".to_string(),
             scope_key: Some(ScopeKey::new("tenant-a").unwrap()),
-            object_path: "app/items/batch-1.parquet".to_string(),
+            object_path: "app/items/segment-0001.parquet".to_string(),
             selected_row_groups: vec![0, 2],
             min_seq: SeqId::new(10).unwrap(),
             max_seq: SeqId::new(30).unwrap(),

@@ -48,7 +48,7 @@ async fn flush_to_minio_writes_objects_and_merge_scan_reads_them() -> Result<()>
             "unexpected manifest path {manifest_path}"
         );
         assert!(
-            object_path.contains("batch-") && object_path.ends_with(".parquet"),
+            object_path.contains("segment-") && object_path.ends_with(".parquet"),
             "unexpected parquet path {object_path}"
         );
 

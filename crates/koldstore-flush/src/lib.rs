@@ -36,11 +36,13 @@ pub use pending_catalog::{
 pub use policy::policy_flush_row_count;
 pub use pre_flush::{
     consume_pending_plans, flush_pending_threshold, pending_is_flushable, plan_pending_segments,
-    PendingSegmentPlan, PreFlushInput,
+    select_flushable_pending_rows, PendingSegmentPlan, PreFlushInput,
 };
 pub use scope_counters::ScopeCounters;
 pub use segment_catalog::{
     indexed_column_stats_json, plan_flush_segments_batch_insert, plan_manifest_row_upsert,
+    plan_mark_segments_deleted, plan_mark_segments_deleting, plan_mark_segments_orphaned,
+    plan_promote_staged_segments_to_published, plan_supersede_published_segments,
     SegmentCatalogError,
 };
 pub use segment_write::{

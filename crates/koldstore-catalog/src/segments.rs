@@ -28,6 +28,27 @@ pub enum SegmentVisibility {
     Orphaned,
 }
 
+/// Invalid cold-file lifecycle transition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegmentLifecycleError {
+    /// Current status.
+    pub from: &'static str,
+    /// Requested status.
+    pub to: &'static str,
+}
+
+impl std::fmt::Display for SegmentLifecycleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "invalid segment lifecycle transition: {} → {}",
+            self.from, self.to
+        )
+    }
+}
+
+impl std::error::Error for SegmentLifecycleError {}
+
 impl SegmentVisibility {
     /// Returns whether this segment should be included in query planning.
     #[must_use]
@@ -46,6 +67,79 @@ impl SegmentVisibility {
             Self::Deleted => "deleted",
             Self::Orphaned => "orphaned",
         }
+    }
+
+    /// Returns whether `from → to` is a valid cold-file lifecycle edge.
+    ///
+    /// Allowed edges (hard cutover):
+    /// - `staged` → `published` | `orphaned`
+    /// - `published` → `superseded` | `orphaned`
+    /// - `superseded` → `deleting`
+    /// - `deleting` → `deleted`
+    /// - `orphaned` → `deleting` | `deleted`
+    #[must_use]
+    pub const fn can_transition(self, to: Self) -> bool {
+        matches!(
+            (self, to),
+            (Self::Staged, Self::Published)
+                | (Self::Staged, Self::Orphaned)
+                | (Self::Published, Self::Superseded)
+                | (Self::Published, Self::Orphaned)
+                | (Self::Superseded, Self::Deleting)
+                | (Self::Deleting, Self::Deleted)
+                | (Self::Orphaned, Self::Deleting)
+                | (Self::Orphaned, Self::Deleted)
+        )
+    }
+
+    /// Validates and returns the next status.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the transition is not allowed.
+    pub fn transition(self, to: Self) -> Result<Self, SegmentLifecycleError> {
+        if self.can_transition(to) {
+            Ok(to)
+        } else {
+            Err(SegmentLifecycleError {
+                from: self.as_str(),
+                to: to.as_str(),
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flush_publish_and_compaction_paths_are_valid() {
+        assert!(SegmentVisibility::Staged
+            .transition(SegmentVisibility::Published)
+            .is_ok());
+        assert!(SegmentVisibility::Published
+            .transition(SegmentVisibility::Superseded)
+            .is_ok());
+        assert!(SegmentVisibility::Superseded
+            .transition(SegmentVisibility::Deleting)
+            .is_ok());
+        assert!(SegmentVisibility::Deleting
+            .transition(SegmentVisibility::Deleted)
+            .is_ok());
+    }
+
+    #[test]
+    fn skips_and_regressions_are_rejected() {
+        assert!(SegmentVisibility::Staged
+            .transition(SegmentVisibility::Deleted)
+            .is_err());
+        assert!(SegmentVisibility::Published
+            .transition(SegmentVisibility::Staged)
+            .is_err());
+        assert!(SegmentVisibility::Deleted
+            .transition(SegmentVisibility::Published)
+            .is_err());
     }
 }
 

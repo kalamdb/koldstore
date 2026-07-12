@@ -236,7 +236,7 @@ pub async fn assert_cold_metadata_present(client: &Client, relation: &str) -> Re
             r#"
             SELECT
               count(DISTINCT cs.segment_id),
-              count(DISTINCT st.column_name),
+              count(DISTINCT st.column_id),
               COALESCE(sum(cs.byte_size), 0)::bigint
             FROM koldstore.segments cs
             LEFT JOIN koldstore.segment_stats st

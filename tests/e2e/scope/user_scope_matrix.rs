@@ -283,7 +283,7 @@ async fn user_scoped_flush_writes_multiple_object_paths_on_pgrx() -> Result<()> 
             );
             assert!(
                 object_path.contains(table_name)
-                    && object_path.contains("batch-")
+                    && object_path.contains("segment-")
                     && object_path.ends_with(".parquet"),
                 "unexpected object path {object_path}"
             );

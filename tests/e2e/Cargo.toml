@@ -50,6 +50,14 @@ name = "schema_evolution"
 path = "schema_evolution.rs"
 
 [[test]]
+name = "column_id_stability"
+path = "column_id_stability.rs"
+
+[[test]]
+name = "segment_lifecycle"
+path = "segment_lifecycle.rs"
+
+[[test]]
 name = "merge_scan_results"
 path = "merge/merge_scan_results.rs"
 

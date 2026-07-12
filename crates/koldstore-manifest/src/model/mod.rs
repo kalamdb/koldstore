@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Utc};
+pub use koldstore_catalog::SegmentVisibility as SegmentStatus;
+use koldstore_common::ColumnId;
 use serde::{Deserialize, Serialize};
 
 /// Object-store manifest.
@@ -57,7 +59,7 @@ pub struct ManifestSegment {
     pub schema_version: u32,
     pub pk_filter: Option<PkFilter>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub column_stats: BTreeMap<String, ManifestColumnStats>,
+    pub column_stats: BTreeMap<ColumnId, ManifestColumnStats>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bloom_filters: Vec<ManifestBloomFilter>,
     pub status: SegmentStatus,
@@ -105,29 +107,6 @@ impl ManifestSegment {
             created_at: Some(Utc::now()),
         }
     }
-
-    /// Alias for [`Self::published`] (legacy call-site name during cutover).
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn committed(
-        batch: u32,
-        path: impl Into<String>,
-        seq_range: RangeInclusive<i64>,
-        commit_range: RangeInclusive<i64>,
-        row_count: u64,
-        byte_size: u64,
-        schema_version: u32,
-    ) -> Self {
-        Self::published(
-            batch,
-            path,
-            seq_range,
-            commit_range,
-            row_count,
-            byte_size,
-            schema_version,
-        )
-    }
 }
 
 /// Min/max stats for one manifest column.
@@ -142,27 +121,6 @@ impl ManifestColumnStats {
     #[must_use]
     pub fn new(min: serde_json::Value, max: serde_json::Value) -> Self {
         Self { min, max }
-    }
-}
-
-/// Segment status in object-store manifest (aligned with catalog lifecycle).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SegmentStatus {
-    Pending,
-    Staged,
-    Published,
-    Superseded,
-    Deleting,
-    Deleted,
-    Orphaned,
-}
-
-impl SegmentStatus {
-    /// Returns whether this segment is query-visible in the current snapshot.
-    #[must_use]
-    pub const fn is_query_visible(self) -> bool {
-        matches!(self, Self::Published)
     }
 }
 

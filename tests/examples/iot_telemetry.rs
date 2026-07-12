@@ -97,6 +97,7 @@ async fn iot_telemetry_parallel_devices_late_arrivals_and_monthly_report_inner()
     }
 
     let mut waves = flush_waves(&db.client, &relation, 1, Some(flush("seed"))).await?;
+    support::assert_policy_flush_progress(&db.client, &relation, "seed", &waves).await?;
     {
         let _step = log_step("device burst + flush waves");
         concurrent_device_bursts(
@@ -107,7 +108,9 @@ async fn iot_telemetry_parallel_devices_late_arrivals_and_monthly_report_inner()
             MIN_FLUSH_ROWS,
         )
         .await?;
-        waves.extend(flush_waves(&db.client, &relation, 2, Some(flush("burst"))).await?);
+        let burst = flush_waves(&db.client, &relation, 2, Some(flush("burst"))).await?;
+        support::assert_policy_flush_progress(&db.client, &relation, "burst", &burst).await?;
+        waves.extend(burst);
     }
     {
         let _step = log_step("concurrent hot UPDATE/DELETE");

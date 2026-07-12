@@ -67,7 +67,7 @@ fn user_scoped_flush_selection_filters_by_application_scope_column() {
     assert!(plan
         .statement
         .sql
-        .contains("\"mirror\".\"tenant_id\"::text = $2::text"));
+        .contains("\"hot\".\"tenant_id\"::text = $2::text"));
     assert_eq!(
         plan.statement.param_types,
         vec![SqlParamType::BigInt, SqlParamType::Text]

@@ -87,22 +87,18 @@ async fn audit_events_immutable_history_hot_recent_and_cold_regulator_export_inn
 
     let mut next_id = config.rows + 1;
     let mut waves = flush_waves(&db.client, &relation, 1, Some(flush("seed"))).await?;
+    support::assert_policy_flush_progress(&db.client, &relation, "seed", &waves).await?;
     for wave in 0..2 {
         let burst = MIN_FLUSH_ROWS + 50;
         concurrent_audit_bursts(&target, &relation, &config, next_id, burst, wave).await?;
         next_id += burst * config.scopes as i64;
-        waves.extend(
-            flush_waves(
-                &db.client,
-                &relation,
-                1,
-                Some(flush(match wave {
-                    0 => "burst-1",
-                    _ => "burst-2",
-                })),
-            )
-            .await?,
-        );
+        let label = match wave {
+            0 => "burst-1",
+            _ => "burst-2",
+        };
+        let burst_waves = flush_waves(&db.client, &relation, 1, Some(flush(label))).await?;
+        support::assert_policy_flush_progress(&db.client, &relation, label, &burst_waves).await?;
+        waves.extend(burst_waves);
     }
     {
         let _step = log_step("concurrent hot UPDATE/DELETE");

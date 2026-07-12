@@ -3,6 +3,7 @@
 //! New shared identifiers, row models, sequence types, and pure validation helpers belong here.
 //! Must not depend on any other `koldstore-*` crate.
 
+pub mod column_id;
 pub mod config;
 pub mod error;
 pub mod filter;
@@ -21,6 +22,7 @@ pub mod strings;
 pub mod table_kind;
 pub mod table_name;
 
+pub use column_id::ColumnId;
 pub use config::{
     flush_enabled_from_options, hot_row_limit_from_options, validate_max_rows_per_file,
     FlushPolicy, ManageTableOptions, MigrationStatus, ParquetCompression,

@@ -26,20 +26,20 @@ fn recovery_deletes_temps_and_quarantines_final_objects() {
         .unwrap();
     client
         .put(
-            "app/items/batch-9.parquet",
+            "app/items/segment-0009.parquet",
             b"orphan",
             PutPrecondition::Overwrite,
         )
         .unwrap();
     client
         .put(
-            "app/items/batch-1.parquet",
+            "app/items/segment-0001.parquet",
             b"referenced",
             PutPrecondition::Overwrite,
         )
         .unwrap();
 
-    let referenced = HashSet::from(["app/items/batch-1.parquet".to_string()]);
+    let referenced = HashSet::from(["app/items/segment-0001.parquet".to_string()]);
     let objects = discover_orphan_objects(&client, "app/items", &referenced).unwrap();
     let plan = plan_recovery_actions(objects);
     assert_eq!(plan.actions.len(), 2);
@@ -50,11 +50,11 @@ fn recovery_deletes_temps_and_quarantines_final_objects() {
         Err(StorageClientError::NotFound { .. })
     ));
     assert!(matches!(
-        client.get("app/items/batch-9.parquet"),
+        client.get("app/items/segment-0009.parquet"),
         Err(StorageClientError::NotFound { .. })
     ));
     assert_eq!(
-        client.get("app/items/batch-1.parquet").unwrap(),
+        client.get("app/items/segment-0001.parquet").unwrap(),
         b"referenced"
     );
     let listed = client.list("app/items").unwrap();
@@ -63,7 +63,7 @@ fn recovery_deletes_temps_and_quarantines_final_objects() {
         .find(|object| {
             object
                 .key
-                .starts_with("app/items/batch-9.parquet.quarantine.")
+                .starts_with("app/items/segment-0009.parquet.quarantine.")
         })
         .unwrap();
     assert_eq!(client.get(&quarantine.key).unwrap(), b"orphan");

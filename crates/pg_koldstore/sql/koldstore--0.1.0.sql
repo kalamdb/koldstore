@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS koldstore.schemas (
   active boolean NOT NULL DEFAULT true,
   table_type text NOT NULL CHECK (table_type IN ('shared', 'user')),
   columns jsonb NOT NULL DEFAULT '[]'::jsonb,
+  next_column_id bigint NOT NULL DEFAULT 1 CHECK (next_column_id >= 1),
   primary_key jsonb NOT NULL,
   scope_column name,
   mirror_relation regclass,
@@ -206,17 +207,17 @@ CREATE TABLE IF NOT EXISTS koldstore.segment_stats (
   segment_id uuid NOT NULL REFERENCES koldstore.segments(segment_id) ON DELETE CASCADE,
   table_oid oid NOT NULL,
   scope_key text NOT NULL DEFAULT '',
-  column_name name NOT NULL,
+  column_id bigint NOT NULL CHECK (column_id > 0),
   type_oid oid NOT NULL,
   min_value bytea,
   max_value bytea,
   null_count bigint,
   distinct_count bigint,
-  PRIMARY KEY (segment_id, column_name)
+  PRIMARY KEY (segment_id, column_id)
 );
 
 CREATE INDEX IF NOT EXISTS segment_stats_lookup_idx
-  ON koldstore.segment_stats (table_oid, scope_key, column_name, segment_id);
+  ON koldstore.segment_stats (table_oid, scope_key, column_id, segment_id);
 
 -- NOTE: Do not add per-PK catalog tables (e.g. exact cold_pk_hints). Cold
 -- presence is discovered via segment_stats / Parquet stats+bloom so catalog

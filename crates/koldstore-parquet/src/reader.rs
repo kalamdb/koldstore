@@ -12,7 +12,7 @@ use std::sync::{Arc, OnceLock};
 use arrow_array::{Array, BooleanArray, Int64Array, RecordBatch, UInt32Array};
 use bytes::Bytes;
 use futures_util::StreamExt;
-use koldstore_common::{ColdRow, CommitSeq, LogicalPk, PkColumn, SeqId};
+use koldstore_common::{ColdRow, ColumnId, CommitSeq, LogicalPk, PkColumn, SeqId};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
@@ -21,7 +21,9 @@ use parquet::file::reader::ChunkReader;
 use parquet::schema::types::SchemaDescriptor;
 
 use crate::object_reader::ObjectStoreParquetReader;
-use crate::prune::{bloom_may_contain, column_index, select_row_groups_from_metadata};
+use crate::prune::{
+    bloom_may_contain, column_index_by_field_id, select_row_groups_from_metadata_by_field_id,
+};
 use crate::schema::{ColdMetadataColumn, PgColumn};
 
 /// Boxed record-batch stream.
@@ -426,6 +428,7 @@ pub async fn read_clean_cold_rows_from_object_store_async(
     let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
         .await
         .map_err(|error| error.to_string())?;
+    validate_application_field_ids(builder.parquet_schema())?;
 
     let application_columns = application_columns_for_read(columns, primary_key_columns, options)?;
 
@@ -469,11 +472,12 @@ pub async fn read_clean_cold_rows_from_object_store_async(
 
     if options.row_groups.is_none() {
         if let Some(pk) = &options.pk_values {
+            let pk_column = required_pg_column(columns, &pk.column)?;
             bloom_mode = BloomPruneMode::SkippedAfterStats;
-            let (stats_selected, _) = select_row_groups_from_metadata(
+            let (stats_selected, _) = select_row_groups_from_metadata_by_field_id(
                 builder.metadata(),
                 builder.parquet_schema(),
-                &pk.column,
+                pk_column.column_id,
                 &pk.values,
             )?;
             // Intersect with any prior seq prune.
@@ -514,8 +518,13 @@ pub async fn read_clean_cold_rows_from_object_store_async(
                 bloom_mode = BloomPruneMode::SkippedAfterStats;
                 stats_selected
             } else {
-                let (refined, fetched) =
-                    refine_row_groups_with_bloom(&mut builder, &stats_selected, pk).await?;
+                let (refined, fetched) = refine_row_groups_with_bloom(
+                    &mut builder,
+                    &stats_selected,
+                    pk,
+                    pk_column.column_id,
+                )
+                .await?;
                 bloom_mode = BloomPruneMode::Applied;
                 bloom_filters_fetched = fetched;
                 refined
@@ -554,7 +563,7 @@ pub async fn read_clean_cold_rows_from_object_store_async(
     }
 
     if !options.columns.is_empty() {
-        let mask = projection_mask(builder.parquet_schema(), &application_columns);
+        let mask = projection_mask(builder.parquet_schema(), columns, &application_columns)?;
         builder = builder.with_projection(mask);
     }
 
@@ -642,8 +651,9 @@ async fn refine_row_groups_with_bloom(
     builder: &mut ParquetRecordBatchStreamBuilder<ObjectStoreParquetReader>,
     candidates: &[usize],
     pk: &PkValues,
+    column_id: ColumnId,
 ) -> Result<(Vec<usize>, usize), String> {
-    let column_idx = column_index(builder.parquet_schema(), &pk.column)?;
+    let column_idx = column_index_by_field_id(builder.parquet_schema(), column_id)?;
     let physical_type = builder.parquet_schema().column(column_idx).physical_type();
     let mut selected = Vec::with_capacity(candidates.len());
     let mut fetched = 0usize;
@@ -736,22 +746,25 @@ where
 {
     let mut builder =
         ParquetRecordBatchReaderBuilder::try_new(reader).map_err(|error| error.to_string())?;
+    validate_application_field_ids(builder.parquet_schema())?;
     let application_columns = application_columns_for_read(columns, primary_key_columns, options)?;
 
     let mut effective = options.clone();
     if effective.row_groups.is_none() {
         if let Some(pk) = &options.pk_values {
-            let (mut selected, _) = select_row_groups_from_metadata(
+            let pk_column = required_pg_column(columns, &pk.column)?;
+            let (mut selected, _) = select_row_groups_from_metadata_by_field_id(
                 builder.metadata(),
                 builder.parquet_schema(),
-                &pk.column,
+                pk_column.column_id,
                 &pk.values,
             )?;
             if selected.is_empty() {
                 return Ok(Vec::new());
             }
             if selected.len() > 1 {
-                let column_idx = column_index(builder.parquet_schema(), &pk.column)?;
+                let column_idx =
+                    column_index_by_field_id(builder.parquet_schema(), pk_column.column_id)?;
                 let physical_type = builder.parquet_schema().column(column_idx).physical_type();
                 let mut refined = Vec::new();
                 for rg_index in selected {
@@ -778,7 +791,7 @@ where
     }
 
     if !effective.columns.is_empty() {
-        let mask = projection_mask(builder.parquet_schema(), &application_columns);
+        let mask = projection_mask(builder.parquet_schema(), columns, &application_columns)?;
         builder = builder.with_projection(mask);
     }
     if let Some(row_groups) = &effective.row_groups {
@@ -867,18 +880,91 @@ fn application_columns_for_read(
     Ok(options.columns.clone())
 }
 
-fn projection_mask(schema: &SchemaDescriptor, application_columns: &[String]) -> ProjectionMask {
-    let mut names = vec![
+fn required_pg_column<'a>(columns: &'a [PgColumn], name: &str) -> Result<&'a PgColumn, String> {
+    columns
+        .iter()
+        .find(|column| column.name == name)
+        .ok_or_else(|| format!("application column `{name}` is missing from the active schema"))
+}
+
+fn projection_mask(
+    schema: &SchemaDescriptor,
+    columns: &[PgColumn],
+    application_columns: &[String],
+) -> Result<ProjectionMask, String> {
+    let mut indices = Vec::with_capacity(application_columns.len() + 3);
+    for metadata_name in [
         ColdMetadataColumn::Seq.name(),
         ColdMetadataColumn::Deleted.name(),
         ColdMetadataColumn::SchemaVersion.name(),
-    ];
-    for column in application_columns {
-        if !names.iter().any(|name| name == column) {
-            names.push(column.as_str());
+    ] {
+        let index = schema
+            .columns()
+            .iter()
+            .position(|descriptor| descriptor.name() == metadata_name)
+            .ok_or_else(|| {
+                format!("parquet schema missing cold metadata column `{metadata_name}`")
+            })?;
+        indices.push(index);
+    }
+    for name in application_columns {
+        let column = required_pg_column(columns, name)?;
+        match column_index_by_field_id(schema, column.column_id) {
+            Ok(index) if !indices.contains(&index) => indices.push(index),
+            Ok(_) => {}
+            // A column added after this segment was written is decoded as NULL.
+            Err(error) if error.starts_with("parquet schema missing application") => {}
+            Err(error) => return Err(error),
         }
     }
-    ProjectionMask::columns(schema, names)
+    Ok(ProjectionMask::leaves(schema, indices))
+}
+
+fn validate_application_field_ids(schema: &SchemaDescriptor) -> Result<(), String> {
+    for descriptor in schema.columns() {
+        let name = descriptor.name();
+        let is_metadata = [
+            ColdMetadataColumn::Seq.name(),
+            ColdMetadataColumn::Op.name(),
+            ColdMetadataColumn::Deleted.name(),
+            ColdMetadataColumn::SchemaVersion.name(),
+        ]
+        .contains(&name);
+        if !is_metadata && !descriptor.self_type().get_basic_info().has_id() {
+            return Err(format!(
+                "parquet application column `{name}` is missing required field_id"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn batch_column_by_field_id(
+    batch: &RecordBatch,
+    column_id: ColumnId,
+) -> Result<Option<&dyn Array>, String> {
+    let expected = column_id.to_string();
+    let schema = batch.schema();
+    let mut matches = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, field)| {
+            field
+                .metadata()
+                .get(parquet::arrow::PARQUET_FIELD_ID_META_KEY)
+                == Some(&expected)
+        })
+        .map(|(index, _)| index);
+    let Some(index) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "Arrow batch contains duplicate application column_id {column_id}"
+        ));
+    }
+    Ok(Some(batch.column(index).as_ref()))
 }
 
 fn clean_rows_from_batch(
@@ -907,7 +993,15 @@ fn clean_rows_from_batch(
         .collect();
 
     let pk_array = pk_filter
-        .map(|pk| required_column(batch, &pk.column))
+        .map(|pk| {
+            let column = required_pg_column(columns, &pk.column)?;
+            batch_column_by_field_id(batch, column.column_id)?.ok_or_else(|| {
+                format!(
+                    "cold segment is missing required primary-key column_id {} (`{}`)",
+                    column.column_id, column.name
+                )
+            })
+        })
         .transpose()?;
 
     let mut rows = Vec::new();
@@ -922,17 +1016,17 @@ fn clean_rows_from_batch(
         let deleted_value = deleted.value(row_index);
         let mut row_image = serde_json::Map::new();
         for column in &decode_columns {
-            let value = match batch.column_by_name(&column.name) {
+            let value = match batch_column_by_field_id(batch, column.column_id)? {
                 Some(array) => crate::pg_type_codec::json_from_arrow_cell(
                     column.pg_type,
                     &column.name,
-                    array.as_ref(),
+                    array,
                     row_index,
                 )?,
                 None if primary_key_columns.iter().any(|pk| pk == &column.name) => {
                     return Err(format!(
-                        "cold segment is missing required primary-key column `{}`",
-                        column.name
+                        "cold segment is missing required primary-key column_id {} (`{}`)",
+                        column.column_id, column.name
                     ));
                 }
                 None => serde_json::Value::Null,

@@ -203,12 +203,12 @@ fn load_manifest_segment_stats(
     let value: serde_json::Value =
         serde_json::from_str(&json).map_err(|error| error.to_string())?;
     let context = koldstore_catalog::decode::in_sync_manifest_scan_context(&value)?;
-    Ok(Some(cached_from_context(context)))
+    Ok(Some(cached_from_context(context)?))
 }
 
 #[cfg(feature = "pg")]
-fn cached_from_context(context: InSyncManifestScanContext) -> CachedSegmentStats {
-    CachedSegmentStats {
+fn cached_from_context(context: InSyncManifestScanContext) -> Result<CachedSegmentStats, String> {
+    Ok(CachedSegmentStats {
         manifest_path: context.manifest_path,
         generation: context.generation,
         base_path: context.base_path,
@@ -218,21 +218,26 @@ fn cached_from_context(context: InSyncManifestScanContext) -> CachedSegmentStats
         segments: context
             .segments
             .into_iter()
-            .map(|segment| SegmentStatsHint {
-                object_path: segment.object_path,
-                column_stats: catalog_column_stats_map(segment.column_stats),
-                byte_size: segment.byte_size,
+            .map(|segment| {
+                Ok(SegmentStatsHint {
+                    object_path: segment.object_path,
+                    column_stats: catalog_column_stats_map(segment.column_stats)?,
+                    byte_size: segment.byte_size,
+                })
             })
-            .collect(),
-    }
+            .collect::<Result<Vec<_>, String>>()?,
+    })
 }
 
 #[cfg(feature = "pg")]
 fn catalog_column_stats_map(
     column_stats: serde_json::Value,
-) -> std::collections::BTreeMap<String, koldstore_parquet::ColumnStats> {
-    koldstore_catalog::column_stats_min_max_map(&column_stats)
+) -> Result<
+    std::collections::BTreeMap<koldstore_common::ColumnId, koldstore_parquet::ColumnStats>,
+    String,
+> {
+    Ok(koldstore_catalog::column_stats_min_max_map(&column_stats)?
         .into_iter()
-        .map(|(column, (min, max))| (column, koldstore_parquet::ColumnStats { min, max }))
-        .collect()
+        .map(|(column_id, (min, max))| (column_id, koldstore_parquet::ColumnStats { min, max }))
+        .collect())
 }

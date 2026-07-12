@@ -149,9 +149,9 @@ The future path is a Kalam-managed cold-vector engine. On flush, Kalam can write
 a segment-level sidecar vector index next to each Parquet segment:
 
 ```text
-s3://bucket/kalam/documents/user_id=u1/segment-001.parquet
-s3://bucket/kalam/documents/user_id=u1/segment-001.usearch
-s3://bucket/kalam/documents/user_id=u1/segment-001.manifest.json
+s3://bucket/kalam/documents/user_id=u1/segment-0001.parquet
+s3://bucket/kalam/documents/user_id=u1/segment-0001.usearch
+s3://bucket/kalam/documents/user_id=u1/segment-0001.manifest.json
 ```
 
 Cold vector search would then:

@@ -28,7 +28,7 @@
         "kind": "exact",
         "column_ids": [0]
       },
-      "status": "committed",
+      "status": "published",
       "checksum": "sha256:golden",
       "etag": "segment-etag",
       "created_at": "2026-07-03T00:00:00Z"

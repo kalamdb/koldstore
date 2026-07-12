@@ -12,10 +12,11 @@
 
 pub mod cache;
 pub mod cold_pk_hints;
-pub mod segments;
 pub mod decode;
 pub mod queries;
+pub mod schema_registry;
 pub mod schema_versions;
+pub mod segments;
 pub mod table_meta;
 
 pub use cache::{
@@ -23,7 +24,9 @@ pub use cache::{
     ManagedTableSnapshotCache,
 };
 pub use cold_pk_hints::{ColdPkHint, HintKind, PkLookup};
-pub use segments::{Segment, SegmentVisibility};
 pub use decode::column_stats_min_max_map;
 pub use koldstore_common::FlushPolicy;
+pub use schema_registry::{SchemaColumn, SchemaRegistryEntry, SchemaVersion};
+pub use schema_versions::{active_schema, allocate_column_id, decode_schema_version, schema_at};
+pub use segments::{Segment, SegmentLifecycleError, SegmentVisibility};
 pub use table_meta::{FkPolicyDecision, ManagedTableMeta};

@@ -1,17 +1,34 @@
 //! Schema-evolution policy for managed table registry refreshes.
 //!
-//! This module owns pure decisions about which PostgreSQL `ALTER TABLE`
-//! outcomes can be represented by a new `koldstore.schemas` version. It does
-//! not read PostgreSQL catalogs or write metadata; the extension crate adapts
-//! catalog rows into these zero-copy shapes and persists accepted refreshes.
+//! Correlates PostgreSQL `attnum` to durable `ColumnId` so rename keeps identity,
+//! drop marks columns inactive without reuse, and compatible type promotions are
+//! accepted. Name-only matching is not used.
 
+use koldstore_common::ColumnId;
 use thiserror::Error;
 
-use crate::{PgType, SchemaColumn};
+use crate::PgType;
+
+/// Borrowed active-schema fields needed by evolution policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveColumnShape<'a> {
+    /// Stable catalog column identity.
+    pub column_id: ColumnId,
+    /// PostgreSQL attribute number used only for rename vs drop+add correlation.
+    pub attnum: i16,
+    /// Logical column name.
+    pub name: &'a str,
+    /// Parsed type recorded in the active schema version.
+    pub pg_type: PgType,
+    /// Original PostgreSQL catalog type spelling.
+    pub catalog_type_name: &'a str,
+}
 
 /// Borrowed shape of a column from the current PostgreSQL catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogColumnShape<'a> {
+    /// PostgreSQL attribute number.
+    pub attnum: i16,
     /// Column name as stored in PostgreSQL.
     pub name: &'a str,
     /// Parsed KoldStore type.
@@ -25,8 +42,8 @@ pub struct CatalogColumnShape<'a> {
 pub struct SchemaEvolutionInput<'a> {
     /// Primary-key columns recorded in the active schema version.
     pub active_primary_key: &'a [String],
-    /// Columns recorded in the active schema version.
-    pub active_columns: &'a [SchemaColumn],
+    /// Active columns recorded in the active schema version.
+    pub active_columns: &'a [ActiveColumnShape<'a>],
     /// Indexed columns recorded in the active schema version.
     pub active_indexed_columns: &'a [String],
     /// Primary-key columns currently reported by PostgreSQL.
@@ -61,6 +78,12 @@ pub enum SchemaEvolutionError {
         /// Dropped primary-key column name.
         column: String,
     },
+    /// Active schema is missing attnum correlation required for hard cutover.
+    #[error("managed schema column `{column}` is missing attnum correlation")]
+    MissingAttnum {
+        /// Column missing attnum.
+        column: String,
+    },
     /// A current catalog column has no MVP cold-storage representation.
     #[error(
         "ALTER TABLE added unsupported type `{type_name}` for managed KoldStore column `{column}`"
@@ -71,9 +94,9 @@ pub enum SchemaEvolutionError {
         /// PostgreSQL catalog type spelling.
         type_name: String,
     },
-    /// A previously managed column changed type in-place.
+    /// A previously managed column changed type incompatibly.
     #[error(
-        "ALTER TABLE changed type of managed KoldStore column `{column}` from `{old_type}` to `{new_type}`; type changes require unmanage/manage"
+        "ALTER TABLE changed type of managed KoldStore column `{column}` from `{old_type}` to `{new_type}`; incompatible type changes require unmanage/manage"
     )]
     ColumnTypeChanged {
         /// Column whose type changed.
@@ -87,10 +110,8 @@ pub enum SchemaEvolutionError {
 
 /// Plans whether an active schema version should be refreshed.
 ///
-/// Supported changes are additive columns, dropped non-primary-key columns, and
-/// index-set changes. Primary-key changes, unsupported newly visible types, and
-/// type changes for existing managed columns are rejected because existing cold
-/// segments cannot be safely interpreted under the new shape.
+/// Correlation is by `attnum` → `column_id`. Supported outcomes are ADD, RENAME,
+/// DROP of non-PK columns, compatible type promotion, and index-set changes.
 ///
 /// # Errors
 ///
@@ -103,7 +124,19 @@ pub fn plan_schema_evolution(
         return Err(SchemaEvolutionError::PrimaryKeyChanged);
     }
 
+    for active in input.active_columns {
+        if active.attnum <= 0 {
+            return Err(SchemaEvolutionError::MissingAttnum {
+                column: active.name.to_string(),
+            });
+        }
+    }
     for current in input.current_columns {
+        if current.attnum <= 0 {
+            return Err(SchemaEvolutionError::MissingAttnum {
+                column: current.name.to_string(),
+            });
+        }
         if !current.pg_type.is_mvp_supported() {
             return Err(SchemaEvolutionError::UnsupportedColumnType {
                 column: current.name.to_string(),
@@ -112,73 +145,96 @@ pub fn plan_schema_evolution(
         }
     }
 
-    for active_column in input.active_columns {
-        if input
-            .active_primary_key
-            .iter()
-            .any(|pk| pk == &active_column.name)
-            && !input
-                .current_columns
-                .iter()
-                .any(|column| column.name == active_column.name)
-        {
-            return Err(SchemaEvolutionError::PrimaryKeyColumnDropped {
-                column: active_column.name.clone(),
-            });
-        }
-
-        if let Some(current) = input
+    for active in input.active_columns {
+        let is_pk = input.active_primary_key.iter().any(|pk| pk == active.name);
+        let current = input
             .current_columns
             .iter()
-            .find(|column| column.name == active_column.name)
-        {
-            if current.catalog_type_name != active_column.catalog_type_name() {
-                return Err(SchemaEvolutionError::ColumnTypeChanged {
-                    column: active_column.name.clone(),
-                    old_type: active_column.catalog_type_name().to_string(),
-                    new_type: current.catalog_type_name.to_string(),
+            .find(|column| column.attnum == active.attnum);
+        match current {
+            None if is_pk => {
+                return Err(SchemaEvolutionError::PrimaryKeyColumnDropped {
+                    column: active.name.to_string(),
                 });
             }
+            Some(current) => {
+                if !active.pg_type.is_compatible_with(current.pg_type) {
+                    return Err(SchemaEvolutionError::ColumnTypeChanged {
+                        column: current.name.to_string(),
+                        old_type: active.catalog_type_name.to_string(),
+                        new_type: current.catalog_type_name.to_string(),
+                    });
+                }
+            }
+            None => {}
         }
     }
 
-    if schema_columns_match(input.active_columns, input.current_columns)
-        && input.active_indexed_columns == input.current_indexed_columns
-    {
+    if schema_matches(input) {
         Ok(SchemaEvolutionAction::Unchanged)
     } else {
         Ok(SchemaEvolutionAction::Refresh)
     }
 }
 
-fn schema_columns_match(active: &[SchemaColumn], current: &[CatalogColumnShape<'_>]) -> bool {
-    active.len() == current.len()
-        && active.iter().zip(current.iter()).all(|(active, current)| {
-            active.name == current.name && active.catalog_type_name() == current.catalog_type_name
-        })
+fn schema_matches(input: &SchemaEvolutionInput<'_>) -> bool {
+    if input.active_indexed_columns != input.current_indexed_columns {
+        return false;
+    }
+    if input.active_columns.len() != input.current_columns.len() {
+        return false;
+    }
+    input.active_columns.iter().all(|active| {
+        input
+            .current_columns
+            .iter()
+            .find(|current| current.attnum == active.attnum)
+            .is_some_and(|current| {
+                current.name == active.name && current.catalog_type_name == active.catalog_type_name
+            })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn active_columns() -> Vec<SchemaColumn> {
+    fn cid(value: u64) -> ColumnId {
+        ColumnId::new(value).unwrap()
+    }
+
+    fn active_columns() -> Vec<ActiveColumnShape<'static>> {
         vec![
-            SchemaColumn::app("id", "int8", false),
-            SchemaColumn::app("title", "text", true),
+            ActiveColumnShape {
+                column_id: cid(1),
+                attnum: 1,
+                name: "id",
+                pg_type: PgType::Int8,
+                catalog_type_name: "int8",
+            },
+            ActiveColumnShape {
+                column_id: cid(2),
+                attnum: 2,
+                name: "title",
+                pg_type: PgType::Text,
+                catalog_type_name: "text",
+            },
         ]
     }
 
     fn current_columns<'a>(
-        columns: &'a [(&'a str, PgType, &'a str)],
+        columns: &'a [(i16, &'a str, PgType, &'a str)],
     ) -> Vec<CatalogColumnShape<'a>> {
         columns
             .iter()
-            .map(|(name, pg_type, catalog_type_name)| CatalogColumnShape {
-                name,
-                pg_type: *pg_type,
-                catalog_type_name,
-            })
+            .map(
+                |(attnum, name, pg_type, catalog_type_name)| CatalogColumnShape {
+                    attnum: *attnum,
+                    name,
+                    pg_type: *pg_type,
+                    catalog_type_name,
+                },
+            )
             .collect()
     }
 
@@ -187,8 +243,8 @@ mod tests {
         let active_primary_key = vec!["id".to_string()];
         let active_columns = active_columns();
         let current_columns = current_columns(&[
-            ("id", PgType::Int8, "int8"),
-            ("title", PgType::Text, "text"),
+            (1, "id", PgType::Int8, "int8"),
+            (2, "title", PgType::Text, "text"),
         ]);
         let indexed_columns = vec!["title".to_string()];
 
@@ -206,13 +262,35 @@ mod tests {
     }
 
     #[test]
+    fn rename_by_attnum_refreshes_without_new_identity() {
+        let active_primary_key = vec!["id".to_string()];
+        let active_columns = active_columns();
+        let current_columns = current_columns(&[
+            (1, "id", PgType::Int8, "int8"),
+            (2, "body", PgType::Text, "text"),
+        ]);
+
+        let action = plan_schema_evolution(&SchemaEvolutionInput {
+            active_primary_key: &active_primary_key,
+            active_columns: &active_columns,
+            active_indexed_columns: &[],
+            current_primary_key: &active_primary_key,
+            current_columns: &current_columns,
+            current_indexed_columns: &[],
+        })
+        .expect("rename is safe");
+
+        assert_eq!(action, SchemaEvolutionAction::Refresh);
+    }
+
+    #[test]
     fn supported_added_column_refreshes() {
         let active_primary_key = vec!["id".to_string()];
         let active_columns = active_columns();
         let current_columns = current_columns(&[
-            ("id", PgType::Int8, "int8"),
-            ("title", PgType::Text, "text"),
-            ("note", PgType::Text, "text"),
+            (1, "id", PgType::Int8, "int8"),
+            (2, "title", PgType::Text, "text"),
+            (3, "note", PgType::Text, "text"),
         ]);
 
         let action = plan_schema_evolution(&SchemaEvolutionInput {
@@ -229,13 +307,69 @@ mod tests {
     }
 
     #[test]
+    fn drop_non_pk_column_refreshes() {
+        let active_primary_key = vec!["id".to_string()];
+        let active_columns = active_columns();
+        let current_columns = current_columns(&[(1, "id", PgType::Int8, "int8")]);
+
+        let action = plan_schema_evolution(&SchemaEvolutionInput {
+            active_primary_key: &active_primary_key,
+            active_columns: &active_columns,
+            active_indexed_columns: &[],
+            current_primary_key: &active_primary_key,
+            current_columns: &current_columns,
+            current_indexed_columns: &[],
+        })
+        .expect("drop non-pk is safe");
+
+        assert_eq!(action, SchemaEvolutionAction::Refresh);
+    }
+
+    #[test]
+    fn compatible_int_promotion_refreshes() {
+        let active_primary_key = vec!["id".to_string()];
+        let active_columns = vec![
+            ActiveColumnShape {
+                column_id: cid(1),
+                attnum: 1,
+                name: "id",
+                pg_type: PgType::Int8,
+                catalog_type_name: "int8",
+            },
+            ActiveColumnShape {
+                column_id: cid(2),
+                attnum: 2,
+                name: "qty",
+                pg_type: PgType::Int4,
+                catalog_type_name: "int4",
+            },
+        ];
+        let current_columns = current_columns(&[
+            (1, "id", PgType::Int8, "int8"),
+            (2, "qty", PgType::Int8, "int8"),
+        ]);
+
+        let action = plan_schema_evolution(&SchemaEvolutionInput {
+            active_primary_key: &active_primary_key,
+            active_columns: &active_columns,
+            active_indexed_columns: &[],
+            current_primary_key: &active_primary_key,
+            current_columns: &current_columns,
+            current_indexed_columns: &[],
+        })
+        .expect("compatible promotion is safe");
+
+        assert_eq!(action, SchemaEvolutionAction::Refresh);
+    }
+
+    #[test]
     fn primary_key_change_is_rejected() {
         let active_primary_key = vec!["id".to_string()];
         let current_primary_key = vec!["title".to_string()];
         let active_columns = active_columns();
         let current_columns = current_columns(&[
-            ("id", PgType::Int8, "int8"),
-            ("title", PgType::Text, "text"),
+            (1, "id", PgType::Int8, "int8"),
+            (2, "title", PgType::Text, "text"),
         ]);
 
         let error = plan_schema_evolution(&SchemaEvolutionInput {
@@ -252,12 +386,12 @@ mod tests {
     }
 
     #[test]
-    fn existing_column_type_change_is_rejected() {
+    fn incompatible_type_change_is_rejected() {
         let active_primary_key = vec!["id".to_string()];
         let active_columns = active_columns();
         let current_columns = current_columns(&[
-            ("id", PgType::Int8, "int8"),
-            ("title", PgType::Jsonb, "jsonb"),
+            (1, "id", PgType::Int8, "int8"),
+            (2, "title", PgType::Jsonb, "jsonb"),
         ]);
 
         let error = plan_schema_evolution(&SchemaEvolutionInput {
@@ -285,9 +419,9 @@ mod tests {
         let active_primary_key = vec!["id".to_string()];
         let active_columns = active_columns();
         let current_columns = current_columns(&[
-            ("id", PgType::Int8, "int8"),
-            ("title", PgType::Text, "text"),
-            ("raw", PgType::Bytea, "bytea"),
+            (1, "id", PgType::Int8, "int8"),
+            (2, "title", PgType::Text, "text"),
+            (3, "raw", PgType::Bytea, "bytea"),
         ]);
 
         let error = plan_schema_evolution(&SchemaEvolutionInput {

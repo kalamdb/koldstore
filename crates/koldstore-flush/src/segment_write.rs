@@ -4,7 +4,7 @@
 //! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
 
 use koldstore_manifest::{table_object_prefix, CatalogManifestSegmentRow};
-use koldstore_parquet::validate_parquet_bytes;
+use koldstore_parquet::{segment_object_path, segment_parquet_file_name, validate_parquet_bytes};
 use koldstore_storage::{
     open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
     ObjectStoreClient, StorageClient,
@@ -85,12 +85,13 @@ pub fn write_flush_segment_with_client(
     chunk_stats: &FlushStats,
 ) -> Result<WrittenFlushSegment, String> {
     let prefix = table_object_prefix(namespace, table_name);
-    let object_path = format!("{prefix}/batch-{batch_number}.parquet");
+    let segment_number = u32::try_from(batch_number.max(0)).unwrap_or(0);
+    let object_path = segment_object_path(&prefix, segment_number);
     let writer_id = uuid::Uuid::new_v4().to_string();
     let temp_key = temp_object_key(
         &prefix,
         &writer_id,
-        &unique_temp_file_name(&format!("batch-{batch_number}.parquet")),
+        &unique_temp_file_name(&segment_parquet_file_name(segment_number)),
     );
 
     let bytes = &chunk.parquet_bytes;
@@ -117,7 +118,7 @@ pub fn write_flush_segment_with_client(
     }
     validate_parquet_bytes(&final_bytes)?;
 
-    let column_stats = indexed_column_stats_json(&chunk.indexed_bounds, chunk_stats);
+    let column_stats = indexed_column_stats_json(&chunk.column_stats);
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
     let catalog_row = CatalogManifestSegmentRow {
         object_path: object_path.clone(),

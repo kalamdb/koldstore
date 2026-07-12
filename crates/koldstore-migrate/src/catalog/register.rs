@@ -5,14 +5,15 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
-use koldstore_common::{dedupe_nonblank, ManageTableOptions};
+use koldstore_catalog::SchemaColumn;
+use koldstore_common::{dedupe_nonblank, ColumnId, ManageTableOptions};
 
 use koldstore_common::SqlStatement;
 use koldstore_common::{
     PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
     PrimaryKeyShape,
 };
-use koldstore_schema::{normalize_type_name, MirrorInitializationState, SchemaColumn, TypeMatrix};
+use koldstore_schema::{normalize_type_name, MirrorInitializationState, TypeMatrix};
 
 /// Initial schema version for a managed table.
 pub const INITIAL_SCHEMA_VERSION: u32 = 1;
@@ -27,6 +28,7 @@ INSERT INTO koldstore.schemas AS s (
     active,
     table_type,
     columns,
+    next_column_id,
     primary_key,
     scope_column,
     mirror_relation,
@@ -44,20 +46,22 @@ VALUES (
     $4,
     $5,
     $6::jsonb,
-    $7::jsonb,
-    $8,
-    $9::text::regclass,
-    $10::jsonb,
-    $11,
-    $12::jsonb,
+    $7,
+    $8::jsonb,
+    $9,
+    $10::text::regclass,
+    $11::jsonb,
+    $12,
     $13::jsonb,
     $14::jsonb,
-    $15
+    $15::jsonb,
+    $16
 )
 ON CONFLICT (table_oid, version) DO UPDATE
 SET active = EXCLUDED.active,
     table_type = EXCLUDED.table_type,
     columns = EXCLUDED.columns,
+    next_column_id = EXCLUDED.next_column_id,
     primary_key = EXCLUDED.primary_key,
     scope_column = EXCLUDED.scope_column,
     mirror_relation = EXCLUDED.mirror_relation,
@@ -98,6 +102,9 @@ pub enum RegistryError {
     /// User-scoped table metadata is missing its scope column.
     #[error("user-scoped manage_table requires scope_column")]
     MissingScopeColumn,
+    /// Column-id allocator does not advance past all allocated ids.
+    #[error("next_column_id must exceed every allocated column id")]
+    InvalidNextColumnId,
     /// SPI statement metadata could not be prepared.
     #[error("{0}")]
     Spi(String),
@@ -245,6 +252,8 @@ pub struct RegistrationMetadata {
     pub primary_key: Vec<String>,
     /// Application column metadata.
     pub columns: Vec<SchemaColumn>,
+    /// First unallocated stable column id.
+    pub next_column_id: ColumnId,
     /// Indexed columns used as cold stats/bloom candidates.
     pub indexed_columns: Vec<String>,
     /// Captured type support/coercion metadata.
@@ -266,6 +275,8 @@ pub struct PreparedRegistrationMetadata {
     pub table_type: String,
     /// Serialized app and system columns.
     pub columns: Value,
+    /// First unallocated stable column id.
+    pub next_column_id: ColumnId,
     /// Serialized preserved primary key columns.
     pub primary_key: Value,
     /// Effective scope column.
@@ -291,7 +302,7 @@ pub struct PreparedRegistrationMetadata {
 pub struct SchemaRegistryPlan {
     /// Schema registry row id to bind as `$1`.
     pub schema_id: Uuid,
-    /// Prepared metadata values to bind as `$2` through `$14`.
+    /// Prepared metadata values to bind as `$2` through `$16`.
     pub metadata: PreparedRegistrationMetadata,
     /// Parameterized SPI statement.
     pub statement: SqlStatement,
@@ -370,6 +381,13 @@ impl RegistrationMetadata {
         {
             return Err(RegistryError::MissingScopeColumn);
         }
+        if self
+            .columns
+            .iter()
+            .any(|column| column.column_id >= self.next_column_id)
+        {
+            return Err(RegistryError::InvalidNextColumnId);
+        }
 
         Ok(())
     }
@@ -403,6 +421,7 @@ impl RegistrationMetadata {
             active: self.active,
             table_type: self.table_type.clone(),
             columns: serde_json::to_value(&self.columns).unwrap_or_else(|_| Value::Array(vec![])),
+            next_column_id: self.next_column_id,
             primary_key: serde_json::json!(self.primary_key),
             scope_column: self
                 .scope_column
@@ -431,21 +450,41 @@ impl RegistrationMetadata {
     }
 }
 
-/// Converts catalog column metadata into schema registry column records.
+/// Converts initial catalog column metadata into schema registry columns and
+/// the first unallocated column id.
 #[must_use]
-pub fn schema_columns_from_catalog(columns: &[crate::order::CatalogColumn]) -> Vec<SchemaColumn> {
-    columns
+pub fn schema_columns_from_catalog(
+    columns: &[crate::order::CatalogColumn],
+) -> (Vec<SchemaColumn>, ColumnId) {
+    let schema_columns = columns
         .iter()
-        .map(|column| {
-            SchemaColumn::typed(
+        .enumerate()
+        .map(|(index, column)| {
+            let ordinal = u32::try_from(index + 1).unwrap_or(u32::MAX);
+            let column_id = ColumnId::new(u64::try_from(index + 1).expect("usize fits in u64"))
+                .expect("positive");
+            let mut schema_column = SchemaColumn::typed(
+                column_id,
                 column.name.clone(),
                 column.pg_type,
                 column.catalog_type_name(),
                 true,
                 false,
-            )
+            );
+            schema_column.ordinal = ordinal;
+            schema_column.attnum = (column.attnum > 0).then_some(column.attnum);
+            schema_column.initial_default = column.default_expr.clone();
+            schema_column.insert_default = column.default_expr.clone();
+            schema_column
         })
-        .collect()
+        .collect();
+    let next_column_id = ColumnId::new(
+        u64::try_from(columns.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(1),
+    )
+    .expect("next column id is positive");
+    (schema_columns, next_column_id)
 }
 
 /// Plans activation of a managed schema after mirror initialization completes.

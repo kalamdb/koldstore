@@ -8,14 +8,12 @@ use std::{
 
 use koldstore_catalog::HintKind;
 use koldstore_common::{
-    compare_json_values, CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey, SeqId,
-    StablePkHash,
+    compare_json_values, ColumnId, CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey,
+    SeqId, StablePkHash,
 };
 use koldstore_jobs::{LeaseEpoch, LeaseSeconds};
 use koldstore_manifest::SyncState;
-use koldstore_parquet::{
-    ColdMetadataColumn, ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata,
-};
+use koldstore_parquet::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
 use koldstore_schema::MirrorInitializationState;
 use uuid::Uuid;
 
@@ -544,22 +542,24 @@ impl FlushBatchPlan {
 
     /// Computes min/max stats for configured columns from live flushed rows.
     #[must_use]
-    pub fn column_stats<I, S>(&self, columns: I) -> BTreeMap<String, ColumnStats>
+    pub fn column_stats<I, S>(&self, columns: I) -> BTreeMap<ColumnId, ColumnStats>
     where
-        I: IntoIterator<Item = S>,
+        I: IntoIterator<Item = (ColumnId, S)>,
         S: AsRef<str>,
     {
-        let mut accumulators = BTreeMap::<String, ColumnStatsAccumulator>::new();
-        for column in columns {
-            let column = column.as_ref().trim();
-            if !column.is_empty() {
-                accumulators.entry(column.to_string()).or_default();
+        let mut accumulators = BTreeMap::<ColumnId, (String, ColumnStatsAccumulator)>::new();
+        for (column_id, column) in columns {
+            let name = column.as_ref().trim();
+            if !name.is_empty() {
+                accumulators
+                    .entry(column_id)
+                    .or_insert_with(|| (name.to_string(), ColumnStatsAccumulator::default()));
             }
         }
 
         for row in self.rows.iter().filter(|row| !row.deleted) {
-            for (column, accumulator) in &mut accumulators {
-                if let Some(value) = row.column_values.get(column) {
+            for (column, accumulator) in accumulators.values_mut() {
+                if let Some(value) = row.column_values.get(column.as_str()) {
                     accumulator.push(value);
                 }
             }
@@ -567,37 +567,10 @@ impl FlushBatchPlan {
 
         accumulators
             .into_iter()
-            .filter_map(|(column, accumulator)| accumulator.finish().map(|stats| (column, stats)))
+            .filter_map(|(column_id, (_, accumulator))| {
+                accumulator.finish().map(|stats| (column_id, stats))
+            })
             .collect()
-    }
-
-    /// Computes segment stats for clean-schema metadata and configured app columns.
-    #[must_use]
-    pub fn segment_column_stats<I, S>(&self, columns: I) -> BTreeMap<String, ColumnStats>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let mut stats = self.column_stats(columns);
-        if let Some((min_seq, max_seq, min_commit_seq, max_commit_seq)) =
-            self.footer_summary().segment_bounds()
-        {
-            stats.insert(
-                ColdMetadataColumn::Seq.name().to_string(),
-                ColumnStats {
-                    min: serde_json::json!(min_seq),
-                    max: serde_json::json!(max_seq),
-                },
-            );
-            stats.insert(
-                "commit_seq".to_string(),
-                ColumnStats {
-                    min: serde_json::json!(min_commit_seq),
-                    max: serde_json::json!(max_commit_seq),
-                },
-            );
-        }
-        stats
     }
 }
 
@@ -679,7 +652,7 @@ pub struct SegmentCatalogInsert {
     /// Segment schema version.
     pub schema_version: u32,
     /// Segment column stats.
-    pub column_stats: BTreeMap<String, ColumnStats>,
+    pub column_stats: BTreeMap<ColumnId, ColumnStats>,
     /// Active only after manifest commit.
     pub status: &'static str,
     /// Manifest identity that published this segment.
@@ -749,7 +722,7 @@ pub fn plan_segment_insert(
         byte_size: metadata.byte_size,
         schema_version: metadata.schema_version,
         column_stats: metadata.column_stats,
-        status: "published",
+        status: "staged",
         manifest_etag: manifest_etag.into(),
     })
 }

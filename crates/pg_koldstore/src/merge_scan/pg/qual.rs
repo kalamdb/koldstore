@@ -65,12 +65,18 @@ pub(super) unsafe fn residual_filters(
 pub(super) unsafe fn segment_prune_predicates(
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
+    schema_columns: &[koldstore_catalog::SchemaColumn],
     params: pg_sys::ParamListInfo,
 ) -> Vec<SegmentPrunePredicate> {
     list_node_pointers(qual)
         .into_iter()
         .flat_map(|node| {
-            segment_prune_node_predicates(node.cast::<pg_sys::Expr>(), columns, params)
+            segment_prune_node_predicates(
+                node.cast::<pg_sys::Expr>(),
+                columns,
+                schema_columns,
+                params,
+            )
         })
         .collect()
 }
@@ -154,13 +160,14 @@ unsafe fn collect_var_column_names(
 unsafe fn segment_prune_node_predicates(
     expr: *mut pg_sys::Expr,
     columns: &[koldstore_migrate::order::CatalogColumn],
+    schema_columns: &[koldstore_catalog::SchemaColumn],
     params: pg_sys::ParamListInfo,
 ) -> Vec<SegmentPrunePredicate> {
     if expr.is_null() {
         return Vec::new();
     }
     match (*expr).type_ {
-        pg_sys::NodeTag::T_OpExpr => segment_prune_op_expr(expr, columns, params)
+        pg_sys::NodeTag::T_OpExpr => segment_prune_op_expr(expr, columns, schema_columns, params)
             .into_iter()
             .collect(),
         pg_sys::NodeTag::T_BoolExpr => {
@@ -171,7 +178,12 @@ unsafe fn segment_prune_node_predicates(
             list_node_pointers((*bool_expr).args)
                 .into_iter()
                 .flat_map(|node| {
-                    segment_prune_node_predicates(node.cast::<pg_sys::Expr>(), columns, params)
+                    segment_prune_node_predicates(
+                        node.cast::<pg_sys::Expr>(),
+                        columns,
+                        schema_columns,
+                        params,
+                    )
                 })
                 .collect()
         }
@@ -182,6 +194,7 @@ unsafe fn segment_prune_node_predicates(
 unsafe fn segment_prune_op_expr(
     expr: *mut pg_sys::Expr,
     columns: &[koldstore_migrate::order::CatalogColumn],
+    schema_columns: &[koldstore_catalog::SchemaColumn],
     params: pg_sys::ParamListInfo,
 ) -> Option<SegmentPrunePredicate> {
     let op_expr = expr.cast::<pg_sys::OpExpr>();
@@ -195,28 +208,41 @@ unsafe fn segment_prune_op_expr(
     }
 
     if let Some((column, literal)) = var_and_json_literal(args[0], args[1], columns, params) {
-        return prune_predicate_from_op(column, literal, opname, false);
+        return prune_predicate_from_op(column, schema_columns, literal, opname, false);
     }
     if let Some((column, literal)) = var_and_json_literal(args[1], args[0], columns, params) {
-        return prune_predicate_from_op(column, literal, opname, true);
+        return prune_predicate_from_op(column, schema_columns, literal, opname, true);
     }
     None
 }
 
 fn prune_predicate_from_op(
     column: &koldstore_migrate::order::CatalogColumn,
+    schema_columns: &[koldstore_catalog::SchemaColumn],
     literal: serde_json::Value,
     opname: &str,
     reversed: bool,
 ) -> Option<SegmentPrunePredicate> {
+    let column_id = schema_columns
+        .iter()
+        .find(|schema_column| schema_column.active && schema_column.name == column.name)?
+        .column_id;
     match (opname, reversed) {
-        ("=", _) => Some(SegmentPrunePredicate::equality(&column.name, literal)),
-        (">" | ">=", false) | ("<" | "<=", true) => {
-            Some(SegmentPrunePredicate::lower_bound(&column.name, literal))
-        }
-        ("<" | "<=", false) | (">" | ">=", true) => {
-            Some(SegmentPrunePredicate::upper_bound(&column.name, literal))
-        }
+        ("=", _) => Some(SegmentPrunePredicate::equality(
+            column_id,
+            &column.name,
+            literal,
+        )),
+        (">" | ">=", false) | ("<" | "<=", true) => Some(SegmentPrunePredicate::lower_bound(
+            column_id,
+            &column.name,
+            literal,
+        )),
+        ("<" | "<=", false) | (">" | ">=", true) => Some(SegmentPrunePredicate::upper_bound(
+            column_id,
+            &column.name,
+            literal,
+        )),
         _ => None,
     }
 }

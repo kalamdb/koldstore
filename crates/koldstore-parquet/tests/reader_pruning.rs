@@ -1,10 +1,19 @@
 use std::collections::BTreeMap;
 
-use koldstore_common::{CommitSeq, SeqId};
+use koldstore_common::{ColumnId, CommitSeq, SeqId};
 use koldstore_parquet::{
     ColumnStats, FooterSummary, ParquetReadOptions, RowGroupPruner, RowGroupStats,
 };
 use serde_json::json;
+
+fn application_field(name: &str, data_type: arrow_schema::DataType) -> arrow_schema::Field {
+    arrow_schema::Field::new(name, data_type, false).with_metadata(std::collections::HashMap::from(
+        [(
+            parquet::arrow::PARQUET_FIELD_ID_META_KEY.to_string(),
+            "1".to_string(),
+        )],
+    ))
+}
 
 #[test]
 fn reader_options_capture_projection_seq_range_and_pk_values() {
@@ -43,14 +52,17 @@ fn reader_options_capture_clean_schema_metadata_projection_and_seq_cursor() {
 #[test]
 fn reader_request_builds_direct_object_store_projection_and_row_group_selection() {
     let request = koldstore_parquet::ParquetReadRequest::new(
-        "s3://bucket/app/items/batch-1.parquet",
+        "s3://bucket/app/items/segment-0001.parquet",
         ParquetReadOptions::new()
             .with_columns(["id", "status"])
             .with_row_groups([0, 2])
             .with_pk_values("id", ["42"]),
     );
 
-    assert_eq!(request.object_path, "s3://bucket/app/items/batch-1.parquet");
+    assert_eq!(
+        request.object_path,
+        "s3://bucket/app/items/segment-0001.parquet"
+    );
     assert_eq!(request.options.columns, vec!["id", "status"]);
     assert_eq!(request.options.row_groups, Some(vec![0, 2]));
     assert!(request.uses_footer_before_columns());
@@ -156,8 +168,9 @@ fn row_group_pruner_uses_pk_bloom_may_contain_metadata() {
 
 #[test]
 fn segment_column_stats_pruning_skips_only_proven_non_overlaps() {
+    let created_at_id = ColumnId::new(4).unwrap();
     let stats = BTreeMap::from([(
-        "created_at".to_string(),
+        created_at_id,
         ColumnStats {
             min: json!("2026-01-10"),
             max: json!("2026-01-20"),
@@ -166,13 +179,13 @@ fn segment_column_stats_pruning_skips_only_proven_non_overlaps() {
 
     assert!(!RowGroupPruner.segment_column_may_overlap(
         &stats,
-        "created_at",
+        created_at_id,
         &json!("2026-02-01"),
         &json!("2026-02-28")
     ));
     assert!(RowGroupPruner.segment_column_may_overlap(
         &stats,
-        "created_at",
+        created_at_id,
         &json!("2026-01-15"),
         &json!("2026-01-31")
     ));
@@ -180,16 +193,27 @@ fn segment_column_stats_pruning_skips_only_proven_non_overlaps() {
 
 #[test]
 fn segment_column_stats_pruning_scans_when_metadata_is_missing_or_incomparable() {
+    let score_id = ColumnId::new(5).unwrap();
     let stats = BTreeMap::from([(
-        "score".to_string(),
+        score_id,
         ColumnStats {
             min: json!(10),
             max: json!(20),
         },
     )]);
 
-    assert!(RowGroupPruner.segment_column_may_overlap(&stats, "missing", &json!(30), &json!(40)));
-    assert!(RowGroupPruner.segment_column_may_overlap(&stats, "score", &json!("30"), &json!("40")));
+    assert!(RowGroupPruner.segment_column_may_overlap(
+        &stats,
+        ColumnId::new(6).unwrap(),
+        &json!(30),
+        &json!(40)
+    ));
+    assert!(RowGroupPruner.segment_column_may_overlap(
+        &stats,
+        score_id,
+        &json!("30"),
+        &json!("40")
+    ));
 }
 
 #[test]
@@ -209,7 +233,7 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
     // Three row groups of 2 ids each: [1,2], [3,4], [5,6].
     let ids = vec![1_i64, 2, 3, 4, 5, 6];
     let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
+        application_field("id", DataType::Int64),
         Field::new("seq", DataType::Int64, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
@@ -247,7 +271,12 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
     );
     assert_eq!(decision.skipped_row_groups, 2);
 
-    let columns = vec![PgColumn::new("id", PgType::Int8, false)];
+    let columns = vec![PgColumn::new(
+        ColumnId::new(1).unwrap(),
+        "id",
+        PgType::Int8,
+        false,
+    )];
     let rows = read_clean_cold_rows_with_options(
         &path,
         &columns,
@@ -275,7 +304,7 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
 
     let ids = vec![1_i64, 2, 3, 4, 5, 6];
     let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
+        application_field("id", DataType::Int64),
         Field::new("seq", DataType::Int64, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
@@ -310,7 +339,12 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
         .put(key, &encoded, koldstore_storage::PutPrecondition::Overwrite)
         .unwrap();
 
-    let columns = vec![PgColumn::new("id", PgType::Int8, false)];
+    let columns = vec![PgColumn::new(
+        ColumnId::new(1).unwrap(),
+        "id",
+        PgType::Int8,
+        false,
+    )];
     let rows = read_clean_cold_rows_from_object_store(
         client.store(),
         key,
@@ -324,6 +358,48 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].pk_json["id"], json!(4));
 }
+
+#[test]
+fn cold_read_resolves_renamed_application_column_by_field_id() {
+    use koldstore_parquet::{
+        plan_clean_cold_record, read_clean_cold_rows_from_bytes,
+        record_batch_from_clean_cold_records, ParquetSegmentWriter, PgColumn, PgType,
+        WriterOptions,
+    };
+
+    let written_columns = [PgColumn::new(
+        ColumnId::new(7).unwrap(),
+        "old_name",
+        PgType::Int8,
+        false,
+    )];
+    let batch = record_batch_from_clean_cold_records(
+        &written_columns,
+        &[plan_clean_cold_record([("old_name", json!(42))], ["old_name"], 1, 1, 1).unwrap()],
+    )
+    .unwrap();
+    let bytes = ParquetSegmentWriter::new(WriterOptions::default())
+        .encode_record_batch(&batch)
+        .unwrap();
+    let current_columns = [PgColumn::new(
+        ColumnId::new(7).unwrap(),
+        "new_name",
+        PgType::Int8,
+        false,
+    )];
+
+    let rows = read_clean_cold_rows_from_bytes(
+        bytes.into(),
+        &current_columns,
+        &["new_name".to_string()],
+        &ParquetReadOptions::new().with_columns(["new_name"]),
+    )
+    .unwrap();
+
+    assert_eq!(rows[0].pk_json["new_name"], json!(42));
+    assert_eq!(rows[0].row_image["new_name"], json!(42));
+}
+
 #[test]
 fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
     use std::sync::Arc;
@@ -338,7 +414,7 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
 
     let ids = vec![1_i64, 2, 3, 4, 5, 6];
     let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
+        application_field("id", DataType::Int64),
         Field::new("seq", DataType::Int64, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
@@ -374,7 +450,12 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
         .unwrap();
 
     let io = Arc::new(ObjectStoreReadStats::default());
-    let columns = vec![PgColumn::new("id", PgType::Int8, false)];
+    let columns = vec![PgColumn::new(
+        ColumnId::new(1).unwrap(),
+        "id",
+        PgType::Int8,
+        false,
+    )];
     let rows = read_clean_cold_rows_from_object_store_with_stats(
         client.store(),
         key,
@@ -417,7 +498,7 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
 
     let ids = vec![1_i64, 2, 3, 4, 5, 6];
     let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Int64, false),
+        application_field("id", DataType::Int64),
         Field::new("seq", DataType::Int64, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
@@ -455,7 +536,12 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         client.store(),
         key,
         Some(file_size),
-        &[PgColumn::new("id", PgType::Int8, false)],
+        &[PgColumn::new(
+            ColumnId::new(1).unwrap(),
+            "id",
+            PgType::Int8,
+            false,
+        )],
         &["id".to_string()],
         &ParquetReadOptions::new()
             .with_columns(["id"])

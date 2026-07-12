@@ -1,3 +1,4 @@
+use koldstore_common::ColumnId;
 use koldstore_manifest::{
     FilesState, Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment, PkFilter,
     SegmentStatus, SyncState,
@@ -7,9 +8,9 @@ use serde_json::json;
 #[test]
 fn manifest_serializes_kalamdb_compatible_shape() {
     let mut manifest = Manifest::new_shared("app", "items", 2);
-    manifest.append_segment(ManifestSegment::committed(
+    manifest.append_segment(ManifestSegment::published(
         0,
-        "batch-0.parquet",
+        "segment-0000.parquet",
         1..=10,
         100..=110,
         10,
@@ -25,7 +26,7 @@ fn manifest_serializes_kalamdb_compatible_shape() {
     assert_eq!(json["scope_id"], serde_json::Value::Null);
     assert_eq!(json["max_seq"], 10);
     assert_eq!(json["max_commit_seq"], 110);
-    assert_eq!(json["segments"][0]["status"], "committed");
+    assert_eq!(json["segments"][0]["status"], "published");
 }
 
 #[test]
@@ -38,7 +39,7 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
         total_files: Some(7),
     };
     let mut segment =
-        ManifestSegment::committed(1, "batch-1.parquet", 20..=30, 120..=130, 11, 8192, 1);
+        ManifestSegment::published(1, "segment-0001.parquet", 20..=30, 120..=130, 11, 8192, 1);
     segment.pk_filter = Some(PkFilter::exact(vec![0, 1]));
     manifest.append_segment(segment);
 
@@ -57,9 +58,9 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
 fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
     let mut segment =
-        ManifestSegment::committed(1, "batch-1.parquet", 20..=30, 120..=130, 11, 8192, 1);
+        ManifestSegment::published(1, "segment-0001.parquet", 20..=30, 120..=130, 11, 8192, 1);
     segment.column_stats.insert(
-        "created_at".to_string(),
+        ColumnId::new(4).unwrap(),
         ManifestColumnStats::new(json!("2026-01-01T00:00:00Z"), json!("2026-01-31T00:00:00Z")),
     );
     segment.bloom_filters.push(ManifestBloomFilter::bloom(
@@ -72,7 +73,7 @@ fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
     let decoded: Manifest = serde_json::from_str(&encoded).unwrap();
 
     assert_eq!(
-        decoded.segments[0].column_stats["created_at"].min,
+        decoded.segments[0].column_stats[&ColumnId::new(4).unwrap()].min,
         json!("2026-01-01T00:00:00Z")
     );
     assert_eq!(decoded.segments[0].bloom_filters[0].kind, "bloom");
@@ -83,8 +84,8 @@ fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
 fn manifest_batch_append_reserves_once_and_updates_watermarks_once_per_flush() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
     let segments = vec![
-        ManifestSegment::committed(1, "batch-1.parquet", 1..=10, 11..=20, 10, 1024, 1),
-        ManifestSegment::committed(2, "batch-2.parquet", 11..=30, 21..=40, 20, 2048, 1),
+        ManifestSegment::published(1, "segment-0001.parquet", 1..=10, 11..=20, 10, 1024, 1),
+        ManifestSegment::published(2, "segment-0002.parquet", 11..=30, 21..=40, 20, 2048, 1),
     ];
 
     let update = manifest.append_segment_batch(segments);
@@ -100,9 +101,9 @@ fn manifest_batch_append_reserves_once_and_updates_watermarks_once_per_flush() {
 #[test]
 fn manifest_omits_unset_optional_fields_on_serialize() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
-    manifest.append_segment(ManifestSegment::committed(
+    manifest.append_segment(ManifestSegment::published(
         0,
-        "batch-0.parquet",
+        "segment-0000.parquet",
         1..=10,
         11..=20,
         10,
@@ -140,7 +141,7 @@ fn sync_state_transitions_match_flush_contract() {
 fn deleted_manifest_segment_does_not_contribute_to_max_watermarks() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
     let mut deleted =
-        ManifestSegment::committed(0, "batch-0.parquet", 1..=100, 1..=100, 100, 1024, 1);
+        ManifestSegment::published(0, "segment-0000.parquet", 1..=100, 1..=100, 100, 1024, 1);
     deleted.status = SegmentStatus::Deleted;
     manifest.append_segment(deleted);
 

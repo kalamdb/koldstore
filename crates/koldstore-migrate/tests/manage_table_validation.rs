@@ -142,11 +142,10 @@ fn user_table_without_scope_column_is_rejected() {
     let mut context = valid_context();
     context.migration.table_type = "user".to_string();
     context.migration.scope_column = None;
-    context.migration.columns.push(ColumnDefinition::new(
-        "tenant_id",
-        "text",
-        false,
-    ));
+    context
+        .migration
+        .columns
+        .push(ColumnDefinition::new("tenant_id", "text", false));
 
     assert_eq!(
         validate_manage_table(context).unwrap_err(),
@@ -156,11 +155,10 @@ fn user_table_without_scope_column_is_rejected() {
     let mut blank = valid_context();
     blank.migration.table_type = "user".to_string();
     blank.migration.scope_column = Some("   ".to_string());
-    blank.migration.columns.push(ColumnDefinition::new(
-        "tenant_id",
-        "text",
-        false,
-    ));
+    blank
+        .migration
+        .columns
+        .push(ColumnDefinition::new("tenant_id", "text", false));
 
     assert_eq!(
         validate_manage_table(blank).unwrap_err(),

@@ -15,6 +15,8 @@ pub mod model;
 pub mod paths;
 #[path = "state/sync_state.rs"]
 pub mod sync_state;
+#[path = "lifecycle/transitions.rs"]
+pub mod transitions;
 #[path = "lifecycle/update.rs"]
 pub mod update;
 
@@ -33,3 +35,4 @@ pub use model::{
 };
 pub use paths::{manifest_paths, relative_manifest_path, table_object_prefix};
 pub use sync_state::SyncState;
+pub use transitions::{LifecycleHook, SegmentStatusTransitionError};

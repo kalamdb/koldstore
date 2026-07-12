@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
+use koldstore_common::ColumnId;
 use koldstore_parquet::{
     encode_parquet_segment_bytes, plan_clean_cold_record, read_clean_cold_rows_from_object_store,
     record_batch_from_clean_cold_records, validate_parquet_bytes, ParquetReadOptions,
@@ -34,8 +35,8 @@ fn sample_batch(rows: usize) -> RecordBatch {
         .collect();
     record_batch_from_clean_cold_records(
         &[
-            PgColumn::new("id", PgType::Int8, false),
-            PgColumn::new("body", PgType::Text, false),
+            PgColumn::new(ColumnId::new(1).unwrap(), "id", PgType::Int8, false),
+            PgColumn::new(ColumnId::new(2).unwrap(), "body", PgType::Text, false),
         ],
         &plans,
     )
@@ -134,10 +135,10 @@ fn encoded_parquet_is_readable_after_in_memory_immutable_publish() {
             .unwrap();
     validate_parquet_bytes(&bytes).unwrap();
     let client = ObjectStoreClient::in_memory();
-    let final_key = "app/items/batch-0.parquet";
+    let final_key = "app/items/segment-0000.parquet";
     publish_immutable_object(
         &client,
-        &temp_object_key("app/items", "writer", "batch-0.parquet.tmp"),
+        &temp_object_key("app/items", "writer", "segment-0000.parquet.tmp"),
         final_key,
         &bytes,
     )
@@ -148,8 +149,8 @@ fn encoded_parquet_is_readable_after_in_memory_immutable_publish() {
         client.store(),
         final_key,
         &[
-            PgColumn::new("id", PgType::Int8, false),
-            PgColumn::new("body", PgType::Text, false),
+            PgColumn::new(ColumnId::new(1).unwrap(), "id", PgType::Int8, false),
+            PgColumn::new(ColumnId::new(2).unwrap(), "body", PgType::Text, false),
         ],
         &["id".to_string()],
         &ParquetReadOptions::default(),

@@ -8,6 +8,8 @@ use thiserror::Error;
 /// Catalog column metadata needed to choose a safe backfill order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogColumn {
+    /// PostgreSQL attribute number used for rename vs drop+add correlation.
+    pub attnum: i16,
     /// Column name.
     pub name: String,
     /// Supported PostgreSQL type parsed from catalog metadata.
@@ -26,6 +28,8 @@ pub struct CatalogColumn {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CatalogColumnWire {
+    #[serde(default)]
+    attnum: i16,
     name: String,
     type_name: String,
     is_primary_key: bool,
@@ -41,6 +45,7 @@ impl TryFrom<CatalogColumnWire> for CatalogColumn {
 
     fn try_from(wire: CatalogColumnWire) -> Result<Self, Self::Error> {
         Ok(Self {
+            attnum: wire.attnum,
             name: wire.name,
             pg_type: PgType::from_postgres_name(&wire.type_name)?,
             catalog_type_name: wire.type_name,
@@ -58,6 +63,7 @@ impl Serialize for CatalogColumn {
         S: serde::Serializer,
     {
         CatalogColumnWire {
+            attnum: self.attnum,
             name: self.name.clone(),
             type_name: self.catalog_type_name.clone(),
             is_primary_key: self.is_primary_key,
@@ -119,6 +125,7 @@ impl CatalogColumn {
         catalog_type_name: impl Into<String>,
     ) -> Self {
         Self {
+            attnum: 0,
             name: name.into(),
             pg_type,
             catalog_type_name: catalog_type_name.into(),

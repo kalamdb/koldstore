@@ -166,7 +166,7 @@ To build from this repo instead, use `docker/run.sh` (compiles the extension).
 - `UNIQUE` / foreign keys are enforced on **hot rows only** after flush ([details](docs/limitations.md#unique-and-foreign-key-constraints))
 - PostgreSQL indexes cover hot rows only
 - Unavailable cold storage fails the query instead of returning partial hot-only results
-- Export/import, compaction, schema evolution, and PK changes are still being built
+- Export/import, compaction, and PK reshape are still being built
 
 Full list: [docs/limitations.md](docs/limitations.md).
 

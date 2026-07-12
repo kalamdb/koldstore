@@ -433,6 +433,7 @@ fn execute_schema_registry_insert(
             DatumWithOid::from(prepared.active),
             DatumWithOid::from(prepared.table_type.as_str()),
             DatumWithOid::from(pgrx::JsonB(prepared.columns.clone())),
+            DatumWithOid::from(i64::try_from(prepared.next_column_id.get()).unwrap_or(i64::MAX)),
             DatumWithOid::from(pgrx::JsonB(prepared.primary_key.clone())),
             DatumWithOid::from(prepared.scope_column.as_deref()),
             DatumWithOid::from(prepared.mirror_relation.as_deref().unwrap_or("")),
@@ -457,6 +458,7 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
         .options
         .clone()
         .with_migration_status(input.migration_status);
+    let (columns, next_column_id) = schema_columns_from_catalog(input.columns);
     let metadata = RegistrationMetadata {
         table_oid: input.table_oid,
         table_type: input.table_type.to_string(),
@@ -467,7 +469,8 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
         initialization_state: input.initialization_state,
         active: input.active,
         primary_key: input.primary_key.to_vec(),
-        columns: schema_columns_from_catalog(input.columns),
+        columns,
+        next_column_id,
         indexed_columns: input.indexed_columns.to_vec(),
         type_matrix: serde_json::Value::Null,
         options,
@@ -496,14 +499,34 @@ pub(crate) fn refresh_active_schema_if_changed(
         .columns
         .iter()
         .map(|column| koldstore_schema::CatalogColumnShape {
+            attnum: column.attnum,
             name: column.name.as_str(),
             pg_type: column.pg_type,
             catalog_type_name: column.catalog_type_name(),
         })
         .collect::<Vec<_>>();
+    let active_columns = active
+        .columns
+        .iter()
+        .filter(|column| column.active)
+        .map(|column| {
+            Ok(koldstore_schema::ActiveColumnShape {
+                column_id: column.column_id,
+                attnum: column.attnum.ok_or_else(|| {
+                    format!(
+                        "managed schema column `{}` is missing attnum correlation",
+                        column.name
+                    )
+                })?,
+                name: column.name.as_str(),
+                pg_type: column.pg_type,
+                catalog_type_name: column.catalog_type_name(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let action = koldstore_schema::plan_schema_evolution(&koldstore_schema::SchemaEvolutionInput {
         active_primary_key: &active.primary_key,
-        active_columns: &active.columns,
+        active_columns: &active_columns,
         active_indexed_columns: &active.indexed_columns,
         current_primary_key: &catalog.primary_key.columns,
         current_columns: &current_columns,

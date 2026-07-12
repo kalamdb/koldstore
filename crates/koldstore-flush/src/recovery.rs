@@ -88,6 +88,10 @@ pub struct RecoveryPlan {
 }
 
 /// Classifies an orphan object for recovery.
+///
+/// Unreferenced `segment-*.parquet` finals and temp objects are recovered the
+/// same way; callers should also mark matching catalog rows `orphaned` when a
+/// catalog segment id is known (see [`plan_mark_segments_orphaned`]).
 #[must_use]
 pub fn classify_orphan_object(path: &str, manifest_referenced: bool) -> Option<RecoveryAction> {
     if manifest_referenced {
@@ -97,6 +101,13 @@ pub fn classify_orphan_object(path: &str, manifest_referenced: bool) -> Option<R
     } else {
         Some(RecoveryAction::QuarantineFinal)
     }
+}
+
+/// Returns whether a path looks like a cold segment object (not temp/quarantine).
+#[must_use]
+pub fn is_cold_segment_object_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.starts_with("segment-") && name.ends_with(".parquet") && !name.contains(".quarantine.")
 }
 
 /// Builds idempotent recovery actions for unreferenced temp/final objects.

@@ -27,8 +27,8 @@ use super::mirror_fetch::fetch_mirror_batch;
 use super::spi::{
     active_flush_policy, active_segment_count, delete_pending_for_scopes,
     manifest_from_active_segments, next_flush_batch_number, persist_flush_segment,
-    prune_flushed_hot_rows, resolve_flush_stats, select_flushable_pending, sync_pending_from_counters,
-    upsert_manifest_row,
+    promote_all_staged_segments_to_published, prune_flushed_hot_rows, resolve_flush_stats,
+    select_flushable_pending, sync_pending_from_counters, upsert_manifest_row,
 };
 
 pub(super) struct FlushPreparedContext {
@@ -38,6 +38,7 @@ pub(super) struct FlushPreparedContext {
     storage: FlushStorageContext,
     snapshot: Arc<ManagedTableSnapshot>,
     catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
+    schema_columns: Vec<koldstore_catalog::SchemaColumn>,
     indexed_columns: Vec<String>,
     max_rows_per_file: usize,
     target_file_size_bytes: Option<u64>,
@@ -73,6 +74,7 @@ pub(super) fn prepare_flush_context(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let catalog = crate::sql::migrate_pg::migration_catalog(table_oid.to_u32())?;
+    let schema = crate::catalog::resolve::active_schema_version(table_oid)?;
     let indexed_columns = dedupe_nonblank(
         snapshot
             .primary_key_columns
@@ -107,6 +109,11 @@ pub(super) fn prepare_flush_context(
         storage,
         snapshot,
         catalog_columns: catalog.columns,
+        schema_columns: schema
+            .columns
+            .into_iter()
+            .filter(|column| column.active && !column.system)
+            .collect(),
         indexed_columns,
         max_rows_per_file,
         target_file_size_bytes,
@@ -164,9 +171,24 @@ pub(super) fn stream_write_flush_batches(
             .catalog_columns
             .iter()
             .map(|column| {
-                koldstore_parquet::PgColumn::new(column.name.clone(), column.pg_type, true)
+                let schema_column = ctx
+                    .schema_columns
+                    .iter()
+                    .find(|schema_column| schema_column.name == column.name)
+                    .ok_or_else(|| {
+                        format!(
+                            "active schema registry is missing application column `{}`",
+                            column.name
+                        )
+                    })?;
+                Ok(koldstore_parquet::PgColumn::new(
+                    schema_column.column_id,
+                    column.name.clone(),
+                    column.pg_type,
+                    true,
+                ))
             })
-            .collect(),
+            .collect::<Result<Vec<_>, String>>()?,
         indexed_columns: ctx.indexed_columns.clone(),
         schema_version,
         max_seq: stats.max_seq,
@@ -184,13 +206,7 @@ pub(super) fn stream_write_flush_batches(
         stream_flush_chunks(
             &encode_input,
             |statement, max_seq, after_seq, scope_value| {
-                fetch_mirror_batch(
-                    &catalog_columns,
-                    statement,
-                    max_seq,
-                    after_seq,
-                    scope_value,
-                )
+                fetch_mirror_batch(&catalog_columns, statement, max_seq, after_seq, scope_value)
             },
             |chunk| {
                 write_streamed_chunk(
@@ -336,6 +352,8 @@ pub(super) fn finalize_flush(
         outcome.manifest.max_seq,
         outcome.manifest.max_commit_seq,
     )?;
+    // Manifest is durable: promote staged → published so merge scan can see them.
+    promote_all_staged_segments_to_published(table_oid)?;
     pgrx::log!(
         "koldstore flush: pruning hot/mirror rows through seq={}",
         outcome.prune_max_seq

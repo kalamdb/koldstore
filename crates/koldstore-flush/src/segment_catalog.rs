@@ -4,12 +4,9 @@
 //! module owns parameterized catalog write plans only. SPI execution stays in
 //! `pg_koldstore`. Pending flush reservations live in `pending_catalog`.
 
-use koldstore_common::SqlStatement;
+use koldstore_common::{ColumnId, SqlStatement};
 use koldstore_manifest::SyncState;
-use koldstore_parquet::ColdMetadataColumn;
 use thiserror::Error;
-
-use crate::stats::FlushStats;
 
 pub use koldstore_manifest::{
     build_manifest_segment_from_catalog_row, load_manifest_from_path, manifest_from_catalog_rows,
@@ -36,17 +33,12 @@ impl From<ManifestAssemblyError> for SegmentCatalogError {
 /// Builds indexed column stats JSON for one flushed segment chunk.
 #[must_use]
 pub fn indexed_column_stats_json(
-    indexed_bounds: &std::collections::BTreeMap<String, (serde_json::Value, serde_json::Value)>,
-    stats: &FlushStats,
+    column_stats: &std::collections::BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
 ) -> serde_json::Value {
     let mut values = serde_json::Map::new();
-    values.insert(
-        ColdMetadataColumn::Seq.name().to_string(),
-        serde_json::json!({"min": stats.min_seq, "max": stats.max_seq}),
-    );
-    for (column, bounds) in indexed_bounds {
+    for (column_id, bounds) in column_stats {
         values.insert(
-            column.clone(),
+            column_id.to_string(),
             serde_json::json!({
                 "min": bounds.0,
                 "max": bounds.1,
@@ -127,7 +119,7 @@ inserted_segments AS (
         u.byte_size,
         u.schema_version,
         u.column_stats,
-        'published'
+        'staged'
     FROM segment_input u
     RETURNING segment_id, table_oid, scope_key, column_stats
 )
@@ -135,7 +127,7 @@ INSERT INTO koldstore.segment_stats (
     segment_id,
     table_oid,
     scope_key,
-    column_name,
+    column_id,
     type_oid,
     min_value,
     max_value
@@ -144,15 +136,24 @@ SELECT
     cs.segment_id,
     cs.table_oid,
     cs.scope_key,
-    stat.column_name::name,
+    stat.column_id::bigint,
     COALESCE(
         (
             SELECT attribute.atttypid
-            FROM pg_catalog.pg_attribute attribute
-            WHERE attribute.attrelid = cs.table_oid
-              AND attribute.attname = stat.column_name::name
-              AND attribute.attnum > 0
-              AND NOT attribute.attisdropped
+            FROM koldstore.schemas schema_version
+            CROSS JOIN LATERAL pg_catalog.jsonb_array_elements(schema_version.columns)
+                AS registry_column(value)
+            JOIN pg_catalog.pg_attribute attribute
+              ON attribute.attrelid = cs.table_oid
+             AND attribute.attname = (registry_column.value->>'name')::name
+             AND attribute.attnum > 0
+             AND NOT attribute.attisdropped
+            WHERE schema_version.table_oid = cs.table_oid
+              AND schema_version.active
+              AND COALESCE((registry_column.value->>'active')::boolean, true)
+              AND (registry_column.value->>'column_id')::bigint = stat.column_id::bigint
+            ORDER BY schema_version.version DESC
+            LIMIT 1
         ),
         'pg_catalog.int8'::regtype::oid
     ),
@@ -160,14 +161,112 @@ SELECT
     pg_catalog.convert_to((stat.bounds->'max')::text, 'UTF8')
 FROM inserted_segments cs
 CROSS JOIN LATERAL pg_catalog.jsonb_each(cs.column_stats)
-    AS stat(column_name, bounds)
-ON CONFLICT (segment_id, column_name)
+    AS stat(column_id, bounds)
+ON CONFLICT (segment_id, column_id)
 DO UPDATE SET
     table_oid = EXCLUDED.table_oid,
     scope_key = EXCLUDED.scope_key,
     type_oid = EXCLUDED.type_oid,
     min_value = EXCLUDED.min_value,
     max_value = EXCLUDED.max_value
+"#,
+    )
+    .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
+}
+
+/// Plans promotion of staged cold segments to query-visible `published`.
+///
+/// Call after the manifest object and catalog row are durable so merge scan
+/// never observes staged files.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_promote_staged_segments_to_published() -> Result<SqlStatement, SegmentCatalogError> {
+    SqlStatement::write(
+        "flush promote staged segments published",
+        r#"
+UPDATE koldstore.segments
+SET status = 'published'
+WHERE table_oid = $1::oid
+  AND segment_id = ANY($2::uuid[])
+  AND status = 'staged'
+"#,
+    )
+    .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
+}
+
+/// Plans compaction supersede for replaced published segments.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_supersede_published_segments() -> Result<SqlStatement, SegmentCatalogError> {
+    SqlStatement::write(
+        "compaction supersede published segments",
+        r#"
+UPDATE koldstore.segments
+SET status = 'superseded'
+WHERE table_oid = $1::oid
+  AND segment_id = ANY($2::uuid[])
+  AND status = 'published'
+"#,
+    )
+    .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
+}
+
+/// Plans retention begin-delete for superseded segments.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_mark_segments_deleting() -> Result<SqlStatement, SegmentCatalogError> {
+    SqlStatement::write(
+        "retention mark segments deleting",
+        r#"
+UPDATE koldstore.segments
+SET status = 'deleting'
+WHERE table_oid = $1::oid
+  AND segment_id = ANY($2::uuid[])
+  AND status IN ('superseded', 'orphaned')
+"#,
+    )
+    .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
+}
+
+/// Plans acknowledge-deleted for segments whose objects were removed.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_mark_segments_deleted() -> Result<SqlStatement, SegmentCatalogError> {
+    SqlStatement::write(
+        "gc mark segments deleted",
+        r#"
+UPDATE koldstore.segments
+SET status = 'deleted'
+WHERE table_oid = $1::oid
+  AND segment_id = ANY($2::uuid[])
+  AND status = 'deleting'
+"#,
+    )
+    .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
+}
+
+/// Plans orphan marking for catalog rows without a valid owner/lease.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_mark_segments_orphaned() -> Result<SqlStatement, SegmentCatalogError> {
+    SqlStatement::write(
+        "recovery mark segments orphaned",
+        r#"
+UPDATE koldstore.segments
+SET status = 'orphaned'
+WHERE table_oid = $1::oid
+  AND segment_id = ANY($2::uuid[])
+  AND status IN ('staged', 'published')
 "#,
     )
     .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
@@ -216,7 +315,11 @@ DO UPDATE SET
 
 #[cfg(test)]
 mod tests {
-    use super::plan_flush_segments_batch_insert;
+    use super::{
+        plan_flush_segments_batch_insert, plan_mark_segments_deleted, plan_mark_segments_deleting,
+        plan_mark_segments_orphaned, plan_promote_staged_segments_to_published,
+        plan_supersede_published_segments,
+    };
 
     #[test]
     fn flush_insert_persists_normalized_stats_without_pk_hints() {
@@ -226,7 +329,27 @@ mod tests {
         assert!(statement.sql.contains("jsonb_each"));
         assert!(!statement.sql.contains("koldstore.cold_pk_hints"));
         assert!(!statement.sql.contains("md5(inserted_segments.object_path)"));
-        assert!(statement.sql.contains("'published'"));
+        assert!(statement.sql.contains("'staged'"));
         assert!(!statement.sql.contains("'pending'"));
+        assert!(!statement.sql.contains("'published'"));
+    }
+
+    #[test]
+    fn promote_and_compaction_plans_use_validated_status_edges() {
+        let promote = plan_promote_staged_segments_to_published().unwrap();
+        assert!(promote.sql.contains("'published'"));
+        assert!(promote.sql.contains("status = 'staged'"));
+
+        let supersede = plan_supersede_published_segments().unwrap();
+        assert!(supersede.sql.contains("'superseded'"));
+
+        let deleting = plan_mark_segments_deleting().unwrap();
+        assert!(deleting.sql.contains("'deleting'"));
+
+        let deleted = plan_mark_segments_deleted().unwrap();
+        assert!(deleted.sql.contains("'deleted'"));
+
+        let orphaned = plan_mark_segments_orphaned().unwrap();
+        assert!(orphaned.sql.contains("'orphaned'"));
     }
 }

@@ -81,6 +81,7 @@ WITH pk AS (
 SELECT COALESCE(
     jsonb_agg(
         jsonb_build_object(
+            'attnum', a.attnum,
             'name', a.attname,
             'type_name', format_type(a.atttypid, a.atttypmod),
             'is_primary_key', pk.attname IS NOT NULL,

@@ -78,3 +78,17 @@ pub fn active_flush_storage_context(
         .map_err(|error| error.to_string())?;
     decode::flush_storage_context(&value)
 }
+
+/// Resolves the active versioned schema for a managed table.
+///
+/// # Errors
+///
+/// Returns an error when SPI execution or schema JSON decoding fails.
+pub fn active_schema_version(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<koldstore_catalog::SchemaVersion, String> {
+    let statement = queries::plan_active_schema_version().map_err(|error| error.to_string())?;
+    let value = spi::select_json_one(&statement, &[pgrx::datum::DatumWithOid::from(table_oid)])
+        .map_err(|error| error.to_string())?;
+    koldstore_catalog::decode_schema_version(&value)
+}

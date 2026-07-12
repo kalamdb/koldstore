@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use koldstore_common::ColumnId;
 use serde::{Deserialize, Serialize};
 
 /// Min/max stats for one column.
@@ -45,7 +46,7 @@ pub struct SegmentFooterMetadata {
     /// Schema version written into the segment.
     pub schema_version: u32,
     /// Column stats used for manifest and local pruning metadata.
-    pub column_stats: BTreeMap<String, ColumnStats>,
+    pub column_stats: BTreeMap<ColumnId, ColumnStats>,
 }
 
 impl FooterSummary {
@@ -76,7 +77,7 @@ impl SegmentFooterMetadata {
         row_count: u64,
         byte_size: u64,
         schema_version: u32,
-        column_stats: Vec<(String, ColumnStats)>,
+        column_stats: Vec<(ColumnId, ColumnStats)>,
     ) -> Option<Self> {
         let (min_seq, max_seq, min_commit_seq, max_commit_seq) = footer.segment_bounds()?;
 

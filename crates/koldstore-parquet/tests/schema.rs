@@ -1,13 +1,19 @@
 use arrow_schema::{DataType, TimeUnit};
+use koldstore_common::ColumnId;
 use koldstore_parquet::{
     arrow_data_type, build_clean_arrow_schema, ColdMetadataColumn, PgColumn, PgType, SchemaError,
 };
+use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+
+fn column_id(value: u64) -> ColumnId {
+    ColumnId::new(value).unwrap()
+}
 
 #[test]
 fn clean_schema_conversion_adds_mirror_metadata_not_user_table_system_columns() {
     let schema = build_clean_arrow_schema(&[
-        PgColumn::new("id", PgType::Int8, false),
-        PgColumn::new("body", PgType::Text, true),
+        PgColumn::new(column_id(1), "id", PgType::Int8, false),
+        PgColumn::new(column_id(2), "body", PgType::Text, true),
     ])
     .unwrap();
 
@@ -18,6 +24,24 @@ fn clean_schema_conversion_adds_mirror_metadata_not_user_table_system_columns() 
     assert_eq!(
         schema.field_with_name("body").unwrap().data_type(),
         &DataType::Utf8
+    );
+    assert_eq!(
+        schema
+            .field_with_name("id")
+            .unwrap()
+            .metadata()
+            .get(PARQUET_FIELD_ID_META_KEY)
+            .map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        schema
+            .field_with_name("body")
+            .unwrap()
+            .metadata()
+            .get(PARQUET_FIELD_ID_META_KEY)
+            .map(String::as_str),
+        Some("2")
     );
     assert_eq!(
         schema
@@ -39,6 +63,13 @@ fn clean_schema_conversion_adds_mirror_metadata_not_user_table_system_columns() 
         schema.field_with_name("deleted").unwrap().data_type(),
         &DataType::Boolean
     );
+    for metadata_column in ["seq", "op", "deleted", "schema_version"] {
+        assert!(!schema
+            .field_with_name(metadata_column)
+            .unwrap()
+            .metadata()
+            .contains_key(PARQUET_FIELD_ID_META_KEY));
+    }
     for forbidden in ["_seq", "_commit_seq", "_deleted"] {
         assert!(schema.field_with_name(forbidden).is_err());
     }
@@ -96,9 +127,9 @@ fn postgres_type_parser_supports_mvp_types_and_common_catalog_aliases() {
 
 #[test]
 fn postgres_catalog_column_conversion_rejects_unsupported_types() {
-    let error = PgColumn::from_catalog("payload", "inet", true).unwrap_err();
+    let error = PgColumn::from_catalog(column_id(1), "payload", "inet", true).unwrap_err();
 
     assert_eq!(error, SchemaError::UnsupportedType("inet".to_string()));
-    assert!(PgColumn::from_catalog("amount", "numeric", false).is_ok());
-    assert!(PgColumn::from_catalog("payload", "bytea", true).is_ok());
+    assert!(PgColumn::from_catalog(column_id(1), "amount", "numeric", false).is_ok());
+    assert!(PgColumn::from_catalog(column_id(1), "payload", "bytea", true).is_ok());
 }

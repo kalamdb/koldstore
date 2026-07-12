@@ -134,3 +134,50 @@ fn concurrent_scopes_produce_independent_pending_plans() {
     assert!(scopes.contains(&"a".to_string()));
     assert!(scopes.contains(&"b".to_string()));
 }
+
+/// Flush backend may only see late-arrival bumps while durable mirror holds the
+/// full table (iot parallel writers). Floor must replace partial keys.
+#[test]
+fn durable_floor_replaces_partial_local_counters() {
+    let _guard = ScopeCounters::lock_for_tests();
+    clear();
+    let table = 1008u32;
+    let late = ScopeCounterKey::scoped(table, "tenant-0001").expect("scope");
+    ScopeCounters::bump(late.clone(), 800);
+
+    let plans = plan_pending_segments(PreFlushInput {
+        table_oid: table,
+        policy: None,
+        force: false,
+        durable_by_scope: &[
+            ("tenant-0000".to_string(), 400),
+            ("tenant-0001".to_string(), 1_200),
+            ("tenant-0002".to_string(), 400),
+        ],
+    });
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].key, ScopeCounterKey::shared(table));
+    assert_eq!(plans[0].row_count, 2_000);
+    assert_eq!(ScopeCounters::get(&late), 0);
+}
+
+#[test]
+fn durable_floor_keeps_local_when_already_complete() {
+    let _guard = ScopeCounters::lock_for_tests();
+    clear();
+    let table = 1009u32;
+    let a = ScopeCounterKey::scoped(table, "a").expect("a");
+    let b = ScopeCounterKey::scoped(table, "b").expect("b");
+    ScopeCounters::bump(a.clone(), 500);
+    ScopeCounters::bump(b.clone(), 500);
+
+    let plans = plan_pending_segments(PreFlushInput {
+        table_oid: table,
+        policy: None,
+        force: false,
+        durable_by_scope: &[("a".to_string(), 500), ("b".to_string(), 500)],
+    });
+    assert_eq!(plans.len(), 2);
+    assert_eq!(ScopeCounters::get(&a), 500);
+    assert_eq!(ScopeCounters::get(&b), 500);
+}

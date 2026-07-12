@@ -23,7 +23,7 @@ fn flush_matrix_covers_flush_manifest_metadata_and_hot_cleanup() {
 
     let workflow = [
         "koldstore.flush_table",
-        "batch-0.parquet",
+        "segment-0000.parquet",
         "manifest.json",
         "koldstore.segments",
         "koldstore.segment_stats",

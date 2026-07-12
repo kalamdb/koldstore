@@ -86,16 +86,13 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
     }
 
     let mut next_id = config.rows + 1;
-    let mut total_flushed = 0_i64;
-    let mut waves = 0_usize;
 
     // Wave 1: seed alone may already overflow hot_row_limit.
     let first = support::flush_table(&db.client, &relation, Some(flush("seed-flush-1"))).await?;
     support::wait_for_jobs(&db.client, &relation).await?;
-    if first > 0 {
-        total_flushed += first;
-        waves += 1;
-    }
+    support::assert_policy_flush_progress(&db.client, &relation, "seed", &[first]).await?;
+    let mut total_flushed = first;
+    let mut waves = 1_usize;
 
     // Waves 2/3: concurrent burst inserts across tenants, then flush again.
     for wave in 0..2 {
@@ -103,20 +100,16 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
         concurrent_burst_inserts(&target, &relation, &config, next_id, burst, wave).await?;
         next_id += burst * config.scopes as i64;
 
-        let flushed = support::flush_table(
-            &db.client,
-            &relation,
-            Some(flush(match wave {
-                0 => "burst-flush-1",
-                _ => "burst-flush-2",
-            })),
-        )
-        .await?;
+        let label = match wave {
+            0 => "burst-flush-1",
+            _ => "burst-flush-2",
+        };
+        let flushed =
+            support::flush_table(&db.client, &relation, Some(flush(label))).await?;
         support::wait_for_jobs(&db.client, &relation).await?;
-        if flushed > 0 {
-            total_flushed += flushed;
-            waves += 1;
-        }
+        support::assert_policy_flush_progress(&db.client, &relation, label, &[flushed]).await?;
+        total_flushed += flushed;
+        waves += 1;
     }
 
     {

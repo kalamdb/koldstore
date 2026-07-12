@@ -14,7 +14,7 @@ use crate::schema::{ColdMetadataColumn, PgColumn};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
-use koldstore_common::dedupe_nonblank;
+use koldstore_common::{dedupe_nonblank, ColumnId};
 use parquet::{
     arrow::ArrowWriter,
     basic::{Compression, ZstdLevel},
@@ -72,10 +72,12 @@ struct SharedWriteBuffer {
 
 impl SharedWriteBuffer {
     fn into_bytes(self) -> Result<Vec<u8>, ParquetError> {
-        let bytes = self.bytes.lock().map_err(|_| {
-            ParquetError::General("parquet output buffer lock poisoned".to_string())
+        let bytes = Arc::try_unwrap(self.bytes).map_err(|_| {
+            ParquetError::General("parquet output buffer still shared at finish".to_string())
         })?;
-        Ok(bytes.clone())
+        bytes
+            .into_inner()
+            .map_err(|_| ParquetError::General("parquet output buffer lock poisoned".to_string()))
     }
 }
 
@@ -91,6 +93,24 @@ impl Write for SharedWriteBuffer {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod shared_write_buffer_tests {
+    use std::io::Write;
+
+    use super::SharedWriteBuffer;
+
+    #[test]
+    fn into_bytes_reuses_the_writer_allocation() {
+        let mut output = SharedWriteBuffer::default();
+        output.write_all(b"parquet payload").unwrap();
+        let allocation = output.bytes.lock().unwrap().as_ptr();
+
+        let bytes = output.into_bytes().unwrap();
+
+        assert_eq!(bytes.as_ptr(), allocation);
     }
 }
 
@@ -142,8 +162,9 @@ impl StreamingParquetSegmentWriter {
     ///
     /// Returns an error when footer encoding fails or the output lock is poisoned.
     pub fn finish(self) -> Result<Vec<u8>, ParquetError> {
-        self.writer.close()?;
-        self.output.into_bytes()
+        let Self { writer, output } = self;
+        writer.close()?;
+        output.into_bytes()
     }
 }
 
@@ -400,6 +421,26 @@ pub struct ParquetSegmentWriter {
     pub options: WriterOptions,
 }
 
+/// Minimum zero-pad width for cold segment filenames (`segment-0001.parquet`).
+pub const SEGMENT_NAME_PAD_WIDTH: usize = 4;
+
+/// Builds a zero-padded cold segment filename: `segment-{NNNN}.parquet`.
+///
+/// Width is at least [`SEGMENT_NAME_PAD_WIDTH`]. Larger numbers expand without
+/// truncation so lexicographic order still matches numeric order.
+#[must_use]
+pub fn segment_parquet_file_name(segment_number: u32) -> String {
+    // Width is SEGMENT_NAME_PAD_WIDTH (4); larger numbers expand naturally.
+    format!("segment-{segment_number:04}.parquet")
+}
+
+/// Builds `{prefix}/segment-{NNNN}.parquet` for a table object prefix.
+#[must_use]
+pub fn segment_object_path(prefix: &str, segment_number: u32) -> String {
+    let prefix = prefix.trim_matches('/');
+    format!("{prefix}/{}", segment_parquet_file_name(segment_number))
+}
+
 impl ParquetSegmentWriter {
     /// Creates a segment writer.
     #[must_use]
@@ -412,15 +453,14 @@ impl ParquetSegmentWriter {
     pub fn plan_segment(
         &self,
         prefix: &str,
-        batch: u32,
+        segment_number: u32,
         min_seq: i64,
         max_seq: i64,
         min_commit_seq: i64,
         max_commit_seq: i64,
     ) -> SegmentWritePlan {
-        let prefix = prefix.trim_matches('/');
         SegmentWritePlan {
-            object_path: format!("{prefix}/batch-{batch}.parquet"),
+            object_path: segment_object_path(prefix, segment_number),
             min_seq,
             max_seq,
             min_commit_seq,
@@ -442,12 +482,12 @@ impl ParquetSegmentWriter {
     pub fn plan_segment_with_metadata(
         &self,
         prefix: &str,
-        batch: u32,
+        segment_number: u32,
         metadata: SegmentMetadataInput,
     ) -> SegmentWritePlan {
         let mut plan = self.plan_segment(
             prefix,
-            batch,
+            segment_number,
             metadata.min_seq,
             metadata.max_seq,
             metadata.min_commit_seq,
@@ -588,7 +628,7 @@ pub struct SegmentMetadataInput {
     /// Columns configured for Parquet statistics.
     pub statistics_columns: Vec<String>,
     /// Column stats used by segment pruning.
-    pub column_stats: Vec<(String, ColumnStats)>,
+    pub column_stats: Vec<(ColumnId, ColumnStats)>,
 }
 
 /// Planned segment metadata produced by the writer.
@@ -611,7 +651,7 @@ pub struct SegmentWritePlan {
     /// Final object byte size.
     pub byte_size: u64,
     /// Column stats captured from the written footer.
-    pub column_stats: BTreeMap<String, ColumnStats>,
+    pub column_stats: BTreeMap<ColumnId, ColumnStats>,
     /// PK filter kind recorded for kalamdb-compatible manifests.
     pub pk_filter_kind: Option<String>,
     /// PK columns covered by the filter.

@@ -1,3 +1,4 @@
+use koldstore_common::ColumnId;
 use koldstore_parquet::{
     plan_clean_cold_record, record_batch_from_clean_cold_records, ColumnStats, FooterSummary,
     ParquetSegmentWriter, PgColumn, PgType, RowGroupStats, SegmentFooterMetadata,
@@ -16,7 +17,7 @@ fn writer_plan_records_kalamdb_compatible_layout_metadata() {
     let writer = ParquetSegmentWriter::new(WriterOptions::default());
     let plan = writer.plan_segment("app/items", 7, 1, 10, 11, 20);
 
-    assert_eq!(plan.object_path, "app/items/batch-7.parquet");
+    assert_eq!(plan.object_path, "app/items/segment-0007.parquet");
     assert_eq!(plan.min_seq, 1);
     assert_eq!(plan.max_seq, 10);
     assert_eq!(plan.min_commit_seq, 11);
@@ -75,31 +76,24 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
             statistics_columns: vec!["id".to_string(), "created_at".to_string()],
             column_stats: vec![
                 (
-                    "id".to_string(),
+                    ColumnId::new(1).unwrap(),
                     ColumnStats {
                         min: json!(1),
                         max: json!(100),
                     },
                 ),
                 (
-                    "seq".to_string(),
+                    ColumnId::new(2).unwrap(),
                     ColumnStats {
-                        min: json!(1),
-                        max: json!(10),
-                    },
-                ),
-                (
-                    "commit_seq".to_string(),
-                    ColumnStats {
-                        min: json!(11),
-                        max: json!(20),
+                        min: json!("2026-01-01"),
+                        max: json!("2026-01-31"),
                     },
                 ),
             ],
         },
     );
 
-    assert_eq!(plan.object_path, "app/items/batch-7.parquet");
+    assert_eq!(plan.object_path, "app/items/segment-0007.parquet");
     assert_eq!(plan.row_count, 100);
     assert_eq!(plan.byte_size, 4096);
     assert_eq!(plan.pk_filter_kind.as_deref(), Some("bloom"));
@@ -109,12 +103,11 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
     assert!(plan.writes_native_bloom_filters);
     assert_eq!(
         plan.column_stats
-            .get("seq")
+            .get(&ColumnId::new(1).unwrap())
             .map(|stats| (&stats.min, &stats.max)),
-        Some((&json!(1), &json!(10)))
+        Some((&json!(1), &json!(100)))
     );
-    assert!(plan.column_stats.contains_key("id"));
-    assert!(plan.column_stats.contains_key("commit_seq"));
+    assert!(plan.column_stats.contains_key(&ColumnId::new(2).unwrap()));
 }
 
 #[test]
@@ -263,11 +256,21 @@ fn clean_cold_record_batch_builder_preserves_payloads_and_metadata_types() {
     ];
     let batch = record_batch_from_clean_cold_records(
         &[
-            PgColumn::new("id", PgType::Int8, false),
-            PgColumn::new("amount", PgType::Numeric, true),
-            PgColumn::new("tags", PgType::TextArray, true),
-            PgColumn::new("binary_hash", PgType::Bytea, true),
-            PgColumn::new("created_at", PgType::Timestamptz, true),
+            PgColumn::new(ColumnId::new(1).unwrap(), "id", PgType::Int8, false),
+            PgColumn::new(ColumnId::new(2).unwrap(), "amount", PgType::Numeric, true),
+            PgColumn::new(ColumnId::new(3).unwrap(), "tags", PgType::TextArray, true),
+            PgColumn::new(
+                ColumnId::new(4).unwrap(),
+                "binary_hash",
+                PgType::Bytea,
+                true,
+            ),
+            PgColumn::new(
+                ColumnId::new(5).unwrap(),
+                "created_at",
+                PgType::Timestamptz,
+                true,
+            ),
         ],
         &rows,
     )
@@ -386,7 +389,7 @@ fn footer_summary_extracts_segment_pruning_metadata_for_manifest() {
         8192,
         3,
         vec![(
-            "id".to_string(),
+            ColumnId::new(1).unwrap(),
             ColumnStats {
                 min: json!(1),
                 max: json!(250),
@@ -402,5 +405,7 @@ fn footer_summary_extracts_segment_pruning_metadata_for_manifest() {
     assert_eq!(metadata.row_count, 250);
     assert_eq!(metadata.byte_size, 8192);
     assert_eq!(metadata.schema_version, 3);
-    assert!(metadata.column_stats.contains_key("id"));
+    assert!(metadata
+        .column_stats
+        .contains_key(&ColumnId::new(1).unwrap()));
 }

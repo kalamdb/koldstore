@@ -29,11 +29,14 @@ pub(super) fn load_cold_rows_for_merge(
 ) -> Result<(ColdReadProfile, Vec<ColdRow>), String> {
     with_hook_disabled(|| {
         unsafe { validate_filter_columns_indexed(qual, catalog)? };
-        let prune_predicates = unsafe { segment_prune_predicates(qual, &catalog.columns, params) };
+        let active_schema = crate::catalog::resolve::active_schema_version(table_oid)?;
+        let prune_predicates = unsafe {
+            segment_prune_predicates(qual, &catalog.columns, &active_schema.columns, params)
+        };
         let predicate_columns = dedupe_nonblank(
             prune_predicates
                 .iter()
-                .map(|predicate| predicate.column.as_str()),
+                .map(|predicate| predicate.column_id.to_string()),
         );
         let manifest_started = Instant::now();
         let Some(manifest_stats) =
@@ -85,8 +88,25 @@ pub(super) fn load_cold_rows_for_merge(
             .columns
             .iter()
             .filter(|column| projection.iter().any(|name| name == &column.name))
-            .map(|column| PgColumn::new(column.name.clone(), column.pg_type, true))
-            .collect::<Vec<_>>();
+            .map(|column| {
+                let schema_column = active_schema
+                    .columns
+                    .iter()
+                    .find(|schema_column| schema_column.active && schema_column.name == column.name)
+                    .ok_or_else(|| {
+                        format!(
+                            "active schema registry is missing application column `{}`",
+                            column.name
+                        )
+                    })?;
+                Ok(PgColumn::new(
+                    schema_column.column_id,
+                    column.name.clone(),
+                    column.pg_type,
+                    true,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
         let mut options = ParquetReadOptions::new().with_columns(projection);
         // Point-lookup path: push PK equality into Parquet row-group prune
         // (column-chunk min/max + native bloom filters written on flush).
