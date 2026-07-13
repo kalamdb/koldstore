@@ -15,10 +15,20 @@ pub fn snowflake_id() -> i64 {
 }
 
 /// Returns the active user scope when available.
+///
+/// SQL contract: `koldstore_user_id()` returns the current `koldstore.user_id`
+/// GUC value, or NULL when unset/blank.
 #[must_use]
 #[cfg_attr(feature = "pg", pgrx::pg_extern(name = "koldstore_user_id"))]
 pub fn koldstore_user_id() -> Option<String> {
-    None
+    #[cfg(feature = "pg")]
+    {
+        crate::guc::user_id()
+    }
+    #[cfg(not(feature = "pg"))]
+    {
+        None
+    }
 }
 
 #[cfg(feature = "pg_test")]

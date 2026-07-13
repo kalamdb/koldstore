@@ -20,6 +20,11 @@ Order of measurement:
 
 TODO rows in the printed table (not measured yet): total PG backup size, restore time.
 Autovacuum counters are not printed: this harness is too short for autovacuum to run.
+
+Hot-only point lookups use 100 warmups and 1,000 measured queries by default.
+Override them with `KOLDSTORE_STORAGE_QUERY_WARMUPS` and
+`KOLDSTORE_STORAGE_QUERY_LOOPS` for quick harness checks or longer release runs.
+
 ```bash
 # Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot):
 scripts/run-storage-comparison.sh

@@ -157,16 +157,14 @@ pub fn plan_schema_evolution(
                     column: active.name.to_string(),
                 });
             }
-            Some(current) => {
-                if !active.pg_type.is_compatible_with(current.pg_type) {
-                    return Err(SchemaEvolutionError::ColumnTypeChanged {
-                        column: current.name.to_string(),
-                        old_type: active.catalog_type_name.to_string(),
-                        new_type: current.catalog_type_name.to_string(),
-                    });
-                }
+            Some(current) if !active.pg_type.is_compatible_with(current.pg_type) => {
+                return Err(SchemaEvolutionError::ColumnTypeChanged {
+                    column: current.name.to_string(),
+                    old_type: active.catalog_type_name.to_string(),
+                    new_type: current.catalog_type_name.to_string(),
+                });
             }
-            None => {}
+            Some(_) | None => {}
         }
     }
 

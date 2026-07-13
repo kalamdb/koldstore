@@ -479,7 +479,7 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
         .map_err(|error| error.to_string())?;
     execute_schema_registry_insert(&plan)?;
     let table_oid = pgrx::pg_sys::Oid::from(input.table_oid);
-    crate::catalog::cache::invalidate_table(table_oid);
+    crate::catalog::cache::publish_table_invalidation(table_oid);
     crate::spi::invalidate_all_prepared_plans();
     Ok(())
 }
@@ -545,7 +545,7 @@ pub(crate) fn refresh_active_schema_if_changed(
         &catalog,
         &primary_key_shape,
     )?;
-    crate::catalog::cache::invalidate_table(table_oid);
+    crate::catalog::cache::publish_table_invalidation(table_oid);
     crate::spi::invalidate_all_prepared_plans();
     Ok(true)
 }
@@ -689,7 +689,7 @@ fn run_existing_table_mirror_initialization_inline(
         ))],
     )
     .map_err(|error| error.to_string())?;
-    crate::catalog::cache::invalidate_table(pgrx::pg_sys::Oid::from(plan.table_oid));
+    crate::catalog::cache::publish_table_invalidation(pgrx::pg_sys::Oid::from(plan.table_oid));
     crate::spi::invalidate_all_prepared_plans();
     Ok(processed_rows)
 }
@@ -734,7 +734,7 @@ fn unmanage_table_pg_impl(
     execute_demigration_locks(&plan)?;
     let deactivated = execute_demigration_statements(&plan, table_oid)?;
 
-    crate::catalog::cache::invalidate_table(table_oid);
+    crate::catalog::cache::publish_table_invalidation(table_oid);
     crate::spi::invalidate_all_prepared_plans();
 
     Ok(deactivated)

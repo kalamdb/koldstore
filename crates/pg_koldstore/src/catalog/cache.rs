@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "pg")]
 use koldstore_catalog::{
-    decode::InSyncManifestScanContext, decode_managed_table_snapshot_str, ManagedTableSnapshot,
-    ManagedTableSnapshotCache,
+    decode::InSyncManifestScanContext, decode_managed_scan_eligibility_str, ManagedScanEligibility,
+    ManagedScanEligibilityCache, ManagedTableSnapshot,
 };
 #[cfg(feature = "pg")]
 use koldstore_merge::scan::plan::SegmentStatsHint;
@@ -23,8 +23,8 @@ type SegmentStatsCache = std::collections::HashMap<SegmentStatsCacheKey, Arc<Cac
 
 #[cfg(feature = "pg")]
 thread_local! {
-    static MANAGED_TABLE_CACHE: std::cell::RefCell<ManagedTableSnapshotCache> =
-        std::cell::RefCell::new(ManagedTableSnapshotCache::default());
+    static MANAGED_SCAN_CACHE: std::cell::RefCell<ManagedScanEligibilityCache> =
+        std::cell::RefCell::new(ManagedScanEligibilityCache::default());
     static SEGMENT_STATS_CACHE: std::cell::RefCell<SegmentStatsCache> =
         std::cell::RefCell::new(std::collections::HashMap::new());
     static MIGRATION_CATALOG_CACHE: std::cell::RefCell<
@@ -56,7 +56,7 @@ pub struct CachedSegmentStats {
 #[cfg(feature = "pg")]
 pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
     let key = table_oid.to_u32();
-    MANAGED_TABLE_CACHE.with(|cache| {
+    MANAGED_SCAN_CACHE.with(|cache| {
         cache.borrow_mut().invalidate(key);
     });
     SEGMENT_STATS_CACHE.with(|cache| {
@@ -72,7 +72,7 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
 /// Invalidates all managed-table snapshots and segment-stats entries in this backend.
 #[cfg(feature = "pg")]
 pub fn invalidate_all() {
-    MANAGED_TABLE_CACHE.with(|cache| {
+    MANAGED_SCAN_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
     SEGMENT_STATS_CACHE.with(|cache| {
@@ -81,6 +81,43 @@ pub fn invalidate_all() {
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
+}
+
+/// Registers the backend-local cache eviction callback for PostgreSQL relcache events.
+#[cfg(feature = "pg")]
+pub fn register_relcache_invalidation_callback() {
+    unsafe {
+        pgrx::pg_sys::CacheRegisterRelcacheCallback(
+            Some(koldstore_relcache_invalidation),
+            pgrx::pg_sys::Datum::null(),
+        );
+    }
+}
+
+/// Publishes a transaction-aware invalidation for a managed relation.
+///
+/// PostgreSQL also uses the relcache event to invalidate saved plans that
+/// reference the relation. The registered callback clears extension-owned
+/// metadata in this backend and every other backend that receives the event.
+#[cfg(feature = "pg")]
+pub fn publish_table_invalidation(table_oid: pgrx::pg_sys::Oid) {
+    invalidate_table(table_oid);
+    unsafe {
+        pgrx::pg_sys::CacheInvalidateRelcacheByRelid(table_oid);
+    }
+}
+
+#[cfg(feature = "pg")]
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn koldstore_relcache_invalidation(
+    _arg: pgrx::pg_sys::Datum,
+    relid: pgrx::pg_sys::Oid,
+) {
+    if relid == pgrx::pg_sys::InvalidOid {
+        invalidate_all();
+    } else {
+        invalidate_table(relid);
+    }
 }
 
 /// Loads the migration catalog (columns / PK / indexed) from cache or SPI.
@@ -118,18 +155,50 @@ pub fn cached_migration_catalog(
 pub fn managed_table_snapshot(
     table_oid: pgrx::pg_sys::Oid,
 ) -> SpiResult<Option<Arc<ManagedTableSnapshot>>> {
+    match managed_scan_eligibility(table_oid)? {
+        ManagedScanEligibility::Unmanaged => Ok(None),
+        ManagedScanEligibility::Managed { snapshot, .. } => Ok(Some(snapshot)),
+    }
+}
+
+/// Loads compact managed-table and cold-presence state from cache or catalog.
+///
+/// Both unmanaged relations and managed relations without published segments
+/// are cached. Visibility-changing operations must invalidate this entry.
+///
+/// # Errors
+///
+/// Returns an error when SPI execution or eligibility decoding fails.
+#[cfg(feature = "pg")]
+pub fn managed_scan_eligibility(table_oid: pgrx::pg_sys::Oid) -> SpiResult<ManagedScanEligibility> {
+    managed_scan_eligibility_with_cache_status(table_oid)
+        .map(|(eligibility, _cache_hit)| eligibility)
+}
+
+/// Loads eligibility and reports whether it came from backend-local memory.
+///
+/// The cache status is used by `EXPLAIN ANALYZE` to prove the warmed hot path
+/// performed no catalog probe.
+///
+/// # Errors
+///
+/// Returns an error when SPI execution or eligibility decoding fails.
+#[cfg(feature = "pg")]
+pub fn managed_scan_eligibility_with_cache_status(
+    table_oid: pgrx::pg_sys::Oid,
+) -> SpiResult<(ManagedScanEligibility, bool)> {
     let key = table_oid.to_u32();
-    if let Some(snapshot) = MANAGED_TABLE_CACHE.with(|cache| cache.borrow().get(key)) {
-        return Ok(Some(snapshot));
+    if let Some(eligibility) = MANAGED_SCAN_CACHE.with(|cache| cache.borrow().get(key)) {
+        return Ok((eligibility, true));
     }
 
-    let snapshot = load_managed_table_snapshot(table_oid)?;
-    if let Some(snapshot) = snapshot.as_ref() {
-        MANAGED_TABLE_CACHE.with(|cache| {
-            cache.borrow_mut().insert_shared(Arc::clone(snapshot));
-        });
-    }
-    Ok(snapshot)
+    // Do not hold the RefCell borrow across SPI: catalog queries can invoke
+    // planner hooks even though KoldMergeScan injection is disabled by callers.
+    let eligibility = load_managed_scan_eligibility(table_oid)?;
+    MANAGED_SCAN_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, eligibility.clone());
+    });
+    Ok((eligibility, false))
 }
 
 /// Loads published manifest path, base path, and active segment stats for merge scan.
@@ -167,17 +236,15 @@ pub fn cached_manifest_segment_stats(
 }
 
 #[cfg(feature = "pg")]
-fn load_managed_table_snapshot(
+fn load_managed_scan_eligibility(
     table_oid: pgrx::pg_sys::Oid,
-) -> SpiResult<Option<Arc<ManagedTableSnapshot>>> {
+) -> SpiResult<ManagedScanEligibility> {
     let statement = koldstore_catalog::queries::plan_managed_table_snapshot()?;
     let json = select_one::<String>(&statement, &[pgrx::datum::DatumWithOid::from(table_oid)])?;
-    json.map(|json| {
-        decode_managed_table_snapshot_str(&json)
-            .map(Arc::new)
+    json.map_or(Ok(ManagedScanEligibility::Unmanaged), |json| {
+        decode_managed_scan_eligibility_str(&json)
             .map_err(|error| map_spi_error(&statement.operation, &error))
     })
-    .transpose()
 }
 
 #[cfg(feature = "pg")]

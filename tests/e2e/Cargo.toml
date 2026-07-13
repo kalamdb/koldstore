@@ -70,6 +70,10 @@ name = "merge_scan_matrix"
 path = "merge/merge_scan_matrix.rs"
 
 [[test]]
+name = "hot_only_fast_path"
+path = "merge/hot_only_fast_path.rs"
+
+[[test]]
 name = "join_targets"
 path = "join/join_targets.rs"
 
@@ -144,6 +148,26 @@ path = "snowflake_concurrency.rs"
 [[test]]
 name = "full_lifecycle"
 path = "full_lifecycle.rs"
+
+[[test]]
+name = "supported_type_roundtrip"
+path = "datatypes/supported_type_roundtrip.rs"
+
+[[test]]
+name = "unsupported_manage_rejects"
+path = "datatypes/unsupported_manage_rejects.rs"
+
+[[test]]
+name = "flush_policy_thresholds"
+path = "flush/flush_policy_thresholds.rs"
+
+[[test]]
+name = "manage_flush_options_matrix"
+path = "flush/manage_flush_options_matrix.rs"
+
+[[test]]
+name = "multi_segment_complex_load"
+path = "load/multi_segment_complex_load.rs"
 
 [dev-dependencies]
 anyhow.workspace = true

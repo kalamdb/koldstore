@@ -4,6 +4,7 @@
 //! lives in `koldstore-flush`.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
 use koldstore_catalog::ManagedTableSnapshot;
@@ -20,6 +21,8 @@ use koldstore_manifest::{
 };
 use koldstore_storage::open_client_from_catalog_fields;
 
+use crate::observability::KoldstoreSpan;
+
 use super::jobs::{
     ensure_flush_job, mark_flush_job_completed, mark_flush_job_failed, mark_flush_job_running,
 };
@@ -30,6 +33,38 @@ use super::spi::{
     promote_all_staged_segments_to_published, prune_flushed_hot_rows, resolve_flush_stats,
     select_flushable_pending, sync_pending_from_counters, upsert_manifest_row,
 };
+
+/// Runs `f` under a flush phase span and logs wall time via PostgreSQL logging.
+///
+/// Tracing spans are cheap even without a subscriber; `pgrx::log!` is what
+/// operators see today. Failed phases still emit elapsed time.
+fn with_flush_phase<T>(
+    phase: &'static str,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _span = KoldstoreSpan::FlushPhase { phase }.tracing_span().entered();
+    let started = Instant::now();
+    let result = f();
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    match &result {
+        Ok(_) => {
+            pgrx::log!(
+                "koldstore flush: phase={} elapsed_ms={:.1}",
+                phase,
+                elapsed_ms
+            );
+        }
+        Err(error) => {
+            pgrx::log!(
+                "koldstore flush: phase={} elapsed_ms={:.1} error={}",
+                phase,
+                elapsed_ms,
+                error
+            );
+        }
+    }
+    result
+}
 
 pub(super) struct FlushPreparedContext {
     job_id: uuid::Uuid,
@@ -202,11 +237,29 @@ pub(super) fn stream_write_flush_batches(
     };
     let catalog_columns = ctx.catalog_columns.clone();
 
+    let mut fetch_ms = 0.0_f64;
+    let mut publish_ms = 0.0_f64;
+    let mut catalog_ms = 0.0_f64;
+    let _stream_span = KoldstoreSpan::FlushPhase {
+        phase: "stream_encode_publish",
+    }
+    .tracing_span()
+    .entered();
+    let stream_started = Instant::now();
     let stream_outcome = crate::merge_scan::pg::with_custom_scan_disabled(|| {
         stream_flush_chunks(
             &encode_input,
             |statement, max_seq, after_seq, scope_value| {
-                fetch_mirror_batch(&catalog_columns, statement, max_seq, after_seq, scope_value)
+                let started = Instant::now();
+                let rows = fetch_mirror_batch(
+                    &catalog_columns,
+                    statement,
+                    max_seq,
+                    after_seq,
+                    scope_value,
+                )?;
+                fetch_ms += started.elapsed().as_secs_f64() * 1000.0;
+                Ok(rows)
             },
             |chunk| {
                 write_streamed_chunk(
@@ -218,11 +271,25 @@ pub(super) fn stream_write_flush_batches(
                     &mut last_max_seq,
                     &mut last_max_commit_seq,
                     &mut written_segments,
+                    &mut publish_ms,
+                    &mut catalog_ms,
                     chunk,
                 )
             },
         )
     })?;
+    let stream_ms = stream_started.elapsed().as_secs_f64() * 1000.0;
+    // Encode time is whatever remains after mirror fetch + publish + catalog SPI.
+    let encode_ms = (stream_ms - fetch_ms - publish_ms - catalog_ms).max(0.0);
+    pgrx::log!(
+        "koldstore flush: phase=stream_encode_publish elapsed_ms={:.1} fetch_ms={:.1} encode_ms={:.1} publish_ms={:.1} catalog_ms={:.1} segments={}",
+        stream_ms,
+        fetch_ms,
+        encode_ms,
+        publish_ms,
+        catalog_ms,
+        written_segments.len()
+    );
 
     validate_flush_row_selection(stats.row_count, stream_outcome.rows_written)?;
     let pending_manifest_segments = written_segments
@@ -274,9 +341,12 @@ fn write_streamed_chunk(
     last_max_seq: &mut i64,
     last_max_commit_seq: &mut i64,
     written_segments: &mut Vec<WrittenFlushSegment>,
+    publish_ms: &mut f64,
+    catalog_ms: &mut f64,
     chunk: FlushWriteChunk,
 ) -> Result<(), String> {
     let chunk_stats = FlushStats::from_write_chunk(&chunk)?;
+    let publish_started = Instant::now();
     let written = write_flush_segment_with_client(
         client,
         &ctx.relation.namespace,
@@ -289,15 +359,19 @@ fn write_streamed_chunk(
         &chunk,
         &chunk_stats,
     )?;
+    *publish_ms += publish_started.elapsed().as_secs_f64() * 1000.0;
+    let catalog_started = Instant::now();
     persist_flush_segment(table_oid, &written)?;
+    *catalog_ms += catalog_started.elapsed().as_secs_f64() * 1000.0;
     *total_rows_flushed = total_rows_flushed.saturating_add(chunk_stats.row_count);
     *last_max_seq = chunk_stats.max_seq;
     *last_max_commit_seq = chunk_stats.max_commit_seq;
     pgrx::log!(
-        "koldstore flush: wrote+cataloged segment batch={} rows={} total_rows={}",
+        "koldstore flush: wrote+cataloged segment batch={} rows={} total_rows={} byte_size={}",
         *batch_number,
         chunk_stats.row_count,
-        *total_rows_flushed
+        *total_rows_flushed,
+        written.byte_size
     );
     *batch_number = batch_number.saturating_add(1);
     written_segments.push(written);
@@ -331,58 +405,69 @@ pub(super) fn finalize_flush(
     ctx: &FlushPreparedContext,
     outcome: &TableFlushBatchOutcome,
 ) -> Result<(), String> {
-    let client = open_client_from_catalog_fields(
-        &ctx.storage.storage_type,
-        &ctx.storage.base_path,
-        &ctx.storage.credentials,
-        &ctx.storage.config,
-    )
-    .map_err(|error| error.to_string())?;
-    pgrx::log!(
-        "koldstore flush: writing manifest path={} segments={} rows={}",
-        outcome.manifest_path,
-        outcome.manifest.segments.len(),
-        outcome.total_rows_flushed
-    );
-    write_manifest_with_client(&client, &outcome.manifest_path, &outcome.manifest)?;
-    upsert_manifest_row(
-        table_oid,
-        &outcome.manifest_path,
-        outcome.manifest.segments.len() as i32,
-        outcome.manifest.max_seq,
-        outcome.manifest.max_commit_seq,
-    )?;
+    with_flush_phase("finalize_manifest", || {
+        let client = open_client_from_catalog_fields(
+            &ctx.storage.storage_type,
+            &ctx.storage.base_path,
+            &ctx.storage.credentials,
+            &ctx.storage.config,
+        )
+        .map_err(|error| error.to_string())?;
+        pgrx::log!(
+            "koldstore flush: writing manifest path={} segments={} rows={}",
+            outcome.manifest_path,
+            outcome.manifest.segments.len(),
+            outcome.total_rows_flushed
+        );
+        write_manifest_with_client(&client, &outcome.manifest_path, &outcome.manifest)?;
+        upsert_manifest_row(
+            table_oid,
+            &outcome.manifest_path,
+            outcome.manifest.segments.len() as i32,
+            outcome.manifest.max_seq,
+            outcome.manifest.max_commit_seq,
+        )?;
+        Ok(())
+    })?;
     // Manifest is durable: promote staged → published so merge scan can see them.
-    promote_all_staged_segments_to_published(table_oid)?;
-    pgrx::log!(
-        "koldstore flush: pruning hot/mirror rows through seq={}",
-        outcome.prune_max_seq
-    );
-    let (mirror_pruned, hot_pruned) = prune_flushed_hot_rows(
-        table_oid,
-        &ctx.snapshot.primary_key_columns,
-        outcome.prune_max_seq,
-        outcome.mirror_ops.as_deref(),
-    )?;
-    pgrx::log!(
-        "koldstore flush: pruned mirror_rows={} hot_rows={}",
-        mirror_pruned,
-        hot_pruned
-    );
-    apply_flush_row_count_deltas(
-        table_oid,
-        mirror_pruned,
-        hot_pruned,
-        outcome.total_rows_flushed,
-    )?;
-    mark_flush_job_completed(
-        ctx.job_id,
-        table_oid,
-        outcome.total_rows_flushed,
-        outcome.last_max_seq,
-        outcome.last_max_commit_seq,
-    )?;
-    crate::catalog::cache::invalidate_table(table_oid);
+    with_flush_phase("finalize_promote", || {
+        promote_all_staged_segments_to_published(table_oid)
+    })?;
+    with_flush_phase("finalize_prune", || {
+        pgrx::log!(
+            "koldstore flush: pruning hot/mirror rows through seq={}",
+            outcome.prune_max_seq
+        );
+        let (mirror_pruned, hot_pruned) = prune_flushed_hot_rows(
+            table_oid,
+            &ctx.snapshot.primary_key_columns,
+            outcome.prune_max_seq,
+            outcome.mirror_ops.as_deref(),
+        )?;
+        pgrx::log!(
+            "koldstore flush: pruned mirror_rows={} hot_rows={}",
+            mirror_pruned,
+            hot_pruned
+        );
+        apply_flush_row_count_deltas(
+            table_oid,
+            mirror_pruned,
+            hot_pruned,
+            outcome.total_rows_flushed,
+        )?;
+        Ok(())
+    })?;
+    with_flush_phase("finalize_complete", || {
+        mark_flush_job_completed(
+            ctx.job_id,
+            table_oid,
+            outcome.total_rows_flushed,
+            outcome.last_max_seq,
+            outcome.last_max_commit_seq,
+        )?;
+        crate::catalog::cache::publish_table_invalidation(table_oid);
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -420,9 +505,15 @@ fn flush_prepared_table(
 ) -> Result<(), String> {
     // Sync approximate counters into one pending row per scope, then flush only
     // scopes that exceeded the table hot-row threshold (or all when force / no policy).
-    let pending = sync_pending_from_counters(table_oid, ctx.storage.schema_version, ctx.force)?;
-    let policy = active_flush_policy(table_oid)?;
-    let flushable = select_flushable_pending(&pending, policy.as_ref(), ctx.force);
+    let flushable = with_flush_phase("pending_select", || {
+        let pending = sync_pending_from_counters(table_oid, ctx.storage.schema_version, ctx.force)?;
+        let policy = active_flush_policy(table_oid)?;
+        Ok(select_flushable_pending(
+            &pending,
+            policy.as_ref(),
+            ctx.force,
+        ))
+    })?;
     if flushable.is_empty() {
         mark_flush_job_completed(ctx.job_id, table_oid, 0, 0, 0)?;
         return Ok(());
@@ -432,7 +523,9 @@ fn flush_prepared_table(
     // force flag for mirror selection — do not pass force=true here. Force
     // selection prefers a tombstone-only batch when deletes exist, which
     // under-flushes mixed insert/update/delete mirrors on normal flush_table.
-    let selection = resolve_flush_stats(table_oid, ctx.force)?;
+    let selection = with_flush_phase("resolve_stats", || {
+        resolve_flush_stats(table_oid, ctx.force)
+    })?;
     if selection.stats.row_count == 0 {
         let scopes: Vec<String> = flushable.iter().map(|row| row.scope_key.clone()).collect();
         delete_pending_for_scopes(table_oid, &scopes)?;

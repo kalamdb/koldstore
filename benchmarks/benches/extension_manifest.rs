@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use koldstore_common::ColumnId;
 use koldstore_manifest::{Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment};
 use serde_json::json;
 
@@ -60,7 +61,7 @@ fn build_segments(count: usize) -> Vec<ManifestSegment> {
         .map(|idx| {
             let min_seq = (idx as i64 * 1_000) + 1;
             let max_seq = min_seq + 999;
-            let mut segment = ManifestSegment::committed(
+            let mut segment = ManifestSegment::published(
                 idx as u32,
                 format!("bench/bench_events/batch-{idx}.parquet"),
                 min_seq..=max_seq,
@@ -79,19 +80,27 @@ fn build_segments(count: usize) -> Vec<ManifestSegment> {
         .collect()
 }
 
-fn column_stats(idx: usize) -> BTreeMap<String, ManifestColumnStats> {
+fn column_stats(idx: usize) -> BTreeMap<ColumnId, ManifestColumnStats> {
     let day = (idx % 365) as i64;
     let user = format!("user-{}", idx % 2_500);
     BTreeMap::from([
         (
-            "created_day".to_string(),
+            ColumnId::new(1).expect("valid column id"),
             ManifestColumnStats::new(json!(day), json!(day + 1)),
         ),
         (
-            "user_id".to_string(),
+            ColumnId::new(2).expect("valid column id"),
             ManifestColumnStats::new(json!(user), json!(user)),
         ),
     ])
+}
+
+fn created_day_id() -> ColumnId {
+    ColumnId::new(1).expect("valid column id")
+}
+
+fn user_id_column() -> ColumnId {
+    ColumnId::new(2).expect("valid column id")
 }
 
 fn select_segments_by_created_day(
@@ -99,10 +108,11 @@ fn select_segments_by_created_day(
     min_day: i64,
     max_day: i64,
 ) -> usize {
+    let created_day = created_day_id();
     segments
         .iter()
         .filter(|segment| {
-            let Some(stats) = segment.column_stats.get("created_day") else {
+            let Some(stats) = segment.column_stats.get(&created_day) else {
                 return true;
             };
             let Some(segment_min) = stats.min.as_i64() else {
@@ -122,18 +132,20 @@ fn lookup_by_user_and_time(
     min_day: i64,
     max_day: i64,
 ) -> usize {
+    let created_day = created_day_id();
+    let user_col = user_id_column();
     segments
         .iter()
         .filter(|segment| {
             let user_matches = segment
                 .column_stats
-                .get("user_id")
+                .get(&user_col)
                 .and_then(|stats| stats.min.as_str())
                 .is_none_or(|segment_user| segment_user == user_id);
             user_matches
         })
         .filter(|segment| {
-            let Some(stats) = segment.column_stats.get("created_day") else {
+            let Some(stats) = segment.column_stats.get(&created_day) else {
                 return true;
             };
             let segment_min = stats.min.as_i64().unwrap_or(i64::MIN);

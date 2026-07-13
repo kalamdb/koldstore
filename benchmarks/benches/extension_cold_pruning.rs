@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use koldstore_common::{CommitSeq, SeqId};
+use koldstore_common::{ColumnId, CommitSeq, SeqId};
 use koldstore_parquet::{
     ColumnStats, FooterSummary, RowGroupPruner, RowGroupStats, SegmentFooterMetadata,
 };
@@ -52,8 +52,9 @@ fn bench_pk_and_minmax_pruning(c: &mut Criterion) {
         })
     });
 
+    let created_day = ColumnId::new(1).expect("valid column id");
     let column_stats = BTreeMap::from([(
-        "created_day".to_string(),
+        created_day,
         ColumnStats {
             min: json!(90),
             max: json!(180),
@@ -63,7 +64,7 @@ fn bench_pk_and_minmax_pruning(c: &mut Criterion) {
         b.iter(|| {
             pruner.segment_column_may_overlap(
                 black_box(&column_stats),
-                "created_day",
+                created_day,
                 &json!(120),
                 &json!(121),
             )
@@ -74,7 +75,7 @@ fn bench_pk_and_minmax_pruning(c: &mut Criterion) {
 fn bench_footer_metadata_parsing(c: &mut Criterion) {
     let footer = footer_with_row_groups(10_000);
     let column_stats = vec![(
-        "created_day".to_string(),
+        ColumnId::new(1).expect("valid column id"),
         ColumnStats {
             min: json!(0),
             max: json!(365),

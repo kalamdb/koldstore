@@ -7,16 +7,16 @@
 
 \echo ''
 \echo '━━━ 1. Baseline: a normal PostgreSQL table with 1,000,000 rows ━'
-\! sleep 0.5
+\! sleep 2
 
 SELECT count(*) AS rows_before_flush
 FROM app.messages;
 
-\! sleep 2
+\! sleep 4
 
 \echo ''
 \echo '━━━ 2. PostgreSQL disk usage before flush ━━━━━━━━━━━━━━━━━━━━'
-\! sleep 0.5
+\! sleep 2
 
 SELECT
   pg_size_pretty(pg_relation_size('app.messages')) AS heap,
@@ -27,7 +27,7 @@ SELECT
 
 \echo ''
 \echo '━━━ 3. Put the existing table under KoldStore management ━━━━━'
-\! sleep 0.5
+\! sleep 2
 
 SELECT koldstore.manage_table(
   table_name         => 'app.messages'::regclass,
@@ -38,17 +38,21 @@ SELECT koldstore.manage_table(
   migration_order_by => 'id'
 );
 
+\! sleep 4
+
 \echo ''
 \echo '━━━ 4. Flush the oldest rows to cold Parquet storage (Keep 100k in PostgreSQL) ━━━━━━━━━'
-\! sleep 0.5
+\! sleep 2
 
 SELECT koldstore.flush_table(
   table_name => 'app.messages'::regclass
 );
 
+\! sleep 4
+
 \echo ''
 \echo '━━━ 5. Hot rows stay in PostgreSQL; older rows move cold ━━━━━'
-\! sleep 0.5
+\! sleep 2
 
 SELECT
   (koldstore.describe_table(table_name => 'app.messages'::regclass)->>'hot_rows')::int AS hot_rows,
@@ -58,7 +62,7 @@ SELECT
 
 \echo ''
 \echo '━━━ 6. Reclaim heap space and compare disk usage ━━━━━━━━━━━━━'
-\! sleep 0.1
+\! sleep 2
 
 VACUUM (FULL) app.messages;
 
@@ -75,7 +79,7 @@ FROM app.demo_baseline AS b;
 
 \echo ''
 \echo '━━━ 7. The application still queries the original table (From both Hot & Cold storage) ━━━━━'
-\! sleep 0.5
+\! sleep 2
 
 SELECT count(*) AS rows_visible
 FROM app.messages;
@@ -84,7 +88,7 @@ FROM app.messages;
 
 \echo ''
 \echo '━━━ 8. Cold reads use KoldMergeScan ━━━━━━━━━━━━━━━━━━━━━━━━━━'
-\! sleep 0.5
+\! sleep 2
 
 EXPLAIN (COSTS OFF)
 SELECT *
@@ -95,7 +99,7 @@ WHERE id = 7;
 
 \echo ''
 \echo '━━━ 9. Cold files written by KoldStore ━━━━━━━━━━━━━━━━━━━━━━━'
-\! sleep 0.5
+\! sleep 2
 
 \! du -sh /tmp/koldstore-demo/app/messages
 \! echo

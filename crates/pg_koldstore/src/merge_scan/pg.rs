@@ -8,13 +8,10 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
+use std::time::Instant;
 
-use koldstore_merge::scan::{
-    execute_merge_scan_with_filters, FilterPlan, MergeScanPlan, MirrorOverlayStrategy,
-    CUSTOM_PATH_NAME,
-};
+use koldstore_merge::scan::{execute_merge_scan_with_filters, FilterPlan, CUSTOM_PATH_NAME};
 use pgrx::pg_sys;
 
 mod cold;
@@ -30,7 +27,7 @@ use cold::{load_cold_rows_for_merge, planned_cold_read_profile};
 use emit::materialize_row_from_image;
 use hot::{load_hot_rows_for_merge, load_hot_rows_native};
 use mirror::{load_mirror_tombstone_overlay, MirrorOverlay};
-use profile::ColdReadProfile;
+use profile::{ColdReadProfile, ScanSetupProfile};
 use qual::{requested_target_columns, residual_filters};
 use tuple::{store_materialized_row, MaterializedRow, ScanMemory};
 
@@ -62,11 +59,12 @@ enum ScanEmitMode {
 struct ScanExecutionState {
     mode: ScanEmitMode,
     cold_profile: ColdReadProfile,
+    setup_profile: ScanSetupProfile,
     mirror_tombstones: usize,
     mirror_live_overrides: usize,
     hot_plan_label: String,
     /// Owns all Datums in buffered rows; deleted on EndCustomScan.
-    _memory: ScanMemory,
+    _memory: Option<ScanMemory>,
 }
 
 impl ScanExecutionState {
@@ -121,6 +119,7 @@ pub fn register_custom_scan_hooks() {
         PREVIOUS_SET_REL_PATHLIST_HOOK = pg_sys::set_rel_pathlist_hook;
         pg_sys::set_rel_pathlist_hook = Some(set_rel_pathlist);
     }
+    crate::catalog::cache::register_relcache_invalidation_callback();
 }
 
 /// Runs extension-internal SQL without injecting KoldMergeScan paths.
@@ -167,13 +166,14 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     }
 
     let table_oid = (*rte).relid;
-    let managed = with_hook_disabled(|| {
-        crate::catalog::cache::managed_table_snapshot(table_oid)
-            .ok()
-            .flatten()
-            .map(|snapshot| snapshot.active)
-            .unwrap_or(false)
+    let eligibility = with_hook_disabled(|| {
+        crate::catalog::cache::managed_scan_eligibility(table_oid).unwrap_or_else(|error| {
+            pgrx::error!("{CUSTOM_PATH_NAME} eligibility lookup failed: {error}")
+        })
     });
+    let managed = eligibility
+        .snapshot()
+        .is_some_and(|snapshot| snapshot.active);
     if !managed {
         return;
     }
@@ -184,15 +184,12 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
         return;
     };
 
-    let segment_count = with_hook_disabled(|| {
-        crate::catalog::cache::cached_manifest_segment_stats(table_oid, &[])
-            .ok()
-            .flatten()
-            .map(|stats| stats.segments.len())
-            .unwrap_or(0)
-    });
-    let cold_cost = segment_count as f64 * COLD_SEGMENT_COST;
     let startup_cost = (*hot_child).startup_cost + CATALOG_LOOKUP_COST;
+    let cold_cost = if !eligibility.is_hot_only() {
+        COLD_SEGMENT_COST
+    } else {
+        0.0
+    };
     let total_cost = (*hot_child).total_cost + CATALOG_LOOKUP_COST + cold_cost + MERGE_OVERLAY_COST;
 
     let custom_path =
@@ -233,18 +230,6 @@ unsafe extern "C-unwind" fn plan_custom_path(
     }
 
     let scanrelid = if rel.is_null() { 0 } else { (*rel).relid };
-    let table_oid = resolve_rte_oid(_root, scanrelid).unwrap_or(pg_sys::InvalidOid);
-    let primary_key = with_hook_disabled(|| {
-        crate::catalog::cache::managed_table_snapshot(table_oid)
-            .ok()
-            .flatten()
-            .map(|snapshot| snapshot.primary_key_columns.clone())
-            .unwrap_or_default()
-    });
-    let mut merge_plan = MergeScanPlan::new(table_oid.to_u32(), primary_key);
-    merge_plan.scanrelid = scanrelid;
-    merge_plan.overlay_strategy = MirrorOverlayStrategy::MirrorMask;
-    let private = merge_plan.serialize().unwrap_or_default();
 
     (*scan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
     (*scan).scan.plan.startup_cost = (*best_path).path.startup_cost;
@@ -258,7 +243,7 @@ unsafe extern "C-unwind" fn plan_custom_path(
     (*scan).custom_plans = custom_plans;
     // Do not alias `qual` here: Postgres frees `custom_exprs` and `qual` separately.
     (*scan).custom_exprs = std::ptr::null_mut();
-    (*scan).custom_private = serialize_custom_private(&private);
+    (*scan).custom_private = std::ptr::null_mut();
     (*scan).custom_scan_tlist = std::ptr::null_mut();
     (*scan).custom_relids = std::ptr::null_mut();
     (*scan).methods = &raw const SCAN_METHODS;
@@ -288,8 +273,9 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
 unsafe extern "C-unwind" fn begin_custom_scan(
     node: *mut pg_sys::CustomScanState,
     estate: *mut pg_sys::EState,
-    _eflags: c_int,
+    eflags: c_int,
 ) {
+    let setup_started = Instant::now();
     if node.is_null() || (*node).ss.ss_currentRelation.is_null() {
         return;
     }
@@ -301,6 +287,49 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     }
 
     let table_oid = (*(*node).ss.ss_currentRelation).rd_id;
+    let (eligibility, eligibility_cache_hit) = with_hook_disabled(|| {
+        crate::catalog::cache::managed_scan_eligibility_with_cache_status(table_oid)
+    })
+    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} eligibility lookup failed: {error}"));
+    let (snapshot, cold_visibility) = match eligibility {
+        koldstore_catalog::ManagedScanEligibility::Managed {
+            snapshot,
+            cold_visibility,
+        } => (snapshot, cold_visibility),
+        koldstore_catalog::ManagedScanEligibility::Unmanaged => {
+            pgrx::error!("{CUSTOM_PATH_NAME} planned for an unmanaged relation")
+        }
+    };
+
+    if matches!(
+        cold_visibility,
+        koldstore_catalog::ColdVisibility::NoPublishedSegments
+    ) {
+        initialize_custom_plan_children(node, estate, eflags);
+        if hot_child_planstate(node).is_none() {
+            pgrx::error!("{CUSTOM_PATH_NAME} hot-only plan is missing its native child");
+        }
+        let hot_plan_label = hot_child_explain_label(node);
+        SCAN_STATES.with(|states| {
+            states.borrow_mut().insert(
+                node as usize,
+                ScanExecutionState {
+                    mode: ScanEmitMode::HotChild,
+                    cold_profile: ColdReadProfile::empty("(none)"),
+                    setup_profile: ScanSetupProfile::hot_child(
+                        eligibility_cache_hit,
+                        profile::elapsed_ms(setup_started),
+                    ),
+                    mirror_tombstones: 0,
+                    mirror_live_overrides: 0,
+                    hot_plan_label,
+                    _memory: None,
+                },
+            );
+        });
+        return;
+    }
+
     let plan = (*node).ss.ps.plan;
     let targetlist = if plan.is_null() {
         std::ptr::null_mut()
@@ -317,16 +346,10 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     } else {
         (*estate).es_param_list_info
     };
-
-    let _planned = deserialize_custom_private(plan);
-
-    let (relation, catalog, snapshot) = with_hook_disabled(|| {
+    let (relation, catalog) = with_hook_disabled(|| {
         let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
         let catalog = crate::catalog::cache::cached_migration_catalog(table_oid)?;
-        let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
-        Ok::<_, String>((relation, catalog, snapshot))
+        Ok::<_, String>((relation, catalog))
     })
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} catalog lookup failed: {error}"));
 
@@ -454,10 +477,11 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             ScanExecutionState {
                 mode,
                 cold_profile,
+                setup_profile: ScanSetupProfile::merge(profile::elapsed_ms(setup_started)),
                 mirror_tombstones: overlay.tombstones,
                 mirror_live_overrides: overlay.live_overrides,
                 hot_plan_label,
-                _memory: memory,
+                _memory: Some(memory),
             },
         );
     });
@@ -505,6 +529,7 @@ unsafe extern "C-unwind" fn exec_custom_scan(
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
     if !node.is_null() {
+        end_custom_plan_children(node);
         SCAN_STATES.with(|states| {
             if let Some(scan) = states.borrow_mut().remove(&(node as usize)) {
                 if should_keep_explain_profile(node) {
@@ -512,6 +537,7 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                         node as usize,
                         profile::ExplainScanMeta {
                             cold_profile: scan.cold_profile,
+                            setup_profile: scan.setup_profile,
                             hot_plan_label: scan.hot_plan_label,
                             mirror_tombstones: scan.mirror_tombstones,
                             mirror_live_overrides: scan.mirror_live_overrides,
@@ -521,6 +547,57 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                 // `scan` drops here: releases ScanMemory / buffered Datums.
             }
         });
+    }
+}
+
+/// Initializes planned native children selected for hot-only delegation.
+///
+/// PostgreSQL deliberately leaves `custom_plans` initialization to the custom
+/// provider. Keeping this on the hot-only branch avoids building an unused heap
+/// plan for cold merge execution.
+///
+/// # Safety
+///
+/// `node`, `estate`, and every entry in `custom_plans` must belong to the active
+/// executor invocation. The caller must invoke this at most once per node.
+unsafe fn initialize_custom_plan_children(
+    node: *mut pg_sys::CustomScanState,
+    estate: *mut pg_sys::EState,
+    eflags: c_int,
+) {
+    if node.is_null() || estate.is_null() || !(*node).custom_ps.is_null() {
+        return;
+    }
+    let plan = (*node).ss.ps.plan;
+    if plan.is_null() {
+        return;
+    }
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
+    let planned_children = (*custom_scan).custom_plans;
+    for index in 0..list_len(planned_children) {
+        let child_plan = list_nth_ptr(planned_children, index).cast::<pg_sys::Plan>();
+        if child_plan.is_null() {
+            continue;
+        }
+        let child_state = pg_sys::ExecInitNode(child_plan, estate, eflags);
+        if !child_state.is_null() {
+            (*node).custom_ps = pg_sys::lappend((*node).custom_ps, child_state.cast::<c_void>());
+        }
+    }
+}
+
+/// Ends native children initialized by [`initialize_custom_plan_children`].
+///
+/// # Safety
+///
+/// `node.custom_ps` must contain only live `PlanState` pointers owned by `node`.
+unsafe fn end_custom_plan_children(node: *mut pg_sys::CustomScanState) {
+    let children = (*node).custom_ps;
+    for index in 0..list_len(children) {
+        let child = list_nth_ptr(children, index).cast::<pg_sys::PlanState>();
+        if !child.is_null() {
+            pg_sys::ExecEndNode(child);
+        }
     }
 }
 
@@ -555,17 +632,19 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         states.borrow().get(&(node as usize)).map(|scan| {
             (
                 scan.cold_profile.clone(),
+                Some(scan.setup_profile.clone()),
                 scan.hot_plan_label.clone(),
                 scan.mirror_tombstones,
                 scan.mirror_live_overrides,
             )
         })
     });
-    let (profile, hot_label, tombstones, live_overrides) = match profile {
+    let (profile, setup_profile, hot_label, tombstones, live_overrides) = match profile {
         Some(meta) => meta,
         None => match profile::saved_explain_profile(node as usize) {
             Some(meta) => (
                 meta.cold_profile,
+                Some(meta.setup_profile),
                 meta.hot_plan_label,
                 meta.mirror_tombstones,
                 meta.mirror_live_overrides,
@@ -584,11 +663,14 @@ unsafe extern "C-unwind" fn explain_custom_scan(
                         return;
                     }
                 };
-                (profile, String::new(), 0, 0)
+                (profile, None, String::new(), 0, 0)
             }
         },
     };
 
+    if let Some(setup_profile) = setup_profile.as_ref() {
+        profile::explain_scan_setup(es, setup_profile);
+    }
     if !hot_label.is_empty() {
         profile::explain_property(es, "Hot Plan", &hot_label);
     }
@@ -731,55 +813,6 @@ unsafe fn find_cheapest_path(pathlist: *mut pg_sys::List) -> Option<*mut pg_sys:
         None
     } else {
         Some(best)
-    }
-}
-
-unsafe fn serialize_custom_private(payload: &str) -> *mut pg_sys::List {
-    if payload.is_empty() {
-        return std::ptr::null_mut();
-    }
-    let cstr = match CString::new(payload) {
-        Ok(value) => value,
-        Err(_) => return std::ptr::null_mut(),
-    };
-    let copied = pg_sys::pstrdup(cstr.as_ptr());
-    let value = pg_sys::makeString(copied);
-    pg_sys::lappend(std::ptr::null_mut(), value.cast::<c_void>())
-}
-
-unsafe fn deserialize_custom_private(plan: *mut pg_sys::Plan) -> Option<MergeScanPlan> {
-    if plan.is_null() {
-        return None;
-    }
-    let custom_scan = plan.cast::<pg_sys::CustomScan>();
-    let private = (*custom_scan).custom_private;
-    if list_len(private) < 1 {
-        return None;
-    }
-    let string_node = list_nth_ptr(private, 0) as *mut pg_sys::String;
-    if string_node.is_null() {
-        return None;
-    }
-    let ptr = (*string_node).sval;
-    if ptr.is_null() {
-        return None;
-    }
-    let payload = std::ffi::CStr::from_ptr(ptr).to_string_lossy();
-    MergeScanPlan::deserialize(&payload).ok()
-}
-
-unsafe fn resolve_rte_oid(
-    root: *mut pg_sys::PlannerInfo,
-    scanrelid: pg_sys::Index,
-) -> Option<pg_sys::Oid> {
-    if root.is_null() || scanrelid == 0 || (*root).parse.is_null() {
-        return None;
-    }
-    let rte = pg_sys::rt_fetch(scanrelid, (*(*root).parse).rtable);
-    if rte.is_null() {
-        None
-    } else {
-        Some((*rte).relid)
     }
 }
 

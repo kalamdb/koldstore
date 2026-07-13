@@ -175,7 +175,23 @@ SELECT jsonb_build_object(
     'mirror_relation', format('%I.%I', n.nspname, c.relname),
     'primary_key', s.primary_key,
     'primary_key_shape', s.primary_key_shape,
-    'scope_column', s.scope_column
+    'scope_column', s.scope_column,
+    'manifest_generation', (
+        SELECT m.generation
+        FROM koldstore.manifest m
+        WHERE m.table_oid = s.table_oid
+          AND m.manifest_path IS DISTINCT FROM 'pending'
+          AND COALESCE(m.generation, '') <> ''
+          AND EXISTS (
+              SELECT 1
+              FROM koldstore.segments cs
+              WHERE cs.table_oid = m.table_oid
+                AND cs.scope_key = m.scope_key
+                AND cs.status = 'published'
+          )
+        ORDER BY m.updated_at DESC
+        LIMIT 1
+    )
 )::text
 FROM koldstore.schemas s
 JOIN pg_class c ON c.oid = s.mirror_relation
@@ -362,6 +378,16 @@ mod tests {
             .contains("jsonb_array_elements_text($2::jsonb)"));
         assert!(!statement.sql.contains("'column_stats', cs.column_stats"));
         assert_eq!(statement.param_types.len(), 2);
+    }
+
+    #[test]
+    fn managed_snapshot_uses_a_compact_published_cold_presence_probe() {
+        let statement = super::plan_managed_table_snapshot().unwrap();
+
+        assert!(statement.sql.contains("'manifest_generation'"));
+        assert!(statement.sql.contains("EXISTS"));
+        assert!(statement.sql.contains("status = 'published'"));
+        assert!(!statement.sql.contains("jsonb_agg"));
     }
 
     #[test]

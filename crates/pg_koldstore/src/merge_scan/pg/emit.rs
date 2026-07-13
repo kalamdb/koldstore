@@ -104,7 +104,12 @@ fn json_f64(value: &serde_json::Value) -> Result<f64, String> {
 
 fn json_input_text(value: &serde_json::Value, pg_type: PgType) -> Result<String, String> {
     match pg_type {
-        PgType::Jsonb => Ok(value.to_string()),
+        // Cold Utf8 cells may already be JSON text (`Value::String`). Re-encoding
+        // that string would produce a jsonb string scalar instead of an object.
+        PgType::Jsonb => match value {
+            serde_json::Value::String(text) => Ok(text.clone()),
+            other => Ok(other.to_string()),
+        },
         PgType::Text | PgType::Uuid | PgType::Numeric | PgType::Timestamptz | PgType::Bytea => {
             if let Some(text) = value.as_str() {
                 Ok(text.to_string())

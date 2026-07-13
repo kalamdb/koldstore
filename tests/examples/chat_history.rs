@@ -104,8 +104,7 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
             0 => "burst-flush-1",
             _ => "burst-flush-2",
         };
-        let flushed =
-            support::flush_table(&db.client, &relation, Some(flush(label))).await?;
+        let flushed = support::flush_table(&db.client, &relation, Some(flush(label))).await?;
         support::wait_for_jobs(&db.client, &relation).await?;
         support::assert_policy_flush_progress(&db.client, &relation, label, &[flushed]).await?;
         total_flushed += flushed;

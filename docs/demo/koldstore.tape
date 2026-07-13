@@ -27,6 +27,9 @@ Type "until docker exec koldstore-readme-demo pg_isready -U postgres >/dev/null 
 Enter
 Sleep 2s
 
+# 1. Instantly speed up the frame rate for the 45-second script
+Set PlaybackSpeed 3.5
+
 Type "docker exec -i koldstore-readme-demo psql -U postgres -d koldstore < docs/demo/setup.sql"
 Enter
 

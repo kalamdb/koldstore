@@ -20,8 +20,9 @@ pub mod segments;
 pub mod table_meta;
 
 pub use cache::{
-    decode_managed_table_snapshot, decode_managed_table_snapshot_str, ManagedTableSnapshot,
-    ManagedTableSnapshotCache,
+    decode_managed_scan_eligibility_str, decode_managed_table_snapshot,
+    decode_managed_table_snapshot_str, ColdVisibility, ManagedScanEligibility,
+    ManagedScanEligibilityCache, ManagedTableSnapshot,
 };
 pub use cold_pk_hints::{ColdPkHint, HintKind, PkLookup};
 pub use decode::column_stats_min_max_map;

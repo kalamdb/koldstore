@@ -19,7 +19,8 @@ use tokio_postgres::Client;
 const DEFAULT_ROWS: i64 = 100_000;
 const DEFAULT_HOT_LIMIT: i64 = 10_000;
 const DML_SAMPLE: i64 = 1_000;
-const QUERY_LOOPS: usize = 20;
+const DEFAULT_QUERY_WARMUPS: usize = 100;
+const DEFAULT_QUERY_LOOPS: usize = 1_000;
 
 #[derive(Debug, Clone, Copy)]
 struct Timing {
@@ -745,8 +746,21 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
     // prune + hot equality pushdown the same way applications with Const quals do.
     // Parameterized `$1` is also supported via ParamListInfo resolution.
     let sql = format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {id}");
+    let warmups = env_i64(
+        "KOLDSTORE_STORAGE_QUERY_WARMUPS",
+        DEFAULT_QUERY_WARMUPS as i64,
+    )
+    .max(0) as usize;
+    let query_loops =
+        env_i64("KOLDSTORE_STORAGE_QUERY_LOOPS", DEFAULT_QUERY_LOOPS as i64).max(1) as usize;
+    for _ in 0..warmups {
+        let _ = client
+            .query_one(&sql, &[])
+            .await
+            .with_context(|| format!("warm point query {relation} id={id}"))?;
+    }
     let started = Instant::now();
-    for _ in 0..QUERY_LOOPS {
+    for _ in 0..query_loops {
         let _ = client
             .query_one(&sql, &[])
             .await
@@ -754,7 +768,7 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
     }
     Ok(Timing {
         elapsed: started.elapsed(),
-        ops: QUERY_LOOPS as i64,
+        ops: query_loops as i64,
     })
 }
 

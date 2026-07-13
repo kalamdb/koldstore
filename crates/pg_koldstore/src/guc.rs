@@ -11,6 +11,8 @@ use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 #[cfg(feature = "pg")]
 static COLD_READS: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c"auto"));
 #[cfg(feature = "pg")]
+static USER_ID: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(None);
+#[cfg(feature = "pg")]
 static MAX_OPEN_PARQUET_READERS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_MAX_OPEN_PARQUET_READERS);
 #[cfg(feature = "pg")]
@@ -32,6 +34,14 @@ static MIN_MAX_ROWS_PER_FILE: GucSetting<i32> =
 #[cfg(feature = "pg")]
 pub fn define_gucs() {
     let flags = GucFlags::default();
+    GucRegistry::define_string_guc(
+        c"koldstore.user_id",
+        c"Active KoldStore user-scope id.",
+        c"Required for reads and writes on user-scoped managed tables. Empty means unset.",
+        &USER_ID,
+        GucContext::Userset,
+        flags,
+    );
     GucRegistry::define_string_guc(
         c"koldstore.cold_reads",
         c"Controls KoldStore cold reads.",
@@ -176,6 +186,23 @@ pub const USER_ID_GUC: &str = "koldstore.user_id";
 pub const ENABLE_MERGE_SCAN_GUC: &str = "koldstore.enable_merge_scan";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
+
+/// Active `koldstore.user_id` value, or `None` when unset/blank.
+#[must_use]
+pub fn user_id() -> Option<String> {
+    #[cfg(feature = "pg")]
+    {
+        let value = USER_ID
+            .get()
+            .and_then(|value| value.to_str().ok().map(str::to_string));
+        koldstore_common::normalize_user_id(value.as_deref())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        None
+    }
+}
 
 /// Whether the planner may inject KoldMergeScan paths.
 #[must_use]

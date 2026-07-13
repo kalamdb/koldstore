@@ -25,7 +25,7 @@ KoldMergeScan
 
 The user table stays a normal heap table. There is no custom table access method.
 
-- Planner cost is `hot_child_cost + catalog + estimated cold + merge overlay`.
+- Planner cost is `hot_child_cost + compact eligibility + cold-presence + merge overlay`.
 - Heap-only finals are replaced so managed SELECTs cannot silently omit cold rows.
 - Hot-only scans (no matching cold segments) stream from the native child via
   `ExecProcNode` when available.
@@ -66,7 +66,10 @@ flowchart TD
   CP --> Begin["BeginCustomScan"]
   Begin --> Guc{enable_merge_scan?}
   Guc -->|off| Err[ERROR]
-  Guc -->|on| Cat[Catalog + MergeScanPlan]
+  Guc -->|on| Eligibility[Cached managed + cold visibility]
+  Eligibility -->|no published segments| InitChild[Initialize native child PlanState]
+  InitChild --> Stream
+  Eligibility -->|published segments| Cat[Load cold scan catalog]
   Cat --> Mirror[Load mirror overlay]
   Cat --> Cold[Cold prune + Parquet]
   Mirror --> Merge[Mask cold by mirror PKs]
@@ -93,10 +96,14 @@ For each managed relation on `SELECT`:
 
 1. Let PostgreSQL build normal heap paths.
 2. Choose the cheapest non-custom path as the hot child.
-3. Replace `pathlist` with one `CustomPath` whose `custom_paths` holds that child.
-4. Cost = child cost + catalog lookup + per-segment cold estimate + overlay.
-5. `PlanCustomPath` copies `custom_plans` from the planned child list and stores
-   a serialized `MergeScanPlan` in `custom_private`.
+3. Load compact managed/cold eligibility from a backend-local cache. Both
+   unmanaged relations and managed relations with no published segments are
+   cached explicitly.
+4. Replace `pathlist` with one `CustomPath` whose `custom_paths` holds that child.
+5. Cost = child cost + compact eligibility + cold-presence + overlay. Full
+   segment statistics are not loaded while planning.
+6. `PlanCustomPath` copies `custom_plans` from the planned child list. It does
+   not serialize unused merge metadata into `custom_private`.
 
 `koldstore.enable_merge_scan = off` still plans `KoldMergeScan` for managed
 tables; execution errors instead of allowing an incorrect heap-only read.
@@ -108,12 +115,17 @@ tables; execution errors instead of allowing an incorrect heap-only read.
 ### BeginCustomScan
 
 1. Error if `enable_merge_scan` is off.
-2. Deserialize `MergeScanPlan` when present.
-3. Load catalog snapshot + mirror overlay (all unflushed mirror PKs).
-4. Prune cold segments from local catalog stats; open ObjectStore readers only
+2. Read compact managed/cold eligibility. On a warmed backend this is an
+   in-memory lookup with no SPI.
+3. If no segment is published, initialize the planned native child with
+   `ExecInitNode`, install `HotChild`, and return immediately. This branch does
+   not resolve relation names, inspect schemas, parse cold projection/filter
+   metadata, allocate scan memory, load mirror state, or query manifest stats.
+4. When cold may be visible, load the catalog snapshot and mirror overlay.
+5. Prune cold segments from local catalog stats; open ObjectStore readers only
    for remaining candidates.
-5. Filter cold rows whose PK appears in the mirror overlay.
-6. Hot-only + native child → stream mode; otherwise merge hot (SPI/JSON today
+6. Filter cold rows whose PK appears in the mirror overlay.
+7. Otherwise merge hot (SPI/JSON today
    for overlap) with filtered cold and materialize winners into a scan-local
    memory context.
 
@@ -127,6 +139,15 @@ tables; execution errors instead of allowing an incorrect heap-only read.
 
 - Drop scan state and cold profile (keep profile briefly for `EXPLAIN ANALYZE`).
 - `ExecReScan` the hot child when present; reset buffer index.
+
+### Cache invalidation
+
+Manage, schema migration, demigration, and committed manifest publication emit
+a PostgreSQL relcache invalidation for the managed relation. Every backend
+registers a relcache callback that evicts its eligibility, schema, and segment
+caches. PostgreSQL also invalidates saved plans that reference the relation, so
+a prepared hot-only statement replans before its first execution after another
+backend publishes cold segments.
 
 ---
 

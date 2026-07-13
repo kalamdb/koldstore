@@ -25,12 +25,16 @@ Options:
   --pg-versions LIST   Comma-separated PostgreSQL majors for local pgrx checks (default: 16)
   --skip-fmt           Skip cargo fmt --check
   --skip-lint          Skip cargo clippy
-  --skip-unit          Skip cargo nextest workspace tests
+  --skip-unit          Skip workspace unit tests
   --skip-pgrx          Skip pgrx feature compile/install checks
   --skip-e2e           Skip local pgrx-backed E2E matrix
   --skip-memory        Skip memory checks
   --skip-benchmarks    Skip benchmark runner
   -h, --help           Show this help text
+
+Environment:
+  KOLDSTORE_UNIT_RUNNER=nextest   Force cargo-nextest for unit tests on Darwin
+  KOLDSTORE_E2E_RUNNER=nextest    Force cargo-nextest for E2E (see scripts/run-pg-e2e.sh)
 
 Examples:
   scripts/run-all-tests.sh
@@ -214,9 +218,20 @@ if [[ "${SKIP_LINT}" -eq 0 ]]; then
 fi
 
 if [[ "${SKIP_UNIT}" -eq 0 ]]; then
-  ensure_cargo_nextest
-  step "cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison"
-  cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
+  # macOS: cargo-nextest can hang in dyld while listing many harnesses in parallel.
+  # Prefer serial cargo test there; keep nextest on Linux CI.
+  if [[ "$(uname -s)" == "Darwin" && "${KOLDSTORE_UNIT_RUNNER:-}" != "nextest" ]]; then
+    step "cargo test --workspace --no-default-features --jobs 1 (Darwin; set KOLDSTORE_UNIT_RUNNER=nextest to override)"
+    # --jobs 1 avoids macOS dyld_start hangs when cargo launches many heavy
+    # pg_koldstore test binaries in quick succession after a parallel build.
+    cargo test --workspace --no-default-features \
+      --exclude e2e --exclude examples --exclude storage-comparison \
+      --jobs 1
+  else
+    ensure_cargo_nextest
+    step "cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison"
+    cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
+  fi
 fi
 
 IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"

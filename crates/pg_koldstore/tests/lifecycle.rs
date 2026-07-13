@@ -214,6 +214,15 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
         .fields()
         .contains(&("function", "koldstore.manage_table")));
 
+    let flush_span = observability::KoldstoreSpan::FlushPhase {
+        phase: "stream_encode_publish",
+    };
+    assert_eq!(flush_span.name(), "koldstore.flush");
+    assert!(flush_span
+        .fields()
+        .contains(&("phase", "stream_encode_publish")));
+    let _entered = flush_span.tracing_span().entered();
+
     let counter = observability::ObjectStoreIoCounter::default();
     counter.record_read("manifest");
     counter.record_write("parquet");

@@ -2,12 +2,16 @@
 //!
 //! Owns PG-free object-path planning, Parquet encoding, durable object publish,
 //! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
+//!
+//! Durability invariant: in-memory Parquet is validated before publish;
+//! [`publish_immutable_object`] byte-verifies temp and final objects. Callers
+//! must not re-GET the final object solely for re-validation.
 
 use koldstore_manifest::{table_object_prefix, CatalogManifestSegmentRow};
 use koldstore_parquet::{segment_object_path, segment_parquet_file_name, validate_parquet_bytes};
 use koldstore_storage::{
     open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
-    ObjectStoreClient, StorageClient,
+    ObjectStoreClient,
 };
 
 use crate::segment_catalog::indexed_column_stats_json;
@@ -95,6 +99,10 @@ pub fn write_flush_segment_with_client(
     );
 
     let bytes = &chunk.parquet_bytes;
+    // Validate in-memory bytes before publish. `publish_immutable_object` then
+    // durably stages, copies to final, and byte-compares both objects — do not
+    // re-GET + re-validate here (that reread is redundant and expensive for
+    // large segments).
     let validation = validate_parquet_bytes(bytes)?;
     let expected_rows = u64::try_from(chunk_stats.row_count.max(0)).unwrap_or(0);
     if validation.row_count != expected_rows {
@@ -106,17 +114,13 @@ pub fn write_flush_segment_with_client(
 
     let published = publish_immutable_object(client, &temp_key, &object_path, bytes)
         .map_err(|error| error.to_string())?;
-    // Defense in depth: re-fetch final and confirm it is still a readable Parquet file.
-    let final_bytes = client
-        .get(&published.final_key)
-        .map_err(|error| error.to_string())?;
-    if final_bytes.as_slice() != bytes.as_slice() {
+    let expected_bytes = u64::try_from(bytes.len()).map_err(|error| error.to_string())?;
+    if published.byte_size != expected_bytes {
         return Err(format!(
-            "published object `{}` content diverged from encoded payload",
-            published.final_key
+            "published object `{}` size {} does not match encoded payload {}",
+            published.final_key, published.byte_size, expected_bytes
         ));
     }
-    validate_parquet_bytes(&final_bytes)?;
 
     let column_stats = indexed_column_stats_json(&chunk.column_stats);
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;

@@ -830,7 +830,30 @@ async fn assert_sample_rows_readable(client: &Client, pg_version: u16) -> Result
                   count(*),
                   count(DISTINCT (tenant_id, id)),
                   min(c_text),
-                  max(c_int8)
+                  max(c_int8),
+                  bool_and(
+                    c_uuid = md5(c_int8::text)::uuid
+                    AND c_jsonb = jsonb_build_object(
+                      'row', c_int8,
+                      'tenant', ((c_int8 - 1) % 10) + 1
+                    )
+                    AND c_timestamptz = timestamptz '2020-01-01'
+                      + (c_int8 || ' seconds')::interval
+                  ),
+                  bool_and(
+                    CASE
+                      WHEN c_int8 % 5 = 0 THEN
+                        c_text_null IS NULL
+                        AND c_uuid_null IS NULL
+                        AND c_jsonb_null IS NULL
+                        AND c_timestamptz_null IS NULL
+                      ELSE
+                        c_text_null IS NOT NULL
+                        AND c_uuid_null IS NOT NULL
+                        AND c_jsonb_null IS NOT NULL
+                        AND c_timestamptz_null IS NOT NULL
+                    END
+                  )
                 FROM {relation}
                 "#
             ),
@@ -842,6 +865,14 @@ async fn assert_sample_rows_readable(client: &Client, pg_version: u16) -> Result
     assert_eq!(summary.get::<_, i64>(1), TOTAL_ROWS);
     assert_eq!(summary.get::<_, String>(2), "text-1");
     assert_eq!(summary.get::<_, i64>(3), TOTAL_ROWS);
+    assert!(
+        summary.get::<_, bool>(4),
+        "uuid/jsonb/timestamptz values must round-trip through cold segments"
+    );
+    assert!(
+        summary.get::<_, bool>(5),
+        "nullable advanced-type columns must preserve NULL/non-NULL pattern"
+    );
     Ok(())
 }
 

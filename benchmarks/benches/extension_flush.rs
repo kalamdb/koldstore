@@ -3,7 +3,7 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use koldstore_catalog::HintKind;
-use koldstore_common::{CommitSeq, SeqId, StablePkHash, TableName};
+use koldstore_common::{ColumnId, CommitSeq, SeqId, StablePkHash, TableName};
 use koldstore_flush::job::{
     conditional_cleanup_allowed, plan_cold_pk_hint_updates, FlushBatchBuilder, FlushBatchInput,
     FlushExecutionConfig, FlushWatermark, HotRowCandidate,
@@ -47,7 +47,12 @@ fn bench_flush_metadata(c: &mut Criterion) {
         b.iter(|| black_box(&plan).footer_summary())
     });
     c.bench_function("flush_column_stats", |b| {
-        b.iter(|| black_box(&plan).column_stats(["created_day", "priority"]))
+        b.iter(|| {
+            black_box(&plan).column_stats([
+                (ColumnId::new(1).expect("valid column id"), "created_day"),
+                (ColumnId::new(2).expect("valid column id"), "priority"),
+            ])
+        })
     });
     c.bench_function("cold_pk_hint_update_generation", |b| {
         b.iter(|| plan_cold_pk_hint_updates(42, None, black_box(&plan), HintKind::Exact))

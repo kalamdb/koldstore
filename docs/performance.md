@@ -45,6 +45,14 @@ Use `EXPLAIN (ANALYZE)` on managed SELECTs and inspect KoldMergeScan properties
 (`Parquet segment` `read_ms`, row-group selection, bloom mode, PK probe) to
 separate footer-open cost from merge/SPI overhead.
 
+For hot-only scans, inspect `Execution Mode`, `Cold Decision`, `Catalog Probes`,
+and `KoldStore Setup`. A warmed pre-flush point lookup should report
+`hot-child`, `cached-no-published-segments`, and zero catalog probes.
+
+The storage comparison warms point queries 100 times and measures 1,000 queries
+by default. Override with `KOLDSTORE_STORAGE_QUERY_WARMUPS` and
+`KOLDSTORE_STORAGE_QUERY_LOOPS` for shorter smoke checks or longer release runs.
+
 ## Investigation Workflow
 
 Start with heap baseline comparison, then inspect PostgreSQL plans, row-group

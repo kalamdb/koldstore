@@ -14,9 +14,58 @@ const EXPLAIN_PROFILE_LIMIT: usize = 64;
 #[derive(Debug, Clone)]
 pub(super) struct ExplainScanMeta {
     pub(super) cold_profile: ColdReadProfile,
+    pub(super) setup_profile: ScanSetupProfile,
     pub(super) hot_plan_label: String,
     pub(super) mirror_tombstones: usize,
     pub(super) mirror_live_overrides: usize,
+}
+
+/// Executor setup facts rendered by `EXPLAIN ANALYZE`.
+#[derive(Debug, Clone)]
+pub(super) struct ScanSetupProfile {
+    pub(super) execution_mode: &'static str,
+    pub(super) cold_decision: &'static str,
+    pub(super) catalog_probes: Option<usize>,
+    pub(super) setup_ms: f64,
+}
+
+impl ScanSetupProfile {
+    pub(super) fn hot_child(cache_hit: bool, setup_ms: f64) -> Self {
+        Self {
+            execution_mode: "hot-child",
+            cold_decision: if cache_hit {
+                "cached-no-published-segments"
+            } else {
+                "catalog-no-published-segments"
+            },
+            catalog_probes: Some(usize::from(!cache_hit)),
+            setup_ms,
+        }
+    }
+
+    pub(super) fn merge(setup_ms: f64) -> Self {
+        Self {
+            execution_mode: "merge",
+            cold_decision: "published-segments",
+            // Cold setup spans several lazy caches and SPI helpers. Do not
+            // expose an invented count until those boundaries report it.
+            catalog_probes: None,
+            setup_ms,
+        }
+    }
+}
+
+pub(super) fn explain_scan_setup(es: *mut pg_sys::ExplainState, profile: &ScanSetupProfile) {
+    explain_property(es, "Execution Mode", profile.execution_mode);
+    explain_property(es, "Cold Decision", profile.cold_decision);
+    if let Some(catalog_probes) = profile.catalog_probes {
+        explain_property(es, "Catalog Probes", &catalog_probes.to_string());
+    }
+    explain_property(
+        es,
+        "KoldStore Setup",
+        &format!("{:.3} ms", profile.setup_ms),
+    );
 }
 
 thread_local! {
