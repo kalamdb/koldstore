@@ -61,6 +61,16 @@ jobs:
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
         run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
 
+      # `cargo pgrx test` installs into pg_config --sharedir/--pkglibdir. Apt packages
+      # put those under /usr, so the runner needs write access without --sudo (pgrx
+      # test has no install --sudo flag).
+      - name: Allow non-root extension install into system PostgreSQL
+        run: |
+          share_ext="$("${PGRX_PG_CONFIG}" --sharedir)/extension"
+          pkglib="$("${PGRX_PG_CONFIG}" --pkglibdir)"
+          sudo mkdir -p "${share_ext}" "${pkglib}"
+          sudo chmod a+w "${share_ext}" "${pkglib}"
+
       - name: Run #[pg_test] suite
         run: cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg${PG_VER}
         env:
