@@ -38,7 +38,8 @@ async fn baseline_equality_smoke_matches_after_shared_dml() -> Result<()> {
                   storage => $2,
                   hot_row_limit => 4,
                   min_flush_rows => 1,
-                  max_rows_per_file => 8
+                  max_rows_per_file => 8,
+                  migration_order_by => 'id'
                 )
                 "#,
                 &[&managed, &db.storage_name],

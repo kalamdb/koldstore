@@ -421,8 +421,11 @@ SELECT koldstore.recover_segments(
 ```
 
 Discovers orphan cold objects under the table prefix that are not referenced by
-the current manifest, plans recovery actions for them, and applies the plan
-unless `dry_run => true`. `dry_run` defaults to `false`.
+the current object-store manifest **or** by active `koldstore.cold_segments`
+rows, plans recovery actions for them, and applies the plan unless
+`dry_run => true`. `dry_run` defaults to `false`. Catalog-referenced segments
+are preserved so crash-before-manifest-publish recovery does not delete Parquet
+that merge scan still needs.
 
 **Returns:** `bigint` — number of recovery actions planned (orphan objects
 found). With `dry_run => true`, the count is still returned and no objects are

@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_current_type_is_rejected() {
+    fn supported_bytea_added_column_refreshes() {
         let active_primary_key = vec!["id".to_string()];
         let active_columns = active_columns();
         let current_columns = current_columns(&[
@@ -290,7 +290,7 @@ mod tests {
             ("raw", PgType::Bytea, "bytea"),
         ]);
 
-        let error = plan_schema_evolution(&SchemaEvolutionInput {
+        let action = plan_schema_evolution(&SchemaEvolutionInput {
             active_primary_key: &active_primary_key,
             active_columns: &active_columns,
             active_indexed_columns: &[],
@@ -298,14 +298,8 @@ mod tests {
             current_columns: &current_columns,
             current_indexed_columns: &[],
         })
-        .expect_err("unsupported types are unsafe");
+        .expect("bytea is an MVP-supported additive column");
 
-        assert_eq!(
-            error,
-            SchemaEvolutionError::UnsupportedColumnType {
-                column: "raw".to_string(),
-                type_name: "bytea".to_string(),
-            }
-        );
+        assert_eq!(action, SchemaEvolutionAction::Refresh);
     }
 }

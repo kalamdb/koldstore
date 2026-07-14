@@ -80,7 +80,7 @@ async fn unsupported_alter_table_type_records_error_job_without_pruning_hot_rows
 
         db.client
             .batch_execute(&format!(
-                "ALTER TABLE {} ADD COLUMN raw bytea",
+                "ALTER TABLE {} ADD COLUMN search tsvector",
                 table.relation
             ))
             .await?;
@@ -105,10 +105,14 @@ async fn unsupported_alter_table_type_records_error_job_without_pruning_hot_rows
         assert_eq!(job.get::<_, String>(1), "failed");
         let error_trace = job.get::<_, Option<String>>(2).unwrap_or_default();
         assert!(
-            error_trace.contains("unsupported type `bytea`"),
+            error_trace.contains("unsupported PostgreSQL type: tsvector"),
             "unexpected error_trace: {error_trace}"
         );
-        assert_eq!(common::row_count(&db.client, &table.relation).await?, 8);
+        // Managed-table SELECT goes through merge scan, which re-introspects the
+        // live catalog and cannot decode unsupported types. Prove hot rows were
+        // not pruned via the change-log mirror and cold-segment catalog instead.
+        let mirror = common::change_log_mirror_relation(&table.relation);
+        assert_eq!(common::row_count(&db.client, &mirror).await?, 8);
         assert_eq!(
             common::cold_segment_count(&db.client, &table.relation).await?,
             0

@@ -58,14 +58,22 @@ impl FlushPreparedContext {
     }
 }
 
-pub(super) fn prepare_flush_context(
+fn claim_flush_job(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
-) -> Result<FlushPreparedContext, String> {
+) -> Result<(uuid::Uuid, bool), String> {
     crate::sql::job_lock_pg::lock_table_job(table_oid)?;
     let (job_id, force) = ensure_flush_job(table_oid, force)?;
     mark_flush_job_running(job_id, table_oid)?;
     crate::failpoints::hit("after_claim")?;
+    Ok((job_id, force))
+}
+
+fn load_flush_prepared_context(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+    job_id: uuid::Uuid,
+) -> Result<FlushPreparedContext, String> {
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
     let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
@@ -373,28 +381,34 @@ pub(super) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<pgrx::Uuid, String> {
-    let mut ctx = prepare_flush_context(table_oid, force)?;
-    let job_uuid = pgrx::Uuid::from_bytes(*ctx.job_id.as_bytes());
-    match crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid) {
-        Ok(true) => {
-            ctx = prepare_flush_context(table_oid, force).inspect_err(|error| {
-                let _ = mark_flush_job_failed(ctx.job_id, table_oid, error);
-            })?;
-        }
-        Ok(false) => {}
-        Err(error) => {
-            mark_flush_job_failed(ctx.job_id, table_oid, &error)?;
-            return Ok(job_uuid);
-        }
-    }
-    let result = flush_prepared_table(table_oid, &ctx);
-    match result {
+    let (job_id, force) = claim_flush_job(table_oid, force)?;
+    let job_uuid = pgrx::Uuid::from_bytes(*job_id.as_bytes());
+    match flush_after_claim(table_oid, force, job_id) {
         Ok(()) => Ok(job_uuid),
         Err(error) => {
-            mark_flush_job_failed(ctx.job_id, table_oid, &error)?;
+            mark_flush_job_failed(job_id, table_oid, &error)?;
+            // Segments/manifest/hot cleanup may already have committed work in
+            // this transaction; drop stale merge-scan caches even on failure.
+            crate::catalog::cache::invalidate_table_globally(table_oid);
             Ok(job_uuid)
         }
     }
+}
+
+fn flush_after_claim(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+    job_id: uuid::Uuid,
+) -> Result<(), String> {
+    let mut ctx = load_flush_prepared_context(table_oid, force, job_id)?;
+    match crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid) {
+        Ok(true) => {
+            ctx = load_flush_prepared_context(table_oid, force, job_id)?;
+        }
+        Ok(false) => {}
+        Err(error) => return Err(error),
+    }
+    flush_prepared_table(table_oid, &ctx)
 }
 
 fn flush_prepared_table(
@@ -405,6 +419,7 @@ fn flush_prepared_table(
     crate::failpoints::hit("after_select_rows")?;
     if selection.stats.row_count == 0 {
         mark_flush_job_completed(ctx.job_id, table_oid, 0, 0, 0)?;
+        crate::catalog::cache::invalidate_table_globally(table_oid);
         return Ok(());
     }
 
