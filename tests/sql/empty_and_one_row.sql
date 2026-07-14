@@ -10,7 +10,8 @@ SELECT koldstore.manage_table(
   storage => 'sqlreg_fs',
   hot_row_limit => 10,
   min_flush_rows => 1,
-  max_rows_per_file => 10
+  max_rows_per_file => 10,
+  migration_order_by => 'id'
 );
 
 SELECT count(*) AS empty_count FROM sqlreg.empty_t;
@@ -29,7 +30,8 @@ SELECT koldstore.manage_table(
   storage => 'sqlreg_fs',
   hot_row_limit => 1,
   min_flush_rows => 1,
-  max_rows_per_file => 1
+  max_rows_per_file => 1,
+  migration_order_by => 'id'
 );
 
 SELECT koldstore.flush_table('sqlreg.one_row'::regclass);

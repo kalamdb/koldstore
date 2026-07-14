@@ -79,7 +79,9 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
     };
     use koldstore_manifest::{
         relative_manifest_path, table_object_prefix, try_load_manifest_with_client,
+        CatalogManifestSegmentRow,
     };
+    use pgrx::datum::DatumWithOid;
 
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
@@ -101,6 +103,19 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
                 .map(|segment| format!("{prefix}/{}", segment.path.trim_start_matches('/'))),
         );
     }
+    // Merge scan reads catalog `cold_segments`, not the object-store manifest.
+    // Crash before publish can leave active catalog rows whose Parquet exists on
+    // disk but is absent from manifest.json — those must not be quarantined.
+    let catalog_segments =
+        koldstore_catalog::queries::plan_active_cold_segments_for_manifest_json()
+            .map_err(|error| error.to_string())?;
+    let catalog_json =
+        crate::spi::select_one::<String>(&catalog_segments, &[DatumWithOid::from(table_oid)])
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| "[]".to_string());
+    let catalog_rows: Vec<CatalogManifestSegmentRow> =
+        serde_json::from_str(&catalog_json).map_err(|error| error.to_string())?;
+    referenced.extend(catalog_rows.into_iter().map(|row| row.object_path));
     let objects = discover_orphan_objects(&client, &prefix, &referenced)?;
     let recovery = plan_recovery_actions(objects);
     let count = i64::try_from(recovery.actions.len()).map_err(|error| error.to_string())?;

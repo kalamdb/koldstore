@@ -15,7 +15,8 @@ SELECT koldstore.manage_table(
   storage => 'sqlreg_fs',
   hot_row_limit => 5,
   min_flush_rows => 1,
-  max_rows_per_file => 10
+  max_rows_per_file => 10,
+  migration_order_by => 'id'
 );
 
 CREATE TEMP TABLE before_flush AS

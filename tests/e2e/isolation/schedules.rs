@@ -170,6 +170,10 @@ async fn concurrent_flush_fencing() -> Result<()> {
 
         let a = connect_peer(&db).await?;
         let b = connect_peer(&db).await?;
+        a.batch_execute("SET koldstore.min_max_rows_per_file = 1;")
+            .await?;
+        b.batch_execute("SET koldstore.min_max_rows_per_file = 1;")
+            .await?;
         let rel_a = relation.clone();
         let rel_b = relation.clone();
         let ha = tokio::spawn(async move {
@@ -191,8 +195,21 @@ async fn concurrent_flush_fencing() -> Result<()> {
 
         let ra = ha.await?;
         let rb = hb.await?;
-        // Both must complete without backend death; job lock serializes them.
-        assert!(ra.is_ok() || rb.is_ok());
+        // Blocking table job lock serializes concurrent flush_table callers.
+        match (&ra, &rb) {
+            (Ok(_), _) | (_, Ok(_)) => {}
+            (Err(a), Err(b)) => {
+                let detail_a = a
+                    .as_db_error()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| a.to_string());
+                let detail_b = b
+                    .as_db_error()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| b.to_string());
+                anyhow::bail!("both concurrent flushes failed: {detail_a}; {detail_b}");
+            }
+        }
         common::assert_no_active_jobs(&db.client, &relation).await?;
         common::assert_pk_unique(&db.client, &relation, &["id"]).await?;
     }
@@ -255,6 +272,8 @@ async fn txn_rollback_mirror() -> Result<()> {
         let relation = seed_managed_items(&db, "txn_items", 20).await?;
         let baseline = mirror_baseline(&db.client, &db.schema, &relation).await?;
         let before = common::relation_row_count(&db.client, &relation).await?;
+        let mirror = common::change_log_mirror_relation(&relation);
+        let mirror_before = common::relation_row_count(&db.client, &mirror).await?;
 
         db.client.batch_execute("BEGIN;").await?;
         db.client
@@ -273,19 +292,21 @@ async fn txn_rollback_mirror() -> Result<()> {
         assert_eq!(before, after);
         assert_matches_baseline(&db.client, &baseline, &relation).await?;
 
-        let mirror = format!(
-            "koldstore.{}__cl",
-            relation.rsplit('.').next().unwrap_or(&relation)
+        // `__cl` mirrors PK/seq/op columns only — assert rollback left mirror unchanged.
+        let mirror_after = common::relation_row_count(&db.client, &mirror).await?;
+        assert_eq!(
+            mirror_before, mirror_after,
+            "rolled-back mirror effects must not persist"
         );
-        let rolled: i64 = db
+        let ghost: i64 = db
             .client
             .query_one(
-                &format!("SELECT count(*)::bigint FROM {mirror} WHERE title = 'rolled-back' OR title = 'ghost'"),
+                &format!("SELECT count(*)::bigint FROM {mirror} WHERE id = 9001"),
                 &[],
             )
             .await?
             .get(0);
-        assert_eq!(rolled, 0, "rolled-back mirror effects must not persist");
+        assert_eq!(ghost, 0, "rolled-back insert must not persist in mirror");
     }
     Ok(())
 }

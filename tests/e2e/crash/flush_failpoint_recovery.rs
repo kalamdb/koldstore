@@ -58,7 +58,8 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
               storage => $2,
               hot_row_limit => 6,
               min_flush_rows => 1,
-              max_rows_per_file => 12
+              max_rows_per_file => 12,
+              migration_order_by => 'id'
             )
             "#,
             &[&table.relation, &db.storage_name],

@@ -71,7 +71,8 @@ pub async fn seed_managed_items(db: &TestDb, table: &str, rows: i64) -> Result<S
               storage => $2,
               hot_row_limit => 8,
               min_flush_rows => 1,
-              max_rows_per_file => 16
+              max_rows_per_file => 16,
+              migration_order_by => 'id'
             )
             "#,
             &[&managed.relation, &db.storage_name],

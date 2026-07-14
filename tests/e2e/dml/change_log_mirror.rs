@@ -28,7 +28,8 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
                   table_name     => $1::text::regclass,
                   storage        => $2,
                   hot_row_limit  => 1000,
-                  min_flush_rows => 1
+                  min_flush_rows => 1,
+                  migration_order_by => 'id'
                 )
                 "#,
                 &[&relation, &db.storage_name],

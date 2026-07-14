@@ -296,7 +296,7 @@ async fn insert_late_arrivals(
             SELECT
               '{tenant}',
               '{device}',
-              900_000_000 + gs,
+              900000000 + gs,
               timestamptz '2025-12-01' + ((gs % 72) || ' hours')::interval,
               41.0, -73.5, 55.0, 12.0, 88.0, 'late_upload'
             FROM generate_series(1, {count}) AS gs;
