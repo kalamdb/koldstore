@@ -69,12 +69,17 @@ run_case() {
 
   mkdir -p "$STORAGE_ROOT" "$EXPECTED_DIR"
 
+  # setup.sql and the case must share one psql session so session GUCs such as
+  # koldstore.min_max_rows_per_file survive into manage_table / flush_table.
+  # Suppress setup chatter so expected/*.out stay case-focused.
   {
     "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
-      -v "STORAGE_ROOT=${STORAGE_ROOT}" \
-      -f "${SQL_DIR}/setup.sql"
-    "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
-      -f "$sql_file"
+      -v "STORAGE_ROOT=${STORAGE_ROOT}" <<EOF
+\\o /dev/null
+\\i ${SQL_DIR}/setup.sql
+\\o
+\\i ${sql_file}
+EOF
   } 2>&1 | normalize_output >"$actual"
 
   if [[ "${UPDATE_EXPECTED}" == "1" || "${UPDATE_EXPECTED}" == "true" ]]; then
