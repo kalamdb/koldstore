@@ -24,6 +24,10 @@ pub const MAX_RUNNING_JOBS_GUC: &str = "koldstore.max_running_jobs";
 pub const LOG_LEVEL_GUC: &str = "koldstore.log_level";
 /// GUC that sets the minimum allowed `max_rows_per_file` for managed tables.
 pub const MIN_MAX_ROWS_PER_FILE_GUC: &str = "koldstore.min_max_rows_per_file";
+/// Test-only failpoint arming GUC (empty = disabled).
+pub const FAILPOINT_GUC: &str = "koldstore.failpoint";
+/// Default failpoint value (disabled).
+pub const DEFAULT_FAILPOINT: &str = "";
 
 /// Minimum accepted integer setting value for `min_max_rows_per_file`.
 pub const MIN_MIN_MAX_ROWS_PER_FILE: i32 = 1;

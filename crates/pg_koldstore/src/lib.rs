@@ -1,6 +1,8 @@
 //! Thin PostgreSQL integration layer for pg-koldstore.
 
 pub mod catalog;
+/// Test-only flush failpoints (GUC-armed; inert when unset).
+pub mod failpoints;
 pub mod guc;
 pub mod hooks;
 pub mod memory;
@@ -11,6 +13,22 @@ pub mod row_counter_cache;
 pub mod settings;
 pub mod spi;
 pub mod sql;
+
+#[cfg(any(test, feature = "pg_test"))]
+mod pg_tests;
+
+/// Required by `cargo pgrx test` invocations. Must remain at the crate root.
+#[cfg(any(test, feature = "pg_test"))]
+pub mod pg_test {
+    /// One-off initialization when the pgrx test framework starts.
+    pub fn setup(_options: Vec<&str>) {}
+
+    /// Extra `postgresql.conf` settings required for in-server tests.
+    #[must_use]
+    pub fn postgresql_conf_options() -> Vec<&'static str> {
+        vec![]
+    }
+}
 
 /// Extension version exposed by SQL.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -43,6 +61,7 @@ pub fn koldstore_version() -> &'static str {
 pub extern "C" fn _PG_init() {
     observability::init_tracing();
     guc::define_gucs();
+    catalog::cache::register_invalidation_callback();
     hooks::register_hooks();
     row_counter_cache::register_xact_callbacks();
 }

@@ -3,8 +3,8 @@ mod common;
 
 use anyhow::Result;
 use koldstore_common::{ScopeKey, SeqId};
-use pg_koldstore::merge_scan::exec::{begin_merge_scan_with_plan, ColdAvailability};
-use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
+use koldstore::merge_scan::exec::{begin_merge_scan_with_plan, ColdAvailability};
+use koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 
 #[test]
 fn user_scope_cold_pruning_filters_segments_before_stream_open() {

@@ -24,15 +24,15 @@ fn user_scope_matrix_contract_covers_missing_scope_and_cross_scope_denial() {
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
     let missing =
-        pg_koldstore::hooks::planner::plan_scope_key_for_read(TableKind::User, None).unwrap_err();
+        koldstore::hooks::planner::plan_scope_key_for_read(TableKind::User, None).unwrap_err();
     assert_eq!(missing.to_string(), "koldstore.user_id is not set");
 
     let planned =
-        pg_koldstore::hooks::planner::plan_scope_key_for_read(TableKind::User, Some("user-a"))
+        koldstore::hooks::planner::plan_scope_key_for_read(TableKind::User, Some("user-a"))
             .unwrap()
             .unwrap();
     let row_scope = koldstore_common::ScopeKey::new("user-b").unwrap();
-    let denied = pg_koldstore::hooks::executor::enforce_dml_scope(
+    let denied = koldstore::hooks::executor::enforce_dml_scope(
         TableKind::User,
         Some(planned.as_str()),
         Some(&row_scope),

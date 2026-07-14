@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="560"
+     viewBox="0 0 1000 560" role="img">
+  <rect width="1000" height="560" fill="#f8fafc"/>
+  <rect x="0" y="0" width="1000" height="84" fill="#e2e8f0"/>
+  <text x="500.0" y="36" text-anchor="middle" fill="#0f172a"
+        font-size="26" font-weight="700" font-family="Helvetica, Arial, sans-serif">HISTORY PK lookup latency (proves hot / hot+cold path)</text>
+  <text x="500.0" y="62" text-anchor="middle" fill="#475569"
+        font-size="14" font-family="Helvetica, Arial, sans-serif">TPROC-C · 2 WH · 4 VU · 2 min · HISTORY-only manage · 200 PK read iters · lower is faster</text>
+  <text x="24" y="120" fill="#64748b" font-size="12"
+        font-family="Helvetica, Arial, sans-serif">ms total</text>
+  <line x1="90" y1="470.0" x2="960" y2="470.0" stroke="#cbd5e1" stroke-width="1"/><text x="78" y="474.0" text-anchor="end" fill="#475569" font-size="13" font-family="Helvetica, Arial, sans-serif">0.00</text><line x1="90" y1="377.5" x2="960" y2="377.5" stroke="#cbd5e1" stroke-width="1"/><text x="78" y="381.5" text-anchor="end" fill="#475569" font-size="13" font-family="Helvetica, Arial, sans-serif">81.07</text><line x1="90" y1="285.0" x2="960" y2="285.0" stroke="#cbd5e1" stroke-width="1"/><text x="78" y="289.0" text-anchor="end" fill="#475569" font-size="13" font-family="Helvetica, Arial, sans-serif">162</text><line x1="90" y1="192.5" x2="960" y2="192.5" stroke="#cbd5e1" stroke-width="1"/><text x="78" y="196.5" text-anchor="end" fill="#475569" font-size="13" font-family="Helvetica, Arial, sans-serif">243</text><line x1="90" y1="100.0" x2="960" y2="100.0" stroke="#cbd5e1" stroke-width="1"/><text x="78" y="104.0" text-anchor="end" fill="#475569" font-size="13" font-family="Helvetica, Arial, sans-serif">324</text>
+  <line x1="90" y1="100" x2="90" y2="470" stroke="#334155" stroke-width="2"/>
+  <line x1="90" y1="470" x2="960" y2="470"
+        stroke="#334155" stroke-width="2"/>
+  
+  <rect x="90.0" y="453.0" width="266.0" height="17.0"
+        rx="8" fill="#2563eb" stroke="#0f172a" stroke-width="1"/>
+  <text x="223.0" y="441.0" text-anchor="middle"
+        fill="#0f172a" font-size="20" font-weight="700"
+        font-family="Helvetica, Arial, sans-serif">14.93</text>
+  <text x="223.0" y="524" text-anchor="middle"
+        fill="#0f172a" font-size="16" font-weight="600"
+        font-family="Helvetica, Arial, sans-serif">Baseline</text>
+
+  <rect x="392.0" y="375.7" width="266.0" height="94.3"
+        rx="8" fill="#16a34a" stroke="#0f172a" stroke-width="1"/>
+  <text x="525.0" y="363.7" text-anchor="middle"
+        fill="#0f172a" font-size="20" font-weight="700"
+        font-family="Helvetica, Arial, sans-serif">82.69</text>
+  <text x="525.0" y="524" text-anchor="middle"
+        fill="#0f172a" font-size="16" font-weight="600"
+        font-family="Helvetica, Arial, sans-serif">Hot only</text>
+
+  <rect x="694.0" y="100.0" width="266.0" height="370.0"
+        rx="8" fill="#ca8a04" stroke="#0f172a" stroke-width="1"/>
+  <text x="827.0" y="128.0" text-anchor="middle"
+        fill="#ffffff" font-size="20" font-weight="700"
+        font-family="Helvetica, Arial, sans-serif">324</text>
+  <text x="827.0" y="524" text-anchor="middle"
+        fill="#0f172a" font-size="16" font-weight="600"
+        font-family="Helvetica, Arial, sans-serif">Hot + cold</text>
+
+</svg>

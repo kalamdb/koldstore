@@ -133,6 +133,18 @@ path = "snowflake_concurrency.rs"
 name = "full_lifecycle"
 path = "full_lifecycle.rs"
 
+[[test]]
+name = "baseline_equality_smoke"
+path = "equality/baseline_equality_smoke.rs"
+
+[[test]]
+name = "isolation_schedules"
+path = "isolation/schedules.rs"
+
+[[test]]
+name = "flush_failpoint_recovery"
+path = "crash/flush_failpoint_recovery.rs"
+
 [dev-dependencies]
 anyhow.workspace = true
 bytes.workspace = true
@@ -146,7 +158,7 @@ koldstore-manifest.workspace = true
 koldstore-parquet.workspace = true
 koldstore-storage.workspace = true
 parquet.workspace = true
-pg_koldstore = { path = "../../crates/pg_koldstore", default-features = false }
+koldstore = { path = "../../crates/pg_koldstore", package = "pg_koldstore", default-features = false }
 serde_json.workspace = true
 serde.workspace = true
 tokio.workspace = true

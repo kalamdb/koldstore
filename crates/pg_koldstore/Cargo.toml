@@ -9,17 +9,24 @@ repository.workspace = true
 ignored = ["cc"]
 
 [lib]
+name = "koldstore"
 crate-type = ["lib", "cdylib"]
 
 [features]
 default = []
 pg = ["dep:pgrx"]
-pg15 = ["pg", "pgrx/pg15"]
-pg16 = ["pg", "pgrx/pg16"]
-pg17 = ["pg", "pgrx/pg17"]
-pg18 = ["pg", "pgrx/pg18"]
+# `pgrx-tests` stays optional so workspace `cargo nextest --no-default-features`
+# does not build `pgrx-pg-sys` without a `pgXX` feature.
+pg15 = ["pg", "pgrx/pg15", "dep:pgrx-tests", "pgrx-tests/pg15"]
+pg16 = ["pg", "pgrx/pg16", "dep:pgrx-tests", "pgrx-tests/pg16"]
+pg17 = ["pg", "pgrx/pg17", "dep:pgrx-tests", "pgrx-tests/pg17"]
+pg18 = ["pg", "pgrx/pg18", "dep:pgrx-tests", "pgrx-tests/pg18"]
 cshim = ["dep:pgrx", "pgrx/cshim"]
+# Enabled by `cargo pgrx test`. Distinct from the `#[pg_test]` attribute macro.
+# Also used to shim Snowflake worker id for in-server tests (see sql/session.rs).
 pg_test = []
+# Test-only flush failpoints for crash-recovery suites. No-op in release unless enabled.
+test-failpoints = []
 
 [dependencies]
 arrow-array.workspace = true
@@ -37,6 +44,7 @@ koldstore-migrate.workspace = true
 koldstore-schema.workspace = true
 koldstore-storage.workspace = true
 pgrx = { workspace = true, optional = true }
+pgrx-tests = { workspace = true, optional = true }
 hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -11,7 +11,7 @@ use koldstore_flush::job::{
 use koldstore_merge::events::plan_mirror_changes_since;
 use koldstore_migrate::QualifiedTableName;
 use koldstore_mirror::{mirror_relation_for_source, mirror_to_sql, plan_mirror_stats};
-use pg_koldstore::spi::prepared_plan_key;
+use koldstore::spi::prepared_plan_key;
 use serde_json::json;
 
 fn bench_flush_candidate_selection(c: &mut Criterion) {

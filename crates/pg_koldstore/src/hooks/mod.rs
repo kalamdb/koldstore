@@ -19,5 +19,6 @@ pub const fn registered_hook_names() -> &'static [&'static str] {
         "ExecutorStart",
         "ProcessUtility",
         "XactCallback",
+        "RelcacheCallback",
     ]
 }

@@ -42,9 +42,9 @@ whether a flush writes cold segments.
 ## Smoke-test against local pgrx
 
 ```bash
-scripts/run-test-with-cron.sh
-scripts/run-test-with-cron.sh --pg-version 16
-scripts/run-test-with-cron.sh --skip-prepare   # reuse an already-prepared DB
+scripts/readiness/run-test-with-cron.sh
+scripts/readiness/run-test-with-cron.sh --pg-version 16
+scripts/readiness/run-test-with-cron.sh --skip-prepare   # reuse an already-prepared DB
 ```
 
 This is intentionally outside the default E2E/CI loop because `pg_cron` needs

@@ -26,7 +26,7 @@ koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-schema.workspace = true
 koldstore-storage.workspace = true
-pg_koldstore = { path = "../crates/pg_koldstore", default-features = false }
+koldstore = { path = "../crates/pg_koldstore", package = "pg_koldstore", default-features = false }
 
 [[bench]]
 name = "extension_manifest"

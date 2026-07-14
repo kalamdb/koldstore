@@ -3,7 +3,7 @@
 ## Benchmarks
 
 Storage-comparison results, methodology, and throughput trade-offs live in
-[benchmarks.md](benchmarks.md). Re-run with
+[benchmarks](benchmarks/README.md). Re-run with
 `scripts/run-storage-comparison.sh`.
 
 Additional suite:

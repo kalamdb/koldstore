@@ -5,11 +5,56 @@
 //! PG-free decode + in-process cache shape used by `pg_koldstore`.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 
 use koldstore_common::TableName;
 use koldstore_schema::MirrorInitializationState;
 use serde::Deserialize;
+
+/// Cache that distinguishes an unqueried key from a queried-but-absent value.
+///
+/// Catalog lookups may legitimately return no row. Keeping that absence avoids
+/// repeating the same lookup while still letting invalidation remove the entry.
+#[derive(Debug)]
+pub struct OptionalLookupCache<K, V> {
+    entries: HashMap<K, Option<V>>,
+}
+
+impl<K, V> Default for OptionalLookupCache<K, V> {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl<K, V> OptionalLookupCache<K, V>
+where
+    K: Eq + Hash,
+    V: Clone,
+{
+    /// Returns `None` for a cache miss and `Some(None)` for cached absence.
+    #[must_use]
+    pub fn get(&self, key: &K) -> Option<Option<V>> {
+        self.entries.get(key).cloned()
+    }
+
+    /// Stores either a present value or a successful absent lookup.
+    pub fn insert(&mut self, key: K, value: Option<V>) {
+        self.entries.insert(key, value);
+    }
+
+    /// Retains entries matching `keep`.
+    pub fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        self.entries.retain(|key, _| keep(key));
+    }
+
+    /// Clears every cached lookup.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
 
 /// Stable table-shape metadata for one managed table.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,5 +189,26 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
             primary_key_shape_hash: hasher.finish(),
             scope_column,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OptionalLookupCache;
+
+    #[test]
+    fn optional_lookup_cache_distinguishes_miss_from_cached_absence() {
+        let mut cache = OptionalLookupCache::<u32, String>::default();
+
+        assert_eq!(cache.get(&42), None);
+
+        cache.insert(42, None);
+        assert_eq!(cache.get(&42), Some(None));
+
+        cache.insert(42, Some("manifest".to_string()));
+        assert_eq!(cache.get(&42), Some(Some("manifest".to_string())));
+
+        cache.retain(|key| *key != 42);
+        assert_eq!(cache.get(&42), None);
     }
 }

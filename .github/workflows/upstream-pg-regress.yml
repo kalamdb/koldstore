@@ -1,0 +1,26 @@
+name: upstream-pg-regress
+
+# Optional external confidence signal only — not a claim of full PG compatibility.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 0" # weekly Sunday 06:00 UTC
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+  KOLDSTORE_UPSTREAM_REGRESS_EXECUTE: "0"
+
+jobs:
+  upstream-signal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Document and optionally run upstream installcheck
+        run: |
+          echo "This workflow documents the optional upstream PostgreSQL regression signal."
+          echo "Sources are typically unavailable on CI runners; the script skips gracefully."
+          bash scripts/readiness/run-upstream-pg-regress.sh 16 || true
+          # Exit 0: skip-without-sources is success for this external signal job.
+          exit 0

@@ -40,6 +40,26 @@ cargo nextest run --workspace --no-default-features \
   --exclude storage-comparison
 ```
 
+Run in-server pgrx tests (`#[pg_test]` inside `crates/pg_koldstore/src/pg_tests/`):
+
+```bash
+cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
+```
+
+The Cargo feature `pg_test` is the standard pgrx switch enabled by `cargo pgrx test`. It is distinct from the `#[pg_test]` attribute macro. Keep the feature name; do not rename it.
+
+The extension crate's library target is named `koldstore` (see `[lib] name` in `crates/pg_koldstore/Cargo.toml`) so `cargo pgrx test` issues `CREATE EXTENSION koldstore`. Dependents import it as `koldstore` (`package = "pg_koldstore"`).
+
+PostgreSQL-free shell/contract tests for the extension adapter live in `crates/pg_koldstore-shell-tests` so they do not break `cargo pgrx test` linking.
+
+Run the full in-server matrix:
+
+```bash
+for v in 15 16 17 18; do
+  cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg$v
+done
+```
+
 Run the extension E2E tests against one PostgreSQL version:
 
 ```bash
@@ -52,7 +72,19 @@ Run the full PostgreSQL 15–18 matrix when changing extension integration, SQL,
 scripts/run-pgrx-matrix.sh
 ```
 
-Do not use `cargo pgrx test` for the current E2E suite. The repository scripts install the extension and run the tests serially with the expected configuration.
+Additional KoldStore-specific layers (SQL regression, isolation, crash recovery, fuzz, integrity, stress):
+
+```bash
+scripts/run-sql-regression.sh 16
+scripts/readiness/run-isolation.sh 16
+scripts/readiness/run-crash-recovery.sh 16
+scripts/readiness/run-sqlsmith.sh 16          # KOLDSTORE_SQLSMITH_SECONDS=…
+scripts/readiness/run-integrity-checks.sh 16  # pg_amcheck + KoldStore checks
+scripts/readiness/run-hammerdb.sh 16          # weekly/RC; skips if HammerDB missing
+scripts/readiness/run-readiness-report.sh 16
+```
+
+Do not use `cargo pgrx test` as a substitute for the external E2E suite. E2E still covers multi-session, object-store, and restart scenarios via `scripts/run-pg-e2e.sh`.
 
 For MinIO-backed tests, see [docs/development.md](docs/development.md#minio--s3-backed-e2e).
 

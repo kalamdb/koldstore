@@ -32,6 +32,6 @@
   <text x="1030" y="400" text-anchor="middle" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="48" font-weight="700">95%</text>
   <text x="1030" y="450" text-anchor="middle" fill="#86efac" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="22">faster</text>
 
-  <text x="640" y="560" text-anchor="middle" fill="#64748b" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="16">Cold rows live in open Parquet on storage you control. Full methodology and throughput trade-offs: docs/benchmarks.md</text>
+  <text x="640" y="560" text-anchor="middle" fill="#64748b" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="16">Cold rows live in open Parquet on storage you control. Full methodology and throughput trade-offs: docs/benchmarks/</text>
   <text x="640" y="595" text-anchor="middle" fill="#475569" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="14">github.com/kalamdb/koldstore</text>
 </svg>

@@ -10,6 +10,51 @@ cargo nextest run --workspace --no-default-features --exclude e2e --exclude exam
 
 `e2e`, `examples`, and `storage-comparison` need a running pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh`, and `scripts/run-storage-comparison.sh`.
 
+## Production-readiness test layers
+
+```bash
+# Unit
+cargo nextest run --workspace --no-default-features \
+  --exclude e2e --exclude examples --exclude storage-comparison
+
+# In-server pgrx #[pg_test]
+cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
+
+# KoldStore SQL regression (normalization rules in tests/sql/README.md)
+scripts/run-sql-regression.sh 16
+
+# E2E
+scripts/run-pg-e2e.sh 16
+
+# Isolation (two-session schedules; no sleep-based races)
+scripts/readiness/run-isolation.sh 16
+
+# Crash / failpoint recovery (GUC koldstore.failpoint; see failpoints.rs)
+scripts/readiness/run-crash-recovery.sh 16
+# Full matrix: KOLDSTORE_CRASH_FULL_MATRIX=1 scripts/readiness/run-crash-recovery.sh 16
+
+# SQLsmith (skips if not installed). CI default 30s; nightly may use 600.
+KOLDSTORE_SQLSMITH_SECONDS=30 scripts/readiness/run-sqlsmith.sh 16
+
+# Integrity (pg_amcheck if available + KS catalog queries)
+scripts/readiness/run-integrity-checks.sh 16
+
+# Optional upstream PG installcheck — external confidence signal only
+scripts/readiness/run-upstream-pg-regress.sh 16
+
+# HammerDB (skips if not installed; manage append-heavy tables only)
+scripts/readiness/run-hammerdb.sh 16
+
+# Readiness report (never claims "production safe")
+scripts/readiness/run-readiness-report.sh 16
+```
+
+Nightly workflow: `.github/workflows/nightly-readiness.yml` (isolation, crash, SQLsmith, integrity).
+Weekly HammerDB: `.github/workflows/weekly-hammerdb.yml`.
+Script layout: `scripts/README.md` (everyday runners at top level; readiness/CI/build in subfolders).
+
+PR / main CI: `.github/workflows/ci-tests.yml` runs fmt/clippy/unit, `cargo pgrx test`, E2E (including isolation/crash harnesses), examples, storage comparison, and SQL regression across PostgreSQL 15–18.
+
 The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, `pg17`, or `pg18` feature when `cargo pgrx` is configured.
 
 ## pgrx Setup
@@ -20,7 +65,7 @@ cargo pgrx init
 scripts/run-pg-e2e.sh
 ```
 
-The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. Avoid direct `cargo pgrx test` for now because normal Rust integration tests link as native pg-feature test binaries and can fail on unresolved PostgreSQL server symbols.
+The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. Prefer `scripts/run-pg-e2e.sh` for multi-process E2E; use `cargo pgrx test` for in-server `#[pg_test]` modules under `crates/pg_koldstore/src/pg_tests/`.
 
 ## Local pgrx PostgreSQL Matrix
 
@@ -87,9 +132,9 @@ To verify that recipe against local pgrx PostgreSQL (builds/installs `pg_cron`
 if needed, waits for a one-minute cron tick):
 
 ```bash
-scripts/run-test-with-cron.sh
-scripts/run-test-with-cron.sh --pg-version 16
-scripts/run-test-with-cron.sh --skip-prepare   # reuse an already-prepared DB
+scripts/readiness/run-test-with-cron.sh
+scripts/readiness/run-test-with-cron.sh --pg-version 16
+scripts/readiness/run-test-with-cron.sh --skip-prepare   # reuse an already-prepared DB
 ```
 
 This is intentionally outside the default E2E/CI loop because `pg_cron` needs

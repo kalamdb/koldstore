@@ -6,7 +6,7 @@ use std::sync::Arc;
 #[cfg(feature = "pg")]
 use koldstore_catalog::{
     decode::InSyncManifestScanContext, decode_managed_table_snapshot_str, ManagedTableSnapshot,
-    ManagedTableSnapshotCache,
+    ManagedTableSnapshotCache, OptionalLookupCache,
 };
 #[cfg(feature = "pg")]
 use koldstore_merge::scan::plan::SegmentStatsHint;
@@ -19,14 +19,14 @@ use crate::spi::{
 #[cfg(feature = "pg")]
 type SegmentStatsCacheKey = (u32, Vec<String>);
 #[cfg(feature = "pg")]
-type SegmentStatsCache = std::collections::HashMap<SegmentStatsCacheKey, Arc<CachedSegmentStats>>;
+type SegmentStatsCache = OptionalLookupCache<SegmentStatsCacheKey, Arc<CachedSegmentStats>>;
 
 #[cfg(feature = "pg")]
 thread_local! {
     static MANAGED_TABLE_CACHE: std::cell::RefCell<ManagedTableSnapshotCache> =
         std::cell::RefCell::new(ManagedTableSnapshotCache::default());
     static SEGMENT_STATS_CACHE: std::cell::RefCell<SegmentStatsCache> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+        std::cell::RefCell::new(OptionalLookupCache::default());
     static MIGRATION_CATALOG_CACHE: std::cell::RefCell<
         std::collections::HashMap<u32, Arc<koldstore_migrate::ExistingTableCatalog>>
     > = std::cell::RefCell::new(std::collections::HashMap::new());
@@ -52,6 +52,43 @@ pub struct CachedSegmentStats {
     pub segments: Vec<SegmentStatsHint>,
 }
 
+/// Registers the relcache callback that keeps backend-local KoldStore caches coherent.
+#[cfg(feature = "pg")]
+pub fn register_invalidation_callback() {
+    unsafe {
+        pgrx::pg_sys::CacheRegisterRelcacheCallback(
+            Some(relcache_invalidation_callback),
+            pgrx::pg_sys::Datum::from(0usize),
+        );
+    }
+}
+
+/// Invalidates one table locally and broadcasts a relcache invalidation to other backends.
+///
+/// Flush completion uses this after publishing a new manifest so backends that
+/// cached the pre-flush absence reload cold-segment metadata before their next
+/// managed-table plan or execution.
+#[cfg(feature = "pg")]
+pub fn invalidate_table_globally(table_oid: pgrx::pg_sys::Oid) {
+    invalidate_table(table_oid);
+    unsafe {
+        pgrx::pg_sys::CacheInvalidateRelcacheByRelid(table_oid);
+    }
+}
+
+#[cfg(feature = "pg")]
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn relcache_invalidation_callback(
+    _arg: pgrx::pg_sys::Datum,
+    table_oid: pgrx::pg_sys::Oid,
+) {
+    if table_oid == pgrx::pg_sys::InvalidOid {
+        invalidate_all();
+    } else {
+        invalidate_table(table_oid);
+    }
+}
+
 /// Invalidates one managed-table snapshot and segment-stats entry in this backend.
 #[cfg(feature = "pg")]
 pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
@@ -62,7 +99,7 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
     SEGMENT_STATS_CACHE.with(|cache| {
         cache
             .borrow_mut()
-            .retain(|(table_oid, _), _| *table_oid != key);
+            .retain(|(table_oid, _)| *table_oid != key);
     });
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().remove(&key);
@@ -137,6 +174,9 @@ pub fn managed_table_snapshot(
 /// Returns `Ok(None)` when no published manifest exists (hot-only / pre-flush).
 /// Hot DML that dirties `sync_state` to `pending_write` still returns the last
 /// published cold segments.
+/// Both present and absent lookups are cached. Flush completion broadcasts a
+/// relcache invalidation for the managed table before later scans can reuse the
+/// entry.
 ///
 /// # Errors
 ///
@@ -151,19 +191,15 @@ pub fn cached_manifest_segment_stats(
     columns.sort();
     columns.dedup();
     let cache_key = (key, columns);
-    if let Some(cached) = SEGMENT_STATS_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned())
-    {
-        return Ok(Some(cached));
+    if let Some(cached) = SEGMENT_STATS_CACHE.with(|cache| cache.borrow().get(&cache_key)) {
+        return Ok(cached);
     }
 
-    let Some(loaded) = load_manifest_segment_stats(table_oid, &cache_key.1)? else {
-        return Ok(None);
-    };
-    let shared = Arc::new(loaded);
+    let shared = load_manifest_segment_stats(table_oid, &cache_key.1)?.map(Arc::new);
     SEGMENT_STATS_CACHE.with(|cache| {
-        cache.borrow_mut().insert(cache_key, Arc::clone(&shared));
+        cache.borrow_mut().insert(cache_key, shared.clone());
     });
-    Ok(Some(shared))
+    Ok(shared)
 }
 
 #[cfg(feature = "pg")]

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_pgrx_tests:
-        description: "Run pgrx compile/install and local E2E checks before packaging"
+        description: "Run cargo pgrx test + E2E on PostgreSQL 15–18 before packaging"
         type: boolean
         required: false
         default: true
@@ -59,7 +59,7 @@ jobs:
       - name: Read version from Cargo.toml
         id: version
         shell: bash
-        run: python3 scripts/release-version.py github-outputs --github-output "$GITHUB_OUTPUT"
+        run: python3 scripts/build/release-version.py github-outputs --github-output "$GITHUB_OUTPUT"
 
       - name: Show release version
         run: echo "Release tag ${{ steps.version.outputs.tag }} (version ${{ steps.version.outputs.version }})"
@@ -86,7 +86,7 @@ jobs:
       - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
 
   pgrx_tests:
-    name: "pgrx + E2E · PG${{ matrix.pg }}"
+    name: "pgrx test + E2E · PG${{ matrix.pg }}"
     runs-on: ubuntu-24.04
     needs: rust_checks
     if: ${{ inputs.run_pgrx_tests }}
@@ -142,6 +142,11 @@ jobs:
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
         run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
 
+      - name: Run #[pg_test] suite (cargo pgrx test)
+        run: cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg${PG_VER}
+        env:
+          RUST_BACKTRACE: "1"
+
       - name: Start MinIO for S3-backed E2E
         run: bash scripts/ci/start-minio.sh
 
@@ -193,7 +198,7 @@ jobs:
 
       - name: Build Linux packages
         run: |
-          bash scripts/build-linux.sh \
+          bash scripts/build/linux.sh \
             --pg "${{ matrix.pg }}" \
             --arch "${{ matrix.arch }}" \
             --distro "${{ matrix.distro }}" \
@@ -246,7 +251,7 @@ jobs:
 
       - name: Build Linux packages
         run: |
-          bash scripts/build-linux.sh \
+          bash scripts/build/linux.sh \
             --pg "${{ matrix.pg }}" \
             --arch "${{ matrix.arch }}" \
             --distro "${{ matrix.distro }}" \
@@ -299,7 +304,7 @@ jobs:
 
       - name: Build Linux packages
         run: |
-          bash scripts/build-linux.sh \
+          bash scripts/build/linux.sh \
             --pg "${{ matrix.pg }}" \
             --arch "${{ matrix.arch }}" \
             --distro "${{ matrix.distro }}" \
@@ -341,7 +346,7 @@ jobs:
 
       - name: Build macOS package
         run: |
-          bash scripts/build-macos-arm64.sh \
+          bash scripts/build/macos-arm64.sh \
             --pg 18 \
             --version "${{ needs.read_version.outputs.version }}" \
             --install-deps
@@ -400,7 +405,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          ./scripts/build-windows.ps1 -Pg 18 -Version "${{ needs.read_version.outputs.version }}"
+          ./scripts/build/windows.ps1 -Pg 18 -Version "${{ needs.read_version.outputs.version }}"
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
