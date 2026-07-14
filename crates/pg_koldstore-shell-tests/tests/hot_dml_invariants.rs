@@ -1,6 +1,6 @@
+use koldstore::hooks::{executor, xact};
 use koldstore_common::{CommitSeq, MirrorOperation, SeqId};
 use koldstore_merge::dml;
-use koldstore::hooks::{executor, xact};
 
 #[test]
 fn dml_helpers_keep_one_hot_row_per_pk_by_using_upsert_revival() {

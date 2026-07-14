@@ -17,9 +17,10 @@ pub const BARRIER_LOCK_KEY: i64 = 0x4B4F_4C44; // "KOLD"
 ///
 /// Returns an error when the connection fails.
 pub async fn connect_peer(db: &TestDb) -> Result<Client> {
-    let (client, connection) = tokio_postgres::connect(&db.target.connection_string(), tokio_postgres::NoTls)
-        .await
-        .context("connect peer client")?;
+    let (client, connection) =
+        tokio_postgres::connect(&db.target.connection_string(), tokio_postgres::NoTls)
+            .await
+            .context("connect peer client")?;
     tokio::spawn(async move {
         if let Err(error) = connection.await {
             eprintln!("peer connection error: {error}");
@@ -87,11 +88,7 @@ pub async fn seed_managed_items(db: &TestDb, table: &str, rows: i64) -> Result<S
 /// # Errors
 ///
 /// Returns an error when equality fails.
-pub async fn assert_matches_baseline(
-    client: &Client,
-    baseline: &str,
-    managed: &str,
-) -> Result<()> {
+pub async fn assert_matches_baseline(client: &Client, baseline: &str, managed: &str) -> Result<()> {
     let left_only = client
         .query(
             &format!(

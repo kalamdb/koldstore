@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use koldstore::spi::prepared_plan_key;
 use koldstore_catalog::HintKind;
 use koldstore_common::{CommitSeq, SeqId, StablePkHash, TableName};
 use koldstore_flush::job::{
@@ -11,7 +12,6 @@ use koldstore_flush::job::{
 use koldstore_merge::events::plan_mirror_changes_since;
 use koldstore_migrate::QualifiedTableName;
 use koldstore_mirror::{mirror_relation_for_source, mirror_to_sql, plan_mirror_stats};
-use koldstore::spi::prepared_plan_key;
 use serde_json::json;
 
 fn bench_flush_candidate_selection(c: &mut Criterion) {
