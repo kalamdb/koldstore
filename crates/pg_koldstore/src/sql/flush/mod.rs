@@ -109,12 +109,10 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
     let catalog_segments =
         koldstore_catalog::queries::plan_active_cold_segments_for_manifest_json()
             .map_err(|error| error.to_string())?;
-    let catalog_json = crate::spi::select_one::<String>(
-        &catalog_segments,
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map_err(|error| error.to_string())?
-    .unwrap_or_else(|| "[]".to_string());
+    let catalog_json =
+        crate::spi::select_one::<String>(&catalog_segments, &[DatumWithOid::from(table_oid)])
+            .map_err(|error| error.to_string())?
+            .unwrap_or_else(|| "[]".to_string());
     let catalog_rows: Vec<CatalogManifestSegmentRow> =
         serde_json::from_str(&catalog_json).map_err(|error| error.to_string())?;
     referenced.extend(catalog_rows.into_iter().map(|row| row.object_path));
