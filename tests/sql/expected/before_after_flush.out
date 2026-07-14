@@ -1,18 +1,17 @@
 CREATE TABLE
 INSERT 0 20
- manage_table
--------------
- t
-(1 row)
-
-SELECT
-CREATE TEMP TABLE
- flush_table
-------------
+             manage_table
+--------------------------------------
  <UUID>
 (1 row)
 
-CREATE TEMP TABLE
+SELECT 20
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+SELECT 20
  diff | id | body | qty
 ------+----+------+-----
 (0 rows)
@@ -21,3 +20,4 @@ CREATE TEMP TABLE
 -----------
         20
 (1 row)
+

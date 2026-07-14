@@ -21,8 +21,10 @@ STORAGE_ROOT="${KOLDSTORE_SQL_REGRESSION_STORAGE:-$(mktemp -d "${TMPDIR:-/tmp}/k
 normalize_output() {
   # Strip unstable identifiers while keeping relational assertions intact.
   sed -E \
+    -e '/^psql:[^[:space:]]+: NOTICE:/d' \
     -e 's/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/<UUID>/g' \
-    -e 's#(/private)?/[^[:space:]]+/(koldstore[^[:space:]]*|pg-koldstore[^[:space:]]*|sqlreg[^[:space:]]*)#<PATH>#g' \
+    -e 's#psql:[^[:space:]]+:#psql:<PATH>:#g' \
+    -e 's#(/private)?/[^[:space:]]+/(koldstore[^[:space:]]*|pg-koldstore[^[:space:]]*|pg-kalam[^[:space:]]*|sqlreg[^[:space:]]*)#<PATH>#g' \
     -e 's/cost=[0-9.]+(\.\.[0-9.]+)?/<COST>/g' \
     -e 's/actual time=[0-9.]+(\.\.[0-9.]+)?/<TIME>/g' \
     -e 's/rows=[0-9]+/<ROWS>/g' \

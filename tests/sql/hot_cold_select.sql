@@ -14,7 +14,8 @@ SELECT koldstore.manage_table(
   storage => 'sqlreg_fs',
   hot_row_limit => 4,
   min_flush_rows => 1,
-  max_rows_per_file => 8
+  max_rows_per_file => 8,
+  migration_order_by => 'id'
 );
 
 SELECT koldstore.flush_table('sqlreg.hot_cold'::regclass);

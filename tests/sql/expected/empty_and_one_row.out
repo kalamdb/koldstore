@@ -1,7 +1,7 @@
 CREATE TABLE
- manage_table
--------------
- t
+             manage_table
+--------------------------------------
+ <UUID>
 (1 row)
 
  empty_count
@@ -9,8 +9,8 @@ CREATE TABLE
            0
 (1 row)
 
- flush_table
-------------
+             flush_table
+--------------------------------------
  <UUID>
 (1 row)
 
@@ -21,13 +21,13 @@ CREATE TABLE
 
 CREATE TABLE
 INSERT 0 1
- manage_table
--------------
- t
+             manage_table
+--------------------------------------
+ <UUID>
 (1 row)
 
- flush_table
-------------
+             flush_table
+--------------------------------------
  <UUID>
 (1 row)
 
@@ -35,3 +35,4 @@ INSERT 0 1
 ----+------
   1 | only
 (1 row)
+

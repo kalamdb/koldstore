@@ -13,7 +13,7 @@ cases, and before-flush vs after-flush result equality.
 |---|---|
 | `*.sql` | Input scripts (run with `ON_ERROR_STOP`) |
 | `expected/*.out` | Normalized expected `psql` output |
-| `setup.sql` | Shared fixture: storage + schemas used by cases |
+| `setup.sql` | Shared fixture: storage + schemas + test GUCs (same psql session as each case) |
 
 ## Normalization rules
 
