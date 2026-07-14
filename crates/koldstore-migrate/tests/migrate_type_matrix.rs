@@ -16,15 +16,23 @@ fn migration_sql_rejects_unsupported_generated_and_expression_shapes() {
         "text",
         "varchar",
         "character varying",
+        "numeric",
         "uuid",
         "jsonb",
+        "bytea",
         "timestamptz",
         "timestamp with time zone",
     ] {
-        assert!(koldstore_migrate::constraints::type_supported(supported));
+        assert!(
+            koldstore_migrate::constraints::type_supported(supported),
+            "{supported} should be supported"
+        );
     }
-    for unsupported in ["bytea", "inet", "numeric", "geometry"] {
-        assert!(!koldstore_migrate::constraints::type_supported(unsupported));
+    for unsupported in ["inet", "geometry", "tsvector", "cidr"] {
+        assert!(
+            !koldstore_migrate::constraints::type_supported(unsupported),
+            "{unsupported} should be unsupported"
+        );
     }
 }
 
