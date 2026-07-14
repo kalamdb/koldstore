@@ -263,9 +263,23 @@ require_command cargo
 ensure_cargo_pgrx
 
 if [[ "${SKIP_UNIT}" -eq 0 ]]; then
-  ensure_cargo_nextest
-  step "workspace non-E2E tests"
-  cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
+  # nextest discovers tests by spawning every binary with `--list`. On macOS that
+  # often stalls for minutes on unsigned debug deps; cargo test stays reliable.
+  unit_excludes=(
+    --exclude e2e
+    --exclude examples
+    --exclude storage-comparison
+    --exclude pg-koldstore-benchmarks
+    --exclude koldstore-memory-tests
+  )
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    step "workspace non-E2E tests (cargo test; nextest --list is unreliable on macOS)"
+    cargo test --workspace --no-default-features "${unit_excludes[@]}"
+  else
+    ensure_cargo_nextest
+    step "workspace non-E2E tests"
+    cargo nextest run --workspace --no-default-features "${unit_excludes[@]}"
+  fi
 fi
 
 IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"

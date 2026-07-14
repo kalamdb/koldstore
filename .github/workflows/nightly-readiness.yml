@@ -1,0 +1,94 @@
+name: nightly-readiness
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # nightly 03:00 UTC
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+  KOLDSTORE_SQLSMITH_SECONDS: "30"
+
+jobs:
+  nightly:
+    name: Nightly readiness (PG 16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PG_VER: "16"
+      KOLDSTORE_E2E_PGVERSION: "16"
+      KOLDSTORE_E2E_PGPORT: "28816"
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL 16 development packages
+        run: |
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential libssl-dev pkg-config \
+            postgresql-16 postgresql-server-dev-16
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 "${PGRX_PG_CONFIG}"
+
+      - name: Prepare pgrx cluster + install koldstore
+        run: bash scripts/run-pg-e2e.sh 16
+        env:
+          KOLDSTORE_E2E_PREPARE_ONLY: "1"
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+
+      - name: Isolation schedules
+        run: cargo nextest run -p e2e --test isolation_schedules --test-threads 1
+
+      - name: Crash / failpoint recovery
+        run: cargo nextest run -p e2e --test flush_failpoint_recovery --test-threads 1
+
+      - name: Install SQLsmith
+        run: bash scripts/ci/install-sqlsmith.sh
+
+      - name: SQLsmith (short fuzz)
+        run: bash scripts/readiness/run-sqlsmith.sh 16
+        env:
+          KOLDSTORE_SQLSMITH_SECONDS: "30"
+          SQLSMITH_BIN: ${{ github.workspace }}/target/tools/sqlsmith/bin/sqlsmith
+
+      - name: Integrity checks (pg_amcheck + KS SQL)
+        run: bash scripts/readiness/run-integrity-checks.sh 16
+        env:
+          KOLDSTORE_INTEGRITY_PREPARE: "0"
+
+      - name: Emit readiness report
+        run: |
+          export KOLDSTORE_REPORT_CATEGORY=nightly-readiness
+          export KOLDSTORE_REPORT_PASSED=true
+          export KOLDSTORE_REPORT_SQLSMITH=ran
+          export KOLDSTORE_REPORT_ISOLATION=ran
+          export KOLDSTORE_REPORT_CRASH=ran
+          export KOLDSTORE_REPORT_INTEGRITY=ran
+          bash scripts/readiness/run-readiness-report.sh 16
+
+      - name: Upload readiness artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-readiness-report
+          path: target/readiness
+          if-no-files-found: warn

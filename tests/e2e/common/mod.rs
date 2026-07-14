@@ -6,6 +6,7 @@ mod catalog;
 mod cluster;
 mod db;
 mod describe_table;
+pub mod equality;
 mod log;
 mod minio;
 mod sql;
@@ -29,6 +30,9 @@ pub use cluster::{
 pub use db::{FixtureStorage, ManagedTable, TestDb};
 pub use describe_table::{
     assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
+};
+pub use equality::{
+    assert_pk_unique, assert_relations_equal, assert_row_counts_equal, relation_row_count,
 };
 pub use log::{log, log_always, log_step, log_step_always, timed_sync, verbose_enabled, StepGuard};
 pub use minio::{minio_enabled, MinioConfig};

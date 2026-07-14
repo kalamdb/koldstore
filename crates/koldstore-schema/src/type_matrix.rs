@@ -55,8 +55,11 @@ impl TypeMatrix {
             "float8",
             "text",
             "varchar",
+            "numeric",
             "uuid",
             "jsonb",
+            "bytea",
+            "text[]",
             "timestamptz",
         ];
         Self {

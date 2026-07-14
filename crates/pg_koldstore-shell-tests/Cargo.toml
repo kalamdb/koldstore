@@ -1,0 +1,24 @@
+[package]
+name = "pg_koldstore-shell-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+koldstore-catalog.workspace = true
+koldstore-common.workspace = true
+koldstore-flush.workspace = true
+koldstore-merge.workspace = true
+koldstore-migrate.workspace = true
+koldstore-mirror.workspace = true
+koldstore-parquet.workspace = true
+koldstore-schema.workspace = true
+koldstore-setup.workspace = true
+koldstore-storage.workspace = true
+koldstore = { path = "../pg_koldstore", package = "pg_koldstore", default-features = false }
+serde_json.workspace = true
+
+[lints]
+workspace = true

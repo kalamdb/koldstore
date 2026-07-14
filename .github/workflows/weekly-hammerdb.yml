@@ -1,0 +1,71 @@
+name: weekly-hammerdb
+
+# Selective-manage TPROC-C stress. Skips gracefully if download/install fails
+# only when KOLDSTORE_HAMMERDB_REQUIRED=0 (default for forks); main requires it.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1" # weekly Monday 05:00 UTC (after benchmarks)
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+  PG_VER: "16"
+  KOLDSTORE_HAMMERDB_MINUTES: "2"
+  KOLDSTORE_HAMMERDB_WAREHOUSES: "2"
+  KOLDSTORE_HAMMERDB_VU: "2"
+
+jobs:
+  hammerdb:
+    name: HammerDB TPROC-C (selective HISTORY manage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      KOLDSTORE_E2E_PGVERSION: "16"
+      KOLDSTORE_E2E_PGPORT: "28816"
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install PostgreSQL 16 development packages
+        run: |
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release curl
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential libssl-dev pkg-config \
+            postgresql-16 postgresql-server-dev-16
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 "${PGRX_PG_CONFIG}"
+
+      - name: Install HammerDB
+        id: hammerdb
+        run: |
+          BIN="$(bash scripts/ci/install-hammerdb.sh | tail -n 1)"
+          echo "bin=${BIN}" >> "$GITHUB_OUTPUT"
+
+      - name: Run HammerDB stress (selective HISTORY manage)
+        env:
+          HAMMERDB_BIN: ${{ steps.hammerdb.outputs.bin }}
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+        run: bash scripts/readiness/run-hammerdb.sh 16
+
+      - name: Upload HammerDB logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hammerdb-logs
+          path: target/hammerdb
+          if-no-files-found: warn

@@ -3,7 +3,7 @@ mod common;
 
 use anyhow::Result;
 use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, SeqId};
-use pg_koldstore::merge_scan::exec::{
+use koldstore::merge_scan::exec::{
     execute_merge_scan, execute_merge_scan_with_filters, FilterPlan,
 };
 use serde_json::json;

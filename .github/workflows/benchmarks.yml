@@ -2,6 +2,8 @@ name: benchmarks
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1" # weekly Monday 04:00 UTC
 
 env:
   CARGO_TERM_COLOR: always
@@ -10,12 +12,13 @@ env:
 
 jobs:
   benchmarks:
+    name: Criterion + pgbench + Rust bench CLI
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.96.0
 
       - uses: Swatinem/rust-cache@v2
 
@@ -70,10 +73,12 @@ jobs:
             --features pg${PG_VER} \
             --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
 
-      - name: Run Criterion and pgbench benchmarks
+      - name: Run Criterion + pgbench suite (benchmarks/scripts/run.sh)
         env:
           DATABASE_URL: "host=/var/run/postgresql user=runner dbname=runner"
           KOLDSTORE_BENCH_START_PGRX: "0"
+          # Enable Criterion extension microbenches (default in run.sh skips them).
+          KOLDSTORE_BENCH_SKIP_CRITERION: "0"
           BENCH_ROWS: "100000"
           BENCH_SECONDS: "10"
           BENCH_MIXED_SECONDS: "30"
@@ -81,8 +86,21 @@ jobs:
           set -euo pipefail
           ./benchmarks/scripts/run.sh
 
+      - name: Run Rust benchmark CLI (pg-koldstore-benchmarks)
+        env:
+          DATABASE_URL: "host=/var/run/postgresql user=runner dbname=runner"
+        run: |
+          set -euo pipefail
+          cargo run -p pg-koldstore-benchmarks -- \
+            --database-url "${DATABASE_URL}" \
+            --rows 10000 \
+            --clients 2 \
+            --jobs 2 \
+            --seconds 5
+
       - name: Upload Criterion HTML report
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: criterion-report
           path: target/criterion/report
@@ -90,6 +108,7 @@ jobs:
 
       - name: Upload pgbench benchmark reports
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: pgbench-benchmark-results
           path: benchmarks/results

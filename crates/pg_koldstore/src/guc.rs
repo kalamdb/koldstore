@@ -27,11 +27,14 @@ static INTERNAL_FLUSH_CLEANUP: GucSetting<bool> = GucSetting::<bool>::new(false)
 #[cfg(feature = "pg")]
 static MIN_MAX_ROWS_PER_FILE: GucSetting<i32> =
     GucSetting::<i32>::new(settings::default_min_max_rows_per_file());
+#[cfg(feature = "pg")]
+static FAILPOINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
 
 /// Defines pg-koldstore configuration variables.
 #[cfg(feature = "pg")]
 pub fn define_gucs() {
     let flags = GucFlags::default();
+    crate::failpoints::mark_registered();
     GucRegistry::define_string_guc(
         c"koldstore.cold_reads",
         c"Controls KoldStore cold reads.",
@@ -102,6 +105,15 @@ pub fn define_gucs() {
         GucContext::Userset,
         flags,
     );
+    // Test-only: empty default keeps production paths inert unless explicitly armed.
+    GucRegistry::define_string_guc(
+        c"koldstore.failpoint",
+        c"Test-only KoldStore flush failpoint.",
+        c"Arms a named flush failpoint (error:<name> or wait:<name>). Empty disables. For crash-recovery and isolation suites only.",
+        &FAILPOINT,
+        GucContext::Userset,
+        flags,
+    );
 }
 
 /// No-op placeholder for non-PostgreSQL tests.
@@ -167,6 +179,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: INTERNAL_FLUSH_CLEANUP_GUC,
             internal: true,
             default_value: "off",
+        },
+        GucDefinition {
+            name: settings::FAILPOINT_GUC,
+            internal: false,
+            default_value: settings::DEFAULT_FAILPOINT,
         },
     ]
 }
@@ -248,5 +265,22 @@ pub fn min_max_rows_per_file() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::default_min_max_rows_per_file()
+    }
+}
+
+/// Current test-only failpoint arming value (empty when disabled).
+#[must_use]
+pub fn failpoint_value() -> String {
+    #[cfg(feature = "pg")]
+    {
+        FAILPOINT
+            .get()
+            .and_then(|value| value.to_str().ok().map(str::to_string))
+            .unwrap_or_default()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        String::new()
     }
 }

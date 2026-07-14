@@ -2,7 +2,7 @@
 mod common;
 
 use anyhow::Result;
-use pg_koldstore::merge_scan::exec::{begin_merge_scan, ColdAvailability, MergeScanError};
+use koldstore::merge_scan::exec::{begin_merge_scan, ColdAvailability, MergeScanError};
 
 #[test]
 fn merge_scan_outage_requires_error_not_partial_hot_only_results() {

@@ -29,7 +29,7 @@
 - [X] T013 Create the Rust E2E helper crate/module for pgrx, tokio-postgres, and MinIO bootstrapping in `/Users/jamal/git/pg-kalam/tests/e2e/common/mod.rs`
 - [X] T014 Create the benchmarking harness crate and baseline report schema in `/Users/jamal/git/pg-kalam/benchmarks/Cargo.toml` and `/Users/jamal/git/pg-kalam/benchmarks/src/report.rs`
 - [X] T015 Create memory and leak testing scripts for ASAN, LSAN, Valgrind, heaptrack, and PostgreSQL memory-context smoke checks in `/Users/jamal/git/pg-kalam/tests/memory/run_memory_checks.sh`
-- [X] T016 Create CI workflow gates for Rust tests, pgrx SQL tests, PG matrix E2E, benchmarks, and memory checks in `/Users/jamal/git/pg-kalam/.github/workflows/pg-koldstore-ci.yml`
+- [X] T016 Create CI workflow gates for Rust tests, pgrx SQL tests, PG matrix E2E, benchmarks, and memory checks in `/Users/jamal/git/pg-kalam/.github/workflows/ci-tests.yml`
 - [X] T017 Create developer command aliases for formatting, linting, unit tests, pgrx tests, E2E, benchmarks, and memory checks in `/Users/jamal/git/pg-kalam/Makefile`
 
 ---

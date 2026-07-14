@@ -8,7 +8,7 @@ use koldstore_common::{
 use koldstore_merge::resolve_rows;
 use koldstore_schema::MirrorInitializationState;
 use koldstore_storage::PathTemplate;
-use pg_koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
+use koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 use serde_json::json;
 
 fn bench_merge_plan_serialization(c: &mut Criterion) {

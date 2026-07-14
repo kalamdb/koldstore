@@ -65,6 +65,7 @@ pub(super) fn prepare_flush_context(
     crate::sql::job_lock_pg::lock_table_job(table_oid)?;
     let (job_id, force) = ensure_flush_job(table_oid, force)?;
     mark_flush_job_running(job_id, table_oid)?;
+    crate::failpoints::hit("after_claim")?;
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
     let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
@@ -175,6 +176,7 @@ pub(super) fn stream_write_flush_batches(
         mirror_ops: selection.mirror_ops.clone(),
     };
     let catalog_columns = ctx.catalog_columns.clone();
+    crate::failpoints::hit("after_pending_segment")?;
 
     let stream_outcome = crate::merge_scan::pg::with_custom_scan_disabled(|| {
         stream_flush_chunks(
@@ -250,6 +252,7 @@ fn write_streamed_chunk(
     written_segments: &mut Vec<WrittenFlushSegment>,
     chunk: FlushWriteChunk,
 ) -> Result<(), String> {
+    crate::failpoints::hit("during_parquet_write")?;
     let chunk_stats = FlushStats::from_write_chunk(&chunk)?;
     let written = write_flush_segment_with_client(
         client,
@@ -263,6 +266,8 @@ fn write_streamed_chunk(
         &chunk,
         &chunk_stats,
     )?;
+    crate::failpoints::hit("after_temp_object")?;
+    crate::failpoints::hit("after_checksum_metadata")?;
     persist_flush_segment(table_oid, &written)?;
     *total_rows_flushed = total_rows_flushed.saturating_add(chunk_stats.row_count);
     *last_max_seq = chunk_stats.max_seq;
@@ -312,6 +317,7 @@ pub(super) fn finalize_flush(
         &ctx.storage.config,
     )
     .map_err(|error| error.to_string())?;
+    crate::failpoints::hit("before_manifest_publish")?;
     pgrx::log!(
         "koldstore flush: writing manifest path={} segments={} rows={}",
         outcome.manifest_path,
@@ -326,10 +332,13 @@ pub(super) fn finalize_flush(
         outcome.manifest.max_seq,
         outcome.manifest.max_commit_seq,
     )?;
+    crate::failpoints::hit("after_manifest_publish")?;
+    crate::failpoints::hit("before_hot_cleanup")?;
     pgrx::log!(
         "koldstore flush: pruning hot/mirror rows through seq={}",
         outcome.prune_max_seq
     );
+    crate::failpoints::hit("during_hot_cleanup")?;
     let (mirror_pruned, hot_pruned) = prune_flushed_hot_rows(
         table_oid,
         &ctx.snapshot.primary_key_columns,
@@ -347,6 +356,7 @@ pub(super) fn finalize_flush(
         hot_pruned,
         outcome.total_rows_flushed,
     )?;
+    crate::failpoints::hit("after_cleanup_before_job_complete")?;
     mark_flush_job_completed(
         ctx.job_id,
         table_oid,
@@ -354,7 +364,8 @@ pub(super) fn finalize_flush(
         outcome.last_max_seq,
         outcome.last_max_commit_seq,
     )?;
-    crate::catalog::cache::invalidate_table(table_oid);
+    crate::failpoints::hit("after_job_complete_before_temp_cleanup")?;
+    crate::catalog::cache::invalidate_table_globally(table_oid);
     Ok(())
 }
 
@@ -391,6 +402,7 @@ fn flush_prepared_table(
     ctx: &FlushPreparedContext,
 ) -> Result<(), String> {
     let selection = resolve_flush_stats(table_oid, ctx.force)?;
+    crate::failpoints::hit("after_select_rows")?;
     if selection.stats.row_count == 0 {
         mark_flush_job_completed(ctx.job_id, table_oid, 0, 0, 0)?;
         return Ok(());

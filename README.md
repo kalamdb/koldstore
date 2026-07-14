@@ -15,7 +15,7 @@ Your table remains a normal PostgreSQL heap table. KoldStore keeps the active wo
 
 <p align="center">
   <a href="https://github.com/kalamdb/koldstore/releases"><img src="https://img.shields.io/github/v/release/kalamdb/koldstore?display_name=tag&amp;label=release" alt="Release" /></a>
-  <a href="https://github.com/kalamdb/koldstore/actions/workflows/pg-koldstore-ci.yml"><img src="https://github.com/kalamdb/koldstore/actions/workflows/pg-koldstore-ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/kalamdb/koldstore/actions/workflows/ci-tests.yml"><img src="https://github.com/kalamdb/koldstore/actions/workflows/ci-tests.yml/badge.svg" alt="CI Tests" /></a>
   <img src="https://img.shields.io/badge/PostgreSQL-15%E2%80%9318-336791" alt="PostgreSQL 15-18" />
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.96%2B-orange.svg" alt="Rust 1.96+" /></a>
   <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
@@ -83,7 +83,7 @@ KoldStore is a **storage lifecycle tool**, not a universal query accelerator. Af
 | Indexes | 415 MiB → 11.4 MiB | **97% smaller** |
 | `VACUUM (FULL, ANALYZE)` | 131 s → 6.4 s | **95% faster** |
 
-Sample: 10M wide rows, `hot_row_limit = 100000`. Capture triggers add DML overhead, and cold PK lookups are slower than pure B-tree probes today — that is expected for this design. Full methodology, throughput numbers, and trade-offs: [docs/benchmarks.md](docs/benchmarks.md).
+Sample: 10M wide rows, `hot_row_limit = 100000`. Capture triggers add DML overhead, and cold PK lookups are slower than pure B-tree probes today — that is expected for this design. Full methodology, throughput numbers, and trade-offs: [docs/benchmarks/](docs/benchmarks/README.md).
 
 ## How it works
 

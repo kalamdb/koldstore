@@ -1,0 +1,23 @@
+CREATE TABLE
+INSERT 0 20
+ manage_table
+-------------
+ t
+(1 row)
+
+SELECT
+CREATE TEMP TABLE
+ flush_table
+------------
+ <UUID>
+(1 row)
+
+CREATE TEMP TABLE
+ diff | id | body | qty
+------+----+------+-----
+(0 rows)
+
+ row_count
+-----------
+        20
+(1 row)
