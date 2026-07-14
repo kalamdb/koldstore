@@ -1,8 +1,8 @@
+use koldstore::hooks::executor;
 use koldstore_common::{CommitSeq, MirrorOperation, SeqId};
 use koldstore_merge::dml::{
     allocate_seq_for_tests, stamp_dml_effect, DmlStamp, ManagedDmlOperation,
 };
-use koldstore::hooks::executor;
 
 #[test]
 fn hot_update_stamp_advances_seq_and_commit_seq() {

@@ -33,12 +33,9 @@ fn dml_scope_checks_run_before_heap_or_cold_metadata_access() {
             .unwrap_err();
     assert_eq!(missing_session.to_string(), "koldstore.user_id is not set");
 
-    let missing_row = koldstore::hooks::executor::enforce_dml_scope(
-        TableKind::User,
-        Some(active.as_str()),
-        None,
-    )
-    .unwrap_err();
+    let missing_row =
+        koldstore::hooks::executor::enforce_dml_scope(TableKind::User, Some(active.as_str()), None)
+            .unwrap_err();
     assert_eq!(missing_row.to_string(), "row scope is missing");
 
     let cross_scope = koldstore::hooks::executor::enforce_dml_scope(

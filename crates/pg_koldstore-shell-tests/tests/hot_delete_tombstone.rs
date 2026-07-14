@@ -1,9 +1,9 @@
+use koldstore::hooks::executor;
 use koldstore_common::{CommitSeq, SeqId};
 use koldstore_merge::dml::{
     delete_decision, delete_decision_with_flush_fence, DeleteDecision, DmlStamp,
     ManagedDmlOperation,
 };
-use koldstore::hooks::executor;
 
 #[test]
 fn hot_delete_routes_to_physical_delete_or_tombstone_from_cold_hints() {

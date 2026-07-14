@@ -214,9 +214,23 @@ if [[ "${SKIP_LINT}" -eq 0 ]]; then
 fi
 
 if [[ "${SKIP_UNIT}" -eq 0 ]]; then
-  ensure_cargo_nextest
-  step "cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison"
-  cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
+  # nextest discovers tests by spawning every binary with `--list`. On macOS that
+  # often stalls for a long time on unsigned debug deps under Gatekeeper.
+  unit_excludes=(
+    --exclude e2e
+    --exclude examples
+    --exclude storage-comparison
+    --exclude pg-koldstore-benchmarks
+    --exclude koldstore-memory-tests
+  )
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    step "workspace non-E2E tests (cargo test; nextest --list is unreliable on macOS)"
+    cargo test --workspace --no-default-features "${unit_excludes[@]}"
+  else
+    ensure_cargo_nextest
+    step "cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison"
+    cargo nextest run --workspace --no-default-features "${unit_excludes[@]}"
+  fi
 fi
 
 IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"
