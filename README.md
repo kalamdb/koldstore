@@ -83,7 +83,15 @@ KoldStore is a **storage lifecycle tool**, not a universal query accelerator. Af
 | Indexes | 415 MiB → 11.4 MiB | **97% smaller** |
 | `VACUUM (FULL, ANALYZE)` | 131 s → 6.4 s | **95% faster** |
 
-Sample: 10M wide rows, `hot_row_limit = 100000`. Capture triggers add DML overhead, and cold PK lookups are slower than pure B-tree probes today — that is expected for this design. Full methodology, throughput numbers, and trade-offs: [docs/benchmarks/](docs/benchmarks/README.md).
+Sample: 10M wide rows, `hot_row_limit = 100000`.
+
+Managed tables still maintain a latest-state change-log mirror on every
+`INSERT` / `UPDATE` / `DELETE` (same transaction as the heap write). Statement-level
+capture cut that cost sharply on bulk DML — median managed **UPDATE ~48×** and
+**DELETE ~3×** faster vs the prior capture SQL on a local PG16 `release-pg`
+5k-row sample; bulk INSERT ~1.9×. Cold PK lookups remain slower than pure
+B-tree probes today. Full methodology and tables:
+[docs/benchmarks/](docs/benchmarks/README.md).
 
 ## How it works
 

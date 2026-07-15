@@ -52,9 +52,9 @@ How to read the table (Postgres-oriented):
 
 | Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |
 | --- | --- | --- | --- |
-| insert speed† | 69k ops/s | 23k ops/s | — |
-| update speed† | 6.8k ops/s | 5.5k ops/s | — |
-| delete speed† | 1.0M ops/s | 38k ops/s | — |
+| insert speed† | 69k ops/s | 50k ops/s | — |
+| update speed† | see DML section | see DML section | — |
+| delete speed† | see DML section | see DML section | — |
 | query hot only (before flush) | 1.6k ops/s | 1.3k ops/s | — |
 | query with hot+cold (after flush) | 1.5k ops/s | 127 ops/s‡ | — |
 | VACUUM time (after flush) | 131 s | 6.4 s | **95%** |
@@ -64,25 +64,47 @@ How to read the table (Postgres-oriented):
 | total PG backup size | TODO | TODO | — |
 | restore time | TODO | TODO | — |
 
-† DML is slower under KoldStore because `manage_table` installs statement-level
-capture triggers that maintain the latest-state change-log mirror
-(`koldstore.<table>__cl`: one row per PK with `seq` / `op`). That is the cost
-of flush cutoffs and change cursors. The payoff is a smaller hot heap/indexes,
-cheaper VACUUM, and (planned) `changes_since` so sync/cache consumers can
-follow changes without a second CDC pipeline.
-
-Managed DML capture was rewritten for bulk statements (NEW-only UPDATE, direct
-mirror updates, adaptive INSERT). On a local PG16 `release-pg` machine, a
-5k-row sample improved median managed UPDATE ~48× and DELETE ~3× vs the prior
-Task-1 capture SQL; see the plan
-[`docs/plans/2026-07-15-managed-mirror-dml-performance.md`](../plans/2026-07-15-managed-mirror-dml-performance.md).
-Reproduce with `--dml-sample N` on `scripts/run-storage-comparison.sh`.
+† Managed DML still pays for latest-state mirror capture
+(`koldstore.<table>__cl`). That cost dropped sharply after the statement-level
+rewrite in the DML section below; use `--dml-sample` when comparing UPDATE/DELETE.
+The insert figure above is the median managed 100k-row bulk INSERT from that
+section (~50k ops/s on PG16 `release-pg`).
 
 ‡ Hot+cold PK lookups open matching Parquet segments (min/max prune +
 row-group stats / bloom). At this scale each surviving segment is ~1M wide
 rows, so footer open + merge-scan setup dominates vs a pure B-tree probe;
 streaming execution and tighter segment sizing are follow-ups. See
 [performance](../performance.md).
+
+## Managed DML capture (before → after)
+
+Capture is synchronous in the user transaction (`AFTER … FOR EACH STATEMENT`
+with transition tables). The rewrite keeps small INSERTs on `ON CONFLICT`,
+uses `MERGE` for bulk INSERT, updates the mirror directly for UPDATE/DELETE,
+and moves PK rejection to a separate `BEFORE UPDATE OF pk…` row trigger so
+ordinary UPDATEs no longer materialize `OLD TABLE`.
+
+Local PG16.13, `release-pg`, median of three runs
+(`scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000`):
+
+| Managed op | Before (5k sample) | After (5k sample) | Speedup |
+| --- | ---: | ---: | ---: |
+| INSERT | 26.7k ops/s | 50.3k ops/s | **1.9×** |
+| UPDATE | 887 ops/s | 43.0k ops/s | **48×** |
+| DELETE | 39.7k ops/s | 123k ops/s | **3.1×** |
+
+Absolute after numbers at a **100k-row** DML sample (same machine/profile):
+
+| Managed op | After (100k sample) |
+| --- | ---: |
+| INSERT | 50.5k ops/s |
+| UPDATE | 34.9k ops/s |
+| DELETE | 87.3k ops/s |
+
+Task-1 UPDATE of 100k rows with the old OLD/NEW PK guard did not finish in
+>6 minutes here, so the fair before/after ratio uses the 5k sample. Design and
+gates: [plan](../plans/2026-07-15-managed-mirror-dml-performance.md). Architecture:
+[dml-table](../architecture/dml-table.md).
 
 ## Reproduce
 
@@ -91,7 +113,8 @@ streaming execution and tighter segment sizing are follow-ups. See
 scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000
 # Faster local smoke (defaults: 100k rows / 10k hot / 1k DML sample):
 scripts/run-storage-comparison.sh
-# Bulk managed DML sample (UPDATE/DELETE size):
+# Managed DML before/after-style sample (UPDATE/DELETE size):
+scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 5000
 scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
 ```
 
