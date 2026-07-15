@@ -36,3 +36,4 @@ Thumbs.db
 
 # Release Docker build staging (created in CI / local experiments)
 docker-artifacts/
+/tmp

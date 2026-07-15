@@ -27,6 +27,28 @@ fn merge_scan_explain_and_plan_contract_are_exposed() {
 }
 
 #[test]
+fn format_bytes_human_matches_timescale_style_units() {
+    // Mirror of pg/profile.rs helper — keep the contract stable for docs/examples.
+    fn format_bytes_human(bytes: u64) -> String {
+        const KB: f64 = 1024.0;
+        const MB: f64 = KB * 1024.0;
+        const GB: f64 = MB * 1024.0;
+        let bytes_f = bytes as f64;
+        if bytes_f >= GB {
+            format!("{:.1} GB", bytes_f / GB)
+        } else if bytes_f >= MB {
+            format!("{:.1} MB", bytes_f / MB)
+        } else if bytes_f >= KB {
+            format!("{:.1} kB", bytes_f / KB)
+        } else {
+            format!("{bytes} bytes")
+        }
+    }
+
+    assert_eq!(format_bytes_human(1_889_000), "1.8 MB");
+}
+
+#[test]
 fn merge_scan_plan_serializes_complete_custom_private_payload() {
     use koldstore_common::{ColumnClass, Predicate, PredicateValue, ScopeKey, SeqId};
     use merge_scan::plan::{MergeMetadataAttnums, MergeScanPlan, SegmentHint};

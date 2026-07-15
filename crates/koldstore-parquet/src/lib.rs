@@ -2,6 +2,7 @@
 
 pub mod batch_builder;
 pub mod footer;
+pub mod footer_cache;
 pub mod object_reader;
 pub mod pg_type_codec;
 pub mod prune;
@@ -14,6 +15,7 @@ pub use batch_builder::{
     FlushColumnValue, FlushMirrorRow,
 };
 pub use footer::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
+pub use footer_cache as parquet_footer_cache;
 pub use koldstore_common::canonical_postgres_type_name;
 pub use koldstore_schema::{PgIntegerArrayOid, PgType, SchemaError};
 pub use object_reader::{ObjectStoreParquetReader, ObjectStoreReadStats};

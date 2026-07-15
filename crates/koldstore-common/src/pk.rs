@@ -334,7 +334,7 @@ impl fmt::Display for PkColumn {
 }
 
 /// A JSON-compatible primary-key value.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct PkValue(Value);
 
@@ -361,7 +361,7 @@ impl PkValue {
 }
 
 /// Ordered logical primary key.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct LogicalPk {
     columns: Vec<(PkColumn, PkValue)>,
 }

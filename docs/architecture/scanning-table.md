@@ -159,19 +159,43 @@ A committed delete must never require a later flush to become invisible.
 `EXPLAIN` / `EXPLAIN ANALYZE` should show at least:
 
 - Hot Plan (Index Scan / Bitmap Heap Scan / Seq Scan)
+- Emit path (`hot_child` / `hot_native` / `cold_native` / `merge_buffer`)
+- Hot rows / Result rows (ANALYZE)
+- Candidate segments
+- Segments pruned by scope / min/max
+- Parquet segments opened
+- Row groups read / Bytes fetched (ANALYZE)
+- Footer cache hits when footers were reused
 - Mirror Tombstones / Mirror Overrides
 - Manifest path + catalog source
-- Segments considered / pruned by min/max / opened
-- Row-group and bloom prune details when ANALYZE ran
-- Cold bytes / rows when available
+- Per-segment Parquet I/O / row-group / bloom detail when ANALYZE ran
+
+Example shape (ANALYZE):
+
+```text
+Custom Scan (KoldMergeScan)
+  Hot Plan: Index Scan
+  Emit path: cold_native
+  Hot rows: 0
+  Result rows: 1
+  Candidate segments: 12
+  Segments pruned by scope: 0
+  Segments pruned by min/max: 10
+  Parquet segments opened: 2
+  Row groups read: 3
+  Bytes fetched: 1.8 MB
+```
 
 ---
 
 ## Implementation notes / remaining polish
 
-1. Overlap merge path still uses SPI JSON hot load for winner resolution; hot-only
-   streams the native child. Further pushdown of residual quals through
-   PostgreSQL `ExprState` and fully lazy cold segment iteration remain follow-ups.
+1. Overlap merge path still uses SPI JSON hot load for winner resolution when a
+   full PK equality probe is not available; PK point lookups use hot-native /
+   cold-native emit. Further pushdown of residual quals through PostgreSQL
+   `ExprState` and fully lazy cold segment iteration remain follow-ups.
 2. User-scoped cold segment loading beyond `scope_key = ''` continues to land
-   with catalog scope work.
+   with catalog scope work (`Segments pruned by scope` stays 0 for shared-only).
 3. No DSM / parallel CustomScan workers yet.
+4. Backend Parquet footer metadata is cached across scans and cleared on flush /
+   managed-table invalidation.

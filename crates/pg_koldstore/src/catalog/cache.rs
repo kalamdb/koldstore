@@ -104,6 +104,8 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().remove(&key);
     });
+    // Footers are path-keyed across tables; drop them on any managed-table change.
+    koldstore_parquet::parquet_footer_cache::clear();
 }
 
 /// Invalidates all managed-table snapshots and segment-stats entries in this backend.
@@ -118,6 +120,7 @@ pub fn invalidate_all() {
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
+    koldstore_parquet::parquet_footer_cache::clear();
 }
 
 /// Loads the migration catalog (columns / PK / indexed) from cache or SPI.

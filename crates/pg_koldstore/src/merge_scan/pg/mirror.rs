@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::ffi::CString;
 
-use koldstore_common::{quote_ident, TableName};
+use koldstore_common::{quote_ident, LogicalPk, PkColumn, TableName};
 use pgrx::pg_sys;
 
 use super::hot::HotEqualityFilter;
@@ -16,8 +16,8 @@ use super::with_hook_disabled;
 /// Mirror tombstones that must mask cold Parquet rows until flush.
 #[derive(Debug, Default, Clone)]
 pub(super) struct MirrorOverlay {
-    /// Canonical PK JSON text for unflushed tombstones (`op = 3`).
-    pub masked_pks: HashSet<String>,
+    /// Unflushed tombstone PKs (`op = 3`), keyed as [`LogicalPk`].
+    pub masked_pks: HashSet<LogicalPk>,
     /// Count of tombstone (op = 3) rows in the overlay.
     pub tombstones: usize,
     /// Live overrides are not loaded; kept for EXPLAIN compatibility (always 0).
@@ -27,8 +27,8 @@ pub(super) struct MirrorOverlay {
 impl MirrorOverlay {
     /// Returns true when cold state for this PK must be skipped.
     #[must_use]
-    pub(super) fn masks_pk(&self, pk_json_text: &str) -> bool {
-        self.masked_pks.contains(pk_json_text)
+    pub(super) fn masks_pk(&self, pk: &LogicalPk) -> bool {
+        self.masked_pks.contains(pk)
     }
 
     #[must_use]
@@ -51,6 +51,10 @@ pub(super) fn load_mirror_tombstone_overlay(
     if primary_key_columns.is_empty() {
         return Err("mirror overlay requires primary key columns".to_string());
     }
+    let pk_columns = primary_key_columns
+        .iter()
+        .map(|column| PkColumn::new(column.as_str()).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
     let pk_json = primary_key_columns
         .iter()
         .map(|column| {
@@ -93,10 +97,13 @@ WHERE {where_clause}
         where_clause = where_clauses.join(" AND "),
     );
 
-    with_hook_disabled(|| unsafe { execute_mirror_overlay_query(&sql) })
+    with_hook_disabled(|| unsafe { execute_mirror_overlay_query(&sql, &pk_columns) })
 }
 
-unsafe fn execute_mirror_overlay_query(query: &str) -> Result<MirrorOverlay, String> {
+unsafe fn execute_mirror_overlay_query(
+    query: &str,
+    pk_columns: &[PkColumn],
+) -> Result<MirrorOverlay, String> {
     let query = CString::new(query).map_err(|error| error.to_string())?;
     let connect = pg_sys::SPI_connect();
     if connect < 0 {
@@ -115,12 +122,13 @@ unsafe fn execute_mirror_overlay_query(query: &str) -> Result<MirrorOverlay, Str
         let tupdesc = (*tuptable).tupdesc;
         for index in 0..processed {
             let tuple = *(*tuptable).vals.add(index);
-            let pk_json = spi_text(tuple, tupdesc, 1)?;
-            let canonical_pk = serde_json::from_str::<serde_json::Value>(&pk_json)
-                .map(|value| value.to_string())
-                .unwrap_or(pk_json);
+            let pk_json_text = spi_text(tuple, tupdesc, 1)?;
+            let pk_value: serde_json::Value = serde_json::from_str(&pk_json_text)
+                .map_err(|error| format!("mirror overlay pk JSON: {error}"))?;
+            let pk = LogicalPk::from_json_object(&pk_value, pk_columns)
+                .map_err(|error| error.to_string())?;
             overlay.tombstones += 1;
-            overlay.masked_pks.insert(canonical_pk);
+            overlay.masked_pks.insert(pk);
         }
     }
 

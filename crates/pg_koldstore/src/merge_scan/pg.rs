@@ -30,7 +30,7 @@ use cold::{load_cold_rows_for_merge, planned_cold_read_profile};
 use emit::materialize_row_from_image;
 use hot::{load_hot_rows_for_merge, load_hot_rows_native};
 use mirror::{load_mirror_tombstone_overlay, MirrorOverlay};
-use profile::ColdReadProfile;
+use profile::{ColdReadProfile, EmitPath};
 use qual::{requested_target_columns, residual_filters};
 use tuple::{store_materialized_row, MaterializedRow, ScanMemory};
 
@@ -65,6 +65,9 @@ struct ScanExecutionState {
     mirror_tombstones: usize,
     mirror_live_overrides: usize,
     hot_plan_label: String,
+    emit_path: EmitPath,
+    hot_rows: usize,
+    result_rows: usize,
     /// Owns all Datums in buffered rows; deleted on EndCustomScan.
     _memory: ScanMemory,
 }
@@ -390,12 +393,12 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     let mut memory = ScanMemory::create("KoldMergeScan");
 
     // Hot-only fast path: stream the native child when present and cold is empty.
-    let mode = if cold_rows.is_empty()
+    let (mode, emit_path, hot_rows_count) = if cold_rows.is_empty()
         && cold_profile.segments.is_empty()
         && residual.membership.is_empty()
         && has_hot_child
     {
-        ScanEmitMode::HotChild
+        (ScanEmitMode::HotChild, EmitPath::HotChild, 0)
     } else if cold_rows.is_empty()
         && cold_profile.segments.is_empty()
         && residual.membership.is_empty()
@@ -406,8 +409,69 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             &emit_columns,
             &mut memory,
         ) {
-            Ok(rows) => ScanEmitMode::Buffer { rows, next: 0 },
+            Ok(rows) => {
+                let hot_count = rows.len();
+                (
+                    ScanEmitMode::Buffer { rows, next: 0 },
+                    EmitPath::HotNative,
+                    hot_count,
+                )
+            }
             Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot-only read failed: {error}"),
+        }
+    } else if !cold_rows.is_empty()
+        && residual.membership.is_empty()
+        && hot_equality_covers_primary_key(
+            &residual.hot_equality,
+            &snapshot.primary_key_columns,
+        )
+    {
+        // PK point-lookup fast path: probe hot with native Datums (no to_jsonb).
+        // Hot always wins for the same PK, so a hit skips cold merge entirely.
+        // A miss materializes cold winners without the JSON hot merge path.
+        match load_hot_rows_native(
+            &relation,
+            &residual.hot_equality,
+            &emit_columns,
+            &mut memory,
+        ) {
+            Ok(rows) if !rows.is_empty() => {
+                let hot_count = rows.len();
+                (
+                    ScanEmitMode::Buffer { rows, next: 0 },
+                    EmitPath::HotNative,
+                    hot_count,
+                )
+            }
+            Ok(_) => {
+                let mut filters = FilterPlan::new();
+                for (column, expected) in &residual.equality {
+                    filters = filters.with_required_json_eq(column.clone(), expected.clone());
+                }
+                let merged = match execute_merge_scan_with_filters(Vec::new(), cold_rows, filters)
+                {
+                    Ok(result) => result,
+                    Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} cold-native merge failed: {error}"),
+                };
+                let rows = unsafe {
+                    memory.switch(|| {
+                        merged
+                            .rows
+                            .iter()
+                            .map(|row| materialize_row_from_image(&row.row_image, &emit_columns))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                }
+                .unwrap_or_else(|error| {
+                    pgrx::error!("{CUSTOM_PATH_NAME} cold-native emit failed: {error}")
+                });
+                (
+                    ScanEmitMode::Buffer { rows, next: 0 },
+                    EmitPath::ColdNative,
+                    0,
+                )
+            }
+            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot probe failed: {error}"),
         }
     } else {
         let mut filters = FilterPlan::new();
@@ -427,6 +491,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             Ok(rows) => rows,
             Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot read failed: {error}"),
         };
+        let hot_count = hot_rows.len();
 
         let merged = match execute_merge_scan_with_filters(hot_rows, cold_rows, filters) {
             Ok(result) => result,
@@ -443,10 +508,18 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             })
         }
         .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} emit failed: {error}"));
-        ScanEmitMode::Buffer { rows, next: 0 }
+        (
+            ScanEmitMode::Buffer { rows, next: 0 },
+            EmitPath::MergeBuffer,
+            hot_count,
+        )
     };
 
     cold_profile.segments_opened = cold_profile.segments.len();
+    let result_rows = match &mode {
+        ScanEmitMode::HotChild => 0,
+        ScanEmitMode::Buffer { rows, .. } => rows.len(),
+    };
 
     SCAN_STATES.with(|states| {
         states.borrow_mut().insert(
@@ -457,6 +530,9 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 mirror_tombstones: overlay.tombstones,
                 mirror_live_overrides: overlay.live_overrides,
                 hot_plan_label,
+                emit_path,
+                hot_rows: hot_rows_count,
+                result_rows,
                 _memory: memory,
             },
         );
@@ -515,6 +591,9 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                             hot_plan_label: scan.hot_plan_label,
                             mirror_tombstones: scan.mirror_tombstones,
                             mirror_live_overrides: scan.mirror_live_overrides,
+                            emit_path: scan.emit_path,
+                            hot_rows: scan.hot_rows,
+                            result_rows: scan.result_rows,
                         },
                     );
                 }
@@ -558,43 +637,50 @@ unsafe extern "C-unwind" fn explain_custom_scan(
                 scan.hot_plan_label.clone(),
                 scan.mirror_tombstones,
                 scan.mirror_live_overrides,
+                scan.emit_path,
+                scan.hot_rows,
+                scan.result_rows,
             )
         })
     });
-    let (profile, hot_label, tombstones, live_overrides) = match profile {
-        Some(meta) => meta,
-        None => match profile::saved_explain_profile(node as usize) {
-            Some(meta) => (
-                meta.cold_profile,
-                meta.hot_plan_label,
-                meta.mirror_tombstones,
-                meta.mirror_live_overrides,
-            ),
-            None => {
-                // EXPLAIN without ANALYZE (or missing saved meta): plan-time cold profile only.
-                // Do not touch custom_ps here — children may already be shut down.
-                let profile = match resolve_table_oid(node).and_then(planned_cold_read_profile) {
-                    Ok(profile) => profile,
-                    Err(error) => {
-                        profile::explain_property(
-                            es,
-                            "Cold storage",
-                            &format!("unavailable: {error}"),
-                        );
-                        return;
-                    }
-                };
-                (profile, String::new(), 0, 0)
-            }
-        },
-    };
+    let (profile, hot_label, tombstones, live_overrides, emit_path, hot_rows, result_rows) =
+        match profile {
+            Some(meta) => meta,
+            None => match profile::saved_explain_profile(node as usize) {
+                Some(meta) => (
+                    meta.cold_profile,
+                    meta.hot_plan_label,
+                    meta.mirror_tombstones,
+                    meta.mirror_live_overrides,
+                    meta.emit_path,
+                    meta.hot_rows,
+                    meta.result_rows,
+                ),
+                None => {
+                    // EXPLAIN without ANALYZE (or missing saved meta): plan-time cold profile only.
+                    // Do not touch custom_ps here — children may already be shut down.
+                    let profile = match resolve_table_oid(node).and_then(planned_cold_read_profile) {
+                        Ok(profile) => profile,
+                        Err(error) => {
+                            profile::explain_property(
+                                es,
+                                "Cold storage",
+                                &format!("unavailable: {error}"),
+                            );
+                            return;
+                        }
+                    };
+                    (profile, String::new(), 0, 0, EmitPath::default(), 0, 0)
+                }
+            },
+        };
 
     if !hot_label.is_empty() {
         profile::explain_property(es, "Hot Plan", &hot_label);
     }
     profile::explain_property(es, "Mirror Tombstones", &tombstones.to_string());
     profile::explain_property(es, "Mirror Overrides", &live_overrides.to_string());
-    profile::explain_cold_read_profile(es, &profile);
+    profile::explain_cold_read_profile(es, &profile, emit_path, hot_rows, result_rows);
 
     if (*es).analyze {
         profile::forget_explain_profile(node as usize);
@@ -694,6 +780,19 @@ unsafe fn hot_child_explain_label(node: *mut pg_sys::CustomScanState) -> String 
     }
 }
 
+/// Returns true when equality filters cover every primary-key column.
+fn hot_equality_covers_primary_key(
+    filters: &[hot::HotEqualityFilter],
+    primary_key_columns: &[String],
+) -> bool {
+    !primary_key_columns.is_empty()
+        && primary_key_columns.iter().all(|pk| {
+            filters
+                .iter()
+                .any(|filter| filter.column.eq_ignore_ascii_case(pk))
+        })
+}
+
 fn filter_cold_rows_with_overlay(
     cold_rows: Vec<koldstore_common::ColdRow>,
     overlay: &MirrorOverlay,
@@ -703,10 +802,7 @@ fn filter_cold_rows_with_overlay(
     }
     cold_rows
         .into_iter()
-        .filter(|row| {
-            let key = row.pk.to_canonical_json().to_string();
-            !overlay.masks_pk(&key)
-        })
+        .filter(|row| !overlay.masks_pk(&row.pk))
         .collect()
 }
 
