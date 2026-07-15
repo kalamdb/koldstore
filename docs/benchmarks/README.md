@@ -17,16 +17,16 @@ Harness: [`tests/storage/`](../../tests/storage/) with a wide (~50 column) table
 from [`tests/storage/schema.sql`](../../tests/storage/schema.sql).
 
 Sample run: **10,000,000 rows**, `hot_row_limit = 100000`,
-`max_rows_per_file = 1000000` (~9.9M rows flushed, zstd Parquet). Numbers vary
-by machine; re-run for your hardware. Figures below are from a local PG16.13
-`release-pg` run on the managed-mirror DML capture rewrite.
+`max_rows_per_file = 1000000`, `--dml-sample 50000` (~9.9M rows flushed, zstd
+Parquet). Numbers vary by machine; re-run for your hardware. Figures below are
+from a local PG16.13 `release-pg` run on the managed-mirror DML capture rewrite.
 
 | Result | PostgreSQL only | PostgreSQL + KoldStore | Win |
 | --- | --- | --- | --- |
 | PostgreSQL heap + indexes (after flush) | 5.85 GiB | 73 MiB | **99% smaller** |
 | Index storage | 415 MiB | 11.5 MiB | **97% smaller** |
 | Table storage | 5.45 GiB | 62 MiB (+ 599 MiB cold Parquet) | **99% smaller** heap |
-| `VACUUM (FULL, ANALYZE)` (after flush) | 71.8 s | 5.16 s | **93% faster** |
+| `VACUUM (FULL, ANALYZE)` (after flush) | 77.7 s | 3.39 s | **96% faster** |
 
 Point lookups on hot and cold primary keys still return the same rows as the
 unmanaged baseline (`KoldMergeScan`).
@@ -53,24 +53,32 @@ How to read the table (Postgres-oriented):
 
 | Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |
 | --- | --- | --- | --- |
-| insert speed† | 59k ops/s | 45k ops/s | — |
-| update speed† | 6.0k ops/s | 8.0k ops/s | — |
-| delete speed† | 1.1M ops/s | 130k ops/s | — |
+| insert speed† | 70k ops/s | 45k ops/s | — |
+| update speed† | 23k ops/s | 20k ops/s | — |
+| delete speed† | 1.4M ops/s | 97k ops/s | — |
 | query hot only (before flush) | 1.5k ops/s | 1.7k ops/s | — |
-| query with hot+cold (after flush) | 1.5k ops/s | 119 ops/s‡ | — |
-| VACUUM time (after flush) | 71.8 s | 5.16 s | **93%** |
-| dead tuples after workload | 2010 (live≈10M) | 2000 (live≈10M) | — |
+| query with hot+cold (after flush) | 1.5k ops/s | 124 ops/s‡ | — |
+| VACUUM time (after flush) | 77.7 s | 3.39 s | **96%** |
+| dead tuples after workload | 100k (live≈10M) | 100k (live≈10M) | — |
 | index storage | 415 MiB | 11.5 MiB | **97%** |
 | table storage | 5.45 GiB | 62 MiB (+ 599 MiB cold Parquet) | **99%** |
 | total PG backup size | TODO | TODO | — |
 | restore time | TODO | TODO | — |
 
-† DML timings use the harness default `--dml-sample 1000` on the 10M-row table.
-Managed INSERT/UPDATE/DELETE still maintain the latest-state mirror
-(`koldstore.<table>__cl`) in the same transaction. After the statement-level
-capture rewrite, a 1k-row UPDATE on this run was competitive with (here, slightly
-faster than) the unmanaged heap; bulk DML before/after ratios are in the section
-below. Reproduce with `--dml-sample N`.
+† DML rows use `--dml-sample 50000` on the 10M-row table. Managed UPDATE/DELETE
+are slower than plain heap because each statement also updates the latest-state
+mirror (`koldstore.<table>__cl`) in the same transaction — confirmed with
+`EXPLAIN` (`Trigger …_update_capture`) and a separate 50k-row microbench where
+managed UPDATE was ~3× slower on a narrow table. A prior default 1k-row sample
+(~100–200 ms single-shot) was too noisy and incorrectly showed managed UPDATE
+faster; do not use `--dml-sample` that small for published comparisons. Bulk
+before/after ratios vs the old capture SQL are in the section below.
+
+‡ Hot+cold PK lookups open matching Parquet segments (min/max prune +
+row-group stats / bloom). At this scale each surviving segment is ~1M wide
+rows, so footer open + merge-scan setup dominates vs a pure B-tree probe;
+streaming execution and tighter segment sizing are follow-ups. See
+[performance](../performance.md).
 
 ‡ Hot+cold PK lookups open matching Parquet segments (min/max prune +
 row-group stats / bloom). At this scale each surviving segment is ~1M wide
@@ -111,8 +119,8 @@ gates: [plan](../plans/2026-07-15-managed-mirror-dml-performance.md). Architectu
 ## Reproduce
 
 ```bash
-# Table above: 10M rows / 100k hot (~30 min on a laptop; release-pg extension).
-scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000
+# Table above: 10M rows / 100k hot / 50k DML sample (~12 min on a laptop; release-pg).
+scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000 --dml-sample 50000
 # Faster local smoke (defaults: 100k rows / 10k hot / 1k DML sample):
 scripts/run-storage-comparison.sh
 # Managed DML before/after-style sample (UPDATE/DELETE size):
