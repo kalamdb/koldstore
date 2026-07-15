@@ -20,12 +20,15 @@ Sample run: **10,000,000 rows**, `hot_row_limit = 100000`,
 `max_rows_per_file = 1000000` (~9.9M rows flushed, zstd Parquet). Numbers vary
 by machine; re-run for your hardware.
 
+Measured on this machine after cold-PK / merge-scan optimizations (footer cache,
+cold-native emit, `LogicalPk` merge keys), `release-pg` extension profile:
+
 | Result | PostgreSQL only | PostgreSQL + KoldStore | Win |
 | --- | --- | --- | --- |
 | PostgreSQL heap + indexes (after flush) | 5.85 GiB | 72 MiB | **99% smaller** |
 | Index storage | 415 MiB | 11.4 MiB | **97% smaller** |
 | Table storage | 5.45 GiB | 61 MiB (+ 597 MiB cold Parquet) | **99% smaller** heap |
-| `VACUUM (FULL, ANALYZE)` (after flush) | 131 s | 6.4 s | **95% faster** |
+| `VACUUM (FULL, ANALYZE)` (after flush) | 64 s | 4.9 s | **92% faster** |
 
 Point lookups on hot and cold primary keys still return the same rows as the
 unmanaged baseline (`KoldMergeScan`).
@@ -52,12 +55,12 @@ How to read the table (Postgres-oriented):
 
 | Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |
 | --- | --- | --- | --- |
-| insert speed† | 69k ops/s | 23k ops/s | — |
-| update speed† | 6.8k ops/s | 5.5k ops/s | — |
-| delete speed† | 1.0M ops/s | 38k ops/s | — |
-| query hot only (before flush) | 1.6k ops/s | 1.3k ops/s | — |
-| query with hot+cold (after flush) | 1.5k ops/s | 127 ops/s‡ | — |
-| VACUUM time (after flush) | 131 s | 6.4 s | **95%** |
+| insert speed† | 50k ops/s | 24k ops/s | — |
+| update speed† | 8.0k ops/s | 5.6k ops/s | — |
+| delete speed† | 1.1M ops/s | 38k ops/s | — |
+| query hot only (before flush) | 1.6k ops/s | 1.7k ops/s | — |
+| query with hot+cold (after flush) | 1.6k ops/s | 1.3k ops/s‡ | — |
+| VACUUM time (after flush) | 64 s | 4.9 s | **92%** |
 | dead tuples after workload | 2000 (live≈10M) | 2000 (live≈10M) | — |
 | index storage | 415 MiB | 11.4 MiB | **97%** |
 | table storage | 5.45 GiB | 61 MiB (+ 597 MiB cold Parquet) | **99%** |
@@ -71,10 +74,11 @@ of flush cutoffs and change cursors. The payoff is a smaller hot heap/indexes,
 cheaper VACUUM, and (planned) `changes_since` so sync/cache consumers can
 follow changes without a second CDC pipeline.
 
-‡ Hot+cold PK lookups open matching Parquet segments (min/max prune +
-row-group stats / bloom). At this scale each surviving segment is ~1M wide
-rows, so footer open + merge-scan setup dominates vs a pure B-tree probe;
-streaming execution and tighter segment sizing are follow-ups. See
+‡ Same-machine A/B (10M rows, `release-pg`): managed hot+cold PK lookups improved
+from **119 ops/s → 1272 ops/s** (~10.7×) after footer cache + cold-native emit +
+`LogicalPk` merge/overlay keys. Managed is now within ~20% of the plain heap
+on this workload (1591 vs 1272 ops/s). Remaining gap is Parquet open / prune
+vs B-tree; streaming full-table scans are still a follow-up. See
 [performance](../performance.md).
 
 ## Reproduce

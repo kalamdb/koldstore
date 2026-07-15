@@ -10,6 +10,31 @@ use pgrx::pg_sys;
 
 const EXPLAIN_PROFILE_LIMIT: usize = 64;
 
+/// How BeginCustomScan chose to emit rows (surfaced in EXPLAIN).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) enum EmitPath {
+    /// Native hot child plan streamed via ExecProcNode.
+    #[default]
+    HotChild,
+    /// Hot-only SPI native Datums (no JSON), buffered.
+    HotNative,
+    /// Cold-only after PK probe: no hot JSON merge.
+    ColdNative,
+    /// Hot+cold overlap via JSON merge buffer.
+    MergeBuffer,
+}
+
+impl EmitPath {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::HotChild => "hot_child",
+            Self::HotNative => "hot_native",
+            Self::ColdNative => "cold_native",
+            Self::MergeBuffer => "merge_buffer",
+        }
+    }
+}
+
 /// Scan metadata retained across EndCustomScan for EXPLAIN ANALYZE rendering.
 #[derive(Debug, Clone)]
 pub(super) struct ExplainScanMeta {
@@ -17,6 +42,9 @@ pub(super) struct ExplainScanMeta {
     pub(super) hot_plan_label: String,
     pub(super) mirror_tombstones: usize,
     pub(super) mirror_live_overrides: usize,
+    pub(super) emit_path: EmitPath,
+    pub(super) hot_rows: usize,
+    pub(super) result_rows: usize,
 }
 
 thread_local! {
@@ -42,8 +70,10 @@ pub(super) struct ColdReadProfile {
     pub(super) storage_type: String,
     pub(super) base_path: String,
     pub(super) manifest_read_ms: Option<f64>,
-    /// Segments considered before catalog min/max prune.
+    /// Segments considered before any prune (catalog candidates).
     pub(super) segments_considered: usize,
+    /// Segments rejected because they do not match the scan scope.
+    pub(super) segments_pruned_scope: usize,
     /// Segments rejected by normalized catalog min/max statistics.
     pub(super) segments_pruned_min_max: usize,
     /// Segments opened after catalog prune.
@@ -63,6 +93,7 @@ impl ColdReadProfile {
             base_path: String::new(),
             manifest_read_ms: None,
             segments_considered: 0,
+            segments_pruned_scope: 0,
             segments_pruned_min_max: 0,
             segments_opened: 0,
             pk_probe: None,
@@ -99,12 +130,87 @@ pub(super) fn forget_explain_profile(node_key: usize) {
     });
 }
 
-pub(super) fn explain_cold_read_profile(es: *mut pg_sys::ExplainState, profile: &ColdReadProfile) {
+/// Formats a byte count for EXPLAIN (for example `1.8 MB`).
+#[must_use]
+pub(super) fn format_bytes_human(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes_f = bytes as f64;
+    if bytes_f >= GB {
+        format!("{:.1} GB", bytes_f / GB)
+    } else if bytes_f >= MB {
+        format!("{:.1} MB", bytes_f / MB)
+    } else if bytes_f >= KB {
+        format!("{:.1} kB", bytes_f / KB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
+pub(super) fn explain_cold_read_profile(
+    es: *mut pg_sys::ExplainState,
+    profile: &ColdReadProfile,
+    emit_path: EmitPath,
+    hot_rows: usize,
+    result_rows: usize,
+) {
     let executed = profile.manifest_read_ms.is_some()
         && profile
             .segments
             .iter()
             .all(|segment| segment.read_ms.is_some());
+
+    // Timescale-style prune summary first — easy to scan while tuning.
+    explain_property(es, "Emit path", emit_path.as_str());
+    explain_property(es, "Hot rows", &hot_rows.to_string());
+    if executed {
+        explain_property(es, "Result rows", &result_rows.to_string());
+    }
+    explain_property(
+        es,
+        "Candidate segments",
+        &profile.segments_considered.to_string(),
+    );
+    explain_property(
+        es,
+        "Segments pruned by scope",
+        &profile.segments_pruned_scope.to_string(),
+    );
+    explain_property(
+        es,
+        "Segments pruned by min/max",
+        &profile.segments_pruned_min_max.to_string(),
+    );
+    explain_property(
+        es,
+        "Parquet segments opened",
+        &profile.segments_opened.to_string(),
+    );
+
+    let (row_groups_total, row_groups_selected, row_groups_skipped, bloom_filters_fetched) =
+        profile.row_group_totals();
+    let bytes_fetched = profile.bytes_fetched();
+    let footer_cache_hits = profile.footer_cache_hits();
+
+    if executed || row_groups_total > 0 || bytes_fetched > 0 {
+        explain_property(
+            es,
+            "Row groups read",
+            &row_groups_selected.to_string(),
+        );
+        if row_groups_total > 0 {
+            explain_property(
+                es,
+                "Row groups skipped",
+                &format!("{row_groups_skipped} of {row_groups_total}"),
+            );
+        }
+        explain_property(es, "Bytes fetched", &format_bytes_human(bytes_fetched));
+        if footer_cache_hits > 0 {
+            explain_property(es, "Footer cache hits", &footer_cache_hits.to_string());
+        }
+    }
 
     let manifest_value = if executed {
         format!(
@@ -145,16 +251,15 @@ pub(super) fn explain_cold_read_profile(es: *mut pg_sys::ExplainState, profile: 
         es,
         "Cold segments",
         &format!(
-            "considered={}, pruned_min_max={}, pruned_bloom={}, opened={}",
+            "considered={}, pruned_scope={}, pruned_min_max={}, pruned_bloom={}, opened={}",
             profile.segments_considered,
+            profile.segments_pruned_scope,
             profile.segments_pruned_min_max,
             profile.segments_pruned_by_bloom(),
             profile.segments_opened
         ),
     );
 
-    let (row_groups_total, row_groups_selected, row_groups_skipped, bloom_filters_fetched) =
-        profile.row_group_totals();
     if row_groups_total > 0 || bloom_filters_fetched > 0 {
         explain_property(
             es,
@@ -220,6 +325,22 @@ impl ColdReadProfile {
                 )
             })
     }
+
+    fn bytes_fetched(&self) -> u64 {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .map(|parquet| parquet.bytes_read)
+            .sum()
+    }
+
+    fn footer_cache_hits(&self) -> usize {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .filter(|parquet| parquet.footer_cache_hit)
+            .count()
+    }
 }
 
 fn format_segment_line(segment: &SegmentReadProfile, executed: bool) -> String {
@@ -258,5 +379,18 @@ pub(super) fn explain_property(es: *mut pg_sys::ExplainState, label: &str, value
     let value = CString::new(value).unwrap_or_default();
     unsafe {
         pg_sys::ExplainPropertyText(label.as_ptr(), value.as_ptr(), es);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_bytes_human;
+
+    #[test]
+    fn format_bytes_human_uses_readable_units() {
+        assert_eq!(format_bytes_human(512), "512 bytes");
+        assert_eq!(format_bytes_human(2048), "2.0 kB");
+        assert_eq!(format_bytes_human(1_889_000), "1.8 MB");
+        assert_eq!(format_bytes_human(3_221_225_472), "3.0 GB");
     }
 }

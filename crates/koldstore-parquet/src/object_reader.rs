@@ -141,6 +141,19 @@ impl AsyncFileReader for ObjectStoreParquetReader {
         options: Option<&'a ArrowReaderOptions>,
     ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
         Box::pin(async move {
+            // Only cache footers loaded with page indexes skipped (the merge-scan
+            // default). Indexed metadata is rarer and must not reuse a Skip entry.
+            let indexes_requested = options.is_some_and(|opts| {
+                opts.column_index_policy() != PageIndexPolicy::Skip
+                    || opts.offset_index_policy() != PageIndexPolicy::Skip
+            });
+            let cache_path = self.path.as_ref().to_string();
+            if !indexes_requested {
+                if let Some(cached) = crate::footer_cache::get(&cache_path, self.file_size) {
+                    return Ok(cached);
+                }
+            }
+
             let metadata_opts = options.map(|o| o.metadata_options().clone());
             let mut metadata = ParquetMetaDataReader::new()
                 .with_metadata_options(metadata_opts)
@@ -158,12 +171,17 @@ impl AsyncFileReader for ObjectStoreParquetReader {
                 }
             }
 
-            let metadata = if let Some(file_size) = self.file_size {
+            let file_size = self.file_size;
+            let metadata = if let Some(file_size) = file_size {
                 metadata.load_and_finish(self, file_size).await?
             } else {
                 metadata.load_via_suffix_and_finish(self).await?
             };
-            Ok(Arc::new(metadata))
+            let metadata = Arc::new(metadata);
+            if !indexes_requested {
+                crate::footer_cache::insert(&cache_path, file_size, Arc::clone(&metadata));
+            }
+            Ok(metadata)
         })
     }
 }

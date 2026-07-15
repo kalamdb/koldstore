@@ -1,6 +1,7 @@
 //! Hot/cold winner resolution.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 
 use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, SeqId};
 
@@ -22,13 +23,20 @@ pub struct ResolvedRow {
     pub deleted: bool,
 }
 
-/// Resolves hot and cold rows.
+/// Resolves hot and cold rows (borrowed inputs; clones row images).
 #[must_use]
 pub fn resolve_rows(hot: &[HotRow], cold: &[ColdRow]) -> Vec<ResolvedRow> {
-    #[derive(Clone)]
+    resolve_rows_owned(hot.to_vec(), cold.to_vec())
+}
+
+/// Resolves hot and cold rows, taking ownership to avoid per-candidate image clones.
+///
+/// Merge identity uses [`LogicalPk`] directly — canonical JSON is produced only
+/// when winners leave the merge for the SQL/API boundary.
+#[must_use]
+pub fn resolve_rows_owned(hot: Vec<HotRow>, cold: Vec<ColdRow>) -> Vec<ResolvedRow> {
     struct Candidate {
         source: RowSource,
-        pk: LogicalPk,
         seq: SeqId,
         commit_seq: CommitSeq,
         deleted: bool,
@@ -44,47 +52,51 @@ pub fn resolve_rows(hot: &[HotRow], cold: &[ColdRow]) -> Vec<ResolvedRow> {
         }
     }
 
-    let mut winners: BTreeMap<String, Candidate> = BTreeMap::new();
+    let mut winners: HashMap<LogicalPk, Candidate> = HashMap::new();
     for row in cold {
-        let key = row.pk.to_canonical_json().to_string();
         let candidate = Candidate {
             source: RowSource::Cold,
-            pk: row.pk.clone(),
             seq: row.seq,
             commit_seq: row.commit_seq,
             deleted: row.deleted,
-            row_image: row.row_image.clone(),
+            row_image: row.row_image,
         };
-        match winners.get(&key) {
-            Some(existing) if !candidate.beats(existing) => {}
-            _ => {
-                winners.insert(key, candidate);
+        match winners.entry(row.pk) {
+            Entry::Vacant(slot) => {
+                slot.insert(candidate);
+            }
+            Entry::Occupied(mut slot) => {
+                if candidate.beats(slot.get()) {
+                    slot.insert(candidate);
+                }
             }
         }
     }
     for row in hot {
-        let key = row.pk.to_canonical_json().to_string();
         let candidate = Candidate {
             source: RowSource::Hot,
-            pk: row.pk.clone(),
             seq: row.seq,
             commit_seq: row.commit_seq,
             deleted: row.deleted,
-            row_image: row.row_image.clone(),
+            row_image: row.row_image,
         };
-        match winners.get(&key) {
-            Some(existing) if !candidate.beats(existing) => {}
-            _ => {
-                winners.insert(key, candidate);
+        match winners.entry(row.pk) {
+            Entry::Vacant(slot) => {
+                slot.insert(candidate);
+            }
+            Entry::Occupied(mut slot) => {
+                if candidate.beats(slot.get()) {
+                    slot.insert(candidate);
+                }
             }
         }
     }
 
     winners
-        .into_values()
-        .filter(|winner| !winner.deleted)
-        .map(|winner| ResolvedRow {
-            pk_json: winner.pk.to_canonical_json(),
+        .into_iter()
+        .filter(|(_, winner)| !winner.deleted)
+        .map(|(pk, winner)| ResolvedRow {
+            pk_json: pk.to_canonical_json(),
             source: winner.source,
             seq: winner.seq,
             commit_seq: winner.commit_seq,

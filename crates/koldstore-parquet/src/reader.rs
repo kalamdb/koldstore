@@ -197,6 +197,8 @@ pub struct ParquetReadProfile {
     pub bytes_read: u64,
     /// Decoded clean cold rows after exact PK filter.
     pub rows_returned: usize,
+    /// Footer metadata served from the backend-local cache (no footer GET).
+    pub footer_cache_hit: bool,
 }
 
 impl BloomPruneMode {
@@ -218,6 +220,9 @@ impl ParquetReadProfile {
         let mut parts = Vec::new();
         if self.footer_first {
             parts.push("footer-first".to_string());
+        }
+        if self.footer_cache_hit {
+            parts.push("footer_cache=hit".to_string());
         }
         parts.push(format!(
             "range_gets={}, bytes_read={}",
@@ -418,6 +423,7 @@ pub async fn read_clean_cold_rows_from_object_store_async(
 ) -> Result<(Vec<CleanColdRow>, ParquetReadProfile), String> {
     let io =
         stats.unwrap_or_else(|| Arc::new(crate::object_reader::ObjectStoreReadStats::default()));
+    let footer_cache_hit = crate::footer_cache::get(object_path, file_size).is_some();
     let mut reader = ObjectStoreParquetReader::from_key(store, object_path)?;
     if let Some(size) = file_size {
         reader = reader.with_file_size(size);
@@ -505,6 +511,7 @@ pub async fn read_clean_cold_rows_from_object_store_async(
                         range_calls,
                         bytes_read,
                         rows_returned: 0,
+                        footer_cache_hit,
                     },
                 ));
             }
@@ -547,6 +554,7 @@ pub async fn read_clean_cold_rows_from_object_store_async(
                     range_calls,
                     bytes_read,
                     rows_returned: 0,
+                    footer_cache_hit,
                 },
             ));
         }
@@ -596,6 +604,7 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         range_calls,
         bytes_read,
         rows_returned: rows.len(),
+        footer_cache_hit,
     };
     Ok((rows, profile))
 }

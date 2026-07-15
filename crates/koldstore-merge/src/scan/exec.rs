@@ -4,7 +4,7 @@ use koldstore_common::{ColdRow, HotRow};
 use thiserror::Error;
 
 use super::plan::MergeScanPlan;
-use crate::resolver::{resolve_rows, ResolvedRow};
+use crate::resolver::{resolve_rows_owned, ResolvedRow};
 
 /// Availability of cold storage for a scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,7 +181,7 @@ pub fn execute_merge_scan(
     let tombstones_masked = hot_rows.iter().filter(|row| row.deleted).count();
     let hot_rows_seen = hot_rows.len();
     let cold_rows_seen = cold_rows.len();
-    let rows = resolve_rows(&hot_rows, &cold_rows);
+    let rows = resolve_rows_owned(hot_rows, cold_rows);
 
     Ok(MergeScanResult {
         rows,

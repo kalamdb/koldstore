@@ -60,6 +60,21 @@ pub(crate) fn spi_get_text(sql: &str) -> String {
         .expect("expected non-null text")
 }
 
+/// Returns the full multiline `EXPLAIN` / `EXPLAIN ANALYZE` text.
+pub(crate) fn spi_get_explain(sql: &str) -> String {
+    Spi::connect(|client| {
+        let table = client.select(sql, None, &[]).expect("explain select");
+        let mut lines = Vec::new();
+        for row in table {
+            let line: Option<String> = row.get(1).expect("explain column");
+            if let Some(line) = line {
+                lines.push(line);
+            }
+        }
+        lines.join("\n")
+    })
+}
+
 /// Returns a single i64 column from a one-row query.
 pub(crate) fn spi_get_i64(sql: &str) -> i64 {
     Spi::get_one::<i64>(sql)

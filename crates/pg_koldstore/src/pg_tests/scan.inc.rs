@@ -13,11 +13,57 @@ fn explain_shows_kold_merge_scan_for_managed_table() {
     ))
     .expect("insert");
 
-    let plan = spi_get_text(&format!("EXPLAIN SELECT * FROM {relation}"));
+    let plan = spi_get_explain(&format!("EXPLAIN SELECT * FROM {relation}"));
     assert!(
         plan.contains("KoldMergeScan") || plan.contains("Custom Scan"),
         "expected custom merge scan in EXPLAIN: {plan}"
     );
+    assert!(
+        plan.contains("Candidate segments")
+            || plan.contains("Segments pruned by min/max")
+            || plan.contains("Parquet segments opened"),
+        "expected Timescale-style prune properties in EXPLAIN: {plan}"
+    );
+}
+
+#[pg_test]
+fn explain_analyze_shows_prune_summary_after_flush() {
+    let suffix = unique_suffix("explain_prune");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_shared(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) SELECT body FROM {relation} WHERE id = 2"
+    ));
+    assert!(
+        plan.contains("KoldMergeScan") || plan.contains("Custom Scan"),
+        "expected custom merge scan: {plan}"
+    );
+    for needle in [
+        "Emit path",
+        "Hot rows",
+        "Candidate segments",
+        "Segments pruned by scope",
+        "Segments pruned by min/max",
+        "Parquet segments opened",
+        "Bytes fetched",
+    ] {
+        assert!(
+            plan.contains(needle),
+            "EXPLAIN ANALYZE missing `{needle}`: {plan}"
+        );
+    }
 }
 
 #[pg_test]

@@ -55,6 +55,9 @@ pub(super) fn load_cold_rows_for_merge(
         let segments_considered = manifest_stats.segments.len();
         let segments = prune_segment_stats_hints(&manifest_stats.segments, &prune_predicates);
         let segments_pruned_min_max = segments_considered.saturating_sub(segments.len());
+        // Shared-scope catalog SQL already filters `scope_key = ''`; scoped prune
+        // counters stay 0 until multi-scope segments are returned to the scan.
+        let segments_pruned_scope = 0usize;
 
         let projection = projection_column_names(projected_columns, &snapshot.primary_key_columns);
         let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
@@ -66,6 +69,7 @@ pub(super) fn load_cold_rows_for_merge(
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: Some(manifest_read_ms),
             segments_considered,
+            segments_pruned_scope,
             segments_pruned_min_max,
             segments_opened: segments.len(),
             pk_probe: pk_probe.clone(),
@@ -129,6 +133,7 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: Some(0.0),
             segments_considered: manifest_stats.segments.len(),
+            segments_pruned_scope: 0,
             segments_pruned_min_max: 0,
             segments_opened: manifest_stats.segments.len(),
             pk_probe: None,
