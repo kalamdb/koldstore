@@ -11,7 +11,8 @@ from pathlib import Path
 
 import tomllib
 
-ROOT = Path(__file__).resolve().parents[1]
+# scripts/build/release-version.py → repo root is two levels up
+ROOT = Path(__file__).resolve().parents[2]
 WORKSPACE_CARGO = ROOT / "Cargo.toml"
 
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$")

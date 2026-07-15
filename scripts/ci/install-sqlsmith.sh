@@ -17,8 +17,10 @@ if [[ -x "$BIN" ]]; then
 fi
 
 echo "installing sqlsmith into ${PREFIX}"
-sudo apt-get install -y -qq build-essential autoconf automake libtool \
-  libpq-dev libboost-regex-dev pkg-config >/dev/null
+# autoconf-archive supplies AX_CXX_COMPILE_STDCXX_* / AX_BOOST_* / AX_LIB_POSTGRESQL
+# used by sqlsmith's configure.ac; without it, autoreconf leaves raw macros in ./configure.
+sudo apt-get install -y -qq build-essential autoconf automake autoconf-archive libtool \
+  libpq-dev libpqxx-dev libboost-regex-dev pkg-config >/dev/null
 
 rm -rf "$SRC"
 if [[ -n "$REF" ]]; then
@@ -28,7 +30,7 @@ else
 fi
 (
   cd "$SRC"
-  autoreconf -i
+  autoreconf -fi
   ./configure --prefix="$PREFIX"
   make -j"$(nproc)"
   make install
