@@ -64,12 +64,19 @@ How to read the table (Postgres-oriented):
 | total PG backup size | TODO | TODO | — |
 | restore time | TODO | TODO | — |
 
-† DML is slower under KoldStore because `manage_table` installs capture
-triggers that maintain the latest-state change-log mirror
+† DML is slower under KoldStore because `manage_table` installs statement-level
+capture triggers that maintain the latest-state change-log mirror
 (`koldstore.<table>__cl`: one row per PK with `seq` / `op`). That is the cost
 of flush cutoffs and change cursors. The payoff is a smaller hot heap/indexes,
 cheaper VACUUM, and (planned) `changes_since` so sync/cache consumers can
 follow changes without a second CDC pipeline.
+
+Managed DML capture was rewritten for bulk statements (NEW-only UPDATE, direct
+mirror updates, adaptive INSERT). On a local PG16 `release-pg` machine, a
+5k-row sample improved median managed UPDATE ~48× and DELETE ~3× vs the prior
+Task-1 capture SQL; see the plan
+[`docs/plans/2026-07-15-managed-mirror-dml-performance.md`](../plans/2026-07-15-managed-mirror-dml-performance.md).
+Reproduce with `--dml-sample N` on `scripts/run-storage-comparison.sh`.
 
 ‡ Hot+cold PK lookups open matching Parquet segments (min/max prune +
 row-group stats / bloom). At this scale each surviving segment is ~1M wide
@@ -82,8 +89,10 @@ streaming execution and tighter segment sizing are follow-ups. See
 ```bash
 # Table above: 10M rows / 100k hot (~30 min on a laptop; release-pg extension).
 scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000
-# Faster local smoke (defaults: 100k rows / 10k hot):
+# Faster local smoke (defaults: 100k rows / 10k hot / 1k DML sample):
 scripts/run-storage-comparison.sh
+# Bulk managed DML sample (UPDATE/DELETE size):
+scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
 ```
 
 Additional pgbench-oriented suites live under [`benchmarks/`](../../benchmarks/).

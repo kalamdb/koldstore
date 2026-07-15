@@ -19,7 +19,9 @@ setup vs B-tree) is the main read-path focus.
 
 ## Success Criteria
 
-- SC-002: hot DML latency stays within 10 percent of a regular heap table.
+- SC-002: hot DML latency stays within 10 percent of a regular heap table for
+  small statements; bulk managed DML is dominated by mirror heap/index
+  maintenance (see [dml-table](architecture/dml-table.md)).
 - SC-006: PK point lookups skip at least 90 percent of cold row groups.
 
 ## Priority order (accepted direction)
@@ -27,11 +29,14 @@ setup vs B-tree) is the main read-path focus.
 1. **Cold PK point lookups** — backend Parquet footer/reader cache; cold-native
    emit that skips the JSON merge path when a PK equality hits cold only.
    Dominates the hot+cold ops/s gap after flush.
-2. **Footer-derived catalog segment stats** — stop double-computing min/max on
+2. **Managed mirror DML** — statement-level capture with NEW-only UPDATE,
+   direct mirror updates, and adaptive INSERT (`ON CONFLICT` / `MERGE`). Landed;
+   index-layout and native-capture follow-ups stay gated.
+3. **Footer-derived catalog segment stats** — stop double-computing min/max on
    flush (`indexed_bounds` vs writer chunk stats). Catalog still owns
    prune-before-open; `byte_size` is already single-source from publish.
    See [ADR-002](decisions/002-footer-derived-catalog-stats.md).
-3. Segment sizing / page indexes / streaming merge polish — secondary levers
+4. Segment sizing / page indexes / streaming merge polish — secondary levers
    once (1) lands.
 
 Tracked on the [roadmap](roadmap.md).

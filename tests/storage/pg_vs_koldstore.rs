@@ -147,15 +147,12 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         time_update(&db.client, &managed, rows - dml_sample + 1, dml_sample).await?
     };
 
-    let delete_start = rows + 1;
-    let delete_end = rows + dml_sample;
-    {
-        let _step = common::log_step_always(format!(
-            "storage_cmp: seed delete sample ({dml_sample} rows each side)"
-        ));
-        time_insert(&db.client, &baseline, delete_start, dml_sample).await?;
-        time_insert(&db.client, &managed, delete_start, dml_sample).await?;
-    }
+    // Delete from the high end of the seeded range, then re-insert the same
+    // keys before flush. Seeding a disjoint range left `dml_sample` tombstones
+    // in the mirror; flush-by-oldest-seq then evacuated live hot rows while
+    // retaining tombstones whenever `dml_sample` approached `rows`.
+    let delete_start = rows - dml_sample + 1;
+    let delete_end = rows;
     let baseline_delete = {
         let _step = common::log_step_always("storage_cmp: delete baseline sample");
         time_delete(&db.client, &baseline, delete_start, delete_end).await?
@@ -164,6 +161,13 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         let _step = common::log_step_always("storage_cmp: delete managed sample");
         time_delete(&db.client, &managed, delete_start, delete_end).await?
     };
+    {
+        let _step = common::log_step_always(format!(
+            "storage_cmp: restore delete sample ({dml_sample} rows each side)"
+        ));
+        time_insert(&db.client, &baseline, delete_start, dml_sample).await?;
+        time_insert(&db.client, &managed, delete_start, dml_sample).await?;
+    }
 
     // Snapshot bloat / autovacuum pressure after DML, before flush reclaims space.
     // Force the stats collector so n_dead_tup reflects this backend's DML.
