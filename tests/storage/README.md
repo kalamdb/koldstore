@@ -37,10 +37,12 @@ KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 KOLDSTORE_STORAG
   cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
 ```
 
-The harness prints a markdown comparison table and asserts that after flush,
-PostgreSQL heap and index bytes for the managed table are smaller than the
-unmanaged baseline. Progress lines are always logged for seed / flush / vacuum
-phases so large runs do not look hung.
+The harness prints a markdown comparison table with a **Tradeoff** column
+(e.g. `35% slower`, `99% smaller`) and asserts that after flush, PostgreSQL
+heap and index bytes for the managed table — **including**
+`koldstore.<table>__cl` and its indexes — are smaller than the unmanaged
+baseline. Progress lines are always logged for seed / flush / vacuum phases so
+large runs do not look hung.
 
 Visibility after flush is checked with point lookups plus `describe_table`
 hot+cold counters — not `SELECT count(*)` through `KoldMergeScan`, which still

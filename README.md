@@ -77,22 +77,24 @@ KoldStore is a **storage lifecycle tool**, not a universal query accelerator. Af
   <img src="docs/assets/benchmark-storage-wins.svg" alt="After flush: heap and indexes 99% smaller, indexes 97% smaller, VACUUM FULL 95% faster" width="900" />
 </p>
 
-| Result | Before → after flush | Win |
+| Result | Before → after flush | Tradeoff |
 | --- | --- | --- |
-| PostgreSQL heap + indexes | 5.85 GiB → 73 MiB | **99% smaller** |
-| Indexes | 415 MiB → 11.5 MiB | **97% smaller** |
-| `VACUUM (FULL, ANALYZE)` | 77.7 s → 3.39 s | **96% faster** |
+| PostgreSQL heap + indexes (includes `__cl`) | 5.85 GiB → 73 MiB | **99% smaller** |
+| Indexes (hot + `__cl`) | 415 MiB → 11.5 MiB | **97% smaller** |
+| `VACUUM (FULL, ANALYZE)` | 77.7 s → 3.39 s | **23× faster** |
 
 Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000` (local
-PG16.13 `release-pg`).
+PG16.13 `release-pg`). Managed PostgreSQL sizes include the hot heap **and**
+`koldstore.<table>__cl` plus its indexes.
 
-Managed tables still maintain a latest-state change-log mirror on every
+Managed tables maintain a latest-state change-log mirror on every
 `INSERT` / `UPDATE` / `DELETE` (same transaction as the heap write), so managed DML
-is slower than plain heap (e.g. UPDATE ~20k vs ~23k ops/s on this run). Relative
-to the prior capture SQL, statement-level capture is much faster on bulk DML —
-median managed **UPDATE ~48×** and **DELETE ~3×** on a 5k-row sample; bulk INSERT
-~1.9×. Cold PK lookups remain slower than pure B-tree probes (~124 ops/s managed
-hot+cold vs ~1.5k heap here). Full methodology and tables:
+is slower than plain heap (e.g. INSERT **35% slower**, UPDATE **15% slower**,
+DELETE **15× slower** on this run). Relative to the prior capture SQL,
+statement-level capture is much faster on bulk DML — median managed **UPDATE ~48×**
+and **DELETE ~3×** on a 5k-row sample; bulk INSERT ~1.9×. Cold PK lookups remain
+slower than pure B-tree probes (~124 ops/s managed hot+cold vs ~1.5k heap here,
+**~12× slower**). Full methodology and tables:
 [docs/benchmarks/](docs/benchmarks/README.md).
 
 ## How it works

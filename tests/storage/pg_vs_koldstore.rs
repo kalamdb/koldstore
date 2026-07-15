@@ -4,6 +4,7 @@
 //! DML, then **hot-only PK lookups before flush** (both heaps still hold all
 //! rows — fair merge-scan overhead), flushes older rows to zstd Parquet, then
 //! measures hot+cold PK lookups and compares PostgreSQL heap/index sizes.
+//! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
 
 #[path = "../e2e/common/mod.rs"]
 mod common;
@@ -43,11 +44,34 @@ impl Timing {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Sizes {
+    /// User-table heap bytes (`pg_table_size`), excluding indexes.
     table_bytes: i64,
+    /// User-table index bytes (`pg_indexes_size`).
     index_bytes: i64,
+    /// Change-log mirror heap bytes (`koldstore.<table>__cl`), when measured.
+    mirror_table_bytes: i64,
+    /// Change-log mirror index bytes (PK + seq + tombstone), when measured.
+    mirror_index_bytes: i64,
+    /// Active cold Parquet `byte_size` sum from `koldstore.cold_segments`.
     cold_bytes: i64,
+}
+
+impl Sizes {
+    /// PostgreSQL heap bytes charged to this side (user table + `__cl` when present).
+    fn pg_table_bytes(self) -> i64 {
+        self.table_bytes.saturating_add(self.mirror_table_bytes)
+    }
+
+    /// PostgreSQL index bytes charged to this side (user indexes + `__cl` indexes).
+    fn pg_index_bytes(self) -> i64 {
+        self.index_bytes.saturating_add(self.mirror_index_bytes)
+    }
+
+    fn pg_total_bytes(self) -> i64 {
+        self.pg_table_bytes().saturating_add(self.pg_index_bytes())
+    }
 }
 
 /// Heap live/dead tuple counters from `pg_stat_user_tables` after the DML workload.
@@ -290,6 +314,14 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
 
     let baseline_sizes = relation_sizes(&db.client, &baseline, None).await?;
     let managed_sizes = relation_sizes(&db.client, &managed, Some(&managed)).await?;
+    anyhow::ensure!(
+        managed_sizes.mirror_table_bytes > 0,
+        "expected change-log mirror heap bytes after flush, got {managed_sizes:?}"
+    );
+    anyhow::ensure!(
+        managed_sizes.mirror_index_bytes > 0,
+        "expected change-log mirror index bytes after flush, got {managed_sizes:?}"
+    );
 
     let baseline_metrics = SideMetrics {
         insert: baseline_insert,
@@ -323,16 +355,16 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
     );
 
     anyhow::ensure!(
-        managed_sizes.table_bytes < baseline_sizes.table_bytes,
-        "expected KoldStore PostgreSQL table footprint smaller after flush: managed={} baseline={}",
-        managed_sizes.table_bytes,
-        baseline_sizes.table_bytes
+        managed_sizes.pg_table_bytes() < baseline_sizes.pg_table_bytes(),
+        "expected KoldStore PostgreSQL table footprint (hot+__cl) smaller after flush: managed={} baseline={}",
+        managed_sizes.pg_table_bytes(),
+        baseline_sizes.pg_table_bytes()
     );
     anyhow::ensure!(
-        managed_sizes.index_bytes < baseline_sizes.index_bytes,
-        "expected KoldStore PostgreSQL index footprint smaller after flush: managed={} baseline={}",
-        managed_sizes.index_bytes,
-        baseline_sizes.index_bytes
+        managed_sizes.pg_index_bytes() < baseline_sizes.pg_index_bytes(),
+        "expected KoldStore PostgreSQL index footprint (hot+__cl) smaller after flush: managed={} baseline={}",
+        managed_sizes.pg_index_bytes(),
+        baseline_sizes.pg_index_bytes()
     );
     anyhow::ensure!(
         managed_sizes.cold_bytes > 0,
@@ -511,10 +543,14 @@ async fn relation_sizes(
             &[&relation],
         )
         .await?;
-    let mut table_bytes: i64 = row.get(0);
-    let mut index_bytes: i64 = row.get(1);
+    let table_bytes: i64 = row.get(0);
+    let index_bytes: i64 = row.get(1);
+    let mut mirror_table_bytes = 0_i64;
+    let mut mirror_index_bytes = 0_i64;
     let mut cold_bytes = 0_i64;
 
+    // Managed PostgreSQL footprint must include the latest-state change-log
+    // mirror heap and its indexes; omitting `__cl` understates KoldStore cost.
     if let Some(managed) = managed_relation {
         if let Some(mirror) = mirror_relation(managed) {
             let mirror_row = client
@@ -528,8 +564,8 @@ async fn relation_sizes(
                 )
                 .await
                 .with_context(|| format!("size mirror {mirror}"))?;
-            table_bytes += mirror_row.get::<_, i64>(0);
-            index_bytes += mirror_row.get::<_, i64>(1);
+            mirror_table_bytes = mirror_row.get(0);
+            mirror_index_bytes = mirror_row.get(1);
         }
 
         let cold = client
@@ -549,6 +585,8 @@ async fn relation_sizes(
     Ok(Sizes {
         table_bytes,
         index_bytes,
+        mirror_table_bytes,
+        mirror_index_bytes,
         cold_bytes,
     })
 }
@@ -773,11 +811,17 @@ fn print_comparison_table(
     baseline: SideMetrics,
     managed: SideMetrics,
 ) {
-    let table_win = storage_win_pct(baseline.sizes.table_bytes, managed.sizes.table_bytes);
-    let index_win = storage_win_pct(baseline.sizes.index_bytes, managed.sizes.index_bytes);
-    let total_baseline = baseline.sizes.table_bytes + baseline.sizes.index_bytes;
-    let total_managed = managed.sizes.table_bytes + managed.sizes.index_bytes;
-    let total_win = storage_win_pct(total_baseline, total_managed);
+    let table_tradeoff = storage_tradeoff(
+        baseline.sizes.pg_table_bytes(),
+        managed.sizes.pg_table_bytes(),
+    );
+    let index_tradeoff = storage_tradeoff(
+        baseline.sizes.pg_index_bytes(),
+        managed.sizes.pg_index_bytes(),
+    );
+    let total_baseline = baseline.sizes.pg_total_bytes();
+    let total_managed = managed.sizes.pg_total_bytes();
+    let total_tradeoff = storage_tradeoff(total_baseline, total_managed);
 
     println!();
     println!("## pg vs KoldStore comparison");
@@ -788,38 +832,43 @@ fn print_comparison_table(
          compression=zstd"
     );
     println!();
-    println!("| Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |");
+    println!("| Operation | PostgreSQL only | PostgreSQL + KoldStore | Tradeoff |");
     println!("| --- | --- | --- | --- |");
     println!(
-        "| insert speed† | {} | {} | — |",
+        "| insert speed† | {} | {} | {} |",
         format_speed(baseline.insert),
-        format_speed(managed.insert)
+        format_speed(managed.insert),
+        speed_tradeoff(baseline.insert, managed.insert)
     );
     println!(
-        "| update speed† | {} | {} | — |",
+        "| update speed† | {} | {} | {} |",
         format_speed(baseline.update),
-        format_speed(managed.update)
+        format_speed(managed.update),
+        speed_tradeoff(baseline.update, managed.update)
     );
     println!(
-        "| delete speed† | {} | {} | — |",
+        "| delete speed† | {} | {} | {} |",
         format_speed(baseline.delete),
-        format_speed(managed.delete)
+        format_speed(managed.delete),
+        speed_tradeoff(baseline.delete, managed.delete)
     );
     println!(
-        "| query hot only (before flush) | {} | {} | — |",
+        "| query hot only (before flush) | {} | {} | {} |",
         format_speed(baseline.query_hot_only),
-        format_speed(managed.query_hot_only)
+        format_speed(managed.query_hot_only),
+        speed_tradeoff(baseline.query_hot_only, managed.query_hot_only)
     );
     println!(
-        "| query with hot+cold (after flush) | {} | {} | — |",
+        "| query with hot+cold (after flush) | {} | {} | {} |",
         format_speed(baseline.query_hot_cold),
-        format_speed(managed.query_hot_cold)
+        format_speed(managed.query_hot_cold),
+        speed_tradeoff(baseline.query_hot_cold, managed.query_hot_cold)
     );
     println!(
         "| VACUUM time (after flush) | {} | {} | {} |",
         format_duration(baseline.vacuum.elapsed),
         format_duration(managed.vacuum.elapsed),
-        duration_win_pct(baseline.vacuum.elapsed, managed.vacuum.elapsed)
+        duration_tradeoff(baseline.vacuum.elapsed, managed.vacuum.elapsed)
     );
     println!(
         "| dead tuples after workload | {} (live={}) | {} (live={}) | — |",
@@ -829,14 +878,14 @@ fn print_comparison_table(
         format_count(managed.heap_after_workload.n_live_tup),
     );
     println!(
-        "| index storage | {} | {} | {index_win} |",
-        format_bytes(baseline.sizes.index_bytes),
-        format_bytes(managed.sizes.index_bytes)
+        "| index storage (hot + __cl) | {} | {} | {index_tradeoff} |",
+        format_bytes(baseline.sizes.pg_index_bytes()),
+        format_bytes(managed.sizes.pg_index_bytes())
     );
     println!(
-        "| table storage | {} | {}{} | {table_win} |",
-        format_bytes(baseline.sizes.table_bytes),
-        format_bytes(managed.sizes.table_bytes),
+        "| table storage (hot + __cl) | {} | {}{} | {table_tradeoff} |",
+        format_bytes(baseline.sizes.pg_table_bytes()),
+        format_bytes(managed.sizes.pg_table_bytes()),
         if managed.sizes.cold_bytes > 0 {
             format!(
                 " (+ {} cold Parquet)",
@@ -846,13 +895,31 @@ fn print_comparison_table(
             String::new()
         }
     );
+    println!(
+        "| └ hot heap only | {} | {} | — |",
+        format_bytes(baseline.sizes.table_bytes),
+        format_bytes(managed.sizes.table_bytes)
+    );
+    println!(
+        "| └ __cl mirror heap | — | {} | — |",
+        format_bytes(managed.sizes.mirror_table_bytes)
+    );
+    println!(
+        "| └ __cl mirror indexes | — | {} | — |",
+        format_bytes(managed.sizes.mirror_index_bytes)
+    );
     println!("| total PG backup size | TODO | TODO | — |");
     println!("| restore time | TODO | TODO | — |");
     println!();
     println!(
-        "PostgreSQL heap+index after flush: baseline={} managed={} ({total_win} smaller)",
+        "PostgreSQL heap+index after flush: baseline={} managed={} ({total_tradeoff})",
         format_bytes(total_baseline),
         format_bytes(total_managed),
+    );
+    println!(
+        "Managed PG bytes include `koldstore.<table>__cl` heap ({}) + indexes ({}).",
+        format_bytes(managed.sizes.mirror_table_bytes),
+        format_bytes(managed.sizes.mirror_index_bytes),
     );
     println!();
     println!(
@@ -864,23 +931,77 @@ fn print_comparison_table(
          Dead tuples are snapshotted after DML via `pg_stat_user_tables` (pre-flush, so \
          both sides match for the same update/delete sample). Autovacuum counters are \
          omitted: this harness is too short for autovacuum to run, so they would read \
-         as zeros on both sides."
+         as zeros on both sides. Managed storage rows always include `__cl` heap+indexes."
     );
     println!();
 }
 
-fn storage_win_pct(baseline: i64, managed: i64) -> String {
+fn storage_tradeoff(baseline: i64, managed: i64) -> String {
     if baseline <= 0 {
         return "n/a".to_string();
     }
-    let saved = baseline.saturating_sub(managed).max(0) as f64;
-    format!("{:.0}%", 100.0 * saved / baseline as f64)
+    if managed >= baseline {
+        let growth = 100.0 * (managed - baseline) as f64 / baseline as f64;
+        return format!("{growth:.0}% larger");
+    }
+    let saved = 100.0 * (baseline - managed) as f64 / baseline as f64;
+    format!("{saved:.0}% smaller")
 }
 
-fn duration_win_pct(baseline: Duration, managed: Duration) -> String {
-    let baseline_us = baseline.as_micros() as i64;
-    let managed_us = managed.as_micros() as i64;
-    storage_win_pct(baseline_us, managed_us)
+fn speed_tradeoff(baseline: Timing, managed: Timing) -> String {
+    let baseline_ops = baseline.ops_per_sec();
+    let managed_ops = managed.ops_per_sec();
+    if baseline_ops <= 0.0 || managed_ops <= 0.0 {
+        return "n/a".to_string();
+    }
+    if managed_ops < baseline_ops {
+        let ratio = baseline_ops / managed_ops;
+        if ratio >= 2.0 {
+            format!("{ratio:.0}× slower")
+        } else {
+            format!("{:.0}% slower", 100.0 * (1.0 - managed_ops / baseline_ops))
+        }
+    } else if managed_ops > baseline_ops {
+        let ratio = managed_ops / baseline_ops;
+        if ratio >= 2.0 {
+            format!("{ratio:.0}× faster")
+        } else {
+            format!("{:.0}% faster", 100.0 * (ratio - 1.0))
+        }
+    } else {
+        "≈ same".to_string()
+    }
+}
+
+fn duration_tradeoff(baseline: Duration, managed: Duration) -> String {
+    let baseline_us = baseline.as_micros() as f64;
+    let managed_us = managed.as_micros() as f64;
+    if baseline_us <= 0.0 {
+        return "n/a".to_string();
+    }
+    if managed_us < baseline_us {
+        let ratio = baseline_us / managed_us;
+        if ratio >= 2.0 {
+            format!("{ratio:.0}× faster")
+        } else {
+            format!(
+                "{:.0}% faster",
+                100.0 * (1.0 - managed_us / baseline_us)
+            )
+        }
+    } else if managed_us > baseline_us {
+        let ratio = managed_us / baseline_us;
+        if ratio >= 2.0 {
+            format!("{ratio:.0}× slower")
+        } else {
+            format!(
+                "{:.0}% slower",
+                100.0 * (managed_us / baseline_us - 1.0)
+            )
+        }
+    } else {
+        "≈ same".to_string()
+    }
 }
 
 fn format_speed(timing: Timing) -> String {
