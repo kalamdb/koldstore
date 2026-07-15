@@ -79,19 +79,19 @@ KoldStore is a **storage lifecycle tool**, not a universal query accelerator. Af
 
 | Result | Before → after flush | Win |
 | --- | --- | --- |
-| PostgreSQL heap + indexes | 5.85 GiB → 72 MiB | **99% smaller** |
-| Indexes | 415 MiB → 11.4 MiB | **97% smaller** |
-| `VACUUM (FULL, ANALYZE)` | 131 s → 6.4 s | **95% faster** |
+| PostgreSQL heap + indexes | 5.85 GiB → 73 MiB | **99% smaller** |
+| Indexes | 415 MiB → 11.5 MiB | **97% smaller** |
+| `VACUUM (FULL, ANALYZE)` | 71.8 s → 5.16 s | **93% faster** |
 
-Sample: 10M wide rows, `hot_row_limit = 100000`.
+Sample: 10M wide rows, `hot_row_limit = 100000` (local PG16.13 `release-pg`).
 
 Managed tables still maintain a latest-state change-log mirror on every
 `INSERT` / `UPDATE` / `DELETE` (same transaction as the heap write). Statement-level
 capture cut that cost sharply on bulk DML — median managed **UPDATE ~48×** and
-**DELETE ~3×** faster vs the prior capture SQL on a local PG16 `release-pg`
-5k-row sample; bulk INSERT ~1.9×. Cold PK lookups remain slower than pure
-B-tree probes today. Full methodology and tables:
-[docs/benchmarks/](docs/benchmarks/README.md).
+**DELETE ~3×** faster vs the prior capture SQL on a local 5k-row sample; bulk
+INSERT ~1.9×. Cold PK lookups remain slower than pure B-tree probes today (~119
+ops/s managed hot+cold vs ~1.5k heap on this 10M run). Full methodology and
+tables: [docs/benchmarks/](docs/benchmarks/README.md).
 
 ## How it works
 

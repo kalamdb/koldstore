@@ -18,14 +18,15 @@ from [`tests/storage/schema.sql`](../../tests/storage/schema.sql).
 
 Sample run: **10,000,000 rows**, `hot_row_limit = 100000`,
 `max_rows_per_file = 1000000` (~9.9M rows flushed, zstd Parquet). Numbers vary
-by machine; re-run for your hardware.
+by machine; re-run for your hardware. Figures below are from a local PG16.13
+`release-pg` run on the managed-mirror DML capture rewrite.
 
 | Result | PostgreSQL only | PostgreSQL + KoldStore | Win |
 | --- | --- | --- | --- |
-| PostgreSQL heap + indexes (after flush) | 5.85 GiB | 72 MiB | **99% smaller** |
-| Index storage | 415 MiB | 11.4 MiB | **97% smaller** |
-| Table storage | 5.45 GiB | 61 MiB (+ 597 MiB cold Parquet) | **99% smaller** heap |
-| `VACUUM (FULL, ANALYZE)` (after flush) | 131 s | 6.4 s | **95% faster** |
+| PostgreSQL heap + indexes (after flush) | 5.85 GiB | 73 MiB | **99% smaller** |
+| Index storage | 415 MiB | 11.5 MiB | **97% smaller** |
+| Table storage | 5.45 GiB | 62 MiB (+ 599 MiB cold Parquet) | **99% smaller** heap |
+| `VACUUM (FULL, ANALYZE)` (after flush) | 71.8 s | 5.16 s | **93% faster** |
 
 Point lookups on hot and cold primary keys still return the same rows as the
 unmanaged baseline (`KoldMergeScan`).
@@ -52,23 +53,24 @@ How to read the table (Postgres-oriented):
 
 | Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |
 | --- | --- | --- | --- |
-| insert speed† | 69k ops/s | 50k ops/s | — |
-| update speed† | see DML section | see DML section | — |
-| delete speed† | see DML section | see DML section | — |
-| query hot only (before flush) | 1.6k ops/s | 1.3k ops/s | — |
-| query with hot+cold (after flush) | 1.5k ops/s | 127 ops/s‡ | — |
-| VACUUM time (after flush) | 131 s | 6.4 s | **95%** |
-| dead tuples after workload | 2000 (live≈10M) | 2000 (live≈10M) | — |
-| index storage | 415 MiB | 11.4 MiB | **97%** |
-| table storage | 5.45 GiB | 61 MiB (+ 597 MiB cold Parquet) | **99%** |
+| insert speed† | 59k ops/s | 45k ops/s | — |
+| update speed† | 6.0k ops/s | 8.0k ops/s | — |
+| delete speed† | 1.1M ops/s | 130k ops/s | — |
+| query hot only (before flush) | 1.5k ops/s | 1.7k ops/s | — |
+| query with hot+cold (after flush) | 1.5k ops/s | 119 ops/s‡ | — |
+| VACUUM time (after flush) | 71.8 s | 5.16 s | **93%** |
+| dead tuples after workload | 2010 (live≈10M) | 2000 (live≈10M) | — |
+| index storage | 415 MiB | 11.5 MiB | **97%** |
+| table storage | 5.45 GiB | 62 MiB (+ 599 MiB cold Parquet) | **99%** |
 | total PG backup size | TODO | TODO | — |
 | restore time | TODO | TODO | — |
 
-† Managed DML still pays for latest-state mirror capture
-(`koldstore.<table>__cl`). That cost dropped sharply after the statement-level
-rewrite in the DML section below; use `--dml-sample` when comparing UPDATE/DELETE.
-The insert figure above is the median managed 100k-row bulk INSERT from that
-section (~50k ops/s on PG16 `release-pg`).
+† DML timings use the harness default `--dml-sample 1000` on the 10M-row table.
+Managed INSERT/UPDATE/DELETE still maintain the latest-state mirror
+(`koldstore.<table>__cl`) in the same transaction. After the statement-level
+capture rewrite, a 1k-row UPDATE on this run was competitive with (here, slightly
+faster than) the unmanaged heap; bulk DML before/after ratios are in the section
+below. Reproduce with `--dml-sample N`.
 
 ‡ Hot+cold PK lookups open matching Parquet segments (min/max prune +
 row-group stats / bloom). At this scale each surviving segment is ~1M wide
