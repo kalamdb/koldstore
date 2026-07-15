@@ -24,15 +24,18 @@ setup vs B-tree) is the main read-path focus.
 
 ## Priority order (accepted direction)
 
-1. **Cold PK point lookups** — backend Parquet footer/reader cache; cold-native
-   emit that skips the JSON merge path when a PK equality hits cold only.
-   Dominates the hot+cold ops/s gap after flush.
+1. **Cold PK point lookups** — backend Parquet footer/reader cache (landed);
+   cold-native emit that skips the JSON merge path when a PK equality hits
+   cold only (landed for full-PK probes). Dominates the hot+cold ops/s gap
+   after flush.
 2. **Footer-derived catalog segment stats** — stop double-computing min/max on
    flush (`indexed_bounds` vs writer chunk stats). Catalog still owns
    prune-before-open; `byte_size` is already single-source from publish.
    See [ADR-002](decisions/002-footer-derived-catalog-stats.md).
 3. Segment sizing / page indexes / streaming merge polish — secondary levers
-   once (1) lands.
+   once (1) lands. `EXPLAIN ANALYZE` now surfaces Timescale-style prune
+   counters (`Candidate segments`, `Segments pruned by min/max`,
+   `Parquet segments opened`, `Bytes fetched`, emit path).
 
 Tracked on the [roadmap](roadmap.md).
 
@@ -42,8 +45,10 @@ Important span families are SQL API calls, DML hook work, flush phases, cold
 reader pruning, merge execution, and object-store I/O.
 
 Use `EXPLAIN (ANALYZE)` on managed SELECTs and inspect KoldMergeScan properties
-(`Parquet segment` `read_ms`, row-group selection, bloom mode, PK probe) to
-separate footer-open cost from merge/SPI overhead.
+(`Emit path`, `Candidate segments`, `Segments pruned by min/max`,
+`Parquet segments opened`, `Bytes fetched`, per-segment `read_ms`, row-group
+selection, bloom mode, PK probe, footer cache hits) to separate footer-open
+cost from merge/SPI overhead.
 
 ## Investigation Workflow
 

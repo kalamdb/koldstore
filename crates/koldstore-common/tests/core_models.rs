@@ -75,6 +75,24 @@ fn logical_pk_hash_is_stable_for_ordered_columns() {
 }
 
 #[test]
+fn logical_pk_is_hashable_map_key_without_json_stringify() {
+    use std::collections::HashMap;
+
+    let columns = vec![PkColumn::new("id").unwrap()];
+    let left =
+        LogicalPk::from_json_object(&json!({"id": 7}), &columns).unwrap();
+    let right =
+        LogicalPk::from_json_object(&json!({"id": 7}), &columns).unwrap();
+    let other =
+        LogicalPk::from_json_object(&json!({"id": 8}), &columns).unwrap();
+
+    let mut map = HashMap::new();
+    map.insert(left, "seven");
+    assert_eq!(map.get(&right), Some(&"seven"));
+    assert!(map.get(&other).is_none());
+}
+
+#[test]
 fn logical_pk_rejects_missing_null_and_duplicate_columns() {
     let columns = vec![PkColumn::new("id").unwrap()];
     assert!(LogicalPk::from_json_object(&json!({}), &columns).is_err());

@@ -43,13 +43,21 @@ fn resolver_selects_newest_row_per_pk_and_hot_wins_exact_tie() {
     );
 
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].source, koldstore_merge::RowSource::Hot);
-    assert_eq!(rows[0].seq.get(), 10);
-    assert_eq!(rows[0].commit_seq.get(), 10);
-    assert_eq!(rows[0].row_image, json!({"id": 1, "body": "hot"}));
-    assert_eq!(rows[1].source, koldstore_merge::RowSource::Hot);
-    assert_eq!(rows[1].seq.get(), 5);
-    assert_eq!(rows[1].row_image, json!({"id": 2, "body": "hot-2"}));
+    let by_id: std::collections::BTreeMap<_, _> = rows
+        .into_iter()
+        .map(|row| (row.pk_json["id"].as_i64().unwrap(), row))
+        .collect();
+
+    let row1 = by_id.get(&1).expect("pk 1");
+    assert_eq!(row1.source, koldstore_merge::RowSource::Hot);
+    assert_eq!(row1.seq.get(), 10);
+    assert_eq!(row1.commit_seq.get(), 10);
+    assert_eq!(row1.row_image, json!({"id": 1, "body": "hot"}));
+
+    let row2 = by_id.get(&2).expect("pk 2");
+    assert_eq!(row2.source, koldstore_merge::RowSource::Hot);
+    assert_eq!(row2.seq.get(), 5);
+    assert_eq!(row2.row_image, json!({"id": 2, "body": "hot-2"}));
 }
 
 #[test]
@@ -64,14 +72,22 @@ fn resolver_emits_at_most_one_visible_winner_per_pk() {
     );
 
     assert_eq!(rows.len(), 2);
+    let by_id: std::collections::BTreeMap<_, _> = rows
+        .into_iter()
+        .map(|row| (row.pk_json["id"].as_i64().unwrap(), row))
+        .collect();
     assert_eq!(
-        rows.iter()
-            .map(|row| row.pk_json.clone())
-            .collect::<Vec<_>>(),
-        vec![json!({"id": 1}), json!({"id": 2})]
+        by_id.keys().copied().collect::<Vec<_>>(),
+        vec![1_i64, 2]
     );
-    assert_eq!(rows[0].row_image, json!({"id": 1, "body": "hot"}));
-    assert_eq!(rows[1].row_image, json!({"id": 2, "body": "cold-2"}));
+    assert_eq!(
+        by_id.get(&1).unwrap().row_image,
+        json!({"id": 1, "body": "hot"})
+    );
+    assert_eq!(
+        by_id.get(&2).unwrap().row_image,
+        json!({"id": 2, "body": "cold-2"})
+    );
 }
 
 #[test]

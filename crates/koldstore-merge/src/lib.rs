@@ -35,7 +35,7 @@ pub use managed_hook::{
     HOT_DML_MANIFEST_SYNC_STATE,
 };
 pub use quals::{build_pruning_plan, classify_predicates, ClassifiedPredicates, PruningPlan};
-pub use resolver::{resolve_rows, ResolvedRow, RowSource};
+pub use resolver::{resolve_rows, resolve_rows_owned, ResolvedRow, RowSource};
 pub use rls::{
     enforce_or_fail_closed, plan_security_quals, unsupported_rls_error, SecurityQualPlan,
 };

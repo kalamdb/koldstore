@@ -471,9 +471,27 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     assert_eq!(profile.bloom, BloomPruneMode::SkippedAfterStats);
     assert_eq!(profile.bloom_filters_fetched, 0);
     assert!(profile.bytes_read < file_size);
+    assert!(!profile.footer_cache_hit);
     assert!(profile.format_io_summary().contains("footer-first"));
     assert!(profile.format_row_groups_summary().contains("selected=[1]"));
     assert!(profile
         .format_bloom_summary()
         .contains("skipped_after_stats"));
+
+    let (_rows2, profile2) = read_clean_cold_rows_from_object_store_with_size(
+        client.store(),
+        key,
+        Some(file_size),
+        &[PgColumn::new("id", PgType::Int8, false)],
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_pk_values("id", ["4"]),
+    )
+    .unwrap();
+    assert!(
+        profile2.footer_cache_hit,
+        "second read of the same segment must reuse cached footer metadata"
+    );
+    assert!(profile2.format_io_summary().contains("footer_cache=hit"));
 }
