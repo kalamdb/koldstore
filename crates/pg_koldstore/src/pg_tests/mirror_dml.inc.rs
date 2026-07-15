@@ -3,6 +3,9 @@ fn mirror_name(table: &str) -> String {
 }
 
 fn reported_mirror_rows(relation: &str) -> i64 {
+    // Capture deltas stay backend-local until pre-commit; flush so pg_tests can
+    // assert manifest counters inside the outer test transaction.
+    crate::row_counter_cache::flush_pending_deltas();
     spi_get_i64(&format!(
         r#"
         SELECT COALESCE(m.mirror_row_count, 0)::bigint
