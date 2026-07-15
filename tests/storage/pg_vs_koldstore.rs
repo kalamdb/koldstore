@@ -984,20 +984,14 @@ fn duration_tradeoff(baseline: Duration, managed: Duration) -> String {
         if ratio >= 2.0 {
             format!("{ratio:.0}× faster")
         } else {
-            format!(
-                "{:.0}% faster",
-                100.0 * (1.0 - managed_us / baseline_us)
-            )
+            format!("{:.0}% faster", 100.0 * (1.0 - managed_us / baseline_us))
         }
     } else if managed_us > baseline_us {
         let ratio = managed_us / baseline_us;
         if ratio >= 2.0 {
             format!("{ratio:.0}× slower")
         } else {
-            format!(
-                "{:.0}% slower",
-                100.0 * (managed_us / baseline_us - 1.0)
-            )
+            format!("{:.0}% slower", 100.0 * (managed_us / baseline_us - 1.0))
         }
     } else {
         "≈ same".to_string()

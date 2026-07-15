@@ -125,27 +125,25 @@ pub fn plan_mirror_capture(
         .try_into()
         .expect("mirror capture has exactly three trigger operations");
     let [insert_trigger, update_trigger, delete_trigger] = triggers;
-    let pk_guard_trigger = plan_pk_guard_trigger(mirror_table, &source, &guard_function_name, primary_key)?;
+    let pk_guard_trigger =
+        plan_pk_guard_trigger(mirror_table, &source, &guard_function_name, primary_key)?;
 
-    let drop_triggers = SqlStatement::write(
-        "drop change-log mirror capture triggers",
-        &{
-            let mut drops = MirrorOperation::ALL
-                .into_iter()
-                .map(|operation| {
-                    format!(
-                        "DROP TRIGGER IF EXISTS {} ON {source}",
-                        quote_ident(&operation.capture_trigger_name(&mirror_table.name))
-                    )
-                })
-                .collect::<Vec<_>>();
-            drops.push(format!(
-                "DROP TRIGGER IF EXISTS {} ON {source}",
-                quote_ident(&pk_guard_trigger_name(&mirror_table.name))
-            ));
-            drops.join(";\n")
-        },
-    )
+    let drop_triggers = SqlStatement::write("drop change-log mirror capture triggers", &{
+        let mut drops = MirrorOperation::ALL
+            .into_iter()
+            .map(|operation| {
+                format!(
+                    "DROP TRIGGER IF EXISTS {} ON {source}",
+                    quote_ident(&operation.capture_trigger_name(&mirror_table.name))
+                )
+            })
+            .collect::<Vec<_>>();
+        drops.push(format!(
+            "DROP TRIGGER IF EXISTS {} ON {source}",
+            quote_ident(&pk_guard_trigger_name(&mirror_table.name))
+        ));
+        drops.join(";\n")
+    })
     .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
     let drop_function = SqlStatement::write(
         "drop change-log mirror capture function",

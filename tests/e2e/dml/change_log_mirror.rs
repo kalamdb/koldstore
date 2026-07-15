@@ -171,10 +171,7 @@ async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
             .await?;
         let update_count: i64 = db
             .client
-            .query_one(
-                &format!("SELECT count(*) FROM {mirror} WHERE op = 2"),
-                &[],
-            )
+            .query_one(&format!("SELECT count(*) FROM {mirror} WHERE op = 2"), &[])
             .await?
             .get(0);
         assert_eq!(update_count, 1000);
@@ -195,10 +192,7 @@ async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
             .get(0);
         let delete_count: i64 = db
             .client
-            .query_one(
-                &format!("SELECT count(*) FROM {mirror} WHERE op = 3"),
-                &[],
-            )
+            .query_one(&format!("SELECT count(*) FROM {mirror} WHERE op = 3"), &[])
             .await?
             .get(0);
         assert_eq!(source_count, 0);
