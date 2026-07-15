@@ -21,9 +21,10 @@ Order of measurement:
 TODO rows in the printed table (not measured yet): total PG backup size, restore time.
 Autovacuum counters are not printed: this harness is too short for autovacuum to run.
 ```bash
-# Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot):
+# Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot, 1k DML sample):
 scripts/run-storage-comparison.sh
 scripts/run-storage-comparison.sh --rows 1000000 --hot-limit 50000
+scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
 
 # Or prepare manually, then run the test directly:
 # Use release-pg for fair hot+cold timings (debug is ~3–7× slower; plain --release
@@ -32,7 +33,7 @@ KOLDSTORE_E2E_PREPARE_ONLY=1 scripts/run-pg-e2e.sh 16
 cargo pgrx install -p pg_koldstore --profile release-pg --no-default-features --features pg16 \
   --pg-config "$(cargo pgrx info pg-config 16)"
 cargo pgrx stop pg16 && cargo pgrx start pg16
-KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 \
+KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 KOLDSTORE_STORAGE_DML_SAMPLE=1000 \
   cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
 ```
 

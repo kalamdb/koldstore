@@ -18,7 +18,7 @@ use tokio_postgres::Client;
 /// for the README-scale demonstration.
 const DEFAULT_ROWS: i64 = 100_000;
 const DEFAULT_HOT_LIMIT: i64 = 10_000;
-const DML_SAMPLE: i64 = 1_000;
+const DEFAULT_DML_SAMPLE: i64 = 1_000;
 const QUERY_LOOPS: usize = 20;
 
 #[derive(Debug, Clone, Copy)]
@@ -77,6 +77,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
     let rows = env_i64("KOLDSTORE_STORAGE_ROWS", DEFAULT_ROWS);
     let hot_limit = env_i64("KOLDSTORE_STORAGE_HOT_LIMIT", DEFAULT_HOT_LIMIT)
         .clamp(1, rows.saturating_sub(1).max(1));
+    let dml_sample = env_i64("KOLDSTORE_STORAGE_DML_SAMPLE", DEFAULT_DML_SAMPLE).clamp(1, rows);
 
     let target = common::local_pg_matrix()
         .into_iter()
@@ -135,25 +136,25 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
 
     let baseline_update = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: update baseline sample ({DML_SAMPLE} rows)"
+            "storage_cmp: update baseline sample ({dml_sample} rows)"
         ));
-        time_update(&db.client, &baseline, rows - DML_SAMPLE + 1, DML_SAMPLE).await?
+        time_update(&db.client, &baseline, rows - dml_sample + 1, dml_sample).await?
     };
     let managed_update = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: update managed sample ({DML_SAMPLE} rows)"
+            "storage_cmp: update managed sample ({dml_sample} rows)"
         ));
-        time_update(&db.client, &managed, rows - DML_SAMPLE + 1, DML_SAMPLE).await?
+        time_update(&db.client, &managed, rows - dml_sample + 1, dml_sample).await?
     };
 
     let delete_start = rows + 1;
-    let delete_end = rows + DML_SAMPLE;
+    let delete_end = rows + dml_sample;
     {
         let _step = common::log_step_always(format!(
-            "storage_cmp: seed delete sample ({DML_SAMPLE} rows each side)"
+            "storage_cmp: seed delete sample ({dml_sample} rows each side)"
         ));
-        time_insert(&db.client, &baseline, delete_start, DML_SAMPLE).await?;
-        time_insert(&db.client, &managed, delete_start, DML_SAMPLE).await?;
+        time_insert(&db.client, &baseline, delete_start, dml_sample).await?;
+        time_insert(&db.client, &managed, delete_start, dml_sample).await?;
     }
     let baseline_delete = {
         let _step = common::log_step_always("storage_cmp: delete baseline sample");
@@ -310,6 +311,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
     print_comparison_table(
         rows,
         hot_limit,
+        dml_sample,
         max_rows_per_file,
         flushed,
         baseline_metrics,
@@ -761,6 +763,7 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
 fn print_comparison_table(
     rows: i64,
     hot_limit: i64,
+    dml_sample: i64,
     max_rows_per_file: i64,
     flushed: i64,
     baseline: SideMetrics,
@@ -777,7 +780,8 @@ fn print_comparison_table(
     println!();
     println!(
         "schema=tests/storage/schema.sql rows={rows} hot_row_limit={hot_limit} \
-         max_rows_per_file={max_rows_per_file} flushed={flushed} compression=zstd"
+         dml_sample={dml_sample} max_rows_per_file={max_rows_per_file} flushed={flushed} \
+         compression=zstd"
     );
     println!();
     println!("| Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |");

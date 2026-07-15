@@ -8,6 +8,7 @@ PG_VERSION="${KOLDSTORE_STORAGE_PGVERSION:-${KOLDSTORE_E2E_PGVERSION:-16}}"
 PREPARE_ONLY="${KOLDSTORE_STORAGE_PREPARE_ONLY:-0}"
 ROWS="${KOLDSTORE_STORAGE_ROWS:-100000}"
 HOT_LIMIT="${KOLDSTORE_STORAGE_HOT_LIMIT:-10000}"
+DML_SAMPLE="${KOLDSTORE_STORAGE_DML_SAMPLE:-1000}"
 
 usage() {
   cat <<'EOF'
@@ -19,6 +20,7 @@ Usage:
 Options:
   --rows N          Total rows seeded per table (default: 100000)
   --hot-limit N     Rows kept hot after flush (default: 10000)
+  --dml-sample N    Rows used for timed UPDATE/DELETE samples (default: 1000)
   --pg-version N    PostgreSQL major version (default: 16)
   --prepare-only    Prepare pgrx + extension only, skip the test
   -h, --help        Show this help text
@@ -26,6 +28,7 @@ Options:
 Environment overrides (used when the matching flag is omitted):
   KOLDSTORE_STORAGE_ROWS
   KOLDSTORE_STORAGE_HOT_LIMIT
+  KOLDSTORE_STORAGE_DML_SAMPLE
   KOLDSTORE_STORAGE_PGVERSION / KOLDSTORE_E2E_PGVERSION
   KOLDSTORE_STORAGE_PREPARE_ONLY
 
@@ -36,7 +39,7 @@ profile for fair hot+cold timings (debug builds are ~3–7× slower; plain
 Examples:
   scripts/run-storage-comparison.sh
   scripts/run-storage-comparison.sh --rows 1000000
-  scripts/run-storage-comparison.sh --rows 1000000 --hot-limit 50000
+  scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
   scripts/run-storage-comparison.sh --prepare-only
 EOF
 }
@@ -49,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --hot-limit)
       HOT_LIMIT="${2:?missing value for --hot-limit}"
+      shift 2
+      ;;
+    --dml-sample)
+      DML_SAMPLE="${2:?missing value for --dml-sample}"
       shift 2
       ;;
     --pg-version)
@@ -82,9 +89,10 @@ if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
   exit 0
 fi
 
-echo "running storage comparison (rows=${ROWS}, hot_limit=${HOT_LIMIT})"
+echo "running storage comparison (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE})"
 KOLDSTORE_STORAGE_ROWS="${ROWS}" \
   KOLDSTORE_STORAGE_HOT_LIMIT="${HOT_LIMIT}" \
+  KOLDSTORE_STORAGE_DML_SAMPLE="${DML_SAMPLE}" \
   cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
 
 echo "storage comparison passed"
