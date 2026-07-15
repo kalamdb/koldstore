@@ -244,13 +244,15 @@ async fn mirror_row_count(client: &tokio_postgres::Client, mirror: &str, id: i64
 async fn reported_mirror_counter(client: &tokio_postgres::Client, relation: &str) -> Result<i64> {
     let row = client
         .query_one(
-            r#"
-            SELECT COALESCE(m.mirror_row_count, 0)::bigint
-            FROM koldstore.manifest m
-            WHERE m.table_oid = $1::regclass
-              AND m.scope_key = ''
-            "#,
-            &[&relation],
+            &format!(
+                r#"
+                SELECT COALESCE(m.mirror_row_count, 0)::bigint
+                FROM koldstore.manifest m
+                WHERE m.table_oid = '{relation}'::regclass
+                  AND m.scope_key = ''
+                "#
+            ),
+            &[],
         )
         .await?;
     Ok(row.get(0))
