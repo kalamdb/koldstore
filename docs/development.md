@@ -54,7 +54,13 @@ Nightly workflow: `.github/workflows/nightly-readiness.yml` (isolation, crash, S
 Weekly HammerDB: `.github/workflows/weekly-hammerdb.yml`.
 Script layout: `scripts/README.md` (everyday runners at top level; readiness/CI/build in subfolders).
 
-PR / main CI: `.github/workflows/ci-tests.yml` runs fmt/clippy/unit, `cargo pgrx test`, E2E (including isolation/crash harnesses), examples, storage comparison, and SQL regression across PostgreSQL 15–18.
+PR / main CI: `.github/workflows/ci-tests.yml` runs fmt/clippy/unit and
+`cargo pgrx test` across PostgreSQL 15–18. Async E2E also covers PostgreSQL
+15–18; strict E2E currently runs on PostgreSQL 16. Examples, storage comparison,
+and SQL regression retain their PostgreSQL matrix. Manual workflow runs expose
+two dropdowns: PostgreSQL (`All`, 15, 16, 17, or 18) and E2E mode (`Both`,
+`Async`, or `Strict`). Selecting strict with a PostgreSQL filter other than
+`All` or `16` intentionally schedules no strict E2E job.
 
 The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, `pg17`, or `pg18` feature when `cargo pgrx` is configured.
 

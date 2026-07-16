@@ -33,6 +33,15 @@ fn applier_type(database_oid: u32) -> String {
     format!("koldstore async mirror {database_oid}")
 }
 
+fn applier_running(worker_type: &str) -> Result<bool, String> {
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE backend_type = $1)",
+        &[DatumWithOid::from(worker_type)],
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "async mirror worker activity query returned no row".to_string())
+}
+
 /// Creates missing async infrastructure in an autonomous transaction.
 ///
 /// The caller waits for worker shutdown and then validates the resulting slot,
@@ -71,20 +80,16 @@ pub(super) fn ensure_applier() -> Result<bool, String> {
     if !crate::guc::async_mirror_worker_enabled() {
         return Ok(false);
     }
-    if APPLIER_ENSURED.load(Ordering::Relaxed) {
-        return Ok(false);
-    }
 
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    super::lifecycle::lock_worker_registration(database_oid)?;
     let worker_type = applier_type(database_oid);
-    let exists = pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE backend_type = $1)",
-        &[DatumWithOid::from(worker_type.as_str())],
-    )
-    .map_err(|error| error.to_string())?
-    .unwrap_or(false);
-    if exists {
+    if APPLIER_ENSURED.load(Ordering::Relaxed) && applier_running(&worker_type)? {
+        return Ok(false);
+    }
+    APPLIER_ENSURED.store(false, Ordering::Relaxed);
+
+    super::lifecycle::lock_worker_registration(database_oid)?;
+    if applier_running(&worker_type)? {
         APPLIER_ENSURED.store(true, Ordering::Relaxed);
         return Ok(false);
     }
@@ -104,6 +109,27 @@ pub(super) fn ensure_applier() -> Result<bool, String> {
         .map_err(|status| format!("async mirror WAL applier did not start: {status:?}"))?;
     APPLIER_ENSURED.store(true, Ordering::Relaxed);
     Ok(true)
+}
+
+/// Ensures async capture has a live database worker before activation completes.
+///
+/// # Errors
+///
+/// Returns an error when the worker GUC is disabled or the applier cannot be
+/// registered and observed in `pg_stat_activity`.
+pub(super) fn require_applier_for_async_capture() -> Result<(), String> {
+    if !crate::guc::async_mirror_worker_enabled() {
+        return Err(
+            "async mirror capture requires koldstore.internal_async_mirror_worker=on".to_string(),
+        );
+    }
+    ensure_applier()?;
+    let worker_type = applier_type(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
+    if applier_running(&worker_type)? {
+        Ok(())
+    } else {
+        Err("async mirror WAL applier is not running".to_string())
+    }
 }
 
 /// Internal SQL entry point used by the async statement trigger.
@@ -248,6 +274,11 @@ pub extern "C-unwind" fn koldstore_async_mirror_applier_main(argument: pgrx::pg_
 
     let slot = slot_name(database_oid);
     let slot_c = CString::new(slot.as_str()).expect("deterministic slot name contains no NUL");
+    while !super::lifecycle::native_slot_exists_cstr(&slot_c) {
+        if !BackgroundWorker::wait_latch(Some(APPLY_INTERVAL)) {
+            return;
+        }
+    }
     let mut last_checked_wal = None;
     loop {
         let keep_running = super::lifecycle::native_slot_exists_cstr(&slot_c);

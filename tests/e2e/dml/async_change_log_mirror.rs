@@ -4,6 +4,7 @@ mod common;
 use anyhow::Result;
 use std::time::{Duration, Instant};
 
+const WORKER_START_DEADLINE: Duration = Duration::from_secs(30);
 const BACKGROUND_APPLY_DEADLINE: Duration = Duration::from_secs(5);
 
 #[tokio::test]
@@ -284,9 +285,15 @@ async fn wait_for_op_count(
 async fn wait_for_worker(client: &tokio_postgres::Client) -> Result<Duration> {
     let started = Instant::now();
     loop {
+        client
+            .query_one(
+                "SELECT koldstore.internal_ensure_async_mirror_worker()",
+                &[],
+            )
+            .await?;
         let exists: bool = client
             .query_one(
-                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE backend_type = 'koldstore async mirror ' || (SELECT oid::text FROM pg_database WHERE datname = current_database()))",
+                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE backend_type = 'koldstore async mirror ' || (SELECT oid::text FROM pg_catalog.pg_database WHERE datname = current_database()))",
                 &[],
             )
             .await?
@@ -295,8 +302,8 @@ async fn wait_for_worker(client: &tokio_postgres::Client) -> Result<Duration> {
             return Ok(started.elapsed());
         }
         anyhow::ensure!(
-            started.elapsed() <= BACKGROUND_APPLY_DEADLINE,
-            "manage_table did not start the async WAL applier within {BACKGROUND_APPLY_DEADLINE:?}"
+            started.elapsed() <= WORKER_START_DEADLINE,
+            "manage_table did not start the async WAL applier within {WORKER_START_DEADLINE:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

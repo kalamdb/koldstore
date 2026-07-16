@@ -89,15 +89,31 @@ if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUD
 fi
 cargo pgrx install "${INSTALL_ARGS[@]}"
 
+PGRX_START_ARGS=("$PG_FEATURE")
 if [[ "$MIRROR_CAPTURE_MODE" == "async" ]]; then
   echo "enabling logical WAL for async mirror tests"
-  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-    -c "ALTER SYSTEM SET wal_level = 'logical';"
+  PGRX_START_ARGS+=(--postgresql-conf wal_level=logical --postgresql-conf max_worker_processes=16)
 fi
 
 echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
-cargo pgrx stop "$PG_FEATURE"
-cargo pgrx start "$PG_FEATURE"
+cargo pgrx stop "$PG_FEATURE" || true
+cargo pgrx start "${PGRX_START_ARGS[@]}"
+
+wait_for_postgres() {
+  local attempts=30
+  local delay=1
+  local attempt
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$delay"
+  done
+  echo "error: PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT} did not become ready" >&2
+  return 1
+}
+
+wait_for_postgres
 
 echo "recreating local E2E database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \

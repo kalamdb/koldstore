@@ -199,7 +199,7 @@ pub(crate) fn activate_table(
         source.quoted(),
     ))
     .map_err(|error| error.to_string())?;
-    super::worker::ensure_applier()?;
+    super::worker::require_applier_for_async_capture()?;
     Ok(())
 }
 
