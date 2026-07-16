@@ -7,7 +7,7 @@ suites live in subfolders so the top level stays scannable.
 
 | Script | Purpose |
 |--------|---------|
-| `run-pg-e2e.sh` | Prepare pgrx cluster + run `tests/e2e` |
+| `run-pg-e2e.sh` | Prepare pgrx cluster + run `tests/e2e` in `--mode strict` or `--mode async` |
 | `run-examples.sh` | Real-world example scenarios |
 | `run-storage-comparison.sh` | Heap vs managed storage comparison |
 | `run-sql-regression.sh` | KoldStore SQL regression (`tests/sql/`) |

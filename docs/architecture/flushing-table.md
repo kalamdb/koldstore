@@ -20,7 +20,8 @@ All flushes are **table-wide** (`scope_key = ''` in catalog).
 
 ```mermaid
 flowchart TD
-  A["flush_table_pg"] --> B["lock_table_job"]
+  A["flush_table_pg"] --> W["apply_available async WAL fence"]
+  W --> B["lock_table_job"]
   B --> C["ensure_flush_job + mark_running"]
   C --> D["prepare_flush_context"]
   D --> E["refresh_active_schema_if_changed?"]
@@ -40,6 +41,19 @@ flowchart TD
 
 Internal mirror/hot SQL runs under `with_custom_scan_disabled` so the flush path
 does not recurse into `KoldMergeScan`.
+
+---
+
+## Phase 0 — Async mirror fence
+
+`flush_table` first calls `async_mirror::apply::apply_available`. If the current
+database has no async logical slot, this is a cheap no-op. Otherwise it applies
+all committed async source changes available to the explicit fence before the
+flush takes its table lock or resolves mirror statistics.
+
+This makes flush a strong consistency boundary for both capture modes: strict
+changes already exist in the mirror, and async changes are caught up before
+selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
 
 ---
 
@@ -285,9 +299,19 @@ SELECT count(removed_mirror), count(deleted_hot)
 ```
 
 - Bind parameter: single `bigint max_seq`
-- Runs under `SET LOCAL session_replication_role = replica`
+- Runs under `SET LOCAL session_replication_role = replica` so strict-mode
+  source triggers do not capture KoldStore's own pruning
+- The hot DELETE runs with PostgreSQL's internal replication origin temporarily
+  set to `DoNotReplicateId`; the prior origin is restored even if SPI returns an
+  error
 - Mirror rows removed first; hot rows removed only for `op IN (1,2)` (insert/update)
 - Delete tombstones (`op = 3`) stay in cold after flush; mirror copy is removed
+
+`DoNotReplicateId` matters in async mode: pruning hot source rows is KoldStore
+maintenance, not application DML, and must not be decoded later into fresh
+tombstones. Replication-origin marking uses the backend C API boundary directly
+instead of SQL `pg_replication_origin_session_setup/reset`; the trigger-control
+setting above remains transaction-local SQL state.
 
 `plan_clean_schema_cleanup` (JSON `jsonb_to_recordset`) remains for tests only.
 

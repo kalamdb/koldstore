@@ -98,6 +98,7 @@ async fn run_greenfield_scenario(
     scenario: &GreenfieldScenario,
     pg_version: u16,
 ) -> Result<()> {
+    let mode = common::selected_mirror_capture_mode()?.as_str();
     let relation = format!(
         "{}.{}_pg{}",
         scenario.schema_name, scenario.table_name, pg_version
@@ -136,8 +137,8 @@ async fn run_greenfield_scenario(
 
     client
         .execute(
-            "SELECT koldstore.manage_table(table_name => $1::text::regclass, storage => 'local-minio', hot_row_limit => NULL, table_type => $2, scope_column => $3)",
-            &[&relation, &scenario.table_type, &scenario.scope_column],
+            "SELECT koldstore.manage_table(table_name => $1::text::regclass, storage => 'local-minio', hot_row_limit => NULL, table_type => $2, scope_column => $3, mirror_capture_mode => $4)",
+            &[&relation, &scenario.table_type, &scenario.scope_column, &mode],
         )
         .await?;
 

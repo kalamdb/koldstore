@@ -9,6 +9,8 @@ PREPARE_ONLY="${KOLDSTORE_STORAGE_PREPARE_ONLY:-0}"
 ROWS="${KOLDSTORE_STORAGE_ROWS:-100000}"
 HOT_LIMIT="${KOLDSTORE_STORAGE_HOT_LIMIT:-10000}"
 DML_SAMPLE="${KOLDSTORE_STORAGE_DML_SAMPLE:-1000}"
+INSERT_BATCH_ROWS="${KOLDSTORE_STORAGE_INSERT_BATCH_ROWS:-100000}"
+MIRROR_CAPTURE_MODE="${KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE:-strict}"
 
 usage() {
   cat <<'EOF'
@@ -21,6 +23,8 @@ Options:
   --rows N          Total rows seeded per table (default: 100000)
   --hot-limit N     Rows kept hot after flush (default: 10000)
   --dml-sample N    Rows used for timed UPDATE/DELETE samples (default: 1000)
+  --insert-batch-rows N  Rows per committed insert batch (default: 100000)
+  --mirror-capture-mode MODE  strict or async (default: strict)
   --pg-version N    PostgreSQL major version (default: 16)
   --prepare-only    Prepare pgrx + extension only, skip the test
   -h, --help        Show this help text
@@ -29,6 +33,8 @@ Environment overrides (used when the matching flag is omitted):
   KOLDSTORE_STORAGE_ROWS
   KOLDSTORE_STORAGE_HOT_LIMIT
   KOLDSTORE_STORAGE_DML_SAMPLE
+  KOLDSTORE_STORAGE_INSERT_BATCH_ROWS
+  KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE
   KOLDSTORE_STORAGE_PGVERSION / KOLDSTORE_E2E_PGVERSION
   KOLDSTORE_STORAGE_PREPARE_ONLY
 
@@ -56,6 +62,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dml-sample)
       DML_SAMPLE="${2:?missing value for --dml-sample}"
+      shift 2
+      ;;
+    --insert-batch-rows)
+      INSERT_BATCH_ROWS="${2:?missing value for --insert-batch-rows}"
+      shift 2
+      ;;
+    --mirror-capture-mode)
+      MIRROR_CAPTURE_MODE="${2:?missing value for --mirror-capture-mode}"
       shift 2
       ;;
     --pg-version)
@@ -89,10 +103,12 @@ if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
   exit 0
 fi
 
-echo "running storage comparison (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE})"
+echo "running storage comparison (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, mirror_capture_mode=${MIRROR_CAPTURE_MODE})"
 KOLDSTORE_STORAGE_ROWS="${ROWS}" \
   KOLDSTORE_STORAGE_HOT_LIMIT="${HOT_LIMIT}" \
   KOLDSTORE_STORAGE_DML_SAMPLE="${DML_SAMPLE}" \
+  KOLDSTORE_STORAGE_INSERT_BATCH_ROWS="${INSERT_BATCH_ROWS}" \
+  KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE="${MIRROR_CAPTURE_MODE}" \
   cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
 
 echo "storage comparison passed"

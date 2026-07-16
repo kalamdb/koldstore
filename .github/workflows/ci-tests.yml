@@ -136,14 +136,24 @@ jobs:
         run: bash scripts/ci/start-minio.sh
 
       - name: Start pgrx PostgreSQL ${{ matrix.pg }} and install koldstore
-        run: bash scripts/run-pg-e2e.sh "${PG_VER}"
+        run: bash scripts/run-pg-e2e.sh "${PG_VER}" --mode async
         env:
           KOLDSTORE_E2E_PREPARE_ONLY: "1"
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
-      - name: Run E2E suite (includes isolation + crash/failpoint harnesses)
+      - name: Run strict-mode E2E suite (includes isolation + crash/failpoint harnesses)
         run: cargo nextest run -p e2e --test-threads 1
         env:
+          KOLDSTORE_E2E_MIRROR_CAPTURE_MODE: strict
+          KOLDSTORE_MINIO: "1"
+          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+
+      - name: Run async-mode E2E suite (includes isolation + crash/failpoint harnesses)
+        run: cargo nextest run -p e2e --test-threads 1
+        env:
+          KOLDSTORE_E2E_MIRROR_CAPTURE_MODE: async
           KOLDSTORE_MINIO: "1"
           KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
           KOLDSTORE_MINIO_ACCESS_KEY: minioadmin

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
   <title id="title">KoldStore storage wins</title>
-  <desc id="desc">After flush: PostgreSQL heap and indexes 99 percent smaller, indexes 97 percent smaller, VACUUM FULL 95 percent faster.</desc>
+  <desc id="desc">After flush: PostgreSQL heap and indexes 99 percent smaller, indexes 97 percent smaller, VACUUM FULL 17 times faster.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0%" stop-color="#0f172a"/>
@@ -14,22 +14,22 @@
   <!-- Card 1 -->
   <rect x="70" y="180" width="360" height="320" rx="24" fill="#111827" stroke="#334155" stroke-width="2"/>
   <text x="250" y="250" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="20">PG heap + indexes</text>
-  <text x="250" y="320" text-anchor="middle" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="28" font-weight="600">5.85 GiB → 72 MiB</text>
+  <text x="250" y="320" text-anchor="middle" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="28" font-weight="600">5.85 GiB → 73.01 MiB</text>
   <text x="250" y="400" text-anchor="middle" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="48" font-weight="700">99%</text>
   <text x="250" y="450" text-anchor="middle" fill="#86efac" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="22">smaller</text>
 
   <!-- Card 2 -->
   <rect x="460" y="180" width="360" height="320" rx="24" fill="#111827" stroke="#334155" stroke-width="2"/>
   <text x="640" y="250" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="20">Indexes</text>
-  <text x="640" y="320" text-anchor="middle" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="28" font-weight="600">415 MiB → 11.4 MiB</text>
+  <text x="640" y="320" text-anchor="middle" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="28" font-weight="600">414.86 MiB → 11.45 MiB</text>
   <text x="640" y="400" text-anchor="middle" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="48" font-weight="700">97%</text>
   <text x="640" y="450" text-anchor="middle" fill="#86efac" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="22">smaller</text>
 
   <!-- Card 3 -->
   <rect x="850" y="180" width="360" height="320" rx="24" fill="#111827" stroke="#334155" stroke-width="2"/>
   <text x="1030" y="250" text-anchor="middle" fill="#94a3b8" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="20">VACUUM FULL</text>
-  <text x="1030" y="320" text-anchor="middle" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="28" font-weight="600">131 s → 6.4 s</text>
-  <text x="1030" y="400" text-anchor="middle" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="48" font-weight="700">95%</text>
+  <text x="1030" y="320" text-anchor="middle" fill="#f8fafc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="28" font-weight="600">57.01 s → 3.43 s</text>
+  <text x="1030" y="400" text-anchor="middle" fill="#4ade80" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="48" font-weight="700">17×</text>
   <text x="1030" y="450" text-anchor="middle" fill="#86efac" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="22">faster</text>
 
   <text x="640" y="560" text-anchor="middle" fill="#64748b" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif" font-size="16">Cold rows live in open Parquet on storage you control. Full methodology and throughput trade-offs: docs/benchmarks/</text>

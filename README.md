@@ -74,36 +74,57 @@ KoldStore extends PostgreSQL instead of replacing it. Applications keep using th
 KoldStore is a **storage lifecycle tool**, not a universal query accelerator. After older rows are flushed, PostgreSQL keeps a smaller hot working set; cold data lives in zstd Parquet outside the primary heap.
 
 <p align="center">
-  <img src="docs/assets/benchmark-storage-wins.svg" alt="After flush: heap and indexes 99% smaller, indexes 97% smaller, VACUUM FULL 95% faster" width="900" />
+  <img src="docs/assets/benchmark-storage-wins.svg" alt="After flush: heap and indexes 99% smaller, indexes 97% smaller, VACUUM FULL 17 times faster" width="900" />
 </p>
 
 | Result | Before → after flush | Tradeoff |
 | --- | --- | --- |
 | PostgreSQL heap + indexes (includes `__cl`) | 5.85 GiB → 73 MiB | **99% smaller** |
 | Indexes (hot + `__cl`) | 415 MiB → 11.5 MiB | **97% smaller** |
-| `VACUUM (FULL, ANALYZE)` | 77.7 s → 3.39 s | **23× faster** |
+| `VACUUM (FULL, ANALYZE)` | 57.01 s → 3.43 s | **17× faster** |
 
 Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000` (local
 PG16.13 `release-pg`). Managed PostgreSQL sizes include the hot heap **and**
 `koldstore.<table>__cl` plus its indexes.
 
-Managed tables maintain a latest-state change-log mirror on every
-`INSERT` / `UPDATE` / `DELETE` (same transaction as the heap write), so managed DML
-is slower than plain heap (e.g. INSERT **35% slower**, UPDATE **15% slower**,
-DELETE **15× slower** on this run). Relative to the prior capture SQL,
-statement-level capture is much faster on bulk DML — median managed **UPDATE ~48×**
-and **DELETE ~3×** on a 5k-row sample; bulk INSERT ~1.9×. Cold PK lookups remain
-slower than pure B-tree probes (~124 ops/s managed hot+cold vs ~1.5k heap here,
-**~12× slower**). Full methodology and tables:
+### Latest 10M-row throughput
+
+The latest run uses async capture and reports foreground DML separately from
+mirror catch-up. This matters because async commits the source heap first;
+strict mode includes mirror maintenance in the application transaction.
+
+| Operation | PostgreSQL only | KoldStore async | Trade-off |
+| --- | ---: | ---: | ---: |
+| INSERT | 98,978 ops/s | 98,454 ops/s | **1% slower** |
+| UPDATE | 22,001 ops/s | 21,546 ops/s | **2% slower** |
+| DELETE | 112,889 ops/s | 130,241 ops/s | **15% faster** |
+| Hot-only PK lookup | 1,568 ops/s | 1,731 ops/s | **10% faster** |
+| Hot+cold PK lookup | 1,591 ops/s | 506 ops/s | **3× slower** |
+
+Async mirror catch-up measured 28,881 INSERT, 1,170 UPDATE, 58,976 DELETE,
+and 24,440 restore operations per second. The foreground INSERT result meets
+the project acceptance target of staying within 10% of plain PostgreSQL; async
+UPDATE catch-up remains the main DML bottleneck. These are results from one
+machine, not universal capacity claims.
+
+Managed tables support two mirror paths. The default `strict` mode writes the
+latest-state mirror in the heap transaction for immediate consistency. The
+opt-in `async` mode commits the heap first; a database worker applies committed
+PK-only WAL with a 100 ms polling interval, while an explicit fence remains
+available for strong reads. This reduces foreground insert overhead while
+reporting catch-up as separate work. `CREATE EXTENSION` and the first async
+`manage_table` create the publication and slot automatically; only
+`wal_level=logical` requires administrator setup. Full methodology, phase
+definitions, current 10M-row results, and strict-mode history:
 [docs/benchmarks/](docs/benchmarks/README.md).
 
 ## How it works
 
-1. `manage_table` registers the table and creates a small latest-state change-log mirror (one metadata row per primary key; commits/rolls back with the original transaction).
+1. `manage_table` registers the table and creates a small latest-state change-log mirror (one metadata row per primary key). Choose strict transactional capture or opt-in async committed-WAL capture.
 2. `flush_table` moves older rows to Parquet and prunes them from the hot heap when safe.
 3. `SELECT` on the original table uses `KoldMergeScan` so the newest visible row wins.
 
-Details: [Architecture](docs/architecture.md) · [Manage](docs/architecture/manage-table.md) · [Flush](docs/architecture/flushing-table.md) · [Scan](docs/architecture/scanning-table.md)
+Details: [Architecture](docs/architecture.md) · [Capture modes](docs/architecture/mirror-capture-modes.md) · [Manage](docs/architecture/manage-table.md) · [Flush](docs/architecture/flushing-table.md) · [Scan](docs/architecture/scanning-table.md)
 
 ```mermaid
 flowchart TD
@@ -208,7 +229,8 @@ Development loop and crate layout:
 ```bash
 cargo test --workspace
 cargo pgrx install -p pg_koldstore --no-default-features --features pg16
-scripts/run-pg-e2e.sh 16
+scripts/run-pg-e2e.sh 16 --mode strict
+scripts/run-pg-e2e.sh 16 --mode async
 ```
 
 - [Development guide](docs/development.md)

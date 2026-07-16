@@ -40,6 +40,9 @@ pub enum MigrationConstraintError {
     /// The requested Parquet compression codec is unsupported.
     #[error("unsupported compression codec `{0}`")]
     UnsupportedCompression(String),
+    /// The requested mirror capture consistency mode is unsupported.
+    #[error("unsupported mirror capture mode `{0}`; expected `strict` or `async`")]
+    UnsupportedMirrorCaptureMode(String),
     /// The requested table ownership model is unsupported.
     #[error("unsupported table type `{0}`")]
     UnsupportedTableType(String),

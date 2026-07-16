@@ -30,7 +30,10 @@ flowchart TD
   SchemaE --> ScopeE["RLS policy if user-scoped"]
   ScopeE --> JobE["INSERT koldstore.jobs completed"]
   JobE --> CountersE["manifest row counters refresh"]
-  CountersE --> DoneE["RETURN job_id"]
+  CountersE --> CaptureE{"capture mode"}
+  CaptureE -->|strict| DoneE["RETURN job_id"]
+  CaptureE -->|async| SwitchE["Publish PK columns + drop DML triggers"]
+  SwitchE --> DoneE
 
   Rows -->|Yes| PlanExist["plan_existing_table_migration"]
   PlanExist --> CreateP["CREATE mirror + capture triggers"]
@@ -41,7 +44,10 @@ flowchart TD
   Activate --> ScopeP["RLS if user-scoped"]
   ScopeP --> JobDoneP["UPDATE jobs completed"]
   JobDoneP --> CountersP["manifest counters refresh"]
-  CountersP --> DoneP["RETURN job_id"]
+  CountersP --> CaptureP{"capture mode"}
+  CaptureP -->|strict| DoneP["RETURN job_id"]
+  CaptureP -->|async| SwitchP["Publish PK columns + drop DML triggers"]
+  SwitchP --> DoneP
 ```
 
 `manage_table` does **not** write Parquet files or object-store `manifest.json`.
@@ -65,6 +71,7 @@ Those happen on the first `koldstore.flush_table` call.
 | `migration_order_by` | null | Explicit ordering for existing-table backfill |
 | `compression` | null | `snappy`, `zstd`, or `uncompressed` |
 | `target_file_size_mb` | null | Optional target Parquet segment size in MiB |
+| `mirror_capture_mode` | `strict` | `strict` transaction triggers or opt-in `async` committed-WAL capture |
 
 When `hot_row_limit` is set, the triple `(hot_row_limit, min_flush_rows,
 max_rows_per_file)` is validated and stored in `ManageTableOptions` as a
@@ -73,6 +80,12 @@ max_rows_per_file)` is validated and stored in `ManageTableOptions` as a
 **Serde boundary:** SQL args are native pgrx types. Options are assembled in Rust
 as `ManageTableOptions` (`koldstore-common/src/config.rs`) before catalog
 persistence.
+
+`async` mode requires `wal_level=logical`. `CREATE EXTENSION` creates the empty
+`koldstore_async_mirror` publication, and the first async call creates or reuses
+the deterministic database slot before migration writes. Setup and consistency
+semantics are documented in
+[mirror-capture-modes.md](mirror-capture-modes.md).
 
 ---
 
@@ -130,7 +143,8 @@ rejected unless `allow_fk_hot_only = true`.
 | Seq index | `{mirror}_seq_idx` | `("seq")` |
 | Tombstone index | `{mirror}_tombstone_seq_idx` | `("seq") WHERE op = 3` |
 | Capture function | `koldstore.{mirror}_capture()` | PL/pgSQL trigger body |
-| Capture triggers | on user heap | INSERT / UPDATE / DELETE AFTER ROW |
+| Capture triggers | on user heap | INSERT / UPDATE / DELETE AFTER STATEMENT with transition tables |
+| PK guard | on user heap | BEFORE UPDATE OF primary-key columns FOR EACH ROW |
 
 The user heap is **not** altered. No `_seq`, `_commit_seq`, or `_deleted`
 columns are added (clean-schema contract).
@@ -154,7 +168,7 @@ When `EXISTS (SELECT 1 FROM ONLY table LIMIT 1)` is false:
 1. **Create mirror objects** — `mirror_plan.create_statements()` via SPI:
    - `CREATE TABLE IF NOT EXISTS koldstore.{name}__cl`
    - Indexes
-   - Capture function + three triggers
+   - Capture function + three statement triggers + PK guard
 
 2. **Register schema** — `register_schema_version` inserts `koldstore.schemas` v1:
    - `active = true`
@@ -171,7 +185,13 @@ When `EXISTS (SELECT 1 FROM ONLY table LIMIT 1)` is false:
 
 5. **Row counters** — `refresh_managed_table_row_counters` (see Phase 5)
 
-6. **Return** job UUID
+6. **Select capture path**:
+   - `strict`: keep the statement triggers
+   - `async`: add the source's primary-key columns to the shared publication,
+     drop only the three DML capture triggers, retain the PK guard, install the
+     worker-kick statement trigger, and ensure the database applier is running
+
+7. **Return** job UUID
 
 ---
 
@@ -205,11 +225,21 @@ When the heap already has rows:
 
 7. **Complete job** — `status = completed`, `phase = finished`, `rows_processed = count`
 
-8. **Row counters** + return job UUID
+8. **Row counters**
+
+9. **Select capture path** — keep strict triggers, or atomically publish the
+   primary-key columns and remove the DML triggers for async mode
+
+10. **Return** job UUID
 
 **Note:** Backfill runs inline in the caller session today. The `koldstore.jobs`
 row is durable audit/progress; there is no separate worker claim loop in
 `pg_koldstore` yet.
+
+Async activation happens only after this initialization is complete. Strict
+triggers cover writes before activation; publication membership covers commits
+after activation. Both changes occur in the `manage_table` transaction, so the
+handoff has no capture gap.
 
 ---
 
@@ -232,8 +262,9 @@ This creates or updates `koldstore.manifest` for `scope_key = ''`:
 | `cold_row_count` | 0 |
 | `segment_count` | 0 |
 
-After manage, DML triggers bump counters in memory; manifest is updated at
-transaction pre-commit (see [dml-table.md](dml-table.md)).
+After manage, strict triggers or the async applier record counter deltas in
+memory; manifest is updated at transaction pre-commit (see
+[dml-table.md](dml-table.md)).
 
 ---
 
@@ -253,6 +284,7 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
   "compression": "zstd",
   "backfill_batch_size": 10000,
   "allow_fk_hot_only": true,
+  "mirror_capture_mode": "async",
   "migration_status": "active",
   "cold_metadata": {
     "stats_columns": ["seq", "created_at"],
@@ -265,7 +297,8 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
 ```
 
 `FlushPolicy` is read back with `FlushPolicy::from_value(&options)` — not a
-separate column.
+separate column. `mirror_capture_mode` is present only for async mode; a missing
+value means the backward-compatible strict default.
 
 ### `koldstore.jobs.payload` (migrate_backfill)
 
@@ -307,7 +340,7 @@ Serde: `#[serde(rename_all = "snake_case")]` on job phase enums.
 | `koldstore.jobs` | completed migrate_backfill | pending → completed |
 | `koldstore.manifest` | counters from live counts | same |
 | Mirror table `__cl` | created | created + backfilled |
-| Capture triggers | installed | installed |
+| Capture path | strict triggers retained, or async publication membership | same |
 | `koldstore.cold_segments` | — | not touched |
 | Object-store Parquet / `manifest.json` | — | not touched |
 

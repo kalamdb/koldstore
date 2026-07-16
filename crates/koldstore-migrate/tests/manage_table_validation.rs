@@ -12,6 +12,7 @@ fn valid_context() -> ManageTableValidationContext<'static> {
         already_managed: false,
         migration_order_by: None,
         compression: None,
+        mirror_capture_mode: None,
         policy: ManageTablePolicyInput {
             hot_row_limit: Some(10_000),
             min_flush_rows: 1_000,
@@ -123,6 +124,29 @@ fn invalid_compression_is_rejected() {
     assert_eq!(
         validate_manage_table(context).unwrap_err(),
         MigrationConstraintError::UnsupportedCompression("brotli".to_string())
+    );
+}
+
+#[test]
+fn async_mirror_capture_mode_is_persisted() {
+    let mut context = valid_context();
+    context.mirror_capture_mode = Some("async");
+
+    let validated = validate_manage_table(context).unwrap();
+    assert_eq!(
+        validated.options.mirror_capture_mode(),
+        koldstore_common::MirrorCaptureMode::Async
+    );
+}
+
+#[test]
+fn invalid_mirror_capture_mode_is_rejected() {
+    let mut context = valid_context();
+    context.mirror_capture_mode = Some("eventual");
+
+    assert_eq!(
+        validate_manage_table(context).unwrap_err(),
+        MigrationConstraintError::UnsupportedMirrorCaptureMode("eventual".to_string())
     );
 }
 

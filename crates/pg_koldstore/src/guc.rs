@@ -25,6 +25,8 @@ static INTERNAL_SYSTEM_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static INTERNAL_FLUSH_CLEANUP: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static INTERNAL_ASYNC_MIRROR_WORKER: GucSetting<bool> = GucSetting::<bool>::new(true);
+#[cfg(feature = "pg")]
 static MIN_MAX_ROWS_PER_FILE: GucSetting<i32> =
     GucSetting::<i32>::new(settings::default_min_max_rows_per_file());
 #[cfg(feature = "pg")]
@@ -92,6 +94,14 @@ pub fn define_gucs() {
         c"Allows internal KoldStore flush cleanup.",
         c"Internal guard used while pruning flushed hot and mirror rows.",
         &INTERNAL_FLUSH_CLEANUP,
+        GucContext::Suset,
+        flags,
+    );
+    GucRegistry::define_bool_guc(
+        c"koldstore.internal_async_mirror_worker",
+        c"Enables automatic async mirror worker registration.",
+        c"Internal benchmark control. Keep enabled in production so async mirrors apply committed WAL automatically.",
+        &INTERNAL_ASYNC_MIRROR_WORKER,
         GucContext::Suset,
         flags,
     );
@@ -181,6 +191,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "off",
         },
         GucDefinition {
+            name: INTERNAL_ASYNC_MIRROR_WORKER_GUC,
+            internal: true,
+            default_value: "on",
+        },
+        GucDefinition {
             name: settings::FAILPOINT_GUC,
             internal: false,
             default_value: settings::DEFAULT_FAILPOINT,
@@ -193,6 +208,7 @@ pub const USER_ID_GUC: &str = "koldstore.user_id";
 pub const ENABLE_MERGE_SCAN_GUC: &str = "koldstore.enable_merge_scan";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
+pub const INTERNAL_ASYNC_MIRROR_WORKER_GUC: &str = "koldstore.internal_async_mirror_worker";
 
 /// Whether the planner may inject KoldMergeScan paths.
 #[must_use]
@@ -200,6 +216,23 @@ pub fn enable_merge_scan() -> bool {
     #[cfg(feature = "pg")]
     {
         ENABLE_MERGE_SCAN.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        true
+    }
+}
+
+/// Whether async capture should register the bounded-lag database worker.
+///
+/// This is disabled only by deterministic benchmarks that account for each
+/// explicit catch-up phase. Production sessions keep the default enabled.
+#[must_use]
+pub fn async_mirror_worker_enabled() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        INTERNAL_ASYNC_MIRROR_WORKER.get()
     }
 
     #[cfg(not(feature = "pg"))]

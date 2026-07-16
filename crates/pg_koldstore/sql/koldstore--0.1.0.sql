@@ -8,6 +8,21 @@
 CREATE SCHEMA IF NOT EXISTS koldstore;
 GRANT USAGE ON SCHEMA koldstore TO PUBLIC;
 
+-- Publications are database-scoped runtime infrastructure rather than
+-- extension members. Provision the empty publication at install time so the
+-- first async manage call only needs to reserve its logical slot before writes.
+DO $koldstore_publication$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_publication
+    WHERE pubname = 'koldstore_async_mirror'
+  ) THEN
+    CREATE PUBLICATION koldstore_async_mirror;
+  END IF;
+END
+$koldstore_publication$;
+
 CREATE TYPE koldstore.managed_table_info AS (
   table_oid oid,
   table_type text,
@@ -71,6 +86,29 @@ CREATE TABLE IF NOT EXISTS koldstore.schemas (
 CREATE UNIQUE INDEX IF NOT EXISTS schemas_one_active_per_table_idx
   ON koldstore.schemas (table_oid)
   WHERE active;
+
+-- Logical decoding is acknowledged one fence after mirror apply. Persisting
+-- the applied LSN first makes a crash retry duplicates instead of losing rows.
+CREATE TABLE IF NOT EXISTS koldstore.async_mirror_state (
+  database_oid oid PRIMARY KEY,
+  applied_lsn pg_lsn NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Async source transactions only wake/ensure the database worker; logical
+-- decoding and mirror writes remain outside the user's transaction.
+CREATE OR REPLACE FUNCTION koldstore.async_mirror_kick()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, koldstore
+AS $$
+BEGIN
+  PERFORM koldstore.internal_ensure_async_mirror_worker();
+  RETURN NULL;
+END;
+$$;
+REVOKE ALL ON FUNCTION koldstore.async_mirror_kick() FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS koldstore.manifest (
   table_oid oid NOT NULL,

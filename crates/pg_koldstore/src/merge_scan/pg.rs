@@ -421,10 +421,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         }
     } else if !cold_rows.is_empty()
         && residual.membership.is_empty()
-        && hot_equality_covers_primary_key(
-            &residual.hot_equality,
-            &snapshot.primary_key_columns,
-        )
+        && hot_equality_covers_primary_key(&residual.hot_equality, &snapshot.primary_key_columns)
     {
         // PK point-lookup fast path: probe hot with native Datums (no to_jsonb).
         // Hot always wins for the same PK, so a hit skips cold merge entirely.
@@ -448,10 +445,11 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 for (column, expected) in &residual.equality {
                     filters = filters.with_required_json_eq(column.clone(), expected.clone());
                 }
-                let merged = match execute_merge_scan_with_filters(Vec::new(), cold_rows, filters)
-                {
+                let merged = match execute_merge_scan_with_filters(Vec::new(), cold_rows, filters) {
                     Ok(result) => result,
-                    Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} cold-native merge failed: {error}"),
+                    Err(error) => {
+                        pgrx::error!("{CUSTOM_PATH_NAME} cold-native merge failed: {error}")
+                    }
                 };
                 let rows = unsafe {
                     memory.switch(|| {
@@ -659,7 +657,8 @@ unsafe extern "C-unwind" fn explain_custom_scan(
                 None => {
                     // EXPLAIN without ANALYZE (or missing saved meta): plan-time cold profile only.
                     // Do not touch custom_ps here — children may already be shut down.
-                    let profile = match resolve_table_oid(node).and_then(planned_cold_read_profile) {
+                    let profile = match resolve_table_oid(node).and_then(planned_cold_read_profile)
+                    {
                         Ok(profile) => profile,
                         Err(error) => {
                             profile::explain_property(

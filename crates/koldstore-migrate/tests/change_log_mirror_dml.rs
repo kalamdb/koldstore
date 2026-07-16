@@ -2,7 +2,7 @@ use koldstore_common::{
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
 };
 use koldstore_migrate::{
-    capture::{plan_mirror_capture, MirrorCapturePlan},
+    capture::{plan_drop_mirror_dml_triggers, plan_mirror_capture, MirrorCapturePlan},
     mirror, QualifiedTableName,
 };
 
@@ -169,6 +169,10 @@ fn mirror_capture_cleanup_drops_triggers_before_function() {
         .drop_triggers
         .sql
         .contains("\"messages__cl_pk_update_guard\""));
+    assert!(plan
+        .drop_triggers
+        .sql
+        .contains("\"messages__cl_async_worker_kick\""));
     assert_eq!(
         plan.drop_function.sql,
         "DROP FUNCTION IF EXISTS \"koldstore\".\"messages__cl_capture\"()"
@@ -212,4 +216,27 @@ fn create_statements_include_guard_artifacts_in_dependency_order() {
             "create change-log mirror primary-key guard trigger",
         ]
     );
+}
+
+#[test]
+fn async_capture_switch_drops_only_statement_dml_triggers() {
+    let source = QualifiedTableName::parse("public.messages").unwrap();
+    let mirror = QualifiedTableName::parse("koldstore.messages__cl").unwrap();
+    let statement = plan_drop_mirror_dml_triggers(&source, &mirror).unwrap();
+
+    assert!(statement.sql.contains("messages__cl_insert_capture"));
+    assert!(statement.sql.contains("messages__cl_update_capture"));
+    assert!(statement.sql.contains("messages__cl_delete_capture"));
+    assert!(!statement.sql.contains("messages__cl_pk_update_guard"));
+    assert_eq!(statement.sql.matches("DROP TRIGGER IF EXISTS").count(), 3);
+}
+
+#[test]
+fn async_worker_kick_name_matches_postgres_identifier_truncation() {
+    let name = koldstore_migrate::capture::async_worker_kick_trigger_name(
+        "a_very_long_managed_table_name_that_nearly_fills_a_postgres_identifier__cl",
+    );
+
+    assert!(name.len() <= 63);
+    assert!(name.is_char_boundary(name.len()));
 }

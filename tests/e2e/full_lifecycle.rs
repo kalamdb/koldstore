@@ -496,6 +496,7 @@ async fn insert_rows(
 }
 
 async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
+    let mode = common::selected_mirror_capture_mode()?.as_str();
     client
         .execute(
             r#"
@@ -504,13 +505,15 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
               storage        => $2,
               hot_row_limit  => $3,
               min_flush_rows => 1,
-              migration_order_by => 'id'
+              migration_order_by => 'id',
+              mirror_capture_mode => $4
             )
             "#,
             &[
                 &relation(pg_version),
                 &storage_name(pg_version),
                 &FLUSH_POLICY_ROW_LIMIT,
+                &mode,
             ],
         )
         .await?;

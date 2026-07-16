@@ -267,9 +267,19 @@ fn execute_seq_range_cleanup(
             client
                 .update("SET LOCAL session_replication_role = replica", None, &[])
                 .map_err(|error| error.to_string())?;
-            let tuples = client
-                .update(&plan.statement.sql, None, &cleanup_arg)
-                .map_err(|error| error.to_string())?;
+            // Stamp only cleanup WAL with PostgreSQL's non-replicated origin.
+            // Restoring the backend global immediately avoids the session-origin
+            // lifecycle and error-recursion hazards of SQL origin setup/reset.
+            let previous_origin = unsafe { pgrx::pg_sys::replorigin_session_origin };
+            unsafe {
+                pgrx::pg_sys::replorigin_session_origin =
+                    pgrx::pg_sys::DoNotReplicateId as pgrx::pg_sys::RepOriginId;
+            }
+            let cleanup_result = client.update(&plan.statement.sql, None, &cleanup_arg);
+            unsafe {
+                pgrx::pg_sys::replorigin_session_origin = previous_origin;
+            }
+            let tuples = cleanup_result.map_err(|error| error.to_string())?;
             if tuples.is_empty() {
                 return Ok((0_i64, 0_i64));
             }

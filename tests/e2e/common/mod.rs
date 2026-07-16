@@ -9,6 +9,7 @@ mod describe_table;
 pub mod equality;
 mod log;
 mod minio;
+mod mirror_mode;
 mod sql;
 
 pub use assertions::{
@@ -36,6 +37,7 @@ pub use equality::{
 };
 pub use log::{log, log_always, log_step, log_step_always, timed_sync, verbose_enabled, StepGuard};
 pub use minio::{minio_enabled, MinioConfig};
+pub use mirror_mode::{fence_selected_mirror, selected_mirror_capture_mode, MirrorCaptureMode};
 pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
     relation_size, row_count, row_count_from_sql, RelationSize,

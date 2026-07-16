@@ -23,8 +23,9 @@ cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
 # KoldStore SQL regression (normalization rules in tests/sql/README.md)
 scripts/run-sql-regression.sh 16
 
-# E2E
-scripts/run-pg-e2e.sh 16
+# E2E: run the same suite once per mirror mode
+scripts/run-pg-e2e.sh 16 --mode strict
+scripts/run-pg-e2e.sh 16 --mode async
 
 # Isolation (two-session schedules; no sleep-based races)
 scripts/readiness/run-isolation.sh 16
@@ -65,7 +66,7 @@ cargo pgrx init
 scripts/run-pg-e2e.sh
 ```
 
-The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. Prefer `scripts/run-pg-e2e.sh` for multi-process E2E; use `cargo pgrx test` for in-server `#[pg_test]` modules under `crates/pg_koldstore/src/pg_tests/`.
+The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. `--mode strict` is the default; `--mode async` enables logical WAL and runs the same fixtures with async capture. Async-only publication, slot, and worker lifecycle assertions skip themselves in strict mode. Prefer `scripts/run-pg-e2e.sh` for multi-process E2E; use `cargo pgrx test` for in-server `#[pg_test]` modules under `crates/pg_koldstore/src/pg_tests/`.
 
 ## Local pgrx PostgreSQL Matrix
 
@@ -75,7 +76,7 @@ scripts/run-pgrx-matrix.sh
 
 The matrix runner executes non-E2E workspace tests once, then loops over PostgreSQL 15, 16, 17, and 18 for pgrx feature clippy, extension install, and E2E checks. Use `scripts/run-pgrx-matrix.sh --download-missing` to let cargo-pgrx download missing PostgreSQL versions. On local machines without ICU development packages, add `--without-icu` for downloaded PostgreSQL builds.
 
-For a single version, use `scripts/run-pg-e2e.sh 18` or `scripts/run-pgrx-matrix.sh --pg-versions 18`. After the E2E runner prepares PostgreSQL and installs the extension, it executes `cargo nextest run -p e2e --test-threads 1`.
+For a single version and mode, use `scripts/run-pg-e2e.sh 18 --mode async`; use `scripts/run-pgrx-matrix.sh --pg-versions 18` for the version matrix. After the E2E runner prepares PostgreSQL and installs the extension, it executes the E2E crate serially with the selected mode exported as `KOLDSTORE_E2E_MIRROR_CAPTURE_MODE`.
 
 Every E2E test now calls a shared pgrx gate before running. The gate connects to the configured PostgreSQL port, verifies the server major version and listening port, and ensures `koldstore` is installed in the E2E database. If pgrx PostgreSQL is stopped or unreachable, the suite fails fast instead of letting contract-only tests pass.
 
@@ -151,4 +152,3 @@ tests/memory/run_memory_checks.sh
 ```
 
 The script runs Rust tests and opportunistically reports Valgrind and heaptrack availability. PostgreSQL memory-context checks are represented by `tests/memory/memory_probe.rs` and are intended to be wired into pgrx/E2E tests as the extension glue matures.
-

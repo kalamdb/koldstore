@@ -68,6 +68,55 @@ Sample result:
 Management runs inline for this table. The returned UUID is the
 `migrate_backfill` job id in `koldstore.jobs`.
 
+### Choose strict or async mirror capture
+
+The example above uses `strict`, the default. Strict capture updates the heap
+and latest-state mirror in the same transaction, so successful DML is visible
+through the managed table immediately and both writes roll back together.
+
+Choose `async` when foreground DML throughput is more important than an
+immediately current mirror. To do that, use this call **instead of** the Step 3
+call above (a table cannot be managed twice):
+
+```sql
+SELECT koldstore.manage_table(
+  table_name          => 'app.messages',
+  storage             => 'local-dev',
+  hot_row_limit       => 1000,
+  min_flush_rows      => 1,
+  max_rows_per_file   => 500,
+  migration_order_by  => 'id',
+  mirror_capture_mode => 'async'
+) AS manage_job_id;
+```
+
+Async mode requires PostgreSQL to start with `wal_level=logical`. This server
+setting and restart are the only manual administrator step. Do **not** create a
+publication or logical slot yourself: `CREATE EXTENSION` ensures the empty
+publication, and the first async `manage_table` creates the database's slot
+before changing the table or KoldStore catalogs. Provisioning is idempotent.
+
+Async source transactions commit before mirror work. A database worker normally
+applies committed primary-key changes within its 100 ms polling interval. Use
+the explicit fence before work that must observe every source commit visible at
+the start of the call:
+
+```sql
+SELECT koldstore.wait_for_async_mirror();
+```
+
+`flush_table` performs this catch-up automatically. To remove the logical slot
+and publication, first unmanage every async table and then run:
+
+```sql
+SELECT koldstore.disable_async_mirror();
+```
+
+The cleanup function is idempotent and refuses to run while an active async
+table depends on the infrastructure. A later async `manage_table` recreates it
+automatically. See [Mirror capture modes](architecture/mirror-capture-modes.md)
+for consistency, WAL-retention, monitoring, and recovery details.
+
 The application table is still the table you created:
 
 ```sql
@@ -89,10 +138,11 @@ LIMIT 3;
 
 Management also creates `koldstore.messages__cl`, a latest-state mirror with
 one metadata row per primary key. It stores the key columns plus `seq` and
-`op`; it does not duplicate full application row payloads. The mirror commits
-or rolls back with the original transaction so flush cutoffs stay consistent
-with application DML. Full semantics live in the
-[architecture docs](architecture.md).
+`op`; it does not duplicate full application row payloads. In strict mode the
+mirror commits or rolls back with application DML. In async mode it follows
+committed WAL and may briefly lag; the worker and consistency fence close that
+gap before flush or any caller-selected strong boundary. Full semantics live
+in the [architecture docs](architecture.md).
 
 ```sql
 SELECT id, seq, op

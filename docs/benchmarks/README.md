@@ -18,8 +18,12 @@ from [`tests/storage/schema.sql`](../../tests/storage/schema.sql).
 
 Sample run: **10,000,000 rows**, `hot_row_limit = 100000`,
 `max_rows_per_file = 1000000`, `--dml-sample 50000` (~9.9M rows flushed, zstd
-Parquet). Numbers vary by machine; re-run for your hardware. Figures below are
-from a local PG16.13 `release-pg` run on the managed-mirror DML capture rewrite.
+Parquet). Inserts alternate 100k-row committed batches so neither side is
+always measured first and logical decoding stays transaction-bounded. Numbers
+vary by machine; re-run for your hardware. Figures below are
+from a local PG16.13 `release-pg` run using
+`--mirror-capture-mode async`. The strict transactional path remains the
+default; see [Mirror capture modes](../architecture/mirror-capture-modes.md).
 
 **Managed PostgreSQL sizes always include** the hot user heap **plus**
 `koldstore.<table>__cl` (latest-state change-log mirror) **and** that mirror’s
@@ -30,8 +34,8 @@ is outside the PostgreSQL data directory.
 | --- | --- | --- | --- |
 | PostgreSQL heap + indexes (after flush) | 5.85 GiB | 73 MiB | **99% smaller** |
 | Index storage (hot + `__cl`) | 415 MiB | 11.5 MiB | **97% smaller** |
-| Table storage (hot + `__cl`) | 5.45 GiB | 62 MiB (+ 599 MiB cold Parquet) | **99% smaller** heap |
-| `VACUUM (FULL, ANALYZE)` (after flush) | 77.7 s | 3.39 s | **23× faster** |
+| Table storage (hot + `__cl`) | 5.45 GiB | 61.56 MiB (+ 597.05 MiB cold Parquet) | **99% smaller** heap |
+| `VACUUM (FULL, ANALYZE)` (after flush) | 57.01 s | 3.43 s | **17× faster** |
 
 Point lookups on hot and cold primary keys still return the same rows as the
 unmanaged baseline (`KoldMergeScan`).
@@ -51,32 +55,54 @@ How to read the table (Postgres-oriented):
   update/delete sample, **before flush** — so both sides match here. The
   maintenance win shows up in post-flush VACUUM time / heap size, not in that
   pre-flush counter.
-- Autovacuum counters are **not** shown: this harness is too short for
-  autovacuum to run, so `autovacuum_count` stays 0 on both sides and would be
-  misleading.
+- Autovacuum counters are **not** shown: autovacuum is disabled on both source
+  tables and the generated mirror so the longer async catch-up cannot launch
+  maintenance during a following timed phase. Explicit VACUUM is timed after
+  flush.
 - **Backup size / restore time** are TODO until the harness measures
   `pg_dump` / `pg_restore` (or basebackup) of the PostgreSQL database only —
   cold Parquet is outside the cluster and would be protected separately.
 
 | Operation | PostgreSQL only | PostgreSQL + KoldStore | Tradeoff |
 | --- | --- | --- | --- |
-| insert speed† | 70k ops/s | 45k ops/s | **35% slower** |
-| update speed† | 23k ops/s | 20k ops/s | **15% slower** |
-| delete speed† | 1.4M ops/s | 97k ops/s | **15× slower** |
-| query hot only (before flush) | 1.5k ops/s | 1.7k ops/s | **13% faster** |
-| query with hot+cold (after flush) | 1.5k ops/s | 124 ops/s‡ | **12× slower** |
-| VACUUM time (after flush) | 77.7 s | 3.39 s | **23× faster** |
+| insert speed† | 98,978 ops/s | 98,454 ops/s | **1% slower** |
+| update speed† | 22,001 ops/s | 21,546 ops/s | **2% slower** |
+| delete speed† | 112,889 ops/s | 130,241 ops/s | **15% faster** |
+| └ async insert mirror catch-up | — | 28,881 ops/s | outside foreground timing |
+| └ async update mirror catch-up | — | 1,170 ops/s | outside foreground timing |
+| └ async delete mirror catch-up | — | 58,976 ops/s | outside foreground timing |
+| └ async restore mirror catch-up | — | 24,440 ops/s | outside foreground timing |
+| query hot only (before flush) | 1,568 ops/s | 1,731 ops/s | **10% faster** |
+| query with hot+cold (after flush) | 1,591 ops/s | 506 ops/s‡ | **3× slower** |
+| VACUUM time (after flush) | 57.01 s | 3.43 s | **17× faster** |
 | dead tuples after workload | 100k (live≈10M) | 100k (live≈10M) | — |
 | index storage (hot + `__cl`) | 415 MiB | 11.5 MiB | **97% smaller** |
-| table storage (hot + `__cl`) | 5.45 GiB | 62 MiB (+ 599 MiB cold Parquet) | **99% smaller** |
+| table storage (hot + `__cl`) | 5.45 GiB | 61.56 MiB (+ 597.05 MiB cold Parquet) | **99% smaller** |
 | total PG backup size | TODO | TODO | — |
 | restore time | TODO | TODO | — |
 
-† DML rows use `--dml-sample 50000` on the 10M-row table. Managed
-INSERT/UPDATE/DELETE maintain the latest-state mirror
-(`koldstore.<table>__cl`) in the same transaction, so they are slower than plain
-heap. Do not publish comparisons from the default 1k-row sample — it is too
-noisy. Bulk before/after ratios vs the old capture SQL are in the section below.
+† DML rows use `--dml-sample 50000` on the 10M-row table. In async mode the
+foreground number measures the source heap commit; it does **not** include the
+following explicit `koldstore.wait_for_async_mirror()` fence. Catch-up rows are
+therefore part of the result, not optional context. Async reached the foreground
+INSERT acceptance target (no more than 10% below PostgreSQL) at **1% slower**.
+The 1,170 ops/s UPDATE catch-up is the largest remaining DML bottleneck and should
+not be represented as a completed end-to-end update speedup. Do not publish
+comparisons from the default 1k-row sample—it is too noisy.
+
+Insert throughput accumulates only each side's execution time across alternating
+100k-row batches. Alternating order removes sustained-load bias; bounded source
+transactions also avoid presenting one 18GB logical-decoding transaction as a
+representative application insert.
+
+For deterministic phase accounting, the benchmark session sets the internal
+`koldstore.internal_async_mirror_worker` control to `off` before `manage_table`.
+Each explicit fence therefore receives the full insert, update, or delete phase.
+This is a measurement control only: its default is `on`, and normal async tables
+keep the bounded-lag background worker running without application fences.
+The harness also performs untimed `CHECKPOINT`s before the interleaved insert
+phase and before each compared update/delete side, so prior writeback is not
+charged to the next measurement.
 
 ‡ Hot+cold PK lookups open matching Parquet segments (min/max prune +
 row-group stats / bloom). At this scale each surviving segment is ~1M wide
@@ -84,9 +110,11 @@ rows, so footer open + merge-scan setup dominates vs a pure B-tree probe;
 streaming execution and tighter segment sizing are follow-ups. See
 [performance](../performance.md).
 
-## Managed DML capture (before → after)
+## Strict DML capture history (before → trigger rewrite)
 
-Capture is synchronous in the user transaction (`AFTER … FOR EACH STATEMENT`
+This section is retained as historical evidence for the default strict mode;
+it is not the async 10M run above. Capture is synchronous in the user
+transaction (`AFTER … FOR EACH STATEMENT`
 with transition tables). The rewrite keeps small INSERTs on `ON CONFLICT`,
 uses `MERGE` for bulk INSERT, updates the mirror directly for UPDATE/DELETE,
 and moves PK rejection to a separate `BEFORE UPDATE OF pk…` row trigger so
@@ -117,8 +145,12 @@ gates: [plan](../plans/2026-07-15-managed-mirror-dml-performance.md). Architectu
 ## Reproduce
 
 ```bash
-# Table above: 10M rows / 100k hot / 50k DML sample (~12 min on a laptop; release-pg).
-scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000 --dml-sample 50000
+# Table above: 10M rows / 100k hot / 50k DML sample (~15.5 min on this laptop).
+scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000 \
+  --dml-sample 50000 --mirror-capture-mode async
+# Default strong-consistency mode; mirror work is included in foreground DML:
+scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000 \
+  --dml-sample 50000 --mirror-capture-mode strict
 # Faster local smoke (defaults: 100k rows / 10k hot / 1k DML sample):
 scripts/run-storage-comparison.sh
 # Managed DML before/after-style sample (UPDATE/DELETE size):

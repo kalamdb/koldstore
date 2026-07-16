@@ -1,5 +1,7 @@
 //! Thin PostgreSQL integration layer for pg-koldstore.
 
+/// Asynchronous WAL-backed latest-state mirror capture.
+pub mod async_mirror;
 pub mod catalog;
 /// Test-only flush failpoints (GUC-armed; inert when unset).
 pub mod failpoints;
@@ -26,7 +28,7 @@ pub mod pg_test {
     /// Extra `postgresql.conf` settings required for in-server tests.
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec![]
+        vec!["wal_level=logical"]
     }
 }
 

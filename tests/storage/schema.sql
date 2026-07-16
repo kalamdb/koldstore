@@ -65,3 +65,8 @@ CREATE TABLE {{schema}}.{{table}} (
 CREATE INDEX {{table}}_account_idx ON {{schema}}.{{table}} (account_id);
 CREATE INDEX {{table}}_tenant_created_idx ON {{schema}}.{{table}} (tenant_id, created_at);
 CREATE INDEX {{table}}_event_type_idx ON {{schema}}.{{table}} (event_type);
+
+-- Keep the timed comparison deterministic at 10M rows. Long async catch-up can
+-- otherwise give autoanalyze enough time to scan one side while the other is
+-- being measured; explicit ANALYZE/VACUUM phases below remain part of the test.
+ALTER TABLE {{schema}}.{{table}} SET (autovacuum_enabled = false);

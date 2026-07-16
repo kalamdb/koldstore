@@ -4,7 +4,61 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-PG_VERSION="${1:-${KOLDSTORE_E2E_PGVERSION:-16}}"
+usage() {
+  cat <<'EOF'
+Usage: scripts/run-pg-e2e.sh [PG_VERSION] [--mode <strict|async>]
+
+Runs the complete E2E suite with one mirror capture mode. PG_VERSION defaults
+to KOLDSTORE_E2E_PGVERSION or 16; mode defaults to
+KOLDSTORE_E2E_MIRROR_CAPTURE_MODE or strict.
+EOF
+}
+
+PG_VERSION="${KOLDSTORE_E2E_PGVERSION:-16}"
+MIRROR_CAPTURE_MODE="${KOLDSTORE_E2E_MIRROR_CAPTURE_MODE:-strict}"
+pg_version_seen=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --mode requires strict or async" >&2
+        usage >&2
+        exit 2
+      fi
+      MIRROR_CAPTURE_MODE="$2"
+      shift 2
+      ;;
+    --mode=*)
+      MIRROR_CAPTURE_MODE="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -* )
+      echo "error: unknown argument '$1'" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ "$pg_version_seen" -eq 1 ]]; then
+        echo "error: unexpected positional argument '$1'" >&2
+        usage >&2
+        exit 2
+      fi
+      PG_VERSION="$1"
+      pg_version_seen=1
+      shift
+      ;;
+  esac
+done
+
+if [[ "$MIRROR_CAPTURE_MODE" != "strict" && "$MIRROR_CAPTURE_MODE" != "async" ]]; then
+  echo "error: invalid --mode '$MIRROR_CAPTURE_MODE'; expected strict or async" >&2
+  exit 2
+fi
+
 PREPARE_ONLY="${KOLDSTORE_E2E_PREPARE_ONLY:-0}"
 PG_FEATURE="pg${PG_VERSION}"
 PG_PORT="${KOLDSTORE_E2E_PGPORT:-288${PG_VERSION}}"
@@ -35,11 +89,19 @@ if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUD
 fi
 cargo pgrx install "${INSTALL_ARGS[@]}"
 
+if [[ "$MIRROR_CAPTURE_MODE" == "async" ]]; then
+  echo "enabling logical WAL for async mirror tests"
+  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
+    -c "ALTER SYSTEM SET wal_level = 'logical';"
+fi
+
 echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
 cargo pgrx stop "$PG_FEATURE"
 cargo pgrx start "$PG_FEATURE"
 
 echo "recreating local E2E database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
+"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
+  -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE database = '${PG_DATABASE}' AND NOT active;"
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
   -c "DROP DATABASE IF EXISTS ${PG_DATABASE}" \
   -c "CREATE DATABASE ${PG_DATABASE}"
@@ -59,6 +121,7 @@ export KOLDSTORE_E2E_PGPORT="$PG_PORT"
 export KOLDSTORE_E2E_PGUSER="$PG_USER"
 export KOLDSTORE_E2E_PGPASSWORD="$PG_PASSWORD"
 export KOLDSTORE_E2E_PGDATABASE="$PG_DATABASE"
+export KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="$MIRROR_CAPTURE_MODE"
 export KOLDSTORE_E2E_WAIT_FOR_STARTUP=1
 
 if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
@@ -66,7 +129,7 @@ if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
   exit 0
 fi
 
-echo "running pg-koldstore E2E tests against pgrx PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT}"
+echo "running pg-koldstore E2E tests in ${MIRROR_CAPTURE_MODE} mode against pgrx PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT}"
 if [[ "${KOLDSTORE_MINIO:-}" == "1" || -n "${KOLDSTORE_MINIO_ENDPOINT:-}" ]]; then
   echo "MinIO-backed E2E enabled (KOLDSTORE_MINIO / KOLDSTORE_MINIO_ENDPOINT)"
 else

@@ -381,6 +381,10 @@ pub(super) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<pgrx::Uuid, String> {
+    // Flush selects authoritative latest-state rows, so async capture must be
+    // fenced before row selection. Strict databases return immediately because
+    // they have no async slot.
+    crate::async_mirror::apply::apply_available()?;
     let (job_id, force) = claim_flush_job(table_oid, force)?;
     let job_uuid = pgrx::Uuid::from_bytes(*job_id.as_bytes());
     match flush_after_claim(table_oid, force, job_id) {

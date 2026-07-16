@@ -4,6 +4,7 @@
 pub const INTERNAL_GUCS: &[&str] = &[
     "koldstore.internal_system_write",
     "koldstore.internal_flush_cleanup",
+    "koldstore.internal_async_mirror_worker",
 ];
 
 /// Role class used by privilege checks.

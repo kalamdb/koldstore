@@ -17,8 +17,8 @@ mod tests {
     use pgrx::prelude::*;
 
     use super::fixture::{
-        create_messages_table, flush_table_rows, manage_shared, register_temp_storage, spi_get_i64,
-        spi_get_explain, spi_get_text, spi_succeeds, unique_suffix,
+        create_messages_table, flush_table_rows, manage_shared, register_temp_storage,
+        spi_get_explain, spi_get_i64, spi_get_text, spi_succeeds, unique_suffix,
     };
 
     include!("lifecycle.inc.rs");
