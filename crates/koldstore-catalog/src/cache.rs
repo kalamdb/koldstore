@@ -12,6 +12,9 @@ use koldstore_common::TableName;
 use koldstore_schema::MirrorInitializationState;
 use serde::Deserialize;
 
+/// Default cap for optional lookup caches that can grow with query shapes.
+pub const DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT: usize = 64;
+
 /// Cache that distinguishes an unqueried key from a queried-but-absent value.
 ///
 /// Catalog lookups may legitimately return no row. Keeping that absence avoids
@@ -19,19 +22,29 @@ use serde::Deserialize;
 #[derive(Debug)]
 pub struct OptionalLookupCache<K, V> {
     entries: HashMap<K, Option<V>>,
+    limit: usize,
 }
 
 impl<K, V> Default for OptionalLookupCache<K, V> {
     fn default() -> Self {
+        Self::with_limit(DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT)
+    }
+}
+
+impl<K, V> OptionalLookupCache<K, V> {
+    /// Builds a cache that evicts an arbitrary entry when `limit` is exceeded.
+    #[must_use]
+    pub fn with_limit(limit: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            limit: limit.max(1),
         }
     }
 }
 
 impl<K, V> OptionalLookupCache<K, V>
 where
-    K: Eq + Hash,
+    K: Eq + Hash + Clone,
     V: Clone,
 {
     /// Returns `None` for a cache miss and `Some(None)` for cached absence.
@@ -41,7 +54,15 @@ where
     }
 
     /// Stores either a present value or a successful absent lookup.
+    ///
+    /// When the cache is at capacity and `key` is new, one existing entry is
+    /// evicted (arbitrary key order, matching the footer-cache policy).
     pub fn insert(&mut self, key: K, value: Option<V>) {
+        if self.entries.len() >= self.limit && !self.entries.contains_key(&key) {
+            if let Some(evicted) = self.entries.keys().next().cloned() {
+                self.entries.remove(&evicted);
+            }
+        }
         self.entries.insert(key, value);
     }
 
@@ -53,6 +74,18 @@ where
     /// Clears every cached lookup.
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Returns the number of cached entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true when the cache holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -210,5 +243,15 @@ mod tests {
 
         cache.retain(|key| *key != 42);
         assert_eq!(cache.get(&42), None);
+    }
+
+    #[test]
+    fn optional_lookup_cache_evicts_when_over_limit() {
+        let mut cache = OptionalLookupCache::<u32, String>::with_limit(2);
+        cache.insert(1, Some("a".to_string()));
+        cache.insert(2, Some("b".to_string()));
+        cache.insert(3, Some("c".to_string()));
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(&3).is_some());
     }
 }

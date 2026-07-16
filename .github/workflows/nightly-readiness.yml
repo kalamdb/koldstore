@@ -56,10 +56,10 @@ jobs:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
       - name: Isolation schedules
-        run: cargo nextest run -p e2e --test isolation_schedules --test-threads 1
+        run: cargo nextest run -p e2e -E 'test(isolation::)' --test-threads 1
 
       - name: Crash / failpoint recovery
-        run: cargo nextest run -p e2e --test flush_failpoint_recovery --test-threads 1
+        run: cargo nextest run -p e2e -E 'test(crash::)' --test-threads 1
 
       - name: Install SQLsmith
         run: bash scripts/ci/install-sqlsmith.sh

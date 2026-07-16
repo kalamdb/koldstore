@@ -169,6 +169,9 @@ fn mirror_capture_cleanup_drops_triggers_before_function() {
         .drop_triggers
         .sql
         .contains("\"messages__cl_pk_update_guard\""));
+    assert!(plan.drop_triggers.sql.contains("\"messages__cl_aki\""));
+    assert!(plan.drop_triggers.sql.contains("\"messages__cl_aku\""));
+    assert!(plan.drop_triggers.sql.contains("\"messages__cl_akd\""));
     assert!(plan
         .drop_triggers
         .sql
@@ -233,10 +236,12 @@ fn async_capture_switch_drops_only_statement_dml_triggers() {
 
 #[test]
 fn async_worker_kick_name_matches_postgres_identifier_truncation() {
-    let name = koldstore_migrate::capture::async_worker_kick_trigger_name(
-        "a_very_long_managed_table_name_that_nearly_fills_a_postgres_identifier__cl",
-    );
-
-    assert!(name.len() <= 63);
-    assert!(name.is_char_boundary(name.len()));
+    let long = "a_very_long_managed_table_name_that_nearly_fills_a_postgres_identifier__cl";
+    let names = koldstore_migrate::capture::async_worker_kick_trigger_names(long);
+    assert!(names.iter().all(|name| name.len() <= 63));
+    assert_ne!(names[0], names[1]);
+    assert_ne!(names[1], names[2]);
+    assert!(names[0].ends_with("_aki"));
+    assert!(names[1].ends_with("_aku"));
+    assert!(names[2].ends_with("_akd"));
 }

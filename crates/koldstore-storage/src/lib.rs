@@ -27,8 +27,7 @@ pub use publish::{
     StorageObjectMeta,
 };
 pub use registration::{
-    alter_storage_credentials_plan, alter_storage_location_plan, register_storage_name_only,
-    AlterStorageCredentialsPlan, AlterStorageLocationPlan, DdlError, DdlResult,
-    StorageRegistration, StorageRegistrationPlan, DEFAULT_SHARED_PATH_TEMPLATE,
-    DEFAULT_USER_PATH_TEMPLATE, SUPPORTED_STORAGE_TYPES,
+    alter_storage_credentials_plan, alter_storage_location_plan, AlterStorageCredentialsPlan,
+    AlterStorageLocationPlan, DdlError, DdlResult, StorageRegistration, StorageRegistrationPlan,
+    DEFAULT_SHARED_PATH_TEMPLATE, DEFAULT_USER_PATH_TEMPLATE, SUPPORTED_STORAGE_TYPES,
 };

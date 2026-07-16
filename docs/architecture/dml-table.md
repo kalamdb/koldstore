@@ -67,7 +67,9 @@ DML does **not** read Parquet or object storage. The hot path stays heap-native.
 Strict capture keeps the mirror current before the source transaction commits.
 Async capture returns from the foreground commit first and makes the mirror
 current at the next fence. See
-[mirror-capture-modes.md](mirror-capture-modes.md) for selection, setup,
+[mirror-capture-modes.md](mirror-capture-modes.md) for selection,
+[mirror-capture-strict.md](mirror-capture-strict.md) and
+[mirror-capture-async.md](mirror-capture-async.md) for mode details, setup,
 consistency, crash safety, and slot operations.
 
 Primary-key mutation is rejected by a separate

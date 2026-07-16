@@ -85,7 +85,8 @@ persistence.
 `koldstore_async_mirror` publication, and the first async call creates or reuses
 the deterministic database slot before migration writes. Setup and consistency
 semantics are documented in
-[mirror-capture-modes.md](mirror-capture-modes.md).
+[mirror-capture-modes.md](mirror-capture-modes.md)
+([strict](mirror-capture-strict.md), [async](mirror-capture-async.md)).
 
 ---
 

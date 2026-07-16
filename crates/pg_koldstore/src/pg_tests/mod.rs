@@ -24,6 +24,7 @@ mod tests {
     include!("lifecycle.inc.rs");
     include!("manage.inc.rs");
     include!("mirror_dml.inc.rs");
+    include!("async_mirror_worker.inc.rs");
     include!("session.inc.rs");
     include!("scan.inc.rs");
 }

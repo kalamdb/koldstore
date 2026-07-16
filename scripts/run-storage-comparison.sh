@@ -104,11 +104,15 @@ if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
 fi
 
 echo "running storage comparison (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, mirror_capture_mode=${MIRROR_CAPTURE_MODE})"
+if ! cargo nextest --version >/dev/null 2>&1; then
+  echo "error: cargo-nextest is required; install with: cargo install cargo-nextest --locked" >&2
+  exit 1
+fi
 KOLDSTORE_STORAGE_ROWS="${ROWS}" \
   KOLDSTORE_STORAGE_HOT_LIMIT="${HOT_LIMIT}" \
   KOLDSTORE_STORAGE_DML_SAMPLE="${DML_SAMPLE}" \
   KOLDSTORE_STORAGE_INSERT_BATCH_ROWS="${INSERT_BATCH_ROWS}" \
   KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE="${MIRROR_CAPTURE_MODE}" \
-  cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
+  cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
 
 echo "storage comparison passed"

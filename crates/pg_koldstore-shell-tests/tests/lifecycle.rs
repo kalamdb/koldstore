@@ -116,10 +116,10 @@ fn commit_sequence_allocator_is_monotonic_for_test_shell() {
 fn hook_shell_exposes_required_hook_names() {
     let hooks = hooks::registered_hook_names();
     assert!(hooks.contains(&"set_rel_pathlist"));
-    assert!(hooks.contains(&"ExecutorStart"));
-    assert!(hooks.contains(&"ProcessUtility"));
     assert!(hooks.contains(&"XactCallback"));
     assert!(hooks.contains(&"RelcacheCallback"));
+    assert!(!hooks.contains(&"ExecutorStart"));
+    assert!(!hooks.contains(&"ProcessUtility"));
 }
 
 #[test]

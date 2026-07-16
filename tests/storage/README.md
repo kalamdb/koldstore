@@ -50,7 +50,7 @@ cargo pgrx install -p pg_koldstore --profile release-pg --no-default-features --
 cargo pgrx stop pg16 && cargo pgrx start pg16
 KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 KOLDSTORE_STORAGE_DML_SAMPLE=1000 \
   KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE=strict \
-  cargo test -p storage-comparison --test pg_vs_koldstore -- --nocapture
+  cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
 ```
 
 The harness prints a markdown comparison table with a **Tradeoff** column
@@ -84,7 +84,7 @@ Create the `koldstore-test` bucket, then run the opt-in storage tests:
 
 ```bash
 bash scripts/ci/start-minio.sh
-KOLDSTORE_MINIO=1 cargo test -p koldstore-storage --test storage_minio
+KOLDSTORE_MINIO=1 cargo nextest run -p koldstore-storage --test storage_minio
 ```
 
 Defaults are `http://127.0.0.1:9000` after `scripts/ci/start-minio.sh` (or
@@ -97,5 +97,5 @@ For full PostgreSQL flush + merge-scan coverage against MinIO, enable the same
 env vars and run the E2E suite (see `docs/development.md`):
 
 ```bash
-KOLDSTORE_MINIO=1 cargo nextest run -p e2e --test flush_minio --test-threads 1
+KOLDSTORE_MINIO=1 cargo nextest run -p e2e -E 'test(flush::flush_minio)' --test-threads 1
 ```

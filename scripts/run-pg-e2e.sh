@@ -152,26 +152,6 @@ else
   echo "MinIO-backed E2E skipped (set KOLDSTORE_MINIO=1 to enable flush_minio)"
 fi
 
-# Prefer cargo test on macOS: nextest --list spawns every integration binary and
-# routinely stalls for a long time on unsigned debug deps under Gatekeeper.
-use_nextest=0
-if [[ "${KOLDSTORE_E2E_USE_NEXTEST:-}" == "1" || "${KOLDSTORE_E2E_USE_NEXTEST:-}" == "true" ]]; then
-  use_nextest=1
-elif [[ "$(uname -s)" != "Darwin" && "${KOLDSTORE_E2E_USE_CARGO_TEST:-}" != "1" ]]; then
-  use_nextest=1
-fi
-
-if [[ "${use_nextest}" -eq 0 ]]; then
-  echo "using cargo test for E2E (set KOLDSTORE_E2E_USE_NEXTEST=1 to force nextest)"
-  CARGO_TEST_ARGS=(-p e2e --no-fail-fast -- --test-threads=1)
-  if [[ "${KOLDSTORE_E2E_VERBOSE:-}" == "1" || "${KOLDSTORE_E2E_VERBOSE:-}" == "true" ]]; then
-    echo "E2E verbose logging enabled (KOLDSTORE_E2E_VERBOSE); showing live test output"
-    CARGO_TEST_ARGS+=(--nocapture)
-  fi
-  cargo test "${CARGO_TEST_ARGS[@]}"
-  exit 0
-fi
-
 if ! cargo nextest --version >/dev/null 2>&1; then
   echo "error: cargo-nextest is required; install with: cargo install cargo-nextest --locked" >&2
   exit 1

@@ -135,3 +135,5 @@ Trade-offs:
 - [Mirror capture modes](../architecture/mirror-capture-modes.md)
 - [DML workflow](../architecture/dml-table.md)
 - [10M-row benchmark](../benchmarks/README.md)
+- [Case: async flush prune race](../cases/async-flush-prune-race.md) (proposed
+  pre-prune fence; selection fence alone is not sufficient)

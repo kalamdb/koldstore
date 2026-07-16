@@ -156,10 +156,28 @@ impl SpiExecutor for RecordingSpiExecutor {
 }
 
 #[cfg(feature = "pg")]
+const PREPARED_PLAN_CACHE_LIMIT: usize = 64;
+
+#[cfg(feature = "pg")]
 thread_local! {
     static PREPARED_PLAN_CACHE: std::cell::RefCell<
         std::collections::HashMap<PreparedPlanKey, pgrx::spi::OwnedPreparedStatement>
     > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Inserts a prepared plan, evicting an arbitrary entry when the cache is full.
+#[cfg(feature = "pg")]
+fn insert_prepared_plan(
+    cache: &mut std::collections::HashMap<PreparedPlanKey, pgrx::spi::OwnedPreparedStatement>,
+    key: PreparedPlanKey,
+    plan: pgrx::spi::OwnedPreparedStatement,
+) {
+    if cache.len() >= PREPARED_PLAN_CACHE_LIMIT && !cache.contains_key(&key) {
+        if let Some(evicted) = cache.keys().next().cloned() {
+            cache.remove(&evicted);
+        }
+    }
+    cache.insert(key, plan);
 }
 
 /// Invalidates one cached prepared plan in the current backend.
@@ -214,7 +232,7 @@ fn execute_prepared_once<R>(
                 if !cache.contains_key(key) {
                     let arg_types = pg_param_oids(&statement.param_types);
                     let prepared = client.prepare(&statement.sql, &arg_types)?.keep();
-                    cache.insert((*key).clone(), prepared);
+                    insert_prepared_plan(&mut cache, (*key).clone(), prepared);
                 }
                 let plan = cache
                     .get(key)
@@ -229,7 +247,7 @@ fn execute_prepared_once<R>(
                 if !cache.contains_key(key) {
                     let arg_types = pg_param_oids(&statement.param_types);
                     let prepared = client.prepare_mut(&statement.sql, &arg_types)?.keep();
-                    cache.insert((*key).clone(), prepared);
+                    insert_prepared_plan(&mut cache, (*key).clone(), prepared);
                 }
                 let plan = cache
                     .get(key)

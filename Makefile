@@ -7,7 +7,9 @@ lint:
 	cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 
 test:
-	cargo test
+	cargo nextest run --workspace --no-default-features \
+		--exclude e2e --exclude examples --exclude storage-comparison \
+		--exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 
 pgrx-test:
 	cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg16 -- -D warnings
@@ -25,5 +27,6 @@ benchmarks:
 memory:
 	tests/memory/run_memory_checks.sh
 
-verify: fmt lint test pgrx-test e2e memory benchmarks
+verify:
+	scripts/run-all-tests.sh
 

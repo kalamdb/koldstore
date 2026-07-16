@@ -1,5 +1,4 @@
-#[path = "common/mod.rs"]
-mod common;
+use crate::common;
 
 #[test]
 fn capture_mode_accepts_the_runner_values() {

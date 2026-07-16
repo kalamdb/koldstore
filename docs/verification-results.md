@@ -16,7 +16,7 @@ Date: 2026-07-04
 | `scripts/run-pg-e2e.sh` | PASS | Uses local pgrx PostgreSQL 16, installs `koldstore`, recreates `koldstore_pgrx_e2e`, and runs `cargo nextest run -p e2e --test-threads 1` serially against the pgrx-managed server with no ignored tests. No Docker dependency. |
 | `cargo pgrx install -p pg_koldstore --no-default-features --features pg16 --pg-config "$(cargo pgrx info pg-config 16)"` | PASS | Valid local pgrx extension install path. Direct `cargo pgrx test` is intentionally avoided because native pg-feature test binaries can link unresolved PostgreSQL backend symbols outside the server. |
 | `cargo run -p pg-koldstore-benchmarks -- --database-url "host=127.0.0.1 port=28816 user=$USER dbname=koldstore_pgrx_bench" --rows 1000 --clients 2 --jobs 2 --seconds 3` | PASS | Runs real `pgbench` workloads against a fresh local pgrx benchmark database, reports p50/p95/p99 latency plus throughput, and exits nonzero if any benchmark verdict fails. |
-| `scripts/run-all-tests.sh` | PASS | Full local verification passes with fmt, no-default-feature clippy/tests, pgrx feature compile/install, local pgrx E2E, memory checks, and benchmarks. |
+| `scripts/run-all-tests.sh` | PASS | Full local verification: fmt, clippy, unit, pgrx compile/install, `#[pg_test]`, E2E strict+async, examples, storage, SQL, memory, benchmarks. |
 
 ## Residual Notes
 

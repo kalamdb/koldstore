@@ -1,6 +1,5 @@
 //! Smoke test: managed table stays equal to a plain-heap baseline under the same DML.
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use anyhow::Result;
 

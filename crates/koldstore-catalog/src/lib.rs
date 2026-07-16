@@ -18,7 +18,7 @@ pub mod table_meta;
 
 pub use cache::{
     decode_managed_table_snapshot, decode_managed_table_snapshot_str, ManagedTableSnapshot,
-    ManagedTableSnapshotCache, OptionalLookupCache,
+    ManagedTableSnapshotCache, OptionalLookupCache, DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT,
 };
 pub use cold_pk_hints::{ColdPkHint, HintKind, PkLookup};
 pub use cold_segments::{ColdSegment, SegmentVisibility};

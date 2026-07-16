@@ -1,21 +1,18 @@
-//! Test-only flush failpoints for crash-recovery and isolation suites.
+//! Test-only failpoints for crash-recovery and isolation suites.
 //!
 //! Armed via GUC `koldstore.failpoint` (empty default). Release builds are inert
 //! unless an operator explicitly sets the GUC. Supported values:
 //!
-//! - `<name>` or `error:<name>` — abort the flush with an error at that phase
+//! - `<name>` or `error:<name>` — abort with an error at that phase
 //! - `wait:<name>` — block on the advisory barrier lock until another session unlocks
 //!
-//! Failpoint names match the twelve flush crash points used by E2E recovery tests.
-//! PostgreSQL-free flush planning stays in `koldstore-flush`; only this adapter
-//! checks failpoints.
-
-use std::sync::OnceLock;
+//! Failpoint names include the twelve flush crash points used by E2E recovery
+//! tests plus `async_mirror_apply` for async WAL applier crash injection.
 
 /// Advisory lock key shared with E2E isolation/crash harnesses (`"KOLD"`).
 pub const FAILPOINT_BARRIER_KEY: i64 = 0x4B4F_4C44;
 
-/// Canonical flush failpoint names (12 crash points).
+/// Canonical failpoint names (flush crash points + async apply).
 pub const FAILPOINT_NAMES: &[&str] = &[
     "after_claim",
     "after_select_rows",
@@ -29,14 +26,8 @@ pub const FAILPOINT_NAMES: &[&str] = &[
     "during_hot_cleanup",
     "after_cleanup_before_job_complete",
     "after_job_complete_before_temp_cleanup",
+    "async_mirror_apply",
 ];
-
-static FAILPOINT_GUC: OnceLock<()> = OnceLock::new();
-
-/// Marks that the failpoint GUC has been registered (no-op placeholder for callers).
-pub fn mark_registered() {
-    let _ = FAILPOINT_GUC.set(());
-}
 
 /// Hits a named failpoint if the session GUC arms it.
 ///

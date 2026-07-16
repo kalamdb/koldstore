@@ -95,20 +95,11 @@ CREATE TABLE IF NOT EXISTS koldstore.async_mirror_state (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
--- Async source transactions only wake/ensure the database worker; logical
--- decoding and mirror writes remain outside the user's transaction.
-CREATE OR REPLACE FUNCTION koldstore.async_mirror_kick()
-RETURNS trigger
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, koldstore
-AS $$
-BEGIN
-  PERFORM koldstore.internal_ensure_async_mirror_worker();
-  RETURN NULL;
-END;
-$$;
-REVOKE ALL ON FUNCTION koldstore.async_mirror_kick() FROM PUBLIC;
+-- Async source transactions only write the heap; logical decoding and mirror
+-- writes run in the always-on database worker. Hot/mirror row counters are
+-- updated by the WAL applier. The worker is started at async activation,
+-- auto-restarted by postmaster on crash, and re-ensured after postmaster
+-- restart (shared_preload launcher and/or the first backend transaction).
 
 CREATE TABLE IF NOT EXISTS koldstore.manifest (
   table_oid oid NOT NULL,

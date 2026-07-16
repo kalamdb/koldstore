@@ -36,7 +36,6 @@ static FAILPOINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::n
 #[cfg(feature = "pg")]
 pub fn define_gucs() {
     let flags = GucFlags::default();
-    crate::failpoints::mark_registered();
     GucRegistry::define_string_guc(
         c"koldstore.cold_reads",
         c"Controls KoldStore cold reads.",

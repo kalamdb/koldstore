@@ -10,6 +10,7 @@ members = [
     "crates/koldstore-merge",
     "crates/koldstore-mirror",
     "crates/koldstore-jobs",
+    "crates/koldstore-worker",
     "crates/koldstore-flush",
     "crates/koldstore-migrate",
     "crates/pg_koldstore",
@@ -31,6 +32,7 @@ default-members = [
     "crates/koldstore-merge",
     "crates/koldstore-mirror",
     "crates/koldstore-jobs",
+    "crates/koldstore-worker",
     "crates/koldstore-flush",
     "crates/koldstore-migrate",
     "crates/pg_koldstore",
@@ -58,33 +60,34 @@ koldstore-parquet = { path = "crates/koldstore-parquet" }
 koldstore-merge = { path = "crates/koldstore-merge" }
 koldstore-mirror = { path = "crates/koldstore-mirror" }
 koldstore-jobs = { path = "crates/koldstore-jobs" }
+koldstore-worker = { path = "crates/koldstore-worker" }
 koldstore-flush = { path = "crates/koldstore-flush" }
 koldstore-migrate = { path = "crates/koldstore-migrate" }
 
-anyhow = "1"
+anyhow = "1.0.103"
 arrow-array = { version = "59.1.0", default-features = false }
 arrow-schema = { version = "59.1.0", default-features = false }
-base64 = "0.22"
+base64 = "0.22.1"
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
-futures-util = "0.3"
-hex = "0.4"
+futures-util = "0.3.32"
+hex = "0.4.3"
 object_store = { version = "0.14.1", default-features = false, features = ["fs", "aws"] }
 pgrx = { version = "0.19.1", default-features = false }
 pgrx-tests = { version = "0.19.1", default-features = false }
 parquet = { version = "59.1.0", default-features = false, features = ["arrow", "async", "zstd", "snap"] }
-postgres-types = "0.2"
+postgres-types = "0.2.14"
 rand = "0.10.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["preserve_order"] }
 sha2 = "0.11.0"
-tempfile = "3"
+tempfile = "3.27.0"
 thiserror = "2.0.18"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time", "fs"] }
-tokio-postgres = "0.7"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-uuid = { version = "1.23.5", features = ["v4", "serde"] }
+tokio = { version = "1.52.4", features = ["macros", "rt-multi-thread", "process", "time", "fs"] }
+tokio-postgres = "0.7.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+uuid = { version = "1.24.0", features = ["v4", "serde"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

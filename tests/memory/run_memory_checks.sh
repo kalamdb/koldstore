@@ -4,12 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
-echo "running Rust tests with sanitizer-friendly profile"
+echo "running memory / leak probe tests"
 if ! command -v cargo-nextest >/dev/null 2>&1; then
   echo "error: required command not found: cargo-nextest" >&2
   exit 1
 fi
-RUSTFLAGS="${RUSTFLAGS:-}" cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
+cargo nextest run -p koldstore-memory-tests
 
 if command -v valgrind >/dev/null 2>&1; then
   echo "valgrind is available; run targeted pgrx binaries when extension install is configured"
@@ -22,4 +22,3 @@ if command -v heaptrack >/dev/null 2>&1; then
 else
   echo "heaptrack not found; skipping heaptrack pass"
 fi
-

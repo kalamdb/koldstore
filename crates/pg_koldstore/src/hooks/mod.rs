@@ -11,14 +11,8 @@ pub fn register_hooks() {
     crate::merge_scan::pg::register_custom_scan_hooks();
 }
 
-/// Hook names installed by the extension shell.
+/// Hook names installed by the extension shell at `_PG_init`.
 #[must_use]
 pub const fn registered_hook_names() -> &'static [&'static str] {
-    &[
-        "set_rel_pathlist",
-        "ExecutorStart",
-        "ProcessUtility",
-        "XactCallback",
-        "RelcacheCallback",
-    ]
+    &["set_rel_pathlist", "XactCallback", "RelcacheCallback"]
 }

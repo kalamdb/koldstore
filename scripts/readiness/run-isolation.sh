@@ -16,4 +16,4 @@ if ! cargo nextest --version >/dev/null 2>&1; then
 fi
 
 echo "running isolation schedules against PostgreSQL ${PG_VERSION}"
-cargo nextest run -p e2e --test isolation_schedules --test-threads 1
+cargo nextest run -p e2e -E 'test(isolation::)' --test-threads 1

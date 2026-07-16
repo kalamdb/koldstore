@@ -17,4 +17,4 @@ fi
 
 echo "running crash/failpoint recovery against PostgreSQL ${PG_VERSION}"
 # Optional: KOLDSTORE_CRASH_FULL_MATRIX=1 or KOLDSTORE_CRASH_FAILPOINTS=a,b,c
-cargo nextest run -p e2e --test flush_failpoint_recovery --test-threads 1
+cargo nextest run -p e2e -E 'test(crash::)' --test-threads 1

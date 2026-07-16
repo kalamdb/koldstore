@@ -1,5 +1,4 @@
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use anyhow::Result;
 use std::time::{Duration, Instant};
@@ -250,6 +249,7 @@ async fn wait_for_mirror_state(
 ) -> Result<MirrorState> {
     let started = Instant::now();
     loop {
+        let _ = common::fence_async_mirror_if_needed(client).await;
         if let Ok(state) = mirror_state(client, mirror, id).await {
             if state.op == expected_op {
                 return Ok(state);
@@ -271,6 +271,7 @@ async fn wait_for_op_count(
 ) -> Result<()> {
     let started = Instant::now();
     loop {
+        let _ = common::fence_async_mirror_if_needed(client).await;
         let count: i64 = client
             .query_one(
                 &format!("SELECT count(*) FROM {mirror} WHERE op = $1"),

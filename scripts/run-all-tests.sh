@@ -10,7 +10,11 @@ SKIP_FMT=0
 SKIP_LINT=0
 SKIP_UNIT=0
 SKIP_PGRX=0
+SKIP_PG_TEST=0
 SKIP_E2E=0
+SKIP_EXAMPLES=0
+SKIP_STORAGE=0
+SKIP_SQL=0
 SKIP_MEMORY=0
 SKIP_BENCHMARKS=0
 
@@ -21,21 +25,34 @@ Run the full pg-koldstore verification suite.
 Usage:
   scripts/run-all-tests.sh [options]
 
+Runs (in order):
+  fmt, clippy, workspace unit tests, pgrx feature compile/install,
+  cargo pgrx test (#[pg_test]), E2E (strict + async), examples,
+  storage comparison, SQL regression, memory checks, short benchmarks.
+
 Options:
-  --pg-versions LIST   Comma-separated PostgreSQL majors for local pgrx checks (default: 16)
+  --pg-versions LIST   Comma-separated PostgreSQL majors (default: 16)
   --skip-fmt           Skip cargo fmt --check
   --skip-lint          Skip cargo clippy
-  --skip-unit          Skip cargo nextest workspace tests
+  --skip-unit          Skip workspace unit tests
   --skip-pgrx          Skip pgrx feature compile/install checks
-  --skip-e2e           Skip local pgrx-backed E2E matrix
+  --skip-pg-test       Skip cargo pgrx test (#[pg_test])
+  --skip-e2e           Skip local pgrx-backed E2E (both modes)
+  --skip-examples      Skip real-world example scenarios
+  --skip-storage       Skip storage comparison harness
+  --skip-sql           Skip KoldStore SQL regression
   --skip-memory        Skip memory checks
   --skip-benchmarks    Skip benchmark runner
   -h, --help           Show this help text
 
+Environment (optional overrides for heavy suites; CI-friendly defaults apply):
+  KOLDSTORE_EXAMPLE_ROWS / CLIENTS / SCOPES / TIMEOUT_SECS
+  KOLDSTORE_STORAGE_ROWS / HOT_LIMIT / DML_SAMPLE
+
 Examples:
   scripts/run-all-tests.sh
   scripts/run-all-tests.sh --pg-versions 15,16,17,18
-  scripts/run-all-tests.sh --skip-e2e --skip-benchmarks
+  scripts/run-all-tests.sh --skip-benchmarks --skip-examples
 EOF
 }
 
@@ -49,7 +66,11 @@ while [[ $# -gt 0 ]]; do
     --skip-lint) SKIP_LINT=1; shift ;;
     --skip-unit) SKIP_UNIT=1; shift ;;
     --skip-pgrx) SKIP_PGRX=1; shift ;;
+    --skip-pg-test) SKIP_PG_TEST=1; shift ;;
     --skip-e2e) SKIP_E2E=1; shift ;;
+    --skip-examples) SKIP_EXAMPLES=1; shift ;;
+    --skip-storage) SKIP_STORAGE=1; shift ;;
+    --skip-sql) SKIP_SQL=1; shift ;;
     --skip-memory) SKIP_MEMORY=1; shift ;;
     --skip-benchmarks) SKIP_BENCHMARKS=1; shift ;;
     -h|--help)
@@ -123,7 +144,7 @@ ensure_pgrx_postgres() {
   fi
 
   if [[ -z "${pg_config}" ]]; then
-    echo "warning: PostgreSQL ${pg} is not configured for pgrx; skipping pgrx tests for pg${pg}" >&2
+    echo "warning: PostgreSQL ${pg} is not configured for pgrx; skipping pgrx-backed suites for pg${pg}" >&2
     echo "         run: cargo pgrx init --pg${pg} /path/to/pg_config" >&2
     return 1
   fi
@@ -149,17 +170,73 @@ cargo_pgrx_install_koldstore() {
   cargo pgrx install "${install_args[@]}"
 }
 
+run_workspace_unit_tests() {
+  # Exclude suites that need a prepared pgrx cluster or are covered later.
+  local unit_excludes=(
+    --exclude e2e
+    --exclude examples
+    --exclude storage-comparison
+    --exclude pg-koldstore-benchmarks
+    --exclude koldstore-memory-tests
+  )
+
+  ensure_cargo_nextest
+  step "workspace unit tests (cargo nextest)"
+  cargo nextest run --workspace --no-default-features "${unit_excludes[@]}"
+}
+
 run_local_pgrx_e2e() {
   local pg="$1"
+  local mode="$2"
   local pg_config
   pg_config="$(configured_pg_config "${pg}")"
   local port="${KOLDSTORE_E2E_PGPORT:-288${pg}}"
 
-  step "local pgrx E2E PostgreSQL ${pg}"
+  step "local pgrx E2E PostgreSQL ${pg} (--mode ${mode})"
   KOLDSTORE_E2E_PGVERSION="${pg}" \
     KOLDSTORE_E2E_PGPORT="${port}" \
     PGRX_PG_CONFIG="${pg_config}" \
-    scripts/run-pg-e2e.sh
+    scripts/run-pg-e2e.sh "${pg}" --mode "${mode}"
+}
+
+run_local_pg_test() {
+  local pg="$1"
+
+  step "cargo pgrx test (#[pg_test]) PostgreSQL ${pg}"
+  cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml "pg${pg}"
+}
+
+run_local_examples() {
+  local pg="$1"
+
+  step "example scenarios PostgreSQL ${pg}"
+  # CI-friendly defaults when the caller has not sized the suite.
+  KOLDSTORE_EXAMPLE_PGVERSION="${pg}" \
+    KOLDSTORE_EXAMPLE_ROWS="${KOLDSTORE_EXAMPLE_ROWS:-2000}" \
+    KOLDSTORE_EXAMPLE_CLIENTS="${KOLDSTORE_EXAMPLE_CLIENTS:-4}" \
+    KOLDSTORE_EXAMPLE_SCOPES="${KOLDSTORE_EXAMPLE_SCOPES:-8}" \
+    KOLDSTORE_EXAMPLE_TIMEOUT_SECS="${KOLDSTORE_EXAMPLE_TIMEOUT_SECS:-600}" \
+    scripts/run-examples.sh
+}
+
+run_local_storage() {
+  local pg="$1"
+
+  step "storage comparison PostgreSQL ${pg}"
+  KOLDSTORE_STORAGE_ROWS="${KOLDSTORE_STORAGE_ROWS:-10000}" \
+    KOLDSTORE_STORAGE_HOT_LIMIT="${KOLDSTORE_STORAGE_HOT_LIMIT:-2000}" \
+    KOLDSTORE_STORAGE_DML_SAMPLE="${KOLDSTORE_STORAGE_DML_SAMPLE:-1000}" \
+    scripts/run-storage-comparison.sh --pg-version "${pg}"
+}
+
+run_local_sql() {
+  local pg="$1"
+  local pg_config
+  pg_config="$(configured_pg_config "${pg}")"
+
+  step "SQL regression PostgreSQL ${pg}"
+  PGRX_PG_CONFIG="${pg_config}" \
+    scripts/run-sql-regression.sh "${pg}"
 }
 
 first_pg_version() {
@@ -202,6 +279,7 @@ prepare_benchmark_database() {
 }
 
 require_command cargo
+ensure_cargo_nextest
 
 if [[ "${SKIP_FMT}" -eq 0 ]]; then
   step "cargo fmt --check"
@@ -214,23 +292,7 @@ if [[ "${SKIP_LINT}" -eq 0 ]]; then
 fi
 
 if [[ "${SKIP_UNIT}" -eq 0 ]]; then
-  # nextest discovers tests by spawning every binary with `--list`. On macOS that
-  # often stalls for a long time on unsigned debug deps under Gatekeeper.
-  unit_excludes=(
-    --exclude e2e
-    --exclude examples
-    --exclude storage-comparison
-    --exclude pg-koldstore-benchmarks
-    --exclude koldstore-memory-tests
-  )
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    step "workspace non-E2E tests (cargo test; nextest --list is unreliable on macOS)"
-    cargo test --workspace --no-default-features "${unit_excludes[@]}"
-  else
-    ensure_cargo_nextest
-    step "cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison"
-    cargo nextest run --workspace --no-default-features "${unit_excludes[@]}"
-  fi
+  run_workspace_unit_tests
 fi
 
 IFS=',' read -r -a pg_versions <<<"${PG_VERSIONS}"
@@ -250,13 +312,58 @@ if [[ "${SKIP_PGRX}" -eq 0 ]]; then
   done
 fi
 
+if [[ "${SKIP_PG_TEST}" -eq 0 ]]; then
+  ensure_cargo_pgrx
+  for pg in "${pg_versions[@]}"; do
+    pg="$(echo "${pg}" | xargs)"
+    [[ -z "${pg}" ]] && continue
+    if ensure_pgrx_postgres "${pg}"; then
+      run_local_pg_test "${pg}"
+    fi
+  done
+fi
+
 if [[ "${SKIP_E2E}" -eq 0 ]]; then
   ensure_cargo_pgrx
   for pg in "${pg_versions[@]}"; do
     pg="$(echo "${pg}" | xargs)"
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
-      run_local_pgrx_e2e "${pg}"
+      run_local_pgrx_e2e "${pg}" strict
+      run_local_pgrx_e2e "${pg}" async
+    fi
+  done
+fi
+
+if [[ "${SKIP_EXAMPLES}" -eq 0 ]]; then
+  ensure_cargo_pgrx
+  for pg in "${pg_versions[@]}"; do
+    pg="$(echo "${pg}" | xargs)"
+    [[ -z "${pg}" ]] && continue
+    if ensure_pgrx_postgres "${pg}"; then
+      run_local_examples "${pg}"
+    fi
+  done
+fi
+
+if [[ "${SKIP_STORAGE}" -eq 0 ]]; then
+  ensure_cargo_pgrx
+  for pg in "${pg_versions[@]}"; do
+    pg="$(echo "${pg}" | xargs)"
+    [[ -z "${pg}" ]] && continue
+    if ensure_pgrx_postgres "${pg}"; then
+      run_local_storage "${pg}"
+    fi
+  done
+fi
+
+if [[ "${SKIP_SQL}" -eq 0 ]]; then
+  ensure_cargo_pgrx
+  for pg in "${pg_versions[@]}"; do
+    pg="$(echo "${pg}" | xargs)"
+    [[ -z "${pg}" ]] && continue
+    if ensure_pgrx_postgres "${pg}"; then
+      run_local_sql "${pg}"
     fi
   done
 fi
@@ -287,7 +394,7 @@ if [[ "${SKIP_BENCHMARKS}" -eq 0 ]]; then
     --rows 1000 \
     --clients 2 \
     --jobs 2 \
-    --seconds 3
+    --seconds 5
 fi
 
 step "all requested test suites passed"

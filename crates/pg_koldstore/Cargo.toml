@@ -43,6 +43,7 @@ koldstore-parquet.workspace = true
 koldstore-migrate.workspace = true
 koldstore-schema.workspace = true
 koldstore-storage.workspace = true
+koldstore-worker.workspace = true
 pgrx = { workspace = true, optional = true }
 pgrx-tests = { workspace = true, optional = true }
 hex.workspace = true

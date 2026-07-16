@@ -1,5 +1,4 @@
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use anyhow::Result;
 use koldstore::merge_scan::exec::{
@@ -141,6 +140,8 @@ async fn flushed_table_prunes_hot_rows_and_keeps_cold_payload_for_merge_reads() 
             ))
             .await?;
 
+        common::fence_async_mirror_if_needed(&db.client).await?;
+
         let cold_count = db
             .client
             .query_one(&format!("SELECT count(*) FROM {}", table.relation), &[])
@@ -266,6 +267,7 @@ async fn merge_scan_preserves_native_hot_plan_and_masks_preflush_deletes() -> Re
                 relation = table.relation
             ))
             .await?;
+        common::fence_async_mirror_if_needed(&db.client).await?;
         let count: i64 = db
             .client
             .query_one(

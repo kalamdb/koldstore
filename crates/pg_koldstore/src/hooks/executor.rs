@@ -57,7 +57,7 @@ pub const fn plan_mirror_capture_effect(operation: ManagedDmlOperation) -> Mirro
 
     MirrorCaptureEffect {
         operation,
-        seq_expression: "SNOWFLAKE_ID()",
+        seq_expression: koldstore_common::snowflake_default_expression(),
         commit_lsn_expression: "pg_current_wal_lsn()",
         transactional: true,
     }

@@ -79,6 +79,19 @@ impl TestDb {
             .batch_execute(&format!("CREATE SCHEMA {schema};"))
             .await
             .with_context(|| format!("create schema {schema}"))?;
+        // Clear any database-level failpoint left by a prior crashed async test.
+        let dbname: String = server
+            .client
+            .query_one("SELECT current_database()::text", &[])
+            .await
+            .context("read current database")?
+            .get(0);
+        let _ = server
+            .client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; RESET koldstore.failpoint"
+            ))
+            .await;
         register_filesystem_storage(&server.client, &storage_name, &storage_root).await?;
 
         Ok(Self {

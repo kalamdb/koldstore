@@ -3,6 +3,9 @@
 /// Asynchronous WAL-backed latest-state mirror capture.
 pub mod async_mirror;
 pub mod catalog;
+/// Database-scoped background worker adapter over `koldstore-worker`.
+#[cfg(feature = "pg")]
+pub mod database_worker;
 /// Test-only flush failpoints (GUC-armed; inert when unset).
 pub mod failpoints;
 pub mod guc;
@@ -66,4 +69,5 @@ pub extern "C" fn _PG_init() {
     catalog::cache::register_invalidation_callback();
     hooks::register_hooks();
     row_counter_cache::register_xact_callbacks();
+    database_worker::register_launcher_if_shared_preload();
 }

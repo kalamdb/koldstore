@@ -1,29 +1,52 @@
 //! Bounded, set-based application of committed `pgoutput` changes.
 //!
-//! Logical decoding, mirror writes, and the durable applied-LSN checkpoint
-//! share the caller's PostgreSQL transaction. Slot advancement is deliberately
-//! deferred until the next call: a crash can leave WAL retained, but can never
-//! acknowledge source WAL before its mirror effect is durable.
+//! Ordering (idempotent under crash):
+//! 1. Peek available WAL (`pg_logical_slot_peek_binary_changes`)
+//! 2. Write latest-state mirror rows (PK `ON CONFLICT` upsert / keyed update)
+//! 3. Record durable `applied_lsn` in `koldstore.async_mirror_state`
+//! 4. On the **next** call, advance the slot to that LSN
+//!
+//! A crash between steps 2 and 4 may re-peek already-applied changes; replay is
+//! safe because mirror writes are latest-state upserts. Batches are capped at
+//! [`koldstore_mirror::APPLY_BATCH_ROWS`] and cleared on every flush.
 
 use std::collections::{HashMap, HashSet};
 
-use koldstore_common::{quote_ident, MirrorOperation};
+use koldstore_common::{format_pg_lsn, quote_ident, snowflake_id_call_expression, MirrorOperation};
+use koldstore_mirror::{
+    decode_message, must_flush_before_push, plan_async_mirror_batch_insert,
+    plan_async_mirror_batch_update, PgOutputMessage, PgOutputRelation, PgOutputTuple,
+    PgOutputValue, APPLY_BATCH_ROWS,
+};
 use pgrx::datum::DatumWithOid;
 use serde_json::{Map, Value};
 
 use super::lifecycle::{current_slot_name, PUBLICATION_NAME};
-use super::protocol::{
-    decode_message, PgOutputMessage, PgOutputRelation, PgOutputTuple, PgOutputValue,
-};
 
 const DECODE_FETCH_ROWS: std::os::raw::c_long = 8_192;
-const APPLY_BATCH_ROWS: usize = 8_192;
+
+/// Failpoint name: abort during async mirror apply (worker ERROR exit).
+pub const ASYNC_MIRROR_APPLY_FAILPOINT: &str = "async_mirror_apply";
 
 #[derive(Debug, Clone)]
 struct ManagedRelation {
     table_oid: pgrx::pg_sys::Oid,
     mirror: String,
     primary_key: Vec<String>,
+    /// Cached `jsonb_to_recordset` column DDL (`"id" bigint, ...`).
+    record_columns: Option<Vec<String>>,
+    /// Cached insert batch SQL for the current relation type fingerprint.
+    insert_sql: Option<String>,
+    /// Cached update/delete batch SQL for the current relation type fingerprint.
+    update_sql: Option<String>,
+}
+
+impl ManagedRelation {
+    fn invalidate_plans(&mut self) {
+        self.record_columns = None;
+        self.insert_sql = None;
+        self.update_sql = None;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +84,8 @@ impl ApplyBatch {
 /// Returns an error for malformed protocol data, stale relation metadata,
 /// missing primary-key values, or an SPI/apply failure.
 pub fn apply_available() -> Result<i64, String> {
+    // Re-attach the always-on applier after postmaster restart (no per-DML kick).
+    crate::database_worker::ensure_async_mirror_worker_once_if_needed();
     super::lifecycle::lock_apply(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())?;
     let slot = current_slot_name();
     let exists = pgrx::Spi::get_one_with_args::<bool>(
@@ -92,81 +117,122 @@ pub fn apply_available() -> Result<i64, String> {
     .map_err(|error| error.to_string())?;
     let mut relations = HashMap::<u32, PgOutputRelation>::new();
     let mut managed = HashMap::<u32, Option<ManagedRelation>>::new();
+    let mut type_names = HashMap::<(u32, i32), String>::new();
     let mut transaction_lsn = None::<u64>;
     let mut applied_end_lsn = None::<u64>;
     let mut batch = None::<ApplyBatch>;
     let mut applied = 0_i64;
+    let mut saw_row_change = false;
 
-    loop {
-        let messages = fetch_decode_messages(&cursor_name)?;
-        if messages.is_empty() {
-            break;
-        }
-        for data in messages {
-            match decode_message(&data).map_err(|error| error.to_string())? {
-                PgOutputMessage::Begin { final_lsn, .. } => {
-                    flush_batch(&mut batch, &relations, &mut managed, final_lsn)?;
-                    transaction_lsn = Some(final_lsn);
+    // Close the named portal on every exit path (including mid-apply errors).
+    let result = (|| {
+        loop {
+            let messages = fetch_decode_messages(&cursor_name)?;
+            if messages.is_empty() {
+                break;
+            }
+            for data in messages {
+                match decode_message(&data).map_err(|error| error.to_string())? {
+                    PgOutputMessage::Begin { final_lsn, .. } => {
+                        flush_batch(
+                            &mut batch,
+                            &relations,
+                            &mut managed,
+                            &mut type_names,
+                            final_lsn,
+                        )?;
+                        transaction_lsn = Some(final_lsn);
+                    }
+                    PgOutputMessage::Commit { end_lsn, .. } => {
+                        let lsn = transaction_lsn
+                            .ok_or_else(|| "pgoutput COMMIT arrived without BEGIN".to_string())?;
+                        flush_batch(&mut batch, &relations, &mut managed, &mut type_names, lsn)?;
+                        transaction_lsn = None;
+                        applied_end_lsn = Some(end_lsn);
+                    }
+                    PgOutputMessage::Relation(relation) => {
+                        let id = relation.id;
+                        relations.insert(id, relation);
+                        if let Some(Some(config)) = managed.get_mut(&id) {
+                            config.invalidate_plans();
+                        }
+                    }
+                    PgOutputMessage::Insert { relation_id, new } => {
+                        if !saw_row_change {
+                            crate::failpoints::hit(ASYNC_MIRROR_APPLY_FAILPOINT)?;
+                            saw_row_change = true;
+                        }
+                        push_change(
+                            &mut batch,
+                            &relations,
+                            &mut managed,
+                            &mut type_names,
+                            relation_id,
+                            MirrorOperation::Insert,
+                            &new,
+                            transaction_lsn,
+                        )?;
+                        applied = applied.saturating_add(1);
+                    }
+                    PgOutputMessage::Update {
+                        relation_id, new, ..
+                    } => {
+                        if !saw_row_change {
+                            crate::failpoints::hit(ASYNC_MIRROR_APPLY_FAILPOINT)?;
+                            saw_row_change = true;
+                        }
+                        push_change(
+                            &mut batch,
+                            &relations,
+                            &mut managed,
+                            &mut type_names,
+                            relation_id,
+                            MirrorOperation::Update,
+                            &new,
+                            transaction_lsn,
+                        )?;
+                        applied = applied.saturating_add(1);
+                    }
+                    PgOutputMessage::Delete { relation_id, old } => {
+                        if !saw_row_change {
+                            crate::failpoints::hit(ASYNC_MIRROR_APPLY_FAILPOINT)?;
+                            saw_row_change = true;
+                        }
+                        push_change(
+                            &mut batch,
+                            &relations,
+                            &mut managed,
+                            &mut type_names,
+                            relation_id,
+                            MirrorOperation::Delete,
+                            &old,
+                            transaction_lsn,
+                        )?;
+                        applied = applied.saturating_add(1);
+                    }
+                    PgOutputMessage::Ignored { .. } => {}
                 }
-                PgOutputMessage::Commit { end_lsn, .. } => {
-                    let lsn = transaction_lsn
-                        .ok_or_else(|| "pgoutput COMMIT arrived without BEGIN".to_string())?;
-                    flush_batch(&mut batch, &relations, &mut managed, lsn)?;
-                    transaction_lsn = None;
-                    applied_end_lsn = Some(end_lsn);
-                }
-                PgOutputMessage::Relation(relation) => {
-                    relations.insert(relation.id, relation);
-                }
-                PgOutputMessage::Insert { relation_id, new } => {
-                    push_change(
-                        &mut batch,
-                        &relations,
-                        &mut managed,
-                        relation_id,
-                        MirrorOperation::Insert,
-                        &new,
-                        transaction_lsn,
-                    )?;
-                    applied = applied.saturating_add(1);
-                }
-                PgOutputMessage::Update {
-                    relation_id, new, ..
-                } => {
-                    push_change(
-                        &mut batch,
-                        &relations,
-                        &mut managed,
-                        relation_id,
-                        MirrorOperation::Update,
-                        &new,
-                        transaction_lsn,
-                    )?;
-                    applied = applied.saturating_add(1);
-                }
-                PgOutputMessage::Delete { relation_id, old } => {
-                    push_change(
-                        &mut batch,
-                        &relations,
-                        &mut managed,
-                        relation_id,
-                        MirrorOperation::Delete,
-                        &old,
-                        transaction_lsn,
-                    )?;
-                    applied = applied.saturating_add(1);
-                }
-                PgOutputMessage::Ignored { .. } => {}
             }
         }
-    }
-    if transaction_lsn.is_some() {
-        return Err("pgoutput stream ended before COMMIT".to_string());
-    }
-    if let Some(end_lsn) = applied_end_lsn {
-        record_applied_lsn(end_lsn)?;
-    }
-    Ok(applied)
+        if transaction_lsn.is_some() {
+            return Err("pgoutput stream ended before COMMIT".to_string());
+        }
+        if let Some(end_lsn) = applied_end_lsn {
+            record_applied_lsn(end_lsn)?;
+        }
+        Ok(applied)
+    })();
+    let _ = drop_named_cursor(&cursor_name);
+    result
+}
+
+fn drop_named_cursor(cursor_name: &str) -> Result<(), String> {
+    pgrx::Spi::connect_mut(|client| {
+        if let Ok(cursor) = client.find_cursor(cursor_name) {
+            drop(cursor);
+        }
+        Ok(())
+    })
 }
 
 fn fetch_decode_messages(cursor_name: &str) -> Result<Vec<Vec<u8>>, String> {
@@ -217,7 +283,7 @@ fn acknowledge_committed_apply(slot: &str) -> Result<(), String> {
 
 fn record_applied_lsn(applied_lsn: u64) -> Result<(), String> {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
-    let lsn = format_lsn(applied_lsn);
+    let lsn = format_pg_lsn(applied_lsn);
     pgrx::Spi::run_with_args(
         "INSERT INTO koldstore.async_mirror_state(database_oid, applied_lsn, updated_at) \
          VALUES (\
@@ -235,10 +301,12 @@ fn record_applied_lsn(applied_lsn: u64) -> Result<(), String> {
     .map_err(|error| error.to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_change(
     batch: &mut Option<ApplyBatch>,
     relations: &HashMap<u32, PgOutputRelation>,
     managed: &mut HashMap<u32, Option<ManagedRelation>>,
+    type_names: &mut HashMap<(u32, i32), String>,
     relation_id: u32,
     operation: MirrorOperation,
     tuple: &PgOutputTuple,
@@ -253,18 +321,25 @@ fn push_change(
         return Ok(());
     };
     let row = primary_key_json(relation, config, tuple)?;
-    let identity = serde_json::to_string(&row).map_err(|error| error.to_string())?;
+    let identity = pk_identity(&row);
     let key = BatchKey {
         relation_id,
         operation,
     };
-    let must_flush = batch.as_ref().is_some_and(|current| {
-        current.key != key
-            || current.rows.len() >= APPLY_BATCH_ROWS
-            || current.seen.contains(&identity)
-    });
-    if must_flush {
-        flush_batch(batch, relations, managed, lsn)?;
+    let needs_flush = match batch.as_ref() {
+        Some(current) => must_flush_before_push(
+            Some(&current.key),
+            &key,
+            current.rows.len(),
+            &current.seen,
+            &identity,
+            APPLY_BATCH_ROWS,
+        )
+        .is_some(),
+        None => false,
+    };
+    if needs_flush {
+        flush_batch(batch, relations, managed, type_names, lsn)?;
     }
     let current = batch.get_or_insert_with(|| ApplyBatch::new(key));
     current.seen.insert(identity);
@@ -272,10 +347,26 @@ fn push_change(
     Ok(())
 }
 
+/// Compact PK identity for in-batch dedupe (ordered values, NUL-separated).
+fn pk_identity(row: &Map<String, Value>) -> String {
+    let mut identity = String::new();
+    for (index, value) in row.values().enumerate() {
+        if index > 0 {
+            identity.push('\0');
+        }
+        match value {
+            Value::String(text) => identity.push_str(text),
+            other => identity.push_str(&other.to_string()),
+        }
+    }
+    identity
+}
+
 fn flush_batch(
     batch: &mut Option<ApplyBatch>,
     relations: &HashMap<u32, PgOutputRelation>,
     managed: &mut HashMap<u32, Option<ManagedRelation>>,
+    type_names: &mut HashMap<(u32, i32), String>,
     commit_lsn: u64,
 ) -> Result<(), String> {
     let Some(batch) = batch.take() else {
@@ -287,11 +378,14 @@ fn flush_batch(
     let relation = relations
         .get(&batch.key.relation_id)
         .ok_or_else(|| "relation metadata disappeared while applying batch".to_string())?;
-    let config = managed_relation(managed, batch.key.relation_id)?
+    let config = managed
+        .get_mut(&batch.key.relation_id)
+        .and_then(Option::as_mut)
         .ok_or_else(|| "managed relation disappeared while applying batch".to_string())?;
     apply_batch(
         config,
         relation,
+        type_names,
         batch.key.operation,
         &batch.rows,
         commit_lsn,
@@ -352,6 +446,9 @@ fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
         table_oid,
         mirror,
         primary_key,
+        record_columns: None,
+        insert_sql: None,
+        update_sql: None,
     })
 }
 
@@ -360,33 +457,31 @@ fn primary_key_json(
     config: &ManagedRelation,
     tuple: &PgOutputTuple,
 ) -> Result<Map<String, Value>, String> {
-    let key_columns = relation
+    let column_index: HashMap<&str, usize> = relation
         .columns
         .iter()
         .enumerate()
-        .filter(|(_, column)| config.primary_key.iter().any(|key| key == &column.name))
-        .collect::<Vec<_>>();
-    if key_columns.len() != config.primary_key.len() {
-        return Err(format!(
-            "pgoutput relation {}.{} does not publish every managed primary-key column",
-            relation.namespace, relation.name
-        ));
+        .map(|(index, column)| (column.name.as_str(), index))
+        .collect();
+    let mut key_columns = Vec::with_capacity(config.primary_key.len());
+    for key in &config.primary_key {
+        let relation_index = column_index.get(key.as_str()).copied().ok_or_else(|| {
+            format!(
+                "pgoutput relation {}.{} does not publish managed primary-key column {key}",
+                relation.namespace, relation.name
+            )
+        })?;
+        key_columns.push(relation_index);
     }
     let compact_old_key =
         tuple.values.len() == key_columns.len() && tuple.values.len() != relation.columns.len();
     let mut row = Map::with_capacity(config.primary_key.len());
-    for key in &config.primary_key {
-        let (relation_index, _) = key_columns
-            .iter()
-            .find(|(_, column)| &column.name == key)
-            .ok_or_else(|| format!("primary-key column {key} missing from relation metadata"))?;
+    for (key_position, key) in config.primary_key.iter().enumerate() {
+        let relation_index = key_columns[key_position];
         let tuple_index = if compact_old_key {
-            key_columns
-                .iter()
-                .position(|(index, _)| index == relation_index)
-                .expect("key position exists")
+            key_position
         } else {
-            *relation_index
+            relation_index
         };
         let value = tuple
             .values
@@ -403,100 +498,98 @@ fn pg_value_json(value: &PgOutputValue, column: &str) -> Result<Value, String> {
         PgOutputValue::UnchangedToast => Err(format!(
             "primary-key column {column} was emitted as unchanged TOAST"
         )),
-        PgOutputValue::Text(bytes) => String::from_utf8(bytes.clone())
-            .map(Value::String)
+        PgOutputValue::Text(bytes) => std::str::from_utf8(bytes)
+            .map(|text| Value::String(text.to_string()))
             .map_err(|error| error.to_string()),
         PgOutputValue::Binary(_) => Err("binary pgoutput values are not requested".to_string()),
     }
 }
 
-fn apply_batch(
-    config: &ManagedRelation,
+fn resolve_record_columns(
+    config: &mut ManagedRelation,
     relation: &PgOutputRelation,
+    type_names: &mut HashMap<(u32, i32), String>,
+) -> Result<Vec<String>, String> {
+    if config.record_columns.is_none() {
+        let mut record_columns = Vec::with_capacity(config.primary_key.len());
+        for key in &config.primary_key {
+            let column = relation
+                .columns
+                .iter()
+                .find(|column| &column.name == key)
+                .ok_or_else(|| format!("primary-key column {key} has no pgoutput type"))?;
+            let type_key = (column.type_oid, column.typmod);
+            if let std::collections::hash_map::Entry::Vacant(entry) = type_names.entry(type_key) {
+                let type_name = pgrx::Spi::get_one_with_args::<String>(
+                    "SELECT pg_catalog.format_type($1::oid, $2)",
+                    &[
+                        DatumWithOid::from(pgrx::pg_sys::Oid::from(column.type_oid)),
+                        DatumWithOid::from(column.typmod),
+                    ],
+                )
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("PostgreSQL cannot format type OID {}", column.type_oid))?;
+                entry.insert(type_name);
+            }
+            let type_name = type_names.get(&type_key).expect("type name inserted above");
+            record_columns.push(format!("{} {type_name}", quote_ident(key)));
+        }
+        config.record_columns = Some(record_columns);
+    }
+    Ok(config
+        .record_columns
+        .as_ref()
+        .expect("record columns populated")
+        .clone())
+}
+
+fn apply_batch(
+    config: &mut ManagedRelation,
+    relation: &PgOutputRelation,
+    type_names: &mut HashMap<(u32, i32), String>,
     operation: MirrorOperation,
     rows: &[Value],
     commit_lsn: u64,
 ) -> Result<(), String> {
-    let mut record_columns = Vec::with_capacity(config.primary_key.len());
-    for key in &config.primary_key {
-        let column = relation
-            .columns
-            .iter()
-            .find(|column| &column.name == key)
-            .ok_or_else(|| format!("primary-key column {key} has no pgoutput type"))?;
-        let type_name = pgrx::Spi::get_one_with_args::<String>(
-            "SELECT pg_catalog.format_type($1::oid, $2)",
-            &[
-                DatumWithOid::from(pgrx::pg_sys::Oid::from(column.type_oid)),
-                DatumWithOid::from(column.typmod),
-            ],
-        )
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| format!("PostgreSQL cannot format type OID {}", column.type_oid))?;
-        record_columns.push(format!("{} {type_name}", quote_ident(key)));
-    }
-    let quoted_keys = config
+    let record_columns = resolve_record_columns(config, relation, type_names)?;
+    let pk_refs = config
         .primary_key
         .iter()
-        .map(|key| quote_ident(key))
+        .map(String::as_str)
         .collect::<Vec<_>>();
-    let select_keys = quoted_keys
-        .iter()
-        .map(|key| format!("incoming.{key}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let conflict_keys = quoted_keys.join(", ");
-    let insert_columns = format!("{conflict_keys}, \"seq\", \"op\", \"commit_lsn\"");
-    let incoming = format!(
-        "WITH incoming AS (\
-           SELECT * FROM pg_catalog.jsonb_to_recordset($1::jsonb) AS x({})\
-         )",
-        record_columns.join(", ")
-    );
     let sql = if operation == MirrorOperation::Insert {
-        format!(
-            "{incoming}, existing AS (\
-               SELECT count(*)::bigint AS count FROM incoming \
-               JOIN {} AS mirror USING ({conflict_keys})\
-             ), applied AS (\
-               INSERT INTO {} ({insert_columns}) \
-               SELECT {select_keys}, {}, $2::smallint, $3::pg_lsn \
-               FROM incoming \
-               ON CONFLICT ({conflict_keys}) DO UPDATE \
-               SET \"seq\" = EXCLUDED.\"seq\", \
-                   \"op\" = EXCLUDED.\"op\", \
-                   \"commit_lsn\" = EXCLUDED.\"commit_lsn\" \
-               RETURNING 1\
-             ) \
-             SELECT (SELECT count(*)::bigint FROM applied), \
-                    (SELECT count FROM existing)",
-            config.mirror,
-            config.mirror,
-            koldstore_common::snowflake_id_call_expression(),
-        )
+        if config.insert_sql.is_none() {
+            config.insert_sql = Some(
+                plan_async_mirror_batch_insert(
+                    &config.mirror,
+                    &pk_refs,
+                    &record_columns,
+                    snowflake_id_call_expression(),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
+        config.insert_sql.as_ref().expect("insert SQL cached")
     } else {
-        let join = quoted_keys
-            .iter()
-            .map(|key| format!("mirror.{key} = incoming.{key}"))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-        format!(
-            "{incoming}, applied AS (\
-               UPDATE {} AS mirror \
-               SET \"seq\" = {}, \"op\" = $2::smallint, \"commit_lsn\" = $3::pg_lsn \
-               FROM incoming WHERE {join} RETURNING 1\
-             ) \
-             SELECT count(*)::bigint, count(*)::bigint FROM applied",
-            config.mirror,
-            koldstore_common::snowflake_id_call_expression(),
-        )
+        if config.update_sql.is_none() {
+            config.update_sql = Some(
+                plan_async_mirror_batch_update(
+                    &config.mirror,
+                    &pk_refs,
+                    &record_columns,
+                    snowflake_id_call_expression(),
+                )
+                .map_err(|error| error.to_string())?,
+            );
+        }
+        config.update_sql.as_ref().expect("update SQL cached")
     };
     let rows_json = serde_json::to_string(rows).map_err(|error| error.to_string())?;
-    let lsn = format_lsn(commit_lsn);
+    let lsn = format_pg_lsn(commit_lsn);
     let result = pgrx::Spi::connect(|client| -> Result<(i64, i64), String> {
         let table = client
             .select(
-                &sql,
+                sql,
                 None,
                 &[
                     DatumWithOid::from(rows_json.as_str()),
@@ -520,10 +613,13 @@ fn apply_batch(
         Ok((affected, existing))
     })?;
 
+    // Hot and mirror counters update together with the apply transaction.
+    // Deltas are derived from batch results so WAL replay after a crash does
+    // not double-count (replayed upserts see existing rows; deletes affect 0).
     let hot_delta = match operation {
-        MirrorOperation::Insert => result.0,
-        MirrorOperation::Update => 0,
+        MirrorOperation::Insert => result.0.saturating_sub(result.1),
         MirrorOperation::Delete => -result.0,
+        MirrorOperation::Update => 0,
     };
     let mirror_delta = if operation == MirrorOperation::Insert {
         result.0.saturating_sub(result.1)
@@ -532,10 +628,6 @@ fn apply_batch(
     };
     crate::row_counter_cache::record_delta(config.table_oid, hot_delta, mirror_delta);
     Ok(())
-}
-
-fn format_lsn(lsn: u64) -> String {
-    format!("{:X}/{:X}", lsn >> 32, lsn & 0xffff_ffff)
 }
 
 /// Applies available committed WAL and returns the number of row changes.

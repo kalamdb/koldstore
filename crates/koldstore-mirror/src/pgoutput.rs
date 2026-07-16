@@ -1,7 +1,8 @@
 //! Bounded decoder for PostgreSQL's `pgoutput` protocol.
 //!
-//! The decoder is PostgreSQL-free so malformed logical-decoding output can be
-//! rejected before it reaches SPI or mirror mutation code.
+//! Owns the PostgreSQL-free binary decoder used by async mirror apply. Malformed
+//! logical-decoding output is rejected here before SPI or mirror mutation code.
+//! Execution and slot lifecycle stay in `pg_koldstore::async_mirror`.
 
 use thiserror::Error;
 

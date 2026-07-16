@@ -17,7 +17,7 @@ pub const PUBLICATION_NAME: &str = "koldstore_async_mirror";
 
 /// Returns the cluster-unique logical slot name for a database OID.
 #[must_use]
-pub(super) fn slot_name(database_oid: u32) -> String {
+pub(crate) fn slot_name(database_oid: u32) -> String {
     format!("koldstore_async_{database_oid}")
 }
 
@@ -70,7 +70,7 @@ fn prepare_slot_locked(database_oid: u32, slot: &str) -> Result<(), String> {
         true
     };
     if needs_provisioning {
-        super::worker::provision_infrastructure(database_oid)?;
+        super::provision::provision_infrastructure(database_oid)?;
     }
     validate_slot(slot)?;
     if publication_exists()? {
@@ -82,7 +82,7 @@ fn prepare_slot_locked(database_oid: u32, slot: &str) -> Result<(), String> {
     }
 }
 
-fn publication_exists() -> Result<bool, String> {
+pub(super) fn publication_exists() -> Result<bool, String> {
     pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)",
         &[DatumWithOid::from(PUBLICATION_NAME)],
@@ -91,12 +91,12 @@ fn publication_exists() -> Result<bool, String> {
     .ok_or_else(|| "publication existence query returned no row".to_string())
 }
 
-pub(super) fn native_slot_exists(slot: &str) -> bool {
+pub(crate) fn native_slot_exists(slot: &str) -> bool {
     let slot = std::ffi::CString::new(slot).expect("deterministic slot name contains no NUL");
     native_slot_exists_cstr(&slot)
 }
 
-pub(super) fn native_slot_exists_cstr(slot: &std::ffi::CStr) -> bool {
+pub(crate) fn native_slot_exists_cstr(slot: &std::ffi::CStr) -> bool {
     !unsafe { pgrx::pg_sys::SearchNamedReplicationSlot(slot.as_ptr(), true) }.is_null()
 }
 
@@ -185,21 +185,47 @@ pub(crate) fn activate_table(
     let drop = koldstore_migrate::capture::plan_drop_mirror_dml_triggers(source, mirror)
         .map_err(|error| error.to_string())?;
     pgrx::Spi::run(&drop.sql).map_err(|error| error.to_string())?;
-    let kick_name = koldstore_migrate::capture::async_worker_kick_trigger_name(&mirror.name);
-    pgrx::Spi::run(&format!(
-        "DROP TRIGGER IF EXISTS {} ON {}",
-        quote_ident(&kick_name),
-        source.quoted(),
-    ))
-    .map_err(|error| error.to_string())?;
-    pgrx::Spi::run(&format!(
-        "CREATE TRIGGER {} AFTER INSERT OR UPDATE OR DELETE ON {} \
-         FOR EACH STATEMENT EXECUTE FUNCTION koldstore.async_mirror_kick()",
-        quote_ident(&kick_name),
-        source.quoted(),
-    ))
-    .map_err(|error| error.to_string())?;
-    super::worker::require_applier_for_async_capture()?;
+    let kick_names = koldstore_migrate::capture::async_worker_kick_trigger_names(&mirror.name);
+    let legacy_kicks = [
+        koldstore_migrate::capture::async_worker_kick_trigger_name(&mirror.name),
+        // Truncated mid-migration names from the `_ins/_upd/_del` experiment.
+        {
+            let mut name = format!("{}_async_worker_kick_ins", mirror.name);
+            name.truncate(63);
+            while !name.is_char_boundary(name.len()) {
+                name.pop();
+            }
+            name
+        },
+        {
+            let mut name = format!("{}_async_worker_kick_upd", mirror.name);
+            name.truncate(63);
+            while !name.is_char_boundary(name.len()) {
+                name.pop();
+            }
+            name
+        },
+        {
+            let mut name = format!("{}_async_worker_kick_del", mirror.name);
+            name.truncate(63);
+            while !name.is_char_boundary(name.len()) {
+                name.pop();
+            }
+            name
+        },
+    ];
+    for kick_name in kick_names.iter().cloned().chain(legacy_kicks) {
+        pgrx::Spi::run(&format!(
+            "DROP TRIGGER IF EXISTS {} ON {}",
+            quote_ident(&kick_name),
+            source.quoted(),
+        ))
+        .map_err(|error| error.to_string())?;
+    }
+    // No per-DML kick: the WAL applier is started here, auto-restarted by
+    // postmaster on crash, and re-ensured after postmaster restart by the
+    // shared_preload launcher / first backend transaction.
+    crate::database_worker::require_async_mirror_worker()?;
     Ok(())
 }
 
@@ -229,7 +255,7 @@ pub(super) fn lock_apply(database_oid: u32) -> Result<(), String> {
 }
 
 /// Serializes dynamic worker discovery and registration for one database.
-pub(super) fn lock_worker_registration(database_oid: u32) -> Result<(), String> {
+pub(crate) fn lock_worker_registration(database_oid: u32) -> Result<(), String> {
     lock_database(WORKER_LOCK_NAMESPACE, database_oid)
 }
 
@@ -293,12 +319,7 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     )
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
-    let publication_exists = pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)",
-        &[DatumWithOid::from(PUBLICATION_NAME)],
-    )
-    .map_err(|error| error.to_string())?
-    .unwrap_or(false);
+    let publication_exists = publication_exists()?;
     if slot_exists {
         pgrx::Spi::run_with_args(
             "SELECT pg_catalog.pg_drop_replication_slot($1)",
@@ -318,6 +339,6 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         &[DatumWithOid::from(pgrx::pg_sys::Oid::from(database_oid))],
     )
     .map_err(|error| error.to_string())?;
-    super::worker::mark_applier_not_ensured();
+    crate::database_worker::mark_worker_not_ensured();
     Ok(slot_exists || publication_exists)
 }

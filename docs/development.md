@@ -1,11 +1,24 @@
 # pg-koldstore Development
 
+## Full local aggregator
+
+```bash
+scripts/run-all-tests.sh
+```
+
+Runs fmt, clippy, workspace unit tests, pgrx compile/install, `cargo pgrx test`,
+E2E in **both** `--mode strict` and `--mode async`, examples, storage comparison,
+SQL regression, memory checks, and a short benchmark. Use `--skip-*` flags to
+narrow the run; example/storage sizing defaults match CI (`2000` / `10000` rows).
+
 ## Local Build
 
 ```bash
 cargo fmt --all
 cargo check --workspace --all-targets --no-default-features
-cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
+cargo nextest run --workspace --no-default-features \
+  --exclude e2e --exclude examples --exclude storage-comparison \
+  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 ```
 
 `e2e`, `examples`, and `storage-comparison` need a running pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh`, and `scripts/run-storage-comparison.sh`.
@@ -15,7 +28,8 @@ cargo nextest run --workspace --no-default-features --exclude e2e --exclude exam
 ```bash
 # Unit
 cargo nextest run --workspace --no-default-features \
-  --exclude e2e --exclude examples --exclude storage-comparison
+  --exclude e2e --exclude examples --exclude storage-comparison \
+  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 
 # In-server pgrx #[pg_test]
 cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
@@ -108,7 +122,7 @@ CI starts MinIO before the pgrx E2E job so `flush_minio` runs on every PostgreSQ
 Low-level storage-client MinIO tests remain available as:
 
 ```bash
-KOLDSTORE_MINIO=1 cargo test -p koldstore-storage --test storage_minio
+KOLDSTORE_MINIO=1 cargo nextest run -p koldstore-storage --test storage_minio
 ```
 
 ## Published try-it Docker image

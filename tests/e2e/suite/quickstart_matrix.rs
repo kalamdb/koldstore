@@ -1,5 +1,4 @@
-#[path = "common/mod.rs"]
-mod common;
+use crate::common;
 
 use anyhow::Result;
 
@@ -8,7 +7,7 @@ fn quickstart_matrix_covers_all_documented_scenarios() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    let quickstart = include_str!("../../specs/001-pg-kalam-hot-cold-storage/quickstart.md");
+    let quickstart = include_str!("../../../specs/001-pg-kalam-hot-cold-storage/quickstart.md");
     let scenario_count = quickstart.matches("## Scenario ").count();
 
     assert!(scenario_count >= 10);

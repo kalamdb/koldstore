@@ -51,9 +51,14 @@ database has no async logical slot, this is a cheap no-op. Otherwise it applies
 all committed async source changes available to the explicit fence before the
 flush takes its table lock or resolves mirror statistics.
 
-This makes flush a strong consistency boundary for both capture modes: strict
-changes already exist in the mirror, and async changes are caught up before
-selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
+This makes flush selection a strong consistency boundary for both capture modes:
+strict changes already exist in the mirror, and async changes are caught up
+before selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
+
+**Known gap (async only):** the start fence does not cover commits that land
+*during* Parquet upload before hot/mirror prune. Proposed fix: a short
+writer-blocking prune fence + WAL drain after manifest publish. See
+[async-flush-prune-race](../cases/async-flush-prune-race.md).
 
 ---
 

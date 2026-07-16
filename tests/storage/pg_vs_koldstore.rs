@@ -979,6 +979,7 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_comparison_table(
     rows: i64,
     hot_limit: i64,

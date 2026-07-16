@@ -156,3 +156,84 @@ fn pk_selected_join_predicates(primary_key: &[&str]) -> MirrorResult<Vec<String>
         .map(|column| format!("mirror.{column}::text = selected.{column}"))
         .collect())
 }
+
+/// Plans a set-based async-mirror insert upsert from `jsonb_to_recordset($1)`.
+///
+/// `$2` is the operation code and `$3` is the commit LSN. Primary-key columns in
+/// `record_columns` must already include PostgreSQL type names
+/// (for example `"id" bigint`).
+///
+/// # Errors
+///
+/// Returns an error when the primary key is empty or unsafe.
+pub fn plan_async_mirror_batch_insert(
+    mirror_quoted: &str,
+    primary_key: &[&str],
+    record_columns: &[String],
+    seq_expression: &str,
+) -> MirrorResult<String> {
+    let quoted_keys = quoted_pk_columns(primary_key)?;
+    let conflict_keys = quoted_keys.join(", ");
+    let select_keys = quoted_keys
+        .iter()
+        .map(|key| format!("incoming.{key}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert_columns = format!("{conflict_keys}, \"seq\", \"op\", \"commit_lsn\"");
+    let incoming = format!(
+        "WITH incoming AS (\
+           SELECT * FROM pg_catalog.jsonb_to_recordset($1::jsonb) AS x({})\
+         )",
+        record_columns.join(", ")
+    );
+    Ok(format!(
+        "{incoming}, existing AS (\
+           SELECT count(*)::bigint AS count FROM incoming \
+           JOIN {mirror_quoted} AS mirror USING ({conflict_keys})\
+         ), applied AS (\
+           INSERT INTO {mirror_quoted} ({insert_columns}) \
+           SELECT {select_keys}, {seq_expression}, $2::smallint, $3::pg_lsn \
+           FROM incoming \
+           ON CONFLICT ({conflict_keys}) DO UPDATE \
+           SET \"seq\" = EXCLUDED.\"seq\", \
+               \"op\" = EXCLUDED.\"op\", \
+               \"commit_lsn\" = EXCLUDED.\"commit_lsn\" \
+           RETURNING 1\
+         ) \
+         SELECT (SELECT count(*)::bigint FROM applied), \
+                (SELECT count FROM existing)"
+    ))
+}
+
+/// Plans a set-based async-mirror update/delete from `jsonb_to_recordset($1)`.
+///
+/// # Errors
+///
+/// Returns an error when the primary key is empty or unsafe.
+pub fn plan_async_mirror_batch_update(
+    mirror_quoted: &str,
+    primary_key: &[&str],
+    record_columns: &[String],
+    seq_expression: &str,
+) -> MirrorResult<String> {
+    let quoted_keys = quoted_pk_columns(primary_key)?;
+    let join = quoted_keys
+        .iter()
+        .map(|key| format!("mirror.{key} = incoming.{key}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let incoming = format!(
+        "WITH incoming AS (\
+           SELECT * FROM pg_catalog.jsonb_to_recordset($1::jsonb) AS x({})\
+         )",
+        record_columns.join(", ")
+    );
+    Ok(format!(
+        "{incoming}, applied AS (\
+           UPDATE {mirror_quoted} AS mirror \
+           SET \"seq\" = {seq_expression}, \"op\" = $2::smallint, \"commit_lsn\" = $3::pg_lsn \
+           FROM incoming WHERE {join} RETURNING 1\
+         ) \
+         SELECT count(*)::bigint, count(*)::bigint FROM applied"
+    ))
+}

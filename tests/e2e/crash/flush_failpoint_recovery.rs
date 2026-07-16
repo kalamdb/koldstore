@@ -1,6 +1,5 @@
 //! Crash/failpoint recovery: arm flush failpoints, recover, retry, validate rows.
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use anyhow::{bail, Context, Result};
 

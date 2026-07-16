@@ -1,4 +1,4 @@
-use koldstore::async_mirror::protocol::{decode_message, PgOutputMessage, PgOutputValue};
+use koldstore_mirror::pgoutput::{decode_message, PgOutputMessage, PgOutputValue};
 
 fn cstring(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(value.as_bytes());
@@ -108,5 +108,13 @@ fn decodes_insert_update_delete_and_commit_messages() {
 #[test]
 fn rejects_truncated_and_unknown_messages() {
     assert!(decode_message(&[b'R', 0, 0]).is_err());
-    assert!(decode_message(&[b'?']).is_err());
+    assert!(decode_message(b"?").is_err());
+}
+
+#[test]
+fn ignores_truncate_origin_type_and_message_tags() {
+    for tag in [b'T', b'O', b'Y', b'M'] {
+        let message = decode_message(&[tag]).unwrap();
+        assert_eq!(message, PgOutputMessage::Ignored { tag });
+    }
 }

@@ -2,6 +2,7 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod assertions;
+mod async_mirror;
 mod catalog;
 mod cluster;
 mod db;
@@ -16,6 +17,11 @@ pub use assertions::{
     assert_kold_merge_scan_cold_reads, assert_kold_merge_scan_executed_cold_reads,
     assert_kold_merge_scan_explain, assert_kold_merge_scan_planned_cold_reads,
     assert_merge_scan_explain, assert_minio_listing_contains,
+};
+
+pub use async_mirror::{
+    async_worker_running, fence_async_mirror_if_needed, mirror_op_count, terminate_async_worker,
+    wait_for_async_mirror, wait_for_async_worker, wait_for_mirror_op_count,
 };
 
 pub use catalog::{

@@ -11,7 +11,7 @@ suites live in subfolders so the top level stays scannable.
 | `run-examples.sh` | Real-world example scenarios |
 | `run-storage-comparison.sh` | Heap vs managed storage comparison |
 | `run-sql-regression.sh` | KoldStore SQL regression (`tests/sql/`) |
-| `run-all-tests.sh` | Full local verification aggregator |
+| `run-all-tests.sh` | Full local aggregator: unit, `#[pg_test]`, E2E strict+async, examples, storage, SQL, memory, benchmarks |
 | `run-pgrx-matrix.sh` | Multi-PG local matrix |
 
 ## `scripts/ci/`
