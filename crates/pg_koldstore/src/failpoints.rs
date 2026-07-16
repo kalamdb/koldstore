@@ -84,12 +84,13 @@ fn wait_barrier(name: &str) -> Result<(), String> {
     {
         use pgrx::datum::DatumWithOid;
         // Block until the coordinating session releases the barrier lock.
-        let _ = pgrx::Spi::get_one_with_args::<bool>(
+        // pg_advisory_lock/unlock return void — use Spi::run, not bool decode.
+        pgrx::Spi::run_with_args(
             "SELECT pg_advisory_lock($1)",
             &[DatumWithOid::from(FAILPOINT_BARRIER_KEY)],
         )
         .map_err(|error| error.to_string())?;
-        let _ = pgrx::Spi::get_one_with_args::<bool>(
+        pgrx::Spi::run_with_args(
             "SELECT pg_advisory_unlock($1)",
             &[DatumWithOid::from(FAILPOINT_BARRIER_KEY)],
         )

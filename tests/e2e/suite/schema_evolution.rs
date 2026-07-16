@@ -10,6 +10,23 @@ async fn alter_table_add_nullable_column_refreshes_schema_and_reads_old_cold_row
         db.manage_shared(&table.relation, "id").await?;
         assert_eq!(db.flush_table(&table.relation).await?, 12);
 
+        // Stop the async applier before ALTER/INSERT so those commits stay in WAL
+        // until flush's fence applies them in the same transaction. That is the
+        // path where pending counter deltas must be visible to flush selection.
+        if common::selected_mirror_capture_mode()?.is_async() {
+            let dbname: String = db
+                .client
+                .query_one("SELECT current_database()", &[])
+                .await?
+                .get(0);
+            db.client
+                .batch_execute(&format!(
+                    "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off"
+                ))
+                .await?;
+            let _ = common::terminate_async_worker(&db.client).await?;
+        }
+
         db.client
             .batch_execute(&format!(
                 r#"
@@ -23,7 +40,20 @@ async fn alter_table_add_nullable_column_refreshes_schema_and_reads_old_cold_row
             ))
             .await?;
 
-        assert_eq!(db.flush_table(&table.relation).await?, 2);
+        let flushed = db.flush_table(&table.relation).await;
+        if common::selected_mirror_capture_mode()?.is_async() {
+            let dbname: String = db
+                .client
+                .query_one("SELECT current_database()", &[])
+                .await?
+                .get(0);
+            db.client
+                .batch_execute(&format!(
+                    "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker"
+                ))
+                .await?;
+        }
+        assert_eq!(flushed?, 2);
 
         let schema = db
             .client

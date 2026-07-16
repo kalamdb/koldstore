@@ -30,7 +30,9 @@ pub(crate) fn slot_name(database_oid: u32) -> String {
 /// # Errors
 ///
 /// Returns an error when logical decoding is disabled, installation did not
-/// cannot provision the publication, or the deterministic slot name is incompatible.
+/// cannot provision the publication, the current transaction already has an
+/// XID (slot creation would deadlock), or the deterministic slot name is
+/// incompatible.
 pub(crate) fn prepare_capture(mode: MirrorCaptureMode) -> Result<(), String> {
     if mode != MirrorCaptureMode::Async {
         return Ok(());
@@ -64,12 +66,10 @@ fn prepare_slot_locked(database_oid: u32, slot: &str) -> Result<(), String> {
     // Do not call SPI before creating a missing logical slot: pgrx SPI assigns
     // the parent an XID, and the slot's consistent-point search would then
     // wait for the parent while the parent waits for the provisioner.
-    let needs_provisioning = if native_slot_exists(slot) {
-        !publication_exists()?
-    } else {
-        true
-    };
-    if needs_provisioning {
+    let slot_ready = native_slot_exists(slot);
+    let publication_ready = native_publication_exists();
+    if !slot_ready || !publication_ready {
+        require_no_assigned_xid_for_slot_provision()?;
         super::provision::provision_infrastructure(database_oid)?;
     }
     validate_slot(slot)?;
@@ -80,6 +80,25 @@ fn prepare_slot_locked(database_oid: u32, slot: &str) -> Result<(), String> {
             "async mirror provisioner did not create publication {PUBLICATION_NAME}"
         ))
     }
+}
+
+/// Slot init waits for concurrent XIDs. If this backend already wrote, the
+/// provisioner blocks on us while we block on its shutdown → deadlock.
+fn require_no_assigned_xid_for_slot_provision() -> Result<(), String> {
+    let xid = unsafe { pgrx::pg_sys::GetCurrentTransactionIdIfAny() };
+    if xid != pgrx::pg_sys::InvalidTransactionId {
+        return Err(
+            "async mirror slot provisioning cannot run after the current transaction has written; \
+             commit preceding statements first, then call manage_table with mirror_capture_mode => 'async'"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn native_publication_exists() -> bool {
+    let name = std::ffi::CString::new(PUBLICATION_NAME).expect("publication name contains no NUL");
+    unsafe { pgrx::pg_sys::get_publication_oid(name.as_ptr(), true) != pgrx::pg_sys::InvalidOid }
 }
 
 pub(super) fn publication_exists() -> Result<bool, String> {
@@ -257,6 +276,19 @@ pub(super) fn lock_apply(database_oid: u32) -> Result<(), String> {
 /// Serializes dynamic worker discovery and registration for one database.
 pub(crate) fn lock_worker_registration(database_oid: u32) -> Result<(), String> {
     lock_database(WORKER_LOCK_NAMESPACE, database_oid)
+}
+
+/// Non-blocking variant for the cluster launcher (skip when a session holds the lock).
+pub(crate) fn try_lock_worker_registration(database_oid: u32) -> Result<bool, String> {
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)",
+        &[
+            DatumWithOid::from(WORKER_LOCK_NAMESPACE),
+            DatumWithOid::from(database_oid as i32),
+        ],
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "worker registration try-lock returned no row".to_string())
 }
 
 fn lock_database(namespace: i32, database_oid: u32) -> Result<(), String> {

@@ -26,8 +26,8 @@ Usage:
   scripts/run-all-tests.sh [options]
 
 Runs (in order):
-  fmt, clippy, workspace unit tests, pgrx feature compile/install,
-  cargo pgrx test (#[pg_test]), E2E (strict + async), examples,
+  fmt, clippy, workspace unit tests (nextest), pgrx feature compile/install,
+  #[pg_test] via nextest, E2E (strict + async, nextest), examples,
   storage comparison, SQL regression, memory checks, short benchmarks.
 
 Options:
@@ -36,7 +36,7 @@ Options:
   --skip-lint          Skip cargo clippy
   --skip-unit          Skip workspace unit tests
   --skip-pgrx          Skip pgrx feature compile/install checks
-  --skip-pg-test       Skip cargo pgrx test (#[pg_test])
+  --skip-pg-test       Skip in-server #[pg_test] suite (nextest)
   --skip-e2e           Skip local pgrx-backed E2E (both modes)
   --skip-examples      Skip real-world example scenarios
   --skip-storage       Skip storage comparison harness
@@ -201,9 +201,26 @@ run_local_pgrx_e2e() {
 
 run_local_pg_test() {
   local pg="$1"
+  local features="pg${pg} pg_test"
+  local manifest="${ROOT_DIR}/crates/pg_koldstore/Cargo.toml"
+  local target_dir="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}"
 
-  step "cargo pgrx test (#[pg_test]) PostgreSQL ${pg}"
-  cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml "pg${pg}"
+  ensure_cargo_nextest
+  step "#[pg_test] via cargo nextest (PostgreSQL ${pg})"
+  # Mirror the env `cargo pgrx test` passes into its inner `cargo test`, but run
+  # nextest directly — setting CARGO=shim fails because outer cargo resets CARGO.
+  CARGO_TARGET_DIR="${target_dir}" \
+    PGRX_FEATURES="${features}" \
+    PGRX_NO_DEFAULT_FEATURES=true \
+    PGRX_ALL_FEATURES=false \
+    PGRX_BUILD_PROFILE=dev \
+    PGRX_NO_SCHEMA=false \
+    PGRX_MANIFEST_PATH="${manifest}" \
+    cargo nextest run \
+      --manifest-path "${manifest}" \
+      --features "${features}" \
+      --no-default-features \
+      --test-threads 1
 }
 
 run_local_examples() {

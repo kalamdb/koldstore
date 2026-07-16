@@ -282,7 +282,8 @@ cleanup (see [flushing-table.md](flushing-table.md)).
 Used by flush stats resolution and operator diagnostics. Mid-transaction reads
 of `manifest.mirror_row_count` do not include pending backend deltas until
 pre-commit flush (pg_tests that assert counters call `flush_pending_deltas`
-explicitly).
+explicitly). Flush selection folds `row_counter_cache::pending_deltas` into the
+O(1) mirror pending count so an in-transaction async fence cannot miss rows.
 
 ---
 

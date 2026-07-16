@@ -49,7 +49,7 @@ migration transaction, it:
 2. publishes only the primary-key columns;
 3. drops the INSERT / UPDATE / DELETE capture triggers;
 4. retains the primary-key mutation guard;
-5. starts the WAL applier and cluster launcher.
+5. starts the WAL applier (cluster launcher is shared-preload only).
 
 Changes before the switch are covered by strict capture; committed changes after
 it are covered by WAL. Publication and trigger changes are transactional, so
@@ -71,9 +71,9 @@ on the source relation.
 
 | Event | Behavior |
 | --- | --- |
-| Async `manage_table` | Starts the database WAL applier and the cluster launcher |
+| Async `manage_table` | Starts the database WAL applier (`wait_for_startup`; the worker finishes connecting after the manage transaction commits) |
 | Steady state | Applier polls every 100 ms; skips decode when WAL has not advanced |
-| Applier crash | Launcher re-registers the applier (no user DML required) |
+| Applier crash | Shared-preload launcher re-registers the applier; otherwise the next session `ensure` / `wait_for_async_mirror` after commit does |
 | Postmaster restart | Shared-preload launcher (if `koldstore` is in `shared_preload_libraries`) and/or the next `wait_for_async_mirror` / `internal_ensure_async_mirror_worker` re-attaches appliers for databases that still have a slot |
 | `disable_async_mirror` | Drops the slot; applier exits and is not restarted |
 

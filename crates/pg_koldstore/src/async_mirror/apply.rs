@@ -84,8 +84,12 @@ impl ApplyBatch {
 /// Returns an error for malformed protocol data, stale relation metadata,
 /// missing primary-key values, or an SPI/apply failure.
 pub fn apply_available() -> Result<i64, String> {
-    // Re-attach the always-on applier after postmaster restart (no per-DML kick).
-    crate::database_worker::ensure_async_mirror_worker_once_if_needed();
+    // Frontend fences (flush / wait_for_async_mirror) re-attach the applier after
+    // postmaster restart. The applier itself must not re-enter ensure: that takes
+    // the worker-registration xact lock held by an in-progress manage_table.
+    if !is_background_worker() {
+        crate::database_worker::ensure_async_mirror_worker_once_if_needed();
+    }
     super::lifecycle::lock_apply(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())?;
     let slot = current_slot_name();
     let exists = pgrx::Spi::get_one_with_args::<bool>(
@@ -100,6 +104,14 @@ pub fn apply_available() -> Result<i64, String> {
 
     acknowledge_committed_apply(&slot)?;
 
+    // `origin=none` is PG16+ only. On PG15, flush prune still uses
+    // `DoNotReplicateId`, which keeps those WAL records out of logical decoding
+    // entirely; the filter is defense-in-depth for ordinary origin-stamped WAL.
+    #[cfg(feature = "pg15")]
+    let query = "SELECT data FROM pg_catalog.pg_logical_slot_peek_binary_changes(\
+        $1, NULL, NULL, 'proto_version', '1', 'publication_names', $2, \
+        'messages', 'false')";
+    #[cfg(not(feature = "pg15"))]
     let query = "SELECT data FROM pg_catalog.pg_logical_slot_peek_binary_changes(\
         $1, NULL, NULL, 'proto_version', '1', 'publication_names', $2, \
         'messages', 'false', 'origin', 'none')";
@@ -628,6 +640,10 @@ fn apply_batch(
     };
     crate::row_counter_cache::record_delta(config.table_oid, hot_delta, mirror_delta);
     Ok(())
+}
+
+fn is_background_worker() -> bool {
+    unsafe { !pgrx::pg_sys::MyBgworkerEntry.is_null() }
 }
 
 /// Applies available committed WAL and returns the number of row changes.

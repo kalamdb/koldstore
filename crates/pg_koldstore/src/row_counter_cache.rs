@@ -33,6 +33,19 @@ pub fn record_delta(table_oid: pg_sys::Oid, hot_delta: i64, mirror_delta: i64) {
     });
 }
 
+/// Returns uncommitted `(hot_delta, mirror_delta)` for one table in this backend.
+///
+/// Flush may call `apply_available` and then read O(1) manifest counters in the
+/// same transaction. Those counters stay stale until pre-commit unless callers
+/// fold these pending deltas into the read.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn pending_deltas(table_oid: pg_sys::Oid) -> (i64, i64) {
+    let table_oid = table_oid.to_u32();
+    PENDING_ROW_COUNT_DELTAS
+        .with(|pending| pending.borrow().get(&table_oid).copied().unwrap_or((0, 0)))
+}
+
 /// Applies pending counter deltas to `koldstore.manifest` at transaction pre-commit.
 ///
 /// SPI must run while the transaction is still open; `XACT_EVENT_COMMIT` is too late
@@ -106,6 +119,12 @@ unsafe extern "C-unwind" fn row_counter_xact_callback(
 
 #[cfg(not(feature = "pg"))]
 pub fn record_delta(_table_oid: u32, _hot_delta: i64, _mirror_delta: i64) {}
+
+#[cfg(not(feature = "pg"))]
+#[must_use]
+pub fn pending_deltas(_table_oid: u32) -> (i64, i64) {
+    (0, 0)
+}
 
 #[cfg(not(feature = "pg"))]
 pub fn flush_pending_deltas() {}

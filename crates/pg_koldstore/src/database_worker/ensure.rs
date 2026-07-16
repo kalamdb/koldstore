@@ -9,8 +9,6 @@ use pgrx::bgworkers::BackgroundWorkerBuilder;
 use pgrx::datum::DatumWithOid;
 
 const APPLIER_FUNCTION: &str = "koldstore_async_mirror_applier_main";
-const LAUNCHER_FUNCTION: &str = "koldstore_async_mirror_launcher_main";
-const LAUNCHER_NAME: &str = "koldstore async mirror launcher";
 
 /// Per-backend latch: the first query may re-register after postmaster restart.
 static WORKER_ENSURED: AtomicBool = AtomicBool::new(false);
@@ -43,31 +41,13 @@ fn async_slot_exists_for_current_database() -> Result<bool, String> {
     .ok_or_else(|| "async slot probe returned no row".to_string())
 }
 
-/// Ensures the cluster launcher is running (auto-restarts on its own crashes).
-fn ensure_launcher() -> Result<(), String> {
-    if worker_running(LAUNCHER_NAME)? {
-        return Ok(());
-    }
-    let worker = BackgroundWorkerBuilder::new(LAUNCHER_NAME)
-        .set_type(LAUNCHER_NAME)
-        .set_library(LIBRARY_NAME)
-        .set_function(LAUNCHER_FUNCTION)
-        .enable_spi_access()
-        // Never restart: postmaster stop must not fight a respawning launcher.
-        // ensure_async_mirror_worker() re-registers the launcher when needed.
-        .set_notify_pid(unsafe { pgrx::pg_sys::MyProcPid })
-        .load_dynamic()
-        .map_err(|_| "could not register the async mirror launcher".to_string())?;
-    worker
-        .wait_for_startup()
-        .map_err(|status| format!("async mirror launcher did not start: {status:?}"))?;
-    Ok(())
-}
-
 /// Ensures one persistent WAL applier is running for the current database.
 ///
 /// Appliers use `BGW_NEVER_RESTART` so dropping the slot can leave them stopped.
-/// The launcher (and session ensure) re-registers them after crashes.
+/// Session ensure (manage / fences / SQL) starts the applier directly. The
+/// cluster launcher is registered only from shared_preload (or a future
+/// explicit admin path) so a crashing launcher cannot starve worker slots
+/// under `cargo pgrx test`.
 ///
 /// # Errors
 ///
@@ -76,7 +56,6 @@ pub(crate) fn ensure_async_mirror_worker() -> Result<bool, String> {
     if !crate::guc::async_mirror_worker_enabled() {
         return Ok(false);
     }
-    ensure_launcher()?;
     let database_oid = DatabaseOid::new(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
     ensure_async_mirror_worker_for(database_oid)
 }
@@ -92,15 +71,29 @@ pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Resul
     }
 
     let worker_type = async_mirror_worker_type(database_oid);
+    // Per-backend latch: after this backend registers (or observes) the applier,
+    // further ensure calls are no-ops until the worker exits. The worker may
+    // still be connecting until the registering transaction commits, so an
+    // open XID means "not visible yet" rather than "dead".
+    if WORKER_ENSURED.load(Ordering::Relaxed) {
+        if worker_running(&worker_type)? {
+            return Ok(false);
+        }
+        let in_xact = unsafe { pgrx::pg_sys::GetCurrentTransactionIdIfAny() }
+            != pgrx::pg_sys::InvalidTransactionId;
+        if in_xact {
+            return Ok(false);
+        }
+        WORKER_ENSURED.store(false, Ordering::Relaxed);
+    }
+
     let running = worker_running(&worker_type)?;
     match ensure_action(running) {
         EnsureAction::AlreadyRunning => {
             WORKER_ENSURED.store(true, Ordering::Relaxed);
             return Ok(false);
         }
-        EnsureAction::Register => {
-            WORKER_ENSURED.store(false, Ordering::Relaxed);
-        }
+        EnsureAction::Register => {}
     }
 
     crate::async_mirror::lifecycle::lock_worker_registration(database_oid.get())?;
@@ -109,8 +102,14 @@ pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Resul
         return Ok(false);
     }
 
-    // Never restart: intentional slot drop must leave the applier stopped.
-    // Crash recovery is the launcher's job (poll + re-register).
+    // Never restart via postmaster: intentional slot drop must leave the applier
+    // stopped. Crash recovery is the launcher's job (shared_preload) or a new
+    // backend's ensure after mark_worker_not_ensured.
+    //
+    // Only wait for postmaster startup notification. The worker finishes
+    // `BackgroundWorkerInitializeConnection` after this transaction commits, so
+    // requiring `pg_stat_activity` visibility inside `manage_table` deadlocks
+    // (worker waits for commit; we wait for the worker).
     let worker = BackgroundWorkerBuilder::new(&worker_type)
         .set_type(&worker_type)
         .set_library(LIBRARY_NAME)
@@ -119,7 +118,12 @@ pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Resul
         .set_argument(Some(pgrx::pg_sys::Datum::from(database_oid.get())))
         .set_notify_pid(unsafe { pgrx::pg_sys::MyProcPid })
         .load_dynamic()
-        .map_err(|_| "could not register the async mirror WAL applier".to_string())?;
+        .map_err(|_| {
+            format!(
+                "could not register the async mirror WAL applier \
+                 (worker_type={worker_type}; usually max_worker_processes exhausted)"
+            )
+        })?;
     worker
         .wait_for_startup()
         .map_err(|status| format!("async mirror WAL applier did not start: {status:?}"))?;

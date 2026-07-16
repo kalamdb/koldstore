@@ -147,6 +147,25 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
             serde_json::to_vec_pretty(&manifest)?,
         )?;
 
+        // In async mode, stop the background applier so the next INSERT stays in
+        // WAL until flush's own fence applies it in the same transaction. That is
+        // the path where pending counter deltas must be visible to flush selection.
+        if common::selected_mirror_capture_mode()?.is_async() {
+            let dbname: String = db
+                .client
+                .query_one("SELECT current_database()", &[])
+                .await?
+                .get(0);
+            db.client
+                .batch_execute(&format!(
+                    "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off"
+                ))
+                .await?;
+            let _ = common::terminate_async_worker(&db.client).await?;
+            // Give the launcher a moment; with the GUC off it should not restart.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+
         db.client
             .batch_execute(&format!(
                 r#"
@@ -157,7 +176,21 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
                 table.relation
             ))
             .await?;
-        db.flush_table(&table.relation).await?;
+        let flush_result = db.flush_table(&table.relation).await;
+
+        if common::selected_mirror_capture_mode()?.is_async() {
+            let dbname: String = db
+                .client
+                .query_one("SELECT current_database()", &[])
+                .await?
+                .get(0);
+            db.client
+                .batch_execute(&format!(
+                    "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker"
+                ))
+                .await?;
+        }
+        flush_result?;
 
         let rebuilt: Value =
             serde_json::from_str(&std::fs::read_to_string(&absolute_manifest_path)?)?;

@@ -31,7 +31,11 @@ pub mod pg_test {
     /// Extra `postgresql.conf` settings required for in-server tests.
     #[must_use]
     pub fn postgresql_conf_options() -> Vec<&'static str> {
-        vec!["wal_level=logical"]
+        vec![
+            "wal_level=logical",
+            // Launcher + provisioner + applier need headroom beyond defaults.
+            "max_worker_processes=16",
+        ]
     }
 }
 

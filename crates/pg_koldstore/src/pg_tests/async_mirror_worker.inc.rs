@@ -1,5 +1,16 @@
 #[pg_test]
 fn async_manage_starts_database_worker() {
+    // #[pg_test] runs the whole body inside one SQL-function transaction.
+    // Logical slot creation waits for concurrent XIDs, so provision before any
+    // SPI write (CREATE TABLE) or the provisioner deadlocks with this backend.
+    //
+    // The WAL applier finishes database connect only after this transaction
+    // commits, so we cannot assert pg_stat_activity visibility here. E2E tests
+    // cover post-commit visibility; this test covers registration + cleanup.
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    crate::async_mirror::provision::provision_infrastructure(database_oid)
+        .expect("pre-provision async slot/publication");
+
     let suffix = unique_suffix("async_worker");
     let schema = format!("pgtest_{suffix}");
     let table = "events";
@@ -19,33 +30,14 @@ fn async_manage_starts_database_worker() {
     ))
     .expect("manage_table async");
 
-    assert!(
-        Spi::get_one::<bool>("SELECT koldstore.internal_ensure_async_mirror_worker()")
-            .expect("ensure")
-            .unwrap_or(false)
-            || spi_get_i64(
-                "SELECT count(*)::bigint FROM pg_catalog.pg_stat_activity \
-                 WHERE backend_type = 'koldstore async mirror ' \
-                   || (SELECT oid::text FROM pg_catalog.pg_database \
-                       WHERE datname = current_database())"
-            ) >= 1,
-        "async manage_table must leave a database worker running"
-    );
-
-    let worker_count = spi_get_i64(
-        "SELECT count(*)::bigint FROM pg_catalog.pg_stat_activity \
-         WHERE backend_type = 'koldstore async mirror ' \
-           || (SELECT oid::text FROM pg_catalog.pg_database \
-               WHERE datname = current_database())",
-    );
-    assert!(worker_count >= 1, "worker must be visible in pg_stat_activity");
-
+    // manage_table required the applier (wait_for_startup). A second ensure in
+    // this same open transaction must not try to register another worker.
     let ensured_again = Spi::get_one::<bool>("SELECT koldstore.internal_ensure_async_mirror_worker()")
         .expect("second ensure")
         .expect("non-null");
     assert!(
         !ensured_again,
-        "second ensure must be an idempotent no-op while the worker is running"
+        "second ensure must be an idempotent no-op after manage registered the applier"
     );
 
     Spi::run(&format!(

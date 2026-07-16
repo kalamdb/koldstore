@@ -32,12 +32,16 @@ pub(crate) fn register_if_shared_preload() {
 #[pgrx::pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::pg_sys::Datum) {
-    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP);
+    // SIGHUP + SIGTERM so postmaster stop does not leave an unhandled signal as
+    // a non-zero exit that ensure() then respawns in a tight loop.
+    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     // Connect to the default database so we can read cluster-wide slot catalogs.
     BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
     let poll = Duration::from_millis(LAUNCHER_POLL_INTERVAL_MS);
     loop {
-        let _ = worker_transaction(ensure_appliers_for_async_slots);
+        if let Err(error) = worker_transaction(ensure_appliers_for_async_slots) {
+            pgrx::log!("koldstore async mirror launcher: ensure failed: {error}");
+        }
         if !BackgroundWorker::wait_latch(Some(poll)) {
             break;
         }
@@ -73,6 +77,12 @@ fn ensure_appliers_for_async_slots() -> Result<(), String> {
         Ok(out)
     })?;
     for oid in oids {
+        // Skip when a session ensure already holds the registration lock
+        // (e.g. manage_table's open transaction). Blocking here wedged the
+        // launcher under pg_test and led to ensure() respawn storms.
+        if !crate::async_mirror::lifecycle::try_lock_worker_registration(oid)? {
+            continue;
+        }
         let _ = super::ensure::ensure_async_mirror_worker_for(DatabaseOid::new(oid));
     }
     Ok(())

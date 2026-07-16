@@ -299,7 +299,16 @@ fn execute_seq_range_cleanup(
 
 fn mirror_pending_row_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     match super::counters::read_table_row_counters(table_oid) {
-        Ok(counters) => Ok(counters.mirror_row_count.max(0)),
+        Ok(counters) => {
+            // Async flush fences via `apply_available` in this same transaction.
+            // Apply records counter deltas in backend memory until pre-commit, so
+            // include them or flush can falsely see a zero pending mirror.
+            let (_, mirror_delta) = crate::row_counter_cache::pending_deltas(table_oid);
+            Ok(counters
+                .mirror_row_count
+                .saturating_add(mirror_delta)
+                .max(0))
+        }
         Err(_) => Ok(mirror_flush_stats(table_oid)?.row_count),
     }
 }

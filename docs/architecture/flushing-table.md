@@ -122,7 +122,8 @@ It returns `ResolvedFlushSelection { stats: FlushStats, mirror_ops: Option<Vec<i
 ### Path B — Policy flush (normal)
 
 1. **`mirror_pending_row_count`** — O(1) read from `koldstore.manifest.mirror_row_count`
-   (falls back to `mirror_flush_stats` if manifest missing)
+   plus any same-backend pending apply/DML deltas (falls back to
+   `mirror_flush_stats` if manifest missing)
 
 2. Load **`FlushPolicy`** from `koldstore.schemas.options`:
    - SPI → `pgrx::JsonB` → `FlushPolicy::from_value`

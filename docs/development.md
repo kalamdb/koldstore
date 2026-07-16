@@ -6,10 +6,11 @@
 scripts/run-all-tests.sh
 ```
 
-Runs fmt, clippy, workspace unit tests, pgrx compile/install, `cargo pgrx test`,
-E2E in **both** `--mode strict` and `--mode async`, examples, storage comparison,
-SQL regression, memory checks, and a short benchmark. Use `--skip-*` flags to
-narrow the run; example/storage sizing defaults match CI (`2000` / `10000` rows).
+Runs fmt, clippy, workspace unit tests (nextest), pgrx compile/install,
+in-server `#[pg_test]` via nextest, E2E in **both** `--mode strict` and
+`--mode async` (nextest), examples, storage comparison, SQL regression,
+memory checks, and a short benchmark. Use `--skip-*` flags to narrow the run;
+example/storage sizing defaults match CI (`2000` / `10000` rows).
 
 ## Local Build
 

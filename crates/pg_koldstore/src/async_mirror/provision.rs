@@ -20,7 +20,7 @@ const PROVISIONER_FUNCTION: &str = "koldstore_async_mirror_slot_provisioner_main
 /// # Errors
 ///
 /// Returns an error when PostgreSQL cannot register, start, or stop the worker.
-pub(super) fn provision_infrastructure(database_oid: u32) -> Result<(), String> {
+pub(crate) fn provision_infrastructure(database_oid: u32) -> Result<(), String> {
     let worker = BackgroundWorkerBuilder::new("koldstore async slot provisioner")
         .set_type("koldstore async slot provisioner")
         .set_library(LIBRARY_NAME)
