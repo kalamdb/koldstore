@@ -156,9 +156,6 @@ pub fn apply_available() -> Result<i64, String> {
                     )?;
                     applied = applied.saturating_add(1);
                 }
-                PgOutputMessage::Ignored { tag: b'T' } => {
-                    return Err("TRUNCATE is not supported for async managed tables".to_string());
-                }
                 PgOutputMessage::Ignored { .. } => {}
             }
         }

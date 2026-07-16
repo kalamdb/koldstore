@@ -86,7 +86,7 @@ fn logical_pk_is_hashable_map_key_without_json_stringify() {
     let mut map = HashMap::new();
     map.insert(left, "seven");
     assert_eq!(map.get(&right), Some(&"seven"));
-    assert!(map.get(&other).is_none());
+    assert!(!map.contains_key(&other));
 }
 
 #[test]

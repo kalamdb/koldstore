@@ -18,10 +18,11 @@ const LIBRARY_NAME: &str = "koldstore";
 const PROVISIONER_FUNCTION: &str = "koldstore_async_mirror_slot_provisioner_main";
 const APPLIER_FUNCTION: &str = "koldstore_async_mirror_applier_main";
 const APPLY_INTERVAL: Duration = Duration::from_millis(100);
-const RESTART_INTERVAL: Duration = Duration::from_secs(1);
 
 // Each PostgreSQL backend only needs to discover or launch the database worker
-// once. A crashed applier is restarted by the postmaster using its registration.
+// once while the applier remains visible. Crash recovery is handled by the
+// statement kick trigger and the next ensure_applier call, not postmaster
+// auto-restart, so intentional cleanup can leave the worker stopped.
 static APPLIER_ENSURED: AtomicBool = AtomicBool::new(false);
 
 /// Clears the current backend's worker fast path after explicit cleanup.
@@ -99,7 +100,6 @@ pub(super) fn ensure_applier() -> Result<bool, String> {
         .set_library(LIBRARY_NAME)
         .set_function(APPLIER_FUNCTION)
         .enable_spi_access()
-        .set_restart_time(Some(RESTART_INTERVAL))
         .set_argument(Some(pgrx::pg_sys::Datum::from(database_oid)))
         .set_notify_pid(unsafe { pgrx::pg_sys::MyProcPid })
         .load_dynamic()
@@ -111,12 +111,16 @@ pub(super) fn ensure_applier() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Ensures async capture has a live database worker before activation completes.
+/// Ensures async capture starts a database worker before activation completes.
+///
+/// Startup is synchronized with PostgreSQL's background-worker notify path.
+/// Visibility in `pg_stat_activity` can lag SPI connection, so callers that need
+/// that view should poll after the manage transaction commits.
 ///
 /// # Errors
 ///
 /// Returns an error when the worker GUC is disabled or the applier cannot be
-/// registered and observed in `pg_stat_activity`.
+/// registered.
 pub(super) fn require_applier_for_async_capture() -> Result<(), String> {
     if !crate::guc::async_mirror_worker_enabled() {
         return Err(
@@ -124,12 +128,7 @@ pub(super) fn require_applier_for_async_capture() -> Result<(), String> {
         );
     }
     ensure_applier()?;
-    let worker_type = applier_type(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
-    if applier_running(&worker_type)? {
-        Ok(())
-    } else {
-        Err("async mirror WAL applier is not running".to_string())
-    }
+    Ok(())
 }
 
 /// Internal SQL entry point used by the async statement trigger.

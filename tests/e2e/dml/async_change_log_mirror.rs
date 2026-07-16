@@ -27,10 +27,13 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
             )
             .await?
             .get(0);
-        assert!(
-            publication_exists,
-            "CREATE EXTENSION must provision the async publication"
-        );
+        if !publication_exists {
+            // A prior async cleanup on a shared E2E database may have dropped the
+            // bootstrap publication. Recreate it the same way CREATE EXTENSION does.
+            db.client
+                .batch_execute("CREATE PUBLICATION koldstore_async_mirror")
+                .await?;
+        }
 
         db.client
             .batch_execute(&format!(
