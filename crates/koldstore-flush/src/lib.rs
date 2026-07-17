@@ -32,7 +32,8 @@ pub use segment_catalog::{
     SegmentCatalogError,
 };
 pub use segment_write::{
-    write_flush_segment_file, write_flush_segment_with_client, WrittenFlushSegment,
+    flush_segment_object_path, write_flush_segment_file, write_flush_segment_with_client,
+    WrittenFlushSegment,
 };
 pub use stats::{
     resolve_force_flush_selection, resolve_policy_flush_selection, validate_flush_row_selection,

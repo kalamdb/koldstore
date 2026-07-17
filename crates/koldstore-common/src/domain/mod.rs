@@ -4,6 +4,7 @@
 //! snowflake ids. SQL text helpers live in [`crate::sql`]; manage options live
 //! in [`crate::config`].
 
+pub mod commit_sequence;
 pub mod filter;
 pub mod pk;
 pub mod row;

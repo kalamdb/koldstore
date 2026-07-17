@@ -22,24 +22,24 @@ pub fn koldstore_user_id() -> Option<String> {
 }
 
 #[cfg(feature = "pg_test")]
-const fn snowflake_worker_id() -> u16 {
+pub(crate) const fn snowflake_worker_id() -> u16 {
     0
 }
 
 #[cfg(all(not(feature = "pg_test"), any(feature = "pg17", feature = "pg18")))]
-fn snowflake_worker_id() -> u16 {
+pub(crate) fn snowflake_worker_id() -> u16 {
     let proc_number = unsafe { pgrx::pg_sys::MyProcNumber };
     normalize_postgres_worker_id(proc_number)
 }
 
 #[cfg(all(not(feature = "pg_test"), any(feature = "pg15", feature = "pg16")))]
-fn snowflake_worker_id() -> u16 {
+pub(crate) fn snowflake_worker_id() -> u16 {
     let backend_id = unsafe { pgrx::pg_sys::MyBackendId };
     normalize_postgres_worker_id(backend_id)
 }
 
 #[cfg(not(any(feature = "pg", feature = "pg_test")))]
-const fn snowflake_worker_id() -> u16 {
+pub(crate) const fn snowflake_worker_id() -> u16 {
     0
 }
 

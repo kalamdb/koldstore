@@ -1,6 +1,5 @@
-use koldstore::{
-    catalog, guc, hooks, koldstore_version, memory, observability, privileges, spi, sql,
-};
+use koldstore::{catalog, guc, hooks, koldstore_version, memory, observability, spi, sql};
+use koldstore_common::{can_set_guc, RoleClass};
 
 #[test]
 fn extension_version_and_session_functions_are_non_empty_and_monotonic() {
@@ -52,24 +51,21 @@ fn guc_definitions_include_public_and_internal_settings() {
 
 #[test]
 fn application_roles_cannot_set_internal_gucs() {
-    assert!(privileges::can_set_guc(
-        privileges::RoleClass::Application,
-        "koldstore.user_id",
-    ));
-    assert!(privileges::can_set_guc(
-        privileges::RoleClass::Application,
+    assert!(can_set_guc(RoleClass::Application, "koldstore.user_id"));
+    assert!(can_set_guc(
+        RoleClass::Application,
         "koldstore.max_open_parquet_readers",
     ));
-    assert!(privileges::can_set_guc(
-        privileges::RoleClass::Application,
+    assert!(can_set_guc(
+        RoleClass::Application,
         "koldstore.min_max_rows_per_file",
     ));
-    assert!(!privileges::can_set_guc(
-        privileges::RoleClass::Application,
+    assert!(!can_set_guc(
+        RoleClass::Application,
         "koldstore.internal_system_write",
     ));
-    assert!(privileges::can_set_guc(
-        privileges::RoleClass::Superuser,
+    assert!(can_set_guc(
+        RoleClass::Superuser,
         "koldstore.internal_system_write",
     ));
 }

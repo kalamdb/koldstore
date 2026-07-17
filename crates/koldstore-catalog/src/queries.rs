@@ -42,6 +42,32 @@ WHERE c.oid = $1::oid",
     )
 }
 
+/// Builds an async-capture managed-relation lookup by source table OID.
+///
+/// Returns JSON text with `table_oid`, `mirror` (`regclass` text), and
+/// `primary_key` for active schemas with `mirror_capture_mode = async`.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_async_managed_relation_by_oid() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve async managed relation by table oid",
+        r#"
+SELECT (SELECT jsonb_build_object(
+    'table_oid', s.table_oid::text,
+    'mirror', s.mirror_relation::text,
+    'primary_key', s.primary_key
+)::text
+FROM koldstore.schemas s
+WHERE s.active AND s.table_oid = $1::oid
+  AND COALESCE(s.options->>'mirror_capture_mode', 'strict') = 'async'
+LIMIT 1)
+"#,
+        [SqlParamType::Oid],
+    )
+}
+
 /// Builds an active mirror relation lookup for a managed table.
 ///
 /// # Errors

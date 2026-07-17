@@ -134,7 +134,7 @@ fn json_input_text(value: &serde_json::Value, pg_type: PgType) -> Result<String,
 }
 
 unsafe fn input_datum_from_text(text: &str, pg_type: PgType) -> Result<pg_sys::Datum, String> {
-    let type_oid = pg_sys::Oid::from(pg_type_oid(pg_type));
+    let type_oid = pg_sys::Oid::from(pg_type.type_oid());
     let mut typinput = pg_sys::InvalidOid;
     let mut typioparam = pg_sys::InvalidOid;
     pg_sys::getTypeInputInfo(type_oid, &mut typinput, &mut typioparam);
@@ -145,22 +145,4 @@ unsafe fn input_datum_from_text(text: &str, pg_type: PgType) -> Result<pg_sys::D
         typioparam,
         -1,
     ))
-}
-
-const fn pg_type_oid(pg_type: PgType) -> u32 {
-    match pg_type {
-        PgType::Bool => 16,
-        PgType::Int2 => 21,
-        PgType::Int4 => 23,
-        PgType::Int8 => 20,
-        PgType::Float4 => 700,
-        PgType::Float8 => 701,
-        PgType::Text => 25,
-        PgType::Numeric => 1700,
-        PgType::Uuid => 2950,
-        PgType::Jsonb => 3802,
-        PgType::TextArray => 1009,
-        PgType::Bytea => 17,
-        PgType::Timestamptz => 1184,
-    }
 }

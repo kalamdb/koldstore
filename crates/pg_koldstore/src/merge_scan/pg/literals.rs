@@ -165,16 +165,12 @@ unsafe fn datum_json_value(
 }
 
 fn column_type_oid(pg_type: PgType) -> Option<pg_sys::Oid> {
-    // Keep in sync with koldstore_schema::PgType OID mapping for output fallback.
-    let oid = match pg_type {
-        PgType::Uuid => 2950u32,
-        PgType::Timestamptz => 1184u32,
-        PgType::Bytea => 17,
-        PgType::Float4 => 700,
-        PgType::Float8 => 701,
-        _ => return None,
-    };
-    Some(pg_sys::Oid::from(oid))
+    match pg_type {
+        PgType::Uuid | PgType::Timestamptz | PgType::Bytea | PgType::Float4 | PgType::Float8 => {
+            Some(pg_sys::Oid::from(pg_type.type_oid()))
+        }
+        _ => None,
+    }
 }
 
 pub(super) unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {

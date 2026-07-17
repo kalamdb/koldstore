@@ -2,10 +2,10 @@
 
 | | |
 | --- | --- |
-| Status | Implementation design (not yet implemented) |
+| Status | Phase-6 prune fence implemented; phase-5.5 pre-lock catch-up, row/WAL caps, and strict seq audit remain deferred |
 | Severity | Correctness — possible loss of a newer hot row under async capture |
 | Modes | Primary race affects `mirror_capture_mode = 'async'`; sequence-ordering prerequisite also requires a strict-mode audit |
-| Related | [flushing-table](../architecture/flushing-table.md), [mirror-capture-modes](../architecture/mirror-capture-modes.md), [ADR-003](../decisions/003-optional-async-mirror-capture.md) |
+| Related | [flushing-table](../architecture/flushing-table.md), [mirror-capture-modes](../architecture/mirror-capture-modes.md), [ADR-003](../decisions/003-optional-async-mirror-capture.md), [implementation plan](../plans/2026-07-17-async-flush-prune-fence.md) |
 
 ---
 
@@ -1067,15 +1067,15 @@ counter update.
 ### Apply protocol
 
 - [ ] Resolve the target table’s capture mode before the phase-0 apply call
-- [ ] Add typed `WalFenceLsn`, `AppliedWalBoundary`, and bounded apply request/outcome
-- [ ] Add typed `PruneSeqFloor` and an overflow-checked floor-aware allocator
-- [ ] Split durable slot acknowledgement from peek/apply
-- [ ] Pass explicit `upto_lsn = F0/Fp/F1` to logical decoding
-- [ ] Force/wait for WAL durability through each fence LSN
-- [ ] Return and retain the exact phase-0 transaction end-LSN `L0`
+- [x] Add typed `WalFenceLsn`, `AppliedWalBoundary`, and bounded apply request/outcome
+- [x] Add typed `PruneSeqFloor` and an overflow-checked floor-aware allocator
+- [x] Split durable slot acknowledgement from peek/apply
+- [x] Pass explicit `upto_lsn` to logical decoding (phase-6 `F1`; phase-0 still unbounded available)
+- [x] Force/wait for WAL durability through fence LSN (phase-6 `F1`)
+- [x] Return and retain the exact phase-0 transaction end-LSN `L0`
 - [ ] Run a bounded pre-lock catch-up and retain its exact boundary `Lp`
-- [ ] Skip complete replayed transactions through the latest local boundary
-- [ ] Never acknowledge a checkpoint written by the current flush transaction
+- [x] Skip complete replayed transactions through the latest local boundary
+- [x] Never acknowledge a checkpoint written by the current flush transaction
 - [ ] Store exact decoded end-LSN; remove `GREATEST(..., pg_current_wal_insert_lsn())`
 - [ ] Audit strict-mode sequence ordering across PostgreSQL backends
 
@@ -1085,10 +1085,10 @@ counter update.
 - [ ] Prove sequence uniqueness or implement a stable composite cleanup watermark
 - [ ] Add finite pre-lock catch-up budgets and a final-delta safety limit
 - [ ] Add overall flush/upload and retained-WAL admission limits
-- [ ] Acquire `SHARE ROW EXCLUSIVE` by source table OID only for async tables
-- [ ] Call final bounded apply after manifest publish and before cleanup
-- [ ] Keep mirror+hot delete as one atomic data-modifying CTE
-- [ ] Add configurable local relation-lock/cleanup timeout behavior
+- [x] Acquire `SHARE ROW EXCLUSIVE` by source table OID only for async tables
+- [x] Call final bounded apply after manifest publish and before cleanup
+- [x] Keep mirror+hot delete as one atomic data-modifying CTE
+- [x] Add configurable local relation-lock/cleanup timeout behavior
 - [ ] Enforce or document autocommit/worker-owned flush transaction lifetime
 - [ ] Make cleanup/counter/job failure recovery idempotent and reconcilable
 - [ ] Verify source `ACCESS SHARE` prevents schema changes throughout selection/upload

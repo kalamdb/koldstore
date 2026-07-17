@@ -73,6 +73,77 @@ pub(super) fn active_flush_policy(
     ))
 }
 
+/// Returns the managed table's mirror capture mode (defaults to strict).
+pub(super) fn active_mirror_capture_mode(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<koldstore_common::MirrorCaptureMode, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let statement = koldstore_catalog::queries::plan_active_flush_policy_options()
+        .map_err(|error| error.to_string())?;
+    let options =
+        crate::spi::select_one::<pgrx::JsonB>(&statement, &[DatumWithOid::from(table_oid)])
+            .map_err(|error| error.to_string())?;
+    let Some(options) = options else {
+        return Ok(koldstore_common::MirrorCaptureMode::Strict);
+    };
+    Ok(koldstore_common::ManageTableOptions::from_value(&options.0).mirror_capture_mode())
+}
+
+/// Blocks concurrent source DML for the async prune fence.
+///
+/// Uses `SHARE ROW EXCLUSIVE` so in-flight writers finish, new writers wait,
+/// and ordinary `SELECT` continues. Sets a local `lock_timeout` so an idle
+/// blocker fails the flush before prune rather than waiting forever.
+pub(super) fn lock_source_table_share_row_exclusive(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<(), String> {
+    let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+    let table = QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
+    let quoted = table.quoted();
+    pgrx::Spi::connect_mut(|client| -> Result<(), String> {
+        client
+            .update("SET LOCAL lock_timeout = '30s'", None, &[])
+            .map_err(|error| error.to_string())?;
+        client
+            .update(
+                &format!("LOCK TABLE ONLY {quoted} IN SHARE ROW EXCLUSIVE MODE"),
+                None,
+                &[],
+            )
+            .map_err(|error| format!("async flush prune fence could not lock {quoted}: {error}"))?;
+        Ok(())
+    })
+}
+
+/// Captures the current WAL insert LSN and waits until it is durable on disk.
+///
+/// Required so logical decoding with `upto_lsn = F1` can see commits that used
+/// `synchronous_commit = off`.
+pub(super) fn capture_durable_wal_fence() -> Result<crate::async_mirror::apply::WalFenceLsn, String>
+{
+    let insert =
+        pgrx::Spi::get_one::<String>("SELECT pg_catalog.pg_current_wal_insert_lsn()::text")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "pg_current_wal_insert_lsn returned NULL".to_string())?;
+    let fence = koldstore_common::parse_pg_lsn(&insert)?;
+    // Poll flush LSN until the fence is durable (bounded busy-wait).
+    for _ in 0..10_000 {
+        let flush =
+            pgrx::Spi::get_one::<String>("SELECT pg_catalog.pg_current_wal_flush_lsn()::text")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "pg_current_wal_flush_lsn returned NULL".to_string())?;
+        let flush_lsn = koldstore_common::parse_pg_lsn(&flush)?;
+        if flush_lsn >= fence {
+            return Ok(crate::async_mirror::apply::WalFenceLsn::new(fence));
+        }
+        pgrx::Spi::run("SELECT pg_catalog.pg_sleep(0.001)").map_err(|error| error.to_string())?;
+    }
+    Err(format!(
+        "timed out waiting for WAL durability through {insert}"
+    ))
+}
+
 pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -165,7 +236,7 @@ pub(super) fn persist_flush_segments_batch(
     let mut object_etags = Vec::with_capacity(segments.len());
     for segment in segments {
         let row = &segment.catalog_row;
-        let segment_id = pgrx::Uuid::from_bytes(*segment.segment_id.as_bytes());
+        let segment_id = crate::spi::uuid_to_pgrx(segment.segment_id);
         segment_ids.push(segment_id);
         object_paths.push(row.object_path.clone());
         batch_numbers.push(row.batch_number);
@@ -238,7 +309,8 @@ pub(super) fn activate_flush_segments(
         .ok_or_else(|| "manifest generation overflow".to_string())?;
     let segment_ids: Vec<pgrx::Uuid> = pending_segment_ids
         .iter()
-        .map(|id| pgrx::Uuid::from_bytes(*id.as_bytes()))
+        .copied()
+        .map(crate::spi::uuid_to_pgrx)
         .collect();
     let statement = plan_activate_flush_segments().map_err(|error| error.to_string())?;
     let activated = crate::spi::update_one::<i64>(

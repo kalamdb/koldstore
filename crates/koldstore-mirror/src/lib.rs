@@ -8,6 +8,7 @@
 //! `koldstore-common`-only leaf so migrate/merge do not pull cold bookkeeping.
 //! PostgreSQL execution stays in `pg_koldstore`.
 
+pub mod apply_row;
 pub mod batch;
 pub mod columns;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod schema;
 pub mod statement;
 pub mod write;
 
+pub use apply_row::{pg_value_json, pk_identity, primary_key_json};
 pub use batch::{must_flush_before_push, BatchFlushReason, APPLY_BATCH_ROWS};
 pub use columns::MirrorColumn;
 pub use error::{MirrorError, MirrorResult};
