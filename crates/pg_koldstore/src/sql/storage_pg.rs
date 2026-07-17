@@ -77,7 +77,7 @@ fn register_storage_pg_impl(
     let plan = registration
         .register_plan()
         .unwrap_or_else(|error| pgrx::error!("{error}"));
-    let storage_id = pgrx::Uuid::from_bytes(*plan.storage_id.as_bytes());
+    let storage_id = crate::spi::uuid_to_pgrx(plan.storage_id);
 
     let args = [
         DatumWithOid::from(storage_id),

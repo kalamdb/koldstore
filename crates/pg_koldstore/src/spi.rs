@@ -40,6 +40,20 @@ pub fn pg_param_oids(param_types: &[SqlParamType]) -> Vec<pgrx::pg_sys::PgOid> {
     param_types.iter().copied().map(sql_param_pg_oid).collect()
 }
 
+/// Converts a `uuid::Uuid` into a pgrx SPI UUID datum type.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn uuid_to_pgrx(id: uuid::Uuid) -> pgrx::Uuid {
+    pgrx::Uuid::from_bytes(*id.as_bytes())
+}
+
+/// Converts a pgrx SPI UUID into `uuid::Uuid`.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn uuid_from_pgrx(id: pgrx::Uuid) -> uuid::Uuid {
+    uuid::Uuid::from_bytes(*id.as_bytes())
+}
+
 /// Cache key for a backend-local prepared SPI plan.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PreparedPlanKey {

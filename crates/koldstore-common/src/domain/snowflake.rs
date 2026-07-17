@@ -46,6 +46,77 @@ pub fn next_id(worker_id: u16) -> Result<i64, SnowflakeError> {
     compose_id(timestamp, worker_id, sequence)
 }
 
+/// Generates the next Snowflake id that is strictly greater than `floor`.
+///
+/// Used by async flush prune fences so applied mutations of the flushed table
+/// receive `new_seq > max_seq` and survive `seq <= max_seq` cleanup.
+///
+/// # Errors
+///
+/// Returns an error when the worker id is out of range, the clock is unusable,
+/// or no representable id above `floor` exists.
+pub fn next_id_after(worker_id: u16, floor: i64) -> Result<i64, SnowflakeError> {
+    if worker_id > MAX_WORKER_ID {
+        return Err(SnowflakeError::WorkerIdOutOfRange(worker_id));
+    }
+    if floor == i64::MAX {
+        return Err(SnowflakeError::IdOverflow);
+    }
+
+    // Fast path: normal allocation already clears the floor.
+    let candidate = next_id(worker_id)?;
+    if candidate > floor {
+        return Ok(candidate);
+    }
+
+    // Clock/generator is at or behind the prune watermark. Advance the shared
+    // timestamp past the floor's timestamp so subsequent ids sort above it.
+    let floor_u = u64::try_from(floor).unwrap_or(0);
+    let min_timestamp = (floor_u >> TIMESTAMP_SHIFT)
+        .checked_add(1)
+        .ok_or(SnowflakeError::IdOverflow)?;
+    advance_generator_to_timestamp(min_timestamp)?;
+
+    let raised = next_id(worker_id)?;
+    if raised > floor {
+        return Ok(raised);
+    }
+    Err(SnowflakeError::IdOverflow)
+}
+
+/// Raises the shared generator clock to at least `timestamp` (sequence 0).
+fn advance_generator_to_timestamp(timestamp: u64) -> Result<(), SnowflakeError> {
+    let want = pack_timestamp_and_sequence(timestamp, 0);
+    loop {
+        let observed = LAST_TIMESTAMP_AND_SEQUENCE.load(Ordering::Acquire);
+        let (last_timestamp, last_sequence) = unpack_timestamp_and_sequence(observed);
+        if last_timestamp > timestamp
+            || (last_timestamp == timestamp && last_sequence == MAX_SEQUENCE)
+        {
+            // Already past the target; let next_id allocate normally.
+            return Ok(());
+        }
+        let next_state = if timestamp > last_timestamp {
+            want
+        } else if last_sequence < MAX_SEQUENCE {
+            pack_timestamp_and_sequence(last_timestamp, last_sequence + 1)
+        } else {
+            pack_timestamp_and_sequence(
+                last_timestamp
+                    .checked_add(1)
+                    .ok_or(SnowflakeError::IdOverflow)?,
+                0,
+            )
+        };
+        if LAST_TIMESTAMP_AND_SEQUENCE
+            .compare_exchange(observed, next_state, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return Ok(());
+        }
+    }
+}
+
 /// Returns the worker id encoded in a generated id.
 #[must_use]
 pub fn worker_id(id: i64) -> u16 {
@@ -119,5 +190,21 @@ mod tests {
     #[test]
     fn rejects_worker_ids_outside_snowflake_budget() {
         assert_eq!(next_id(1024), Err(SnowflakeError::WorkerIdOutOfRange(1024)));
+    }
+
+    #[test]
+    fn next_id_after_is_strictly_above_floor() {
+        let baseline = next_id(3).unwrap();
+        let above = next_id_after(3, baseline).unwrap();
+        assert!(above > baseline);
+        assert_eq!(worker_id(above), 3);
+
+        let again = next_id_after(3, above).unwrap();
+        assert!(again > above);
+    }
+
+    #[test]
+    fn next_id_after_rejects_max_floor() {
+        assert_eq!(next_id_after(1, i64::MAX), Err(SnowflakeError::IdOverflow));
     }
 }

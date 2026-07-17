@@ -37,7 +37,7 @@ pub(super) fn ensure_flush_job(
     crate::spi::update(
         &insert,
         &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
             DatumWithOid::from(force),
         ],
@@ -56,7 +56,7 @@ pub(super) fn mark_flush_job_running(
     crate::spi::update(
         &statement,
         &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
         ],
     )
@@ -77,7 +77,7 @@ pub(super) fn mark_flush_job_completed(
     crate::spi::update(
         &statement,
         &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
             DatumWithOid::from(rows_flushed),
             DatumWithOid::from(checkpoint_seq),
@@ -99,7 +99,7 @@ pub(super) fn mark_flush_job_failed(
     crate::spi::update(
         &statement,
         &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
             DatumWithOid::from(error_trace),
         ],

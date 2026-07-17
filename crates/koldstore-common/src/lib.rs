@@ -17,9 +17,10 @@ pub mod sql;
 
 // Stable top-level paths used across the workspace.
 pub use config::privileges;
-pub use domain::{filter, pk, row, scope, seq, snowflake, table_kind, table_name};
+pub use domain::{commit_sequence, filter, pk, row, scope, seq, snowflake, table_kind, table_name};
 pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 
+pub use commit_sequence::{CommitSequenceDomain, COMMIT_SEQUENCE_LOCK_NAMESPACE};
 pub use config::{
     flush_enabled_from_options, hot_row_limit_from_options, validate_max_rows_per_file,
     FlushPolicy, ManageTableOptions, MigrationStatus, MirrorCaptureMode, ParquetCompression,
@@ -29,7 +30,7 @@ pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};
 pub use ident::{escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident};
 pub use json::compare_json_values;
-pub use lsn::format_pg_lsn;
+pub use lsn::{format_pg_lsn, parse_pg_lsn, AppliedWalBoundary, WalFenceLsn};
 pub use pg_type_name::canonical_postgres_type_name;
 pub use pk::{
     LogicalPk, PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue,
@@ -48,7 +49,7 @@ pub use session::{
     normalize_user_id, primary_key_default_clause, snowflake_default_expression,
     snowflake_id_call_expression, SessionSqlError, SessionSqlResult, SNOWFLAKE_ID_FUNCTION,
 };
-pub use snowflake::{next_id, worker_id, SnowflakeError, KOLDSTORE_EPOCH_MILLIS};
+pub use snowflake::{next_id, next_id_after, worker_id, SnowflakeError, KOLDSTORE_EPOCH_MILLIS};
 pub use sql::{map_sql_error, SqlAccess, SqlError, SqlParamType, SqlResult, SqlStatement};
 pub use strings::dedupe_nonblank;
 pub use table_kind::TableKind;

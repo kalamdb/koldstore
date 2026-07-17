@@ -176,7 +176,7 @@ fn manage_table_pg_impl(
             &primary_key_shape,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-        return pgrx::Uuid::from_bytes(*job_id.as_bytes());
+        return crate::spi::uuid_to_pgrx(job_id);
     }
 
     let plan = koldstore_migrate::plan_existing_table_migration(
@@ -229,7 +229,7 @@ fn manage_table_pg_impl(
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
-    pgrx::Uuid::from_bytes(*job_id.as_bytes())
+    crate::spi::uuid_to_pgrx(job_id)
 }
 
 #[cfg(feature = "pg")]
@@ -457,7 +457,7 @@ fn execute_schema_registry_insert(
     pgrx::Spi::run_with_args(
         &plan.statement.sql,
         &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*plan.schema_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(plan.schema_id)),
             DatumWithOid::from(pgrx::pg_sys::Oid::from(prepared.table_oid)),
             DatumWithOid::from(i32::try_from(prepared.version).unwrap_or(i32::MAX)),
             DatumWithOid::from(prepared.active),
@@ -471,7 +471,7 @@ fn execute_schema_registry_insert(
             DatumWithOid::from(pgrx::JsonB(prepared.indexed_columns.clone())),
             DatumWithOid::from(pgrx::JsonB(prepared.type_matrix.clone())),
             DatumWithOid::from(pgrx::JsonB(prepared.options.clone())),
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*prepared.storage_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(prepared.storage_id)),
         ],
     )
     .map_err(|error| error.to_string())
@@ -609,11 +609,11 @@ fn insert_completed_empty_migration_job(
     crate::spi::update(
         &statement,
         &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
             DatumWithOid::from(table_name.as_str()),
             DatumWithOid::from(table_type),
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*storage_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(storage_id)),
             DatumWithOid::from(scope_column),
         ],
     )
@@ -630,7 +630,7 @@ fn enqueue_migration_job(
     pgrx::Spi::run_with_args(
         &plan.backfill_job.statement.sql,
         &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*plan.backfill_job.job_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(plan.backfill_job.job_id)),
             DatumWithOid::from(pgrx::pg_sys::Oid::from(plan.backfill_job.table_oid)),
             DatumWithOid::from(pgrx::JsonB(plan.backfill_job.payload.clone())),
         ],
@@ -647,7 +647,7 @@ fn complete_migration_job(job_id: Uuid, table_oid: u32, processed_rows: i64) -> 
     crate::spi::update(
         &statement,
         &[
-            DatumWithOid::from(pgrx::Uuid::from_bytes(*job_id.as_bytes())),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
             DatumWithOid::from(processed_rows),
         ],

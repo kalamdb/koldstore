@@ -9,6 +9,7 @@ use koldstore_storage::{
     open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
     ObjectStoreClient,
 };
+use uuid::Uuid;
 
 use crate::segment_catalog::indexed_column_stats_json;
 use crate::stats::FlushStats;
@@ -34,6 +35,17 @@ pub struct WrittenFlushSegment {
     pub column_stats: serde_json::Value,
     /// Catalog row shape for manifest assembly (single source of truth).
     pub catalog_row: CatalogManifestSegmentRow,
+}
+
+/// Builds the immutable object key for one flush segment write attempt.
+///
+/// Keys include `segment_id` so a retry after a rolled-back flush cannot collide
+/// with an orphaned final object left by the previous attempt at the same
+/// `batch_number`.
+#[must_use]
+pub fn flush_segment_object_path(prefix: &str, batch_number: i32, segment_id: Uuid) -> String {
+    let prefix = prefix.trim_matches('/');
+    format!("{prefix}/batch-{batch_number}-{segment_id}.parquet")
 }
 
 /// Writes one Parquet segment via encode → validate → durable Create publish.
@@ -92,12 +104,15 @@ pub fn write_flush_segment_with_client(
     chunk_stats: &FlushStats,
 ) -> Result<WrittenFlushSegment, String> {
     let prefix = table_object_prefix(namespace, table_name);
-    let object_path = format!("{prefix}/batch-{batch_number}.parquet");
-    let writer_id = uuid::Uuid::new_v4().to_string();
+    // Allocate the segment id before publish so the final key is unique per
+    // write attempt. Retries after abort must not reuse an orphaned object.
+    let segment_id = Uuid::new_v4();
+    let object_path = flush_segment_object_path(&prefix, batch_number, segment_id);
+    let writer_id = Uuid::new_v4().to_string();
     let temp_key = temp_object_key(
         &prefix,
         &writer_id,
-        &unique_temp_file_name(&format!("batch-{batch_number}.parquet")),
+        &unique_temp_file_name(&format!("batch-{batch_number}-{segment_id}.parquet")),
     );
 
     let bytes = &chunk.parquet_bytes;
@@ -130,7 +145,7 @@ pub fn write_flush_segment_with_client(
     };
 
     Ok(WrittenFlushSegment {
-        segment_id: uuid::Uuid::new_v4(),
+        segment_id,
         object_path,
         byte_size,
         checksum: published.checksum,

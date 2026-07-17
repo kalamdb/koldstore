@@ -1,5 +1,6 @@
 //! Flush and cold-publish E2E category.
 
+mod flush_async_prune_race;
 mod flush_complex_and_multi;
 mod flush_concurrent_barrier;
 mod flush_concurrent_load;

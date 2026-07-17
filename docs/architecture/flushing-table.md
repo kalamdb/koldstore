@@ -46,18 +46,29 @@ does not recurse into `KoldMergeScan`.
 
 ## Phase 0 — Async mirror fence
 
-`flush_table` first calls `async_mirror::apply::apply_available`. If the current
-database has no async logical slot, this is a cheap no-op. Otherwise it applies
-all committed async source changes available to the explicit fence before the
+`flush_table` first calls `async_mirror::apply::apply_bounded` (via
+`apply_available`) and retains the last applied source commit end-LSN (`L0`).
+If the current database has no async logical slot, this is a cheap no-op.
+Otherwise it applies all committed async source changes available before the
 flush takes its table lock or resolves mirror statistics.
 
 This makes flush selection a strong consistency boundary for both capture modes:
 strict changes already exist in the mirror, and async changes are caught up
 before selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
 
-**Known gap (async only):** the start fence does not cover commits that land
-*during* Parquet upload before hot/mirror prune. Proposed fix: a short
-writer-blocking prune fence + WAL drain after manifest publish. See
+## Phase 6 — Async prune fence (after manifest publish)
+
+For tables with `mirror_capture_mode = async`, after manifest publish and before
+`prune_flushed_hot_rows`:
+
+1. `LOCK TABLE ONLY … IN SHARE ROW EXCLUSIVE MODE` (local `lock_timeout`)
+2. Capture durable WAL upper bound `F1`
+3. Bounded apply with `upto_lsn = F1`, skip through `L0`, no durable checkpoint
+   acknowledgement, and target-table sequences strictly above `max_seq`
+4. Existing atomic mirror+hot prune
+
+Parquet upload stays concurrent with DML; only this short finalize window blocks
+writers. Strict tables skip the fence. Design notes:
 [async-flush-prune-race](../cases/async-flush-prune-race.md).
 
 ---
@@ -235,7 +246,9 @@ in-file row-group prune already uses the footer. Details:
 
 `write_flush_segment_file` (`segment_write.rs`):
 
-1. Path: `{namespace}/{table}/batch-{n}.parquet`
+1. Path: `{namespace}/{table}/batch-{n}-{segment_id}.parquet`
+   (`segment_id` makes each write attempt unique so a retry after abort cannot
+   collide with an orphaned final object at the same `batch_number`)
 2. Encode in memory via `encode_parquet_segment_bytes` (Arrow `RecordBatch` →
    native Parquet), then `validate_parquet_bytes` (magic + footer open)
 3. Durable publish through `koldstore-storage`:

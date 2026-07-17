@@ -178,13 +178,33 @@ impl PgType {
         )
     }
 
+    /// Maps a supported type to its PostgreSQL type OID.
+    #[must_use]
+    pub const fn type_oid(self) -> u32 {
+        match self {
+            Self::Bool => 16,
+            Self::Int2 => 21,
+            Self::Int4 => 23,
+            Self::Int8 => 20,
+            Self::Float4 => 700,
+            Self::Float8 => 701,
+            Self::Text => 25,
+            Self::Numeric => 1700,
+            Self::Uuid => 2950,
+            Self::Jsonb => 3802,
+            Self::TextArray => 1009,
+            Self::Bytea => 17,
+            Self::Timestamptz => 1184,
+        }
+    }
+
     /// Maps a supported integer type to its PostgreSQL type OID.
     #[must_use]
     pub const fn integer_oid(self) -> Option<u32> {
         match self {
-            Self::Int2 => Some(21),
-            Self::Int4 => Some(23),
-            Self::Int8 => Some(20),
+            Self::Int2 => Some(self.type_oid()),
+            Self::Int4 => Some(self.type_oid()),
+            Self::Int8 => Some(self.type_oid()),
             _ => None,
         }
     }
@@ -307,5 +327,14 @@ mod tests {
                 Some(pg_type)
             );
         }
+    }
+
+    #[test]
+    fn type_oid_matches_known_postgres_oids() {
+        assert_eq!(PgType::Bool.type_oid(), 16);
+        assert_eq!(PgType::Int8.type_oid(), 20);
+        assert_eq!(PgType::Uuid.type_oid(), 2950);
+        assert_eq!(PgType::Timestamptz.type_oid(), 1184);
+        assert_eq!(PgType::Int8.integer_oid(), Some(20));
     }
 }

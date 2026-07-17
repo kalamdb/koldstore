@@ -61,7 +61,7 @@ pub fn storage_id_by_name(name: &str) -> Result<Option<Uuid>, String> {
     let statement = queries::plan_storage_id_by_name().map_err(|error| error.to_string())?;
     let id = spi::select_one::<pgrx::Uuid>(&statement, &[pgrx::datum::DatumWithOid::from(name)])
         .map_err(|error| error.to_string())?;
-    Ok(id.map(|id| Uuid::from_bytes(*id.as_bytes())))
+    Ok(id.map(crate::spi::uuid_from_pgrx))
 }
 
 /// Resolves active schema/storage metadata required by flush.

@@ -44,7 +44,10 @@ pub const MIN_MIN_MAX_ROWS_PER_FILE: i32 = 1;
 pub const MAX_MIN_MAX_ROWS_PER_FILE: i32 = 1_000_000;
 
 /// Default minimum allowed `max_rows_per_file` for managed tables.
-pub const DEFAULT_MIN_MAX_ROWS_PER_FILE_SETTING: i32 = 1_000;
+///
+/// Kept in sync with [`koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE`].
+pub const DEFAULT_MIN_MAX_ROWS_PER_FILE_SETTING: i32 =
+    koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE as i32;
 
 /// Runtime mode for cold reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

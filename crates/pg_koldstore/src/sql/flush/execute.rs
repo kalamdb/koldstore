@@ -25,9 +25,10 @@ use super::jobs::{
 };
 use super::mirror_fetch::fetch_mirror_batch;
 use super::spi::{
-    activate_flush_segments, manifest_from_publishable_cold_segments, manifest_generation,
-    next_flush_batch_number, persist_flush_segment, prune_flushed_hot_rows,
-    publishable_cold_segment_count, resolve_flush_stats,
+    activate_flush_segments, capture_durable_wal_fence, lock_source_table_share_row_exclusive,
+    manifest_from_publishable_cold_segments, manifest_generation, next_flush_batch_number,
+    persist_flush_segment, prune_flushed_hot_rows, publishable_cold_segment_count,
+    resolve_flush_stats,
 };
 
 pub(super) struct FlushPreparedContext {
@@ -322,6 +323,7 @@ pub(super) fn finalize_flush(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
     outcome: &TableFlushBatchOutcome,
+    phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     let client = open_client_from_catalog_fields(
         &ctx.storage.storage_type,
@@ -350,6 +352,7 @@ pub(super) fn finalize_flush(
         &outcome.pending_segment_ids,
     )?;
     crate::failpoints::hit("after_manifest_publish")?;
+    run_async_prune_fence(table_oid, outcome.prune_max_seq, phase0_applied)?;
     crate::failpoints::hit("before_hot_cleanup")?;
     pgrx::log!(
         "koldstore flush: pruning hot/mirror rows through seq={}",
@@ -386,17 +389,60 @@ pub(super) fn finalize_flush(
     Ok(())
 }
 
+/// Phase-6 async prune fence: block source writers, catch mirror up through a
+/// durable WAL upper bound, then allow `prune_flushed_hot_rows` to run safely.
+fn run_async_prune_fence(
+    table_oid: pgrx::pg_sys::Oid,
+    prune_max_seq: i64,
+    phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
+) -> Result<(), String> {
+    use crate::async_mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
+    use koldstore_common::MirrorCaptureMode;
+
+    if super::spi::active_mirror_capture_mode(table_oid)? != MirrorCaptureMode::Async {
+        return Ok(());
+    }
+    if prune_max_seq <= 0 {
+        return Ok(());
+    }
+
+    lock_source_table_share_row_exclusive(table_oid)?;
+    let fence = capture_durable_wal_fence()?;
+    pgrx::log!(
+        "koldstore flush: async prune fence upto_lsn={} skip_through={:?} floor={}",
+        koldstore_common::format_pg_lsn(fence.get()),
+        phase0_applied.map(|lsn| koldstore_common::format_pg_lsn(lsn.get())),
+        prune_max_seq
+    );
+    let outcome = apply_bounded(BoundedApplyRequest {
+        upper_bound: Some(fence),
+        skip_through: phase0_applied,
+        acknowledge_durable_checkpoint: false,
+        target_prune_floor: Some((table_oid, PruneSeqFloor::new(prune_max_seq))),
+    })?;
+    pgrx::log!(
+        "koldstore flush: async prune fence applied row_changes={} last_applied={:?}",
+        outcome.row_changes,
+        outcome
+            .last_applied
+            .map(|lsn| koldstore_common::format_pg_lsn(lsn.get()))
+    );
+    Ok(())
+}
+
 pub(super) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<pgrx::Uuid, String> {
     // Flush selects authoritative latest-state rows, so async capture must be
     // fenced before row selection. Strict databases return immediately because
-    // they have no async slot.
-    crate::async_mirror::apply::apply_available()?;
+    // they have no async slot. Retain L0 for the post-publish prune fence.
+    let phase0 = crate::async_mirror::apply::apply_bounded(
+        crate::async_mirror::apply::BoundedApplyRequest::available(),
+    )?;
     let (job_id, force) = claim_flush_job(table_oid, force)?;
-    let job_uuid = pgrx::Uuid::from_bytes(*job_id.as_bytes());
-    match flush_after_claim(table_oid, force, job_id) {
+    let job_uuid = crate::spi::uuid_to_pgrx(job_id);
+    match flush_after_claim(table_oid, force, job_id, phase0.last_applied) {
         Ok(()) => Ok(job_uuid),
         Err(error) => {
             mark_flush_job_failed(job_id, table_oid, &error)?;
@@ -412,6 +458,7 @@ fn flush_after_claim(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
     job_id: uuid::Uuid,
+    phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     let mut ctx = load_flush_prepared_context(table_oid, force, job_id)?;
     match crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid) {
@@ -421,12 +468,13 @@ fn flush_after_claim(
         Ok(false) => {}
         Err(error) => return Err(error),
     }
-    flush_prepared_table(table_oid, &ctx)
+    flush_prepared_table(table_oid, &ctx, phase0_applied)
 }
 
 fn flush_prepared_table(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
+    phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     let selection = resolve_flush_stats(table_oid, ctx.force)?;
     crate::failpoints::hit("after_select_rows")?;
@@ -444,5 +492,5 @@ fn flush_prepared_table(
         ctx.force
     );
     let outcome = stream_write_flush_batches(table_oid, ctx, &selection)?;
-    finalize_flush(table_oid, ctx, &outcome)
+    finalize_flush(table_oid, ctx, &outcome, phase0_applied)
 }

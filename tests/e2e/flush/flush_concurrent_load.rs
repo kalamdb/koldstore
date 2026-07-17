@@ -87,6 +87,11 @@ async fn flush_while_ten_mixed_workers_write_and_query() -> Result<()> {
 
 fn is_transient_flush_error(error: &anyhow::Error) -> bool {
     let text = format!("{error:#}");
+    // Object-key collisions after a rolled-back publish are a product bug, not a
+    // soft concurrency blip — unique segment paths must make retries safe.
+    if text.contains("object validation failed") {
+        return false;
+    }
     text.contains("deadlock detected")
         || text.contains("selection mismatch")
         || text.contains("could not serialize")
