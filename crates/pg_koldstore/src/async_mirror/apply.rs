@@ -3,7 +3,8 @@
 //! Ordering (idempotent under crash):
 //! 1. Peek available WAL (`pg_logical_slot_peek_binary_changes`)
 //! 2. Write latest-state mirror rows (PK `ON CONFLICT` upsert / keyed update)
-//! 3. Record durable `applied_lsn` in `koldstore.async_mirror_state`
+//! 3. Record durable `applied_lsn` as the exact last decoded source commit
+//!    end-LSN in `koldstore.async_mirror_state` (never the global insert LSN)
 //! 4. On the **next** call, advance the slot to that LSN
 //!
 //! A crash between steps 2 and 4 may re-peek already-applied changes; replay is
@@ -298,17 +299,22 @@ fn acknowledge_committed_apply(slot: &str) -> Result<(), String> {
 }
 
 fn record_applied_lsn(applied_lsn: u64) -> Result<(), String> {
+    // Store the exact last decoded source commit end-LSN. Never advance to
+    // `pg_current_wal_insert_lsn()`: concurrent commits can land after the peek
+    // boundary but before this write, and claiming them applied would let the
+    // next slot advance discard undecoded WAL (including delete tombstones).
+    // Mirror apply WAL is outside the publication, so it does not need covering.
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
     let lsn = format_pg_lsn(applied_lsn);
     pgrx::Spi::run_with_args(
         "INSERT INTO koldstore.async_mirror_state(database_oid, applied_lsn, updated_at) \
-         VALUES (\
-           $1, \
-           GREATEST($2::pg_lsn, pg_catalog.pg_current_wal_insert_lsn()), \
-           pg_catalog.clock_timestamp()\
-         ) \
+         VALUES ($1, $2::pg_lsn, pg_catalog.clock_timestamp()) \
          ON CONFLICT (database_oid) DO UPDATE \
-         SET applied_lsn = EXCLUDED.applied_lsn, updated_at = EXCLUDED.updated_at",
+         SET applied_lsn = GREATEST(\
+               koldstore.async_mirror_state.applied_lsn, \
+               EXCLUDED.applied_lsn\
+             ), \
+             updated_at = EXCLUDED.updated_at",
         &[
             DatumWithOid::from(database_oid),
             DatumWithOid::from(lsn.as_str()),

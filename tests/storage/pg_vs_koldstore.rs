@@ -3,7 +3,7 @@
 //! Schema: [`schema.sql`](schema.sql). Seeds a wide (~50 column) table, measures
 //! DML, then **hot-only PK lookups before flush** (both heaps still hold all
 //! rows — fair merge-scan overhead), flushes older rows to zstd Parquet (timing
-//! + peak cluster RSS), then measures hot+cold PK lookups and compares
+//! and peak cluster RSS), then measures hot+cold PK lookups and compares
 //! PostgreSQL heap/index sizes versus total hot+cold footprint.
 //! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
 
@@ -241,25 +241,25 @@ async fn run_storage_comparison_body(
         let _step = common::log_step_always(format!(
             "storage_cmp: interleaved baseline/managed inserts ({rows} rows each)"
         ));
-        time_interleaved_inserts(&db.client, &baseline, &managed, rows, insert_batch_rows).await?
+        time_interleaved_inserts(&db.client, baseline, managed, rows, insert_batch_rows).await?
     };
-    let insert_catchup = async_catchup(&db.client, &mirror_capture_mode, rows).await?;
+    let insert_catchup = async_catchup(&db.client, mirror_capture_mode, rows).await?;
 
     checkpoint_before_timing(&db.client, "baseline update").await?;
     let baseline_update = {
         let _step = common::log_step_always(format!(
             "storage_cmp: update baseline sample ({dml_sample} rows)"
         ));
-        time_update(&db.client, &baseline, rows - dml_sample + 1, dml_sample).await?
+        time_update(&db.client, baseline, rows - dml_sample + 1, dml_sample).await?
     };
     checkpoint_before_timing(&db.client, "managed update").await?;
     let managed_update = {
         let _step = common::log_step_always(format!(
             "storage_cmp: update managed sample ({dml_sample} rows)"
         ));
-        time_update(&db.client, &managed, rows - dml_sample + 1, dml_sample).await?
+        time_update(&db.client, managed, rows - dml_sample + 1, dml_sample).await?
     };
-    let update_catchup = async_catchup(&db.client, &mirror_capture_mode, dml_sample).await?;
+    let update_catchup = async_catchup(&db.client, mirror_capture_mode, dml_sample).await?;
 
     // Delete from the high end of the seeded range, then re-insert the same
     // keys before flush. Seeding a disjoint range left `dml_sample` tombstones
@@ -270,22 +270,22 @@ async fn run_storage_comparison_body(
     checkpoint_before_timing(&db.client, "baseline delete").await?;
     let baseline_delete = {
         let _step = common::log_step_always("storage_cmp: delete baseline sample");
-        time_delete(&db.client, &baseline, delete_start, delete_end).await?
+        time_delete(&db.client, baseline, delete_start, delete_end).await?
     };
     checkpoint_before_timing(&db.client, "managed delete").await?;
     let managed_delete = {
         let _step = common::log_step_always("storage_cmp: delete managed sample");
-        time_delete(&db.client, &managed, delete_start, delete_end).await?
+        time_delete(&db.client, managed, delete_start, delete_end).await?
     };
-    let delete_catchup = async_catchup(&db.client, &mirror_capture_mode, dml_sample).await?;
+    let delete_catchup = async_catchup(&db.client, mirror_capture_mode, dml_sample).await?;
     {
         let _step = common::log_step_always(format!(
             "storage_cmp: restore delete sample ({dml_sample} rows each side)"
         ));
-        time_insert(&db.client, &baseline, delete_start, dml_sample).await?;
-        time_insert(&db.client, &managed, delete_start, dml_sample).await?;
+        time_insert(&db.client, baseline, delete_start, dml_sample).await?;
+        time_insert(&db.client, managed, delete_start, dml_sample).await?;
     }
-    let restore_catchup = async_catchup(&db.client, &mirror_capture_mode, dml_sample).await?;
+    let restore_catchup = async_catchup(&db.client, mirror_capture_mode, dml_sample).await?;
 
     // Snapshot bloat / autovacuum pressure after DML, before flush reclaims space.
     // Force the stats collector so n_dead_tup reflects this backend's DML.
@@ -293,8 +293,8 @@ async fn run_storage_comparison_body(
         .client
         .execute("SELECT pg_stat_force_next_flush()", &[])
         .await;
-    let baseline_heap = heap_stats(&db.client, &baseline).await?;
-    let managed_heap = heap_stats(&db.client, &managed).await?;
+    let baseline_heap = heap_stats(&db.client, baseline).await?;
+    let managed_heap = heap_stats(&db.client, managed).await?;
 
     // Fair hot-only comparison: measure PK lookups while every row is still in
     // the PostgreSQL heap on both sides (before any flush). Post-flush "hot"
@@ -314,17 +314,17 @@ async fn run_storage_comparison_body(
             plan_pre_flush.contains("Parquet segment: none"),
             "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
         );
-        assert_point_row_matches(&db.client, &baseline, &managed, hot_id).await?;
-        assert_point_row_matches(&db.client, &baseline, &managed, cold_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, hot_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, cold_id).await?;
     }
 
     let baseline_hot = {
         let _step = common::log_step_always("storage_cmp: time baseline hot PK lookups");
-        time_point_queries(&db.client, &baseline, hot_id).await?
+        time_point_queries(&db.client, baseline, hot_id).await?
     };
     let managed_hot = {
         let _step = common::log_step_always("storage_cmp: time managed hot PK lookups");
-        time_point_queries(&db.client, &managed, hot_id).await?
+        time_point_queries(&db.client, managed, hot_id).await?
     };
 
     let flush = {
@@ -332,7 +332,7 @@ async fn run_storage_comparison_body(
             "storage_cmp: flush_table (expect ~{} cold rows)",
             rows.saturating_sub(hot_limit)
         ));
-        flush_table_with_metrics(&db.client, &managed, db.target.port).await?
+        flush_table_with_metrics(&db.client, managed, db.target.port).await?
     };
     anyhow::ensure!(
         flush.rows_flushed > 0,
@@ -345,7 +345,7 @@ async fn run_storage_comparison_body(
         format_bytes(flush.peak_rss_bytes as i64),
     ));
 
-    let status = common::describe_table(&db.client, &managed).await?;
+    let status = common::describe_table(&db.client, managed).await?;
     anyhow::ensure!(
         status.hot_rows > 0,
         "expected hot rows to remain after policy flush, got {status:?}"
@@ -363,17 +363,17 @@ async fn run_storage_comparison_body(
     // maintenance-cost comparison, then REINDEX so size numbers are clean.
     let baseline_vacuum = {
         let _step = common::log_step_always("storage_cmp: VACUUM FULL baseline (~full heap)");
-        time_vacuum_full(&db.client, &baseline).await?
+        time_vacuum_full(&db.client, baseline).await?
     };
     let managed_vacuum = {
         let _step = common::log_step_always("storage_cmp: VACUUM FULL managed (hot heap)");
-        time_vacuum_full(&db.client, &managed).await?
+        time_vacuum_full(&db.client, managed).await?
     };
     {
         let _step = common::log_step_always("storage_cmp: REINDEX + vacuum mirror");
-        reindex_relation(&db.client, &baseline).await?;
-        reindex_relation(&db.client, &managed).await?;
-        if let Some(mirror) = mirror_relation(&managed) {
+        reindex_relation(&db.client, baseline).await?;
+        reindex_relation(&db.client, managed).await?;
+        if let Some(mirror) = mirror_relation(managed) {
             time_vacuum_full(&db.client, &mirror).await?;
             reindex_relation(&db.client, &mirror).await?;
         }
@@ -394,23 +394,23 @@ async fn run_storage_comparison_body(
         );
 
         // Correctness after flush: cold-flushed and still-hot PKs must match baseline.
-        assert_point_row_matches(&db.client, &baseline, &managed, hot_id).await?;
-        assert_point_row_matches(&db.client, &baseline, &managed, cold_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, hot_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, cold_id).await?;
         let mid_cold_id = (hot_limit / 2).max(1);
-        assert_point_row_matches(&db.client, &baseline, &managed, mid_cold_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, mid_cold_id).await?;
     }
 
     let baseline_cold = {
         let _step = common::log_step_always("storage_cmp: time baseline cold-id PK lookups");
-        time_point_queries(&db.client, &baseline, cold_id).await?
+        time_point_queries(&db.client, baseline, cold_id).await?
     };
     let managed_cold = {
         let _step = common::log_step_always("storage_cmp: time managed hot+cold PK lookups");
-        time_point_queries(&db.client, &managed, cold_id).await?
+        time_point_queries(&db.client, managed, cold_id).await?
     };
 
-    let baseline_sizes = relation_sizes(&db.client, &baseline, None).await?;
-    let managed_sizes = relation_sizes(&db.client, &managed, Some(&managed)).await?;
+    let baseline_sizes = relation_sizes(&db.client, baseline, None).await?;
+    let managed_sizes = relation_sizes(&db.client, managed, Some(managed)).await?;
     anyhow::ensure!(
         managed_sizes.mirror_table_bytes > 0,
         "expected change-log mirror heap bytes after flush, got {managed_sizes:?}"
@@ -457,7 +457,7 @@ async fn run_storage_comparison_body(
         flush,
         baseline_metrics,
         managed_metrics,
-        &mirror_capture_mode,
+        mirror_capture_mode,
     )?;
 
     anyhow::ensure!(
