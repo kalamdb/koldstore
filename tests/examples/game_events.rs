@@ -38,7 +38,7 @@ async fn game_events_tournament_spike_parallel_matches_and_anticheat_scan_inner(
         .next()
         .context("no local pg target configured")?;
 
-    let db = support::e2e::TestDb::start(target.clone(), "game_events").await?;
+    let db = support::e2e::TestDb::start(target, "game_events").await?;
     let table_name = "player_events";
     let relation = db.relation(table_name);
     log_scenario_start("game_events", &relation, &db.storage_root, config);
@@ -85,7 +85,7 @@ async fn game_events_tournament_spike_parallel_matches_and_anticheat_scan_inner(
             "seed {} rows across {} games",
             config.rows, config.scopes
         ));
-        seed_tournament_spike_parallel(&target, &relation, &config).await?;
+        seed_tournament_spike_parallel(&db.target, &relation, &config).await?;
         support::wait_for_jobs(&db.client, &relation).await?;
     }
 
@@ -99,7 +99,7 @@ async fn game_events_tournament_spike_parallel_matches_and_anticheat_scan_inner(
     let mut waves = flush_waves(&db.client, &relation, 1, Some(flush("seed"))).await?;
     for wave in 0..2 {
         concurrent_match_bursts(
-            &target,
+            &db.target,
             &relation,
             &config,
             config.rows + 1 + wave as i64 * MIN_FLUSH_ROWS * config.scopes as i64,
@@ -122,7 +122,7 @@ async fn game_events_tournament_spike_parallel_matches_and_anticheat_scan_inner(
     }
     {
         let _step = log_step("concurrent hot UPDATE/DELETE");
-        concurrent_hot_dml(&target, &relation, &config).await?;
+        concurrent_hot_dml(&db.target, &relation, &config).await?;
     }
 
     // Verify multiple games are visible before the overlay path adds another

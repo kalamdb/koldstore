@@ -16,9 +16,10 @@ fn failure_injection_matrix_lists_required_faults() {
         "orphan final object",
         "credential failure",
         "network timeout",
+        "partial multi-segment outage",
     ];
 
-    assert_eq!(faults.len(), 7);
+    assert_eq!(faults.len(), 8);
 }
 
 #[tokio::test]

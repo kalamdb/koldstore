@@ -38,7 +38,7 @@ async fn iot_telemetry_parallel_devices_late_arrivals_and_monthly_report_inner()
         .next()
         .context("no local pg target configured")?;
 
-    let db = support::e2e::TestDb::start(target.clone(), "iot_telemetry").await?;
+    let db = support::e2e::TestDb::start(target, "iot_telemetry").await?;
     let table_name = "telemetry";
     let relation = db.relation(table_name);
     log_scenario_start("iot_telemetry", &relation, &db.storage_root, config);
@@ -84,7 +84,7 @@ async fn iot_telemetry_parallel_devices_late_arrivals_and_monthly_report_inner()
             "seed {} rows across {} tenants",
             config.rows, config.scopes
         ));
-        seed_telemetry_parallel(&target, &relation, &config).await?;
+        seed_telemetry_parallel(&db.target, &relation, &config).await?;
         support::wait_for_jobs(&db.client, &relation).await?;
     }
 
@@ -100,7 +100,7 @@ async fn iot_telemetry_parallel_devices_late_arrivals_and_monthly_report_inner()
     {
         let _step = log_step("device burst + flush waves");
         concurrent_device_bursts(
-            &target,
+            &db.target,
             &relation,
             &config,
             config.rows + 10_000,
@@ -111,7 +111,7 @@ async fn iot_telemetry_parallel_devices_late_arrivals_and_monthly_report_inner()
     }
     {
         let _step = log_step("concurrent hot UPDATE/DELETE");
-        concurrent_hot_dml(&target, &relation, &config).await?;
+        concurrent_hot_dml(&db.target, &relation, &config).await?;
     }
 
     // Verify tenant isolation before the overlay path adds another force flush.

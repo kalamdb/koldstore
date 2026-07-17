@@ -10,3 +10,4 @@ mod memory_leak;
 mod quickstart_matrix;
 mod schema_evolution;
 mod snowflake_concurrency;
+mod tiered_coverage;

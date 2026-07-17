@@ -34,7 +34,7 @@ async fn ai_memory_large_sessions_flush_in_batches_and_audit_cold_history_inner(
         .next()
         .context("no local pg target configured")?;
 
-    let db = support::e2e::TestDb::start(target.clone(), "ai_memory").await?;
+    let db = support::e2e::TestDb::start(target, "ai_memory").await?;
     let table_name = "session_events";
     let relation = db.relation(table_name);
     log_scenario_start("ai_memory", &relation, &db.storage_root, config);
@@ -71,7 +71,7 @@ async fn ai_memory_large_sessions_flush_in_batches_and_audit_cold_history_inner(
             MAX_ROWS_PER_FILE,
         )
         .await?;
-        seed_session_events_parallel(&target, &relation, &config).await?;
+        seed_session_events_parallel(&db.target, &relation, &config).await?;
         support::wait_for_jobs(&db.client, &relation).await?;
     }
 
@@ -79,7 +79,7 @@ async fn ai_memory_large_sessions_flush_in_batches_and_audit_cold_history_inner(
     let mut waves = flush_waves(&db.client, &relation, 1, Some(flush("seed"))).await?;
     for wave in 0..2 {
         let burst = MIN_FLUSH_ROWS + 80;
-        concurrent_session_bursts(&target, &relation, &config, next_id, burst, wave).await?;
+        concurrent_session_bursts(&db.target, &relation, &config, next_id, burst, wave).await?;
         next_id += burst * config.scopes as i64;
         waves.extend(
             flush_waves(
@@ -96,7 +96,7 @@ async fn ai_memory_large_sessions_flush_in_batches_and_audit_cold_history_inner(
     }
     {
         let _step = log_step("concurrent hot UPDATE/DELETE");
-        concurrent_hot_dml(&target, &relation, &config).await?;
+        concurrent_hot_dml(&db.target, &relation, &config).await?;
     }
 
     // Verify multiple workspaces are visible while the table still has a mixed

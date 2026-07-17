@@ -35,7 +35,7 @@ async fn audit_events_immutable_history_hot_recent_and_cold_regulator_export_inn
         .next()
         .context("no local pg target configured")?;
 
-    let db = support::e2e::TestDb::start(target.clone(), "audit_events").await?;
+    let db = support::e2e::TestDb::start(target, "audit_events").await?;
     let table_name = "account_events";
     let relation = db.relation(table_name);
     log_scenario_start("audit_events", &relation, &db.storage_root, config);
@@ -81,7 +81,7 @@ async fn audit_events_immutable_history_hot_recent_and_cold_regulator_export_inn
             "seed {} rows across {} tenants",
             config.rows, config.scopes
         ));
-        seed_audit_events_parallel(&target, &relation, &config).await?;
+        seed_audit_events_parallel(&db.target, &relation, &config).await?;
         support::wait_for_jobs(&db.client, &relation).await?;
     }
 
@@ -89,7 +89,7 @@ async fn audit_events_immutable_history_hot_recent_and_cold_regulator_export_inn
     let mut waves = flush_waves(&db.client, &relation, 1, Some(flush("seed"))).await?;
     for wave in 0..2 {
         let burst = MIN_FLUSH_ROWS + 50;
-        concurrent_audit_bursts(&target, &relation, &config, next_id, burst, wave).await?;
+        concurrent_audit_bursts(&db.target, &relation, &config, next_id, burst, wave).await?;
         next_id += burst * config.scopes as i64;
         waves.extend(
             flush_waves(
@@ -106,7 +106,7 @@ async fn audit_events_immutable_history_hot_recent_and_cold_regulator_export_inn
     }
     {
         let _step = log_step("concurrent hot UPDATE/DELETE");
-        concurrent_hot_dml(&target, &relation, &config).await?;
+        concurrent_hot_dml(&db.target, &relation, &config).await?;
     }
 
     // Verify tenant isolation before the overlay path adds another force flush.
