@@ -6,7 +6,7 @@
 //! - `<name>` or `error:<name>` — abort with an error at that phase
 //! - `wait:<name>` — block on the advisory barrier lock until another session unlocks
 //!
-//! Failpoint names include the twelve flush crash points used by E2E recovery
+//! Failpoint names include the flush crash points used by E2E recovery
 //! tests plus `async_mirror_apply` for async WAL applier crash injection.
 
 /// Advisory lock key shared with E2E isolation/crash harnesses (`"KOLD"`).
@@ -21,6 +21,7 @@ pub const FAILPOINT_NAMES: &[&str] = &[
     "after_temp_object",
     "after_checksum_metadata",
     "before_manifest_publish",
+    "before_activate",
     "after_manifest_publish",
     "before_hot_cleanup",
     "during_hot_cleanup",

@@ -7,7 +7,7 @@ use koldstore_manifest::{table_object_prefix, CatalogManifestSegmentRow};
 use koldstore_parquet::validate_parquet_bytes;
 use koldstore_storage::{
     open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
-    ObjectStoreClient, StorageClient,
+    ObjectStoreClient,
 };
 
 use crate::segment_catalog::indexed_column_stats_json;
@@ -15,6 +15,9 @@ use crate::stats::FlushStats;
 use crate::write::FlushWriteChunk;
 
 /// One cold segment written to the object-store mount.
+///
+/// Inserted into `koldstore.cold_segments` as `pending` until flush activate
+/// CAS makes it `active`. Checksum/etag come from the single publish pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WrittenFlushSegment {
     /// New segment id for catalog inserts.
@@ -23,6 +26,10 @@ pub struct WrittenFlushSegment {
     pub object_path: String,
     /// Final on-disk byte size.
     pub byte_size: i64,
+    /// Sha256 hex of the published Parquet bytes.
+    pub checksum: String,
+    /// Optional object-store etag from publish.
+    pub object_etag: Option<String>,
     /// Column stats JSON stored in `koldstore.cold_segments`.
     pub column_stats: serde_json::Value,
     /// Catalog row shape for manifest assembly (single source of truth).
@@ -32,8 +39,8 @@ pub struct WrittenFlushSegment {
 /// Writes one Parquet segment via encode → validate → durable Create publish.
 ///
 /// Final keys are never truncated in place. Crash before publish leaves at most
-/// a temp object under `{prefix}/.tmp/…`; crash after publish but before catalog
-/// commit leaves an unreferenced final that recovery can quarantine.
+/// a temp object under `{prefix}/.tmp/…`; crash after publish but before activate
+/// leaves a `pending` catalog row (or unreferenced final) that recovery can expire.
 ///
 /// # Errors
 ///
@@ -103,19 +110,9 @@ pub fn write_flush_segment_with_client(
         ));
     }
 
+    // Publish verifies byte identity and returns checksum from this same buffer.
     let published = publish_immutable_object(client, &temp_key, &object_path, bytes)
         .map_err(|error| error.to_string())?;
-    // Defense in depth: re-fetch final and confirm it is still a readable Parquet file.
-    let final_bytes = client
-        .get(&published.final_key)
-        .map_err(|error| error.to_string())?;
-    if final_bytes.as_slice() != bytes.as_slice() {
-        return Err(format!(
-            "published object `{}` content diverged from encoded payload",
-            published.final_key
-        ));
-    }
-    validate_parquet_bytes(&final_bytes)?;
 
     let column_stats = indexed_column_stats_json(&chunk.indexed_bounds, chunk_stats);
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
@@ -136,6 +133,8 @@ pub fn write_flush_segment_with_client(
         segment_id: uuid::Uuid::new_v4(),
         object_path,
         byte_size,
+        checksum: published.checksum,
+        object_etag: published.etag,
         column_stats,
         catalog_row,
     })

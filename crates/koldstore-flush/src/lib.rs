@@ -28,7 +28,7 @@ pub use koldstore_jobs::{JobId, JobStatus, JobType, LeaseEpoch, StaleLeaseAction
 pub use ops::*;
 pub use policy::policy_flush_row_count;
 pub use segment_catalog::{
-    indexed_column_stats_json, plan_flush_segments_batch_insert, plan_manifest_row_upsert,
+    indexed_column_stats_json, plan_activate_flush_segments, plan_flush_segments_batch_insert,
     SegmentCatalogError,
 };
 pub use segment_write::{

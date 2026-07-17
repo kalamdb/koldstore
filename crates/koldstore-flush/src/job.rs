@@ -680,10 +680,12 @@ pub struct ColdSegmentCatalogInsert {
     pub schema_version: u32,
     /// Segment column stats.
     pub column_stats: BTreeMap<String, ColumnStats>,
-    /// Active only after manifest commit.
+    /// Insert as pending until activate CAS (query-visible only when active).
     pub status: &'static str,
-    /// Manifest identity that published this segment.
-    pub manifest_etag: String,
+    /// Sha256 hex of the published object (empty in planning-only helpers).
+    pub checksum: String,
+    /// Optional object-store etag from publish.
+    pub object_etag: String,
 }
 
 /// Planned `koldstore.cold_pk_hints` catalog update.
@@ -730,12 +732,16 @@ impl FlushFailurePlan {
 }
 
 /// Plans `koldstore.cold_segments` insertion from published footer metadata.
+///
+/// Planning helper only — live flush uses [`plan_flush_segments_batch_insert`].
+/// Status is `pending` until activate CAS.
 pub fn plan_cold_segment_insert(
     table_oid: u32,
     scope_key: Option<ScopeKey>,
     object_path: impl Into<String>,
     metadata: SegmentFooterMetadata,
-    manifest_etag: impl Into<String>,
+    checksum: impl Into<String>,
+    object_etag: impl Into<String>,
 ) -> Result<ColdSegmentCatalogInsert> {
     Ok(ColdSegmentCatalogInsert {
         table_oid,
@@ -749,8 +755,9 @@ pub fn plan_cold_segment_insert(
         byte_size: metadata.byte_size,
         schema_version: metadata.schema_version,
         column_stats: metadata.column_stats,
-        status: "active",
-        manifest_etag: manifest_etag.into(),
+        status: "pending",
+        checksum: checksum.into(),
+        object_etag: object_etag.into(),
     })
 }
 

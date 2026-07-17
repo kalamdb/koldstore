@@ -75,13 +75,17 @@ pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Resul
     // further ensure calls are no-ops until the worker exits. The worker may
     // still be connecting until the registering transaction commits, so an
     // open XID means "not visible yet" rather than "dead".
+    //
+    // Check for an assigned XID *before* any SPI: `worker_running` uses SPI and
+    // would assign an XID, which falsely trips the in-xact guard and prevents
+    // re-registration after a terminated NEVER_RESTART applier.
     if WORKER_ENSURED.load(Ordering::Relaxed) {
-        if worker_running(&worker_type)? {
-            return Ok(false);
-        }
         let in_xact = unsafe { pgrx::pg_sys::GetCurrentTransactionIdIfAny() }
             != pgrx::pg_sys::InvalidTransactionId;
         if in_xact {
+            return Ok(false);
+        }
+        if worker_running(&worker_type)? {
             return Ok(false);
         }
         WORKER_ENSURED.store(false, Ordering::Relaxed);

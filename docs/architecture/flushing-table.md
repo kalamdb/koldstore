@@ -30,10 +30,10 @@ flowchart TD
   G -->|yes| H["mark_completed(0)"]
   G -->|no| I["stream_write_flush_batches"]
   I --> J["stream_flush_chunks\nSPI fetch → Arrow → Parquet"]
-  J --> K["persist_flush_segment\n(per Parquet file + segment stats)"]
+  J --> K["persist pending segment\n(checksum + etag)"]
   K --> L["manifest reconcile if needed"]
-  L --> M["write manifest object"]
-  M --> N["upsert manifest catalog row"]
+  L --> M["write derived manifest object"]
+  M --> N["CAS generation + activate pending"]
   N --> O["prune_flushed_hot_rows\nseq-range DELETE"]
   O --> P["apply_flush_row_count_deltas"]
   P --> Q["mark job completed"]
@@ -265,26 +265,28 @@ Manifest finalize uses `write_manifest_with_client` and the same atomic put path
 
 ---
 
-## Phase 5 — Catalog insert (per segment)
+## Phase 5 — Catalog insert as `pending` (per segment)
 
 During streaming, each Parquet file is cataloged immediately via
-`persist_flush_segment`:
+`persist_flush_segment` with **`status = 'pending'`** (not query-visible):
 
 1. One SPI insert for `koldstore.cold_segments` + `cold_segment_stats`
-   (native arrays / `unnest`)
+   (native arrays / `unnest`), including `checksum` (sha256 hex) and
+   `object_etag` from the single publish pass
 2. No per-PK catalog rows — prune with `cold_segment_stats` / Parquet
    row-group stats and bloom filters so catalog size stays O(segments ×
    indexed columns)
 
 `column_stats` crosses SPI as `pgrx::JsonB` per segment (already
-`serde_json::Value` in Rust).
+`serde_json::Value` in Rust). Failpoints: `after_checksum_metadata` then
+`after_pending_segment` after the pending insert.
 
 ---
 
-## Phase 6 — Seq-range cleanup (after manifest publish)
+## Phase 6 — Seq-range cleanup (after activate)
 
 `prune_flushed_hot_rows` (`spi.rs`) — **production path uses seq-range DELETE,
-not JSON cleanup**.
+not JSON cleanup**. Runs only after pending segments are activated.
 
 `plan_seq_range_cleanup` (`cleanup.rs`):
 
@@ -341,29 +343,33 @@ Four native `bigint` SPI parameters — no JSON.
 
 ## Phase 8 — Manifest reconciliation
 
-If in-memory `manifest.segments.len() != active_cold_segment_count`:
+If in-memory `manifest.segments.len() != publishable_cold_segment_count`
+(`pending` + `active`):
 
-- Rebuild from catalog: `plan_active_cold_segments_for_manifest_json`
+- Rebuild from catalog: `plan_publishable_cold_segments_for_manifest_json`
 - SQL → `jsonb_agg` text → `Vec<CatalogManifestSegmentRow>` → `Manifest`
 
-Guards against drift between streamed manifest and catalog truth.
+Guards against drift between streamed manifest and catalog truth before activate.
 
 ---
 
-## Phase 9 — Finalize
+## Phase 9 — Finalize (derived manifest + CAS activate)
 
 | Step | Serde |
 |------|-------|
-| Write `manifest.json` | `serde_json::to_vec(&Manifest)` to object-store path |
-| Upsert `koldstore.manifest` | native SPI: path, generation UUID, segment_count, max_seq |
+| Write `manifest.json` | `serde_json::to_vec(&Manifest)` to object-store path (derived export) |
+| CAS activate | `plan_activate_flush_segments`: bump `manifest.generation` bigint where expected matches; set pending → `active` for this flush’s segment ids |
 | Complete job | native SPI bigints |
 | Invalidate cache | `catalog::cache::invalidate_table` |
 
-The durable ordering is: publish final segments → insert segment catalog rows →
-write manifest object → upsert manifest row → prune mirror/hot rows → apply row
-count deltas → mark the job complete. Cleanup never runs before the manifest
-visibility boundary succeeds, so a manifest write failure leaves hot data
-authoritative and retryable.
+The durable ordering is: publish final segments → insert **pending** catalog rows
+→ write derived manifest object → **CAS generation + activate** → prune
+mirror/hot rows → apply row count deltas → mark the job complete. Cleanup never
+runs before activate succeeds, so a CAS/manifest failure leaves hot data
+authoritative and retryable. Pending segments are invisible to merge scan
+(`status = 'active'` only).
+
+See [ADR-004](../decisions/004-segment-publication-protocol.md).
 
 ### `manifest.json` shape (`koldstore-manifest`)
 
@@ -373,7 +379,7 @@ authoritative and retryable.
 - `column_stats`: `BTreeMap<String, {min, max: serde_json::Value}>`
 - Watermarks: `max_seq`, `max_commit_seq`
 
-After finalize, `sync_state` becomes `in_sync` (via upsert SQL).
+After finalize, `sync_state` becomes `in_sync` and `generation` is monotonic.
 
 ---
 

@@ -53,15 +53,17 @@ fn flush_to_cold_plan_writes_parquet_manifest_and_segments() {
         Some(ScopeKey::new("tenant-a").unwrap()),
         "app/items/batch-0.parquet",
         footer,
-        "manifest-etag-1",
+        "abc123checksum",
+        "object-etag-1",
     )
     .unwrap();
 
     assert_eq!(batch.live_rows, 2);
     assert_eq!(batch.tombstones_retained, 1);
     assert_eq!(segment.object_path, "app/items/batch-0.parquet");
-    assert_eq!(segment.status, "active");
-    assert_eq!(segment.manifest_etag, "manifest-etag-1");
+    assert_eq!(segment.status, "pending");
+    assert_eq!(segment.checksum, "abc123checksum");
+    assert_eq!(segment.object_etag, "object-etag-1");
     assert_eq!(segment.scope_key.as_ref().unwrap().as_str(), "tenant-a");
     assert_eq!(segment.min_seq.get(), 1);
     assert_eq!(segment.max_commit_seq.get(), 12);
@@ -78,6 +80,36 @@ async fn flush_to_cold_writes_catalog_manifest_and_parquet_on_pgrx() -> Result<(
         assert_eq!(flushed, 64);
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
         common::assert_no_active_jobs(&db.client, &table.relation).await?;
+
+        let publish_meta = db
+            .client
+            .query_one(
+                r#"
+                SELECT m.generation,
+                       count(*) FILTER (WHERE cs.status = 'active')::bigint,
+                       count(*) FILTER (WHERE cs.status = 'pending')::bigint,
+                       bool_and(cs.checksum IS NOT NULL AND length(cs.checksum) = 64)
+                FROM koldstore.manifest m
+                JOIN koldstore.cold_segments cs
+                  ON cs.table_oid = m.table_oid
+                 AND cs.scope_key = m.scope_key
+                WHERE m.table_oid = $1::text::regclass::oid
+                GROUP BY m.generation
+                "#,
+                &[&table.relation],
+            )
+            .await?;
+        let generation: i64 = publish_meta.get(0);
+        let active: i64 = publish_meta.get(1);
+        let pending: i64 = publish_meta.get(2);
+        let checksums_ok: bool = publish_meta.get(3);
+        assert!(
+            generation >= 1,
+            "generation must be CAS-bumped, got {generation}"
+        );
+        assert!(active > 0);
+        assert_eq!(pending, 0, "no pending segments after successful flush");
+        assert!(checksums_ok, "active segments must store sha256 checksum");
         common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 64).await?;
 
         let artifact = db

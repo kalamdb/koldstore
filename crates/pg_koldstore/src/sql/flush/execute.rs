@@ -25,8 +25,9 @@ use super::jobs::{
 };
 use super::mirror_fetch::fetch_mirror_batch;
 use super::spi::{
-    active_cold_segment_count, manifest_from_active_cold_segments, next_flush_batch_number,
-    persist_flush_segment, prune_flushed_hot_rows, resolve_flush_stats, upsert_manifest_row,
+    activate_flush_segments, manifest_from_publishable_cold_segments, manifest_generation,
+    next_flush_batch_number, persist_flush_segment, prune_flushed_hot_rows,
+    publishable_cold_segment_count, resolve_flush_stats,
 };
 
 pub(super) struct FlushPreparedContext {
@@ -184,7 +185,7 @@ pub(super) fn stream_write_flush_batches(
         mirror_ops: selection.mirror_ops.clone(),
     };
     let catalog_columns = ctx.catalog_columns.clone();
-    crate::failpoints::hit("after_pending_segment")?;
+    // Failpoint after pending catalog inserts lives in write_streamed_chunk.
 
     let stream_outcome = crate::merge_scan::pg::with_custom_scan_disabled(|| {
         stream_flush_chunks(
@@ -209,6 +210,10 @@ pub(super) fn stream_write_flush_batches(
     })?;
 
     validate_flush_row_selection(stats.row_count, stream_outcome.rows_written)?;
+    let pending_segment_ids: Vec<uuid::Uuid> = written_segments
+        .iter()
+        .map(|written| written.segment_id)
+        .collect();
     let pending_manifest_segments = written_segments
         .iter()
         .map(|written| {
@@ -223,12 +228,10 @@ pub(super) fn stream_write_flush_batches(
         .collect::<Result<Vec<_>, _>>()?;
     let _ = manifest.append_segment_batch(pending_manifest_segments);
 
-    // Segments + PK hints are cataloged per Parquet file during streaming so
-    // peak hint memory stays near one segment instead of the full flush.
-
-    let catalog_segments = active_cold_segment_count(table_oid)?;
+    // Reconcile derived manifest against pending+active catalog truth when counts drift.
+    let catalog_segments = publishable_cold_segment_count(table_oid)?;
     if manifest.segments.len() as i64 != catalog_segments {
-        manifest = manifest_from_active_cold_segments(
+        manifest = manifest_from_publishable_cold_segments(
             table_oid,
             &ctx.relation,
             &ctx.snapshot,
@@ -245,6 +248,7 @@ pub(super) fn stream_write_flush_batches(
         manifest,
         manifest_path,
         absolute_manifest_path,
+        pending_segment_ids,
     })
 }
 
@@ -277,6 +281,7 @@ fn write_streamed_chunk(
     crate::failpoints::hit("after_temp_object")?;
     crate::failpoints::hit("after_checksum_metadata")?;
     persist_flush_segment(table_oid, &written)?;
+    crate::failpoints::hit("after_pending_segment")?;
     *total_rows_flushed = total_rows_flushed.saturating_add(chunk_stats.row_count);
     *last_max_seq = chunk_stats.max_seq;
     *last_max_commit_seq = chunk_stats.max_commit_seq;
@@ -333,12 +338,16 @@ pub(super) fn finalize_flush(
         outcome.total_rows_flushed
     );
     write_manifest_with_client(&client, &outcome.manifest_path, &outcome.manifest)?;
-    upsert_manifest_row(
+    crate::failpoints::hit("before_activate")?;
+    let expected_generation = manifest_generation(table_oid)?;
+    let _new_generation = activate_flush_segments(
         table_oid,
+        expected_generation,
         &outcome.manifest_path,
         outcome.manifest.segments.len() as i32,
         outcome.manifest.max_seq,
         outcome.manifest.max_commit_seq,
+        &outcome.pending_segment_ids,
     )?;
     crate::failpoints::hit("after_manifest_publish")?;
     crate::failpoints::hit("before_hot_cleanup")?;

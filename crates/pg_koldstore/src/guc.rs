@@ -31,6 +31,9 @@ static MIN_MAX_ROWS_PER_FILE: GucSetting<i32> =
     GucSetting::<i32>::new(settings::default_min_max_rows_per_file());
 #[cfg(feature = "pg")]
 static FAILPOINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
+#[cfg(feature = "pg")]
+static PENDING_SEGMENT_TTL_SECONDS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_PENDING_SEGMENT_TTL_SECONDS);
 
 /// Defines pg-koldstore configuration variables.
 #[cfg(feature = "pg")]
@@ -123,6 +126,16 @@ pub fn define_gucs() {
         GucContext::Userset,
         flags,
     );
+    GucRegistry::define_int_guc(
+        c"koldstore.pending_segment_ttl_seconds",
+        c"TTL for pending cold segments before recovery expiry.",
+        c"recover_segments quarantines object-store blobs and deletes catalog rows for pending segments older than this many seconds.",
+        &PENDING_SEGMENT_TTL_SECONDS,
+        settings::MIN_PENDING_SEGMENT_TTL_SECONDS,
+        settings::MAX_PENDING_SEGMENT_TTL_SECONDS,
+        GucContext::Userset,
+        flags,
+    );
 }
 
 /// No-op placeholder for non-PostgreSQL tests.
@@ -198,6 +211,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::FAILPOINT_GUC,
             internal: false,
             default_value: settings::DEFAULT_FAILPOINT,
+        },
+        GucDefinition {
+            name: settings::PENDING_SEGMENT_TTL_SECONDS_GUC,
+            internal: false,
+            default_value: "3600",
         },
     ]
 }
@@ -314,5 +332,23 @@ pub fn failpoint_value() -> String {
     #[cfg(not(feature = "pg"))]
     {
         String::new()
+    }
+}
+
+/// TTL in seconds for pending cold segments before recover_segments expires them.
+#[must_use]
+pub fn pending_segment_ttl_seconds() -> i64 {
+    #[cfg(feature = "pg")]
+    {
+        i64::from(
+            PENDING_SEGMENT_TTL_SECONDS
+                .get()
+                .max(settings::MIN_PENDING_SEGMENT_TTL_SECONDS),
+        )
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        i64::from(settings::DEFAULT_PENDING_SEGMENT_TTL_SECONDS)
     }
 }

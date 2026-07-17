@@ -29,6 +29,15 @@ pub const FAILPOINT_GUC: &str = "koldstore.failpoint";
 /// Default failpoint value (disabled).
 pub const DEFAULT_FAILPOINT: &str = "";
 
+/// TTL for `pending` cold segments before recover_segments expires them.
+pub const PENDING_SEGMENT_TTL_SECONDS_GUC: &str = "koldstore.pending_segment_ttl_seconds";
+/// Default pending-segment TTL (1 hour).
+pub const DEFAULT_PENDING_SEGMENT_TTL_SECONDS: i32 = 3600;
+/// Minimum pending-segment TTL (allow short values in tests).
+pub const MIN_PENDING_SEGMENT_TTL_SECONDS: i32 = 1;
+/// Maximum pending-segment TTL (30 days).
+pub const MAX_PENDING_SEGMENT_TTL_SECONDS: i32 = 30 * 24 * 3600;
+
 /// Minimum accepted integer setting value for `min_max_rows_per_file`.
 pub const MIN_MIN_MAX_ROWS_PER_FILE: i32 = 1;
 /// Conservative hard cap for `min_max_rows_per_file`.

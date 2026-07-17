@@ -6,6 +6,8 @@ use anyhow::{bail, Context, Result};
 /// Default failpoints exercised in CI smoke; full matrix via env.
 const DEFAULT_FAILPOINTS: &[&str] = &[
     "after_select_rows",
+    "after_pending_segment",
+    "before_activate",
     "before_manifest_publish",
     "after_cleanup_before_job_complete",
 ];

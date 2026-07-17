@@ -73,8 +73,13 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
 
     assert_eq!(written.object_path, "app/items/batch-0.parquet");
     assert!(written.byte_size > 0);
+    assert_eq!(written.checksum.len(), 64);
     let bytes = client.get(&written.object_path).unwrap();
     assert_eq!(bytes.len() as i64, written.byte_size);
+    assert_eq!(
+        written.checksum,
+        koldstore_storage::content_checksum_sha256_hex(&bytes)
+    );
     koldstore_parquet::validate_parquet_bytes(&bytes).unwrap();
 
     let written2 = write_flush_segment_with_client(

@@ -58,6 +58,9 @@ fn enqueue_flush_job_pg_impl(table_oid: pgrx::pg_sys::Oid, force: bool) -> Resul
 
 /// Discovers and recovers orphaned segment objects through the SQL API.
 ///
+/// Also expires stale `pending` catalog rows older than
+/// `koldstore.pending_segment_ttl_seconds` (quarantine object + delete row).
+///
 /// SQL contract:
 /// `koldstore.recover_segments(table_name regclass, dry_run boolean default false)`.
 #[cfg(feature = "pg")]
@@ -75,7 +78,8 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
     use std::collections::HashSet;
 
     use koldstore_flush::recovery::{
-        apply_recovery_plan, discover_orphan_objects, plan_recovery_actions,
+        apply_recovery_plan, discover_orphan_objects, plan_recovery_actions, ObjectPath,
+        RecoveryAction, RecoveryStep,
     };
     use koldstore_manifest::{
         relative_manifest_path, table_object_prefix, try_load_manifest_with_client,
@@ -103,11 +107,9 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
                 .map(|segment| format!("{prefix}/{}", segment.path.trim_start_matches('/'))),
         );
     }
-    // Merge scan reads catalog `cold_segments`, not the object-store manifest.
-    // Crash before publish can leave active catalog rows whose Parquet exists on
-    // disk but is absent from manifest.json — those must not be quarantined.
+    // Include pending + active so in-flight uploads are not quarantined early.
     let catalog_segments =
-        koldstore_catalog::queries::plan_active_cold_segments_for_manifest_json()
+        koldstore_catalog::queries::plan_publishable_cold_segments_for_manifest_json()
             .map_err(|error| error.to_string())?;
     let catalog_json =
         crate::spi::select_one::<String>(&catalog_segments, &[DatumWithOid::from(table_oid)])
@@ -116,11 +118,65 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
     let catalog_rows: Vec<CatalogManifestSegmentRow> =
         serde_json::from_str(&catalog_json).map_err(|error| error.to_string())?;
     referenced.extend(catalog_rows.into_iter().map(|row| row.object_path));
+
+    let ttl_seconds = crate::guc::pending_segment_ttl_seconds();
+    let expired_plan = koldstore_catalog::queries::plan_expired_pending_segment_paths()
+        .map_err(|error| error.to_string())?;
+    let expired_json = crate::spi::select_one::<String>(
+        &expired_plan,
+        &[
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(ttl_seconds),
+        ],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or_else(|| "[]".to_string());
+    let expired_paths: Vec<String> =
+        serde_json::from_str(&expired_json).map_err(|error| error.to_string())?;
+
+    // Expired pending paths are removed from the referenced set so LIST recovery
+    // can quarantine them; catalog rows are deleted after object actions.
+    for path in &expired_paths {
+        referenced.remove(path);
+    }
+
     let objects = discover_orphan_objects(&client, &prefix, &referenced)?;
-    let recovery = plan_recovery_actions(objects);
+    let mut recovery = plan_recovery_actions(objects);
+
+    // Explicitly plan quarantine for expired pending objects even if LIST missed them.
+    for path in &expired_paths {
+        if recovery
+            .actions
+            .iter()
+            .any(|step| step.path.as_str() == path.as_str())
+        {
+            continue;
+        }
+        let Ok(object_path) = ObjectPath::parse(path) else {
+            continue;
+        };
+        recovery.actions.push(RecoveryStep {
+            path: object_path,
+            manifest_referenced: false,
+            action: RecoveryAction::QuarantineFinal,
+        });
+    }
+
     let count = i64::try_from(recovery.actions.len()).map_err(|error| error.to_string())?;
     if !dry_run {
         apply_recovery_plan(&client, &recovery)?;
+        if !expired_paths.is_empty() {
+            let delete_plan = koldstore_catalog::queries::plan_delete_expired_pending_segments()
+                .map_err(|error| error.to_string())?;
+            crate::spi::update(
+                &delete_plan,
+                &[
+                    DatumWithOid::from(table_oid),
+                    DatumWithOid::from(ttl_seconds),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+        }
     }
     Ok(count)
 }

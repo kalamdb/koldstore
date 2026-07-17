@@ -54,6 +54,8 @@ pub struct TableFlushBatchOutcome {
     pub manifest_path: String,
     /// Absolute manifest path on local/object-store mount.
     pub absolute_manifest_path: PathBuf,
+    /// Segment ids inserted as `pending` this flush (activated at finalize).
+    pub pending_segment_ids: Vec<uuid::Uuid>,
 }
 
 /// Resolves the configured max rows per Parquet file from flush policy.

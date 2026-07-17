@@ -22,9 +22,9 @@ pub use client::{
 pub use object::StorageObject;
 pub use path_template::PathTemplate;
 pub use publish::{
-    backend_safe_publish_actions, publish_immutable_object, publish_mutable_object,
-    temp_object_key, unique_temp_file_name, validate_object_size, PublishAction, PublishedObject,
-    StorageObjectMeta,
+    backend_safe_publish_actions, content_checksum_sha256_hex, publish_immutable_object,
+    publish_mutable_object, temp_object_key, unique_temp_file_name, validate_object_size,
+    PublishAction, PublishedObject, StorageObjectMeta,
 };
 pub use registration::{
     alter_storage_credentials_plan, alter_storage_location_plan, AlterStorageCredentialsPlan,
