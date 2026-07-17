@@ -6,8 +6,6 @@ use std::sync::{
 };
 
 use koldstore_common::{CommitSeq, Result, ScopeKey};
-#[cfg(feature = "pg")]
-use koldstore_common::{Diagnostic, KoldstoreError};
 
 static NEXT_COMMIT_SEQ: AtomicI64 = AtomicI64::new(1);
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -156,45 +154,6 @@ impl CommitSequenceAllocator {
             .lock()
             .map(|domain| domain.clone())
             .unwrap_or_default()
-    }
-}
-
-/// Allocates a commit sequence under a PostgreSQL transaction-scoped advisory lock.
-///
-/// # Errors
-///
-/// Returns an error when PostgreSQL SPI cannot acquire the lock or sequence.
-#[cfg(feature = "pg")]
-pub fn allocate_for_current_transaction(
-    domain: &CommitSequenceDomain,
-) -> Result<CommitSequenceAllocation> {
-    let lock_key = domain.advisory_lock_key();
-    let lock_sql = format!("SELECT pg_advisory_xact_lock({lock_key})");
-    pgrx::Spi::run(&lock_sql).map_err(|error| catalog_error("commit_lock_failed", error))?;
-
-    let commit_seq = pgrx::Spi::get_one::<i64>(
-        "SELECT nextval('koldstore.global_commit_seq'::regclass)::bigint",
-    )
-    .map_err(|error| catalog_error("commit_seq_failed", error))?
-    .ok_or_else(|| KoldstoreError::CatalogValidation {
-        diagnostic: Diagnostic::new(
-            "commit_seq_missing",
-            "global commit sequence returned no value",
-        ),
-    })
-    .and_then(CommitSeq::new)?;
-
-    Ok(CommitSequenceAllocation {
-        commit_seq,
-        lock_key,
-        domain_name: domain.name().to_string(),
-    })
-}
-
-#[cfg(feature = "pg")]
-fn catalog_error(code: &'static str, error: impl std::fmt::Display) -> KoldstoreError {
-    KoldstoreError::CatalogValidation {
-        diagnostic: Diagnostic::new(code, error.to_string()),
     }
 }
 

@@ -11,11 +11,11 @@ chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros", "process"] }
 tokio-postgres.workspace = true
 
 [dev-dependencies]
-criterion = { version = "0.7", features = ["html_reports"] }
+criterion = "0.7"
 koldstore-catalog.workspace = true
 koldstore-common.workspace = true
 koldstore-manifest.workspace = true

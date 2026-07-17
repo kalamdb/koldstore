@@ -99,6 +99,9 @@ Every SQL-callable function the extension installs today:
 | `koldstore.alter_storage_location(...)` | `uuid` | Storage backend id |
 | `koldstore.manage_table(...)` | `uuid` | Migration job id (`koldstore.jobs.id`) |
 | `koldstore.unmanage_table(...)` | `bigint` | Count of deactivated `koldstore.schemas` rows |
+| `koldstore.wait_for_async_mirror()` | `bigint` | Async source row changes applied by this fence |
+| `koldstore.async_mirror_slot_name()` | `text` | Deterministic logical-slot name for the current database |
+| `koldstore.disable_async_mirror()` | `boolean` | Whether async publication or slot infrastructure was removed |
 | `koldstore.enqueue_flush_job(...)` | `bigint` | `1` if a job was inserted, else `0` |
 | `koldstore.flush_table(...)` | `uuid` | Flush job id |
 | `koldstore.describe_table(...)` | `jsonb` | Table status object (see below) |
@@ -176,7 +179,8 @@ SELECT koldstore.manage_table(
   min_flush_rows    => 1000,
   max_rows_per_file => 1000,
   target_file_size_mb => 256,
-  migration_order_by  => 'created_at'
+  migration_order_by  => 'created_at',
+  mirror_capture_mode => 'strict'
 );
 ```
 
@@ -198,6 +202,7 @@ also available.
 | `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
 | `compression` | `NULL` | Optional Parquet compression name |
 | `target_file_size_mb` | `NULL` | Optional target Parquet segment size in MiB; stored for future size-aware flushing |
+| `mirror_capture_mode` | `'strict'` | `strict` updates the mirror in the source transaction; `async` applies committed PK-only WAL after source commit |
 
 **Returns:** `uuid` — the migration job id written to `koldstore.jobs` (empty
 tables get a completed migrate job; populated tables run mirror initialization
@@ -218,6 +223,23 @@ on normal DML. See [Limitations](limitations.md#unique-and-foreign-key-constrain
 | 11,000 | Flush `1,000` rows into `1` file (`max_rows_per_file = 1000`) |
 | 11,250 | Flush `1,000` rows, keep `10,250` hot |
 | 11,500 | Flush `1,500` rows into `2` files |
+
+#### Mirror capture modes
+
+`strict` is the default and requires no logical-replication setup. Its
+statement triggers update the latest-state mirror in the same transaction as
+the heap, providing immediate read-your-writes behavior.
+
+`async` removes mirror writes from foreground DML. It requires
+`wal_level=logical`; KoldStore automatically manages the empty
+`koldstore_async_mirror` publication and one deterministic logical slot per
+database. Applications must tolerate the normal short lag or call
+`koldstore.wait_for_async_mirror()` at a required consistency boundary.
+`flush_table` invokes the same catch-up path automatically.
+
+The mode is selected when the table is first managed. See
+[Mirror capture modes](architecture/mirror-capture-modes.md) for the complete
+transaction, rollback, WAL-retention, worker, and cleanup model.
 
 ### `koldstore.unmanage_table`
 
@@ -242,6 +264,50 @@ SELECT koldstore.unmanage_table(
 **Returns:** `bigint` — number of `koldstore.schemas` rows deactivated for the
 table (normally `1` when the table was actively managed, `0` if none were
 active).
+
+## Async Mirror Operations
+
+These functions operate on database-scoped infrastructure used by tables
+managed with `mirror_capture_mode => 'async'`.
+
+### `koldstore.wait_for_async_mirror`
+
+```sql
+SELECT koldstore.wait_for_async_mirror();
+```
+
+Applies committed source changes available at the fence boundary and waits
+until the mirror has reached that boundary. This provides a strong consistency
+point for an async table. The background worker normally performs the same work
+without an explicit call, and `flush_table` fences automatically.
+
+**Returns:** `bigint` — the number of source row-change messages applied by
+this invocation. A return value of `0` can mean the worker had already caught
+up; it does not mean async capture is disabled.
+
+### `koldstore.async_mirror_slot_name`
+
+```sql
+SELECT koldstore.async_mirror_slot_name();
+```
+
+**Returns:** `text` — the deterministic logical replication slot name for the
+current database. The function is read-only and is primarily useful when
+monitoring `pg_replication_slots`.
+
+### `koldstore.disable_async_mirror`
+
+```sql
+SELECT koldstore.disable_async_mirror();
+```
+
+Drops the current database's async logical slot and publication and clears its
+apply checkpoint. It refuses cleanup while any actively managed table uses
+async capture. Unmanage those tables first. Calling it repeatedly is safe; a
+later async `manage_table` recreates compatible infrastructure automatically.
+
+**Returns:** `boolean` — `true` when a slot or publication existed and was
+removed, otherwise `false`.
 
 ## Flush and Cold Data
 

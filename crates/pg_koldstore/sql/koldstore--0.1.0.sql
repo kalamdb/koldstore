@@ -8,6 +8,21 @@
 CREATE SCHEMA IF NOT EXISTS koldstore;
 GRANT USAGE ON SCHEMA koldstore TO PUBLIC;
 
+-- Publications are database-scoped runtime infrastructure rather than
+-- extension members. Provision the empty publication at install time so the
+-- first async manage call only needs to reserve its logical slot before writes.
+DO $koldstore_publication$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_publication
+    WHERE pubname = 'koldstore_async_mirror'
+  ) THEN
+    CREATE PUBLICATION koldstore_async_mirror;
+  END IF;
+END
+$koldstore_publication$;
+
 CREATE TYPE koldstore.managed_table_info AS (
   table_oid oid,
   table_type text,
@@ -72,12 +87,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS schemas_one_active_per_table_idx
   ON koldstore.schemas (table_oid)
   WHERE active;
 
+-- Logical decoding is acknowledged one fence after mirror apply. Persisting
+-- the applied LSN first makes a crash retry duplicates instead of losing rows.
+CREATE TABLE IF NOT EXISTS koldstore.async_mirror_state (
+  database_oid oid PRIMARY KEY,
+  applied_lsn pg_lsn NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- Async source transactions only write the heap; logical decoding and mirror
+-- writes run in the always-on database worker. Hot/mirror row counters are
+-- updated by the WAL applier. The worker is started at async activation,
+-- auto-restarted by postmaster on crash, and re-ensured after postmaster
+-- restart (shared_preload launcher and/or the first backend transaction).
+
 CREATE TABLE IF NOT EXISTS koldstore.manifest (
   table_oid oid NOT NULL,
   scope_key text NOT NULL DEFAULT '',
   manifest_path text NOT NULL,
   etag text,
-  generation text,
+  -- Monotonic CAS generation: flush activate bumps with WHERE generation = $expected.
+  generation bigint NOT NULL DEFAULT 0,
   sync_state text NOT NULL CHECK (sync_state IN ('in_sync', 'pending_write', 'syncing', 'stale', 'error')),
   segment_count integer NOT NULL DEFAULT 0,
   max_seq bigint NOT NULL DEFAULT 0,
@@ -175,7 +205,9 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   -- column_stats mirrors cold_segment_stats for cache-friendly segment loads.
   -- Keep both in sync on flush; do not grow this with per-row payloads.
   status text NOT NULL CHECK (status IN ('pending', 'active', 'compacted', 'deleted')),
-  manifest_etag text,
+  -- Object identity from publish (sha256 hex + backend etag). Set at pending insert.
+  checksum text,
+  object_etag text,
   created_xid xid,
   created_lsn pg_lsn,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -183,12 +215,17 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
 
 CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx
   ON koldstore.cold_segments (table_oid, scope_key, min_seq, max_seq)
-  INCLUDE (segment_id, object_path, min_commit_seq, max_commit_seq, row_count, byte_size, schema_version, manifest_etag)
+  INCLUDE (segment_id, object_path, min_commit_seq, max_commit_seq, row_count, byte_size, schema_version, object_etag, checksum)
   WHERE status = 'active';
 
 CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx
   ON koldstore.cold_segments (table_oid, scope_key, min_commit_seq, max_commit_seq)
   WHERE status = 'active';
+
+-- Pending expiry / recovery: find stale uploading rows without a full table scan.
+CREATE INDEX IF NOT EXISTS cold_segments_pending_created_idx
+  ON koldstore.cold_segments (table_oid, created_at)
+  WHERE status = 'pending';
 
 CREATE TABLE IF NOT EXISTS koldstore.cold_segment_stats (
   segment_id uuid NOT NULL REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,

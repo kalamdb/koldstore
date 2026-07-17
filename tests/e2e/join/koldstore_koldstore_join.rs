@@ -1,15 +1,11 @@
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
-#[path = "fixtures.rs"]
-mod fixtures;
-
-use anyhow::Result;
-use fixtures::{
+use super::fixtures::{
     assert_join_pair, assert_koldstore_koldstore_join_samples,
     setup_koldstore_items_with_mixed_storage, setup_koldstore_order_lines_with_mixed_storage,
     JoinKind,
 };
+use anyhow::Result;
 
 #[tokio::test]
 async fn koldstore_table_joins_another_koldstore_table_across_all_join_kinds() -> Result<()> {

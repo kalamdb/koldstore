@@ -1,5 +1,4 @@
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use anyhow::Result;
 
@@ -39,6 +38,7 @@ async fn flush_removes_base_and_mirror_rows_together() -> Result<()> {
             ))
             .await?;
 
+        common::fence_async_mirror_if_needed(&db.client).await?;
         assert_eq!(common::hot_row_count(&db.client, &relation).await?, 3);
         assert_eq!(common::row_count(&db.client, &mirror).await?, 4);
 
@@ -69,6 +69,7 @@ async fn flush_removes_base_and_mirror_rows_together() -> Result<()> {
                 &[],
             )
             .await?;
+        common::fence_async_mirror_if_needed(&db.client).await?;
         assert_eq!(common::hot_row_count(&db.client, &relation).await?, 1);
         assert_eq!(common::row_count(&db.client, &mirror).await?, 1);
 

@@ -39,7 +39,7 @@ pub struct CachedSegmentStats {
     /// Published manifest object path.
     pub manifest_path: String,
     /// Manifest generation used as the cache identity.
-    pub generation: String,
+    pub generation: u64,
     /// Object-store base path.
     pub base_path: String,
     /// Catalog storage backend type.

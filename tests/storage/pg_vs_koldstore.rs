@@ -2,23 +2,29 @@
 //!
 //! Schema: [`schema.sql`](schema.sql). Seeds a wide (~50 column) table, measures
 //! DML, then **hot-only PK lookups before flush** (both heaps still hold all
-//! rows — fair merge-scan overhead), flushes older rows to zstd Parquet, then
-//! measures hot+cold PK lookups and compares PostgreSQL heap/index sizes.
+//! rows — fair merge-scan overhead), flushes older rows to zstd Parquet (timing
+//! and peak cluster RSS), then measures hot+cold PK lookups and compares
+//! PostgreSQL heap/index sizes versus total hot+cold footprint.
+//! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
 
 #[path = "../e2e/common/mod.rs"]
 mod common;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use koldstore_memory::matched_processes_rss_bytes;
 use tokio_postgres::Client;
 
 /// Local default keeps the harness usable; set `KOLDSTORE_STORAGE_ROWS=1000000`
 /// for the README-scale demonstration.
 const DEFAULT_ROWS: i64 = 100_000;
 const DEFAULT_HOT_LIMIT: i64 = 10_000;
-const DML_SAMPLE: i64 = 1_000;
+const DEFAULT_DML_SAMPLE: i64 = 1_000;
+const DEFAULT_INSERT_BATCH_ROWS: i64 = 100_000;
 const QUERY_LOOPS: usize = 20;
 
 #[derive(Debug, Clone, Copy)]
@@ -43,11 +49,34 @@ impl Timing {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Sizes {
+    /// User-table heap bytes (`pg_table_size`), excluding indexes.
     table_bytes: i64,
+    /// User-table index bytes (`pg_indexes_size`).
     index_bytes: i64,
+    /// Change-log mirror heap bytes (`koldstore.<table>__cl`), when measured.
+    mirror_table_bytes: i64,
+    /// Change-log mirror index bytes (PK + seq + tombstone), when measured.
+    mirror_index_bytes: i64,
+    /// Active cold Parquet `byte_size` sum from `koldstore.cold_segments`.
     cold_bytes: i64,
+}
+
+impl Sizes {
+    /// PostgreSQL heap bytes charged to this side (user table + `__cl` when present).
+    fn pg_table_bytes(self) -> i64 {
+        self.table_bytes.saturating_add(self.mirror_table_bytes)
+    }
+
+    /// PostgreSQL index bytes charged to this side (user indexes + `__cl` indexes).
+    fn pg_index_bytes(self) -> i64 {
+        self.index_bytes.saturating_add(self.mirror_index_bytes)
+    }
+
+    fn pg_total_bytes(self) -> i64 {
+        self.pg_table_bytes().saturating_add(self.pg_index_bytes())
+    }
 }
 
 /// Heap live/dead tuple counters from `pg_stat_user_tables` after the DML workload.
@@ -69,6 +98,28 @@ struct SideMetrics {
     /// Dead/live tuple pressure after DML, before flush.
     heap_after_workload: HeapStats,
     sizes: Sizes,
+    async_catchup: Option<AsyncCatchup>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AsyncCatchup {
+    insert: Timing,
+    update: Timing,
+    delete: Timing,
+    restore: Timing,
+}
+
+/// Timed flush with peak cluster RSS sampled while the job runs.
+#[derive(Debug, Clone, Copy)]
+struct FlushMetrics {
+    rows_flushed: i64,
+    duration: Duration,
+    /// Cluster RSS immediately before `flush_table`.
+    before_rss_bytes: u64,
+    /// Max cluster RSS observed during the flush window (polled).
+    peak_rss_bytes: u64,
+    /// Cluster RSS immediately after `flush_table` returns.
+    after_rss_bytes: u64,
 }
 
 #[tokio::test]
@@ -77,12 +128,29 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
     let rows = env_i64("KOLDSTORE_STORAGE_ROWS", DEFAULT_ROWS);
     let hot_limit = env_i64("KOLDSTORE_STORAGE_HOT_LIMIT", DEFAULT_HOT_LIMIT)
         .clamp(1, rows.saturating_sub(1).max(1));
+    let dml_sample = env_i64("KOLDSTORE_STORAGE_DML_SAMPLE", DEFAULT_DML_SAMPLE).clamp(1, rows);
+    let insert_batch_rows = env_i64(
+        "KOLDSTORE_STORAGE_INSERT_BATCH_ROWS",
+        DEFAULT_INSERT_BATCH_ROWS,
+    )
+    .clamp(1, rows);
+    let mirror_capture_mode = std::env::var("KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE")
+        .unwrap_or_else(|_| "strict".to_string());
+    anyhow::ensure!(
+        matches!(mirror_capture_mode.as_str(), "strict" | "async"),
+        "KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE must be strict or async"
+    );
 
     let target = common::local_pg_matrix()
         .into_iter()
         .next()
         .context("no local pg target configured")?;
     let db = common::TestDb::start(target, "storage_cmp").await?;
+    let dbname: String = db
+        .client
+        .query_one("SELECT current_database()", &[])
+        .await?
+        .get(0);
 
     // Warm the extension library so planner hooks/GUCs are registered.
     let _ = db
@@ -106,6 +174,8 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
     );
 
     // Manage before DML so insert/update/delete timings include mirror capture.
+    // Async manage requires the worker GUC on; disable + terminate afterward so
+    // each timed phase uses an explicit fence instead of background catch-up.
     {
         let _step = common::log_step_always("storage_cmp: manage_table");
         manage_with_hot_limit(
@@ -115,54 +185,107 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
             hot_limit,
             1,
             max_rows_per_file,
+            &mirror_capture_mode,
         )
         .await?;
     }
+    let worker_guc_pinned =
+        disable_async_worker_for_benchmark(&db.client, &dbname, &mirror_capture_mode).await?;
+    let result = run_storage_comparison_body(
+        &db,
+        &baseline,
+        &managed,
+        &managed_table,
+        rows,
+        hot_limit,
+        dml_sample,
+        insert_batch_rows,
+        max_rows_per_file,
+        &mirror_capture_mode,
+    )
+    .await;
+    if worker_guc_pinned {
+        reset_async_worker_guc(&db.client, &dbname).await?;
+    }
+    result
+}
 
+#[allow(clippy::too_many_arguments)]
+async fn run_storage_comparison_body(
+    db: &common::TestDb,
+    baseline: &str,
+    managed: &str,
+    managed_table: &str,
+    rows: i64,
+    hot_limit: i64,
+    dml_sample: i64,
+    insert_batch_rows: i64,
+    max_rows_per_file: i64,
+    mirror_capture_mode: &str,
+) -> Result<()> {
+    assert_async_worker_disabled_for_benchmark(&db.client, mirror_capture_mode).await?;
+    // Apply the source tables' benchmark-only autovacuum control to the
+    // generated mirror. Otherwise a long async catch-up can launch mirror
+    // maintenance during the next timed phase.
+    db.client
+        .batch_execute(&format!(
+            "ALTER TABLE koldstore.{managed_table}__cl SET (autovacuum_enabled = false)"
+        ))
+        .await
+        .context("disable autovacuum on benchmark mirror")?;
     common::log_always(format!(
-        "storage_cmp: seeding {rows} rows (hot_row_limit={hot_limit}, max_rows_per_file={max_rows_per_file})"
+        "storage_cmp: seeding {rows} rows (insert_batch_rows={insert_batch_rows}, hot_row_limit={hot_limit}, max_rows_per_file={max_rows_per_file})"
     ));
-    let baseline_insert = {
-        let _step = common::log_step_always(format!("storage_cmp: insert baseline ({rows} rows)"));
-        time_insert(&db.client, &baseline, 1, rows).await?
-    };
-    let managed_insert = {
+    checkpoint_before_timing(&db.client, "interleaved inserts").await?;
+    let (baseline_insert, managed_insert) = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: insert managed ({rows} rows, with change-log mirror)"
+            "storage_cmp: interleaved baseline/managed inserts ({rows} rows each)"
         ));
-        time_insert(&db.client, &managed, 1, rows).await?
+        time_interleaved_inserts(&db.client, baseline, managed, rows, insert_batch_rows).await?
     };
+    let insert_catchup = async_catchup(&db.client, mirror_capture_mode, rows).await?;
 
+    checkpoint_before_timing(&db.client, "baseline update").await?;
     let baseline_update = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: update baseline sample ({DML_SAMPLE} rows)"
+            "storage_cmp: update baseline sample ({dml_sample} rows)"
         ));
-        time_update(&db.client, &baseline, rows - DML_SAMPLE + 1, DML_SAMPLE).await?
+        time_update(&db.client, baseline, rows - dml_sample + 1, dml_sample).await?
     };
+    checkpoint_before_timing(&db.client, "managed update").await?;
     let managed_update = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: update managed sample ({DML_SAMPLE} rows)"
+            "storage_cmp: update managed sample ({dml_sample} rows)"
         ));
-        time_update(&db.client, &managed, rows - DML_SAMPLE + 1, DML_SAMPLE).await?
+        time_update(&db.client, managed, rows - dml_sample + 1, dml_sample).await?
     };
+    let update_catchup = async_catchup(&db.client, mirror_capture_mode, dml_sample).await?;
 
-    let delete_start = rows + 1;
-    let delete_end = rows + DML_SAMPLE;
-    {
-        let _step = common::log_step_always(format!(
-            "storage_cmp: seed delete sample ({DML_SAMPLE} rows each side)"
-        ));
-        time_insert(&db.client, &baseline, delete_start, DML_SAMPLE).await?;
-        time_insert(&db.client, &managed, delete_start, DML_SAMPLE).await?;
-    }
+    // Delete from the high end of the seeded range, then re-insert the same
+    // keys before flush. Seeding a disjoint range left `dml_sample` tombstones
+    // in the mirror; flush-by-oldest-seq then evacuated live hot rows while
+    // retaining tombstones whenever `dml_sample` approached `rows`.
+    let delete_start = rows - dml_sample + 1;
+    let delete_end = rows;
+    checkpoint_before_timing(&db.client, "baseline delete").await?;
     let baseline_delete = {
         let _step = common::log_step_always("storage_cmp: delete baseline sample");
-        time_delete(&db.client, &baseline, delete_start, delete_end).await?
+        time_delete(&db.client, baseline, delete_start, delete_end).await?
     };
+    checkpoint_before_timing(&db.client, "managed delete").await?;
     let managed_delete = {
         let _step = common::log_step_always("storage_cmp: delete managed sample");
-        time_delete(&db.client, &managed, delete_start, delete_end).await?
+        time_delete(&db.client, managed, delete_start, delete_end).await?
     };
+    let delete_catchup = async_catchup(&db.client, mirror_capture_mode, dml_sample).await?;
+    {
+        let _step = common::log_step_always(format!(
+            "storage_cmp: restore delete sample ({dml_sample} rows each side)"
+        ));
+        time_insert(&db.client, baseline, delete_start, dml_sample).await?;
+        time_insert(&db.client, managed, delete_start, dml_sample).await?;
+    }
+    let restore_catchup = async_catchup(&db.client, mirror_capture_mode, dml_sample).await?;
 
     // Snapshot bloat / autovacuum pressure after DML, before flush reclaims space.
     // Force the stats collector so n_dead_tup reflects this backend's DML.
@@ -170,8 +293,8 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         .client
         .execute("SELECT pg_stat_force_next_flush()", &[])
         .await;
-    let baseline_heap = heap_stats(&db.client, &baseline).await?;
-    let managed_heap = heap_stats(&db.client, &managed).await?;
+    let baseline_heap = heap_stats(&db.client, baseline).await?;
+    let managed_heap = heap_stats(&db.client, managed).await?;
 
     // Fair hot-only comparison: measure PK lookups while every row is still in
     // the PostgreSQL heap on both sides (before any flush). Post-flush "hot"
@@ -191,35 +314,38 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
             plan_pre_flush.contains("Parquet segment: none"),
             "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
         );
-        assert_point_row_matches(&db.client, &baseline, &managed, hot_id).await?;
-        assert_point_row_matches(&db.client, &baseline, &managed, cold_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, hot_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, cold_id).await?;
     }
 
     let baseline_hot = {
         let _step = common::log_step_always("storage_cmp: time baseline hot PK lookups");
-        time_point_queries(&db.client, &baseline, hot_id).await?
+        time_point_queries(&db.client, baseline, hot_id).await?
     };
     let managed_hot = {
         let _step = common::log_step_always("storage_cmp: time managed hot PK lookups");
-        time_point_queries(&db.client, &managed, hot_id).await?
+        time_point_queries(&db.client, managed, hot_id).await?
     };
 
-    let flushed = {
+    let flush = {
         let _step = common::log_step_always(format!(
             "storage_cmp: flush_table (expect ~{} cold rows)",
             rows.saturating_sub(hot_limit)
         ));
-        flush_table(&db.client, &managed).await?
+        flush_table_with_metrics(&db.client, managed, db.target.port).await?
     };
     anyhow::ensure!(
-        flushed > 0,
+        flush.rows_flushed > 0,
         "expected KoldStore flush to move rows cold (hot_limit={hot_limit}, rows={rows})"
     );
     common::log_always(format!(
-        "storage_cmp: flush_table returned rows_flushed={flushed}"
+        "storage_cmp: flush_table returned rows_flushed={} duration={} peak_rss={}",
+        flush.rows_flushed,
+        format_duration(flush.duration),
+        format_bytes(flush.peak_rss_bytes as i64),
     ));
 
-    let status = common::describe_table(&db.client, &managed).await?;
+    let status = common::describe_table(&db.client, managed).await?;
     anyhow::ensure!(
         status.hot_rows > 0,
         "expected hot rows to remain after policy flush, got {status:?}"
@@ -237,17 +363,17 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
     // maintenance-cost comparison, then REINDEX so size numbers are clean.
     let baseline_vacuum = {
         let _step = common::log_step_always("storage_cmp: VACUUM FULL baseline (~full heap)");
-        time_vacuum_full(&db.client, &baseline).await?
+        time_vacuum_full(&db.client, baseline).await?
     };
     let managed_vacuum = {
         let _step = common::log_step_always("storage_cmp: VACUUM FULL managed (hot heap)");
-        time_vacuum_full(&db.client, &managed).await?
+        time_vacuum_full(&db.client, managed).await?
     };
     {
         let _step = common::log_step_always("storage_cmp: REINDEX + vacuum mirror");
-        reindex_relation(&db.client, &baseline).await?;
-        reindex_relation(&db.client, &managed).await?;
-        if let Some(mirror) = mirror_relation(&managed) {
+        reindex_relation(&db.client, baseline).await?;
+        reindex_relation(&db.client, managed).await?;
+        if let Some(mirror) = mirror_relation(managed) {
             time_vacuum_full(&db.client, &mirror).await?;
             reindex_relation(&db.client, &mirror).await?;
         }
@@ -268,23 +394,31 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         );
 
         // Correctness after flush: cold-flushed and still-hot PKs must match baseline.
-        assert_point_row_matches(&db.client, &baseline, &managed, hot_id).await?;
-        assert_point_row_matches(&db.client, &baseline, &managed, cold_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, hot_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, cold_id).await?;
         let mid_cold_id = (hot_limit / 2).max(1);
-        assert_point_row_matches(&db.client, &baseline, &managed, mid_cold_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, mid_cold_id).await?;
     }
 
     let baseline_cold = {
         let _step = common::log_step_always("storage_cmp: time baseline cold-id PK lookups");
-        time_point_queries(&db.client, &baseline, cold_id).await?
+        time_point_queries(&db.client, baseline, cold_id).await?
     };
     let managed_cold = {
         let _step = common::log_step_always("storage_cmp: time managed hot+cold PK lookups");
-        time_point_queries(&db.client, &managed, cold_id).await?
+        time_point_queries(&db.client, managed, cold_id).await?
     };
 
-    let baseline_sizes = relation_sizes(&db.client, &baseline, None).await?;
-    let managed_sizes = relation_sizes(&db.client, &managed, Some(&managed)).await?;
+    let baseline_sizes = relation_sizes(&db.client, baseline, None).await?;
+    let managed_sizes = relation_sizes(&db.client, managed, Some(managed)).await?;
+    anyhow::ensure!(
+        managed_sizes.mirror_table_bytes > 0,
+        "expected change-log mirror heap bytes after flush, got {managed_sizes:?}"
+    );
+    anyhow::ensure!(
+        managed_sizes.mirror_index_bytes > 0,
+        "expected change-log mirror index bytes after flush, got {managed_sizes:?}"
+    );
 
     let baseline_metrics = SideMetrics {
         insert: baseline_insert,
@@ -295,6 +429,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         vacuum: baseline_vacuum,
         heap_after_workload: baseline_heap,
         sizes: baseline_sizes,
+        async_catchup: None,
     };
     let managed_metrics = SideMetrics {
         insert: managed_insert,
@@ -305,54 +440,62 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         vacuum: managed_vacuum,
         heap_after_workload: managed_heap,
         sizes: managed_sizes,
+        async_catchup: insert_catchup.map(|insert| AsyncCatchup {
+            insert,
+            update: update_catchup.expect("async update catch-up"),
+            delete: delete_catchup.expect("async delete catch-up"),
+            restore: restore_catchup.expect("async restore catch-up"),
+        }),
     };
 
     print_comparison_table(
         rows,
         hot_limit,
+        dml_sample,
+        insert_batch_rows,
         max_rows_per_file,
-        flushed,
+        flush,
         baseline_metrics,
         managed_metrics,
-    );
+        mirror_capture_mode,
+    )?;
 
     anyhow::ensure!(
-        managed_sizes.table_bytes < baseline_sizes.table_bytes,
-        "expected KoldStore PostgreSQL table footprint smaller after flush: managed={} baseline={}",
-        managed_sizes.table_bytes,
-        baseline_sizes.table_bytes
+        managed_sizes.pg_table_bytes() < baseline_sizes.pg_table_bytes(),
+        "expected KoldStore PostgreSQL table footprint (hot+__cl) smaller after flush: managed={} baseline={}",
+        managed_sizes.pg_table_bytes(),
+        baseline_sizes.pg_table_bytes()
     );
     anyhow::ensure!(
-        managed_sizes.index_bytes < baseline_sizes.index_bytes,
-        "expected KoldStore PostgreSQL index footprint smaller after flush: managed={} baseline={}",
-        managed_sizes.index_bytes,
-        baseline_sizes.index_bytes
+        managed_sizes.pg_index_bytes() < baseline_sizes.pg_index_bytes(),
+        "expected KoldStore PostgreSQL index footprint (hot+__cl) smaller after flush: managed={} baseline={}",
+        managed_sizes.pg_index_bytes(),
+        baseline_sizes.pg_index_bytes()
     );
     anyhow::ensure!(
         managed_sizes.cold_bytes > 0,
         "expected positive cold Parquet bytes after flush"
     );
 
-    // Do NOT `SELECT count(*)` through KoldMergeScan here. At multi-million row
-    // scale BeginCustomScan still materializes the full hot∪cold result set,
-    // which OOMs / closes the session after an otherwise successful run.
-    // Point lookups above already checked correctness; catalog counters cover
-    // row accounting without opening every Parquet segment.
+    // Point lookups above already checked correctness. Avoid counting the
+    // managed relation: even `ONLY` still routes through KoldMergeScan, and
+    // disabling merge scan rejects managed SELECTs. Catalog counters are enough
+    // to confirm flush produced hot + cold coverage.
     let final_status = {
-        let _step = common::log_step_always(
-            "storage_cmp: verify hot+cold coverage via describe_table (skip full COUNT(*))",
-        );
-        common::describe_table(&db.client, &managed).await?
+        let _step =
+            common::log_step_always("storage_cmp: verify hot+cold coverage via describe_table");
+        common::describe_table(&db.client, managed).await?
     };
-    let covered = final_status.hot_rows + final_status.cold_row_count;
     anyhow::ensure!(
-        covered >= rows,
-        "expected hot+cold coverage of at least {rows} rows after flush, got hot={} cold={} (sum={covered})",
-        final_status.hot_rows,
-        final_status.cold_row_count
+        final_status.hot_rows > 0,
+        "expected hot rows after flush, got {final_status:?}"
+    );
+    anyhow::ensure!(
+        final_status.cold_row_count > 0,
+        "expected cold rows after flush, got {final_status:?}"
     );
     common::log_always(format!(
-        "storage_cmp: coverage ok hot={} cold={} sum={covered} (seeded={rows})",
+        "storage_cmp: coverage ok describe_hot={} cold={} (seeded={rows})",
         final_status.hot_rows, final_status.cold_row_count
     ));
 
@@ -397,6 +540,7 @@ async fn manage_with_hot_limit(
     hot_row_limit: i64,
     min_flush_rows: i64,
     max_rows_per_file: i64,
+    mirror_capture_mode: &str,
 ) -> Result<()> {
     client
         .execute(
@@ -409,6 +553,7 @@ async fn manage_with_hot_limit(
               max_rows_per_file => $5,
               migration_order_by => 'id',
               compression       => 'zstd'
+              ,mirror_capture_mode => $6
             )
             "#,
             &[
@@ -417,11 +562,132 @@ async fn manage_with_hot_limit(
                 &hot_row_limit,
                 &min_flush_rows,
                 &max_rows_per_file,
+                &mirror_capture_mode,
             ],
         )
         .await
         .with_context(|| format!("manage_table {relation}"))?;
     Ok(())
+}
+
+async fn async_catchup(
+    client: &Client,
+    mirror_capture_mode: &str,
+    expected_changes: i64,
+) -> Result<Option<Timing>> {
+    if mirror_capture_mode != "async" {
+        return Ok(None);
+    }
+    // Stop a launcher-respawned applier so this fence owns the apply work.
+    let _ = terminate_async_workers_until_idle(client).await;
+    let started = Instant::now();
+    let applied: i64 = client
+        .query_one("SELECT koldstore.wait_for_async_mirror()", &[])
+        .await?
+        .get(0);
+    anyhow::ensure!(
+        applied == expected_changes,
+        "async mirror applied {applied} changes, expected {expected_changes}"
+    );
+    let acknowledged: i64 = client
+        .query_one("SELECT koldstore.wait_for_async_mirror()", &[])
+        .await?
+        .get(0);
+    anyhow::ensure!(
+        acknowledged == 0,
+        "async mirror acknowledgement replayed {acknowledged} changes"
+    );
+    Ok(Some(Timing {
+        elapsed: started.elapsed(),
+        ops: expected_changes,
+    }))
+}
+
+async fn disable_async_worker_for_benchmark(
+    client: &Client,
+    dbname: &str,
+    mirror_capture_mode: &str,
+) -> Result<bool> {
+    if mirror_capture_mode != "async" {
+        return Ok(false);
+    }
+    // Pin the database setting and the session. The shared-preload launcher
+    // connects to `postgres`, so it may still restart appliers; callers also
+    // terminate before each catch-up fence.
+    client
+        .batch_execute(&format!(
+            "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off"
+        ))
+        .await
+        .context("pin async mirror worker GUC off for deterministic benchmark phases")?;
+    client
+        .batch_execute("SET koldstore.internal_async_mirror_worker = off")
+        .await
+        .context("disable async mirror worker GUC in benchmark session")?;
+    terminate_async_workers_until_idle(client).await?;
+    Ok(true)
+}
+
+async fn terminate_async_workers_until_idle(client: &Client) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let _ = common::terminate_async_worker(client).await?;
+        if !common::async_worker_running(client).await? {
+            return Ok(());
+        }
+        if started.elapsed() >= Duration::from_secs(2) {
+            common::log_always(
+                "storage_cmp: async worker still visible after terminate window; continuing with fence",
+            );
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn reset_async_worker_guc(client: &Client, dbname: &str) -> Result<()> {
+    client
+        .batch_execute(&format!(
+            "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker"
+        ))
+        .await
+        .context("reset async mirror worker GUC after benchmark")?;
+    client
+        .batch_execute("RESET koldstore.internal_async_mirror_worker")
+        .await
+        .context("reset async mirror worker GUC in benchmark session")?;
+    Ok(())
+}
+
+async fn assert_async_worker_disabled_for_benchmark(
+    client: &Client,
+    mirror_capture_mode: &str,
+) -> Result<()> {
+    if mirror_capture_mode != "async" {
+        return Ok(());
+    }
+    let disabled: bool = client
+        .query_one(
+            "SELECT current_setting('koldstore.internal_async_mirror_worker') = 'off'",
+            &[],
+        )
+        .await?
+        .get(0);
+    anyhow::ensure!(
+        disabled,
+        "async benchmark worker GUC did not remain disabled"
+    );
+    // Best-effort: launcher may respawn briefly; catch-up paths terminate again.
+    let _ = terminate_async_workers_until_idle(client).await;
+    Ok(())
+}
+
+async fn checkpoint_before_timing(client: &Client, phase: &str) -> Result<()> {
+    let _step = common::log_step_always(format!("storage_cmp: CHECKPOINT before {phase}"));
+    client
+        .batch_execute("CHECKPOINT")
+        .await
+        .with_context(|| format!("checkpoint before {phase}"))
 }
 
 async fn flush_table(client: &Client, relation: &str) -> Result<i64> {
@@ -439,6 +705,54 @@ async fn flush_table(client: &Client, relation: &str) -> Result<i64> {
         )
         .await?;
     Ok(progress.get(0))
+}
+
+/// Runs `flush_table` while polling cluster RSS so peak memory during Parquet
+/// flush is visible (the SQL call itself blocks the session backend).
+async fn flush_table_with_metrics(
+    client: &Client,
+    relation: &str,
+    pg_port: u16,
+) -> Result<FlushMetrics> {
+    let before = common::memory::capture_snapshot(client, pg_port).await?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let peak_rss = Arc::new(AtomicU64::new(before.rss_bytes));
+    let sampler_stop = Arc::clone(&stop);
+    let sampler_peak = Arc::clone(&peak_rss);
+    let sampler = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        while !sampler_stop.load(Ordering::Relaxed) {
+            interval.tick().await;
+            let sample = cluster_rss_bytes(pg_port).unwrap_or(0);
+            let _ = sampler_peak.fetch_max(sample, Ordering::Relaxed);
+        }
+    });
+
+    let started = Instant::now();
+    let rows_flushed = flush_table(client, relation).await?;
+    let duration = started.elapsed();
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = sampler.await;
+    let after = common::memory::capture_snapshot(client, pg_port).await?;
+    let peak_rss_bytes = peak_rss
+        .load(Ordering::Relaxed)
+        .max(before.rss_bytes)
+        .max(after.rss_bytes);
+
+    Ok(FlushMetrics {
+        rows_flushed,
+        duration,
+        before_rss_bytes: before.rss_bytes,
+        peak_rss_bytes,
+        after_rss_bytes: after.rss_bytes,
+    })
+}
+
+fn cluster_rss_bytes(pg_port: u16) -> Result<u64, String> {
+    matched_processes_rss_bytes(&format!(":{pg_port}"))
+        .or_else(|_| matched_processes_rss_bytes(&format!("port={pg_port}")))
 }
 
 async fn time_vacuum_full(client: &Client, relation: &str) -> Result<Timing> {
@@ -505,10 +819,14 @@ async fn relation_sizes(
             &[&relation],
         )
         .await?;
-    let mut table_bytes: i64 = row.get(0);
-    let mut index_bytes: i64 = row.get(1);
+    let table_bytes: i64 = row.get(0);
+    let index_bytes: i64 = row.get(1);
+    let mut mirror_table_bytes = 0_i64;
+    let mut mirror_index_bytes = 0_i64;
     let mut cold_bytes = 0_i64;
 
+    // Managed PostgreSQL footprint must include the latest-state change-log
+    // mirror heap and its indexes; omitting `__cl` understates KoldStore cost.
     if let Some(managed) = managed_relation {
         if let Some(mirror) = mirror_relation(managed) {
             let mirror_row = client
@@ -522,8 +840,8 @@ async fn relation_sizes(
                 )
                 .await
                 .with_context(|| format!("size mirror {mirror}"))?;
-            table_bytes += mirror_row.get::<_, i64>(0);
-            index_bytes += mirror_row.get::<_, i64>(1);
+            mirror_table_bytes = mirror_row.get(0);
+            mirror_index_bytes = mirror_row.get(1);
         }
 
         let cold = client
@@ -543,6 +861,8 @@ async fn relation_sizes(
     Ok(Sizes {
         table_bytes,
         index_bytes,
+        mirror_table_bytes,
+        mirror_index_bytes,
         cold_bytes,
     })
 }
@@ -654,6 +974,47 @@ async fn time_insert(client: &Client, relation: &str, start_id: i64, count: i64)
     })
 }
 
+async fn time_interleaved_inserts(
+    client: &Client,
+    baseline: &str,
+    managed: &str,
+    rows: i64,
+    batch_rows: i64,
+) -> Result<(Timing, Timing)> {
+    let mut baseline_elapsed = Duration::ZERO;
+    let mut managed_elapsed = Duration::ZERO;
+    let mut start_id = 1_i64;
+    let mut batch_index = 0_u64;
+
+    while start_id <= rows {
+        let count = batch_rows.min(rows - start_id + 1);
+        if batch_index.is_multiple_of(2) {
+            baseline_elapsed += time_insert(client, baseline, start_id, count)
+                .await?
+                .elapsed;
+            managed_elapsed += time_insert(client, managed, start_id, count).await?.elapsed;
+        } else {
+            managed_elapsed += time_insert(client, managed, start_id, count).await?.elapsed;
+            baseline_elapsed += time_insert(client, baseline, start_id, count)
+                .await?
+                .elapsed;
+        }
+        start_id += count;
+        batch_index += 1;
+    }
+
+    Ok((
+        Timing {
+            elapsed: baseline_elapsed,
+            ops: rows,
+        },
+        Timing {
+            elapsed: managed_elapsed,
+            ops: rows,
+        },
+    ))
+}
+
 async fn time_update(client: &Client, relation: &str, start_id: i64, count: i64) -> Result<Timing> {
     let end_id = start_id + count - 1;
     let started = Instant::now();
@@ -758,121 +1119,363 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_comparison_table(
     rows: i64,
     hot_limit: i64,
+    dml_sample: i64,
+    insert_batch_rows: i64,
     max_rows_per_file: i64,
-    flushed: i64,
+    flush: FlushMetrics,
     baseline: SideMetrics,
     managed: SideMetrics,
-) {
-    let table_win = storage_win_pct(baseline.sizes.table_bytes, managed.sizes.table_bytes);
-    let index_win = storage_win_pct(baseline.sizes.index_bytes, managed.sizes.index_bytes);
-    let total_baseline = baseline.sizes.table_bytes + baseline.sizes.index_bytes;
-    let total_managed = managed.sizes.table_bytes + managed.sizes.index_bytes;
-    let total_win = storage_win_pct(total_baseline, total_managed);
-
-    println!();
-    println!("## pg vs KoldStore comparison");
-    println!();
-    println!(
-        "schema=tests/storage/schema.sql rows={rows} hot_row_limit={hot_limit} \
-         max_rows_per_file={max_rows_per_file} flushed={flushed} compression=zstd"
+    mirror_capture_mode: &str,
+) -> Result<()> {
+    let report = build_comparison_report(
+        rows,
+        hot_limit,
+        dml_sample,
+        insert_batch_rows,
+        max_rows_per_file,
+        flush,
+        baseline,
+        managed,
+        mirror_capture_mode,
     );
     println!();
-    println!("| Operation | PostgreSQL only | PostgreSQL + KoldStore | Storage win |");
-    println!("| --- | --- | --- | --- |");
-    println!(
-        "| insert speed† | {} | {} | — |",
-        format_speed(baseline.insert),
-        format_speed(managed.insert)
-    );
-    println!(
-        "| update speed† | {} | {} | — |",
-        format_speed(baseline.update),
-        format_speed(managed.update)
-    );
-    println!(
-        "| delete speed† | {} | {} | — |",
-        format_speed(baseline.delete),
-        format_speed(managed.delete)
-    );
-    println!(
-        "| query hot only (before flush) | {} | {} | — |",
-        format_speed(baseline.query_hot_only),
-        format_speed(managed.query_hot_only)
-    );
-    println!(
-        "| query with hot+cold (after flush) | {} | {} | — |",
-        format_speed(baseline.query_hot_cold),
-        format_speed(managed.query_hot_cold)
-    );
-    println!(
-        "| VACUUM time (after flush) | {} | {} | {} |",
-        format_duration(baseline.vacuum.elapsed),
-        format_duration(managed.vacuum.elapsed),
-        duration_win_pct(baseline.vacuum.elapsed, managed.vacuum.elapsed)
-    );
-    println!(
-        "| dead tuples after workload | {} (live={}) | {} (live={}) | — |",
-        format_count(baseline.heap_after_workload.n_dead_tup),
-        format_count(baseline.heap_after_workload.n_live_tup),
-        format_count(managed.heap_after_workload.n_dead_tup),
-        format_count(managed.heap_after_workload.n_live_tup),
-    );
-    println!(
-        "| index storage | {} | {} | {index_win} |",
-        format_bytes(baseline.sizes.index_bytes),
-        format_bytes(managed.sizes.index_bytes)
-    );
-    println!(
-        "| table storage | {} | {}{} | {table_win} |",
-        format_bytes(baseline.sizes.table_bytes),
-        format_bytes(managed.sizes.table_bytes),
-        if managed.sizes.cold_bytes > 0 {
-            format!(
-                " (+ {} cold Parquet)",
-                format_bytes(managed.sizes.cold_bytes)
-            )
-        } else {
-            String::new()
+    print!("{}", render_comparison_markdown(&report));
+    if let Ok(path) = std::env::var("KOLDSTORE_STORAGE_RESULTS_JSON") {
+        if !path.is_empty() {
+            if let Some(parent) = std::path::Path::new(&path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("create results dir {}", parent.display()))?;
+                }
+            }
+            let json = serde_json::to_string_pretty(&report)
+                .context("serialize storage comparison results")?;
+            std::fs::write(&path, format!("{json}\n"))
+                .with_context(|| format!("write results json {path}"))?;
+            common::log_always(format!("storage_cmp: wrote results json {path}"));
         }
-    );
-    println!("| total PG backup size | TODO | TODO | — |");
-    println!("| restore time | TODO | TODO | — |");
-    println!();
-    println!(
-        "PostgreSQL heap+index after flush: baseline={} managed={} ({total_win} smaller)",
-        format_bytes(total_baseline),
-        format_bytes(total_managed),
-    );
-    println!();
-    println!(
-        "† DML is expected to be slower under KoldStore: each statement also updates the \
-         change-log mirror (`koldstore.<table>__cl`). That is the cost of transparent flush \
-         and change cursors; the win shows up in PostgreSQL heap/index size after flush. \
-         Hot-only timings are taken before flush so both heaps still hold all {rows} rows \
-         (fair merge-scan overhead). Hot+cold timings and VACUUM are after flush. \
-         Dead tuples are snapshotted after DML via `pg_stat_user_tables` (pre-flush, so \
-         both sides match for the same update/delete sample). Autovacuum counters are \
-         omitted: this harness is too short for autovacuum to run, so they would read \
-         as zeros on both sides."
-    );
-    println!();
-}
-
-fn storage_win_pct(baseline: i64, managed: i64) -> String {
-    if baseline <= 0 {
-        return "n/a".to_string();
     }
-    let saved = baseline.saturating_sub(managed).max(0) as f64;
-    format!("{:.0}%", 100.0 * saved / baseline as f64)
+    Ok(())
 }
 
-fn duration_win_pct(baseline: Duration, managed: Duration) -> String {
-    let baseline_us = baseline.as_micros() as i64;
-    let managed_us = managed.as_micros() as i64;
-    storage_win_pct(baseline_us, managed_us)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ComparisonReport {
+    mode: String,
+    #[serde(default)]
+    generated_at: String,
+    rows: i64,
+    hot_limit: i64,
+    dml_sample: i64,
+    insert_batch_rows: i64,
+    max_rows_per_file: i64,
+    flushed: i64,
+    main: Vec<ComparisonRow>,
+    detail: Vec<ComparisonRow>,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ComparisonRow {
+    metric: String,
+    postgres_only: String,
+    koldstore: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_comparison_report(
+    rows: i64,
+    hot_limit: i64,
+    dml_sample: i64,
+    insert_batch_rows: i64,
+    max_rows_per_file: i64,
+    flush: FlushMetrics,
+    baseline: SideMetrics,
+    managed: SideMetrics,
+    mirror_capture_mode: &str,
+) -> ComparisonReport {
+    let local_baseline = baseline.sizes.pg_total_bytes();
+    let local_managed = managed.sizes.pg_total_bytes();
+    let total_managed = local_managed.saturating_add(managed.sizes.cold_bytes);
+    let flush_rows_per_sec = if flush.duration.is_zero() || flush.rows_flushed <= 0 {
+        0.0
+    } else {
+        flush.rows_flushed as f64 / flush.duration.as_secs_f64()
+    };
+
+    let main = vec![
+        row(
+            "foreground insert throughput",
+            format_ops_per_sec(baseline.insert),
+            format_ops_per_sec(managed.insert),
+        ),
+        row("sustainable insert throughput", "TODO", "TODO"),
+        row("insert p99 latency", "TODO", "TODO"),
+        row("update p99 latency", "TODO", "TODO"),
+        row("hot-query p99 latency", "TODO", "TODO"),
+        row("cold-query p99 latency", "TODO", "TODO"),
+        row(
+            "hot+cold query throughput",
+            format_ops_per_sec(baseline.query_hot_cold),
+            format_ops_per_sec(managed.query_hot_cold),
+        ),
+        row("cold files fetched/query", "—", "TODO"),
+        row("cold bytes fetched/query", "—", "TODO"),
+        row("peak memory under workload", "TODO", "TODO"),
+        row(
+            "peak RSS during flush",
+            "—",
+            format!(
+                "{} (before={}, after={})",
+                format_bytes(flush.peak_rss_bytes as i64),
+                format_bytes(flush.before_rss_bytes as i64),
+                format_bytes(flush.after_rss_bytes as i64),
+            ),
+        ),
+        row(
+            "flush duration",
+            "—",
+            format!(
+                "{} ({:.0} rows/s)",
+                format_duration(flush.duration),
+                flush_rows_per_sec
+            ),
+        ),
+        row("CPU seconds per 1M operations", "TODO", "TODO"),
+        row("WAL generated per 1M operations", "TODO", "TODO"),
+        row("local bytes written", "TODO", "TODO"),
+        row(
+            "VACUUM duration",
+            format_duration(baseline.vacuum.elapsed),
+            format_duration(managed.vacuum.elapsed),
+        ),
+        row(
+            "local PostgreSQL storage",
+            format_bytes(local_baseline),
+            format_bytes(local_managed),
+        ),
+        row(
+            "total hot+cold storage",
+            format_bytes(local_baseline),
+            format_bytes(total_managed),
+        ),
+        row("peak open file descriptors", "TODO", "TODO"),
+        row("combined backup size", "TODO", "TODO"),
+        row("full query-ready restore time", "TODO", "TODO"),
+        row("mirror backlog after workload", "—", "TODO"),
+        row("backlog drain time", "—", "TODO"),
+    ];
+
+    let mut detail = vec![
+        row(
+            "insert speed†",
+            format_speed(baseline.insert),
+            format_speed(managed.insert),
+        ),
+        row(
+            "update speed†",
+            format_speed(baseline.update),
+            format_speed(managed.update),
+        ),
+        row(
+            "delete speed†",
+            format_speed(baseline.delete),
+            format_speed(managed.delete),
+        ),
+    ];
+    if let Some(catchup) = managed.async_catchup {
+        detail.push(row(
+            "└ async insert mirror catch-up",
+            "—",
+            format_speed(catchup.insert),
+        ));
+        detail.push(row(
+            "└ async update mirror catch-up",
+            "—",
+            format_speed(catchup.update),
+        ));
+        detail.push(row(
+            "└ async delete mirror catch-up",
+            "—",
+            format_speed(catchup.delete),
+        ));
+        detail.push(row(
+            "└ async restore mirror catch-up",
+            "—",
+            format_speed(catchup.restore),
+        ));
+    }
+    detail.extend([
+        row(
+            "query hot only (before flush)",
+            format_speed(baseline.query_hot_only),
+            format_speed(managed.query_hot_only),
+        ),
+        row(
+            "query with hot+cold (after flush)",
+            format_speed(baseline.query_hot_cold),
+            format_speed(managed.query_hot_cold),
+        ),
+        row(
+            "VACUUM time (after flush)",
+            format_duration(baseline.vacuum.elapsed),
+            format_duration(managed.vacuum.elapsed),
+        ),
+        row(
+            "dead tuples after workload",
+            format!(
+                "{} (live={})",
+                format_count(baseline.heap_after_workload.n_dead_tup),
+                format_count(baseline.heap_after_workload.n_live_tup)
+            ),
+            format!(
+                "{} (live={})",
+                format_count(managed.heap_after_workload.n_dead_tup),
+                format_count(managed.heap_after_workload.n_live_tup)
+            ),
+        ),
+        row(
+            "index storage (hot + __cl)",
+            format_bytes(baseline.sizes.pg_index_bytes()),
+            format_bytes(managed.sizes.pg_index_bytes()),
+        ),
+        row(
+            "table storage (hot + __cl)",
+            format_bytes(baseline.sizes.pg_table_bytes()),
+            format_bytes(managed.sizes.pg_table_bytes()),
+        ),
+        row(
+            "└ cold Parquet",
+            "—",
+            format_bytes(managed.sizes.cold_bytes),
+        ),
+        row(
+            "└ hot heap only",
+            format_bytes(baseline.sizes.table_bytes),
+            format_bytes(managed.sizes.table_bytes),
+        ),
+        row(
+            "└ __cl mirror heap",
+            "—",
+            format_bytes(managed.sizes.mirror_table_bytes),
+        ),
+        row(
+            "└ __cl mirror indexes",
+            "—",
+            format_bytes(managed.sizes.mirror_index_bytes),
+        ),
+        row(
+            "PostgreSQL heap + indexes (after flush)",
+            format_bytes(local_baseline),
+            format_bytes(local_managed),
+        ),
+        row("total PG backup size", "TODO", "TODO"),
+        row("restore time", "TODO", "TODO"),
+    ]);
+
+    ComparisonReport {
+        mode: mirror_capture_mode.to_string(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        rows,
+        hot_limit,
+        dml_sample,
+        insert_batch_rows,
+        max_rows_per_file,
+        flushed: flush.rows_flushed,
+        main,
+        detail,
+        notes: vec![
+            format!(
+                "flush: duration={} rows={} ({:.0} rows/s) peak_rss={} (before={}, after={})",
+                format_duration(flush.duration),
+                flush.rows_flushed,
+                flush_rows_per_sec,
+                format_bytes(flush.peak_rss_bytes as i64),
+                format_bytes(flush.before_rss_bytes as i64),
+                format_bytes(flush.after_rss_bytes as i64),
+            ),
+            "† Strict DML updates the change-log mirror in the foreground. Async DML records heap WAL in the foreground and catch-up rows are reported separately.".to_string(),
+        ],
+    }
+}
+
+fn row(
+    metric: &str,
+    postgres_only: impl Into<String>,
+    koldstore: impl Into<String>,
+) -> ComparisonRow {
+    ComparisonRow {
+        metric: metric.to_string(),
+        postgres_only: postgres_only.into(),
+        koldstore: koldstore.into(),
+    }
+}
+
+fn render_comparison_markdown(report: &ComparisonReport) -> String {
+    let mut out = String::new();
+    out.push_str("## Main comparison\n\n");
+    out.push_str(&format!(
+        "schema=tests/storage/schema.sql rows={} hot_row_limit={} \
+         dml_sample={} insert_batch_rows={} max_rows_per_file={} flushed={} \
+         compression=zstd mirror_capture_mode={}\n\n",
+        report.rows,
+        report.hot_limit,
+        report.dml_sample,
+        report.insert_batch_rows,
+        report.max_rows_per_file,
+        report.flushed,
+        report.mode
+    ));
+    out.push_str(&render_three_column_table(
+        "Metric",
+        &report.main,
+        &report.mode,
+    ));
+    out.push('\n');
+    out.push_str("## Detail (throughput and storage breakdown)\n\n");
+    out.push_str(&render_three_column_table(
+        "Operation",
+        &report.detail,
+        &report.mode,
+    ));
+    out.push('\n');
+    for note in &report.notes {
+        out.push_str(note);
+        out.push('\n');
+    }
+    out.push('\n');
+    out
+}
+
+fn render_three_column_table(label: &str, rows: &[ComparisonRow], mode: &str) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "| {label} | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |\n"
+    ));
+    out.push_str("| --- | --- | --- | --- |\n");
+    for row in rows {
+        let (async_val, strict_val) = split_mode_columns(mode, &row.koldstore);
+        out.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            row.metric, row.postgres_only, async_val, strict_val
+        ));
+    }
+    out
+}
+
+fn split_mode_columns(mode: &str, koldstore: &str) -> (String, String) {
+    match mode {
+        "async" => (koldstore.to_string(), "—".to_string()),
+        "strict" => ("—".to_string(), koldstore.to_string()),
+        _ => ("—".to_string(), "—".to_string()),
+    }
+}
+
+fn format_ops_per_sec(timing: Timing) -> String {
+    format!("{:.0} ops/s", timing.ops_per_sec())
 }
 
 fn format_speed(timing: Timing) -> String {

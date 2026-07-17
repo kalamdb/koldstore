@@ -160,9 +160,11 @@ pub fn apply_recovery_plan(
                 .delete(step.path.as_str())
                 .map_err(|error| error.to_string())?,
             RecoveryAction::QuarantineFinal => {
-                let bytes = client
-                    .get(step.path.as_str())
-                    .map_err(|error| error.to_string())?;
+                let bytes = match client.get(step.path.as_str()) {
+                    Ok(bytes) => bytes,
+                    Err(koldstore_storage::StorageClientError::NotFound { .. }) => continue,
+                    Err(error) => return Err(error.to_string()),
+                };
                 let quarantine =
                     format!("{}.quarantine.{}", step.path.as_str(), uuid::Uuid::new_v4());
                 client

@@ -79,6 +79,19 @@ impl TestDb {
             .batch_execute(&format!("CREATE SCHEMA {schema};"))
             .await
             .with_context(|| format!("create schema {schema}"))?;
+        // Clear any database-level failpoint left by a prior crashed async test.
+        let dbname: String = server
+            .client
+            .query_one("SELECT current_database()::text", &[])
+            .await
+            .context("read current database")?
+            .get(0);
+        let _ = server
+            .client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; RESET koldstore.failpoint"
+            ))
+            .await;
         register_filesystem_storage(&server.client, &storage_name, &storage_root).await?;
 
         Ok(Self {
@@ -201,6 +214,7 @@ impl TestDb {
     ///
     /// Returns an error when management fails.
     pub async fn manage_shared(&self, relation: &str, migration_order_by: &str) -> Result<()> {
+        let mode = super::selected_mirror_capture_mode()?.as_str();
         self.client
             .execute(
                 r#"
@@ -208,10 +222,11 @@ impl TestDb {
                   table_name     => $1::text::regclass,
                   storage        => $2,
                   hot_row_limit  => NULL,
-                  migration_order_by => $3
+                  migration_order_by => $3,
+                  mirror_capture_mode => $4
                 )
                 "#,
-                &[&relation, &self.storage_name, &migration_order_by],
+                &[&relation, &self.storage_name, &migration_order_by, &mode],
             )
             .await?;
         catalog::assert_system_columns_absent(&self.client, relation).await?;
@@ -233,6 +248,7 @@ impl TestDb {
     ///
     /// Returns an error when management fails.
     pub async fn manage_user_scoped(&self, relation: &str, scope_column: &str) -> Result<()> {
+        let mode = super::selected_mirror_capture_mode()?.as_str();
         self.client
             .execute(
                 r#"
@@ -242,10 +258,11 @@ impl TestDb {
                   hot_row_limit  => NULL,
                   table_type     => 'user',
                   scope_column   => $3,
-                  migration_order_by => 'id'
+                  migration_order_by => 'id',
+                  mirror_capture_mode => $4
                 )
                 "#,
-                &[&relation, &self.storage_name, &scope_column],
+                &[&relation, &self.storage_name, &scope_column, &mode],
             )
             .await?;
         catalog::assert_system_columns_absent(&self.client, relation).await?;

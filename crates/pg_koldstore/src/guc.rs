@@ -25,16 +25,20 @@ static INTERNAL_SYSTEM_WRITE: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
 static INTERNAL_FLUSH_CLEANUP: GucSetting<bool> = GucSetting::<bool>::new(false);
 #[cfg(feature = "pg")]
+static INTERNAL_ASYNC_MIRROR_WORKER: GucSetting<bool> = GucSetting::<bool>::new(true);
+#[cfg(feature = "pg")]
 static MIN_MAX_ROWS_PER_FILE: GucSetting<i32> =
     GucSetting::<i32>::new(settings::default_min_max_rows_per_file());
 #[cfg(feature = "pg")]
 static FAILPOINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
+#[cfg(feature = "pg")]
+static PENDING_SEGMENT_TTL_SECONDS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_PENDING_SEGMENT_TTL_SECONDS);
 
 /// Defines pg-koldstore configuration variables.
 #[cfg(feature = "pg")]
 pub fn define_gucs() {
     let flags = GucFlags::default();
-    crate::failpoints::mark_registered();
     GucRegistry::define_string_guc(
         c"koldstore.cold_reads",
         c"Controls KoldStore cold reads.",
@@ -95,6 +99,14 @@ pub fn define_gucs() {
         GucContext::Suset,
         flags,
     );
+    GucRegistry::define_bool_guc(
+        c"koldstore.internal_async_mirror_worker",
+        c"Enables automatic async mirror worker registration.",
+        c"Internal benchmark control. Keep enabled in production so async mirrors apply committed WAL automatically.",
+        &INTERNAL_ASYNC_MIRROR_WORKER,
+        GucContext::Suset,
+        flags,
+    );
     GucRegistry::define_int_guc(
         c"koldstore.min_max_rows_per_file",
         c"Minimum allowed max_rows_per_file for managed tables.",
@@ -111,6 +123,16 @@ pub fn define_gucs() {
         c"Test-only KoldStore flush failpoint.",
         c"Arms a named flush failpoint (error:<name> or wait:<name>). Empty disables. For crash-recovery and isolation suites only.",
         &FAILPOINT,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.pending_segment_ttl_seconds",
+        c"TTL for pending cold segments before recovery expiry.",
+        c"recover_segments quarantines object-store blobs and deletes catalog rows for pending segments older than this many seconds.",
+        &PENDING_SEGMENT_TTL_SECONDS,
+        settings::MIN_PENDING_SEGMENT_TTL_SECONDS,
+        settings::MAX_PENDING_SEGMENT_TTL_SECONDS,
         GucContext::Userset,
         flags,
     );
@@ -181,9 +203,19 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "off",
         },
         GucDefinition {
+            name: INTERNAL_ASYNC_MIRROR_WORKER_GUC,
+            internal: true,
+            default_value: "on",
+        },
+        GucDefinition {
             name: settings::FAILPOINT_GUC,
             internal: false,
             default_value: settings::DEFAULT_FAILPOINT,
+        },
+        GucDefinition {
+            name: settings::PENDING_SEGMENT_TTL_SECONDS_GUC,
+            internal: false,
+            default_value: "3600",
         },
     ]
 }
@@ -193,6 +225,7 @@ pub const USER_ID_GUC: &str = "koldstore.user_id";
 pub const ENABLE_MERGE_SCAN_GUC: &str = "koldstore.enable_merge_scan";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
+pub const INTERNAL_ASYNC_MIRROR_WORKER_GUC: &str = "koldstore.internal_async_mirror_worker";
 
 /// Whether the planner may inject KoldMergeScan paths.
 #[must_use]
@@ -200,6 +233,23 @@ pub fn enable_merge_scan() -> bool {
     #[cfg(feature = "pg")]
     {
         ENABLE_MERGE_SCAN.get()
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        true
+    }
+}
+
+/// Whether async capture should register the bounded-lag database worker.
+///
+/// This is disabled only by deterministic benchmarks that account for each
+/// explicit catch-up phase. Production sessions keep the default enabled.
+#[must_use]
+pub fn async_mirror_worker_enabled() -> bool {
+    #[cfg(feature = "pg")]
+    {
+        INTERNAL_ASYNC_MIRROR_WORKER.get()
     }
 
     #[cfg(not(feature = "pg"))]
@@ -282,5 +332,23 @@ pub fn failpoint_value() -> String {
     #[cfg(not(feature = "pg"))]
     {
         String::new()
+    }
+}
+
+/// TTL in seconds for pending cold segments before recover_segments expires them.
+#[must_use]
+pub fn pending_segment_ttl_seconds() -> i64 {
+    #[cfg(feature = "pg")]
+    {
+        i64::from(
+            PENDING_SEGMENT_TTL_SECONDS
+                .get()
+                .max(settings::MIN_PENDING_SEGMENT_TTL_SECONDS),
+        )
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        i64::from(settings::DEFAULT_PENDING_SEGMENT_TTL_SECONDS)
     }
 }

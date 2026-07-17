@@ -76,10 +76,7 @@ fn resolver_emits_at_most_one_visible_winner_per_pk() {
         .into_iter()
         .map(|row| (row.pk_json["id"].as_i64().unwrap(), row))
         .collect();
-    assert_eq!(
-        by_id.keys().copied().collect::<Vec<_>>(),
-        vec![1_i64, 2]
-    );
+    assert_eq!(by_id.keys().copied().collect::<Vec<_>>(), vec![1_i64, 2]);
     assert_eq!(
         by_id.get(&1).unwrap().row_image,
         json!({"id": 1, "body": "hot"})

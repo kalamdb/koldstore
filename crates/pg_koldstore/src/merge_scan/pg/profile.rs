@@ -194,11 +194,7 @@ pub(super) fn explain_cold_read_profile(
     let footer_cache_hits = profile.footer_cache_hits();
 
     if executed || row_groups_total > 0 || bytes_fetched > 0 {
-        explain_property(
-            es,
-            "Row groups read",
-            &row_groups_selected.to_string(),
-        );
+        explain_property(es, "Row groups read", &row_groups_selected.to_string());
         if row_groups_total > 0 {
             explain_property(
                 es,

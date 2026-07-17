@@ -49,6 +49,10 @@ fn operational_functions_build_parameterized_catalog_plans() {
     assert_eq!(status.table_name.as_str(), "app.items");
     assert!(status.statement.sql.contains("jsonb_build_object"));
     assert!(status.statement.sql.contains("'hot_rows'"));
+    assert!(
+        status.statement.sql.contains("NULLIF(m.hot_row_count, 0)"),
+        "hot_rows should fall back to ONLY heap count when the counter is still 0"
+    );
     assert!(status.statement.sql.contains("'mirror_rows'"));
     assert!(status.statement.sql.contains("'cold_row_count'"));
     assert!(status.statement.sql.contains("\"app\".\"items\""));

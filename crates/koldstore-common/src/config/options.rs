@@ -40,6 +40,38 @@ pub enum MigrationStatus {
     MirrorInitializing,
 }
 
+/// How committed heap changes reach the latest-state mirror.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MirrorCaptureMode {
+    /// Apply mirror changes synchronously in the user's transaction.
+    #[default]
+    Strict,
+    /// Decode committed source WAL and apply mirror changes out of band.
+    Async,
+}
+
+impl MirrorCaptureMode {
+    /// Parses an operator-provided capture mode.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "strict" => Some(Self::Strict),
+            "async" => Some(Self::Async),
+            _ => None,
+        }
+    }
+
+    /// Returns the persisted/operator-facing spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Strict => "strict",
+            Self::Async => "async",
+        }
+    }
+}
+
 impl MigrationStatus {
     /// Returns the persisted JSON string for this status.
     #[must_use]
@@ -160,6 +192,9 @@ pub struct ManageTableOptions {
     /// Migration lifecycle marker written by the extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_status: Option<MigrationStatus>,
+    /// Mirror consistency/write-throughput mode. Missing means strict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mirror_capture_mode: Option<MirrorCaptureMode>,
 }
 
 impl ManageTableOptions {
@@ -246,6 +281,22 @@ impl ManageTableOptions {
         self
     }
 
+    /// Sets how committed heap changes reach the mirror.
+    #[must_use]
+    pub fn with_mirror_capture_mode(mut self, mode: MirrorCaptureMode) -> Self {
+        self.mirror_capture_mode = match mode {
+            MirrorCaptureMode::Strict => None,
+            MirrorCaptureMode::Async => Some(mode),
+        };
+        self
+    }
+
+    /// Returns the configured capture mode, defaulting to strict consistency.
+    #[must_use]
+    pub fn mirror_capture_mode(&self) -> MirrorCaptureMode {
+        self.mirror_capture_mode.unwrap_or_default()
+    }
+
     /// Returns a trimmed explicit migration ordering column when configured.
     #[must_use]
     pub fn explicit_migration_order_by(&self) -> Option<&str> {
@@ -278,7 +329,7 @@ pub fn hot_row_limit_from_options(options: &Value) -> Option<u64> {
 mod tests {
     use super::{
         validate_max_rows_per_file, FlushPolicy, ManageTableOptions, MigrationStatus,
-        ParquetCompression, DEFAULT_MIN_MAX_ROWS_PER_FILE,
+        MirrorCaptureMode, ParquetCompression, DEFAULT_MIN_MAX_ROWS_PER_FILE,
     };
 
     #[test]
@@ -402,5 +453,39 @@ mod tests {
             decoded.migration_status,
             Some(MigrationStatus::MirrorInitializing)
         );
+    }
+
+    #[test]
+    fn mirror_capture_mode_defaults_to_strict_and_round_trips_async() {
+        let defaults = ManageTableOptions::default();
+        assert_eq!(defaults.mirror_capture_mode(), MirrorCaptureMode::Strict);
+        assert!(!defaults
+            .to_value()
+            .as_object()
+            .unwrap()
+            .contains_key("mirror_capture_mode"));
+
+        let options = defaults.with_mirror_capture_mode(MirrorCaptureMode::Async);
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({"mirror_capture_mode": "async"})
+        );
+        assert_eq!(
+            ManageTableOptions::from_value(&options.to_value()).mirror_capture_mode(),
+            MirrorCaptureMode::Async
+        );
+    }
+
+    #[test]
+    fn mirror_capture_mode_parses_operator_values() {
+        assert_eq!(
+            MirrorCaptureMode::parse(" strict "),
+            Some(MirrorCaptureMode::Strict)
+        );
+        assert_eq!(
+            MirrorCaptureMode::parse("ASYNC"),
+            Some(MirrorCaptureMode::Async)
+        );
+        assert_eq!(MirrorCaptureMode::parse("eventual"), None);
     }
 }

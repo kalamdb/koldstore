@@ -1,12 +1,12 @@
 //! Smoke test: managed table stays equal to a plain-heap baseline under the same DML.
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use anyhow::Result;
 
 #[tokio::test]
 async fn baseline_equality_smoke_matches_after_shared_dml() -> Result<()> {
     common::require_pgrx_server().await?;
+    let mode = common::selected_mirror_capture_mode()?.as_str();
 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "eq_smoke").await?;
@@ -39,10 +39,11 @@ async fn baseline_equality_smoke_matches_after_shared_dml() -> Result<()> {
                   hot_row_limit => 4,
                   min_flush_rows => 1,
                   max_rows_per_file => 8,
-                  migration_order_by => 'id'
+                  migration_order_by => 'id',
+                  mirror_capture_mode => $3
                 )
                 "#,
-                &[&managed, &db.storage_name],
+                &[&managed, &db.storage_name, &mode],
             )
             .await?;
 

@@ -1,26 +1,23 @@
 Tasks:
-- crates/koldstore-core - rename it to common and inside of it models so it have the shared models and enums
-- the koldstore-mirror should have create/dml/cleanup/select/stats as a separate files to be easy to be read and understood
-- we should divide the crate pg_kold
-crates/pg_koldstore/src/sql/ddl.rs
-crates/pg_koldstore/src/sql/dml.rs
-crates/pg_koldstore/src/sql/ops.rs
-into another crates if needed and check if we even need that long files
+- Add cold policy change and syntax change: (When is a v2 not for now, but its on the roadmap):
 
-- everything which relates to the storage should be moved to the storage crate
-- everything which belong to the parquert read/write should be moved to the parquet crate
-- everything which belong to the koldstore-catalog should be moved to the catalog crate
+Example new syntax:
+ALTER TABLE messages SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'cold_s3',
 
-- there is more things we can move to the commo crate which is scattered around the codebase
-- the source crates/pg_koldstore/src/catalog i guess need to be moved to the catalog crate
+  koldstore_order_column = 'created_at',
+  koldstore_move_after = '90 days',
+  koldstore_move_when = 'status = ''completed''',
+
+  koldstore_hot_row_limit = 100000,
+  koldstore_min_flush_rows = 1000,
+  koldstore_max_rows_per_file = 10000
+);
 
 
-- Check the explain to show if the manifest is read from hot table or from object store json if it didnt existed there, we already have a table which stores segments there.
-i think it would be good to add to the explain:
--- reading the manifest's segment from the hot table
--- reading the manifest from object store
--- deserializing the manifest
-to be included in the explain
+- Check the bg worker which does the WAL reading, we can make it also flush cold rows or make this as a shared resource for both of these workers
 
-- We should add more e2e tests which covers the explain/count/joining with 2 tables which has cold rows
+
+- We need to add lock while we delete/prune hot/mirror rows: docs/cases/async-flush-prune-race.md
 

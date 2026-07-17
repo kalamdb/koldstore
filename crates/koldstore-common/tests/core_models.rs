@@ -79,17 +79,14 @@ fn logical_pk_is_hashable_map_key_without_json_stringify() {
     use std::collections::HashMap;
 
     let columns = vec![PkColumn::new("id").unwrap()];
-    let left =
-        LogicalPk::from_json_object(&json!({"id": 7}), &columns).unwrap();
-    let right =
-        LogicalPk::from_json_object(&json!({"id": 7}), &columns).unwrap();
-    let other =
-        LogicalPk::from_json_object(&json!({"id": 8}), &columns).unwrap();
+    let left = LogicalPk::from_json_object(&json!({"id": 7}), &columns).unwrap();
+    let right = LogicalPk::from_json_object(&json!({"id": 7}), &columns).unwrap();
+    let other = LogicalPk::from_json_object(&json!({"id": 8}), &columns).unwrap();
 
     let mut map = HashMap::new();
     map.insert(left, "seven");
     assert_eq!(map.get(&right), Some(&"seven"));
-    assert!(map.get(&other).is_none());
+    assert!(!map.contains_key(&other));
 }
 
 #[test]

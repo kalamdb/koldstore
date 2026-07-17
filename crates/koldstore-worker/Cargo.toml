@@ -1,0 +1,12 @@
+[package]
+name = "koldstore-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PostgreSQL-free database-scoped background worker orchestration for pg-koldstore"
+
+[dependencies]
+
+[lints]
+workspace = true

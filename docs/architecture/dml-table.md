@@ -4,7 +4,9 @@ This document describes what happens when application SQL mutates a managed heap
 table: `INSERT`, `UPDATE`, and `DELETE`. It covers mirror capture, row counter
 accounting, scope enforcement, and how DML state flows into flush and scan.
 
-**Capture mechanism:** AFTER ROW triggers on the user heap (not executor hooks)  
+**Capture mechanisms:** strict statement triggers or opt-in asynchronous
+logical-WAL apply (plus a separate PK-mutation guard in both modes)
+
 **Mirror contract:** `crates/koldstore-mirror/`  
 **Trigger generation:** `crates/koldstore-migrate/src/sql/capture.rs`  
 **Counter cache:** `crates/pg_koldstore/src/row_counter_cache.rs`
@@ -21,10 +23,11 @@ change-log mirror at `koldstore.{table}__cl`:
 | `<pk columns>` | same as heap | Primary key |
 | `seq` | `bigint` | Snowflake-style effect id (ordering, flush cutoffs) |
 | `op` | `smallint` | `1 = INSERT`, `2 = UPDATE`, `3 = DELETE` |
-| `commit_lsn` | `pg_lsn` | WAL position at capture (diagnostics) |
+| `commit_lsn` | `pg_lsn` | WAL position sampled at capture (diagnostics only) |
 
-The mirror holds **at most one row per PK** — the latest committed hot state for
-that key. It is not a full event log.
+The mirror holds **at most one row per PK** — the latest hot-side state for that
+key. It is not a full event log. Tombstones (`op = 3`) stay until flush prunes
+them.
 
 ---
 
@@ -32,9 +35,26 @@ that key. It is not a full event log.
 
 ```mermaid
 flowchart TD
-  DML["INSERT / UPDATE / DELETE on heap"] --> TRG["AFTER ROW capture trigger"]
-  TRG --> CAP["koldstore.{mirror}_capture()"]
-  CAP --> MIR["UPSERT koldstore.{table}__cl"]
+  DML["INSERT / UPDATE / DELETE on heap"] --> MODE{"mirror capture mode"}
+  DML -->|"UPDATE OF pk…"| PKG["BEFORE ROW pk guard"]
+  PKG -->|"value changed"| ERR["RAISE: PK updates unsupported"]
+  PKG -->|"same value"| DML
+  MODE -->|strict| TRG["AFTER STATEMENT capture trigger"]
+  MODE -->|async| COMMIT["Commit source heap"]
+  COMMIT --> WAL["PK-only pgoutput in logical slot"]
+  WAL --> FENCE["wait_for_async_mirror or flush fence"]
+  FENCE --> APPLY["Bounded set-based apply"]
+  TRG --> CAP["koldstore.{table}__cl_capture()"]
+  CAP --> KIND{"Operation"}
+  KIND -->|"INSERT ≤32 rows"| UPSERT["INSERT ... ON CONFLICT"]
+  KIND -->|"INSERT >32 rows"| MERGE["MERGE latest state"]
+  KIND -->|"UPDATE"| DIRECTU["UPDATE mirror FROM new_rows"]
+  KIND -->|"DELETE"| DIRECTD["UPDATE mirror FROM old_rows"]
+  UPSERT --> MIR["koldstore.{table}__cl"]
+  MERGE --> MIR
+  DIRECTU --> MIR
+  DIRECTD --> MIR
+  APPLY --> MIR
   CAP --> RC["internal_record_row_count_delta"]
   RC --> MEM["In-memory counter deltas"]
   MEM --> XACT["PRE_COMMIT → manifest counters"]
@@ -42,7 +62,20 @@ flowchart TD
   FLUSH --> PQ["Parquet + manifest"]
 ```
 
-DML does **not** read Parquet or object storage. Hot path stays heap-native.
+DML does **not** read Parquet or object storage. The hot path stays heap-native.
+
+Strict capture keeps the mirror current before the source transaction commits.
+Async capture returns from the foreground commit first and makes the mirror
+current at the next fence. See
+[mirror-capture-modes.md](mirror-capture-modes.md) for selection,
+[mirror-capture-strict.md](mirror-capture-strict.md) and
+[mirror-capture-async.md](mirror-capture-async.md) for mode details, setup,
+consistency, crash safety, and slot operations.
+
+Primary-key mutation is rejected by a separate
+`BEFORE UPDATE OF <pk...> FOR EACH ROW` guard so ordinary updates never pay for
+an `OLD TABLE` transition relation. Same-value assignments (`SET id = id`)
+succeed because the guard raises only on `IS DISTINCT FROM`.
 
 ---
 
@@ -51,80 +84,160 @@ DML does **not** read Parquet or object storage. Hot path stays heap-native.
 Installed by `koldstore.manage_table` (see [manage-table.md](manage-table.md)):
 
 1. `CREATE TABLE koldstore.{name}__cl` with PK + metadata columns
-2. Indexes on `seq` and partial tombstone index (`op = 3`)
-3. Capture function `koldstore.{mirror}_capture()`
-4. Three AFTER ROW triggers on the user heap
+2. B-tree on `seq`, plus partial tombstone index `(seq) WHERE op = 3`
+3. Capture function `koldstore.{name}__cl_capture()`
+4. PK-guard function `koldstore.{name}__cl_pk_guard()`
+5. Three `AFTER … FOR EACH STATEMENT` capture triggers (transition tables)
+6. One `BEFORE UPDATE OF <pk...> FOR EACH ROW` guard trigger
+7. Counter refresh so manifest hot/mirror counts match live heaps before capture
+   takes over
+8. In async mode only: add the source's PK columns to the shared publication and
+   drop the three DML capture triggers; keep the PK guard, install the
+   worker-kick statement trigger, and start/reuse the database applier
 
 For user-scoped tables, RLS policy `koldstore_user_scope_fail_closed` is also
 installed.
 
+Existing-table manage backfills one mirror row per live heap PK before
+activation. Empty-table manage relies on INSERT capture from the first write.
+That invariant is what lets UPDATE/DELETE modify the mirror directly.
+
 ---
 
-## Phase 2 — Capture trigger function
+## Phase 2 — Strict capture trigger function
 
 Generated by `capture_function_sql` (`koldstore-migrate/src/sql/capture.rs`).
-All three triggers call the same function.
+All three statement-level triggers call the same function. Capture sets
+
+```sql
+capture_wal_lsn pg_lsn := pg_current_wal_lsn();
+```
+
+once per statement for diagnostics; that value is **not** the final commit LSN.
+
+Sequence ids use `public.snowflake_id()` (restricted `search_path` on the
+capture function).
+
+Threshold constant: `SMALL_INSERT_UPSERT_ROWS = 32` in `capture.rs`.
 
 ### INSERT
 
 ```sql
--- plan_upsert_mirror_row: INSERT ... ON CONFLICT DO UPDATE
-INSERT INTO koldstore.{table}__cl (pk..., seq, op, commit_lsn)
-VALUES (NEW.pk..., SNOWFLAKE_ID(), 1, pg_current_wal_lsn())
-ON CONFLICT (pk...) DO UPDATE SET seq=..., op=..., commit_lsn=...;
+-- Transition: REFERENCING NEW TABLE AS new_rows
 
-PERFORM koldstore.internal_record_row_count_delta(TG_RELID, 1, 1);
--- hot +1, mirror +1
-RETURN NEW;
+-- Pre-count overlapping PKs so reinserts over tombstones do not inflate
+-- mirror_row_count (MERGE has no RETURNING on supported majors).
+SELECT count(*) INTO existing_mirror_rows
+FROM new_rows AS src
+JOIN koldstore.{table}__cl AS mirror ON <pk equality>;
+
+IF EXISTS (SELECT 1 FROM new_rows OFFSET 32 LIMIT 1) THEN
+  -- bulk: MERGE (matched → update seq/op/lsn; not matched → insert)
+  MERGE INTO koldstore.{table}__cl AS mirror ...;
+ELSE
+  -- small: ON CONFLICT keeps insert-or-update concurrency guarantees
+  INSERT INTO koldstore.{table}__cl (...)
+  SELECT ... FROM new_rows
+  ON CONFLICT (pk...) DO UPDATE SET seq=..., op=1, commit_lsn=...;
+END IF;
+
+GET DIAGNOSTICS affected = ROW_COUNT;
+PERFORM koldstore.internal_record_row_count_delta(
+  TG_RELID, affected, affected - existing_mirror_rows);
 ```
 
 ### UPDATE
 
 ```sql
--- RAISE if any PK column changed (primary_key_update_guard)
--- plan_upsert_mirror_row with op = 2
-INSERT ... ON CONFLICT ... op = 2, new seq, pg_current_wal_lsn();
+-- Transition: REFERENCING NEW TABLE AS new_rows only (no OLD TABLE).
+UPDATE koldstore.{table}__cl AS mirror
+SET seq = public.snowflake_id(), op = 2, commit_lsn = capture_wal_lsn
+FROM new_rows AS src
+WHERE <pk equality>;
 
--- No row counter delta (row still exists in hot and mirror)
-RETURN NEW;
+-- Fail closed if transition rows exist but no mirror rows were updated.
+-- No row counter delta (row still exists in hot and mirror).
 ```
+
+PK mutation is rejected by `koldstore.{name}__cl_pk_guard()` on
+`BEFORE UPDATE OF <pk...>`.
 
 ### DELETE
 
 ```sql
--- plan_upsert_mirror_row with OLD.pk..., op = 3
-INSERT ... ON CONFLICT ... op = 3, new seq, pg_current_wal_lsn();
+-- Transition: REFERENCING OLD TABLE AS old_rows.
+UPDATE koldstore.{table}__cl AS mirror
+SET seq = public.snowflake_id(), op = 3, commit_lsn = capture_wal_lsn
+FROM old_rows AS src
+WHERE <pk equality>;
 
-PERFORM koldstore.internal_record_row_count_delta(TG_RELID, -1, 0);
--- hot -1 only; mirror tombstone remains until flush prunes it
-RETURN OLD;
+GET DIAGNOSTICS affected = ROW_COUNT;
+PERFORM koldstore.internal_record_row_count_delta(TG_RELID, -affected, 0);
+-- hot -affected only; mirror tombstone remains until flush prunes it.
 ```
-
-Mirror upsert SQL is built by `koldstore-mirror/src/write.rs::plan_upsert_mirror_row`.
 
 ### Encoding at mirror boundary
 
 | Field | Source | Type |
 |-------|--------|------|
-| PK values | `NEW."col"` / `OLD."col"` | Native PG column types |
-| `seq` | `SNOWFLAKE_ID()` | `i64` snowflake id |
+| PK values | transition `src."col"` | Native PG column types |
+| `seq` | `public.snowflake_id()` | `i64` snowflake id |
 | `op` | `MirrorOperation::code()` | `smallint` 1/2/3 |
-| `commit_lsn` | `pg_current_wal_lsn()` | `pg_lsn` |
+| `commit_lsn` | statement `capture_wal_lsn` | `pg_lsn` |
 
 No JSON or Arrow encoding at capture time. Values are written directly into the
 mirror table via SQL.
 
-Capture runs in the **same user transaction** as the DML. Mirror changes roll
-back with the user statement on abort.
+Strict capture runs in the **same user transaction** as the DML. Mirror changes
+roll back with the user statement on abort. PostgreSQL does not parallelize the
+heap and mirror writes within that transaction.
 
 ---
 
-## Phase 3 — Row counter cache
+## Phase 3 — Async committed-WAL capture
 
-### Per-row hot path
+Async mode removes the three strict DML triggers after initialization. The
+source table publishes only its primary-key columns through pgoutput v1. A
+logical slot filters out aborted transactions; therefore rollback correctness
+does not require speculative mirror writes or compensating deletes.
 
-`internal_record_row_count_delta` (`flush/counters.rs`) calls
-`row_counter_cache::record_delta`:
+The database worker normally peeks committed changes every 100 ms and applies
+them in bounded batches of 8,192. `koldstore.wait_for_async_mirror()` uses the
+same path when the caller needs an explicit consistency boundary:
+
+| Source operation | Mirror apply |
+| --- | --- |
+| INSERT | Set-based `INSERT ... ON CONFLICT DO UPDATE` |
+| UPDATE | Set-based `UPDATE ... FROM` of the existing key |
+| DELETE | Set-based `UPDATE ... FROM`, setting `op = 3` |
+
+Primary keys cross the pgoutput boundary as protocol text, are grouped in Rust,
+serialized once per batch, and are converted back to native PostgreSQL types
+with `jsonb_to_recordset`. Non-key source columns are not published or allocated.
+The mirror remains a metadata index; flush reads the current row image from the
+hot heap.
+
+The mirror batch, row-counter delta, and durable applied LSN commit together.
+The next fence advances the slot to that checkpoint before peeking more WAL.
+`flush_table` invokes this phase automatically. Flush's internal source-row
+cleanup uses PostgreSQL's `DoNotReplicateId`, so maintenance deletes do not
+produce new mirror tombstones.
+
+Async capture is eventual within the worker polling interval. It is not a
+transparent read-your-writes mode; strong reads still use the fence. Full
+operational semantics are in
+[mirror-capture-modes.md](mirror-capture-modes.md).
+
+---
+
+## Phase 4 — Row counter cache
+
+### Delta recording
+
+Strict `internal_record_row_count_delta`
+(`pg_koldstore/src/sql/flush/counters.rs`) calls
+`row_counter_cache::record_delta` once per capture statement. Async capture
+calls the same cache once per applied set-based batch, not once per heap row:
 
 ```rust
 // thread-local HashMap<table_oid, (hot_delta, mirror_delta)>
@@ -137,63 +250,66 @@ No manifest I/O per row.
 
 `row_counter_xact_callback` on `XACT_EVENT_PRE_COMMIT`:
 
-1. Drain pending deltas from thread-local map
+1. Drain pending deltas from the thread-local map
 2. SPI `plan_bump_table_row_counts` → `koldstore.internal_bump_row_counts`
-3. Updates `koldstore.manifest` counters for each touched table
+3. Update `koldstore.manifest` counters for each touched table
 
 On `XACT_EVENT_ABORT`: `clear_pending_deltas` (discard in-memory state).
 
-**Contract:** one manifest `UPDATE` per touched table per transaction, not per row.
+**Contract:** one manifest bump per touched table per strict source transaction
+or async apply transaction, not per row.
 
 ### Counter semantics
 
 | Operation | hot_row_count | mirror_row_count |
 |-----------|---------------|------------------|
-| INSERT | +1 | +1 |
+| INSERT (new PK) | +N | +N |
+| INSERT (reinsert over tombstone) | +N | +0 for overlapping keys |
 | UPDATE | 0 | 0 |
-| DELETE | -1 | 0 (tombstone stays until flush) |
+| DELETE | -N | 0 (tombstone stays until flush) |
 
 Flush applies decrements via `internal_apply_flush_row_counts` after seq-range
 cleanup (see [flushing-table.md](flushing-table.md)).
 
 ### Reading counters
 
-`read_table_row_counters` (`flush/counters.rs`) reads O(1) from manifest:
+`read_table_row_counters` reads O(1) from manifest:
 
 ```json
 {"hot_row_count": N, "mirror_row_count": M, "cold_row_count": C, "cold_segment_count": S}
 ```
 
-Used by flush stats resolution and example diagnostics.
+Used by flush stats resolution and operator diagnostics. Mid-transaction reads
+of `manifest.mirror_row_count` do not include pending backend deltas until
+pre-commit flush (pg_tests that assert counters call `flush_pending_deltas`
+explicitly). Flush selection folds `row_counter_cache::pending_deltas` into the
+O(1) mirror pending count so an in-transaction async fence cannot miss rows.
 
 ---
 
-## Phase 4 — Hot heap behavior
+## Phase 5 — Hot heap behavior
 
-| Operation | Heap | Mirror after capture | Visible via merge scan |
+| Operation | Heap | Mirror after capture/fence | Visible via merge scan |
 |-----------|------|---------------------|------------------------|
 | INSERT | New live row | `op = 1` latest state | Yes (hot wins) |
 | UPDATE | In-place update | `op = 2` latest state | Yes (hot wins) |
 | DELETE | Physical row removed | `op = 3` tombstone | Depends on cold state* |
 
 \*If the PK existed in cold before delete, merge scan may still show the old
-cold live row until the tombstone is flushed to Parquet with `deleted = true`.
-See [scanning-table.md](scanning-table.md).
+cold live row until async capture has been fenced (when applicable) and the
+tombstone is flushed to Parquet with `deleted = true`. See
+[scanning-table.md](scanning-table.md).
 
 **No Parquet reads on DML path** — verified by design and
-`tests/pg_koldstore/tests/hot_dml_no_cold_reads.rs`.
+`crates/pg_koldstore-shell-tests/tests/hot_dml_no_cold_reads.rs`.
 
 ---
 
-## Phase 5 — Scope enforcement (user tables)
+## Phase 6 — Scope enforcement (user tables)
 
-| Check | Where |
-|-------|-------|
-| Session scope required | `koldstore-common/scope.rs::active_scope_for_table` |
-| Row scope must match session | `hooks/executor.rs::enforce_dml_scope` |
-| Fail-closed RLS on heap | `plan_user_scope_policy` at manage time |
-
-RLS policy SQL:
+Live DML/read isolation for user-scoped tables is enforced by **fail-closed
+RLS** installed at manage time (`plan_user_scope_policy` in
+`koldstore-migrate/src/security/scope.rs`):
 
 ```sql
 USING (scope_column = current_setting('koldstore.user_id', true))
@@ -206,15 +322,19 @@ Session scope is set with:
 SET koldstore.user_id = '<tenant_id>';
 ```
 
-`koldstore.user_id` is exposed as a GUC. Applications must set it before scoped
-DML and reads.
+`koldstore.user_id` is a GUC. Applications must set it before scoped DML and
+reads.
+
+`hooks/executor.rs::enforce_dml_scope` is a pure helper used by unit/shell
+tests and planning code. It is **not** registered as a live executor hook;
+runtime row filtering for scoped tables is RLS.
 
 ---
 
-## Phase 6 — Downstream: flush reads mirror + hot
+## Phase 7 — Downstream: flush reads mirror + hot
 
 When `flush_table` runs, row selection joins mirror to hot heap
-(`plan_mirror_flush_selection_batch`):
+(`plan_mirror_flush_selection_batch` in `koldstore-flush`):
 
 ```sql
 SELECT hot.col AS col, ..., mirror."seq", mirror."op"
@@ -227,7 +347,7 @@ ORDER BY mirror."seq"
 SPI decode → `FlushMirrorRow` → Arrow → Parquet.
 
 Delete markers (`op = 3`): only PK columns + cold metadata written to Parquet;
-`row_image` is null; `deleted = true` in segment.
+`row_image` is null; `deleted = true` in the segment.
 
 After Parquet write, **seq-range cleanup** removes mirror rows with
 `seq <= max_seq` and matching hot rows for `op IN (1,2)`.
@@ -238,20 +358,20 @@ After Parquet write, **seq-range cleanup** removes mirror rows with
 
 ```
 User SQL row (native PG types on heap)
-  → Trigger NEW/OLD references
-  → Mirror UPSERT SQL (typed PK + SNOWFLAKE_ID + op + pg_lsn)
-  → Mirror table storage (no JSON)
+  → strict: statement transition relation → set-based mirror write
+  → async: PK-only pgoutput → bounded JSON batch → set-based mirror write
+  → Mirror table storage (typed PK + seq + op + pg_lsn; no JSON)
 
 At flush:
   Mirror + hot JOIN
   → SPI heap tuples
-  → FlushColumnValue (typed decode, mirror_fetch.rs)
-  → Arrow builders (batch_builder.rs)
-  → Parquet binary (writer.rs)
+  → FlushColumnValue (typed decode)
+  → Arrow builders
+  → Parquet binary
 
 Row counter deltas:
   → in-memory (i64, i64) per table_oid
-  → SPI UPDATE manifest at PRE_COMMIT
+  → SPI bump of manifest at PRE_COMMIT
 ```
 
 ---
@@ -267,16 +387,27 @@ Pure planning exists in `koldstore-merge/src/sql/dml.rs` for:
 SQL types exist in bootstrap DDL (`koldstore.dml_result`) but there are no
 `#[pg_extern]` implementations in `pg_koldstore` yet.
 
-Standard SQL `UPDATE`/`DELETE` on cold-only rows (not in hot heap) is a no-op on
-the heap; durable cold masking requires mirror tombstone + flush.
+Standard SQL `UPDATE`/`DELETE` on cold-only rows (not in the hot heap) is a
+no-op on the heap; durable cold masking requires a mirror tombstone + flush.
 
-`hooks/mod.rs` lists `ExecutorStart`, `ProcessUtility`, `XactCallback` for DML
-rewrite — only custom scan + row-counter callbacks are actually registered.
-Capture is entirely trigger-based.
+### What hooks are actually registered
+
+`_PG_init` installs:
+
+- custom-scan hooks for `KoldMergeScan` (`set_rel_pathlist` / related scan hooks)
+- `XactCallback` for row-counter flush/clear
+- `RelcacheCallback` for catalog cache invalidation
+
+Capture uses statement triggers in strict mode and logical decoding in async
+mode. There is no live `ExecutorStart` / `ProcessUtility` DML-rewrite hook that
+writes the mirror. Async tables have a lightweight statement trigger that only
+ensures one database-scoped background applier is running.
 
 ---
 
 ## Transaction workflow summary
+
+Strict mode:
 
 ```mermaid
 sequenceDiagram
@@ -288,11 +419,32 @@ sequenceDiagram
   participant Manifest
 
   App->>Heap: INSERT/UPDATE/DELETE
-  Heap->>Trigger: AFTER ROW
-  Trigger->>Mirror: UPSERT seq/op/commit_lsn
+  Heap->>Trigger: AFTER STATEMENT + transition table
+  Trigger->>Mirror: set-based INSERT/MERGE/UPDATE
   Trigger->>Cache: record_delta(hot, mirror)
   Note over App,Manifest: transaction commits
   Cache->>Manifest: internal_bump_row_counts (PRE_COMMIT)
+```
+
+Async mode:
+
+```mermaid
+sequenceDiagram
+  participant App
+  participant Heap
+  participant Slot
+  participant Fence
+  participant Mirror
+  participant Manifest
+
+  App->>Heap: INSERT/UPDATE/DELETE
+  Note over App,Heap: source transaction commits
+  Heap->>Slot: committed PK-only WAL
+  App->>Fence: wait_for_async_mirror()
+  Fence->>Mirror: set-based apply
+  Fence->>Manifest: counter deltas at PRE_COMMIT
+  Fence->>Fence: commit applied_lsn
+  Note over Fence,Slot: next fence advances slot to durable applied_lsn
 ```
 
 ---
@@ -302,13 +454,17 @@ sequenceDiagram
 | Concern | Location |
 |---------|----------|
 | Capture trigger SQL | `koldstore-migrate/src/sql/capture.rs` |
-| Mirror upsert SQL | `koldstore-mirror/src/write.rs` |
-| Mirror DDL / columns | `koldstore-mirror/src/schema.rs`, `columns.rs` |
+| Async lifecycle / apply / workers | `pg_koldstore/src/async_mirror/{lifecycle,apply,worker}.rs` |
+| Pgoutput parser | `pg_koldstore/src/async_mirror/protocol.rs` |
+| Mirror DDL / indexes | `koldstore-mirror/src/schema.rs`, `columns.rs` |
 | Row counter cache | `pg_koldstore/src/row_counter_cache.rs` |
 | Counter SPI | `pg_koldstore/src/sql/flush/counters.rs` |
 | Counter SQL functions | `pg_koldstore/sql/koldstore--0.1.0.sql` |
 | Scope / RLS | `koldstore-migrate/src/security/scope.rs` |
-| DML effect planning (future) | `koldstore-merge/src/sql/dml.rs`, `managed_hook.rs` |
+| Flush selection | `koldstore-flush/src/ops.rs` |
+| DML effect planning (future) | `koldstore-merge/src/sql/dml.rs` |
 
-For mirror semantics and transaction boundaries, see also
-[change-log-mirror-and-transactions.md](change-log-mirror-and-transactions.md).
+Related docs: [manage-table.md](manage-table.md),
+[mirror-capture-modes.md](mirror-capture-modes.md),
+[flushing-table.md](flushing-table.md), and
+[scanning-table.md](scanning-table.md).

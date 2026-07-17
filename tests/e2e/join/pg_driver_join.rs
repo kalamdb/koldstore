@@ -1,14 +1,10 @@
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
-#[path = "fixtures.rs"]
-mod fixtures;
-
-use anyhow::Result;
-use fixtures::{
+use super::fixtures::{
     assert_join_pair, assert_join_plan_reads_cold_storage, create_plain_order_lines_table,
     setup_koldstore_items_with_mixed_storage, JoinKind,
 };
+use anyhow::Result;
 
 #[tokio::test]
 async fn plain_pg_table_can_drive_join_against_koldstore_items() -> Result<()> {

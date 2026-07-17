@@ -5,6 +5,27 @@ on:
     branches: ["main"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      pg_version:
+        description: PostgreSQL version filter
+        type: choice
+        required: true
+        default: All
+        options:
+          - All
+          - "15"
+          - "16"
+          - "17"
+          - "18"
+      mode:
+        description: E2E mirror capture mode
+        type: choice
+        required: true
+        default: Both
+        options:
+          - Both
+          - Async
+          - Strict
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,15 +44,15 @@ jobs:
       - run: cargo install cargo-nextest --locked
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
+      - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 
   pgrx-test:
-    name: cargo pgrx test (PG ${{ matrix.pg }})
+    name: "pg_test (PG ${{ matrix.pg }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18]
+        pg: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.pg_version != 'All' && format('[{0}]', inputs.pg_version) || '[15,16,17,18]') }}
     env:
       PG_VER: ${{ matrix.pg }}
       PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
@@ -55,15 +76,16 @@ jobs:
             postgresql-${PG_VER} \
             postgresql-server-dev-${PG_VER}
 
-      - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+      - name: Install cargo-pgrx and cargo-nextest
+        run: |
+          cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+          cargo install cargo-nextest --locked
 
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
         run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
 
-      # `cargo pgrx test` installs into pg_config --sharedir/--pkglibdir. Apt packages
-      # put those under /usr, so the runner needs write access without --sudo (pgrx
-      # test has no install --sudo flag).
+      # pgrx-tests installs into pg_config --sharedir/--pkglibdir. Apt packages
+      # put those under /usr, so the runner needs write access.
       - name: Allow non-root extension install into system PostgreSQL
         run: |
           share_ext="$("${PGRX_PG_CONFIG}" --sharedir)/extension"
@@ -71,19 +93,154 @@ jobs:
           sudo mkdir -p "${share_ext}" "${pkglib}"
           sudo chmod a+w "${share_ext}" "${pkglib}"
 
-      - name: Run #[pg_test] suite
-        run: cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg${PG_VER}
+      # Serial threads are required: #[pg_test] shares one DB and one async logical
+      # slot; parallel flush fences race on PostgreSQL's nowait slot acquire.
+      # Use nextest --test-threads 1 (same as scripts/run-all-tests.sh), not
+      # `cargo pgrx test`, which defaults to parallel libtest threads.
+      - name: "Run pg_test suite (nextest, serial)"
+        run: |
+          features="pg${PG_VER} pg_test"
+          manifest="${GITHUB_WORKSPACE}/crates/pg_koldstore/Cargo.toml"
+          CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target" \
+            PGRX_FEATURES="${features}" \
+            PGRX_NO_DEFAULT_FEATURES=true \
+            PGRX_ALL_FEATURES=false \
+            PGRX_BUILD_PROFILE=dev \
+            PGRX_NO_SCHEMA=false \
+            PGRX_MANIFEST_PATH="${manifest}" \
+            cargo nextest run \
+              --manifest-path "${manifest}" \
+              --features "${features}" \
+              --no-default-features \
+              --test-threads 1
         env:
           RUST_BACKTRACE: "1"
 
-  pgrx-integration:
-    name: E2E + examples + SQL (PG ${{ matrix.pg }})
+  e2e-async:
+    name: E2E async (PG ${{ matrix.pg }})
+    if: github.event_name != 'workflow_dispatch' || inputs.mode == 'Both' || inputs.mode == 'Async'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        pg: [15, 16, 17, 18]
+        pg: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.pg_version != 'All' && format('[{0}]', inputs.pg_version) || '[15,16,17,18]') }}
+    env:
+      PG_VER: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGVERSION: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGPORT: ${{ format('288{0}', matrix.pg) }}
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL ${{ matrix.pg }} development packages
+        run: |
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            postgresql-${PG_VER} \
+            postgresql-server-dev-${PG_VER}
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
+
+      - name: Start MinIO for S3-backed E2E
+        run: bash scripts/ci/start-minio.sh
+
+      - name: Run async-mode E2E suite
+        run: bash scripts/run-pg-e2e.sh "${PG_VER}" --mode async
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+          KOLDSTORE_MINIO: "1"
+          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+          KOLDSTORE_MINIO_BUCKET: koldstore-test
+
+  e2e-strict:
+    name: E2E strict (PG 16)
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      ((inputs.mode == 'Both' || inputs.mode == 'Strict') &&
+      (inputs.pg_version == 'All' || inputs.pg_version == '16'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PG_VER: 16
+      KOLDSTORE_E2E_PGVERSION: 16
+      KOLDSTORE_E2E_PGPORT: 28816
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL 16 development packages
+        run: |
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            postgresql-16 \
+            postgresql-server-dev-16
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 "${PGRX_PG_CONFIG}"
+
+      - name: Start MinIO for S3-backed E2E
+        run: bash scripts/ci/start-minio.sh
+
+      - name: Run strict-mode E2E suite
+        run: bash scripts/run-pg-e2e.sh 16 --mode strict
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+          KOLDSTORE_MINIO: "1"
+          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+          KOLDSTORE_MINIO_BUCKET: koldstore-test
+
+  pgrx-integration:
+    name: Examples + storage + SQL (PG ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.pg_version != 'All' && format('[{0}]', inputs.pg_version) || '[15,16,17,18]') }}
     env:
       PG_VER: ${{ matrix.pg }}
       KOLDSTORE_E2E_PGVERSION: ${{ matrix.pg }}
@@ -132,24 +289,6 @@ jobs:
       - name: Compile pg_koldstore for PostgreSQL ${{ matrix.pg }}
         run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER} -- -D warnings
 
-      - name: Start MinIO for S3-backed E2E
-        run: bash scripts/ci/start-minio.sh
-
-      - name: Start pgrx PostgreSQL ${{ matrix.pg }} and install koldstore
-        run: bash scripts/run-pg-e2e.sh "${PG_VER}"
-        env:
-          KOLDSTORE_E2E_PREPARE_ONLY: "1"
-          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
-
-      - name: Run E2E suite (includes isolation + crash/failpoint harnesses)
-        run: cargo nextest run -p e2e --test-threads 1
-        env:
-          KOLDSTORE_MINIO: "1"
-          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
-          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
-          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
-          KOLDSTORE_MINIO_BUCKET: koldstore-test
-
       - name: Run example scenarios
         run: bash scripts/run-examples.sh
         env:
@@ -168,8 +307,54 @@ jobs:
   memory:
     name: memory checks
     runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PG_VER: 16
+      KOLDSTORE_E2E_PGVERSION: 16
+      KOLDSTORE_E2E_PGPORT: 28816
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      KOLDSTORE_MEMORY_PG_VERSION: "16"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
-      - run: cargo install cargo-nextest --locked
-      - run: tests/memory/run_memory_checks.sh
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL 16 development packages
+        run: |
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential \
+            libssl-dev \
+            pkg-config \
+            postgresql-16 \
+            postgresql-server-dev-16
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 "${PGRX_PG_CONFIG}"
+
+      - name: Start MinIO for S3-backed memory E2E
+        run: bash scripts/ci/start-minio.sh
+
+      - name: Run memory checks
+        run: tests/memory/run_memory_checks.sh
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+          KOLDSTORE_MINIO: "1"
+          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+          KOLDSTORE_MINIO_BUCKET: koldstore-test

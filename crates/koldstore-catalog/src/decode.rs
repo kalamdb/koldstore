@@ -31,8 +31,8 @@ pub struct ManifestScanSegmentStats {
 pub struct InSyncManifestScanContext {
     /// Latest published manifest object path.
     pub manifest_path: String,
-    /// Manifest generation identifier.
-    pub generation: String,
+    /// Monotonic catalog generation (CAS identity).
+    pub generation: u64,
     /// Object-store base path for the managed table.
     pub base_path: String,
     /// Catalog storage backend type (`filesystem`, `s3`, …).
@@ -92,7 +92,7 @@ pub fn in_sync_manifest_scan_context(
 
     Ok(InSyncManifestScanContext {
         manifest_path: required_string(value, "manifest_path")?.to_string(),
-        generation: required_string_or_number(value, "generation")?,
+        generation: required_u64(value, "generation")?,
         base_path: required_string(value, "base_path")?.to_string(),
         storage_type: optional_string(value, "storage_type")
             .unwrap_or("filesystem")
@@ -193,28 +193,30 @@ fn optional_string<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a 
         .filter(|text| !text.is_empty())
 }
 
-fn required_string_or_number(value: &serde_json::Value, field: &str) -> Result<String, String> {
-    let raw = value
-        .get(field)
-        .ok_or_else(|| format!("missing field `{field}`"))?;
-    if let Some(text) = raw.as_str() {
-        return Ok(text.to_string());
-    }
-    if let Some(number) = raw.as_i64() {
-        return Ok(number.to_string());
-    }
-    if let Some(number) = raw.as_u64() {
-        return Ok(number.to_string());
-    }
-    Err(format!("field `{field}` must be a string or integer"))
-}
-
 fn required_i32(value: &serde_json::Value, field: &str) -> Result<i32, String> {
     let raw = value
         .get(field)
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| format!("missing integer field `{field}`"))?;
     i32::try_from(raw).map_err(|error| error.to_string())
+}
+
+fn required_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> {
+    let raw = value
+        .get(field)
+        .ok_or_else(|| format!("missing field `{field}`"))?;
+    if let Some(number) = raw.as_u64() {
+        return Ok(number);
+    }
+    if let Some(number) = raw.as_i64() {
+        return u64::try_from(number).map_err(|error| error.to_string());
+    }
+    if let Some(text) = raw.as_str() {
+        return text
+            .parse::<u64>()
+            .map_err(|_| format!("field `{field}` must be an integer generation"));
+    }
+    Err(format!("field `{field}` must be an integer"))
 }
 
 fn optional_u64(value: &serde_json::Value, field: &str) -> Option<u64> {
@@ -232,7 +234,7 @@ mod tests {
     fn in_sync_manifest_scan_context_decodes_segment_stats() {
         let value = serde_json::json!({
             "manifest_path": "ns/table/manifest.json",
-            "generation": "gen-3",
+            "generation": 3,
             "base_path": "/tmp/koldstore",
             "segments": [
                 {
@@ -244,7 +246,7 @@ mod tests {
 
         let context = in_sync_manifest_scan_context(&value).unwrap();
         assert_eq!(context.manifest_path, "ns/table/manifest.json");
-        assert_eq!(context.generation, "gen-3");
+        assert_eq!(context.generation, 3);
         assert_eq!(context.base_path, "/tmp/koldstore");
         assert_eq!(context.storage_type, "filesystem");
         assert_eq!(context.segments.len(), 1);
@@ -260,7 +262,7 @@ mod tests {
     fn in_sync_manifest_scan_context_decodes_byte_size() {
         let value = serde_json::json!({
             "manifest_path": "ns/table/manifest.json",
-            "generation": "gen-3",
+            "generation": 3,
             "base_path": "s3://bucket/prefix",
             "storage_type": "s3",
             "segments": [

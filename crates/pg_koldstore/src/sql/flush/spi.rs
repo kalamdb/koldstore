@@ -4,9 +4,9 @@ use koldstore_catalog::{decode::RelationContext, ManagedTableSnapshot};
 use koldstore_common::QualifiedTableName;
 use koldstore_flush::policy::FlushPolicy;
 use koldstore_flush::{
-    cleanup::plan_seq_range_cleanup, manifest_from_catalog_rows, plan_flush_segments_batch_insert,
-    plan_manifest_row_upsert, policy_flush_row_count, CatalogManifestSegmentRow, FlushStats,
-    ResolvedFlushSelection, WrittenFlushSegment,
+    cleanup::plan_seq_range_cleanup, manifest_from_catalog_rows, plan_activate_flush_segments,
+    plan_flush_segments_batch_insert, policy_flush_row_count, CatalogManifestSegmentRow,
+    FlushStats, ResolvedFlushSelection, WrittenFlushSegment,
 };
 use koldstore_mirror::{
     mirror_to_sql, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats, plan_mirror_stats,
@@ -83,17 +83,17 @@ pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i3
         .ok_or_else(|| "batch number lookup returned no rows".to_string())
 }
 
-pub(super) fn active_cold_segment_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+pub(super) fn publishable_cold_segment_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = koldstore_catalog::queries::plan_active_cold_segment_count()
+    let statement = koldstore_catalog::queries::plan_publishable_cold_segment_count()
         .map_err(|error| error.to_string())?;
     crate::spi::select_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "cold segment count lookup returned no rows".to_string())
 }
 
-pub(super) fn manifest_from_active_cold_segments(
+pub(super) fn manifest_from_publishable_cold_segments(
     table_oid: pgrx::pg_sys::Oid,
     relation: &RelationContext,
     snapshot: &ManagedTableSnapshot,
@@ -101,7 +101,7 @@ pub(super) fn manifest_from_active_cold_segments(
 ) -> Result<koldstore_manifest::Manifest, String> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = koldstore_catalog::queries::plan_active_cold_segments_for_manifest_json()
+    let statement = koldstore_catalog::queries::plan_publishable_cold_segments_for_manifest_json()
         .map_err(|error| error.to_string())?;
     let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?
@@ -116,6 +116,18 @@ pub(super) fn manifest_from_active_cold_segments(
         rows,
     )
     .map_err(|error| error.to_string())
+}
+
+pub(super) fn manifest_generation(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let statement = koldstore_catalog::queries::plan_manifest_generation()
+        .map_err(|error| error.to_string())?;
+    Ok(
+        crate::spi::select_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0),
+    )
 }
 
 /// Catalogs every segment written by one `flush_table` call.
@@ -149,6 +161,8 @@ pub(super) fn persist_flush_segments_batch(
     let mut byte_sizes = Vec::with_capacity(segments.len());
     let mut schema_versions = Vec::with_capacity(segments.len());
     let mut column_stats = Vec::with_capacity(segments.len());
+    let mut checksums = Vec::with_capacity(segments.len());
+    let mut object_etags = Vec::with_capacity(segments.len());
     for segment in segments {
         let row = &segment.catalog_row;
         let segment_id = pgrx::Uuid::from_bytes(*segment.segment_id.as_bytes());
@@ -163,6 +177,8 @@ pub(super) fn persist_flush_segments_batch(
         byte_sizes.push(row.byte_size);
         schema_versions.push(row.schema_version);
         column_stats.push(pgrx::JsonB(row.column_stats.clone()));
+        checksums.push(segment.checksum.clone());
+        object_etags.push(segment.object_etag.clone().unwrap_or_default());
     }
 
     let statement = plan_flush_segments_batch_insert().map_err(|error| error.to_string())?;
@@ -181,6 +197,8 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(byte_sizes),
             DatumWithOid::from(schema_versions),
             DatumWithOid::from(column_stats),
+            DatumWithOid::from(checksums),
+            DatumWithOid::from(object_etags),
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -197,30 +215,52 @@ pub(super) fn persist_flush_segment(
     persist_flush_segments_batch(table_oid, std::slice::from_ref(segment))
 }
 
-pub(super) fn upsert_manifest_row(
+/// Activates pending flush segments and CAS-bumps `manifest.generation`.
+///
+/// Catalog-only: does not re-read object bodies. Returns the new generation.
+///
+/// # Errors
+///
+/// Returns an error when CAS misses (generation conflict) or SPI fails.
+pub(super) fn activate_flush_segments(
     table_oid: pgrx::pg_sys::Oid,
+    expected_generation: i64,
     manifest_path: &str,
     segment_count: i32,
     max_seq: i64,
     max_commit_seq: i64,
-) -> Result<(), String> {
+    pending_segment_ids: &[uuid::Uuid],
+) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
 
-    let generation = uuid::Uuid::new_v4().to_string();
-    let statement = plan_manifest_row_upsert().map_err(|error| error.to_string())?;
-    crate::spi::update(
+    let new_generation = expected_generation
+        .checked_add(1)
+        .ok_or_else(|| "manifest generation overflow".to_string())?;
+    let segment_ids: Vec<pgrx::Uuid> = pending_segment_ids
+        .iter()
+        .map(|id| pgrx::Uuid::from_bytes(*id.as_bytes()))
+        .collect();
+    let statement = plan_activate_flush_segments().map_err(|error| error.to_string())?;
+    let activated = crate::spi::update_one::<i64>(
         &statement,
         &[
             DatumWithOid::from(table_oid),
+            DatumWithOid::from(expected_generation),
+            DatumWithOid::from(new_generation),
             DatumWithOid::from(manifest_path),
-            DatumWithOid::from(generation.as_str()),
             DatumWithOid::from(segment_count),
             DatumWithOid::from(max_seq),
             DatumWithOid::from(max_commit_seq),
+            DatumWithOid::from(segment_ids),
         ],
     )
     .map_err(|error| error.to_string())?;
-    Ok(())
+    match activated {
+        Some(generation) => Ok(generation),
+        None => Err(format!(
+            "manifest generation CAS failed: expected {expected_generation}"
+        )),
+    }
 }
 
 pub(super) fn prune_flushed_hot_rows(
@@ -267,9 +307,19 @@ fn execute_seq_range_cleanup(
             client
                 .update("SET LOCAL session_replication_role = replica", None, &[])
                 .map_err(|error| error.to_string())?;
-            let tuples = client
-                .update(&plan.statement.sql, None, &cleanup_arg)
-                .map_err(|error| error.to_string())?;
+            // Stamp only cleanup WAL with PostgreSQL's non-replicated origin.
+            // Restoring the backend global immediately avoids the session-origin
+            // lifecycle and error-recursion hazards of SQL origin setup/reset.
+            let previous_origin = unsafe { pgrx::pg_sys::replorigin_session_origin };
+            unsafe {
+                pgrx::pg_sys::replorigin_session_origin =
+                    pgrx::pg_sys::DoNotReplicateId as pgrx::pg_sys::RepOriginId;
+            }
+            let cleanup_result = client.update(&plan.statement.sql, None, &cleanup_arg);
+            unsafe {
+                pgrx::pg_sys::replorigin_session_origin = previous_origin;
+            }
+            let tuples = cleanup_result.map_err(|error| error.to_string())?;
             if tuples.is_empty() {
                 return Ok((0_i64, 0_i64));
             }
@@ -289,7 +339,16 @@ fn execute_seq_range_cleanup(
 
 fn mirror_pending_row_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     match super::counters::read_table_row_counters(table_oid) {
-        Ok(counters) => Ok(counters.mirror_row_count.max(0)),
+        Ok(counters) => {
+            // Async flush fences via `apply_available` in this same transaction.
+            // Apply records counter deltas in backend memory until pre-commit, so
+            // include them or flush can falsely see a zero pending mirror.
+            let (_, mirror_delta) = crate::row_counter_cache::pending_deltas(table_oid);
+            Ok(counters
+                .mirror_row_count
+                .saturating_add(mirror_delta)
+                .max(0))
+        }
         Err(_) => Ok(mirror_flush_stats(table_oid)?.row_count),
     }
 }

@@ -118,6 +118,7 @@ pub async fn setup_koldstore_items_with_mixed_storage(
             relation = table.relation
         ))
         .await?;
+    common::fence_async_mirror_if_needed(&db.client).await?;
 
     let status = common::describe_table(&db.client, &table.relation).await?;
     anyhow::ensure!(
@@ -175,6 +176,7 @@ pub async fn setup_koldstore_order_lines_with_mixed_storage(
             relation = relation
         ))
         .await?;
+    common::fence_async_mirror_if_needed(&db.client).await?;
 
     let status = common::describe_table(&db.client, &relation).await?;
     anyhow::ensure!(

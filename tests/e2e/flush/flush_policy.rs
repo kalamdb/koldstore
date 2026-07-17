@@ -1,5 +1,4 @@
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use koldstore_flush::policy::{policy_flush_row_count, FlushPolicy};
 

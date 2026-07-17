@@ -12,10 +12,31 @@
 //! - Temp objects are deleted only after the final object validates.
 //! - Manifest overwrite still uses atomic staged put (never truncate-in-place).
 
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::client::{ObjectStoreClient, PutOutcome, PutPrecondition, StorageClient, StorageResult};
 use crate::StorageClientError;
+
+/// Returns the lowercase hex sha256 of `bytes`.
+///
+/// Callers hash the encode buffer once and reuse the digest for catalog
+/// `checksum` — avoid hashing a second owned copy of the same payload.
+#[must_use]
+pub fn content_checksum_sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    hex_encode(digest.as_slice())
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
+}
 
 /// Publish action kind (planning surface for tests and recovery docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +100,8 @@ pub struct PublishedObject {
     pub byte_size: u64,
     /// Optional etag from the final put/head.
     pub etag: Option<String>,
+    /// Sha256 hex of the published payload (computed once from the encode buffer).
+    pub checksum: String,
     /// True when an existing final object was reused (idempotent retry).
     pub reused_existing: bool,
 }
@@ -107,13 +130,15 @@ pub fn publish_immutable_object(
         u64::try_from(bytes.len()).map_err(|error| StorageClientError::Backend {
             message: error.to_string(),
         })?;
+    // Single content hash for catalog identity (same buffer as put/verify).
+    let checksum = content_checksum_sha256_hex(bytes);
 
     // 1. Stage complete bytes under a unique temp key.
     let _temp: PutOutcome = client.put(temp_key, bytes, PutPrecondition::Overwrite)?;
     ensure_object_bytes(client, temp_key, bytes)?;
 
     // 2. Idempotent retry: byte-identical final already present.
-    if let Some(published) = try_reuse_identical_final(client, final_key, bytes)? {
+    if let Some(published) = try_reuse_identical_final(client, final_key, bytes, &checksum)? {
         let _ = client.delete(temp_key);
         return Ok(PublishedObject {
             temp_key: temp_key.to_string(),
@@ -125,13 +150,10 @@ pub fn publish_immutable_object(
     match client.copy_if_absent(temp_key, final_key) {
         Ok(()) => {}
         Err(StorageClientError::AlreadyExists { .. }) => {
-            let published =
-                try_reuse_identical_final(client, final_key, bytes)?.ok_or_else(|| {
-                    StorageClientError::Validation {
-                        key: final_key.to_string(),
-                        message: "final object exists but content does not match payload"
-                            .to_string(),
-                    }
+            let published = try_reuse_identical_final(client, final_key, bytes, &checksum)?
+                .ok_or_else(|| StorageClientError::Validation {
+                    key: final_key.to_string(),
+                    message: "final object exists but content does not match payload".to_string(),
                 })?;
             let _ = client.delete(temp_key);
             return Ok(PublishedObject {
@@ -148,7 +170,7 @@ pub fn publish_immutable_object(
             match client.put(final_key, bytes, PutPrecondition::CreateIfAbsent) {
                 Ok(_) => {}
                 Err(StorageClientError::AlreadyExists { .. }) => {
-                    let published = try_reuse_identical_final(client, final_key, bytes)?
+                    let published = try_reuse_identical_final(client, final_key, bytes, &checksum)?
                         .ok_or_else(|| StorageClientError::Validation {
                             key: final_key.to_string(),
                             message: "final object exists but content does not match payload"
@@ -179,6 +201,7 @@ pub fn publish_immutable_object(
         temp_key: temp_key.to_string(),
         byte_size: expected_size,
         etag: final_meta.etag,
+        checksum,
         reused_existing: false,
     })
 }
@@ -193,6 +216,7 @@ fn try_reuse_identical_final(
     client: &ObjectStoreClient,
     final_key: &str,
     bytes: &[u8],
+    checksum: &str,
 ) -> StorageResult<Option<PublishedObject>> {
     match client.head(final_key) {
         Ok(existing) => {
@@ -227,6 +251,7 @@ fn try_reuse_identical_final(
                 temp_key: String::new(),
                 byte_size: expected_size,
                 etag: existing.etag,
+                checksum: checksum.to_string(),
                 reused_existing: true,
             }))
         }
@@ -259,7 +284,7 @@ fn ensure_object_bytes(
 /// Atomically writes (or replaces) a mutable object such as `manifest.json`.
 ///
 /// Uses overwrite-mode atomic put. Callers that need generation fencing should
-/// layer that on top (catalog generation UUID).
+/// layer that on top (catalog `manifest.generation` CAS).
 ///
 /// # Errors
 ///

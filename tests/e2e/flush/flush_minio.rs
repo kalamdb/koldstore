@@ -4,8 +4,7 @@
 //! `koldstore-test`). Skipped when the gate is unset so filesystem-only local
 //! runs stay green.
 
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 use anyhow::Result;
 use koldstore_storage::StorageClient;

@@ -1,7 +1,7 @@
 //! PostgreSQL table management and unmanagement SQL entrypoints.
 
 #[cfg(feature = "pg")]
-use koldstore_common::{ManageTableOptions, MigrationStatus};
+use koldstore_common::{ManageTableOptions, MigrationStatus, MirrorCaptureMode};
 #[cfg(feature = "pg")]
 use koldstore_migrate::rehydrate::DemigrateOptions;
 #[cfg(feature = "pg")]
@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null)`.
+/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, mirror_capture_mode default 'strict')`.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
@@ -27,6 +27,7 @@ pub fn manage_table_pg(
     migration_order_by: pgrx::default!(Option<&str>, "NULL"),
     compression: pgrx::default!(Option<&str>, "NULL"),
     target_file_size_mb: pgrx::default!(Option<i64>, "NULL"),
+    mirror_capture_mode: pgrx::default!(&str, "'strict'"),
 ) -> pgrx::Uuid {
     manage_table_pg_impl(
         table_name,
@@ -39,6 +40,7 @@ pub fn manage_table_pg(
         hot_row_limit,
         min_flush_rows,
         max_rows_per_file,
+        mirror_capture_mode,
     )
 }
 
@@ -55,7 +57,17 @@ fn manage_table_pg_impl(
     hot_row_limit: Option<i64>,
     min_flush_rows: i64,
     max_rows_per_file: i64,
+    mirror_capture_mode: &str,
 ) -> pgrx::Uuid {
+    // Validate logical decoding before taking the transaction-scoped job lock.
+    let requested_capture_mode =
+        MirrorCaptureMode::parse(mirror_capture_mode).unwrap_or_else(|| {
+            pgrx::error!(
+                "migrate table failed: unsupported mirror capture mode '{mirror_capture_mode}'"
+            )
+        });
+    crate::async_mirror::lifecycle::prepare_capture(requested_capture_mode)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let table_oid_u32 = table_oid.to_u32();
     let table_oid = pgrx::pg_sys::Oid::from(table_oid_u32);
     crate::sql::job_lock_pg::lock_table_job(table_oid)
@@ -83,11 +95,13 @@ fn manage_table_pg_impl(
             hot_row_limit,
             min_flush_rows,
             max_rows_per_file,
+            Some(mirror_capture_mode),
             &catalog,
             constraints,
         ))
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let options = validation.options;
+    let capture_mode = options.mirror_capture_mode();
     let storage_id = storage_id
         .unwrap_or_else(|| unreachable!("validated storage registration must have an id"));
     let primary_key_shape = primary_key_shape(table_oid_u32)
@@ -155,6 +169,13 @@ fn manage_table_pg_impl(
             &mirror_plan.mirror_table,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+        crate::async_mirror::lifecycle::activate_table(
+            capture_mode,
+            &empty_plan.table,
+            &mirror_plan.mirror_table,
+            &primary_key_shape,
+        )
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         return pgrx::Uuid::from_bytes(*job_id.as_bytes());
     }
 
@@ -200,6 +221,13 @@ fn manage_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     refresh_managed_table_row_counters(table_oid_u32, &plan.table, &mirror_plan.mirror_table)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    crate::async_mirror::lifecycle::activate_table(
+        capture_mode,
+        &plan.table,
+        &mirror_plan.mirror_table,
+        &primary_key_shape,
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
     pgrx::Uuid::from_bytes(*job_id.as_bytes())
 }
@@ -334,6 +362,7 @@ fn manage_table_validation_context<'a>(
     hot_row_limit: Option<i64>,
     min_flush_rows: i64,
     max_rows_per_file: i64,
+    mirror_capture_mode: Option<&'a str>,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
 ) -> koldstore_migrate::manage_table::ManageTableValidationContext<'a> {
@@ -374,6 +403,7 @@ fn manage_table_validation_context<'a>(
         already_managed,
         migration_order_by,
         compression,
+        mirror_capture_mode,
         policy: koldstore_migrate::manage_table::ManageTablePolicyInput {
             hot_row_limit,
             min_flush_rows,

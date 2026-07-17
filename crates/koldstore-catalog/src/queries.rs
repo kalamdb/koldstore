@@ -219,7 +219,7 @@ JOIN koldstore.schemas s ON s.table_oid = m.table_oid AND s.active AND s.initial
 JOIN koldstore.storage st ON st.id = s.storage_id
 WHERE m.table_oid = $1::oid
   AND m.manifest_path IS DISTINCT FROM 'pending'
-  AND COALESCE(m.generation, '') <> ''
+  AND m.generation > 0
 ORDER BY m.generation DESC
 LIMIT 1
 "#,
@@ -253,15 +253,45 @@ pub fn plan_active_cold_segment_count() -> SqlResult<SqlStatement> {
     )
 }
 
+/// Counts `pending` + `active` shared-scope segments (flush reconcile before activate).
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_publishable_cold_segment_count() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve publishable cold segment count",
+        "SELECT count(*)::bigint FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = '' AND status IN ('pending', 'active')",
+        [SqlParamType::Oid],
+    )
+}
+
 /// Builds an active cold-segment manifest row lookup for flush finalization.
 ///
 /// # Errors
 ///
 /// Returns an error when statement metadata is invalid.
 pub fn plan_active_cold_segments_for_manifest_json() -> SqlResult<SqlStatement> {
+    plan_cold_segments_for_manifest_json_with_statuses("active")
+}
+
+/// Builds pending+active cold-segment rows for derived `manifest.json` before activate.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_publishable_cold_segments_for_manifest_json() -> SqlResult<SqlStatement> {
+    plan_cold_segments_for_manifest_json_with_statuses("pending', 'active")
+}
+
+fn plan_cold_segments_for_manifest_json_with_statuses(
+    status_in_list: &str,
+) -> SqlResult<SqlStatement> {
+    // status_in_list is a trusted internal fragment ('active' or "pending', 'active").
     SqlStatement::read_with_params(
-        "resolve active cold segments for manifest",
-        r#"
+        "resolve cold segments for manifest",
+        &format!(
+            r#"
 SELECT COALESCE(jsonb_agg(
     jsonb_build_object(
         'object_path', object_path,
@@ -280,9 +310,64 @@ SELECT COALESCE(jsonb_agg(
 FROM koldstore.cold_segments
 WHERE table_oid = $1::oid
   AND scope_key = ''
-  AND status = 'active'
-"#,
+  AND status IN ('{status_in_list}')
+"#
+        ),
         [SqlParamType::Oid],
+    )
+}
+
+/// Reads the current catalog manifest generation for CAS activate.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_manifest_generation() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve manifest generation",
+        "SELECT generation FROM koldstore.manifest WHERE table_oid = $1::oid AND scope_key = ''",
+        [SqlParamType::Oid],
+    )
+}
+
+/// Lists expired pending segment object paths for recovery.
+///
+/// `$2` is the TTL in seconds (`bigint`).
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_expired_pending_segment_paths() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve expired pending segment paths",
+        r#"
+SELECT COALESCE(jsonb_agg(object_path ORDER BY created_at, segment_id)::text, '[]')
+FROM koldstore.cold_segments
+WHERE table_oid = $1::oid
+  AND scope_key = ''
+  AND status = 'pending'
+  AND created_at < now() - ($2::bigint * interval '1 second')
+"#,
+        [SqlParamType::Oid, SqlParamType::BigInt],
+    )
+}
+
+/// Deletes expired pending catalog rows (after objects are quarantined).
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_delete_expired_pending_segments() -> SqlResult<SqlStatement> {
+    SqlStatement::write_with_params(
+        "delete expired pending segments",
+        r#"
+DELETE FROM koldstore.cold_segments
+WHERE table_oid = $1::oid
+  AND scope_key = ''
+  AND status = 'pending'
+  AND created_at < now() - ($2::bigint * interval '1 second')
+"#,
+        [SqlParamType::Oid, SqlParamType::BigInt],
     )
 }
 

@@ -3,6 +3,10 @@
 //! Manifest assembly and filesystem I/O live in `koldstore-manifest`. This
 //! module owns parameterized catalog write plans only. SPI execution stays in
 //! `pg_koldstore`.
+//!
+//! Publication protocol: segments insert as `pending` with checksum/etag;
+//! [`plan_activate_flush_segments`] CAS-bumps `manifest.generation` and flips
+//! those rows to `active` in one statement.
 
 use koldstore_common::SqlStatement;
 use koldstore_manifest::SyncState;
@@ -56,17 +60,18 @@ pub fn indexed_column_stats_json(
     serde_json::Value::Object(values)
 }
 
-/// Plans combined multi-row segment and normalized-stat inserts.
+/// Plans combined multi-row segment and normalized-stat inserts as `pending`.
 ///
 /// Segment prune metadata lives in `koldstore.cold_segment_stats` (and the
 /// mirrored `column_stats` jsonb). Exact per-PK catalog rows are not written.
+/// Readers ignore `pending` until [`plan_activate_flush_segments`].
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
 pub fn plan_flush_segments_batch_insert() -> Result<SqlStatement, SegmentCatalogError> {
     SqlStatement::write(
-        "flush insert cold segments batch",
+        "flush insert cold segments batch pending",
         r#"
 WITH segment_input AS (
     SELECT *
@@ -81,7 +86,9 @@ WITH segment_input AS (
         $9::bigint[],
         $10::bigint[],
         $11::integer[],
-        $12::jsonb[]
+        $12::jsonb[],
+        $13::text[],
+        $14::text[]
     ) AS u(
         segment_id,
         object_path,
@@ -93,7 +100,9 @@ WITH segment_input AS (
         row_count,
         byte_size,
         schema_version,
-        column_stats
+        column_stats,
+        checksum,
+        object_etag
     )
 ),
 inserted_segments AS (
@@ -111,7 +120,9 @@ inserted_segments AS (
         byte_size,
         schema_version,
         column_stats,
-        status
+        status,
+        checksum,
+        object_etag
     )
     SELECT
         u.segment_id,
@@ -127,7 +138,9 @@ inserted_segments AS (
         u.byte_size,
         u.schema_version,
         u.column_stats,
-        'active'
+        'pending',
+        u.checksum,
+        NULLIF(u.object_etag, '')
     FROM segment_input u
     RETURNING segment_id, table_oid, scope_key, column_stats
 )
@@ -173,41 +186,81 @@ DO UPDATE SET
     .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
 }
 
-/// Plans `koldstore.manifest` upsert after flush finalization.
+/// Plans CAS generation bump + pending→active activation for one flush.
+///
+/// Parameters:
+/// - `$1` table oid
+/// - `$2` expected generation
+/// - `$3` new generation (`expected + 1`)
+/// - `$4` manifest path
+/// - `$5` segment_count
+/// - `$6` max_seq
+/// - `$7` max_commit_seq
+/// - `$8` pending segment id array
+///
+/// Returns one row with the new generation when CAS succeeds; zero rows on
+/// generation conflict (caller must fail the job).
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_manifest_row_upsert() -> Result<SqlStatement, SegmentCatalogError> {
+pub fn plan_activate_flush_segments() -> Result<SqlStatement, SegmentCatalogError> {
     let in_sync = SyncState::InSync.as_str();
     SqlStatement::write(
-        "flush upsert manifest row",
+        "flush activate pending segments with generation CAS",
         &format!(
             r#"
-INSERT INTO koldstore.manifest (
-    table_oid,
-    scope_key,
-    manifest_path,
-    etag,
-    generation,
-    sync_state,
-    segment_count,
-    max_seq,
-    max_commit_seq,
-    last_error,
-    updated_at
+WITH cas AS (
+    INSERT INTO koldstore.manifest (
+        table_oid,
+        scope_key,
+        manifest_path,
+        etag,
+        generation,
+        sync_state,
+        segment_count,
+        max_seq,
+        max_commit_seq,
+        last_error,
+        updated_at
+    )
+    VALUES (
+        $1::oid,
+        '',
+        $4::text,
+        NULL,
+        $3::bigint,
+        '{in_sync}',
+        $5::integer,
+        $6::bigint,
+        $7::bigint,
+        NULL,
+        now()
+    )
+    ON CONFLICT (table_oid, scope_key)
+    DO UPDATE SET
+        manifest_path = EXCLUDED.manifest_path,
+        generation = EXCLUDED.generation,
+        sync_state = '{in_sync}',
+        segment_count = EXCLUDED.segment_count,
+        max_seq = EXCLUDED.max_seq,
+        max_commit_seq = EXCLUDED.max_commit_seq,
+        last_error = NULL,
+        updated_at = now()
+    WHERE koldstore.manifest.generation = $2::bigint
+    RETURNING generation
+),
+activated AS (
+    UPDATE koldstore.cold_segments
+    SET status = 'active'
+    WHERE table_oid = $1::oid
+      AND scope_key = ''
+      AND status = 'pending'
+      AND segment_id = ANY($8::uuid[])
+      AND EXISTS (SELECT 1 FROM cas)
+    RETURNING segment_id
 )
-VALUES ($1::oid, '', $2::text, NULL, $3::text, '{in_sync}', $4::integer, $5::bigint, $6::bigint, NULL, now())
-ON CONFLICT (table_oid, scope_key)
-DO UPDATE SET
-    manifest_path = EXCLUDED.manifest_path,
-    generation = EXCLUDED.generation,
-    sync_state = '{in_sync}',
-    segment_count = EXCLUDED.segment_count,
-    max_seq = EXCLUDED.max_seq,
-    max_commit_seq = EXCLUDED.max_commit_seq,
-    last_error = NULL,
-    updated_at = now()
+SELECT generation FROM cas
 "#
         ),
     )
@@ -216,15 +269,24 @@ DO UPDATE SET
 
 #[cfg(test)]
 mod tests {
-    use super::plan_flush_segments_batch_insert;
+    use super::{plan_activate_flush_segments, plan_flush_segments_batch_insert};
 
     #[test]
-    fn flush_insert_persists_normalized_stats_without_pk_hints() {
+    fn flush_segment_insert_plans_pending_with_checksum() {
         let statement = plan_flush_segments_batch_insert().unwrap();
+        assert!(statement.sql.contains("'pending'"));
+        assert!(statement.sql.contains("checksum"));
+        assert!(statement.sql.contains("object_etag"));
+        assert!(!statement.sql.contains("'active'"));
+    }
 
-        assert!(statement.sql.contains("koldstore.cold_segment_stats"));
-        assert!(statement.sql.contains("jsonb_each"));
-        assert!(!statement.sql.contains("koldstore.cold_pk_hints"));
-        assert!(!statement.sql.contains("md5(inserted_segments.object_path)"));
+    #[test]
+    fn activate_plan_uses_generation_cas() {
+        let statement = plan_activate_flush_segments().unwrap();
+        assert!(statement
+            .sql
+            .contains("WHERE koldstore.manifest.generation = $2::bigint"));
+        assert!(statement.sql.contains("SET status = 'active'"));
+        assert!(statement.sql.contains("segment_id = ANY($8::uuid[])"));
     }
 }

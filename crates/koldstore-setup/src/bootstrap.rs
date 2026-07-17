@@ -172,7 +172,10 @@ fn classify_statement(statement: &str) -> BootstrapObjectPlan {
         )
     } else if let Some(name) = object_after_prefix(&normalized, "CREATE SEQUENCE IF NOT EXISTS ") {
         (BootstrapObjectKind::Sequence, Some(name), None)
+    } else if let Some(name) = object_after_prefix(&normalized, "REVOKE ALL ON FUNCTION ") {
+        (BootstrapObjectKind::Revoke, Some(name), None)
     } else if lower.starts_with("revoke all on ") {
+        // Batch catalog-table revoke; keep a stable synthetic name for plan checks.
         (
             BootstrapObjectKind::Revoke,
             Some("koldstore.catalog_table_access".to_string()),

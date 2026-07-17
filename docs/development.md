@@ -1,11 +1,25 @@
 # pg-koldstore Development
 
+## Full local aggregator
+
+```bash
+scripts/run-all-tests.sh
+```
+
+Runs fmt, clippy, workspace unit tests (nextest), pgrx compile/install,
+in-server `#[pg_test]` via nextest, E2E in **both** `--mode strict` and
+`--mode async` (nextest), examples, storage comparison, SQL regression,
+memory checks, and a short benchmark. Use `--skip-*` flags to narrow the run;
+example/storage sizing defaults match CI (`2000` / `10000` rows).
+
 ## Local Build
 
 ```bash
 cargo fmt --all
 cargo check --workspace --all-targets --no-default-features
-cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison
+cargo nextest run --workspace --no-default-features \
+  --exclude e2e --exclude examples --exclude storage-comparison \
+  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 ```
 
 `e2e`, `examples`, and `storage-comparison` need a running pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh`, and `scripts/run-storage-comparison.sh`.
@@ -15,16 +29,18 @@ cargo nextest run --workspace --no-default-features --exclude e2e --exclude exam
 ```bash
 # Unit
 cargo nextest run --workspace --no-default-features \
-  --exclude e2e --exclude examples --exclude storage-comparison
+  --exclude e2e --exclude examples --exclude storage-comparison \
+  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 
 # In-server pgrx #[pg_test]
-cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
+RUST_TEST_THREADS=1 cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
 
 # KoldStore SQL regression (normalization rules in tests/sql/README.md)
 scripts/run-sql-regression.sh 16
 
-# E2E
-scripts/run-pg-e2e.sh 16
+# E2E: run the same suite once per mirror mode
+scripts/run-pg-e2e.sh 16 --mode strict
+scripts/run-pg-e2e.sh 16 --mode async
 
 # Isolation (two-session schedules; no sleep-based races)
 scripts/readiness/run-isolation.sh 16
@@ -53,7 +69,13 @@ Nightly workflow: `.github/workflows/nightly-readiness.yml` (isolation, crash, S
 Weekly HammerDB: `.github/workflows/weekly-hammerdb.yml`.
 Script layout: `scripts/README.md` (everyday runners at top level; readiness/CI/build in subfolders).
 
-PR / main CI: `.github/workflows/ci-tests.yml` runs fmt/clippy/unit, `cargo pgrx test`, E2E (including isolation/crash harnesses), examples, storage comparison, and SQL regression across PostgreSQL 15–18.
+PR / main CI: `.github/workflows/ci-tests.yml` runs fmt/clippy/unit and
+`cargo pgrx test` across PostgreSQL 15–18. Async E2E also covers PostgreSQL
+15–18; strict E2E currently runs on PostgreSQL 16. Examples, storage comparison,
+and SQL regression retain their PostgreSQL matrix. Manual workflow runs expose
+two dropdowns: PostgreSQL (`All`, 15, 16, 17, or 18) and E2E mode (`Both`,
+`Async`, or `Strict`). Selecting strict with a PostgreSQL filter other than
+`All` or `16` intentionally schedules no strict E2E job.
 
 The extension crate is structured so pure Rust tests compile without a local PostgreSQL install. PostgreSQL-specific pgrx builds use the `pg15`, `pg16`, `pg17`, or `pg18` feature when `cargo pgrx` is configured.
 
@@ -65,7 +87,9 @@ cargo pgrx init
 scripts/run-pg-e2e.sh
 ```
 
-The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. Prefer `scripts/run-pg-e2e.sh` for multi-process E2E; use `cargo pgrx test` for in-server `#[pg_test]` modules under `crates/pg_koldstore/src/pg_tests/`.
+The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. `--mode strict` is the default; `--mode async` enables logical WAL and runs the same fixtures with async capture. Async-only publication, slot, and worker lifecycle assertions skip themselves in strict mode. Prefer `scripts/run-pg-e2e.sh` for multi-process E2E; use
+`RUST_TEST_THREADS=1 cargo pgrx test` for in-server `#[pg_test]` modules under
+`crates/pg_koldstore/src/pg_tests/` (one shared DB/slot; parallel tests race).
 
 ## Local pgrx PostgreSQL Matrix
 
@@ -75,7 +99,7 @@ scripts/run-pgrx-matrix.sh
 
 The matrix runner executes non-E2E workspace tests once, then loops over PostgreSQL 15, 16, 17, and 18 for pgrx feature clippy, extension install, and E2E checks. Use `scripts/run-pgrx-matrix.sh --download-missing` to let cargo-pgrx download missing PostgreSQL versions. On local machines without ICU development packages, add `--without-icu` for downloaded PostgreSQL builds.
 
-For a single version, use `scripts/run-pg-e2e.sh 18` or `scripts/run-pgrx-matrix.sh --pg-versions 18`. After the E2E runner prepares PostgreSQL and installs the extension, it executes `cargo nextest run -p e2e --test-threads 1`.
+For a single version and mode, use `scripts/run-pg-e2e.sh 18 --mode async`; use `scripts/run-pgrx-matrix.sh --pg-versions 18` for the version matrix. After the E2E runner prepares PostgreSQL and installs the extension, it executes the E2E crate serially with the selected mode exported as `KOLDSTORE_E2E_MIRROR_CAPTURE_MODE`.
 
 Every E2E test now calls a shared pgrx gate before running. The gate connects to the configured PostgreSQL port, verifies the server major version and listening port, and ensures `koldstore` is installed in the E2E database. If pgrx PostgreSQL is stopped or unreachable, the suite fails fast instead of letting contract-only tests pass.
 
@@ -101,7 +125,7 @@ CI starts MinIO before the pgrx E2E job so `flush_minio` runs on every PostgreSQ
 Low-level storage-client MinIO tests remain available as:
 
 ```bash
-KOLDSTORE_MINIO=1 cargo test -p koldstore-storage --test storage_minio
+KOLDSTORE_MINIO=1 cargo nextest run -p koldstore-storage --test storage_minio
 ```
 
 ## Published try-it Docker image
@@ -150,5 +174,11 @@ Hot DML benchmark scenarios compare a plain heap table with an equivalent pg-kol
 tests/memory/run_memory_checks.sh
 ```
 
-The script runs Rust tests and opportunistically reports Valgrind and heaptrack availability. PostgreSQL memory-context checks are represented by `tests/memory/memory_probe.rs` and are intended to be wired into pgrx/E2E tests as the extension glue matures.
-
+Runs probe unit tests, then the deep E2E leak gates in
+`tests/e2e/suite/memory_leak.rs` (flush + hot DML + merge-scan SELECT loops;
+MinIO parquet reads when `KOLDSTORE_MINIO=1`). Also prints a plain-Postgres vs
+koldstore comparison table (idle / DML / hot-only / flush / hot+cold) with
+context+RSS before/after/Δ/spike columns. Snapshots use
+`pg_backend_memory_contexts` plus process RSS. Set
+`KOLDSTORE_MEMORY_SKIP_E2E=1` for unit probes only. See
+`tests/memory/heap_profile.md` for budgets and overrides.

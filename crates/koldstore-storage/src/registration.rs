@@ -67,12 +67,6 @@ WHERE name = $1
 RETURNING id
 "#;
 
-/// Registers storage and returns its id.
-#[must_use]
-pub fn register_storage_name_only(_name: &str) -> Uuid {
-    Uuid::new_v4()
-}
-
 /// DDL SQL function planning result.
 pub type DdlResult<T> = Result<T, DdlError>;
 

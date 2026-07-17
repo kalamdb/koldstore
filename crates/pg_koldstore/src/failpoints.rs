@@ -1,21 +1,18 @@
-//! Test-only flush failpoints for crash-recovery and isolation suites.
+//! Test-only failpoints for crash-recovery and isolation suites.
 //!
 //! Armed via GUC `koldstore.failpoint` (empty default). Release builds are inert
 //! unless an operator explicitly sets the GUC. Supported values:
 //!
-//! - `<name>` or `error:<name>` — abort the flush with an error at that phase
+//! - `<name>` or `error:<name>` — abort with an error at that phase
 //! - `wait:<name>` — block on the advisory barrier lock until another session unlocks
 //!
-//! Failpoint names match the twelve flush crash points used by E2E recovery tests.
-//! PostgreSQL-free flush planning stays in `koldstore-flush`; only this adapter
-//! checks failpoints.
-
-use std::sync::OnceLock;
+//! Failpoint names include the flush crash points used by E2E recovery
+//! tests plus `async_mirror_apply` for async WAL applier crash injection.
 
 /// Advisory lock key shared with E2E isolation/crash harnesses (`"KOLD"`).
 pub const FAILPOINT_BARRIER_KEY: i64 = 0x4B4F_4C44;
 
-/// Canonical flush failpoint names (12 crash points).
+/// Canonical failpoint names (flush crash points + async apply).
 pub const FAILPOINT_NAMES: &[&str] = &[
     "after_claim",
     "after_select_rows",
@@ -24,19 +21,14 @@ pub const FAILPOINT_NAMES: &[&str] = &[
     "after_temp_object",
     "after_checksum_metadata",
     "before_manifest_publish",
+    "before_activate",
     "after_manifest_publish",
     "before_hot_cleanup",
     "during_hot_cleanup",
     "after_cleanup_before_job_complete",
     "after_job_complete_before_temp_cleanup",
+    "async_mirror_apply",
 ];
-
-static FAILPOINT_GUC: OnceLock<()> = OnceLock::new();
-
-/// Marks that the failpoint GUC has been registered (no-op placeholder for callers).
-pub fn mark_registered() {
-    let _ = FAILPOINT_GUC.set(());
-}
 
 /// Hits a named failpoint if the session GUC arms it.
 ///
@@ -93,12 +85,13 @@ fn wait_barrier(name: &str) -> Result<(), String> {
     {
         use pgrx::datum::DatumWithOid;
         // Block until the coordinating session releases the barrier lock.
-        let _ = pgrx::Spi::get_one_with_args::<bool>(
+        // pg_advisory_lock/unlock return void — use Spi::run, not bool decode.
+        pgrx::Spi::run_with_args(
             "SELECT pg_advisory_lock($1)",
             &[DatumWithOid::from(FAILPOINT_BARRIER_KEY)],
         )
         .map_err(|error| error.to_string())?;
-        let _ = pgrx::Spi::get_one_with_args::<bool>(
+        pgrx::Spi::run_with_args(
             "SELECT pg_advisory_unlock($1)",
             &[DatumWithOid::from(FAILPOINT_BARRIER_KEY)],
         )

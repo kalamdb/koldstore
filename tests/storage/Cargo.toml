@@ -12,10 +12,11 @@ path = "pg_vs_koldstore.rs"
 [dev-dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+koldstore-memory-tests = { path = "../memory" }
 koldstore-storage.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros"] }
 tokio-postgres.workspace = true
 
 [lints]

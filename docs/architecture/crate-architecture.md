@@ -13,6 +13,7 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 | Merge scan | `koldstore-merge` | `pg_koldstore::merge_scan` |
 | DML | `koldstore-mirror` | `pg_koldstore::sql::dml`, `hooks::*` |
 | Flush / jobs | `koldstore-flush`, `koldstore-jobs`, `koldstore-manifest` | `pg_koldstore::sql::flush` |
+| DB worker orchestration | `koldstore-worker` | `pg_koldstore::database_worker` |
 | Storage | `koldstore-storage` | storage registration wrappers |
 | Schema | `koldstore-schema` | schema registry SQL execution |
 
@@ -21,6 +22,7 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 - **setup** (`koldstore-setup`): DDL plans for internal objects in
   `koldstore--0.1.0.sql` — `storage`, `schemas`, `manifest`, `jobs`,
   `cold_segments`, `cold_segment_stats`, sequences, types, indexes, grants.
+  Dependency-free leaf (parses/classifies SQL only).
 - **schema** (`koldstore-schema`): `koldstore.schemas` registry — column sets,
   versions, type matrix, initialization state for migrated tables.
 - **catalog** (`koldstore-catalog`): cold bookkeeping — segments, PK hints,
@@ -47,6 +49,7 @@ flowchart BT
     mirror[koldstore-mirror]
     merge[koldstore-merge]
     jobs[koldstore-jobs]
+    worker[koldstore-worker]
     setup[koldstore-setup]
     flush[koldstore-flush]
     migrate[koldstore-migrate]
@@ -57,15 +60,15 @@ flowchart BT
     schema --> common
     storage --> common
     parquet --> common
+    parquet --> schema
     manifest --> common
     manifest --> catalog
     manifest --> storage
     mirror --> common
     merge --> common
-    jobs --> common
-    setup --> common
-    setup --> catalog
-    setup --> schema
+    merge --> manifest
+    merge --> mirror
+    merge --> parquet
     flush --> common
     flush --> catalog
     flush --> schema
@@ -77,9 +80,7 @@ flowchart BT
     migrate --> common
     migrate --> schema
     migrate --> mirror
-    migrate --> parquet
     migrate --> jobs
-    migrate --> setup
     pg --> common
     pg --> catalog
     pg --> schema
@@ -89,11 +90,15 @@ flowchart BT
     pg --> mirror
     pg --> merge
     pg --> jobs
+    pg --> worker
     pg --> setup
     pg --> flush
     pg --> migrate
 ```
 
+`koldstore-setup` is a dependency-free SQL classifier (no `koldstore-*` edges).
+`koldstore-jobs` and `koldstore-worker` are leaf crates with no internal
+`koldstore-*` dependencies.
 **Rules:**
 
 1. Arrows point only into lower layers — no crate depends on `pg_koldstore`.
@@ -111,11 +116,13 @@ flowchart BT
 | Object-store access | `koldstore-storage` |
 | Parquet read/write | `koldstore-parquet` |
 | Manifest lifecycle (model, assembly, JSON I/O, paths, sync state, publish plan) | `koldstore-manifest` |
-| Mirror SQL / DML statements | `koldstore-mirror` |
+| Mirror SQL / DML statements / pgoutput decoder | `koldstore-mirror` |
 | Hot+cold merge logic | `koldstore-merge` |
 | Job lease/phase framework | `koldstore-jobs` |
+| DB worker ensure/task/policy (no pgrx) | `koldstore-worker` |
 | Flush workflow (selection, encode, segment write, catalog SQL plans, cleanup) | `koldstore-flush` |
 | Migration workflow | `koldstore-migrate` |
+| Shared privilege / LSN helpers | `koldstore-common` |
 | SPI, hooks, custom scan, `#[pg_extern]` | `pg_koldstore` |
 
 ## Cleanup Policy

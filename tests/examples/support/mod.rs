@@ -276,7 +276,7 @@ pub struct ManifestInfo {
     pub scope_key: String,
     pub manifest_path: String,
     pub sync_state: String,
-    pub generation: String,
+    pub generation: i64,
 }
 
 /// Registers a user-scoped managed table with structured flush settings.

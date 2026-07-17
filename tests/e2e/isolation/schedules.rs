@@ -1,13 +1,9 @@
 //! Deterministic flush/DML isolation schedules (no sleep-based races).
-#[path = "../common/mod.rs"]
-mod common;
-#[path = "harness.rs"]
-mod harness;
-
+use crate::common;
 use anyhow::Result;
 use tokio::task::JoinHandle;
 
-use harness::{
+use super::harness::{
     assert_matches_baseline, barrier_lock, barrier_unlock, connect_peer, mirror_baseline,
     seed_managed_items,
 };

@@ -496,7 +496,9 @@ pub fn describe_table_plan(
         &format!(
             r#"
 SELECT jsonb_build_object(
-    'hot_rows', COALESCE(m.hot_row_count, (SELECT count(*)::bigint FROM ONLY {table})),
+    -- Treat 0 like unknown so a stale post-manage counter (async apply race)
+    -- falls back to the live heap count, matching mirror_rows below.
+    'hot_rows', COALESCE(NULLIF(m.hot_row_count, 0), (SELECT count(*)::bigint FROM ONLY {table})),
     'mirror_rows', COALESCE(NULLIF(m.mirror_row_count, 0), (SELECT count(*)::bigint FROM {mirror})),
     'cold_row_count', COALESCE(m.cold_row_count, (
         SELECT sum(cs.row_count)::bigint

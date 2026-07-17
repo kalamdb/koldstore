@@ -2,19 +2,27 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod assertions;
+mod async_mirror;
 mod catalog;
 mod cluster;
 mod db;
 mod describe_table;
 pub mod equality;
 mod log;
+pub mod memory;
 mod minio;
+mod mirror_mode;
 mod sql;
 
 pub use assertions::{
     assert_kold_merge_scan_cold_reads, assert_kold_merge_scan_executed_cold_reads,
     assert_kold_merge_scan_explain, assert_kold_merge_scan_planned_cold_reads,
     assert_merge_scan_explain, assert_minio_listing_contains,
+};
+
+pub use async_mirror::{
+    async_worker_running, fence_async_mirror_if_needed, mirror_op_count, terminate_async_worker,
+    wait_for_async_mirror, wait_for_async_worker, wait_for_mirror_op_count,
 };
 
 pub use catalog::{
@@ -36,6 +44,7 @@ pub use equality::{
 };
 pub use log::{log, log_always, log_step, log_step_always, timed_sync, verbose_enabled, StepGuard};
 pub use minio::{minio_enabled, MinioConfig};
+pub use mirror_mode::{fence_selected_mirror, selected_mirror_capture_mode, MirrorCaptureMode};
 pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
     relation_size, row_count, row_count_from_sql, RelationSize,

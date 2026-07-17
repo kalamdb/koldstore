@@ -1,5 +1,4 @@
-#[path = "../common/mod.rs"]
-mod common;
+use crate::common;
 
 #[test]
 fn join_targets_active_pgrx_versions() {

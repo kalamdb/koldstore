@@ -4,7 +4,7 @@
 //! them here before constructing migration plans. This module owns no SPI or
 //! PostgreSQL types.
 
-use koldstore_common::{ManageTableOptions, ParquetCompression};
+use koldstore_common::{ManageTableOptions, MirrorCaptureMode, ParquetCompression};
 
 use super::constraints::{
     ConstraintResult, MigrationConstraintError, MigrationValidation, MigrationValidationInput,
@@ -36,6 +36,8 @@ pub struct ManageTableValidationContext<'a> {
     pub migration_order_by: Option<&'a str>,
     /// Optional operator-provided compression spelling.
     pub compression: Option<&'a str>,
+    /// Optional mirror consistency/write-throughput mode.
+    pub mirror_capture_mode: Option<&'a str>,
     /// Raw numeric flush policy.
     pub policy: ManageTablePolicyInput,
 }
@@ -72,6 +74,8 @@ pub fn validate_manage_table(
     let mut options = ManageTableOptions::default();
     let compression = parse_compression(context.compression)?;
     options = options.with_compression(compression);
+    let mirror_capture_mode = parse_mirror_capture_mode(context.mirror_capture_mode)?;
+    options = options.with_mirror_capture_mode(mirror_capture_mode);
 
     if let Some(migration_order_by) = context
         .migration_order_by
@@ -125,6 +129,14 @@ fn parse_compression(compression: Option<&str>) -> ConstraintResult<ParquetCompr
     };
     ParquetCompression::parse(compression)
         .ok_or_else(|| MigrationConstraintError::UnsupportedCompression(compression.to_string()))
+}
+
+fn parse_mirror_capture_mode(value: Option<&str>) -> ConstraintResult<MirrorCaptureMode> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(MirrorCaptureMode::Strict);
+    };
+    MirrorCaptureMode::parse(value)
+        .ok_or_else(|| MigrationConstraintError::UnsupportedMirrorCaptureMode(value.to_string()))
 }
 
 fn positive_value(value: i64, field: &'static str) -> ConstraintResult<u64> {
