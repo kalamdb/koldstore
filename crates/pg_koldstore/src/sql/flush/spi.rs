@@ -310,10 +310,13 @@ fn execute_seq_range_cleanup(
             // Stamp only cleanup WAL with PostgreSQL's non-replicated origin.
             // Restoring the backend global immediately avoids the session-origin
             // lifecycle and error-recursion hazards of SQL origin setup/reset.
+            //
+            // `DoNotReplicateId` is `#define DoNotReplicateId PG_UINT16_MAX` in
+            // replication/origin.h. Use `u16::MAX` directly: Windows pgrx
+            // bindgen does not always export that macro into `pg_sys`.
             let previous_origin = unsafe { pgrx::pg_sys::replorigin_session_origin };
             unsafe {
-                pgrx::pg_sys::replorigin_session_origin =
-                    pgrx::pg_sys::DoNotReplicateId as pgrx::pg_sys::RepOriginId;
+                pgrx::pg_sys::replorigin_session_origin = u16::MAX;
             }
             let cleanup_result = client.update(&plan.statement.sql, None, &cleanup_arg);
             unsafe {
