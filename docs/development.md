@@ -33,7 +33,7 @@ cargo nextest run --workspace --no-default-features \
   --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 
 # In-server pgrx #[pg_test]
-cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
+RUST_TEST_THREADS=1 cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
 
 # KoldStore SQL regression (normalization rules in tests/sql/README.md)
 scripts/run-sql-regression.sh 16
@@ -87,7 +87,9 @@ cargo pgrx init
 scripts/run-pg-e2e.sh
 ```
 
-The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. `--mode strict` is the default; `--mode async` enables logical WAL and runs the same fixtures with async capture. Async-only publication, slot, and worker lifecycle assertions skip themselves in strict mode. Prefer `scripts/run-pg-e2e.sh` for multi-process E2E; use `cargo pgrx test` for in-server `#[pg_test]` modules under `crates/pg_koldstore/src/pg_tests/`.
+The SQL extension name is `koldstore`; public SQL lives in the `koldstore` schema. The local pgrx E2E runner installs the extension into pgrx-managed PostgreSQL and runs the E2E crate serially against that server. `--mode strict` is the default; `--mode async` enables logical WAL and runs the same fixtures with async capture. Async-only publication, slot, and worker lifecycle assertions skip themselves in strict mode. Prefer `scripts/run-pg-e2e.sh` for multi-process E2E; use
+`RUST_TEST_THREADS=1 cargo pgrx test` for in-server `#[pg_test]` modules under
+`crates/pg_koldstore/src/pg_tests/` (one shared DB/slot; parallel tests race).
 
 ## Local pgrx PostgreSQL Matrix
 

@@ -43,8 +43,10 @@ cargo nextest run --workspace --no-default-features \
 Run in-server pgrx tests (`#[pg_test]` inside `crates/pg_koldstore/src/pg_tests/`):
 
 ```bash
-cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
+RUST_TEST_THREADS=1 cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16
 ```
+
+`RUST_TEST_THREADS=1` is required: `#[pg_test]` shares one database and one async logical slot, and PostgreSQL's SQL slot APIs error (instead of waiting) when the slot is busy.
 
 The Cargo feature `pg_test` is the standard pgrx switch enabled by `cargo pgrx test`. It is distinct from the `#[pg_test]` attribute macro. Keep the feature name; do not rename it.
 
@@ -56,7 +58,7 @@ Run the full in-server matrix:
 
 ```bash
 for v in 15 16 17 18; do
-  cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg$v
+  RUST_TEST_THREADS=1 cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg$v
 done
 ```
 

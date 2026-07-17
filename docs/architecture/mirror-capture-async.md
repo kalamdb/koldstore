@@ -75,7 +75,7 @@ on the source relation.
 | Steady state | Applier polls every 100 ms; skips decode when WAL has not advanced |
 | Applier crash | Shared-preload launcher re-registers the applier; otherwise the next session `ensure` / `wait_for_async_mirror` after commit does |
 | Postmaster restart | Shared-preload launcher (if `koldstore` is in `shared_preload_libraries`) and/or the next `wait_for_async_mirror` / `internal_ensure_async_mirror_worker` re-attaches appliers for databases that still have a slot |
-| `disable_async_mirror` | Drops the slot; applier exits and is not restarted |
+| `disable_async_mirror` | Terminates the applier if needed, then drops the slot (avoids deadlock when peek waits on the caller's open XID) |
 
 Hot and mirror row counters are updated by the WAL applier (idempotent under
 peek/replay). Truncate, origin, type, and logical-message pgoutput records are
@@ -116,6 +116,11 @@ sequenceDiagram
   Apply-->>App: applied row count
   Note over Apply,WAL: next fence advances slot to the durable checkpoint
 ```
+
+Logical decoding, flush fences, and `disable_async_mirror` share a
+transaction-scoped advisory apply lock. PostgreSQL's SQL slot APIs acquire with
+`nowait`; disable terminates a stuck applier before taking that lock so a peek
+blocked on the caller's open XID cannot deadlock teardown.
 
 The decoder reads pgoutput v1 in pages of 8,192 messages. The applier groups up
 to 8,192 compatible keys, converts each batch with `jsonb_to_recordset`, and

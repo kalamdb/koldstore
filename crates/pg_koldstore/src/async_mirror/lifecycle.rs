@@ -4,7 +4,10 @@
 //! only after strict capture has initialized their mirror, which prevents a gap
 //! while switching the write path from triggers to committed WAL.
 
+use std::time::Duration;
+
 use koldstore_common::{quote_ident, MirrorCaptureMode, QualifiedTableName};
+use koldstore_worker::DatabaseOid;
 use pgrx::datum::DatumWithOid;
 
 const APPLY_LOCK_NAMESPACE: i32 = 1_263_354_732;
@@ -273,6 +276,112 @@ pub(super) fn lock_apply(database_oid: u32) -> Result<(), String> {
     lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 
+/// Poll interval while waiting for another backend to release the logical slot.
+const SLOT_INACTIVE_POLL: Duration = Duration::from_millis(10);
+/// Abort-window wait only: locks are released before `ReplicationSlotRelease`.
+const SLOT_INACTIVE_MAX_WAIT: Duration = Duration::from_secs(2);
+
+/// Returns the PID holding `slot`, if any.
+fn slot_active_pid(slot: &str) -> Result<Option<i32>, String> {
+    pgrx::Spi::get_one_with_args::<i32>(
+        "SELECT active_pid FROM pg_catalog.pg_replication_slots WHERE slot_name = $1",
+        &[DatumWithOid::from(slot)],
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Waits until `slot` is missing or has no `active_pid`.
+///
+/// PostgreSQL's SQL slot APIs (`pg_logical_slot_peek_*`,
+/// `pg_replication_slot_advance`, `pg_drop_replication_slot`) acquire with
+/// `nowait=true` and ERROR immediately when another PID holds the slot. Callers
+/// must already hold [`lock_apply`] so only abort/exit windows (locks released
+/// before `ReplicationSlotRelease`) can still show an active PID.
+///
+/// # Errors
+///
+/// Returns an error when the slot stays active longer than
+/// [`SLOT_INACTIVE_MAX_WAIT`].
+pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + SLOT_INACTIVE_MAX_WAIT;
+    loop {
+        match slot_active_pid(slot)? {
+            // Slot gone, or present with NULL active_pid.
+            None => return Ok(()),
+            Some(pid) if pid == unsafe { pgrx::pg_sys::MyProcPid } => {
+                // We already own it (should not happen before peek/drop).
+                return Ok(());
+            }
+            Some(_) => {
+                if std::time::Instant::now() >= deadline {
+                    return Err(format!(
+                        "replication slot {slot} stayed active for longer than {}s",
+                        SLOT_INACTIVE_MAX_WAIT.as_secs()
+                    ));
+                }
+                std::thread::sleep(SLOT_INACTIVE_POLL);
+                // Allow CANCEL / postmaster death between polls.
+                pgrx::check_for_interrupts!();
+            }
+        }
+    }
+}
+
+/// Stops the database WAL applier so disable cannot deadlock on [`lock_apply`].
+///
+/// The applier may hold the apply lock inside a peek that waits for concurrent
+/// XIDs — including this backend's open transaction (common under `#[pg_test]`).
+/// Terminate by `backend_type` (not only `active_pid`) so a worker blocked
+/// before acquiring the slot is also cleared.
+fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
+    let worker_type = koldstore_worker::async_mirror_worker_type(DatabaseOid::new(database_oid));
+    // Ignore the boolean result: false means the PID exited already.
+    let _ = pgrx::Spi::run_with_args(
+        "SELECT pg_catalog.pg_terminate_backend(pid) \
+         FROM pg_catalog.pg_stat_activity \
+         WHERE backend_type = $1",
+        &[DatumWithOid::from(worker_type.as_str())],
+    )
+    .map_err(|error| error.to_string())?;
+    // Also clear a non-worker holder (manual fence) if it still owns the slot.
+    if let Some(active_pid) = slot_active_pid(slot)? {
+        let my_pid = unsafe { pgrx::pg_sys::MyProcPid };
+        if active_pid != my_pid {
+            let _ = pgrx::Spi::run_with_args(
+                "SELECT pg_catalog.pg_terminate_backend($1)",
+                &[DatumWithOid::from(active_pid)],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let my_pid = unsafe { pgrx::pg_sys::MyProcPid };
+    loop {
+        let slot_idle = match slot_active_pid(slot)? {
+            None => true,
+            Some(pid) => pid == my_pid,
+        };
+        let worker_gone = pgrx::Spi::get_one_with_args::<bool>(
+            "SELECT NOT EXISTS (\
+               SELECT 1 FROM pg_catalog.pg_stat_activity WHERE backend_type = $1\
+             )",
+            &[DatumWithOid::from(worker_type.as_str())],
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(false);
+        if slot_idle && worker_gone {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!(
+                "async mirror applier for slot {slot} did not stop after terminate"
+            ));
+        }
+        std::thread::sleep(SLOT_INACTIVE_POLL);
+        pgrx::check_for_interrupts!();
+    }
+}
+
 /// Serializes dynamic worker discovery and registration for one database.
 pub(crate) fn lock_worker_registration(database_oid: u32) -> Result<(), String> {
     lock_database(WORKER_LOCK_NAMESPACE, database_oid)
@@ -343,8 +452,12 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
             "unmanage every async table before disabling async mirror infrastructure".to_string(),
         );
     }
-    lock_apply(database_oid)?;
     let slot = slot_name(database_oid);
+    // Stop the applier before lock_apply: a peek blocked on concurrent XIDs
+    // (including this backend's open transaction) holds the apply lock and
+    // would otherwise deadlock with disable.
+    stop_async_mirror_applier(database_oid, &slot)?;
+    lock_apply(database_oid)?;
     let slot_exists = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)",
         &[DatumWithOid::from(slot.as_str())],
@@ -353,6 +466,8 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     .unwrap_or(false);
     let publication_exists = publication_exists()?;
     if slot_exists {
+        // Drop uses nowait acquire; wait out abort/exit windows first.
+        wait_until_slot_inactive(&slot)?;
         pgrx::Spi::run_with_args(
             "SELECT pg_catalog.pg_drop_replication_slot($1)",
             &[DatumWithOid::from(slot.as_str())],

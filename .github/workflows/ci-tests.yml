@@ -47,7 +47,7 @@ jobs:
       - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 
   pgrx-test:
-    name: cargo pgrx test (PG ${{ matrix.pg }})
+    name: "pg_test (PG ${{ matrix.pg }})"
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -76,15 +76,16 @@ jobs:
             postgresql-${PG_VER} \
             postgresql-server-dev-${PG_VER}
 
-      - name: Install cargo-pgrx
-        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+      - name: Install cargo-pgrx and cargo-nextest
+        run: |
+          cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+          cargo install cargo-nextest --locked
 
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
         run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
 
-      # `cargo pgrx test` installs into pg_config --sharedir/--pkglibdir. Apt packages
-      # put those under /usr, so the runner needs write access without --sudo (pgrx
-      # test has no install --sudo flag).
+      # pgrx-tests installs into pg_config --sharedir/--pkglibdir. Apt packages
+      # put those under /usr, so the runner needs write access.
       - name: Allow non-root extension install into system PostgreSQL
         run: |
           share_ext="$("${PGRX_PG_CONFIG}" --sharedir)/extension"
@@ -92,8 +93,26 @@ jobs:
           sudo mkdir -p "${share_ext}" "${pkglib}"
           sudo chmod a+w "${share_ext}" "${pkglib}"
 
-      - name: Run #[pg_test] suite
-        run: cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg${PG_VER}
+      # Serial threads are required: #[pg_test] shares one DB and one async logical
+      # slot; parallel flush fences race on PostgreSQL's nowait slot acquire.
+      # Use nextest --test-threads 1 (same as scripts/run-all-tests.sh), not
+      # `cargo pgrx test`, which defaults to parallel libtest threads.
+      - name: "Run pg_test suite (nextest, serial)"
+        run: |
+          features="pg${PG_VER} pg_test"
+          manifest="${GITHUB_WORKSPACE}/crates/pg_koldstore/Cargo.toml"
+          CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target" \
+            PGRX_FEATURES="${features}" \
+            PGRX_NO_DEFAULT_FEATURES=true \
+            PGRX_ALL_FEATURES=false \
+            PGRX_BUILD_PROFILE=dev \
+            PGRX_NO_SCHEMA=false \
+            PGRX_MANIFEST_PATH="${manifest}" \
+            cargo nextest run \
+              --manifest-path "${manifest}" \
+              --features "${features}" \
+              --no-default-features \
+              --test-threads 1
         env:
           RUST_BACKTRACE: "1"
 
