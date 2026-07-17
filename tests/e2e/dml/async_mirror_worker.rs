@@ -241,15 +241,33 @@ async fn async_worker_survives_truncate_noise_in_slot() -> Result<()> {
         common::wait_for_async_worker(&db.client).await?;
 
         // Publish a second relation, truncate it, then unpublish — leaves truncate
-        // messages that older appliers treated as fatal.
+        // messages that older appliers treated as fatal. Keep each step in its own
+        // transaction so the truncate is unambiguously published while the table
+        // is still a publication member (ADD+DROP in one xact is flaky under load).
         db.client
             .batch_execute(&format!(
-                "ALTER PUBLICATION koldstore_async_mirror ADD TABLE {noise_relation} (id);\
-                 INSERT INTO {noise_relation} VALUES (1, 'n');\
-                 TRUNCATE {noise_relation};\
-                 ALTER PUBLICATION koldstore_async_mirror DROP TABLE {noise_relation}"
+                "ALTER PUBLICATION koldstore_async_mirror ADD TABLE {noise_relation} (id)"
             ))
             .await?;
+        db.client
+            .batch_execute(&format!(
+                "INSERT INTO {noise_relation} VALUES (1, 'n');\
+                 TRUNCATE {noise_relation}"
+            ))
+            .await?;
+        db.client
+            .batch_execute(&format!(
+                "ALTER PUBLICATION koldstore_async_mirror DROP TABLE {noise_relation}"
+            ))
+            .await?;
+
+        // Drain truncate noise before the managed insert; surface apply errors
+        // immediately instead of waiting for a background-worker timeout.
+        let _ = common::wait_for_async_mirror(&db.client).await?;
+        if !common::async_worker_running(&db.client).await? {
+            common::wait_for_async_worker(&db.client).await?;
+        }
+
         db.client
             .execute(
                 &format!("INSERT INTO {relation} (id, body) VALUES (1, 'ok')"),

@@ -29,9 +29,6 @@ pg_test = []
 test-failpoints = []
 
 [dependencies]
-arrow-array.workspace = true
-arrow-schema.workspace = true
-bytes.workspace = true
 chrono.workspace = true
 koldstore-catalog.workspace = true
 koldstore-common.workspace = true
@@ -46,10 +43,8 @@ koldstore-storage.workspace = true
 koldstore-worker.workspace = true
 pgrx = { workspace = true, optional = true }
 pgrx-tests = { workspace = true, optional = true }
-hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 thiserror.workspace = true
 tracing = { workspace = true, features = ["release_max_level_off"] }
 uuid.workspace = true

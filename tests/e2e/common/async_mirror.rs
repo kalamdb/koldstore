@@ -94,9 +94,13 @@ pub async fn mirror_op_count(
 
 /// Waits until the mirror has `expected` rows with operation `op`.
 ///
+/// Drives catch-up via [`wait_for_async_mirror`] so progress does not depend
+/// solely on the background worker remaining alive between polls (important
+/// after failpoint/kill churn in the same suite).
+///
 /// # Errors
 ///
-/// Returns an error when the deadline elapses or queries fail.
+/// Returns an error when the deadline elapses, apply fails, or queries fail.
 pub async fn wait_for_mirror_op_count(
     client: &tokio_postgres::Client,
     mirror: &str,
@@ -112,6 +116,12 @@ pub async fn wait_for_mirror_op_count(
             started.elapsed() <= BACKGROUND_APPLY_DEADLINE,
             "timed out after {BACKGROUND_APPLY_DEADLINE:?} waiting for {expected} mirror rows with op={op}"
         );
+        // Frontend fence applies available WAL even when the background worker
+        // is mid-restart after a prior test's kill/failpoint.
+        wait_for_async_mirror(client).await?;
+        if mirror_op_count(client, mirror, op).await? == expected {
+            return Ok(());
+        }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

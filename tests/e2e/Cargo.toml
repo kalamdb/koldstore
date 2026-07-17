@@ -30,7 +30,7 @@ parquet.workspace = true
 koldstore = { path = "../../crates/pg_koldstore", package = "pg_koldstore", default-features = false }
 serde_json.workspace = true
 serde.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros"] }
 tokio-postgres.workspace = true
 
 [lints]

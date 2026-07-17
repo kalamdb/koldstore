@@ -375,3 +375,32 @@ impl<'a> Reader<'a> {
         std::str::from_utf8(bytes).map_err(|_| PgOutputDecodeError::InvalidUtf8(field))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_message_with_body_is_ignored_without_trailing_byte_error() {
+        // pgoutput Truncate ('T'): nrels=1, flags=0, oid=12345 — body must not
+        // trip TrailingBytes because Ignored intentionally skips the payload.
+        let mut message = vec![b'T'];
+        message.extend_from_slice(&1_i32.to_be_bytes());
+        message.push(0);
+        message.extend_from_slice(&12_345_u32.to_be_bytes());
+        assert_eq!(
+            decode_message(&message),
+            Ok(PgOutputMessage::Ignored { tag: b'T' })
+        );
+    }
+
+    #[test]
+    fn origin_type_and_logical_message_tags_are_ignored() {
+        for tag in [b'O', b'Y', b'M'] {
+            assert_eq!(
+                decode_message(&[tag, 0x01, 0x02, 0x03]),
+                Ok(PgOutputMessage::Ignored { tag })
+            );
+        }
+    }
+}
