@@ -73,14 +73,16 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 futures-util = "0.3.32"
 hex = "0.4.3"
 # Backend features (`fs`, and optionally S3 via `koldstore-storage`'s `s3`
-# feature: aws-base + native-tls + ring) stay out of crates that only need
-# the `ObjectStore` trait.
+# feature: aws-base + rustls-no-provider/ring) stay out of crates that only
+# need the `ObjectStore` trait.
 object_store = { version = "0.14.1", default-features = false }
 pgrx = { version = "0.19.1", default-features = false }
 pgrx-tests = { version = "0.19.1", default-features = false }
 parquet = { version = "59.1.0", default-features = false, features = ["arrow", "async", "zstd", "snap"] }
-# Shared with object_store's HTTP transport; `native-tls` keeps aws-lc/rustls out of S3 builds.
-reqwest = { version = "0.13.4", default-features = false, features = ["native-tls", "stream"] }
+# Shared with object_store's HTTP transport. `rustls-no-provider` + ring keeps
+# aws-lc and OpenSSL out of the extension (OpenSSL conflicts with PostgreSQL).
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
+rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"

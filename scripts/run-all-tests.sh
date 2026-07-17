@@ -321,7 +321,7 @@ if [[ "${SKIP_PGRX}" -eq 0 ]]; then
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
       step "pgrx feature compile check pg${pg}"
-      cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg} s3" -- -D warnings
+      cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg} pg_test s3" -- -D warnings
 
       step "pgrx install check pg${pg}"
       cargo_pgrx_install_koldstore "pg${pg}" "$(configured_pg_config "${pg}")"

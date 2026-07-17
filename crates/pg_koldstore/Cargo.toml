@@ -30,7 +30,7 @@ cshim = ["dep:pgrx", "pgrx/cshim"]
 pg_test = ["dep:pgrx-tests"]
 # Test-only flush failpoints for crash-recovery suites. No-op in release unless enabled.
 test-failpoints = []
-# S3 / MinIO via object_store (native TLS + ring). Keep enabled for release installs.
+# S3 / MinIO via object_store (rustls + ring, no aws-lc/OpenSSL). Keep enabled for release installs.
 s3 = ["koldstore-storage/s3"]
 
 [dependencies]

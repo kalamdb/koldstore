@@ -245,7 +245,7 @@ run_pg_version() {
 
   if [[ "${SKIP_CLIPPY}" -eq 0 ]]; then
     step "pgrx clippy pg${pg}"
-    cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg} s3" -- -D warnings
+    cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg} pg_test s3" -- -D warnings
   fi
 
   if [[ "${SKIP_INSTALL}" -eq 0 ]]; then

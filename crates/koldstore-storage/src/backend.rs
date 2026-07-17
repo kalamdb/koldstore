@@ -184,6 +184,7 @@ fn open_s3_client(
     credentials: &serde_json::Value,
     config: &serde_json::Value,
 ) -> StorageResult<ObjectStoreClient> {
+    crate::ensure_rustls_ring_provider();
     let (bucket, key_prefix) = parse_s3_base_path(base_path)?;
     let access_key = json_string(credentials, "access_key_id")
         .or_else(|| json_string(credentials, "access_key"));

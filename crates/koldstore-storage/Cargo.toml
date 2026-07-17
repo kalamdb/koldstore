@@ -7,13 +7,15 @@ repository.workspace = true
 
 [features]
 default = ["s3"]
-# S3/MinIO via object_store aws-base + platform native TLS + ring SigV4.
-# Avoids the default `object_store/aws` stack (reqwest/rustls + aws-lc).
+# S3/MinIO via object_store aws-base + rustls (ring provider) + ring SigV4.
+# Avoids `object_store/aws` (aws-lc) and native-tls (OpenSSL), both of which
+# bloat or conflict inside the PostgreSQL backend process.
 s3 = [
     "object_store/aws-base",
     "object_store/reqwest",
     "object_store/ring",
     "dep:reqwest",
+    "dep:rustls",
 ]
 
 [dependencies]
@@ -22,8 +24,9 @@ futures-util.workspace = true
 koldstore-common.workspace = true
 # `aws-base` / HTTP / signing are opt-in via the `s3` feature.
 object_store = { workspace = true, features = ["fs"] }
-# Feature-unified with object_store's reqwest; enables native TLS (no aws-lc).
+# Feature-unified with object_store's reqwest; rustls without bundled aws-lc.
 reqwest = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
