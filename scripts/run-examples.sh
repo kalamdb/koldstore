@@ -53,9 +53,13 @@ case "${FILTER}" in
 esac
 
 echo "preparing pgrx PostgreSQL ${PG_VERSION} for KoldStore examples"
+E2E_ENV_FILE="${KOLDSTORE_E2E_ENV_FILE:-$ROOT_DIR/.e2e-env}"
 KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
   KOLDSTORE_E2E_PREPARE_ONLY=1 \
   scripts/run-pg-e2e.sh "${PG_VERSION}"
+# Prepare-only creates worker DBs and writes pool env; source it for nextest.
+# shellcheck disable=SC1090
+source "${E2E_ENV_FILE}"
 
 if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
   echo "examples database is ready (prepare-only; skipping tests)"
