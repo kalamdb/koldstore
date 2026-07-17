@@ -1,5 +1,6 @@
 //! Cross-cutting lifecycle / contract E2E category.
 
+mod async_load_soak;
 mod endurance;
 mod failure_injection;
 mod full_lifecycle;

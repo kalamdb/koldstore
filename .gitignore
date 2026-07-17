@@ -24,6 +24,7 @@ tests/tmp/
 *.log.*
 .env
 .env.*
+.e2e-env
 
 # OS/editor
 .DS_Store

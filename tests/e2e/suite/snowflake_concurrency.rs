@@ -10,10 +10,9 @@ async fn snowflake_ids_are_unique_across_concurrent_backends() -> Result<()> {
         .into_iter()
         .next()
         .expect("local matrix should contain at least one target");
-    let setup = common::wait_for_postgres(&target).await?;
-    setup
-        .batch_execute("CREATE EXTENSION IF NOT EXISTS koldstore;")
-        .await?;
+    // Claim a pooled worker DB so peers share one database (and one snowflake
+    // sequence space) without colliding with parallel suite fixtures.
+    let db = common::TestDb::start(target, "snowflake").await?;
 
     let clients = std::env::var("KOLDSTORE_E2E_SNOWFLAKE_CLIENTS")
         .ok()
@@ -26,7 +25,7 @@ async fn snowflake_ids_are_unique_across_concurrent_backends() -> Result<()> {
 
     let mut tasks = Vec::with_capacity(clients);
     for _ in 0..clients {
-        let target = target.clone();
+        let target = db.target.clone();
         tasks.push(tokio::spawn(async move {
             let client = common::connect(&target).await?;
             let rows = client

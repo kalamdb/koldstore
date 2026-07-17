@@ -63,6 +63,40 @@ pub async fn barrier_unlock(client: &Client) -> Result<()> {
     Ok(())
 }
 
+/// Polls until a backend is waiting on the failpoint barrier lock.
+///
+/// # Errors
+///
+/// Returns an error when the wait query fails or the deadline elapses.
+pub async fn wait_until_barrier_waiter(
+    coordinator: &Client,
+    flush_finished: impl Fn() -> bool,
+) -> Result<()> {
+    for _ in 0..200 {
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        let waiting = coordinator
+            .query_one(
+                "SELECT EXISTS (\
+                   SELECT 1 FROM pg_catalog.pg_locks \
+                   WHERE locktype = 'advisory' \
+                     AND classid = 0 \
+                     AND objid = $1::bigint \
+                     AND granted = false\
+                 )",
+                &[&BARRIER_LOCK_KEY],
+            )
+            .await?
+            .get::<_, bool>(0);
+        if waiting {
+            return Ok(());
+        }
+        if flush_finished() {
+            break;
+        }
+    }
+    anyhow::bail!("flush did not reach wait: failpoint barrier")
+}
+
 /// Creates and seeds a rich-types table (jsonb/uuid/float8/timestamptz + nullables).
 ///
 /// Uses types known to roundtrip through flush SPI + Parquet. Avoids `text[]` and

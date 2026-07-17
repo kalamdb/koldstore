@@ -6,6 +6,7 @@ mod async_mirror;
 mod catalog;
 mod cluster;
 mod db;
+mod db_pool;
 mod describe_table;
 pub mod equality;
 mod log;

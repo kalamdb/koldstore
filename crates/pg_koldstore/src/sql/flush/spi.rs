@@ -116,32 +116,50 @@ pub(super) fn lock_source_table_share_row_exclusive(
     })
 }
 
-/// Captures the current WAL insert LSN and waits until it is durable on disk.
+/// Captures the end of inserted WAL and forces it durable on disk.
 ///
 /// Required so logical decoding with `upto_lsn = F1` can see commits that used
 /// `synchronous_commit = off`.
+///
+/// Uses `XLogFlush` directly rather than SPI-polling `pg_current_wal_flush_lsn`
+/// with `pg_sleep`: during `flush_table` the apply advisory lock blocks the
+/// async worker, so that poll can sit for the full ~10s budget per flush.
+///
+/// The fence LSN must be the end of inserted WAL ([`inserted_wal_end_lsn`]), not
+/// a raw [`GetXLogInsertRecPtr`]: at page boundaries the latter points past the
+/// next page header and `XLogFlush` fails with "xlog flush request … is not
+/// satisfied".
 pub(super) fn capture_durable_wal_fence() -> Result<crate::async_mirror::apply::WalFenceLsn, String>
 {
-    let insert =
-        pgrx::Spi::get_one::<String>("SELECT pg_catalog.pg_current_wal_insert_lsn()::text")
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "pg_current_wal_insert_lsn returned NULL".to_string())?;
-    let fence = koldstore_common::parse_pg_lsn(&insert)?;
-    // Poll flush LSN until the fence is durable (bounded busy-wait).
-    for _ in 0..10_000 {
-        let flush =
-            pgrx::Spi::get_one::<String>("SELECT pg_catalog.pg_current_wal_flush_lsn()::text")
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "pg_current_wal_flush_lsn returned NULL".to_string())?;
-        let flush_lsn = koldstore_common::parse_pg_lsn(&flush)?;
-        if flush_lsn >= fence {
-            return Ok(crate::async_mirror::apply::WalFenceLsn::new(fence));
-        }
-        pgrx::Spi::run("SELECT pg_catalog.pg_sleep(0.001)").map_err(|error| error.to_string())?;
+    let fence = inserted_wal_end_lsn();
+    unsafe { pgrx::pg_sys::XLogFlush(fence) };
+    Ok(crate::async_mirror::apply::WalFenceLsn::new(fence))
+}
+
+/// Latest inserted WAL end pointer that is safe to pass to [`XLogFlush`].
+///
+/// Prefer `GetXLogInsertEndRecPtr` when the running PostgreSQL exports it.
+/// PG 16.13 does not; emulate the page-boundary correction instead.
+fn inserted_wal_end_lsn() -> pgrx::pg_sys::XLogRecPtr {
+    #[cfg(not(feature = "pg16"))]
+    {
+        unsafe { pgrx::pg_sys::GetXLogInsertEndRecPtr() }
     }
-    Err(format!(
-        "timed out waiting for WAL durability through {insert}"
-    ))
+    #[cfg(feature = "pg16")]
+    {
+        // Same correction as GetXLogInsertEndRecPtr / XLogBytePosToEndRecPtr:
+        // at a page boundary GetXLogInsertRecPtr sits just after the page header
+        // (e.g. …/018 or …/028) while no WAL exists there yet.
+        let insert = unsafe { pgrx::pg_sys::GetXLogInsertRecPtr() };
+        let page_off = insert % u64::from(pgrx::pg_sys::XLOG_BLCKSZ);
+        let short_phd = std::mem::size_of::<pgrx::pg_sys::XLogPageHeaderData>() as u64;
+        let long_phd = std::mem::size_of::<pgrx::pg_sys::XLogLongPageHeaderData>() as u64;
+        if page_off == short_phd || page_off == long_phd {
+            insert - page_off
+        } else {
+            insert
+        }
+    }
 }
 
 pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> {
