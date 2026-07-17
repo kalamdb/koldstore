@@ -159,7 +159,7 @@ cargo_pgrx_install_koldstore() {
   local install_args=(
     -p pg_koldstore
     --no-default-features
-    --features "${pg_feature}"
+    --features "${pg_feature} s3"
     --pg-config "${pg_config}"
   )
 
@@ -201,7 +201,7 @@ run_local_pgrx_e2e() {
 
 run_local_pg_test() {
   local pg="$1"
-  local features="pg${pg} pg_test"
+  local features="pg${pg} pg_test s3"
   local manifest="${ROOT_DIR}/crates/pg_koldstore/Cargo.toml"
   local target_dir="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}"
 
@@ -321,7 +321,7 @@ if [[ "${SKIP_PGRX}" -eq 0 ]]; then
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
       step "pgrx feature compile check pg${pg}"
-      cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg}" -- -D warnings
+      cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg} s3" -- -D warnings
 
       step "pgrx install check pg${pg}"
       cargo_pgrx_install_koldstore "pg${pg}" "$(configured_pg_config "${pg}")"

@@ -32,7 +32,7 @@ RUN cargo pgrx init --pg"${PG_MAJOR}" "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_co
     && cargo pgrx package \
       -p pg_koldstore \
       --no-default-features \
-      --features "pg${PG_MAJOR}" \
+      --features "pg${PG_MAJOR} s3" \
       --pg-config "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
 
 RUN mkdir -p /out/lib /out/extension \

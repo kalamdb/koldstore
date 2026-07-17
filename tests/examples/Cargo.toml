@@ -29,7 +29,7 @@ path = "game_events.rs"
 anyhow.workspace = true
 chrono.workspace = true
 koldstore-memory-tests = { path = "../memory" }
-koldstore-storage.workspace = true
+koldstore-storage = { workspace = true, features = ["s3"] }
 parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true

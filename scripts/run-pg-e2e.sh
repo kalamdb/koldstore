@@ -76,7 +76,7 @@ echo "installing koldstore into pgrx PostgreSQL ${PG_VERSION}"
 INSTALL_ARGS=(
   -p pg_koldstore
   --no-default-features
-  --features "$PG_FEATURE"
+  --features "$PG_FEATURE s3"
   --pg-config "$PG_CONFIG"
 )
 if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "true" ]]; then

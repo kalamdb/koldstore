@@ -156,7 +156,7 @@ jobs:
       # slot; parallel flush fences race on PostgreSQL's nowait slot acquire.
       - name: "Run pg_test suite (nextest, serial)"
         run: |
-          features="pg${PG_VER} pg_test"
+          features="pg${PG_VER} pg_test s3"
           manifest="${GITHUB_WORKSPACE}/crates/pg_koldstore/Cargo.toml"
           CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target" \
             PGRX_FEATURES="${features}" \

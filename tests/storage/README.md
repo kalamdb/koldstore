@@ -57,7 +57,7 @@ scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 5
 # Use release-pg for fair hot+cold timings (debug is ~3–7× slower; plain --release
 # uses panic=abort and breaks PostgreSQL ereport/longjmp from extension hooks):
 KOLDSTORE_E2E_PREPARE_ONLY=1 scripts/run-pg-e2e.sh 16
-cargo pgrx install -p pg_koldstore --profile release-pg --no-default-features --features pg16 \
+cargo pgrx install -p pg_koldstore --profile release-pg --no-default-features --features "pg16 s3" \
   --pg-config "$(cargo pgrx info pg-config 16)"
 cargo pgrx stop pg16 && cargo pgrx start pg16
 KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 KOLDSTORE_STORAGE_DML_SAMPLE=1000 \

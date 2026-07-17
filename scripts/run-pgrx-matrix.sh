@@ -225,7 +225,7 @@ cargo_pgrx_install_koldstore() {
   local install_args=(
     -p pg_koldstore
     --no-default-features
-    --features "pg${pg}"
+    --features "pg${pg} s3"
     --pg-config "${pg_config}"
   )
 
@@ -245,7 +245,7 @@ run_pg_version() {
 
   if [[ "${SKIP_CLIPPY}" -eq 0 ]]; then
     step "pgrx clippy pg${pg}"
-    cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg}" -- -D warnings
+    cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg} s3" -- -D warnings
   fi
 
   if [[ "${SKIP_INSTALL}" -eq 0 ]]; then

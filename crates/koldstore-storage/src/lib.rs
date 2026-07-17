@@ -3,6 +3,11 @@
 //! Owns backend configuration, durable `object_store` client construction,
 //! publish-safe action planning/execution, object metadata, and the storage
 //! client trait. Must not depend on `pgrx`.
+//!
+//! The `s3` feature (on by default for this crate) enables S3/MinIO via
+//! `object_store` `aws-base` with platform native TLS and `ring` for SigV4.
+//! Dependents that want a filesystem-only build should use
+//! `default-features = false` and omit `s3`.
 
 pub mod backend;
 pub mod client;

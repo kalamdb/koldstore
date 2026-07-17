@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 fn example_registration() -> StorageRegistration {
     StorageRegistration {
-        name: "local-minio".to_string(),
-        storage_type: "s3".to_string(),
-        base_path: "s3://koldstore-test".to_string(),
+        name: "local-fs".to_string(),
+        storage_type: "filesystem".to_string(),
+        base_path: "file:///tmp/koldstore-test".to_string(),
         credentials: serde_json::json!({
             "access_key_id": "minioadmin",
             "secret_access_key": "do-not-leak"

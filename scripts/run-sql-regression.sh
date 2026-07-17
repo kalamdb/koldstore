@@ -41,7 +41,7 @@ prepare_cluster() {
   INSTALL_ARGS=(
     -p pg_koldstore
     --no-default-features
-    --features "$PG_FEATURE"
+    --features "$PG_FEATURE s3"
     --pg-config "$PG_CONFIG"
   )
   if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then

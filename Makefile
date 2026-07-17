@@ -12,8 +12,8 @@ test:
 		--exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 
 pgrx-test:
-	cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg16 -- -D warnings
-	cargo pgrx install -p pg_koldstore --no-default-features --features pg16 --pg-config "$$(cargo pgrx info pg-config 16)"
+	cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg16 s3" -- -D warnings
+	cargo pgrx install -p pg_koldstore --no-default-features --features "pg16 s3" --pg-config "$$(cargo pgrx info pg-config 16)"
 
 pgrx-test-matrix:
 	scripts/run-pgrx-matrix.sh --skip-unit --skip-e2e

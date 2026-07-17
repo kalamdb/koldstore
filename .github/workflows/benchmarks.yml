@@ -61,7 +61,7 @@ jobs:
       - name: Build extension
         run: |
           set -euo pipefail
-          cargo build -p pg_koldstore --no-default-features --features pg${PG_VER}
+          cargo build -p pg_koldstore --no-default-features --features pg${PG_VER},s3
 
       - name: Install extension into PostgreSQL
         run: |
@@ -70,7 +70,7 @@ jobs:
             -p pg_koldstore \
             --sudo \
             --no-default-features \
-            --features pg${PG_VER} \
+            --features pg${PG_VER},s3 \
             --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
 
       - name: Run Criterion + pgbench suite (benchmarks/scripts/run.sh)

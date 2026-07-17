@@ -17,7 +17,13 @@ pub const DEFAULT_SHARED_PATH_TEMPLATE: &str = "{namespace}/{tableName}/";
 pub const DEFAULT_USER_PATH_TEMPLATE: &str = "{namespace}/{tableName}/{scopeId}/";
 
 /// Supported storage backends.
+///
+/// `s3` is only listed when this crate is built with the `s3` feature (default
+/// for the storage package itself; opt-in via `pg_koldstore`'s `s3` feature).
+#[cfg(feature = "s3")]
 pub const SUPPORTED_STORAGE_TYPES: &[&str] = &["filesystem", "s3", "gcs", "azure"];
+#[cfg(not(feature = "s3"))]
+pub const SUPPORTED_STORAGE_TYPES: &[&str] = &["filesystem", "gcs", "azure"];
 
 const REGISTER_STORAGE_SQL: &str = r#"
 INSERT INTO koldstore.storage AS s (
