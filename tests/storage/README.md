@@ -1,6 +1,6 @@
 # Storage comparison
 
-Compares a plain PostgreSQL heap table with the same wide table under KoldStore
+Compares a plain PostgreSQL heap table with the same table under KoldStore
 management.
 
 This package is excluded from the default workspace `cargo nextest` run (same as
@@ -15,7 +15,7 @@ Order of measurement:
 2. In async mode, time a separate mirror catch-up after each DML phase
 3. Snapshot dead tuples (`pg_stat_user_tables`, pre-flush)
 4. **Hot-only PK lookups before flush** (both heaps still hold all rows)
-5. Flush older managed rows to zstd Parquet
+5. Flush older managed rows to zstd Parquet (duration + peak cluster RSS)
 6. Time `VACUUM (FULL, ANALYZE)` on both heaps, then REINDEX
 7. Hot+cold PK lookups + heap/index size comparison
 
@@ -28,9 +28,21 @@ applies the same benchmark-only setting to the generated mirror. A long async
 catch-up therefore cannot launch maintenance during a following timed phase.
 The harness runs the documented explicit maintenance phase instead.
 
-TODO rows in the printed table (not measured yet): total PG backup size, restore time.
-Autovacuum counters are not printed because autovacuum is intentionally disabled
-for both source relations and the generated mirror.
+The harness prints a **Main comparison** headline table plus a **Detail**
+section. Columns are **PostgreSQL only**, **PG + KoldStore (async)**, and
+**PG + KoldStore (strict)** (inactive mode cells are `—` for a single-mode
+run). Flush rows report duration, rows/s, and peak RSS while `flush_table`
+runs. Storage is split into **local PostgreSQL** versus **total hot+cold**.
+
+Pass `--update-results` to merge the run into `docs/benchmarks/RESULTS.md`
+(JSON cache under `docs/benchmarks/.storage-results/`). Use `--both-modes` to
+fill both managed columns in one invocation.
+
+TODO rows not measured yet include: sustainable throughput, p99 latency, peak
+memory under the full workload, CPU/WAL/I/O, object-store efficiency, open
+files, backup/restore, and mirror backlog. Autovacuum counters are not printed
+because autovacuum is intentionally disabled for both source relations and the
+generated mirror.
 ```bash
 # Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot, 1k DML sample):
 scripts/run-storage-comparison.sh
@@ -53,12 +65,10 @@ KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 KOLDSTORE_STORAG
   cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
 ```
 
-The harness prints a markdown comparison table with a **Tradeoff** column
-(e.g. `3% slower`, `99% smaller`) and asserts that after flush, PostgreSQL
-heap and index bytes for the managed table — **including**
-`koldstore.<table>__cl` and its indexes — are smaller than the unmanaged
-baseline. Progress lines are always logged for seed / flush / vacuum phases so
-large runs do not look hung.
+The harness asserts that after flush, PostgreSQL heap and index bytes for the
+managed table — **including** `koldstore.<table>__cl` and its indexes — are
+smaller than the unmanaged baseline. Progress lines are always logged for
+seed / flush / vacuum phases so large runs do not look hung.
 
 `strict` is the wrapper default and includes mirror writes in foreground DML.
 `async` removes that work from the measured foreground operation and reports
@@ -66,10 +76,11 @@ large runs do not look hung.
 foreground number without also publishing catch-up throughput would hide the
 cost rather than move it, so benchmark reports must include both.
 
-To make those phases reproducible, the benchmark session sets the internal
-`koldstore.internal_async_mirror_worker` control to `off` before `manage_table`.
-Explicit fences then apply every change in the corresponding phase. The default
-is `on`; production async tables apply WAL automatically.
+To make those phases reproducible, the harness keeps the worker GUC on for
+`manage_table` (required for async activation), then pins
+`koldstore.internal_async_mirror_worker=off` on the database (not only the
+session), terminates the applier, and uses explicit fences per timed phase.
+The database GUC is reset when the run finishes.
 An untimed `CHECKPOINT` precedes each compared DML side so writeback from the
 previous side is not charged to the next measurement.
 

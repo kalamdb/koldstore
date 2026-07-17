@@ -232,6 +232,10 @@ pub fn apply_available() -> Result<i64, String> {
         if let Some(end_lsn) = applied_end_lsn {
             record_applied_lsn(end_lsn)?;
         }
+        // Persist hot/mirror counters in this transaction before commit. The
+        // background worker's commit path is not a reliable sole home for the
+        // PRE_COMMIT SPI flush used by foreground DML triggers.
+        crate::row_counter_cache::flush_pending_deltas_in_transaction()?;
         Ok(applied)
     })();
     let _ = drop_named_cursor(&cursor_name);
