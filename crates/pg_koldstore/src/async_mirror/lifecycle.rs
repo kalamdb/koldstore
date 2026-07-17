@@ -335,8 +335,8 @@ pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
 /// before acquiring the slot is also cleared.
 fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
     let worker_type = koldstore_worker::async_mirror_worker_type(DatabaseOid::new(database_oid));
-    // Ignore the boolean result: false means the PID exited already.
-    let _ = pgrx::Spi::run_with_args(
+    // Terminate returns false when the PID already exited; either outcome is fine.
+    pgrx::Spi::run_with_args(
         "SELECT pg_catalog.pg_terminate_backend(pid) \
          FROM pg_catalog.pg_stat_activity \
          WHERE backend_type = $1",
@@ -347,7 +347,7 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
     if let Some(active_pid) = slot_active_pid(slot)? {
         let my_pid = unsafe { pgrx::pg_sys::MyProcPid };
         if active_pid != my_pid {
-            let _ = pgrx::Spi::run_with_args(
+            pgrx::Spi::run_with_args(
                 "SELECT pg_catalog.pg_terminate_backend($1)",
                 &[DatumWithOid::from(active_pid)],
             )

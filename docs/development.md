@@ -174,4 +174,11 @@ Hot DML benchmark scenarios compare a plain heap table with an equivalent pg-kol
 tests/memory/run_memory_checks.sh
 ```
 
-The script runs Rust tests and opportunistically reports Valgrind and heaptrack availability. PostgreSQL memory-context checks are represented by `tests/memory/memory_probe.rs` and are intended to be wired into pgrx/E2E tests as the extension glue matures.
+Runs probe unit tests, then the deep E2E leak gates in
+`tests/e2e/suite/memory_leak.rs` (flush + hot DML + merge-scan SELECT loops;
+MinIO parquet reads when `KOLDSTORE_MINIO=1`). Also prints a plain-Postgres vs
+koldstore comparison table (idle / DML / hot-only / flush / hot+cold) with
+context+RSS before/after/Δ/spike columns. Snapshots use
+`pg_backend_memory_contexts` plus process RSS. Set
+`KOLDSTORE_MEMORY_SKIP_E2E=1` for unit probes only. See
+`tests/memory/heap_profile.md` for budgets and overrides.

@@ -703,6 +703,7 @@ dependencies = [
  "koldstore-common",
  "koldstore-flush",
  "koldstore-manifest",
+ "koldstore-memory-tests",
  "koldstore-merge",
  "koldstore-migrate",
  "koldstore-parquet",

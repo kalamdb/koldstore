@@ -9,6 +9,7 @@ mod db;
 mod describe_table;
 pub mod equality;
 mod log;
+pub mod memory;
 mod minio;
 mod mirror_mode;
 mod sql;

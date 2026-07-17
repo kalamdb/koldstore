@@ -25,6 +25,7 @@ koldstore-migrate.workspace = true
 koldstore-manifest.workspace = true
 koldstore-parquet.workspace = true
 koldstore-storage.workspace = true
+koldstore-memory-tests = { path = "../memory" }
 parquet.workspace = true
 koldstore = { path = "../../crates/pg_koldstore", package = "pg_koldstore", default-features = false }
 serde_json.workspace = true

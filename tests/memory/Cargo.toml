@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+publish = false
+
+[lib]
+name = "koldstore_memory"
+path = "src/lib.rs"
 
 [[test]]
 name = "merge_scan_leak"
