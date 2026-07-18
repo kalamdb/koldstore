@@ -44,8 +44,7 @@ pub(crate) fn flush_replication_origin_name(database_oid: DatabaseOid) -> String
 /// apply still skips prune WAL stamped before the naming change.
 #[must_use]
 pub(crate) fn is_flush_replication_origin(name: &str, database_oid: DatabaseOid) -> bool {
-    name == FLUSH_REPLICATION_ORIGIN_PREFIX
-        || name == flush_replication_origin_name(database_oid)
+    name == FLUSH_REPLICATION_ORIGIN_PREFIX || name == flush_replication_origin_name(database_oid)
 }
 
 /// Returns the cluster-unique logical slot name for a database OID.

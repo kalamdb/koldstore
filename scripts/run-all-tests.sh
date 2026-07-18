@@ -244,7 +244,7 @@ run_local_storage() {
   KOLDSTORE_STORAGE_ROWS="${KOLDSTORE_STORAGE_ROWS:-10000}" \
     KOLDSTORE_STORAGE_HOT_LIMIT="${KOLDSTORE_STORAGE_HOT_LIMIT:-2000}" \
     KOLDSTORE_STORAGE_DML_SAMPLE="${KOLDSTORE_STORAGE_DML_SAMPLE:-1000}" \
-    scripts/run-storage-comparison.sh --pg-version "${pg}"
+    scripts/run-storage-comparison.sh --all-sides --pg-version "${pg}"
 }
 
 run_local_sql() {

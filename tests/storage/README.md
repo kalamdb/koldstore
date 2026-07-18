@@ -48,13 +48,12 @@ files, backup/restore, and mirror backlog. Autovacuum counters are not printed
 because autovacuum is intentionally disabled for both source relations and the
 generated mirror.
 ```bash
-# Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot, 1k DML sample):
-scripts/run-storage-comparison.sh
-scripts/run-storage-comparison.sh --rows 1000000 --hot-limit 50000
-scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
-# Opt-in committed-WAL capture; wrapper prepares the server wal_level:
-scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 5000 \
-  --mode async
+# Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot, 1k DML sample).
+# Requires --all-sides (pg + async + strict, fresh server each) or --side <one>:
+scripts/run-storage-comparison.sh --all-sides
+scripts/run-storage-comparison.sh --all-sides --rows 1000000 --hot-limit 50000
+scripts/run-storage-comparison.sh --all-sides --rows 100000 --hot-limit 10000 --dml-sample 100000
+scripts/run-storage-comparison.sh --side async --rows 100000 --hot-limit 10000 --dml-sample 5000
 
 # Or prepare wal_level manually, then run the test directly. CREATE EXTENSION
 # and the first async manage call create the publication and slot automatically:
@@ -65,7 +64,7 @@ cargo pgrx install -p pg_koldstore --profile release-pg --no-default-features --
   --pg-config "$(cargo pgrx info pg-config 16)"
 cargo pgrx stop pg16 && cargo pgrx start pg16
 KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 KOLDSTORE_STORAGE_DML_SAMPLE=1000 \
-  KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE=strict \
+  KOLDSTORE_STORAGE_SIDE=strict \
   cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
 ```
 

@@ -457,7 +457,8 @@ unsafe extern "C-unwind" fn flush_origin_xact_callback(
         | pgrx::pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT => {
             FLUSH_ORIGIN_RESTORE.with(|slot| {
                 if let Some(previous) = slot.take() {
-                    let needs_reset = FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.replace(false));
+                    let needs_reset =
+                        FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.replace(false));
                     unsafe {
                         if needs_reset {
                             pgrx::pg_sys::replorigin_session_reset();

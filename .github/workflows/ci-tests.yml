@@ -303,7 +303,7 @@ jobs:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
       - name: Run storage comparison (baseline vs managed)
-        run: bash scripts/run-storage-comparison.sh --pg-version "${PG_VER}"
+        run: bash scripts/run-storage-comparison.sh --all-sides --pg-version "${PG_VER}"
         env:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
