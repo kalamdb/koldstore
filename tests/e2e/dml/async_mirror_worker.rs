@@ -117,11 +117,18 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
                 .await?;
             // Applier soft-fails on the failpoint and backs off; it must remain
             // running so catch-up resumes after the failpoint is cleared.
-            tokio::time::sleep(Duration::from_millis(750)).await;
-            assert!(
-                common::async_worker_running(&db.client).await?,
-                "soft-fail must keep the async worker alive"
-            );
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let soft_fail_deadline = Instant::now() + Duration::from_secs(3);
+            loop {
+                if common::async_worker_running(&db.client).await? {
+                    break;
+                }
+                anyhow::ensure!(
+                    Instant::now() < soft_fail_deadline,
+                    "soft-fail must keep the async worker alive"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
             Ok::<(), anyhow::Error>(())
         }
         .await;

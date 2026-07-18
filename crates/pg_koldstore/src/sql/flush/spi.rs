@@ -460,11 +460,17 @@ unsafe extern "C-unwind" fn flush_origin_xact_callback(
                     let needs_reset =
                         FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.replace(false));
                     unsafe {
+                        // Only reset when this backend armed via session_setup.
+                        // Calling reset without a live session state can Assert/FATAL
+                        // and take down the backend mid-abort (including async apply).
                         if needs_reset {
                             pgrx::pg_sys::replorigin_session_reset();
                         }
                         pgrx::pg_sys::replorigin_session_origin = previous;
                     }
+                } else {
+                    // Keep the flag from leaking across xacts if restore was cleared.
+                    FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.set(false));
                 }
             });
         }

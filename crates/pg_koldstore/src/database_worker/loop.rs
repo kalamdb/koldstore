@@ -152,6 +152,10 @@ pub(crate) fn worker_transaction<R>(body: impl FnOnce() -> R) -> R {
 }
 
 /// Like [`worker_transaction`], but aborts the transaction when `body` returns `Err`.
+///
+/// On the error path, abort without `PopActiveSnapshot` first: logical-decoding
+/// SPI can leave the transaction such that an explicit pop before abort FATAL-
+/// exits a `BGW_NEVER_RESTART` applier (soft-fail would otherwise keep it alive).
 pub(crate) fn worker_transaction_result<R>(
     body: impl FnOnce() -> Result<R, String>,
 ) -> Result<R, String> {
@@ -162,10 +166,16 @@ pub(crate) fn worker_transaction_result<R>(
     }
     let result = body();
     unsafe {
-        pgrx::pg_sys::PopActiveSnapshot();
         match &result {
-            Ok(_) => pgrx::pg_sys::CommitTransactionCommand(),
-            Err(_) => pgrx::pg_sys::AbortCurrentTransaction(),
+            Ok(_) => {
+                pgrx::pg_sys::PopActiveSnapshot();
+                pgrx::pg_sys::CommitTransactionCommand();
+            }
+            Err(_) => {
+                if pgrx::pg_sys::IsTransactionOrTransactionBlock() {
+                    pgrx::pg_sys::AbortCurrentTransaction();
+                }
+            }
         }
     }
     result

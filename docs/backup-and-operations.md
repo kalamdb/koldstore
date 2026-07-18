@@ -1,7 +1,9 @@
 # Backup and Operations
 
 pg-koldstore stores authoritative hot rows in PostgreSQL and cold segment
-artifacts in object storage. A recoverable backup must include both sides.
+artifacts in object storage. Because those tiers have separate durability
+domains, a recoverable backup must include both tiers and preserve a consistent
+point between them.
 
 ## Base Backup and PITR
 

@@ -87,7 +87,16 @@ fi
 
 echo "starting pgrx-managed PostgreSQL ${PG_VERSION}"
 pgrx_force_stop "${PG_VERSION}" || true
-pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE"
+# Always enable logical WAL on every start. Async slots persist in the pgrx data
+# directory across mode/side restarts; starting with wal_level < logical makes
+# startup FATAL ("slot exists, but wal_level < logical") and looks like a crash.
+PGRX_LOGICAL_CONF=(
+  --postgresql-conf wal_level=logical
+  --postgresql-conf "max_worker_processes=${WORKER_PROCESSES}"
+  --postgresql-conf "max_replication_slots=${WORKER_PROCESSES}"
+  --postgresql-conf "max_wal_senders=${WORKER_PROCESSES}"
+)
+pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" "${PGRX_LOGICAL_CONF[@]}"
 
 if [[ "${KOLDSTORE_E2E_SKIP_INSTALL:-}" == "1" || "${KOLDSTORE_E2E_SKIP_INSTALL:-}" == "true" ]]; then
   echo "skipping cargo pgrx install (KOLDSTORE_E2E_SKIP_INSTALL=1; extension already installed)"
@@ -110,18 +119,12 @@ else
   cargo pgrx install "${INSTALL_ARGS[@]}"
 fi
 
-PGRX_START_ARGS=("$PG_FEATURE")
-if [[ "$MIRROR_CAPTURE_MODE" == "async" ]]; then
-  echo "enabling logical WAL for async mirror tests (max_worker_processes=${WORKER_PROCESSES})"
-  PGRX_START_ARGS+=(
-    --postgresql-conf wal_level=logical
-    --postgresql-conf "max_worker_processes=${WORKER_PROCESSES}"
-  )
-fi
-
 echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
 pgrx_force_stop "${PG_VERSION}" || true
-pgrx_start_or_dump "${PG_VERSION}" "${PGRX_START_ARGS[@]}"
+# shared_preload registers the async launcher so NEVER_RESTART appliers are
+# re-spawned after a soft-fail/FATAL without waiting for a client ensure().
+pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" "${PGRX_LOGICAL_CONF[@]}" \
+  --postgresql-conf "shared_preload_libraries=koldstore"
 
 wait_for_postgres() {
   local attempts=30
