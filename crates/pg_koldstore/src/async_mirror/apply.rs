@@ -501,12 +501,19 @@ fn open_decode_cursor(slot: &str, upper_bound: Option<WalFenceLsn>) -> Result<St
 }
 
 fn drop_named_cursor(cursor_name: &str) -> Result<(), String> {
-    pgrx::Spi::connect_mut(|client| {
-        if let Ok(cursor) = client.find_cursor(cursor_name) {
-            drop(cursor);
+    // Drop via portal APIs (not SPI CLOSE): on soft-fail / rollback paths an
+    // SPI ERROR here would FATAL a NEVER_RESTART applier before the worker
+    // soft-fail handler runs.
+    let Ok(name) = std::ffi::CString::new(cursor_name) else {
+        return Ok(());
+    };
+    unsafe {
+        let portal = pgrx::pg_sys::GetPortalByName(name.as_ptr());
+        if !portal.is_null() {
+            pgrx::pg_sys::PortalDrop(portal, false);
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
 fn fetch_decode_messages(cursor_name: &str) -> Result<Vec<Vec<u8>>, String> {

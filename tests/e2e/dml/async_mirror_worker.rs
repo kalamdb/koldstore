@@ -103,11 +103,9 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
                     "ALTER DATABASE \"{dbname}\" SET koldstore.failpoint = 'error:async_mirror_apply'"
                 ))
                 .await?;
-            let _ = common::terminate_async_worker(&db.client).await?;
-            // Launcher re-registers; fall back to ensure if the poll window is tight.
-            if wait_until_worker_running(&db.client).await.is_err() {
-                common::wait_for_async_worker(&db.client).await?;
-            }
+            // Fully stop before ensure so the restarted applier loads the new GUC.
+            force_stop_async_worker(&db.client).await?;
+            common::wait_for_async_worker(&db.client).await?;
 
             db.client
                 .execute(
@@ -136,11 +134,10 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
         clear_async_failpoint(&db.client).await?;
         result?;
 
-        // Worker keeps the old failpoint until reconnect; bounce it after reset.
-        let _ = common::terminate_async_worker(&db.client).await?;
-        if wait_until_worker_running(&db.client).await.is_err() {
-            common::wait_for_async_worker(&db.client).await?;
-        }
+        // Worker keeps the old failpoint until reconnect; bounce after reset.
+        // NEVER_RESTART appliers do not auto-respawn — ensure explicitly.
+        force_stop_async_worker(&db.client).await?;
+        common::wait_for_async_worker(&db.client).await?;
         // Catch up any WAL left from the soft-failed apply attempt, then insert the recovery row.
         let _ = common::wait_for_async_mirror(&db.client).await?;
         db.client
@@ -328,21 +325,17 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
         manage_async(&db.client, &relation, &db.storage_name).await?;
         common::wait_for_async_worker(&db.client).await?;
 
-        // Arm the failpoint at database + session scope. Bgworkers only see
-        // database defaults (loaded at connect), so bounce the applier after
-        // ALTER DATABASE. Session SET covers wait_for_async_mirror.
+        // Arm the failpoint on the session and keep the bgworker down so only
+        // wait_for_async_mirror consumes WAL. A racing worker without the
+        // failpoint would apply successfully and make the fence return Ok.
         db.client
             .batch_execute(&format!(
                 "ALTER DATABASE \"{dbname}\" SET koldstore.failpoint = 'error:async_mirror_apply_after_batch'; \
-                 SET koldstore.failpoint = 'error:async_mirror_apply_after_batch'"
+                 SET koldstore.failpoint = 'error:async_mirror_apply_after_batch'; \
+                 SET koldstore.internal_async_mirror_worker = off"
             ))
             .await?;
-        let _ = common::terminate_async_worker(&db.client).await?;
-        if wait_until_worker_running(&db.client).await.is_err() {
-            // Launcher may be slow; ensure still starts a worker that inherits
-            // the database failpoint default.
-            common::wait_for_async_worker(&db.client).await?;
-        }
+        force_stop_async_worker(&db.client).await?;
 
         let before: Option<String> = db
             .client
@@ -361,8 +354,7 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
             )
             .await?;
 
-        // Worker may soft-fail the after-batch abort; the session fence must
-        // still ERROR when it consumes the pending WAL.
+        // Session fence must ERROR when it hits the after-batch failpoint.
         let err = db
             .client
             .query_one("SELECT koldstore.wait_for_async_mirror()", &[])
@@ -392,12 +384,8 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
         );
 
         clear_async_failpoint(&db.client).await?;
-        // Worker kept the old failpoint until reconnect; bounce after reset.
-        let _ = common::terminate_async_worker(&db.client).await?;
-        if wait_until_worker_running(&db.client).await.is_err() {
-            common::wait_for_async_worker(&db.client).await?;
-        }
-        // Worker may catch up before the session fence; wait on mirror state.
+        // Re-enable the worker and catch up the rolled-back change exactly once.
+        common::wait_for_async_worker(&db.client).await?;
         common::wait_for_mirror_op_count(&db.client, &mirror, 1, 1).await?;
         assert_eq!(
             common::mirror_op_count(&db.client, &mirror, 1).await?,

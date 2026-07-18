@@ -121,10 +121,10 @@ fi
 
 echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
 pgrx_force_stop "${PG_VERSION}" || true
-# shared_preload registers the async launcher so NEVER_RESTART appliers are
-# re-spawned after a soft-fail/FATAL without waiting for a client ensure().
-pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" "${PGRX_LOGICAL_CONF[@]}" \
-  --postgresql-conf "shared_preload_libraries=koldstore"
+# Keep wal_level=logical on every restart. Do not force shared_preload here:
+# the async launcher would hold logical slots across DROP DATABASE and race
+# failpoint bounce tests. Session ensure() still starts appliers on demand.
+pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" "${PGRX_LOGICAL_CONF[@]}"
 
 wait_for_postgres() {
   local attempts=30
@@ -144,28 +144,89 @@ wait_for_postgres
 
 echo "recreating E2E template + ${THREADS} worker databases (prefix=${PG_DATABASE})"
 # Drop worker DBs and any leftover shared/template DBs from prior runs.
-for ((i = 0; i < THREADS; i++)); do
-  worker_db="${PG_DATABASE}_w${i}"
-  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-    -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE database = '${worker_db}' AND NOT active;" \
-    >/dev/null
-  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-    -c "DROP DATABASE IF EXISTS ${worker_db}"
-done
-"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-  -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE database IN ('${PG_DATABASE}', '${TEMPLATE_DB}') AND NOT active;" \
-  >/dev/null || true
-"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-  -c "DROP DATABASE IF EXISTS ${PG_DATABASE}"
+# Async appliers may still hold logical slots after a restart; terminate them
+# and drop slots before DROP DATABASE (active slots block DROP).
+release_db_slots_and_backends() {
+  local db="$1"
+  local attempt
+  # Dropping a database fails while any logical slot for it is *active*.
+  # Terminate holders (appliers / walsenders), wait until inactive, then drop.
+  for ((attempt = 1; attempt <= 20; attempt++)); do
+    "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=0 \
+      -c "SELECT pg_terminate_backend(pid)
+          FROM pg_stat_activity
+          WHERE datname = '${db}' AND pid <> pg_backend_pid();" \
+      >/dev/null || true
+    "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=0 \
+      -c "SELECT pg_terminate_backend(pid)
+          FROM pg_stat_activity
+          WHERE backend_type LIKE 'koldstore%' AND pid <> pg_backend_pid();" \
+      >/dev/null || true
+    "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=0 \
+      -c "SELECT pg_terminate_backend(active_pid)
+          FROM pg_replication_slots
+          WHERE (database = '${db}' OR slot_name LIKE 'koldstore_async_%')
+            AND active_pid IS NOT NULL;" \
+      >/dev/null || true
+    # Wait until no slot for this DB is active, then drop them.
+    if "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 -tAc \
+      "SELECT NOT EXISTS (
+         SELECT 1 FROM pg_replication_slots
+         WHERE database = '${db}' AND active
+       )" 2>/dev/null | grep -qx t; then
+      "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=0 \
+        -c "SELECT pg_drop_replication_slot(slot_name)
+            FROM pg_replication_slots
+            WHERE database = '${db}';" \
+        >/dev/null || true
+      return 0
+    fi
+    sleep 0.15
+  done
+  # Best-effort drop even if still marked active (next DROP may still fail).
+  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=0 \
+    -c "SELECT pg_drop_replication_slot(slot_name)
+        FROM pg_replication_slots
+        WHERE database = '${db}' AND NOT active;" \
+    >/dev/null || true
+}
+
+drop_database_retry() {
+  local db="$1"
+  local attempt
+  for ((attempt = 1; attempt <= 15; attempt++)); do
+    release_db_slots_and_backends "${db}"
+    # WITH (FORCE) clears remaining backends; slots must already be inactive.
+    if "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS ${db} WITH (FORCE)" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.3
+  done
+  echo "error: could not DROP DATABASE ${db} (slot or backend still active)" >&2
+  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -c \
+    "SELECT slot_name, database, active, active_pid FROM pg_replication_slots;" >&2 || true
+  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -c \
+    "SELECT pid, backend_type, datname, state FROM pg_stat_activity
+     WHERE datname = '${db}' OR backend_type LIKE 'koldstore%';" >&2 || true
+  return 1
+}
+
+# Drop every leftover worker DB for this prefix (not only 0..THREADS-1), so a
+# lower THREADS count cannot leave wN databases from a prior parallel run.
+while IFS= read -r leftover; do
+  [[ -n "${leftover}" ]] || continue
+  drop_database_retry "${leftover}"
+done < <("$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 -tAc \
+  "SELECT datname FROM pg_database
+   WHERE datname = '${PG_DATABASE}'
+      OR datname LIKE '${PG_DATABASE}\\_w%'
+   ORDER BY datname")
 # Template DBs cannot be dropped until IS_TEMPLATE is cleared.
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
   -c "UPDATE pg_database SET datistemplate = false WHERE datname = '${TEMPLATE_DB}'" \
   >/dev/null || true
-"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-  -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${TEMPLATE_DB}' AND pid <> pg_backend_pid();" \
-  >/dev/null || true
-"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-  -c "DROP DATABASE IF EXISTS ${TEMPLATE_DB}"
+drop_database_retry "${TEMPLATE_DB}"
 
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
   -c "CREATE DATABASE ${TEMPLATE_DB}"
