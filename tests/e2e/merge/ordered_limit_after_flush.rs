@@ -164,7 +164,7 @@ async fn ordered_limit_user_scope_after_flush_uses_merge_scan() -> Result<()> {
                 CREATE INDEX ordered_notes_user_id_idx ON {relation} (user_id, id);
                 INSERT INTO {relation} (id, user_id, title, body)
                 SELECT gs, 'user-a', 'note-' || gs, 'body-' || gs
-                FROM generate_series(1, 2_500) AS gs;
+                FROM generate_series(1, 2500) AS gs;
                 ANALYZE {relation};
                 "#
             ))

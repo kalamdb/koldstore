@@ -260,10 +260,15 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                             .unwrap_or(false);
                     }
                     PgOutputMessage::Origin { name } => {
-                        // Flush prune stamps this origin so async apply does not
-                        // re-insert tombstones for rows already published to cold.
-                        // Critical on PG15 (no peek origin=none filter).
-                        if name == super::lifecycle::FLUSH_REPLICATION_ORIGIN {
+                        // Flush prune stamps a database-scoped origin so async
+                        // apply does not re-insert tombstones for rows already
+                        // published to cold. Critical on PG15 (no peek
+                        // origin=none filter). PG16+ stamps DoNotReplicateId
+                        // instead and peeks with origin=none.
+                        let database_oid = koldstore_worker::DatabaseOid::new(
+                            unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32(),
+                        );
+                        if super::lifecycle::is_flush_replication_origin(&name, database_oid) {
                             skipping_flush_origin = true;
                         }
                     }
@@ -451,8 +456,8 @@ fn budget_hit(
 
 fn open_decode_cursor(slot: &str, upper_bound: Option<WalFenceLsn>) -> Result<String, String> {
     // `origin=none` is PG16+ only. On PG15, flush prune stamps the named
-    // `koldstore_flush` origin and apply skips those changes when ORIGIN is
-    // decoded. On PG16+ the peek filter is defense-in-depth.
+    // database-scoped flush origin and apply skips those changes when ORIGIN
+    // is decoded. On PG16+ the peek filter is defense-in-depth.
     let upto = upper_bound.map(|lsn| format_pg_lsn(lsn.get()));
     let upto_sql = if upto.is_some() { "$3::pg_lsn" } else { "NULL" };
     #[cfg(feature = "pg15")]
@@ -865,11 +870,15 @@ fn is_background_worker() -> bool {
 ///
 /// SQL contract: `koldstore.wait_for_async_mirror()` is the explicit strong
 /// consistency fence for async mode and benchmark accounting. It loops with an
-/// unlimited per-pass budget until the stream is idle (or a hard timeout).
+/// unlimited per-pass budget until the stream is idle. The timeout is
+/// **idle-based**: progress (applied row changes) resets it, so a large catch-up
+/// that keeps applying does not fail solely because wall time exceeded 300s.
 #[pgrx::pg_extern(name = "wait_for_async_mirror", schema = "koldstore")]
 pub fn wait_for_async_mirror() -> i64 {
-    const FENCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    const HARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
     let started = std::time::Instant::now();
+    let mut last_progress = started;
     let mut total = 0_i64;
     loop {
         let outcome = apply_bounded(BoundedApplyRequest::available_unlimited())
@@ -878,10 +887,13 @@ pub fn wait_for_async_mirror() -> i64 {
         if outcome.row_changes == 0 && !outcome.budget_exhausted {
             break;
         }
-        if started.elapsed() >= FENCE_TIMEOUT {
+        if outcome.row_changes > 0 {
+            last_progress = std::time::Instant::now();
+        }
+        if last_progress.elapsed() >= IDLE_TIMEOUT || started.elapsed() >= HARD_TIMEOUT {
             pgrx::error!(
                 "async mirror fence timed out after {}s with {total} row changes applied",
-                FENCE_TIMEOUT.as_secs()
+                started.elapsed().as_secs()
             );
         }
     }

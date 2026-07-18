@@ -14,15 +14,39 @@ const APPLY_LOCK_NAMESPACE: i32 = 1_263_354_732;
 const WORKER_LOCK_NAMESPACE: i32 = 1_263_354_733;
 const SLOT_PROVISION_LOCK_NAMESPACE: i32 = 1_263_354_734;
 const LIFECYCLE_LOCK_NAMESPACE: i32 = 1_263_354_735;
+/// Serializes PG15 flush-origin `replorigin_session_setup` within one database.
+#[cfg(feature = "pg15")]
+pub(crate) const FLUSH_ORIGIN_LOCK_NAMESPACE: i32 = 1_263_354_736;
 
 /// Publication shared by async managed tables in one database.
 pub const PUBLICATION_NAME: &str = "koldstore_async_mirror";
 
-/// Replication origin stamped on flush prune WAL so async apply skips it.
+/// Prefix for flush-prune replication origins stamped on async cleanup WAL.
 ///
-/// PG16+ peek uses `origin=none` (defense in depth). PG15 has no that filter, so
-/// apply must honor ORIGIN messages with this name.
-pub const FLUSH_REPLICATION_ORIGIN: &str = "koldstore_flush";
+/// PG16+ peek uses `origin=none` (defense in depth) and prune stamps
+/// `DoNotReplicateId` instead. PG15 has no that filter, so apply must honor
+/// ORIGIN messages whose name matches this database's flush origin.
+const FLUSH_REPLICATION_ORIGIN_PREFIX: &str = "koldstore_flush";
+
+/// Returns the database-scoped flush replication origin name (PG15 prune path).
+///
+/// Replication-origin sessions are cluster-global and exclusive. Including the
+/// database OID lets independent databases flush concurrently; same-DB parallel
+/// prunes serialize on an advisory xact lock in `arm_flush_replication_origin`.
+#[must_use]
+pub(crate) fn flush_replication_origin_name(database_oid: DatabaseOid) -> String {
+    format!("{FLUSH_REPLICATION_ORIGIN_PREFIX}_{}", database_oid.get())
+}
+
+/// Returns true when `name` is a flush-prune origin for `database_oid`.
+///
+/// Matches `koldstore_flush_<oid>` and the older bare `koldstore_flush` name so
+/// apply still skips prune WAL stamped before the naming change.
+#[must_use]
+pub(crate) fn is_flush_replication_origin(name: &str, database_oid: DatabaseOid) -> bool {
+    name == FLUSH_REPLICATION_ORIGIN_PREFIX
+        || name == flush_replication_origin_name(database_oid)
+}
 
 /// Returns the cluster-unique logical slot name for a database OID.
 #[must_use]
@@ -483,6 +507,17 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     let publication_exists = publication_exists()?;
+    let flush_origin = flush_replication_origin_name(DatabaseOid::new(database_oid));
+    let flush_origins_dropped = pgrx::Spi::get_one_with_args::<i64>(
+        "WITH dropped AS (\
+           SELECT pg_catalog.pg_replication_origin_drop(roname) AS _ \
+           FROM pg_catalog.pg_replication_origin \
+           WHERE roname = 'koldstore_flush' OR roname = $1\
+         ) SELECT count(*)::bigint FROM dropped",
+        &[DatumWithOid::from(flush_origin.as_str())],
+    )
+    .map_err(|error| format!("drop flush replication origins: {error}"))?
+    .unwrap_or(0);
     if slot_exists {
         // Drop uses nowait acquire; wait out abort/exit windows first.
         wait_until_slot_inactive(&slot).map_err(|error| format!("wait slot inactive: {error}"))?;
@@ -509,5 +544,5 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     )
     .map_err(|error| format!("clear async_mirror_state: {error}"))?;
     crate::database_worker::mark_worker_not_ensured();
-    Ok(slot_exists || publication_exists)
+    Ok(slot_exists || publication_exists || flush_origins_dropped > 0)
 }

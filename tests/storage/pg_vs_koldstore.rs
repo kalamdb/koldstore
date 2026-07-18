@@ -3,8 +3,9 @@
 //! Schema: [`schema.sql`](schema.sql). Seeds a wide (~50 column) table, measures
 //! DML, then **hot-only PK lookups before flush** (heaps still hold all rows —
 //! fair merge-scan overhead), flushes older rows to zstd Parquet (timing and
-//! peak cluster RSS), then measures hot+cold PK lookups and compares
-//! PostgreSQL heap/index sizes versus total hot+cold footprint.
+//! peak cluster RSS), then measures **cold-only** and **hot+cold (50/50 mix)**
+//! PK lookups and compares PostgreSQL heap/index sizes versus total hot+cold
+//! footprint.
 //! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
 //!
 //! Published runs isolate each column via `KOLDSTORE_STORAGE_SIDE=pg|async|strict`
@@ -29,15 +30,28 @@ const DEFAULT_ROWS: i64 = 100_000;
 const DEFAULT_HOT_LIMIT: i64 = 10_000;
 const DEFAULT_DML_SAMPLE: i64 = 1_000;
 const DEFAULT_INSERT_BATCH_ROWS: i64 = 100_000;
-const QUERY_LOOPS: usize = 20;
+/// Point-lookup iterations for throughput + p99 (needs enough samples for p99).
+const QUERY_LOOPS: usize = 100;
+/// Update/delete latency sample size when splitting the DML sample into batches.
+const DEFAULT_DML_LATENCY_BATCH_ROWS: i64 = 1_000;
 
 #[derive(Debug, Clone, Copy)]
 struct Timing {
     elapsed: Duration,
     ops: i64,
+    /// p99 of sampled op latencies (insert/update batch, or one PK lookup).
+    p99_us: Option<f64>,
 }
 
 impl Timing {
+    fn with_p99(elapsed: Duration, ops: i64, samples: &[Duration]) -> Self {
+        Self {
+            elapsed,
+            ops,
+            p99_us: percentile_us(samples, 0.99),
+        }
+    }
+
     fn per_op_us(self) -> f64 {
         if self.ops <= 0 {
             return 0.0;
@@ -51,6 +65,18 @@ impl Timing {
         }
         self.ops as f64 / self.elapsed.as_secs_f64()
     }
+}
+
+/// Nearest-rank percentile over sample durations, returned in microseconds.
+fn percentile_us(samples: &[Duration], percentile: f64) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let rank = ((percentile.clamp(0.0, 1.0) * sorted.len() as f64).ceil() as usize).max(1);
+    let idx = rank.saturating_sub(1).min(sorted.len() - 1);
+    Some(sorted[idx].as_secs_f64() * 1_000_000.0)
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -96,7 +122,10 @@ struct SideMetrics {
     update: Timing,
     delete: Timing,
     query_hot_only: Timing,
+    /// After flush: alternating hot PK + cold PK lookups (50/50).
     query_hot_cold: Timing,
+    /// After flush: cold PK only (`id = 1`).
+    query_cold_only: Timing,
     /// Timed `VACUUM (FULL, ANALYZE)` after flush (smaller hot heap → less work).
     vacuum: Timing,
     /// Dead/live tuple pressure after DML, before flush.
@@ -390,9 +419,13 @@ async fn run_pg_only_body(
         reindex_relation(&db.client, baseline).await?;
     }
 
-    let query_hot_cold = {
+    let query_cold_only = {
         let _step = common::log_step_always("storage_cmp: time pg-only cold-id PK lookups");
         time_point_queries(&db.client, baseline, cold_id).await?
+    };
+    let query_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time pg-only mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
     };
     let sizes = relation_sizes(&db.client, baseline, None).await?;
 
@@ -402,6 +435,7 @@ async fn run_pg_only_body(
         delete,
         query_hot_only,
         query_hot_cold,
+        query_cold_only,
         vacuum,
         heap_after_workload: heap,
         sizes,
@@ -550,7 +584,7 @@ async fn run_managed_only_body(
     }
 
     {
-        let _step = common::log_step_always("storage_cmp: post-flush hot+cold PK lookups");
+        let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
         let plan_cold = common::explain(
             &db.client,
             &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {cold_id}"),
@@ -560,12 +594,16 @@ async fn run_managed_only_body(
         common::assert_kold_merge_scan_planned_cold_reads(&plan_cold, "manifest.json", 1)?;
         anyhow::ensure!(
             !plan_cold.contains("Parquet segment: none"),
-            "hot+cold PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
+            "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
         );
     }
-    let query_hot_cold = {
-        let _step = common::log_step_always("storage_cmp: time managed hot+cold PK lookups");
+    let query_cold_only = {
+        let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
         time_point_queries(&db.client, managed, cold_id).await?
+    };
+    let query_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
     };
 
     let sizes = relation_sizes(&db.client, managed, Some(managed)).await?;
@@ -588,6 +626,7 @@ async fn run_managed_only_body(
         delete,
         query_hot_only,
         query_hot_cold,
+        query_cold_only,
         vacuum,
         heap_after_workload: heap,
         sizes,
@@ -797,7 +836,7 @@ async fn run_storage_comparison_body(
     }
 
     {
-        let _step = common::log_step_always("storage_cmp: post-flush hot+cold PK lookups");
+        let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
         let plan_cold = common::explain(
             &db.client,
             &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {cold_id}"),
@@ -807,7 +846,7 @@ async fn run_storage_comparison_body(
         common::assert_kold_merge_scan_planned_cold_reads(&plan_cold, "manifest.json", 1)?;
         anyhow::ensure!(
             !plan_cold.contains("Parquet segment: none"),
-            "hot+cold PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
+            "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
         );
 
         // Correctness after flush: cold-flushed and still-hot PKs must match baseline.
@@ -817,13 +856,21 @@ async fn run_storage_comparison_body(
         assert_point_row_matches(&db.client, baseline, managed, mid_cold_id).await?;
     }
 
-    let baseline_cold = {
-        let _step = common::log_step_always("storage_cmp: time baseline cold-id PK lookups");
+    let baseline_cold_only = {
+        let _step = common::log_step_always("storage_cmp: time baseline cold-only PK lookups");
         time_point_queries(&db.client, baseline, cold_id).await?
     };
-    let managed_cold = {
-        let _step = common::log_step_always("storage_cmp: time managed hot+cold PK lookups");
+    let managed_cold_only = {
+        let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
         time_point_queries(&db.client, managed, cold_id).await?
+    };
+    let baseline_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time baseline mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
+    };
+    let managed_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
     };
 
     let baseline_sizes = relation_sizes(&db.client, baseline, None).await?;
@@ -842,7 +889,8 @@ async fn run_storage_comparison_body(
         update: baseline_update,
         delete: baseline_delete,
         query_hot_only: baseline_hot,
-        query_hot_cold: baseline_cold,
+        query_hot_cold: baseline_hot_cold,
+        query_cold_only: baseline_cold_only,
         vacuum: baseline_vacuum,
         heap_after_workload: baseline_heap,
         sizes: baseline_sizes,
@@ -853,7 +901,8 @@ async fn run_storage_comparison_body(
         update: managed_update,
         delete: managed_delete,
         query_hot_only: managed_hot,
-        query_hot_cold: managed_cold,
+        query_hot_cold: managed_hot_cold,
+        query_cold_only: managed_cold_only,
         vacuum: managed_vacuum,
         heap_after_workload: managed_heap,
         sizes: managed_sizes,
@@ -959,6 +1008,8 @@ async fn manage_with_hot_limit(
     max_rows_per_file: i64,
     mirror_capture_mode: &str,
 ) -> Result<()> {
+    // auto_flush=false so background DB-worker waves don't steal the timed
+    // flush_table measurement (and leave rows_flushed=0 at the explicit call).
     client
         .execute(
             r#"
@@ -969,8 +1020,9 @@ async fn manage_with_hot_limit(
               min_flush_rows    => $4,
               max_rows_per_file => $5,
               migration_order_by => 'id',
-              compression       => 'zstd'
-              ,mirror_capture_mode => $6
+              compression       => 'zstd',
+              mirror_capture_mode => $6,
+              auto_flush        => false
             )
             "#,
             &[
@@ -1017,6 +1069,7 @@ async fn async_catchup(
     Ok(Some(Timing {
         elapsed: started.elapsed(),
         ops: expected_changes,
+        p99_us: None,
     }))
 }
 
@@ -1182,6 +1235,7 @@ async fn time_vacuum_full(client: &Client, relation: &str) -> Result<Timing> {
     Ok(Timing {
         elapsed: started.elapsed(),
         ops: 1,
+        p99_us: None,
     })
 }
 
@@ -1388,6 +1442,7 @@ async fn time_insert(client: &Client, relation: &str, start_id: i64, count: i64)
     Ok(Timing {
         elapsed: started.elapsed(),
         ops: count,
+        p99_us: None,
     })
 }
 
@@ -1397,16 +1452,17 @@ async fn time_batched_inserts(
     rows: i64,
     batch_rows: i64,
 ) -> Result<Timing> {
-    let mut elapsed = Duration::ZERO;
+    let mut samples = Vec::new();
     let mut start_id = 1_i64;
     while start_id <= rows {
         let count = batch_rows.min(rows - start_id + 1);
-        elapsed += time_insert(client, relation, start_id, count)
-            .await?
-            .elapsed;
+        let batch = time_insert(client, relation, start_id, count).await?;
+        samples.push(batch.elapsed);
         start_id += count;
     }
-    Ok(Timing { elapsed, ops: rows })
+    // p99 is over insert-batch commit latency (not per-row).
+    let elapsed: Duration = samples.iter().copied().sum();
+    Ok(Timing::with_p99(elapsed, rows, &samples))
 }
 
 async fn time_interleaved_inserts(
@@ -1416,61 +1472,86 @@ async fn time_interleaved_inserts(
     rows: i64,
     batch_rows: i64,
 ) -> Result<(Timing, Timing)> {
-    let mut baseline_elapsed = Duration::ZERO;
-    let mut managed_elapsed = Duration::ZERO;
+    let mut baseline_samples = Vec::new();
+    let mut managed_samples = Vec::new();
     let mut start_id = 1_i64;
     let mut batch_index = 0_u64;
 
     while start_id <= rows {
         let count = batch_rows.min(rows - start_id + 1);
         if batch_index.is_multiple_of(2) {
-            baseline_elapsed += time_insert(client, baseline, start_id, count)
-                .await?
-                .elapsed;
-            managed_elapsed += time_insert(client, managed, start_id, count).await?.elapsed;
+            baseline_samples.push(
+                time_insert(client, baseline, start_id, count)
+                    .await?
+                    .elapsed,
+            );
+            managed_samples.push(time_insert(client, managed, start_id, count).await?.elapsed);
         } else {
-            managed_elapsed += time_insert(client, managed, start_id, count).await?.elapsed;
-            baseline_elapsed += time_insert(client, baseline, start_id, count)
-                .await?
-                .elapsed;
+            managed_samples.push(time_insert(client, managed, start_id, count).await?.elapsed);
+            baseline_samples.push(
+                time_insert(client, baseline, start_id, count)
+                    .await?
+                    .elapsed,
+            );
         }
         start_id += count;
         batch_index += 1;
     }
 
+    let baseline_elapsed: Duration = baseline_samples.iter().copied().sum();
+    let managed_elapsed: Duration = managed_samples.iter().copied().sum();
     Ok((
-        Timing {
-            elapsed: baseline_elapsed,
-            ops: rows,
-        },
-        Timing {
-            elapsed: managed_elapsed,
-            ops: rows,
-        },
+        Timing::with_p99(baseline_elapsed, rows, &baseline_samples),
+        Timing::with_p99(managed_elapsed, rows, &managed_samples),
     ))
 }
 
 async fn time_update(client: &Client, relation: &str, start_id: i64, count: i64) -> Result<Timing> {
-    let end_id = start_id + count - 1;
-    let started = Instant::now();
-    client
-        .execute(
-            &format!(
-                r#"
-                UPDATE {relation}
-                SET note_5 = note_5 || ' updated',
-                    updated_at = now()
-                WHERE id BETWEEN {start_id} AND {end_id}
-                "#
-            ),
-            &[],
-        )
-        .await
-        .with_context(|| format!("update {relation}"))?;
-    Ok(Timing {
-        elapsed: started.elapsed(),
-        ops: count,
-    })
+    time_batched_updates(
+        client,
+        relation,
+        start_id,
+        count,
+        DEFAULT_DML_LATENCY_BATCH_ROWS,
+    )
+    .await
+}
+
+async fn time_batched_updates(
+    client: &Client,
+    relation: &str,
+    start_id: i64,
+    count: i64,
+    batch_rows: i64,
+) -> Result<Timing> {
+    let batch_rows = batch_rows.clamp(1, count.max(1));
+    let mut samples = Vec::new();
+    let mut remaining = count;
+    let mut cursor = start_id;
+    while remaining > 0 {
+        let n = batch_rows.min(remaining);
+        let end_id = cursor + n - 1;
+        let started = Instant::now();
+        client
+            .execute(
+                &format!(
+                    r#"
+                    UPDATE {relation}
+                    SET note_5 = note_5 || ' updated',
+                        updated_at = now()
+                    WHERE id BETWEEN {cursor} AND {end_id}
+                    "#
+                ),
+                &[],
+            )
+            .await
+            .with_context(|| format!("update {relation}"))?;
+        samples.push(started.elapsed());
+        cursor = end_id + 1;
+        remaining -= n;
+    }
+    let elapsed: Duration = samples.iter().copied().sum();
+    Ok(Timing::with_p99(elapsed, count, &samples))
 }
 
 async fn time_delete(
@@ -1491,6 +1572,7 @@ async fn time_delete(
     Ok(Timing {
         elapsed: started.elapsed(),
         ops,
+        p99_us: None,
     })
 }
 
@@ -1541,17 +1623,42 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
     // prune + hot equality pushdown the same way applications with Const quals do.
     // Parameterized `$1` is also supported via ParamListInfo resolution.
     let sql = format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {id}");
-    let started = Instant::now();
+    let mut samples = Vec::with_capacity(QUERY_LOOPS);
     for _ in 0..QUERY_LOOPS {
+        let started = Instant::now();
         let _ = client
             .query_one(&sql, &[])
             .await
             .with_context(|| format!("point query {relation} id={id}"))?;
+        samples.push(started.elapsed());
     }
-    Ok(Timing {
-        elapsed: started.elapsed(),
-        ops: QUERY_LOOPS as i64,
-    })
+    let elapsed: Duration = samples.iter().copied().sum();
+    Ok(Timing::with_p99(elapsed, QUERY_LOOPS as i64, &samples))
+}
+
+/// After flush: alternate hot PK / cold PK lookups (50/50 of `QUERY_LOOPS`).
+async fn time_mixed_hot_cold_queries(
+    client: &Client,
+    relation: &str,
+    hot_id: i64,
+    cold_id: i64,
+) -> Result<Timing> {
+    let hot_sql =
+        format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {hot_id}");
+    let cold_sql =
+        format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {cold_id}");
+    let mut samples = Vec::with_capacity(QUERY_LOOPS);
+    for i in 0..QUERY_LOOPS {
+        let sql = if i % 2 == 0 { &hot_sql } else { &cold_sql };
+        let started = Instant::now();
+        let _ = client
+            .query_one(sql, &[])
+            .await
+            .with_context(|| format!("mixed hot/cold point query {relation}"))?;
+        samples.push(started.elapsed());
+    }
+    let elapsed: Duration = samples.iter().copied().sum();
+    Ok(Timing::with_p99(elapsed, QUERY_LOOPS as i64, &samples))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1602,6 +1709,14 @@ struct ComparisonReport {
     mode: String,
     #[serde(default)]
     generated_at: String,
+    /// Full git SHA from `KOLDSTORE_STORAGE_GIT_COMMIT` when the side was measured.
+    #[serde(default)]
+    git_commit: String,
+    /// True when the measuring tree had uncommitted changes (`KOLDSTORE_STORAGE_GIT_DIRTY`).
+    #[serde(default)]
+    git_dirty: bool,
+    #[serde(default)]
+    git_note: String,
     rows: i64,
     hot_limit: i64,
     dml_sample: i64,
@@ -1647,6 +1762,8 @@ fn build_comparison_report(
     let mg_ops = |t: Option<Timing>| t.map(format_ops_per_sec).unwrap_or_else(|| missing.clone());
     let pg_speed = |t: Option<Timing>| t.map(format_speed).unwrap_or_else(|| missing.clone());
     let mg_speed = |t: Option<Timing>| t.map(format_speed).unwrap_or_else(|| missing.clone());
+    let pg_p99 = |t: Option<Timing>| t.map(format_p99).unwrap_or_else(|| missing.clone());
+    let mg_p99 = |t: Option<Timing>| t.map(format_p99).unwrap_or_else(|| missing.clone());
     let pg_dur = |t: Option<Duration>| t.map(format_duration).unwrap_or_else(|| missing.clone());
     let mg_dur = |t: Option<Duration>| t.map(format_duration).unwrap_or_else(|| missing.clone());
     let pg_bytes = |b: Option<i64>| b.map(format_bytes).unwrap_or_else(|| missing.clone());
@@ -1659,14 +1776,35 @@ fn build_comparison_report(
             mg_ops(managed.map(|m| m.insert)),
         ),
         row("sustainable insert throughput", "TODO", "TODO"),
-        row("insert p99 latency", "TODO", "TODO"),
-        row("update p99 latency", "TODO", "TODO"),
-        row("hot-query p99 latency", "TODO", "TODO"),
-        row("cold-query p99 latency", "TODO", "TODO"),
+        row(
+            "insert p99 latency",
+            pg_p99(baseline.map(|m| m.insert)),
+            mg_p99(managed.map(|m| m.insert)),
+        ),
+        row(
+            "update p99 latency",
+            pg_p99(baseline.map(|m| m.update)),
+            mg_p99(managed.map(|m| m.update)),
+        ),
+        row(
+            "hot-query p99 latency",
+            pg_p99(baseline.map(|m| m.query_hot_only)),
+            mg_p99(managed.map(|m| m.query_hot_only)),
+        ),
+        row(
+            "cold-query p99 latency",
+            pg_p99(baseline.map(|m| m.query_cold_only)),
+            mg_p99(managed.map(|m| m.query_cold_only)),
+        ),
         row(
             "hot+cold query throughput",
             pg_ops(baseline.map(|m| m.query_hot_cold)),
             mg_ops(managed.map(|m| m.query_hot_cold)),
+        ),
+        row(
+            "cold-only query throughput",
+            pg_ops(baseline.map(|m| m.query_cold_only)),
+            mg_ops(managed.map(|m| m.query_cold_only)),
         ),
         row("cold files fetched/query", "—", "TODO"),
         row("cold bytes fetched/query", "—", "TODO"),
@@ -1774,6 +1912,11 @@ fn build_comparison_report(
             mg_speed(managed.map(|m| m.query_hot_cold)),
         ),
         row(
+            "query cold only (after flush)",
+            pg_speed(baseline.map(|m| m.query_cold_only)),
+            mg_speed(managed.map(|m| m.query_cold_only)),
+        ),
+        row(
             "VACUUM time (after flush)",
             pg_dur(baseline.map(|m| m.vacuum.elapsed)),
             mg_dur(managed.map(|m| m.vacuum.elapsed)),
@@ -1853,6 +1996,12 @@ fn build_comparison_report(
     notes.push(
         "† Strict DML updates the change-log mirror in the foreground. Async DML records heap WAL in the foreground and catch-up rows are reported separately.".to_string(),
     );
+    notes.push(
+        "p99: insert = per insert-batch commit; update = per 1k-row update batch; hot/cold query = per PK lookup (100 loops).".to_string(),
+    );
+    notes.push(
+        "hot+cold query = 50/50 mix of newest hot PK and oldest cold PK after flush; cold-only = cold PK only.".to_string(),
+    );
     if baseline.is_none() || managed.is_none() {
         notes.push(
             "isolated side run: only one column filled; merge with --all-sides for RESULTS.md."
@@ -1863,6 +2012,12 @@ fn build_comparison_report(
     ComparisonReport {
         mode: mirror_capture_mode.to_string(),
         generated_at: chrono::Utc::now().to_rfc3339(),
+        git_commit: std::env::var("KOLDSTORE_STORAGE_GIT_COMMIT").unwrap_or_default(),
+        git_dirty: std::env::var("KOLDSTORE_STORAGE_GIT_DIRTY")
+            .ok()
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+            .unwrap_or(false),
+        git_note: String::new(),
         rows,
         hot_limit,
         dml_sample,
@@ -1958,6 +2113,14 @@ fn format_speed(timing: Timing) -> String {
         timing.ops_per_sec(),
         timing.per_op_us()
     )
+}
+
+fn format_p99(timing: Timing) -> String {
+    match timing.p99_us {
+        Some(us) if us >= 1000.0 => format!("{:.2} ms", us / 1000.0),
+        Some(us) => format!("{us:.0} µs"),
+        None => "—".to_string(),
+    }
 }
 
 fn format_duration(elapsed: Duration) -> String {

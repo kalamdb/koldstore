@@ -10,7 +10,6 @@ ROWS="${KOLDSTORE_STORAGE_ROWS:-100000}"
 HOT_LIMIT="${KOLDSTORE_STORAGE_HOT_LIMIT:-10000}"
 DML_SAMPLE="${KOLDSTORE_STORAGE_DML_SAMPLE:-1000}"
 INSERT_BATCH_ROWS="${KOLDSTORE_STORAGE_INSERT_BATCH_ROWS:-100000}"
-MIRROR_CAPTURE_MODE="${KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE:-strict}"
 SIDE="${KOLDSTORE_STORAGE_SIDE:-}"
 UPDATE_RESULTS=0
 ALL_SIDES=0
@@ -21,54 +20,33 @@ usage() {
   cat <<'EOF'
 Run the PostgreSQL vs KoldStore storage comparison harness (tests/storage/).
 
+Exactly three measurements, each on a fresh pgrx PostgreSQL:
+
+  1. pg      — PostgreSQL only
+  2. async   — PG + KoldStore (async mirror)
+  3. strict  — PG + KoldStore (strict / trigger mirror)
+
 Usage:
-  scripts/run-storage-comparison.sh [options]
+  scripts/run-storage-comparison.sh --all-sides [options]
+  scripts/run-storage-comparison.sh --side pg|async|strict [options]
 
 Options:
-  --rows N          Total rows seeded per table (default: 100000)
+  --rows N          Total rows seeded (default: 100000)
   --hot-limit N     Rows kept hot after flush (default: 10000)
-  --dml-sample N    Rows used for timed UPDATE/DELETE samples (default: 1000)
+  --dml-sample N    Rows for timed UPDATE/DELETE samples (default: 1000)
   --insert-batch-rows N  Rows per committed insert batch (default: 100000)
-  --mode MODE       strict or async (default: strict). Used for interleaved
-                    smoke runs when --side / --all-sides are omitted.
-  --side SIDE       Isolated fair measurement: pg | async | strict
-                    Fresh-prepares PostgreSQL for that side alone.
-  --all-sides       Run pg, then async, then strict — each on a fresh server
-                    (stop → recreate DBs → measure one side). Preferred for
-                    docs/benchmarks/RESULTS.md.
+  --side SIDE       Run one side only: pg | async | strict
+  --all-sides       Run all three sides once each (fresh server per side)
   --both-modes      Deprecated alias for --all-sides
-  --update-results  Merge JSON snapshots into docs/benchmarks/RESULTS.md
+  --update-results  Merge JSON into docs/benchmarks/RESULTS.md
   --pg-version N    PostgreSQL major version (default: 16)
   --prepare-only    Prepare pgrx + extension only, skip the test
   -h, --help        Show this help text
 
-Environment overrides (used when the matching flag is omitted):
-  KOLDSTORE_STORAGE_ROWS
-  KOLDSTORE_STORAGE_HOT_LIMIT
-  KOLDSTORE_STORAGE_DML_SAMPLE
-  KOLDSTORE_STORAGE_INSERT_BATCH_ROWS
-  KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE
-  KOLDSTORE_STORAGE_SIDE
-  KOLDSTORE_STORAGE_PGVERSION / KOLDSTORE_E2E_PGVERSION
-  KOLDSTORE_STORAGE_PREPARE_ONLY
-  KOLDSTORE_STORAGE_RESULTS_DIR
-  KOLDSTORE_STORAGE_RESULTS_MD
-
-Published methodology (--all-sides):
-  1. PostgreSQL only — fresh cluster, no managed table, no logical WAL
-  2. PG + KoldStore (async) — fresh cluster, wal_level=logical
-  3. PG + KoldStore (strict) — fresh cluster, trigger capture (no logical WAL)
-
-Interleaved dual-table smoke (default without --side/--all-sides) is fine for
-local debugging but must not be published to RESULTS.md.
-
 Examples:
-  scripts/run-storage-comparison.sh
   scripts/run-storage-comparison.sh --all-sides --update-results \
     --rows 10000000 --hot-limit 100000 --dml-sample 50000
-  scripts/run-storage-comparison.sh --side async --update-results \
-    --rows 10000000 --hot-limit 100000 --dml-sample 50000
-  scripts/run-storage-comparison.sh --prepare-only
+  scripts/run-storage-comparison.sh --side async --rows 100000
 EOF
 }
 
@@ -89,14 +67,6 @@ while [[ $# -gt 0 ]]; do
     --insert-batch-rows)
       INSERT_BATCH_ROWS="${2:?missing value for --insert-batch-rows}"
       shift 2
-      ;;
-    --mode)
-      MIRROR_CAPTURE_MODE="${2:?missing value for --mode}"
-      shift 2
-      ;;
-    --mode=*)
-      MIRROR_CAPTURE_MODE="${1#*=}"
-      shift
       ;;
     --side)
       SIDE="${2:?missing value for --side}"
@@ -122,6 +92,14 @@ while [[ $# -gt 0 ]]; do
       PREPARE_ONLY=1
       shift
       ;;
+    # Kept for older docs/scripts; ignored — sides are isolated now.
+    --mode|--mode=*)
+      if [[ "$1" == --mode ]]; then
+        shift 2
+      else
+        shift
+      fi
+      ;;
     -h|--help|help)
       usage
       exit 0
@@ -133,11 +111,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ "${MIRROR_CAPTURE_MODE}" != "strict" && "${MIRROR_CAPTURE_MODE}" != "async" ]]; then
-  echo "error: --mode must be strict or async (got: ${MIRROR_CAPTURE_MODE})" >&2
-  exit 1
-fi
 
 if [[ -n "${SIDE}" ]]; then
   case "${SIDE}" in
@@ -154,16 +127,14 @@ if [[ "${ALL_SIDES}" == "1" && -n "${SIDE}" ]]; then
   exit 1
 fi
 
+if [[ "${ALL_SIDES}" != "1" && -z "${SIDE}" && "${PREPARE_ONLY}" != "1" && "${PREPARE_ONLY}" != "true" ]]; then
+  echo "error: pass --all-sides (run pg+async+strict once each) or --side pg|async|strict" >&2
+  usage >&2
+  exit 1
+fi
+
 E2E_ENV_FILE="${KOLDSTORE_E2E_ENV_FILE:-$ROOT_DIR/.e2e-env}"
 PG_FEATURE="pg${PG_VERSION}"
-
-# Map measurement side → prepare mode (wal_level). pg/strict stay off logical WAL.
-prepare_mode_for_side() {
-  case "$1" in
-    async) echo "async" ;;
-    *) echo "strict" ;;
-  esac
-}
 
 normalize_side() {
   case "$1" in
@@ -172,30 +143,28 @@ normalize_side() {
   esac
 }
 
+# Async needs logical WAL; pg/strict are fine with the same prepare.
 prepare_fresh_server() {
-  local prepare_mode="$1"
-  local skip_install="${2:-0}"
+  local skip_install="${1:-0}"
   echo "────────────────────────────────────────────────────────────"
-  echo "fresh PostgreSQL ${PG_VERSION}: stop → restart → recreate DBs (prepare --mode ${prepare_mode}, skip_install=${skip_install})"
+  echo "fresh PostgreSQL ${PG_VERSION} for next side (skip_install=${skip_install})"
   echo "────────────────────────────────────────────────────────────"
   cargo pgrx stop "${PG_FEATURE}" || true
-  # Drop OS-visible shared state from the prior side; recreating DBs in
-  # run-pg-e2e clears relation data. Shared buffers start empty after start.
   if [[ "${skip_install}" == "1" ]]; then
     KOLDSTORE_E2E_SKIP_INSTALL=1 \
       KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
       KOLDSTORE_E2E_PREPARE_ONLY=1 \
       KOLDSTORE_PGRX_INSTALL_RELEASE=1 \
-      KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="${prepare_mode}" \
-      KOLDSTORE_E2E_THREADS="${KOLDSTORE_E2E_THREADS:-1}" \
-      scripts/run-pg-e2e.sh "${PG_VERSION}" --mode "${prepare_mode}"
+      KOLDSTORE_E2E_MIRROR_CAPTURE_MODE=async \
+      KOLDSTORE_E2E_THREADS=1 \
+      scripts/run-pg-e2e.sh "${PG_VERSION}" --mode async
   else
     KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
       KOLDSTORE_E2E_PREPARE_ONLY=1 \
       KOLDSTORE_PGRX_INSTALL_RELEASE=1 \
-      KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="${prepare_mode}" \
-      KOLDSTORE_E2E_THREADS="${KOLDSTORE_E2E_THREADS:-1}" \
-      scripts/run-pg-e2e.sh "${PG_VERSION}" --mode "${prepare_mode}"
+      KOLDSTORE_E2E_MIRROR_CAPTURE_MODE=async \
+      KOLDSTORE_E2E_THREADS=1 \
+      scripts/run-pg-e2e.sh "${PG_VERSION}" --mode async
   fi
   # shellcheck disable=SC1090
   source "${E2E_ENV_FILE}"
@@ -206,47 +175,33 @@ EXTENSION_INSTALLED=0
 run_isolated_side() {
   local side
   side="$(normalize_side "$1")"
-  local prepare_mode
-  prepare_mode="$(prepare_mode_for_side "${side}")"
   local results_json=""
   local skip_install=0
   if [[ "${EXTENSION_INSTALLED}" == "1" ]]; then
     skip_install=1
   fi
-  prepare_fresh_server "${prepare_mode}" "${skip_install}"
+  prepare_fresh_server "${skip_install}"
   EXTENSION_INSTALLED=1
-  echo "running isolated storage comparison side=${side} (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS})"
+  echo "running side=${side} once (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS})"
   if [[ "${UPDATE_RESULTS}" == "1" ]]; then
     mkdir -p "${RESULTS_DIR}"
     results_json="${RESULTS_DIR}/${side}.json"
+  fi
+  local git_commit
+  local git_dirty=0
+  git_commit="$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "${git_commit}" ]] && ! git -C "${ROOT_DIR}" diff --quiet 2>/dev/null; then
+    git_dirty=1
+  elif [[ -n "${git_commit}" ]] && ! git -C "${ROOT_DIR}" diff --cached --quiet 2>/dev/null; then
+    git_dirty=1
   fi
   KOLDSTORE_STORAGE_ROWS="${ROWS}" \
     KOLDSTORE_STORAGE_HOT_LIMIT="${HOT_LIMIT}" \
     KOLDSTORE_STORAGE_DML_SAMPLE="${DML_SAMPLE}" \
     KOLDSTORE_STORAGE_INSERT_BATCH_ROWS="${INSERT_BATCH_ROWS}" \
     KOLDSTORE_STORAGE_SIDE="${side}" \
-    KOLDSTORE_STORAGE_RESULTS_JSON="${results_json}" \
-    cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
-}
-
-run_interleaved_smoke() {
-  local mode="$1"
-  local prepare_mode="$mode"
-  local results_json=""
-  echo "running interleaved smoke (--mode ${mode}; not for RESULTS.md)"
-  prepare_fresh_server "${prepare_mode}" 0
-  EXTENSION_INSTALLED=1
-  if [[ "${UPDATE_RESULTS}" == "1" ]]; then
-    echo "warning: --update-results with interleaved smoke overwrites only ${mode}.json; prefer --all-sides" >&2
-    mkdir -p "${RESULTS_DIR}"
-    results_json="${RESULTS_DIR}/${mode}.json"
-  fi
-  KOLDSTORE_STORAGE_ROWS="${ROWS}" \
-    KOLDSTORE_STORAGE_HOT_LIMIT="${HOT_LIMIT}" \
-    KOLDSTORE_STORAGE_DML_SAMPLE="${DML_SAMPLE}" \
-    KOLDSTORE_STORAGE_INSERT_BATCH_ROWS="${INSERT_BATCH_ROWS}" \
-    KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE="${mode}" \
-    KOLDSTORE_STORAGE_SIDE=combined \
+    KOLDSTORE_STORAGE_GIT_COMMIT="${git_commit}" \
+    KOLDSTORE_STORAGE_GIT_DIRTY="${git_dirty}" \
     KOLDSTORE_STORAGE_RESULTS_JSON="${results_json}" \
     cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
 }
@@ -261,11 +216,7 @@ render_results() {
 }
 
 if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
-  prepare_mode="$(prepare_mode_for_side "${SIDE:-async}")"
-  if [[ "${ALL_SIDES}" == "1" ]]; then
-    prepare_mode="async"
-  fi
-  prepare_fresh_server "${prepare_mode}" 0
+  prepare_fresh_server 0
   echo "storage comparison database is ready (prepare-only; skipping test)"
   exit 0
 fi
@@ -276,14 +227,11 @@ if ! cargo nextest --version >/dev/null 2>&1; then
 fi
 
 if [[ "${ALL_SIDES}" == "1" ]]; then
-  # Order: pg-only first (coldest baseline), then async, then strict.
   run_isolated_side pg
   run_isolated_side async
   run_isolated_side strict
-elif [[ -n "${SIDE}" ]]; then
-  run_isolated_side "${SIDE}"
 else
-  run_interleaved_smoke "${MIRROR_CAPTURE_MODE}"
+  run_isolated_side "${SIDE}"
 fi
 
 if [[ "${UPDATE_RESULTS}" == "1" ]]; then

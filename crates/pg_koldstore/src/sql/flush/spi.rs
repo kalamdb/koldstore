@@ -367,7 +367,9 @@ pub(super) fn prune_flushed_hot_rows(
     // DELETE instead of materializing every PK into JSON and chunking
     // jsonb_to_recordset deletes.
     let plan = prepare_seq_range_cleanup(table_oid, primary_key_columns, mirror_ops)?;
-    execute_seq_range_cleanup(&plan, max_seq)
+    let stamp_replication_origin =
+        active_mirror_capture_mode(table_oid)? == koldstore_common::MirrorCaptureMode::Async;
+    execute_seq_range_cleanup(&plan, max_seq, stamp_replication_origin)
 }
 
 fn prepare_seq_range_cleanup(
@@ -388,6 +390,7 @@ fn prepare_seq_range_cleanup(
 fn execute_seq_range_cleanup(
     plan: &koldstore_flush::CleanSchemaCleanupPlan,
     max_seq: i64,
+    stamp_replication_origin: bool,
 ) -> Result<(i64, i64), String> {
     use pgrx::datum::DatumWithOid;
 
@@ -397,12 +400,13 @@ fn execute_seq_range_cleanup(
             client
                 .update("SET LOCAL session_replication_role = replica", None, &[])
                 .map_err(|error| error.to_string())?;
-            // Stamp prune WAL with a named origin (`koldstore_flush`) and keep
-            // it set through COMMIT. pgoutput emits ORIGIN from the commit
-            // record's origin — restoring before commit left PG15 streams with
-            // prune DELETEs but no ORIGIN message, so async apply re-applied
-            // them as mirror tombstones. PG16+ also filters via peek origin=none.
-            arm_flush_replication_origin()?;
+            if stamp_replication_origin {
+                // Keep the database-scoped origin set through COMMIT. pgoutput
+                // emits ORIGIN from the commit record's origin; restoring before
+                // commit leaves PG15 prune DELETEs without an ORIGIN message.
+                // Strict capture has no logical stream and must not acquire one.
+                arm_flush_replication_origin()?;
+            }
             let tuples = client
                 .update(&plan.statement.sql, None, &cleanup_arg)
                 .map_err(|error| error.to_string())?;
@@ -427,6 +431,8 @@ std::thread_local! {
     /// Prior `replorigin_session_origin` to restore after the flush xact ends.
     static FLUSH_ORIGIN_RESTORE: std::cell::Cell<Option<pgrx::pg_sys::RepOriginId>> =
         const { std::cell::Cell::new(None) };
+    /// When set, the PG15 named-origin path must `replorigin_session_reset`.
+    static FLUSH_ORIGIN_NEEDS_SESSION_RESET: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Registers the xact callback that clears the flush origin after commit/abort.
@@ -451,8 +457,11 @@ unsafe extern "C-unwind" fn flush_origin_xact_callback(
         | pgrx::pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT => {
             FLUSH_ORIGIN_RESTORE.with(|slot| {
                 if let Some(previous) = slot.take() {
+                    let needs_reset = FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.replace(false));
                     unsafe {
-                        pgrx::pg_sys::replorigin_session_reset();
+                        if needs_reset {
+                            pgrx::pg_sys::replorigin_session_reset();
+                        }
                         pgrx::pg_sys::replorigin_session_origin = previous;
                     }
                 }
@@ -462,42 +471,89 @@ unsafe extern "C-unwind" fn flush_origin_xact_callback(
     }
 }
 
-/// Sets `koldstore_flush` as the session replication origin until xact end.
+/// Stamps prune WAL so async apply does not re-ingest flush deletes.
 ///
-/// Must call `replorigin_session_setup`: assigning `replorigin_session_origin`
-/// alone makes `RecordTransactionCommit` assert in `replorigin_session_advance`.
+/// - PG16+: set `DoNotReplicateId` through commit. Peek `origin=none` filters it
+///   and no exclusive replication-origin session is required, so parallel flushes
+///   in one database do not contend.
+/// - PG15: named database-scoped origin via `replorigin_session_setup`, serialized
+///   by an advisory xact lock. pgoutput emits ORIGIN; apply skips that name.
 fn arm_flush_replication_origin() -> Result<(), String> {
-    use std::ffi::CString;
-
     FLUSH_ORIGIN_RESTORE.with(|slot| {
         if slot.get().is_some() {
             return Ok(());
         }
-        let origin_name = CString::new(crate::async_mirror::lifecycle::FLUSH_REPLICATION_ORIGIN)
-            .map_err(|_| "flush replication origin name contains NUL".to_string())?;
-        let origin_id = unsafe {
-            let mut id = pgrx::pg_sys::replorigin_by_name(origin_name.as_ptr(), true);
-            if id == pgrx::pg_sys::InvalidRepOriginId as pgrx::pg_sys::RepOriginId {
-                id = pgrx::pg_sys::replorigin_create(origin_name.as_ptr());
-            }
-            id
-        };
-        if origin_id == pgrx::pg_sys::InvalidRepOriginId as pgrx::pg_sys::RepOriginId {
-            return Err("failed to create koldstore_flush replication origin".to_string());
+        #[cfg(feature = "pg15")]
+        {
+            arm_named_flush_origin_pg15(slot)
         }
-        unsafe {
-            let previous = pgrx::pg_sys::replorigin_session_origin;
-            // Acquire progress state so commit can advance this origin safely.
-            // PG16+ added `acquired_by` (0 = this backend acquires exclusively).
-            #[cfg(feature = "pg15")]
-            pgrx::pg_sys::replorigin_session_setup(origin_id);
-            #[cfg(not(feature = "pg15"))]
-            pgrx::pg_sys::replorigin_session_setup(origin_id, 0);
-            pgrx::pg_sys::replorigin_session_origin = origin_id;
-            slot.set(Some(previous));
+        #[cfg(not(feature = "pg15"))]
+        {
+            arm_do_not_replicate_origin(slot)
         }
-        Ok(())
     })
+}
+
+/// PG16+ path: stamp `DoNotReplicateId` without `replorigin_session_setup`.
+#[cfg(not(feature = "pg15"))]
+fn arm_do_not_replicate_origin(
+    slot: &std::cell::Cell<Option<pgrx::pg_sys::RepOriginId>>,
+) -> Result<(), String> {
+    // `DoNotReplicateId` is `#define DoNotReplicateId PG_UINT16_MAX`. Use
+    // `u16::MAX` directly: Windows pgrx bindgen does not always export that
+    // macro. Commit special-cases it so `replorigin_session_advance` is skipped
+    // and no session setup is required.
+    unsafe {
+        let previous = pgrx::pg_sys::replorigin_session_origin;
+        pgrx::pg_sys::replorigin_session_origin = u16::MAX;
+        FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.set(false));
+        slot.set(Some(previous));
+    }
+    Ok(())
+}
+
+/// PG15 path: exclusive named origin, queued behind a database advisory lock.
+#[cfg(feature = "pg15")]
+fn arm_named_flush_origin_pg15(
+    slot: &std::cell::Cell<Option<pgrx::pg_sys::RepOriginId>>,
+) -> Result<(), String> {
+    use std::ffi::CString;
+
+    let database_oid =
+        koldstore_worker::DatabaseOid::new(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
+    // Queue same-DB parallel prunes instead of failing with "origin already active".
+    pgrx::Spi::run_with_args(
+        "SELECT pg_catalog.pg_advisory_xact_lock($1, $2)",
+        &[
+            pgrx::datum::DatumWithOid::from(
+                crate::async_mirror::lifecycle::FLUSH_ORIGIN_LOCK_NAMESPACE,
+            ),
+            pgrx::datum::DatumWithOid::from(database_oid.get() as i32),
+        ],
+    )
+    .map_err(|error| format!("flush origin advisory lock: {error}"))?;
+
+    let origin_name = crate::async_mirror::lifecycle::flush_replication_origin_name(database_oid);
+    let origin_name = CString::new(origin_name)
+        .map_err(|_| "flush replication origin name contains NUL".to_string())?;
+    let origin_id = unsafe {
+        let mut id = pgrx::pg_sys::replorigin_by_name(origin_name.as_ptr(), true);
+        if id == pgrx::pg_sys::InvalidRepOriginId as pgrx::pg_sys::RepOriginId {
+            id = pgrx::pg_sys::replorigin_create(origin_name.as_ptr());
+        }
+        id
+    };
+    if origin_id == pgrx::pg_sys::InvalidRepOriginId as pgrx::pg_sys::RepOriginId {
+        return Err("failed to create koldstore_flush replication origin".to_string());
+    }
+    unsafe {
+        let previous = pgrx::pg_sys::replorigin_session_origin;
+        pgrx::pg_sys::replorigin_session_setup(origin_id);
+        pgrx::pg_sys::replorigin_session_origin = origin_id;
+        FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.set(true));
+        slot.set(Some(previous));
+    }
+    Ok(())
 }
 
 pub(crate) fn mirror_pending_row_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {

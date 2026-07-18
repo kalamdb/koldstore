@@ -18,15 +18,14 @@ Order of measurement (isolated `--side` / `--all-sides`):
 5. Flush older managed rows to zstd Parquet (duration + peak cluster RSS) —
    skipped for PostgreSQL-only
 6. Time `VACUUM (FULL, ANALYZE)`, then REINDEX
-7. Hot+cold PK lookups + heap/index size snapshot
+7. **Cold-only** PK lookups (`id = 1`) + **hot+cold 50/50 mix** + heap/index
+   size snapshot
+8. Report p99 from the same phases (insert batch / 1k-row update / PK lookup)
 
-Published RESULTS.md always use `--all-sides`: stop PostgreSQL, recreate empty
-worker DBs, measure `pg`, then `async`, then `strict` — each alone. That avoids
-dual-table I/O contention and shared-buffer warm-up from a prior mode.
-
-Interleaved smoke (default without `--side`/`--all-sides`) still seeds both
-tables with alternating 100k-row batches for a quick local check; do **not**
-publish those numbers.
+Published RESULTS.md use `--all-sides`: stop PostgreSQL, recreate empty worker
+DBs, measure `pg`, then `async`, then `strict` — once each, alone (**sequential**,
+not parallel). That avoids dual-table I/O contention and shared-buffer warm-up
+from a prior side. Each side’s JSON records `generated_at` and `git_commit`.
 
 Both source tables have autovacuum disabled by the schema, and the harness
 applies the same benchmark-only setting to the generated mirror. A long async
