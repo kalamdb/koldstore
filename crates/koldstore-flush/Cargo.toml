@@ -9,7 +9,6 @@ description = "Hot-to-cold flush workflow for pg-koldstore"
 [dependencies]
 koldstore-common.workspace = true
 koldstore-catalog.workspace = true
-koldstore-jobs.workspace = true
 koldstore-manifest.workspace = true
 koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true

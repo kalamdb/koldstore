@@ -2,8 +2,10 @@
 
 use koldstore_common::{is_safe_identifier, quote_ident, MirrorOperation};
 
-use crate::columns::MirrorColumn;
-use crate::{MirrorError, MirrorRelation, MirrorResult, MirrorStatement, SqlParamType};
+use super::columns::MirrorColumn;
+use super::error::{MirrorError, MirrorResult};
+use super::relation::MirrorRelation;
+use super::statement::{MirrorStatement, SqlParamType};
 
 /// Builds an upsert statement fragment for the latest-state mirror row.
 ///

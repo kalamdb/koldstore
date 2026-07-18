@@ -2,13 +2,9 @@ use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_common::{
     PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
 };
-use koldstore_flush::job::allows_flush_after_initialization;
 use koldstore_migrate::{
     backfill::plan_mirror_initialization_batch,
-    jobs::{
-        enqueue_migration_backfill_job_plan, finish_mirror_initialization_plan,
-        MigrationBackfillJobRequest, MigrationBatchSize, MigrationJobPhase,
-    },
+    jobs::{enqueue_migration_backfill_job_plan, MigrationBackfillJobRequest, MigrationBatchSize},
     order::{MigrationOrdering, OrderingSource},
     QualifiedTableName,
 };
@@ -167,45 +163,4 @@ fn mirror_initialization_job_starts_in_capturing_phase_not_system_column_phase()
     assert!(plan.statement.sql.contains("'initialize_mirror'"));
     assert!(!plan.statement.sql.contains("'add_system_columns'"));
     assert!(!plan.statement.sql.contains("'backfill_seq'"));
-}
-
-#[test]
-fn finishing_mirror_initialization_marks_metadata_complete_without_enqueuing_flush() {
-    let plan = finish_mirror_initialization_plan(
-        Uuid::from_u128(3),
-        Uuid::from_u128(4),
-        koldstore_migrate::jobs::MigrationLeaseEpoch::new(5).unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(plan.phase, MigrationJobPhase::Finished);
-    assert!(plan.statement.sql.contains("status = 'completed'"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("initialization_state = 'complete'"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("jsonb_set(s.options, '{migration_status}', '\"active\"'::jsonb, true)"));
-    assert!(!plan.statement.sql.contains("INSERT INTO koldstore.jobs"));
-    assert!(!plan.statement.sql.contains("'flush'"));
-}
-
-#[test]
-fn flush_is_blocked_until_mirror_initialization_is_complete() {
-    use koldstore_schema::MirrorInitializationState;
-
-    assert!(!allows_flush_after_initialization(
-        MirrorInitializationState::NotStarted
-    ));
-    assert!(!allows_flush_after_initialization(
-        MirrorInitializationState::Capturing
-    ));
-    assert!(!allows_flush_after_initialization(
-        MirrorInitializationState::Failed
-    ));
-    assert!(allows_flush_after_initialization(
-        MirrorInitializationState::Complete
-    ));
 }

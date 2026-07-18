@@ -11,5 +11,6 @@ mod flush_minio;
 mod flush_object_outage;
 mod flush_policy;
 mod flush_recovery;
+mod flush_scheduler;
 mod flush_to_cold;
 pub(crate) mod harness;

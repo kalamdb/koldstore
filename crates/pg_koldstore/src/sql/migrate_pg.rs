@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, mirror_capture_mode default 'strict')`.
+/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, mirror_capture_mode default 'strict', auto_flush default true)`.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
@@ -28,6 +28,7 @@ pub fn manage_table_pg(
     compression: pgrx::default!(Option<&str>, "NULL"),
     target_file_size_mb: pgrx::default!(Option<i64>, "NULL"),
     mirror_capture_mode: pgrx::default!(&str, "'strict'"),
+    auto_flush: pgrx::default!(bool, true),
 ) -> pgrx::Uuid {
     manage_table_pg_impl(
         table_name,
@@ -41,6 +42,7 @@ pub fn manage_table_pg(
         min_flush_rows,
         max_rows_per_file,
         mirror_capture_mode,
+        auto_flush,
     )
 }
 
@@ -58,6 +60,7 @@ fn manage_table_pg_impl(
     min_flush_rows: i64,
     max_rows_per_file: i64,
     mirror_capture_mode: &str,
+    auto_flush: bool,
 ) -> pgrx::Uuid {
     // Validate logical decoding before taking the transaction-scoped job lock.
     let requested_capture_mode =
@@ -96,6 +99,7 @@ fn manage_table_pg_impl(
             min_flush_rows,
             max_rows_per_file,
             Some(mirror_capture_mode),
+            auto_flush,
             &catalog,
             constraints,
         ))
@@ -176,6 +180,7 @@ fn manage_table_pg_impl(
             &primary_key_shape,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+        ensure_database_worker_for_managed_options(&request.options);
         return crate::spi::uuid_to_pgrx(job_id);
     }
 
@@ -228,8 +233,16 @@ fn manage_table_pg_impl(
         &primary_key_shape,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    ensure_database_worker_for_managed_options(&request.options);
 
     crate::spi::uuid_to_pgrx(job_id)
+}
+
+#[cfg(feature = "pg")]
+fn ensure_database_worker_for_managed_options(options: &ManageTableOptions) {
+    if options.auto_flush_enabled() && options.flush_enabled() {
+        let _ = crate::database_worker::ensure_database_worker();
+    }
 }
 
 #[cfg(feature = "pg")]
@@ -363,6 +376,7 @@ fn manage_table_validation_context<'a>(
     min_flush_rows: i64,
     max_rows_per_file: i64,
     mirror_capture_mode: Option<&'a str>,
+    auto_flush: bool,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
 ) -> koldstore_migrate::manage_table::ManageTableValidationContext<'a> {
@@ -410,6 +424,7 @@ fn manage_table_validation_context<'a>(
             max_rows_per_file,
             target_file_size_mb,
             min_max_rows_per_file,
+            auto_flush,
         },
     }
 }
@@ -701,6 +716,54 @@ fn run_existing_table_mirror_initialization_inline(
     Ok(processed_rows)
 }
 
+/// Sets whether the built-in flush scheduler may auto-flush a managed table.
+///
+/// SQL contract: `koldstore.set_table_auto_flush(table_name regclass, enabled boolean)`.
+/// Manual `flush_table` / `enqueue_flush_job` / cron ignore this flag.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "set_table_auto_flush", schema = "koldstore", security_definer)]
+pub fn set_table_auto_flush_pg(table_name: pgrx::pg_sys::Oid, enabled: bool) -> bool {
+    set_table_auto_flush_pg_impl(table_name, enabled)
+        .unwrap_or_else(|error| pgrx::error!("set_table_auto_flush failed: {error}"))
+}
+
+#[cfg(feature = "pg")]
+fn set_table_auto_flush_pg_impl(
+    table_oid: pgrx::pg_sys::Oid,
+    enabled: bool,
+) -> Result<bool, String> {
+    use pgrx::datum::DatumWithOid;
+
+    crate::sql::job_lock_pg::lock_table_job(table_oid)?;
+    let updated = pgrx::Spi::get_one_with_args::<bool>(
+        r#"
+WITH updated AS (
+    UPDATE koldstore.schemas
+    SET options = CASE
+            WHEN $2::boolean THEN options - 'auto_flush'
+            ELSE jsonb_set(COALESCE(options, '{}'::jsonb), '{auto_flush}', 'false'::jsonb, true)
+        END,
+        updated_at = now()
+    WHERE table_oid = $1::oid
+      AND active
+    RETURNING 1
+)
+SELECT EXISTS (SELECT 1 FROM updated)
+"#,
+        &[DatumWithOid::from(table_oid), DatumWithOid::from(enabled)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false);
+    if !updated {
+        return Err("table is not an active managed table".to_string());
+    }
+    crate::catalog::cache::invalidate_table_globally(table_oid);
+    if enabled {
+        let _ = crate::database_worker::ensure_database_worker();
+    }
+    Ok(true)
+}
+
 /// Unmanages a managed table through the SQL API.
 ///
 /// SQL contract:
@@ -741,7 +804,7 @@ fn unmanage_table_pg_impl(
     execute_demigration_locks(&plan)?;
     let deactivated = execute_demigration_statements(&plan, table_oid)?;
 
-    crate::catalog::cache::invalidate_table(table_oid);
+    crate::catalog::cache::invalidate_table_globally(table_oid);
     crate::spi::invalidate_all_prepared_plans();
 
     Ok(deactivated)

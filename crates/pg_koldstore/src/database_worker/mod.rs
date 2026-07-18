@@ -6,6 +6,8 @@
 #[cfg(feature = "pg")]
 mod ensure;
 #[cfg(feature = "pg")]
+mod flush_task;
+#[cfg(feature = "pg")]
 mod launcher;
 #[cfg(feature = "pg")]
 mod r#loop;
@@ -14,8 +16,11 @@ mod r#loop;
 pub use ensure::ensure_async_mirror_worker_pg;
 #[cfg(feature = "pg")]
 pub(crate) use ensure::{
-    ensure_async_mirror_worker_once_if_needed, mark_worker_not_ensured, require_async_mirror_worker,
+    ensure_async_mirror_worker_once_if_needed, ensure_database_worker, mark_worker_not_ensured,
+    require_async_mirror_worker,
 };
+#[cfg(feature = "pg")]
+pub use flush_task::run_flush_scheduler_tick_pg;
 #[cfg(feature = "pg")]
 pub(crate) use launcher::register_if_shared_preload as register_launcher_if_shared_preload;
 #[cfg(feature = "pg")]

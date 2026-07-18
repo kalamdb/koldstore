@@ -3,8 +3,8 @@
 //! Owns mirror stamp envelopes and cold-only DELETE routing helpers used by
 //! PostgreSQL DML hooks. Mirror SQL expressions stay in `pg_koldstore`.
 
+use koldstore_catalog::SyncState;
 use koldstore_common::{CommitSeq, MirrorOperation, SeqId};
-use koldstore_manifest::SyncState;
 
 use crate::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation};
 

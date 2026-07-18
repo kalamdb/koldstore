@@ -38,6 +38,15 @@ pub const MIN_PENDING_SEGMENT_TTL_SECONDS: i32 = 1;
 /// Maximum pending-segment TTL (30 days).
 pub const MAX_PENDING_SEGMENT_TTL_SECONDS: i32 = 30 * 24 * 3600;
 
+/// How often the database worker evaluates auto-flush eligibility.
+pub const FLUSH_CHECK_INTERVAL_SECONDS_GUC: &str = "koldstore.flush_check_interval_seconds";
+/// Default flush-check cadence (30 seconds).
+pub const DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 30;
+/// Minimum flush-check interval.
+pub const MIN_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 1;
+/// Maximum flush-check interval (1 day).
+pub const MAX_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 24 * 3600;
+
 /// Minimum accepted integer setting value for `min_max_rows_per_file`.
 pub const MIN_MIN_MAX_ROWS_PER_FILE: i32 = 1;
 /// Conservative hard cap for `min_max_rows_per_file`.

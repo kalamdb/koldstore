@@ -5,7 +5,10 @@ use koldstore_common::{
     PrimaryKeyColumnShape,
 };
 
-use crate::{MirrorColumn, MirrorError, MirrorRelation, MirrorResult, MirrorStatement};
+use super::columns::MirrorColumn;
+use super::error::{MirrorError, MirrorResult};
+use super::relation::MirrorRelation;
+use super::statement::MirrorStatement;
 
 /// Primitive mirror table schema statements.
 #[derive(Debug, Clone, PartialEq, Eq)]

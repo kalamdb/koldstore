@@ -6,120 +6,17 @@ use std::{
     num::NonZeroUsize,
 };
 
-use koldstore_catalog::HintKind;
+use koldstore_catalog::SyncState;
 use koldstore_common::{
     compare_json_values, CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey, SeqId,
     StablePkHash,
 };
-use koldstore_jobs::{LeaseEpoch, LeaseSeconds};
-use koldstore_manifest::SyncState;
 use koldstore_parquet::{
     ColdMetadataColumn, ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata,
 };
-use koldstore_schema::MirrorInitializationState;
-use uuid::Uuid;
 
 /// Manifest sync state alias used by flush orchestration.
-pub use koldstore_manifest::SyncState as ManifestSyncState;
-
-/// Returns whether a managed table can be selected for flush.
-#[must_use]
-pub const fn allows_flush_after_initialization(state: MirrorInitializationState) -> bool {
-    matches!(state, MirrorInitializationState::Complete)
-}
-
-/// Positive lease duration for a claimed flush job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlushLeaseSeconds(LeaseSeconds);
-
-impl FlushLeaseSeconds {
-    /// Creates a positive lease duration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the duration is zero.
-    pub fn new(value: u32) -> Result<Self> {
-        let Some(value) = LeaseSeconds::new(value) else {
-            return Err(KoldstoreError::InvalidSequence {
-                field: "lease_seconds",
-                value: 0,
-            });
-        };
-        Ok(Self(value))
-    }
-
-    /// Returns the raw seconds value.
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0.get()
-    }
-}
-
-/// Monotonic lease epoch used to fence stale workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JobLeaseEpoch(LeaseEpoch);
-
-impl JobLeaseEpoch {
-    /// Creates a non-negative lease epoch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the epoch is negative.
-    pub const fn new(value: i64) -> Result<Self> {
-        if let Some(value) = LeaseEpoch::new(value) {
-            Ok(Self(value))
-        } else {
-            Err(KoldstoreError::InvalidSequence {
-                field: "lease_epoch",
-                value,
-            })
-        }
-    }
-
-    /// Returns the raw epoch value.
-    #[must_use]
-    pub const fn get(self) -> i64 {
-        self.0.get()
-    }
-}
-
-/// Claimed flush job lease.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlushJobLease {
-    /// Job id.
-    pub job_id: Uuid,
-    /// Worker/backend that owns the current lease.
-    pub lease_owner: Uuid,
-    /// Lease epoch observed by the worker.
-    pub lease_epoch: JobLeaseEpoch,
-    /// Lease duration.
-    pub lease_seconds: FlushLeaseSeconds,
-}
-
-impl FlushJobLease {
-    /// Creates a claimed lease.
-    #[must_use]
-    pub const fn new(
-        job_id: Uuid,
-        lease_owner: Uuid,
-        lease_epoch: JobLeaseEpoch,
-        lease_seconds: FlushLeaseSeconds,
-    ) -> Self {
-        Self {
-            job_id,
-            lease_owner,
-            lease_epoch,
-            lease_seconds,
-        }
-    }
-
-    /// Returns whether a progress update belongs to this live lease.
-    #[must_use]
-    pub const fn matches(self, lease_owner: Uuid, lease_epoch: JobLeaseEpoch) -> bool {
-        self.lease_owner.as_u128() == lease_owner.as_u128()
-            && self.lease_epoch.get() == lease_epoch.get()
-    }
-}
+pub use koldstore_catalog::SyncState as ManifestSyncState;
 
 /// Bounded flush execution settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +24,6 @@ pub struct FlushExecutionConfig {
     max_rows_per_batch: NonZeroUsize,
     max_bytes_per_batch: u64,
     max_batches_per_run: NonZeroUsize,
-    lease_seconds: FlushLeaseSeconds,
 }
 
 impl FlushExecutionConfig {
@@ -140,7 +36,6 @@ impl FlushExecutionConfig {
         max_rows_per_batch: usize,
         max_bytes_per_batch: u64,
         max_batches_per_run: usize,
-        lease_seconds: u32,
     ) -> Result<Self> {
         let Some(max_rows_per_batch) = NonZeroUsize::new(max_rows_per_batch) else {
             return Err(KoldstoreError::InvalidSequence {
@@ -165,7 +60,6 @@ impl FlushExecutionConfig {
             max_rows_per_batch,
             max_bytes_per_batch,
             max_batches_per_run,
-            lease_seconds: FlushLeaseSeconds::new(lease_seconds)?,
         })
     }
 
@@ -185,12 +79,6 @@ impl FlushExecutionConfig {
     #[must_use]
     pub const fn max_batches_per_run(self) -> usize {
         self.max_batches_per_run.get()
-    }
-
-    /// Lease duration.
-    #[must_use]
-    pub const fn lease_seconds(self) -> FlushLeaseSeconds {
-        self.lease_seconds
     }
 }
 
@@ -322,85 +210,6 @@ impl FlushWatermark {
     pub fn includes(self, row: &HotRowCandidate) -> bool {
         row.seq <= self.seq_upper_bound
     }
-}
-
-/// Durable phase for a flush job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FlushJobPhase {
-    /// Job has been claimed and leased.
-    Claimed,
-    /// Hot rows are being scanned under the flush watermark.
-    ScanHotRows,
-    /// Parquet data is being written to a temp object.
-    WriteParquetTemp,
-    /// Temp object is being copied/validated as final.
-    PublishFinalObject,
-    /// PostgreSQL segment catalog rows are committed before manifest visibility.
-    CommitCatalog,
-    /// Manifest object and manifest catalog row become the visibility boundary.
-    PublishManifest,
-    /// Hot heap rows are being conditionally cleaned up.
-    CleanupHotRows,
-    /// Job finished.
-    Finished,
-}
-
-impl FlushJobPhase {
-    /// Returns the catalog representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Claimed => "claimed",
-            Self::ScanHotRows => "scan_hot_rows",
-            Self::WriteParquetTemp => "write_parquet_temp",
-            Self::PublishFinalObject => "publish_final_object",
-            Self::CommitCatalog => "commit_catalog",
-            Self::PublishManifest => "publish_manifest",
-            Self::CleanupHotRows => "cleanup_hot_rows",
-            Self::Finished => "finished",
-        }
-    }
-}
-
-/// Returns the durable flush phase order.
-#[must_use]
-pub const fn flush_execution_phases() -> &'static [FlushJobPhase] {
-    &[
-        FlushJobPhase::Claimed,
-        FlushJobPhase::ScanHotRows,
-        FlushJobPhase::WriteParquetTemp,
-        FlushJobPhase::PublishFinalObject,
-        FlushJobPhase::CommitCatalog,
-        FlushJobPhase::PublishManifest,
-        FlushJobPhase::CleanupHotRows,
-        FlushJobPhase::Finished,
-    ]
-}
-
-/// Returns whether hot cleanup may run in the given phase.
-#[must_use]
-pub const fn can_cleanup_hot_rows(phase: FlushJobPhase) -> bool {
-    matches!(
-        phase,
-        FlushJobPhase::CleanupHotRows | FlushJobPhase::Finished
-    )
-}
-
-/// Flush metadata written after manifest commit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColdMetadataUpdate {
-    /// Minimum `_seq`.
-    pub min_seq: SeqId,
-    /// Maximum `_seq`.
-    pub max_seq: SeqId,
-    /// Minimum `_commit_seq`.
-    pub min_commit_seq: CommitSeq,
-    /// Maximum `_commit_seq`.
-    pub max_commit_seq: CommitSeq,
-    /// Segment row count.
-    pub row_count: u64,
-    /// Segment byte size.
-    pub byte_size: u64,
 }
 
 /// Hot row candidate read by a bounded flush scan.
@@ -688,23 +497,6 @@ pub struct ColdSegmentCatalogInsert {
     pub object_etag: String,
 }
 
-/// Planned `koldstore.cold_pk_hints` catalog update.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ColdPkHintUpdate {
-    /// Managed table oid.
-    pub table_oid: u32,
-    /// Optional user-scope key.
-    pub scope_key: Option<ScopeKey>,
-    /// Stable logical PK hash.
-    pub pk_hash: StablePkHash,
-    /// Hint kind: exact, bloom, or range.
-    pub hint_kind: HintKind,
-    /// Latest known cold `_seq`.
-    pub latest_seq: SeqId,
-    /// Latest known cold `_commit_seq`.
-    pub latest_commit_seq: CommitSeq,
-}
-
 /// Failure plan for a flush attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlushFailurePlan {
@@ -759,29 +551,6 @@ pub fn plan_cold_segment_insert(
         checksum: checksum.into(),
         object_etag: object_etag.into(),
     })
-}
-
-/// Plans local PK hint updates for live rows written to cold storage.
-#[must_use]
-pub fn plan_cold_pk_hint_updates(
-    table_oid: u32,
-    scope_key: Option<ScopeKey>,
-    batch: &FlushBatchPlan,
-    hint_kind: HintKind,
-) -> Vec<ColdPkHintUpdate> {
-    batch
-        .rows
-        .iter()
-        .filter(|row| !row.deleted)
-        .map(|row| ColdPkHintUpdate {
-            table_oid,
-            scope_key: scope_key.clone(),
-            pk_hash: row.pk_hash.clone(),
-            hint_kind,
-            latest_seq: row.seq,
-            latest_commit_seq: row.commit_seq,
-        })
-        .collect()
 }
 
 /// Returns whether a flushed live row may be removed from hot storage.

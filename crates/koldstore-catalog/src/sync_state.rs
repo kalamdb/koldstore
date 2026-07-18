@@ -1,8 +1,11 @@
-//! Manifest cache sync states.
+//! Catalog `manifest.sync_state` FSM.
+//!
+//! Lives with catalog bookkeeping (not the object-store `manifest.json` model)
+//! so merge/flush can depend on the enum without pulling `koldstore-storage`.
 
 use serde::{Deserialize, Serialize};
 
-/// Local manifest cache state.
+/// Local manifest cache sync state stored in `koldstore.manifest.sync_state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncState {
@@ -65,7 +68,7 @@ impl SyncState {
         Self::Error
     }
 
-    /// Returns whether the manifest cache can transition to `next`.
+    /// Returns whether the catalog sync state can transition to `next`.
     #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {
         matches!(

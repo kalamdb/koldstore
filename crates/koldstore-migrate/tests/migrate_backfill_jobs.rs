@@ -5,10 +5,8 @@ use koldstore_common::{
 use koldstore_migrate::{
     backfill::plan_mirror_initialization_batch,
     jobs::{
-        claim_migration_jobs_plan, enqueue_migration_backfill_job_plan,
-        finish_mirror_initialization_plan, migration_job_progress_plan, ManagedTableType,
-        MigrationBackfillJobRequest, MigrationBatchSize, MigrationJobPhase, MigrationLeaseEpoch,
-        MigrationLeaseSeconds,
+        enqueue_migration_backfill_job_plan, ManagedTableType, MigrationBackfillJobRequest,
+        MigrationBatchSize,
     },
     order::{MigrationOrdering, OrderingSource},
     QualifiedTableName,
@@ -26,7 +24,6 @@ fn ordering() -> MigrationOrdering {
         ascending_oldest_first: true,
     }
 }
-
 #[test]
 fn existing_table_mirror_initialization_batches_without_rewriting_base_schema() {
     let pk = vec![PrimaryKeyColumnShape::new(
@@ -108,81 +105,4 @@ fn migration_backfill_job_payload_is_type_safe_and_operator_visible() {
     assert!(plan.statement.sql.contains("rows_processed"));
     assert!(plan.statement.sql.contains("payload"));
     assert!(plan.statement.sql.contains("ON CONFLICT DO NOTHING"));
-}
-
-#[test]
-fn migration_job_claims_are_lease_guarded_and_skip_locked() {
-    let plan = claim_migration_jobs_plan(64, 4, MigrationLeaseSeconds::new(45).unwrap()).unwrap();
-
-    assert_eq!(plan.limit, 64);
-    assert_eq!(plan.max_running_jobs, 4);
-    assert_eq!(plan.lease_seconds.get(), 45);
-    assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
-    assert!(plan
-        .statement
-        .sql
-        .contains("job_type IN ('migrate_backfill')"));
-    assert!(plan.statement.sql.contains("FOR UPDATE SKIP LOCKED"));
-    assert!(plan.statement.sql.contains("$4::integer"));
-    assert!(plan.statement.sql.contains("running_jobs"));
-    assert!(plan.statement.sql.contains("table_running"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("lease_epoch = j.lease_epoch + 1"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("THEN 'initialize_mirror' ELSE j.phase END"));
-    assert!(plan.statement.sql.contains("rows_processed"));
-    assert!(plan.statement.sql.contains("last_heartbeat_at = now()"));
-}
-
-#[test]
-fn migration_progress_updates_are_guarded_by_the_live_lease() {
-    let job_id = Uuid::from_u128(31);
-    let owner = Uuid::from_u128(32);
-    let plan = migration_job_progress_plan(
-        job_id,
-        owner,
-        MigrationLeaseEpoch::new(4).unwrap(),
-        MigrationJobPhase::InitializeMirror,
-        512,
-    )
-    .unwrap();
-
-    assert_eq!(plan.job_id, job_id);
-    assert_eq!(plan.lease_owner, owner);
-    assert_eq!(plan.lease_epoch.get(), 4);
-    assert_eq!(plan.phase, MigrationJobPhase::InitializeMirror);
-    assert_eq!(plan.rows_processed_increment, 512);
-    assert!(plan.statement.sql.contains("lease_owner = $2::uuid"));
-    assert!(plan.statement.sql.contains("lease_epoch = $3::bigint"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("rows_processed = rows_processed + $5::bigint"));
-    assert!(!plan.statement.sql.contains("checkpoint_seq ="));
-}
-
-#[test]
-fn finishing_mirror_initialization_activates_schema_without_initial_flush() {
-    let plan = finish_mirror_initialization_plan(
-        Uuid::from_u128(41),
-        Uuid::from_u128(42),
-        MigrationLeaseEpoch::new(5).unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
-    assert!(plan.statement.sql.contains("status = 'completed'"));
-    assert!(plan.statement.sql.contains("phase = 'finished'"));
-    assert!(plan.statement.sql.contains("UPDATE koldstore.schemas AS s"));
-    assert!(plan.statement.sql.contains("SET active = true"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("initialization_state = 'complete'"));
-    assert!(!plan.statement.sql.contains("INSERT INTO koldstore.jobs"));
-    assert!(!plan.statement.sql.contains("flush_seq_upper_bound"));
 }

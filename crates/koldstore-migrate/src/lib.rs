@@ -36,6 +36,7 @@ pub mod validation;
 pub use validation::{constraints, manage_table, order};
 
 pub use capture::{
+    async_worker_kick_trigger_name, async_worker_kick_trigger_names, plan_drop_mirror_dml_triggers,
     plan_mirror_capture, plan_mirror_capture_teardown, MirrorCaptureError, MirrorCapturePlan,
     MirrorCaptureResult,
 };

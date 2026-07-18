@@ -204,12 +204,12 @@ pub(crate) fn activate_table(
         .map_err(|error| error.to_string())?;
     }
 
-    let drop = koldstore_migrate::capture::plan_drop_mirror_dml_triggers(source, mirror)
+    let drop = koldstore_mirror::plan_drop_mirror_dml_triggers(source, mirror)
         .map_err(|error| error.to_string())?;
     pgrx::Spi::run(&drop.sql).map_err(|error| error.to_string())?;
-    let kick_names = koldstore_migrate::capture::async_worker_kick_trigger_names(&mirror.name);
+    let kick_names = koldstore_mirror::async_worker_kick_trigger_names(&mirror.name);
     let legacy_kicks = [
-        koldstore_migrate::capture::async_worker_kick_trigger_name(&mirror.name),
+        koldstore_mirror::async_worker_kick_trigger_name(&mirror.name),
         // Truncated mid-migration names from the `_ins/_upd/_del` experiment.
         {
             let mut name = format!("{}_async_worker_kick_ins", mirror.name);

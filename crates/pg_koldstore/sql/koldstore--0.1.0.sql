@@ -8,21 +8,6 @@
 CREATE SCHEMA IF NOT EXISTS koldstore;
 GRANT USAGE ON SCHEMA koldstore TO PUBLIC;
 
--- Publications are database-scoped runtime infrastructure rather than
--- extension members. Provision the empty publication at install time so the
--- first async manage call only needs to reserve its logical slot before writes.
-DO $koldstore_publication$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1
-    FROM pg_catalog.pg_publication
-    WHERE pubname = 'koldstore_async_mirror'
-  ) THEN
-    CREATE PUBLICATION koldstore_async_mirror;
-  END IF;
-END
-$koldstore_publication$;
-
 CREATE TYPE koldstore.managed_table_info AS (
   table_oid oid,
   table_type text,
@@ -86,6 +71,22 @@ CREATE TABLE IF NOT EXISTS koldstore.schemas (
 CREATE UNIQUE INDEX IF NOT EXISTS schemas_one_active_per_table_idx
   ON koldstore.schemas (table_oid)
   WHERE active;
+
+-- Publications are database-scoped runtime infrastructure rather than
+-- extension members. Provision after catalog tables exist so CREATE EXTENSION
+-- under session/shared preload cannot trip the merge-scan planner hook (it
+-- probes koldstore.schemas) while the IF EXISTS publication check is planned.
+DO $koldstore_publication$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_catalog.pg_publication
+    WHERE pubname = 'koldstore_async_mirror'
+  ) THEN
+    CREATE PUBLICATION koldstore_async_mirror;
+  END IF;
+END
+$koldstore_publication$;
 
 -- Logical decoding is acknowledged one fence after mirror apply. Persisting
 -- the applied LSN first makes a crash retry duplicates instead of losing rows.

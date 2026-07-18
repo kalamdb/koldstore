@@ -23,6 +23,8 @@ pub struct ManageTablePolicyInput {
     pub target_file_size_mb: Option<i64>,
     /// Runtime floor for `max_rows_per_file`.
     pub min_max_rows_per_file: u64,
+    /// Whether the built-in scheduler may auto-flush this table.
+    pub auto_flush: bool,
 }
 
 /// PostgreSQL-free context required to validate one `manage_table` call.
@@ -108,6 +110,8 @@ pub fn validate_manage_table(
         }
         options = options.with_flush(hot_row_limit, min_flush_rows, max_rows_per_file);
     }
+
+    options = options.with_auto_flush(context.policy.auto_flush);
 
     if let Some(target_file_size_mb) = context.policy.target_file_size_mb {
         options = options

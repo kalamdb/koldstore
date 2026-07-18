@@ -5,14 +5,14 @@
 //! PG-free decode + in-process cache shape used by `pg_koldstore`.
 
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use koldstore_common::TableName;
 use koldstore_schema::MirrorInitializationState;
 use serde::Deserialize;
 
-/// Default cap for optional lookup caches that can grow with query shapes.
+/// Default cap for OID-keyed and optional lookup caches.
 pub const DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT: usize = 64;
 
 /// Cache that distinguishes an unqueried key from a queried-but-absent value.
@@ -89,6 +89,71 @@ where
     }
 }
 
+/// Bounded in-process map keyed by table OID.
+///
+/// Evicts an arbitrary entry when inserting past [`DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT`]
+/// so week-long backends that touch many managed tables do not grow without bound.
+#[derive(Debug)]
+pub struct BoundedOidCache<V> {
+    entries: HashMap<u32, V>,
+    limit: usize,
+}
+
+impl<V> Default for BoundedOidCache<V> {
+    fn default() -> Self {
+        Self::with_limit(DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT)
+    }
+}
+
+impl<V> BoundedOidCache<V> {
+    /// Builds a cache that evicts an arbitrary entry when `limit` is exceeded.
+    #[must_use]
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    /// Returns a shared reference when present.
+    #[must_use]
+    pub fn get(&self, table_oid: u32) -> Option<&V> {
+        self.entries.get(&table_oid)
+    }
+
+    /// Stores or replaces a value for a table OID.
+    pub fn insert(&mut self, table_oid: u32, value: V) {
+        if self.entries.len() >= self.limit && !self.entries.contains_key(&table_oid) {
+            if let Some(evicted) = self.entries.keys().next().copied() {
+                self.entries.remove(&evicted);
+            }
+        }
+        self.entries.insert(table_oid, value);
+    }
+
+    /// Removes one table from the cache.
+    pub fn invalidate(&mut self, table_oid: u32) {
+        self.entries.remove(&table_oid);
+    }
+
+    /// Clears all entries.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Returns the number of cached entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Returns true when the cache holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 /// Stable table-shape metadata for one managed table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedTableSnapshot {
@@ -113,37 +178,59 @@ pub struct ManagedTableSnapshot {
 /// In-process cache keyed by table OID.
 ///
 /// Entries are stored behind [`Arc`] so cache hits can share ownership without
-/// cloning the full snapshot on every lookup.
+/// cloning the full snapshot on every lookup. Capacity is capped.
 #[derive(Debug, Default)]
 pub struct ManagedTableSnapshotCache {
-    entries: HashMap<u32, Arc<ManagedTableSnapshot>>,
+    inner: BoundedOidCache<Arc<ManagedTableSnapshot>>,
 }
 
 impl ManagedTableSnapshotCache {
+    /// Builds a cache with an explicit entry limit.
+    #[must_use]
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            inner: BoundedOidCache::with_limit(limit),
+        }
+    }
+
     /// Returns a shared snapshot when present.
     #[must_use]
     pub fn get(&self, table_oid: u32) -> Option<Arc<ManagedTableSnapshot>> {
-        self.entries.get(&table_oid).cloned()
+        self.inner.get(table_oid).cloned()
     }
 
     /// Stores or replaces a snapshot for a table OID.
     pub fn insert(&mut self, snapshot: ManagedTableSnapshot) {
-        self.entries.insert(snapshot.table_oid, Arc::new(snapshot));
+        let table_oid = snapshot.table_oid;
+        self.inner.insert(table_oid, Arc::new(snapshot));
     }
 
     /// Stores an already-shared snapshot.
     pub fn insert_shared(&mut self, snapshot: Arc<ManagedTableSnapshot>) {
-        self.entries.insert(snapshot.table_oid, snapshot);
+        let table_oid = snapshot.table_oid;
+        self.inner.insert(table_oid, snapshot);
     }
 
     /// Removes one table from the cache.
     pub fn invalidate(&mut self, table_oid: u32) {
-        self.entries.remove(&table_oid);
+        self.inner.invalidate(table_oid);
     }
 
     /// Clears all cached snapshots.
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.inner.clear();
+    }
+
+    /// Returns the number of cached entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Returns true when the cache holds no entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 }
 
@@ -192,7 +279,6 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
 
     fn try_from(wire: ManagedTableSnapshotWire) -> Result<Self, Self::Error> {
         use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
 
         let table_oid = u32::try_from(wire.table_oid).map_err(|error| error.to_string())?;
         let schema_version =
@@ -210,7 +296,10 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
             ),
         };
         let mut hasher = DefaultHasher::new();
-        wire.primary_key_shape.to_string().hash(&mut hasher);
+        for column in &wire.primary_key {
+            column.hash(&mut hasher);
+        }
+        hash_json_value(&wire.primary_key_shape, &mut hasher);
 
         Ok(Self {
             table_oid,
@@ -225,9 +314,44 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
     }
 }
 
+fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
+    match value {
+        serde_json::Value::Null => 0u8.hash(hasher),
+        serde_json::Value::Bool(flag) => {
+            1u8.hash(hasher);
+            flag.hash(hasher);
+        }
+        serde_json::Value::Number(number) => {
+            2u8.hash(hasher);
+            number.as_i64().hash(hasher);
+            number.as_u64().hash(hasher);
+            number.as_f64().map(f64::to_bits).hash(hasher);
+        }
+        serde_json::Value::String(text) => {
+            3u8.hash(hasher);
+            text.hash(hasher);
+        }
+        serde_json::Value::Array(items) => {
+            4u8.hash(hasher);
+            items.len().hash(hasher);
+            for item in items {
+                hash_json_value(item, hasher);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            5u8.hash(hasher);
+            map.len().hash(hasher);
+            for (key, item) in map {
+                key.hash(hasher);
+                hash_json_value(item, hasher);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::OptionalLookupCache;
+    use super::{BoundedOidCache, OptionalLookupCache};
 
     #[test]
     fn optional_lookup_cache_distinguishes_miss_from_cached_absence() {
@@ -253,5 +377,15 @@ mod tests {
         cache.insert(3, Some("c".to_string()));
         assert_eq!(cache.len(), 2);
         assert!(cache.get(&3).is_some());
+    }
+
+    #[test]
+    fn bounded_oid_cache_evicts_when_over_limit() {
+        let mut cache = BoundedOidCache::with_limit(2);
+        cache.insert(1, "a".to_string());
+        cache.insert(2, "b".to_string());
+        cache.insert(3, "c".to_string());
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get(3).is_some());
     }
 }

@@ -1,16 +1,14 @@
 //! Operational SQL planning for flush jobs and maintenance commands.
 //!
-//! Owns parameterized catalog statements for flush enqueue, claim, progress, and
-//! table status queries. PostgreSQL `#[pg_extern]` wrappers stay in `pg_koldstore`.
+//! Owns parameterized catalog statements for flush enqueue, recovery, and table
+//! status queries. Inline flush job lifecycle lives in `table_jobs`. PostgreSQL
+//! `#[pg_extern]` wrappers stay in `pg_koldstore`.
 
 use koldstore_common::{
-    is_safe_identifier, quote_ident, CommitSeq, QualifiedTableName, ScopeKey, SeqId, SqlParamType,
+    is_safe_identifier, quote_ident, QualifiedTableName, ScopeKey, SeqId, SqlParamType,
     SqlStatement, TableName,
 };
 use thiserror::Error;
-use uuid::Uuid;
-
-use crate::job::{FlushJobPhase, FlushLeaseSeconds, JobLeaseEpoch};
 
 /// Placeholder status key names returned by table status.
 pub const TABLE_STATUS_FIELDS: &[&str] = &[
@@ -91,59 +89,6 @@ pub struct RecoverSegmentsPlan {
     /// Recovery request.
     pub request: RecoverSegmentsRequest,
     /// Parameterized recovery/job statement.
-    pub statement: SqlStatement,
-}
-
-/// Planned flush job claim query.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlushJobClaimPlan {
-    /// Maximum jobs to claim.
-    pub limit: u32,
-    /// Maximum concurrently running jobs allowed before this claim pauses.
-    pub max_running_jobs: u32,
-    /// Lease duration to bind for each claimed job.
-    pub lease_seconds: FlushLeaseSeconds,
-    /// Parameterized claim statement.
-    pub statement: SqlStatement,
-}
-
-/// Planned lease-guarded flush job progress update.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlushJobProgressPlan {
-    /// Job id.
-    pub job_id: Uuid,
-    /// Current lease owner.
-    pub lease_owner: Uuid,
-    /// Current lease epoch.
-    pub lease_epoch: JobLeaseEpoch,
-    /// Durable phase.
-    pub phase: FlushJobPhase,
-    /// Last flushed `_seq` checkpoint.
-    pub checkpoint_seq: SeqId,
-    /// Last flushed `_commit_seq` checkpoint.
-    pub checkpoint_commit_seq: CommitSeq,
-    /// Completed batches.
-    pub batches_completed: u32,
-    /// Flushed rows.
-    pub rows_flushed: u64,
-    /// Parameterized progress statement.
-    pub statement: SqlStatement,
-}
-
-/// Planned lease-guarded flush job finish update.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlushJobFinishPlan {
-    /// Job id.
-    pub job_id: Uuid,
-    /// Current lease owner.
-    pub lease_owner: Uuid,
-    /// Current lease epoch.
-    pub lease_epoch: JobLeaseEpoch,
-    /// Whether the job finished successfully.
-    pub success: bool,
-    /// Optional error trace for failures.
-    pub error_trace: Option<String>,
-    /// Parameterized finish statement.
     pub statement: SqlStatement,
 }
 
@@ -645,172 +590,6 @@ pub fn recover_segments_plan(
             table_name,
             dry_run,
         },
-        statement,
-    })
-}
-
-/// Plans a scalable flush-job claim using row-level locking and leases.
-///
-/// # Errors
-///
-/// Returns an error when SPI statement metadata cannot be prepared.
-pub fn claim_flush_jobs_plan(
-    limit: u32,
-    max_running_jobs: u32,
-    lease_seconds: FlushLeaseSeconds,
-) -> Result<FlushJobClaimPlan, OpsError> {
-    let statement = SqlStatement::write(
-        "claim flush jobs",
-        r#"
-WITH running_jobs AS (
-    SELECT count(*)::integer AS count
-    FROM koldstore.jobs
-    WHERE status = 'running'
-      AND (
-          lease_expires_at IS NULL
-          OR lease_expires_at >= now()
-      )
-),
-candidate AS (
-    SELECT j.id
-    FROM koldstore.jobs AS j
-    CROSS JOIN running_jobs
-    WHERE j.job_type = 'flush'
-      AND j.status IN ('pending', 'running')
-      AND running_jobs.count < $4::integer
-      AND j.run_after <= now()
-      AND (
-          j.status = 'pending'
-          OR j.lease_expires_at IS NULL
-          OR j.lease_expires_at < now()
-      )
-      AND NOT EXISTS (
-          SELECT 1
-          FROM koldstore.jobs AS table_running
-          WHERE table_running.table_oid = j.table_oid
-            AND table_running.id <> j.id
-            AND table_running.job_type IN ('flush', 'migrate_backfill')
-            AND table_running.status = 'running'
-            AND (
-                table_running.lease_expires_at IS NULL
-                OR table_running.lease_expires_at >= now()
-            )
-      )
-    ORDER BY j.priority DESC, j.updated_at, j.id
-    LIMIT $1
-    FOR UPDATE SKIP LOCKED
-)
-UPDATE koldstore.jobs AS j
-SET status = 'running',
-    phase = 'claimed',
-    attempts = CASE WHEN j.status = 'pending' THEN j.attempts + 1 ELSE j.attempts END,
-    lease_owner = $2::uuid,
-    lease_expires_at = now() + ($3::integer * interval '1 second'),
-    lease_epoch = j.lease_epoch + 1,
-    updated_at = now(),
-    last_heartbeat_at = now()
-FROM candidate
-WHERE j.id = candidate.id
-RETURNING j.id, j.table_oid, j.scope_key, j.lease_epoch, j.flush_seq_upper_bound
-"#,
-    )
-    .map_err(|error| OpsError::Sql(error.to_string()))?;
-
-    Ok(FlushJobClaimPlan {
-        limit,
-        max_running_jobs,
-        lease_seconds,
-        statement,
-    })
-}
-
-/// Plans a lease-guarded progress update for a running flush job.
-///
-/// # Errors
-///
-/// Returns an error when SPI statement metadata cannot be prepared.
-#[allow(clippy::too_many_arguments)]
-pub fn flush_job_progress_plan(
-    job_id: Uuid,
-    lease_owner: Uuid,
-    lease_epoch: JobLeaseEpoch,
-    phase: FlushJobPhase,
-    checkpoint_seq: SeqId,
-    checkpoint_commit_seq: CommitSeq,
-    batches_completed: u32,
-    rows_flushed: u64,
-) -> Result<FlushJobProgressPlan, OpsError> {
-    let statement = SqlStatement::write(
-        "flush job progress",
-        r#"
-UPDATE koldstore.jobs
-SET phase = $4::text,
-    checkpoint_seq = $5::bigint,
-    checkpoint_commit_seq = $6::bigint,
-    batches_completed = $7::integer,
-    rows_flushed = $8::bigint,
-    last_heartbeat_at = now(),
-    updated_at = now()
-WHERE id = $1::uuid
-  AND lease_owner = $2::uuid
-  AND lease_epoch = $3::bigint
-  AND status = 'running'
-RETURNING id
-"#,
-    )
-    .map_err(|error| OpsError::Sql(error.to_string()))?;
-
-    Ok(FlushJobProgressPlan {
-        job_id,
-        lease_owner,
-        lease_epoch,
-        phase,
-        checkpoint_seq,
-        checkpoint_commit_seq,
-        batches_completed,
-        rows_flushed,
-        statement,
-    })
-}
-
-/// Plans a lease-guarded finish update for a running flush job.
-///
-/// # Errors
-///
-/// Returns an error when SPI statement metadata cannot be prepared.
-pub fn finish_flush_job_plan(
-    job_id: Uuid,
-    lease_owner: Uuid,
-    lease_epoch: JobLeaseEpoch,
-    success: bool,
-    error_trace: Option<String>,
-) -> Result<FlushJobFinishPlan, OpsError> {
-    let statement = SqlStatement::write(
-        "finish flush job",
-        r#"
-UPDATE koldstore.jobs
-SET status = CASE WHEN $4::boolean THEN 'completed' ELSE 'error' END,
-    phase = CASE WHEN $4::boolean THEN 'finished' ELSE phase END,
-    error_trace = $5::text,
-    lease_owner = NULL,
-    lease_expires_at = NULL,
-    last_heartbeat_at = now(),
-    updated_at = now()
-WHERE id = $1::uuid
-  AND lease_owner = $2::uuid
-  AND lease_epoch = $3::bigint
-  AND status = 'running'
-RETURNING id
-"#,
-    )
-    .map_err(|error| OpsError::Sql(error.to_string()))?;
-
-    Ok(FlushJobFinishPlan {
-        job_id,
-        lease_owner,
-        lease_epoch,
-        success,
-        error_trace,
         statement,
     })
 }

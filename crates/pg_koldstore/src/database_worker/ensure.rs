@@ -41,6 +41,17 @@ fn async_slot_exists_for_current_database() -> Result<bool, String> {
     .ok_or_else(|| "async slot probe returned no row".to_string())
 }
 
+/// Ensures one persistent database worker is running for the current database.
+///
+/// Covers async mirror apply and built-in auto-flush scheduling.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot inspect or start the worker.
+pub(crate) fn ensure_database_worker() -> Result<bool, String> {
+    ensure_async_mirror_worker()
+}
+
 /// Ensures one persistent WAL applier is running for the current database.
 ///
 /// Appliers use `BGW_NEVER_RESTART` so dropping the slot can leave them stopped.
@@ -135,9 +146,10 @@ pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Resul
     Ok(true)
 }
 
-/// Once per backend, starts the applier when this database still has an async slot.
+/// Once per backend, starts the database worker when this database needs it.
 ///
-/// Covers postmaster restart without requiring per-DML triggers.
+/// Starts when an async slot exists or any active managed table has auto-flush
+/// enabled. Covers postmaster restart without requiring per-DML triggers.
 pub(crate) fn ensure_async_mirror_worker_once_if_needed() {
     if WORKER_ENSURED.load(Ordering::Relaxed) {
         return;
@@ -146,15 +158,30 @@ pub(crate) fn ensure_async_mirror_worker_once_if_needed() {
         WORKER_ENSURED.store(true, Ordering::Relaxed);
         return;
     }
-    let exists = match async_slot_exists_for_current_database() {
-        Ok(exists) => exists,
+    let needs_worker = match needs_database_worker_for_current_database() {
+        Ok(needs) => needs,
         Err(_) => return,
     };
-    if !exists {
+    if !needs_worker {
         WORKER_ENSURED.store(true, Ordering::Relaxed);
         return;
     }
     let _ = ensure_async_mirror_worker();
+}
+
+fn needs_database_worker_for_current_database() -> Result<bool, String> {
+    if async_slot_exists_for_current_database()? {
+        return Ok(true);
+    }
+    // Extension may not be installed yet in this database.
+    let has_schemas =
+        pgrx::Spi::get_one::<bool>("SELECT to_regclass('koldstore.schemas') IS NOT NULL")
+            .map_err(|error| error.to_string())?
+            .unwrap_or(false);
+    if !has_schemas {
+        return Ok(false);
+    }
+    super::flush_task::database_has_auto_flush_tables()
 }
 
 /// Ensures async capture starts a database worker before activation completes.

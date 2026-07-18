@@ -621,42 +621,39 @@ fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
     })
 }
 
-fn resolve_record_columns(
+fn ensure_record_columns(
     config: &mut ManagedRelation,
     relation: &PgOutputRelation,
     type_names: &mut HashMap<(u32, i32), String>,
-) -> Result<Vec<String>, String> {
-    if config.record_columns.is_none() {
-        let mut record_columns = Vec::with_capacity(config.primary_key.len());
-        for key in &config.primary_key {
-            let column = relation
-                .columns
-                .iter()
-                .find(|column| &column.name == key)
-                .ok_or_else(|| format!("primary-key column {key} has no pgoutput type"))?;
-            let type_key = (column.type_oid, column.typmod);
-            if let std::collections::hash_map::Entry::Vacant(entry) = type_names.entry(type_key) {
-                let type_name = pgrx::Spi::get_one_with_args::<String>(
-                    "SELECT pg_catalog.format_type($1::oid, $2)",
-                    &[
-                        DatumWithOid::from(pgrx::pg_sys::Oid::from(column.type_oid)),
-                        DatumWithOid::from(column.typmod),
-                    ],
-                )
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("PostgreSQL cannot format type OID {}", column.type_oid))?;
-                entry.insert(type_name);
-            }
-            let type_name = type_names.get(&type_key).expect("type name inserted above");
-            record_columns.push(format!("{} {type_name}", quote_ident(key)));
-        }
-        config.record_columns = Some(record_columns);
+) -> Result<(), String> {
+    if config.record_columns.is_some() {
+        return Ok(());
     }
-    Ok(config
-        .record_columns
-        .as_ref()
-        .expect("record columns populated")
-        .clone())
+    let mut record_columns = Vec::with_capacity(config.primary_key.len());
+    for key in &config.primary_key {
+        let column = relation
+            .columns
+            .iter()
+            .find(|column| &column.name == key)
+            .ok_or_else(|| format!("primary-key column {key} has no pgoutput type"))?;
+        let type_key = (column.type_oid, column.typmod);
+        if let std::collections::hash_map::Entry::Vacant(entry) = type_names.entry(type_key) {
+            let type_name = pgrx::Spi::get_one_with_args::<String>(
+                "SELECT pg_catalog.format_type($1::oid, $2)",
+                &[
+                    DatumWithOid::from(pgrx::pg_sys::Oid::from(column.type_oid)),
+                    DatumWithOid::from(column.typmod),
+                ],
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("PostgreSQL cannot format type OID {}", column.type_oid))?;
+            entry.insert(type_name);
+        }
+        let type_name = type_names.get(&type_key).expect("type name inserted above");
+        record_columns.push(format!("{} {type_name}", quote_ident(key)));
+    }
+    config.record_columns = Some(record_columns);
+    Ok(())
 }
 
 fn uses_floor_seq(config: &ManagedRelation, request: &BoundedApplyRequest) -> bool {
@@ -675,74 +672,75 @@ fn apply_batch(
     commit_lsn: u64,
     request: &BoundedApplyRequest,
 ) -> Result<(), String> {
-    let mut record_columns = resolve_record_columns(config, relation, type_names)?;
+    ensure_record_columns(config, relation, type_names)?;
     let use_floor = uses_floor_seq(config, request);
-    if use_floor {
-        record_columns.push(format!("{} bigint", quote_ident("seq")));
-    }
-    let pk_refs = config
-        .primary_key
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let seq_expression = if use_floor {
-        format!("incoming.{}", quote_ident("seq"))
+    let needs_plan = if operation == MirrorOperation::Insert {
+        if use_floor {
+            config.floor_insert_sql.is_none()
+        } else {
+            config.insert_sql.is_none()
+        }
+    } else if use_floor {
+        config.floor_update_sql.is_none()
     } else {
-        snowflake_id_call_expression().to_string()
+        config.update_sql.is_none()
     };
+    if needs_plan {
+        let mut record_columns = config
+            .record_columns
+            .as_ref()
+            .expect("record columns populated")
+            .clone();
+        if use_floor {
+            record_columns.push(format!("{} bigint", quote_ident("seq")));
+        }
+        let pk_refs = config
+            .primary_key
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let seq_expression = if use_floor {
+            format!("incoming.{}", quote_ident("seq"))
+        } else {
+            snowflake_id_call_expression().to_string()
+        };
+        let planned = if operation == MirrorOperation::Insert {
+            plan_async_mirror_batch_insert(
+                &config.mirror,
+                &pk_refs,
+                &record_columns,
+                &seq_expression,
+            )
+        } else {
+            plan_async_mirror_batch_update(
+                &config.mirror,
+                &pk_refs,
+                &record_columns,
+                &seq_expression,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        if operation == MirrorOperation::Insert {
+            if use_floor {
+                config.floor_insert_sql = Some(planned);
+            } else {
+                config.insert_sql = Some(planned);
+            }
+        } else if use_floor {
+            config.floor_update_sql = Some(planned);
+        } else {
+            config.update_sql = Some(planned);
+        }
+    }
     let sql = if operation == MirrorOperation::Insert {
         if use_floor {
-            if config.floor_insert_sql.is_none() {
-                config.floor_insert_sql = Some(
-                    plan_async_mirror_batch_insert(
-                        &config.mirror,
-                        &pk_refs,
-                        &record_columns,
-                        &seq_expression,
-                    )
-                    .map_err(|error| error.to_string())?,
-                );
-            }
             config.floor_insert_sql.as_ref().expect("floor insert SQL")
         } else {
-            if config.insert_sql.is_none() {
-                config.insert_sql = Some(
-                    plan_async_mirror_batch_insert(
-                        &config.mirror,
-                        &pk_refs,
-                        &record_columns,
-                        &seq_expression,
-                    )
-                    .map_err(|error| error.to_string())?,
-                );
-            }
             config.insert_sql.as_ref().expect("insert SQL cached")
         }
     } else if use_floor {
-        if config.floor_update_sql.is_none() {
-            config.floor_update_sql = Some(
-                plan_async_mirror_batch_update(
-                    &config.mirror,
-                    &pk_refs,
-                    &record_columns,
-                    &seq_expression,
-                )
-                .map_err(|error| error.to_string())?,
-            );
-        }
         config.floor_update_sql.as_ref().expect("floor update SQL")
     } else {
-        if config.update_sql.is_none() {
-            config.update_sql = Some(
-                plan_async_mirror_batch_update(
-                    &config.mirror,
-                    &pk_refs,
-                    &record_columns,
-                    &seq_expression,
-                )
-                .map_err(|error| error.to_string())?,
-            );
-        }
         config.update_sql.as_ref().expect("update SQL cached")
     };
     let rows_json = serde_json::to_string(rows).map_err(|error| error.to_string())?;

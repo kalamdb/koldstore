@@ -1,14 +1,22 @@
-//! Latch poll loop and signal handling for the async mirror applier.
+//! Latch poll loop and signal handling for the shared database worker.
+//!
+//! Each wake: apply async mirror when WAL advanced (if a slot exists), then on
+//! `koldstore.flush_check_interval_seconds` evaluate auto-flush tables.
+//!
+//! The auto-flush catalog probe is not run on the 100ms latch path — only when a
+//! flush check is due (or when deciding whether a slot-less worker should exit).
 
 use std::ffi::CString;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use koldstore_worker::{DatabaseWorkerTask, TickResult, APPLY_POLL_INTERVAL_MS};
+use koldstore_worker::{flush_check_due, DatabaseWorkerTask, TickResult, APPLY_POLL_INTERVAL_MS};
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 
 use crate::async_mirror::task::AsyncMirrorTask;
 
-/// Runs the persistent async-mirror apply loop until the slot disappears or shutdown.
+use super::flush_task::{database_has_auto_flush_tables, run_flush_scheduler_tick};
+
+/// Runs the persistent database worker until neither async nor auto-flush work remains.
 pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     attach_applier_signal_handlers();
     BackgroundWorker::connect_worker_to_spi_by_oid(
@@ -16,24 +24,26 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
         None,
     );
 
-    let task = AsyncMirrorTask::new(database_oid);
+    let async_task = AsyncMirrorTask::new(database_oid);
     let poll = Duration::from_millis(APPLY_POLL_INTERVAL_MS);
     let slot = crate::async_mirror::lifecycle::slot_name(database_oid);
     let slot_c = CString::new(slot.as_str()).expect("deterministic slot name contains no NUL");
-    // Slot must already exist (manage/launcher only start us when it does). Do not
-    // wait forever: after disable_async_mirror the launcher must be able to leave
-    // the applier stopped.
-    if !crate::async_mirror::lifecycle::native_slot_exists_cstr(&slot_c) {
-        return;
-    }
 
     let mut last_checked_wal = None;
+    let mut last_flush_check_secs: Option<i64> = None;
+    // Cached so the 100ms latch path does not open an SPI transaction every wake.
+    let mut auto_flush_cached = true;
+
     loop {
-        let keep_running = crate::async_mirror::lifecycle::native_slot_exists_cstr(&slot_c);
-        if keep_running {
+        let slot_exists = crate::async_mirror::lifecycle::native_slot_exists_cstr(&slot_c);
+        let now_secs = unix_now_secs();
+        let interval = crate::guc::flush_check_interval_seconds();
+        let flush_due = flush_check_due(last_flush_check_secs, now_secs, interval);
+
+        if slot_exists {
             let current_wal = current_wal_position();
             if last_checked_wal != Some(current_wal) {
-                worker_transaction(|| match task.tick() {
+                worker_transaction(|| match async_task.tick() {
                     Ok(TickResult::Continue) => {}
                     Ok(TickResult::Stop) => {}
                     Err(error) => {
@@ -44,7 +54,30 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                 last_checked_wal = Some(current_wal_position());
             }
         }
-        if !keep_running || !BackgroundWorker::wait_latch(Some(poll)) {
+
+        if flush_due {
+            // Single transaction: flush when due; skip EXISTS when a due table ran.
+            auto_flush_cached = worker_transaction(|| match run_flush_scheduler_tick() {
+                Ok(result) if result.had_due_table => true,
+                Ok(_) => match database_has_auto_flush_tables() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        pgrx::log!("koldstore database worker: auto_flush probe failed: {error}");
+                        false
+                    }
+                },
+                Err(error) => {
+                    pgrx::log!("koldstore flush scheduler tick failed: {error}");
+                    database_has_auto_flush_tables().unwrap_or_default()
+                }
+            });
+            last_flush_check_secs = Some(now_secs);
+        }
+
+        if !slot_exists && !auto_flush_cached {
+            break;
+        }
+        if !BackgroundWorker::wait_latch(Some(poll)) {
             break;
         }
         if BackgroundWorker::sighup_received() {
@@ -90,4 +123,11 @@ pub(crate) fn worker_transaction<R>(body: impl FnOnce() -> R) -> R {
 
 fn current_wal_position() -> u64 {
     unsafe { pgrx::pg_sys::GetXLogInsertRecPtr() }
+}
+
+fn unix_now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }

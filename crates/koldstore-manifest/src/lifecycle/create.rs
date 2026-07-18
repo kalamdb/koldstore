@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 
-use super::model::{FilesState, Manifest};
+use crate::model::{FilesState, Manifest};
 
 impl Manifest {
     /// Creates a shared-table manifest.
@@ -26,7 +26,7 @@ impl Manifest {
         Self::new(namespace, table, Some(scope_id.into()), schema_version)
     }
 
-    pub(super) fn new(
+    fn new(
         namespace: impl Into<String>,
         table: impl Into<String>,
         scope_id: Option<String>,

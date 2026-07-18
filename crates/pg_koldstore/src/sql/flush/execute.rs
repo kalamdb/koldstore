@@ -222,7 +222,7 @@ pub(super) fn stream_write_flush_batches(
                 &ctx.relation.namespace,
                 &ctx.relation.name,
                 &ctx.snapshot.primary_key_columns,
-                &written.catalog_row,
+                written.catalog_row.clone(),
             )
             .map_err(|error| error.to_string())
         })
@@ -430,7 +430,7 @@ fn run_async_prune_fence(
     Ok(())
 }
 
-pub(super) fn flush_table_pg_impl(
+pub(crate) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<pgrx::Uuid, String> {

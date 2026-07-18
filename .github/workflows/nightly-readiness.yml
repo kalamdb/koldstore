@@ -55,11 +55,21 @@ jobs:
           KOLDSTORE_E2E_PREPARE_ONLY: "1"
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
+      # prepare-only writes .e2e-env (KOLDSTORE_E2E_DB_POOL=1 + worker DBs).
+      # Each step is a fresh shell, so source it before nextest/psql.
       - name: Isolation schedules
-        run: cargo nextest run -p e2e -E 'test(isolation::)' --test-threads 1
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
+          cargo nextest run -p e2e -E 'test(isolation::)' --test-threads "${KOLDSTORE_E2E_THREADS:-1}"
 
       - name: Crash / failpoint recovery
-        run: cargo nextest run -p e2e -E 'test(crash::)' --test-threads 1
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
+          cargo nextest run -p e2e -E 'test(crash::)' --test-threads "${KOLDSTORE_E2E_THREADS:-1}"
 
       - name: Install SQLsmith
         run: bash scripts/ci/install-sqlsmith.sh

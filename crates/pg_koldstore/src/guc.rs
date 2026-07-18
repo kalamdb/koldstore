@@ -34,6 +34,9 @@ static FAILPOINT: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::n
 #[cfg(feature = "pg")]
 static PENDING_SEGMENT_TTL_SECONDS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_PENDING_SEGMENT_TTL_SECONDS);
+#[cfg(feature = "pg")]
+static FLUSH_CHECK_INTERVAL_SECONDS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS);
 
 /// Defines pg-koldstore configuration variables.
 #[cfg(feature = "pg")]
@@ -136,6 +139,16 @@ pub fn define_gucs() {
         GucContext::Userset,
         flags,
     );
+    GucRegistry::define_int_guc(
+        c"koldstore.flush_check_interval_seconds",
+        c"Interval between built-in auto-flush eligibility checks.",
+        c"Database worker wakes on this cadence to evaluate auto_flush managed tables, enqueue flush jobs when needed, and run one flush. SET / ALTER SYSTEM + reload; workers pick up changes on SIGHUP.",
+        &FLUSH_CHECK_INTERVAL_SECONDS,
+        settings::MIN_FLUSH_CHECK_INTERVAL_SECONDS,
+        settings::MAX_FLUSH_CHECK_INTERVAL_SECONDS,
+        GucContext::Userset,
+        flags,
+    );
 }
 
 /// No-op placeholder for non-PostgreSQL tests.
@@ -216,6 +229,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::PENDING_SEGMENT_TTL_SECONDS_GUC,
             internal: false,
             default_value: "3600",
+        },
+        GucDefinition {
+            name: settings::FLUSH_CHECK_INTERVAL_SECONDS_GUC,
+            internal: false,
+            default_value: "30",
         },
     ]
 }
@@ -350,5 +368,23 @@ pub fn pending_segment_ttl_seconds() -> i64 {
     #[cfg(not(feature = "pg"))]
     {
         i64::from(settings::DEFAULT_PENDING_SEGMENT_TTL_SECONDS)
+    }
+}
+
+/// Seconds between built-in auto-flush eligibility checks in the database worker.
+#[must_use]
+pub fn flush_check_interval_seconds() -> i64 {
+    #[cfg(feature = "pg")]
+    {
+        let value = FLUSH_CHECK_INTERVAL_SECONDS.get();
+        i64::from(value.clamp(
+            settings::MIN_FLUSH_CHECK_INTERVAL_SECONDS,
+            settings::MAX_FLUSH_CHECK_INTERVAL_SECONDS,
+        ))
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        i64::from(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS)
     }
 }

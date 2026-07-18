@@ -1,40 +1,15 @@
 //! Assemble a [`Manifest`] from cold-segment catalog rows.
 //!
-//! Catalog SQL stays in `koldstore-catalog` / flush planners. This module owns
-//! the pure conversion into the on-disk manifest model.
+//! Catalog SQL and the [`CatalogManifestSegmentRow`] wire type live in
+//! `koldstore-catalog`. This module owns the pure conversion into the on-disk
+//! manifest model.
 
 use std::collections::BTreeMap;
 
-use koldstore_catalog::column_stats_min_max_map;
-use serde::Deserialize;
+use koldstore_catalog::{column_stats_min_max_map_into, CatalogManifestSegmentRow};
 use thiserror::Error;
 
 use crate::model::{Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment, PkFilter};
-
-/// Catalog row shape used to rebuild a shared-scope manifest.
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-pub struct CatalogManifestSegmentRow {
-    /// Final object-store path.
-    pub object_path: String,
-    /// Segment batch number.
-    pub batch_number: i32,
-    /// Minimum `_seq`.
-    pub min_seq: i64,
-    /// Maximum `_seq`.
-    pub max_seq: i64,
-    /// Minimum `_commit_seq`.
-    pub min_commit_seq: i64,
-    /// Maximum `_commit_seq`.
-    pub max_commit_seq: i64,
-    /// Segment row count.
-    pub row_count: i64,
-    /// Segment byte size.
-    pub byte_size: i64,
-    /// Segment schema version.
-    pub schema_version: i32,
-    /// Segment column stats JSON.
-    pub column_stats: serde_json::Value,
-}
 
 /// Manifest assembly error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -64,7 +39,7 @@ pub fn manifest_from_catalog_rows(
         schema_version,
     );
     let segments = rows
-        .iter()
+        .into_iter()
         .map(|row| {
             build_manifest_segment_from_catalog_row(namespace, table_name, primary_key_columns, row)
         })
@@ -82,7 +57,7 @@ pub fn build_manifest_segment_from_catalog_row(
     namespace: &str,
     table_name: &str,
     primary_key_columns: &[String],
-    row: &CatalogManifestSegmentRow,
+    row: CatalogManifestSegmentRow,
 ) -> Result<ManifestSegment, ManifestAssemblyError> {
     let manifest_path = manifest_relative_segment_path(namespace, table_name, &row.object_path);
     let mut segment = ManifestSegment::committed(
@@ -98,14 +73,14 @@ pub fn build_manifest_segment_from_catalog_row(
         u32::try_from(row.schema_version)
             .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?,
     );
-    segment.column_stats = manifest_column_stats(&row.column_stats);
+    segment.column_stats = manifest_column_stats(row.column_stats);
     if !primary_key_columns.is_empty() {
         segment.bloom_filters.push(ManifestBloomFilter::bloom(
             primary_key_columns.to_vec(),
             Some(0.01),
         ));
         let column_ids = (1..=primary_key_columns.len() as u32).collect::<Vec<_>>();
-        segment.pk_filter = Some(PkFilter::exact(column_ids));
+        segment.pk_filter.replace(PkFilter::exact(column_ids));
     }
     Ok(segment)
 }
@@ -124,12 +99,8 @@ pub fn manifest_relative_segment_path(
         .to_string()
 }
 
-/// Converts catalog column-stats JSON into manifest column stats.
-#[must_use]
-pub fn manifest_column_stats(
-    column_stats: &serde_json::Value,
-) -> BTreeMap<String, ManifestColumnStats> {
-    column_stats_min_max_map(column_stats)
+fn manifest_column_stats(column_stats: serde_json::Value) -> BTreeMap<String, ManifestColumnStats> {
+    column_stats_min_max_map_into(column_stats)
         .into_iter()
         .map(|(column, (min, max))| (column, ManifestColumnStats::new(min, max)))
         .collect()

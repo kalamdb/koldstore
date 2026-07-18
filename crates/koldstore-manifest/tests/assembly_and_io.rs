@@ -56,7 +56,7 @@ fn manifest_paths_and_round_trip_io() {
         "app",
         "notes",
         &["id".to_string()],
-        &CatalogManifestSegmentRow {
+        CatalogManifestSegmentRow {
             object_path: "app/notes/batch-1.parquet".to_string(),
             batch_number: 1,
             min_seq: 5,

@@ -430,7 +430,7 @@ fn execute_seq_range_cleanup(
     })
 }
 
-fn mirror_pending_row_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+pub(crate) fn mirror_pending_row_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     match super::counters::read_table_row_counters(table_oid) {
         Ok(counters) => {
             // Async flush fences via `apply_available` in this same transaction.

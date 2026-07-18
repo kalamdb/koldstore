@@ -45,6 +45,7 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
                   table_name => $1::text::regclass,
                   storage => $2,
                   hot_row_limit => 1000,
+                  auto_flush => false,
                   mirror_capture_mode => 'async'
                 )
                 "#,
@@ -222,6 +223,7 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
                   table_name => $1::text::regclass,
                   storage => $2,
                   hot_row_limit => 1000,
+                  auto_flush => false,
                   mirror_capture_mode => 'async'
                 )
                 "#,

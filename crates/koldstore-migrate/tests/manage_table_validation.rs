@@ -19,6 +19,7 @@ fn valid_context() -> ManageTableValidationContext<'static> {
             max_rows_per_file: 1_000,
             target_file_size_mb: None,
             min_max_rows_per_file: 1_000,
+            auto_flush: true,
         },
     }
 }
@@ -30,10 +31,20 @@ fn valid_context_returns_canonical_manage_table_options() {
     assert_eq!(validated.options.hot_row_limit, Some(10_000));
     assert_eq!(validated.options.min_flush_rows, Some(1_000));
     assert_eq!(validated.options.max_rows_per_file, Some(1_000));
+    assert!(validated.options.auto_flush_enabled());
     assert_eq!(
         validated.options.compression,
         Some(koldstore_common::ParquetCompression::Zstd)
     );
+}
+
+#[test]
+fn auto_flush_false_is_persisted_in_options() {
+    let mut context = valid_context();
+    context.policy.auto_flush = false;
+    let validated = validate_manage_table(context).unwrap();
+    assert!(!validated.options.auto_flush_enabled());
+    assert_eq!(validated.options.auto_flush, Some(false));
 }
 
 #[test]

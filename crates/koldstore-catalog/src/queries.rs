@@ -266,19 +266,6 @@ pub fn plan_next_flush_batch_number() -> SqlResult<SqlStatement> {
     )
 }
 
-/// Builds an active shared-scope cold-segment count lookup.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata is invalid.
-pub fn plan_active_cold_segment_count() -> SqlResult<SqlStatement> {
-    SqlStatement::read_with_params(
-        "resolve active cold segment count",
-        "SELECT count(*)::bigint FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = '' AND status = 'active'",
-        [SqlParamType::Oid],
-    )
-}
-
 /// Counts `pending` + `active` shared-scope segments (flush reconcile before activate).
 ///
 /// # Errors
@@ -290,15 +277,6 @@ pub fn plan_publishable_cold_segment_count() -> SqlResult<SqlStatement> {
         "SELECT count(*)::bigint FROM koldstore.cold_segments WHERE table_oid = $1::oid AND scope_key = '' AND status IN ('pending', 'active')",
         [SqlParamType::Oid],
     )
-}
-
-/// Builds an active cold-segment manifest row lookup for flush finalization.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata is invalid.
-pub fn plan_active_cold_segments_for_manifest_json() -> SqlResult<SqlStatement> {
-    plan_cold_segments_for_manifest_json_with_statuses("active")
 }
 
 /// Builds pending+active cold-segment rows for derived `manifest.json` before activate.
