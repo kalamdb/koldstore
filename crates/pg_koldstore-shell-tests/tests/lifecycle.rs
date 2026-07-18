@@ -45,6 +45,36 @@ fn guc_definitions_include_public_and_internal_settings() {
             && guc.default_value == "30"));
     assert!(gucs
         .iter()
+        .any(|guc| guc.name == "koldstore.async_apply_poll_interval_ms"
+            && !guc.internal
+            && guc.default_value == "100"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.async_apply_max_rows_per_tick"
+            && !guc.internal
+            && guc.default_value == "0"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.async_apply_max_ms_per_tick"
+            && !guc.internal
+            && guc.default_value == "0"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.flush_prelock_max_passes"
+            && !guc.internal
+            && guc.default_value == "3"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.flush_prelock_max_ms"
+            && !guc.internal
+            && guc.default_value == "5000"));
+    assert!(gucs.iter().any(
+        |guc| guc.name == "koldstore.async_mirror_max_retained_bytes"
+            && !guc.internal
+            && guc.default_value == "0"
+    ));
+    assert!(gucs
+        .iter()
         .any(|guc| guc.name == "koldstore.internal_system_write" && guc.internal));
     assert!(gucs
         .iter()

@@ -28,7 +28,7 @@ Options:
   --hot-limit N     Rows kept hot after flush (default: 10000)
   --dml-sample N    Rows used for timed UPDATE/DELETE samples (default: 1000)
   --insert-batch-rows N  Rows per committed insert batch (default: 100000)
-  --mirror-capture-mode MODE  strict or async (default: strict)
+  --mode MODE       strict or async (default: strict)
   --both-modes      Run async then strict (implies measuring both columns)
   --update-results  Merge this run into docs/benchmarks/RESULTS.md
                     (writes JSON under docs/benchmarks/.storage-results/)
@@ -55,7 +55,7 @@ Examples:
   scripts/run-storage-comparison.sh
   scripts/run-storage-comparison.sh --rows 1000000
   scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
-  scripts/run-storage-comparison.sh --mirror-capture-mode async --update-results
+  scripts/run-storage-comparison.sh --mode async --update-results
   scripts/run-storage-comparison.sh --both-modes --update-results \
     --rows 10000000 --hot-limit 100000 --dml-sample 50000
   scripts/run-storage-comparison.sh --prepare-only
@@ -80,9 +80,13 @@ while [[ $# -gt 0 ]]; do
       INSERT_BATCH_ROWS="${2:?missing value for --insert-batch-rows}"
       shift 2
       ;;
-    --mirror-capture-mode)
-      MIRROR_CAPTURE_MODE="${2:?missing value for --mirror-capture-mode}"
+    --mode)
+      MIRROR_CAPTURE_MODE="${2:?missing value for --mode}"
       shift 2
+      ;;
+    --mode=*)
+      MIRROR_CAPTURE_MODE="${1#*=}"
+      shift
       ;;
     --both-modes)
       BOTH_MODES=1
@@ -113,16 +117,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "${MIRROR_CAPTURE_MODE}" != "strict" && "${MIRROR_CAPTURE_MODE}" != "async" ]]; then
-  echo "error: --mirror-capture-mode must be strict or async (got: ${MIRROR_CAPTURE_MODE})" >&2
+  echo "error: --mode must be strict or async (got: ${MIRROR_CAPTURE_MODE})" >&2
   exit 1
 fi
 
-echo "preparing pgrx PostgreSQL ${PG_VERSION} for storage comparison (release extension)"
+# Async (and --both-modes) need logical WAL; preparing as async is safe for strict too.
+PREPARE_MODE="${MIRROR_CAPTURE_MODE}"
+if [[ "${BOTH_MODES}" == "1" ]]; then
+  PREPARE_MODE="async"
+fi
+
+echo "preparing pgrx PostgreSQL ${PG_VERSION} for storage comparison (release extension, --mode ${PREPARE_MODE})"
 E2E_ENV_FILE="${KOLDSTORE_E2E_ENV_FILE:-$ROOT_DIR/.e2e-env}"
 KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
   KOLDSTORE_E2E_PREPARE_ONLY=1 \
   KOLDSTORE_PGRX_INSTALL_RELEASE=1 \
-  scripts/run-pg-e2e.sh "${PG_VERSION}"
+  KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="${PREPARE_MODE}" \
+  scripts/run-pg-e2e.sh "${PG_VERSION}" --mode "${PREPARE_MODE}"
 # Prepare-only creates worker DBs and writes pool env; source it for nextest.
 # shellcheck disable=SC1090
 source "${E2E_ENV_FILE}"
@@ -140,7 +151,7 @@ fi
 run_one_mode() {
   local mode="$1"
   local results_json=""
-  echo "running storage comparison (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, mirror_capture_mode=${mode})"
+  echo "running storage comparison (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, --mode ${mode})"
   if [[ "${UPDATE_RESULTS}" == "1" ]]; then
     mkdir -p "${RESULTS_DIR}"
     results_json="${RESULTS_DIR}/${mode}.json"

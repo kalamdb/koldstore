@@ -22,7 +22,7 @@ cargo nextest run --workspace --no-default-features \
   --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
 ```
 
-`e2e`, `examples`, and `storage-comparison` need a running pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh`, and `scripts/run-storage-comparison.sh`.
+`e2e`, `examples`, and `storage-comparison` need a running pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh` (`--mode strict|async`), and `scripts/run-storage-comparison.sh`.
 
 ## Production-readiness test layers
 

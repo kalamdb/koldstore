@@ -55,8 +55,11 @@ pub async fn timed_async<T, E: std::fmt::Display>(
 
 /// Logs scenario sizing and filesystem layout at startup.
 pub fn log_scenario_start(name: &str, relation: &str, storage_root: &Path, config: ExampleConfig) {
+    let mode = e2e::selected_mirror_capture_mode()
+        .map(|mode| mode.as_str())
+        .unwrap_or("strict");
     log_always(format!(
-        "{name}: rows={} scopes={} clients={} ({} rows/scope)",
+        "{name}: rows={} scopes={} clients={} ({} rows/scope) mirror_capture_mode={mode}",
         config.rows,
         config.scopes,
         config.clients,
@@ -67,6 +70,19 @@ pub fn log_scenario_start(name: &str, relation: &str, storage_root: &Path, confi
         "{name}: cold storage root {}",
         storage_root.display()
     ));
+}
+
+/// Establishes a mirror-consistency boundary when examples run in async mode.
+///
+/// Strict mode is a no-op. Async mode waits until committed WAL has been
+/// applied so subsequent flush / merge-scan asserts see the same rows.
+///
+/// # Errors
+///
+/// Returns an error when mode selection or the async SQL fence fails.
+pub async fn fence_mirror_if_needed(client: &Client) -> Result<()> {
+    e2e::fence_selected_mirror(client).await?;
+    Ok(())
 }
 
 /// Optional context for flush helpers to emit row counts and on-disk paths.
@@ -295,6 +311,7 @@ pub async fn manage_user_scoped_with_policy(
     min_flush_rows: i64,
     max_rows_per_file: i64,
 ) -> Result<()> {
+    let mode = e2e::selected_mirror_capture_mode()?.as_str();
     client
         .execute(
             r#"
@@ -306,7 +323,8 @@ pub async fn manage_user_scoped_with_policy(
               max_rows_per_file => $5,
               table_type        => 'user',
               scope_column      => $6,
-              migration_order_by => $7
+              migration_order_by => $7,
+              mirror_capture_mode => $8
             )
             "#,
             &[
@@ -317,6 +335,7 @@ pub async fn manage_user_scoped_with_policy(
                 &max_rows_per_file,
                 &scope_column,
                 &migration_order_by,
+                &mode,
             ],
         )
         .await?;
@@ -552,6 +571,9 @@ pub async fn wait_for_jobs(client: &Client, relation: &str) -> Result<()> {
     for _ in 0..120 {
         let active = e2e::active_job_count(client, relation).await?;
         if active == 0 {
+            // After writers drain flush jobs, also catch up async WAL apply so
+            // follow-on reads see the same committed rows in both modes.
+            fence_mirror_if_needed(client).await?;
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -787,6 +809,7 @@ pub async fn assert_multi_tenant_visibility(
     scope_column: &str,
     tenant_ids: &[&str],
 ) -> Result<()> {
+    fence_mirror_if_needed(client).await?;
     for tenant in tenant_ids {
         set_scope(client, tenant).await?;
         let count = scalar_count(
@@ -825,16 +848,15 @@ pub async fn scoped_overlay_ids_from_cold(
     scope_id: &str,
     count: usize,
 ) -> Result<Vec<i64>> {
+    fence_mirror_if_needed(client).await?;
     set_scope(client, scope_id).await?;
+    let limit = i64::try_from(count).context("overlay id count")?;
     let rows = client
         .query(
             &format!(
                 "SELECT id FROM {relation} WHERE {scope_column} = $1 ORDER BY id ASC LIMIT $2"
             ),
-            &[
-                &scope_id,
-                &(i64::try_from(count).context("overlay id count")?),
-            ],
+            &[&scope_id, &limit],
         )
         .await?;
     anyhow::ensure!(
@@ -892,6 +914,7 @@ pub async fn visible_pk_count_with_profile(
     id: i64,
     profile: bool,
 ) -> Result<i64> {
+    fence_mirror_if_needed(client).await?;
     let sql = format!("SELECT count(*) FROM {relation} WHERE id = {id}");
     if profile {
         let plan = timed_async(
@@ -917,6 +940,7 @@ pub async fn visible_pk_batch_count(client: &Client, relation: &str, ids: &[i64]
     if ids.is_empty() {
         return Ok(0);
     }
+    fence_mirror_if_needed(client).await?;
     timed_async(
         format!("merge scan visible_pk_batch_count ({} ids)", ids.len()),
         async {
@@ -971,6 +995,7 @@ fn log_merge_scan_profile(id: i64, plan: &str) {
 ///
 /// Returns an error when the query fails.
 pub async fn mirror_op(client: &Client, relation: &str, id: i64) -> Result<Option<i16>> {
+    fence_mirror_if_needed(client).await?;
     let mirror = e2e::change_log_mirror_relation(relation);
     timed_async(format!("mirror op lookup id={id}"), async {
         let row = client

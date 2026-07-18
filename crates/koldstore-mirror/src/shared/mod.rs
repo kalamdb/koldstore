@@ -27,7 +27,7 @@ pub use schema::{plan_drop_mirror_table, plan_mirror_schema, MirrorSchemaPlan};
 pub use statement::{mirror_to_sql, MirrorAccess, MirrorStatement, SqlParamType};
 pub use write::{
     mirror_delete_using_selected_sql, mirror_selected_join_predicate,
-    plan_async_mirror_batch_insert, plan_async_mirror_batch_update,
+    plan_async_mirror_batch_insert, plan_async_mirror_batch_update, plan_async_mirror_batch_upsert,
     plan_delete_selected_mirror_rows, plan_upsert_mirror_row, quoted_pk_columns,
     selected_record_columns,
 };

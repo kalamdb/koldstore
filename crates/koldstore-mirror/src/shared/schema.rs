@@ -17,6 +17,8 @@ pub struct MirrorSchemaPlan {
     pub collision_probe: MirrorStatement,
     /// Exact-PK mirror table DDL.
     pub create_table: MirrorStatement,
+    /// Drops legacy `commit_lsn` from mirrors created before the slim schema.
+    pub drop_legacy_commit_lsn: MirrorStatement,
     /// Sequence cursor index for scans.
     pub seq_index: MirrorStatement,
     /// Partial index over delete-marker rows, keyed by `seq`.
@@ -32,8 +34,13 @@ pub struct MirrorSchemaPlan {
 impl MirrorSchemaPlan {
     /// Statements required to create mirror storage after collision checks pass.
     #[must_use]
-    pub fn create_statements(&self) -> [&MirrorStatement; 3] {
-        [&self.create_table, &self.seq_index, &self.tombstone_index]
+    pub fn create_statements(&self) -> [&MirrorStatement; 4] {
+        [
+            &self.create_table,
+            &self.drop_legacy_commit_lsn,
+            &self.seq_index,
+            &self.tombstone_index,
+        ]
     }
 }
 
@@ -69,7 +76,6 @@ pub fn plan_mirror_schema(
     ddl_columns.extend([
         MirrorColumn::Seq.definition().to_string(),
         MirrorColumn::Op.definition().to_string(),
-        MirrorColumn::CommitLsn.definition().to_string(),
         format!("PRIMARY KEY ({})", pk_columns.join(", ")),
     ]);
 
@@ -90,6 +96,10 @@ pub fn plan_mirror_schema(
             ),
         ),
         create_table: MirrorStatement::write("create change-log mirror table", create_sql),
+        drop_legacy_commit_lsn: MirrorStatement::write(
+            "drop legacy commit_lsn mirror column",
+            format!("ALTER TABLE {quoted_mirror} DROP COLUMN IF EXISTS \"commit_lsn\""),
+        ),
         seq_index: MirrorStatement::write(
             "create change-log mirror seq index",
             format!("CREATE INDEX IF NOT EXISTS {seq_index_name} ON {quoted_mirror} (\"seq\")"),

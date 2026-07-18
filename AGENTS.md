@@ -8,6 +8,13 @@
 - Docker-targeted scripts, Compose files, and image validation should live under `docker/` or clearly Docker-owned paths.
 - Treat Docker as a final packaging smoke test, not the main correctness loop.
 
+## Tests Must Exercise Real Bugs
+
+- When a test reveals an extension defect, **fix the extension**. Do not weaken the test, rewrite the query to avoid the failing plan, or sort/filter in the test client to hide incorrect scan results.
+- Workarounds in tests (`ORDER BY` removed, literals instead of parameters, client-side merge) are only allowed as a temporary bisect step and must be reverted once the product fix lands.
+- Prefer adding a focused regression e2e that would have caught the bug (for example ordered `SELECT … LIMIT` after multi-wave flush) before calling the fix done.
+- Managed-table reads must never omit hot or cold rows that should be visible, including under load, during flush, and for `ORDER BY` / `LIMIT` / parameterized plans.
+
 ## Rust Design Preferences
 
 - Prefer type-safe domain objects for identifiers, sequence values, table names, primary keys, and related boundaries, such as `SeqId`-style newtypes instead of raw integers or strings.

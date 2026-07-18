@@ -26,7 +26,8 @@ KoldMergeScan
 The user table stays a normal heap table. There is no custom table access method.
 
 - Planner cost is `hot_child_cost + catalog + estimated cold + merge overlay`.
-- Heap-only finals are replaced so managed SELECTs cannot silently omit cold rows.
+- Heap-only finals **and** parallel partials are replaced so managed SELECTs
+  cannot silently omit cold rows (including under `ORDER BY` / Gather Merge).
 - Hot-only scans (no matching cold segments) stream from the native child via
   `ExecProcNode` when available.
 - Merge paths apply the mirror overlay immediately so committed deletes cannot
@@ -91,9 +92,13 @@ On `_PG_init` (`pg_koldstore/src/lib.rs`):
 
 For each managed relation on `SELECT`:
 
-1. Let PostgreSQL build normal heap paths.
+1. Let PostgreSQL build normal heap paths (including parallel partials).
 2. Choose the cheapest non-custom path as the hot child.
-3. Replace `pathlist` with one `CustomPath` whose `custom_paths` holds that child.
+3. Clear both `pathlist` and `partial_pathlist`, then install one `CustomPath`
+   whose `custom_paths` holds that child. Clearing partials is required:
+   PostgreSQL builds Gather / Gather Merge *after* `set_rel_pathlist` from
+   leftover heap IndexScan partials; leaving them lets `ORDER BY … LIMIT`
+   prefer a hot-heap-only plan that omits cold rows after flush.
 4. Cost = child cost + catalog lookup + per-segment cold estimate + overlay.
 5. `PlanCustomPath` copies `custom_plans` from the planned child list and stores
    a serialized `MergeScanPlan` in `custom_private`.

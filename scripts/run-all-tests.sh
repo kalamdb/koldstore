@@ -27,7 +27,7 @@ Usage:
 
 Runs (in order):
   fmt, clippy, workspace unit tests (nextest), pgrx feature compile/install,
-  #[pg_test] via nextest, E2E (strict + async, nextest), examples,
+  #[pg_test] via nextest, E2E (strict + async, nextest), examples (strict + async),
   storage comparison, SQL regression, memory checks, short benchmarks.
 
 Options:
@@ -225,15 +225,16 @@ run_local_pg_test() {
 
 run_local_examples() {
   local pg="$1"
+  local mode="$2"
 
-  step "example scenarios PostgreSQL ${pg}"
+  step "example scenarios PostgreSQL ${pg} (--mode ${mode})"
   # CI-friendly defaults when the caller has not sized the suite.
   KOLDSTORE_EXAMPLE_PGVERSION="${pg}" \
     KOLDSTORE_EXAMPLE_ROWS="${KOLDSTORE_EXAMPLE_ROWS:-2000}" \
     KOLDSTORE_EXAMPLE_CLIENTS="${KOLDSTORE_EXAMPLE_CLIENTS:-4}" \
     KOLDSTORE_EXAMPLE_SCOPES="${KOLDSTORE_EXAMPLE_SCOPES:-8}" \
     KOLDSTORE_EXAMPLE_TIMEOUT_SECS="${KOLDSTORE_EXAMPLE_TIMEOUT_SECS:-600}" \
-    scripts/run-examples.sh
+    scripts/run-examples.sh --mode "${mode}"
 }
 
 run_local_storage() {
@@ -358,7 +359,8 @@ if [[ "${SKIP_EXAMPLES}" -eq 0 ]]; then
     pg="$(echo "${pg}" | xargs)"
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
-      run_local_examples "${pg}"
+      run_local_examples "${pg}" strict
+      run_local_examples "${pg}" async
     fi
   done
 fi

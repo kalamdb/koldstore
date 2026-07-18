@@ -233,7 +233,13 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     (*custom_path).custom_paths = pg_sys::lappend(std::ptr::null_mut(), hot_child.cast::<c_void>());
     (*custom_path).methods = &raw const PATH_METHODS;
 
-    // Managed reads must not expose heap-only finals (they omit cold rows).
+    // Managed reads must expose only KoldMergeScan as a final path. Clear both
+    // `pathlist` and `partial_pathlist`: PostgreSQL builds Gather / Gather Merge
+    // *after* this hook from leftover partials. Leaving heap IndexScan partials
+    // lets `ORDER BY … LIMIT` prefer a hot-heap-only plan that omits cold rows
+    // after flush (visible as count(*) > 0 but ordered SELECT returning empty).
+    (*rel).pathlist = std::ptr::null_mut();
+    (*rel).partial_pathlist = std::ptr::null_mut();
     (*rel).pathlist = pg_sys::lappend(std::ptr::null_mut(), (&raw mut (*custom_path).path).cast());
 }
 

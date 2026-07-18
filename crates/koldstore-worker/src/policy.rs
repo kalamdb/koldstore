@@ -10,6 +10,7 @@ pub const LIBRARY_NAME: &str = "koldstore";
 /// Default latch poll interval for the async mirror apply loop, in milliseconds.
 ///
 /// Bounds mirror lag without spinning; each tick only peeks when WAL advanced.
+/// Runtime value is `koldstore.async_apply_poll_interval_ms` (default 100).
 pub const APPLY_POLL_INTERVAL_MS: u64 = 100;
 
 /// Launcher poll interval while discovering databases that need an applier.

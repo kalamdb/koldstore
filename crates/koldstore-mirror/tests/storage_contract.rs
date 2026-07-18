@@ -3,9 +3,9 @@ use koldstore_common::{
     TableName,
 };
 use koldstore_mirror::{
-    mirror_relation_for_source, plan_delete_selected_mirror_rows, plan_mirror_schema,
-    plan_mirror_stats, plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorAccess,
-    MirrorColumn, SqlParamType,
+    mirror_relation_for_source, plan_async_mirror_batch_upsert, plan_delete_selected_mirror_rows,
+    plan_mirror_schema, plan_mirror_stats, plan_select_mirror_rows_after_seq,
+    plan_upsert_mirror_row, MirrorAccess, MirrorColumn, SqlParamType,
 };
 
 fn pk_shape(name: &str, type_name: &str) -> PrimaryKeyColumnShape {
@@ -34,7 +34,7 @@ fn mirror_relation_uses_clean_schema_storage_name() {
 fn mirror_columns_have_stable_contract_names() {
     assert_eq!(MirrorColumn::Seq.name(), "seq");
     assert_eq!(MirrorColumn::Op.name(), "op");
-    assert_eq!(MirrorColumn::CommitLsn.name(), "commit_lsn");
+    assert_eq!(MirrorColumn::ALL.len(), 2);
 }
 
 #[test]
@@ -50,7 +50,12 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
         .contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"items__cl\""));
     assert!(plan.create_table.sql.contains("\"id\" bigint NOT NULL"));
     assert!(plan.create_table.sql.contains("\"seq\" bigint NOT NULL"));
+    assert!(!plan.create_table.sql.contains("commit_lsn"));
     assert!(plan.create_table.sql.contains("PRIMARY KEY (\"id\")"));
+    assert!(plan
+        .drop_legacy_commit_lsn
+        .sql
+        .contains("DROP COLUMN IF EXISTS \"commit_lsn\""));
     assert!(plan
         .seq_index
         .sql
@@ -59,7 +64,7 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
         .tombstone_index
         .sql
         .contains("ON \"koldstore\".\"items__cl\" (\"seq\") WHERE \"op\" = 3"));
-    assert_eq!(plan.create_statements().len(), 3);
+    assert_eq!(plan.create_statements().len(), 4);
 }
 
 #[test]
@@ -71,14 +76,31 @@ fn mirror_upsert_builder_returns_latest_state_write_fragment() {
         &["NEW.\"id\"".to_string()],
         "SNOWFLAKE_ID()",
         MirrorOperation::Update,
-        "pg_current_wal_lsn()",
     )
     .unwrap();
 
     assert!(sql.contains("INSERT INTO \"koldstore\".\"items__cl\""));
-    assert!(sql.contains("VALUES (NEW.\"id\", SNOWFLAKE_ID(), 2, pg_current_wal_lsn())"));
+    assert!(sql.contains("VALUES (NEW.\"id\", SNOWFLAKE_ID(), 2)"));
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
-    assert!(sql.contains("\"commit_lsn\" = EXCLUDED.\"commit_lsn\""));
+    assert!(!sql.contains("commit_lsn"));
+}
+
+#[test]
+fn async_mirror_batch_upsert_uses_typed_unnest_and_xmax_counters() {
+    let sql = plan_async_mirror_batch_upsert(
+        "\"koldstore\".\"items__cl\"",
+        &["id"],
+        &["bigint".to_string()],
+    )
+    .unwrap();
+
+    assert!(sql.contains("unnest($2::text[], $3::bigint[])"));
+    assert!(sql.contains("incoming.pk_0::bigint AS \"id\""));
+    assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
+    assert!(sql.contains("RETURNING (xmax = 0) AS inserted"));
+    assert!(!sql.contains("jsonb_to_recordset"));
+    assert!(!sql.contains("commit_lsn"));
+    assert!(!sql.contains("existing AS"));
 }
 
 #[test]

@@ -75,6 +75,12 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
 | `koldstore.flush_check_interval_seconds` | int | `30` | How often the database worker evaluates `auto_flush` tables and runs at most one needed flush. Clamped to `1..=86400`. |
+| `koldstore.async_apply_poll_interval_ms` | int | `100` | Latch poll interval for the async mirror apply loop. Clamped to `50..=5000`. Prefer `ALTER DATABASE` / `ALTER SYSTEM` + reload for the bgworker (session `SET` does not affect it). |
+| `koldstore.async_apply_max_rows_per_tick` | int | `0` | Max source row changes per apply tick (`0` = unlimited / drain available WAL). |
+| `koldstore.async_apply_max_ms_per_tick` | int | `0` | Max wall-clock ms per apply tick (`0` = unlimited). When exhausted, commit `applied_lsn` and continue next wake. |
+| `koldstore.flush_prelock_max_passes` | int | `3` | Max phase-5.5 pre-lock async apply passes during flush before failing closed. |
+| `koldstore.flush_prelock_max_ms` | int | `5000` | Combined wall-clock budget (ms) for flush phase-5.5 pre-lock catch-up. |
+| `koldstore.async_mirror_max_retained_bytes` | int | `0` | Optional fail-closed admission limit on slot retained WAL bytes (`0` = disabled). Never silently drops WAL. |
 
 ### Internal GUCs
 
@@ -102,6 +108,7 @@ Every SQL-callable function the extension installs today:
 | `koldstore.set_table_auto_flush(...)` | `boolean` | `true` when an active managed table was updated |
 | `koldstore.unmanage_table(...)` | `bigint` | Count of deactivated `koldstore.schemas` rows |
 | `koldstore.wait_for_async_mirror()` | `bigint` | Async source row changes applied by this fence |
+| `koldstore.async_mirror_status()` | `jsonb` | Slot lag, retained bytes, apply rates, health |
 | `koldstore.async_mirror_slot_name()` | `text` | Deterministic logical-slot name for the current database |
 | `koldstore.disable_async_mirror()` | `boolean` | Whether async publication or slot infrastructure was removed |
 | `koldstore.enqueue_flush_job(...)` | `bigint` | `1` if a job was inserted, else `0` |

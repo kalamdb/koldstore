@@ -127,9 +127,12 @@ fn mirror_capture_preserves_composite_pk_in_conflict_and_row_values() {
     let plan = capture_plan(vec![pk_column("tenant_id", 1), pk_column("id", 2)]);
     let sql = &plan.function.sql;
 
-    assert!(sql.contains(
-        "INSERT INTO \"koldstore\".\"messages__cl\" (\"tenant_id\", \"id\", \"seq\", \"op\", \"commit_lsn\")"
-    ) || sql.contains("(\"tenant_id\", \"id\", \"seq\", \"op\", \"commit_lsn\")"));
+    assert!(
+        sql.contains(
+            "INSERT INTO \"koldstore\".\"messages__cl\" (\"tenant_id\", \"id\", \"seq\", \"op\")"
+        ) || sql.contains("(\"tenant_id\", \"id\", \"seq\", \"op\")")
+    );
+    assert!(!sql.contains("commit_lsn"));
     assert!(sql.contains("src.\"tenant_id\", src.\"id\""));
     assert!(sql.contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE"));
     assert!(sql.contains("mirror.\"tenant_id\" = src.\"tenant_id\""));

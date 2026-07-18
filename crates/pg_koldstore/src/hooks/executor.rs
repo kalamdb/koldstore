@@ -16,8 +16,6 @@ pub struct MirrorCaptureEffect {
     pub operation: MirrorOperation,
     /// SQL expression used to allocate the mirror sequence.
     pub seq_expression: &'static str,
-    /// SQL expression used to capture diagnostic WAL position.
-    pub commit_lsn_expression: &'static str,
     /// Whether the effect is coupled to the user transaction.
     pub transactional: bool,
 }
@@ -58,7 +56,6 @@ pub const fn plan_mirror_capture_effect(operation: ManagedDmlOperation) -> Mirro
     MirrorCaptureEffect {
         operation,
         seq_expression: koldstore_common::snowflake_default_expression(),
-        commit_lsn_expression: "pg_current_wal_lsn()",
         transactional: true,
     }
 }

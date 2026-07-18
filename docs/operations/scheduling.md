@@ -30,6 +30,29 @@ Session `SET` only affects the current backend. The built-in worker reads GUCs
 from its own connection (database / system defaults), so use `ALTER DATABASE`
 or `ALTER SYSTEM` when changing scheduler cadence for background flushes.
 
+### Async apply poll interval
+
+The same worker peeks the logical slot on a latch cadence controlled by
+`koldstore.async_apply_poll_interval_ms` (default `100`, clamped to
+`50..=5000`). Each apply tick runs in **one** PostgreSQL transaction: mirror
+batch writes and `async_mirror_state.applied_lsn` commit together (or roll back
+together on ERROR).
+
+```sql
+-- Per-database (preferred for the bgworker):
+ALTER DATABASE mydb SET koldstore.async_apply_poll_interval_ms = 50;
+-- Restart the database worker (or terminate + ensure) so it reconnects with
+-- the new database default. SIGHUP also reloads ALTER SYSTEM values.
+
+-- Or persist cluster-wide:
+ALTER SYSTEM SET koldstore.async_apply_poll_interval_ms = 200;
+SELECT pg_reload_conf();
+```
+
+Session `SET` does not affect the background worker. Prefer `ALTER DATABASE`
+or `ALTER SYSTEM` + reload / worker restart, matching
+`flush_check_interval_seconds`.
+
 After a failed auto-flush (for example `max_rows_per_file` below the
 `koldstore.min_max_rows_per_file` floor), that table is skipped for 60 seconds
 so one bad table cannot monopolize every tick.

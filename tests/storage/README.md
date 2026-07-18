@@ -50,7 +50,7 @@ scripts/run-storage-comparison.sh --rows 1000000 --hot-limit 50000
 scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
 # Opt-in committed-WAL capture; wrapper prepares the server wal_level:
 scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 5000 \
-  --mirror-capture-mode async
+  --mode async
 
 # Or prepare wal_level manually, then run the test directly. CREATE EXTENSION
 # and the first async manage call create the publication and slot automatically:

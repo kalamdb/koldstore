@@ -15,8 +15,8 @@ pub use exec::{
 };
 pub use materialize::HOT_SEQ_SENTINEL;
 pub use path::{
-    build_path_replacement, custom_scan_explain_label, replace_heap_final_path,
-    PathReplacementDecision, PlannerPath, PlannerPathKind, CUSTOM_PATH_NAME,
+    build_path_replacement, clear_partial_heap_paths, custom_scan_explain_label,
+    replace_heap_final_path, PathReplacementDecision, PlannerPath, PlannerPathKind, CUSTOM_PATH_NAME,
 };
 pub use plan::{
     prune_segment_stats, prune_segment_stats_hints, MergeMetadataAttnums, MergeScanPlan,

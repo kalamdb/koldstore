@@ -115,9 +115,13 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
                     &[],
                 )
                 .await?;
-            // Applier ERROR-exits on the failpoint; the launcher may restart it
-            // immediately, so do not require a stable stopped window.
+            // Applier soft-fails on the failpoint and backs off; it must remain
+            // running so catch-up resumes after the failpoint is cleared.
             tokio::time::sleep(Duration::from_millis(750)).await;
+            assert!(
+                common::async_worker_running(&db.client).await?,
+                "soft-fail must keep the async worker alive"
+            );
             Ok::<(), anyhow::Error>(())
         }
         .await;
@@ -125,12 +129,12 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
         clear_async_failpoint(&db.client).await?;
         result?;
 
-        // New backends must load the reset failpoint default.
+        // Worker keeps the old failpoint until reconnect; bounce it after reset.
         let _ = common::terminate_async_worker(&db.client).await?;
         if wait_until_worker_running(&db.client).await.is_err() {
             common::wait_for_async_worker(&db.client).await?;
         }
-        // Catch up any WAL left from the crashed apply attempt, then insert the recovery row.
+        // Catch up any WAL left from the soft-failed apply attempt, then insert the recovery row.
         let _ = common::wait_for_async_mirror(&db.client).await?;
         db.client
             .execute(
@@ -286,6 +290,120 @@ async fn async_worker_survives_truncate_noise_in_slot() -> Result<()> {
     Ok(())
 }
 
+/// Mid-tick abort after mirror SPI writes must roll back `applied_lsn` and
+/// mirror rows together (one PostgreSQL transaction per apply tick).
+#[tokio::test]
+async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
+    if !common::selected_mirror_capture_mode()?.is_async() {
+        common::log_always("skipping mid-tick applied_lsn abort assertions in strict mode");
+        return Ok(());
+    }
+
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "async_mid_tick_abort").await?;
+        clear_async_failpoint(&db.client).await?;
+        cleanup_leftover_async_tables(&db.client).await?;
+        let table_name = format!("{}_events", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+        let dbname: String = db
+            .client
+            .query_one("SELECT current_database()::text", &[])
+            .await?
+            .get(0);
+
+        ensure_publication(&db.client).await?;
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        manage_async(&db.client, &relation, &db.storage_name).await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        // Arm the failpoint at database + session scope. Bgworkers only see
+        // database defaults (loaded at connect), so bounce the applier after
+        // ALTER DATABASE. Session SET covers wait_for_async_mirror.
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" SET koldstore.failpoint = 'error:async_mirror_apply_after_batch'; \
+                 SET koldstore.failpoint = 'error:async_mirror_apply_after_batch'"
+            ))
+            .await?;
+        let _ = common::terminate_async_worker(&db.client).await?;
+        if wait_until_worker_running(&db.client).await.is_err() {
+            // Launcher may be slow; ensure still starts a worker that inherits
+            // the database failpoint default.
+            common::wait_for_async_worker(&db.client).await?;
+        }
+
+        let before: Option<String> = db
+            .client
+            .query_opt(
+                "SELECT applied_lsn::text FROM koldstore.async_mirror_state \
+                 WHERE database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())",
+                &[],
+            )
+            .await?
+            .map(|row| row.get(0));
+
+        db.client
+            .execute(
+                &format!("INSERT INTO {relation} (id, body) VALUES (1, 'partial')"),
+                &[],
+            )
+            .await?;
+
+        // Worker may soft-fail the after-batch abort; the session fence must
+        // still ERROR when it consumes the pending WAL.
+        let err = db
+            .client
+            .query_one("SELECT koldstore.wait_for_async_mirror()", &[])
+            .await;
+        assert!(
+            err.is_err(),
+            "wait_for_async_mirror must ERROR on mid-tick after-batch failpoint; got {err:?}"
+        );
+
+        let after: Option<String> = db
+            .client
+            .query_opt(
+                "SELECT applied_lsn::text FROM koldstore.async_mirror_state \
+                 WHERE database_oid = (SELECT oid FROM pg_database WHERE datname = current_database())",
+                &[],
+            )
+            .await?
+            .map(|row| row.get(0));
+        assert_eq!(
+            before, after,
+            "mid-tick abort must not durably advance applied_lsn"
+        );
+        assert_eq!(
+            common::mirror_op_count(&db.client, &mirror, 1).await?,
+            0,
+            "mid-tick abort must roll back mirror SPI writes with applied_lsn"
+        );
+
+        clear_async_failpoint(&db.client).await?;
+        // Worker kept the old failpoint until reconnect; bounce after reset.
+        let _ = common::terminate_async_worker(&db.client).await?;
+        if wait_until_worker_running(&db.client).await.is_err() {
+            common::wait_for_async_worker(&db.client).await?;
+        }
+        // Worker may catch up before the session fence; wait on mirror state.
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, 1).await?;
+        assert_eq!(
+            common::mirror_op_count(&db.client, &mirror, 1).await?,
+            1,
+            "recovery must apply the rolled-back change exactly once"
+        );
+        assert_eq!(common::wait_for_async_mirror(&db.client).await?, 0);
+
+        cleanup_async_table(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
 async fn clear_async_failpoint(client: &tokio_postgres::Client) -> Result<()> {
     let dbname: String = client
         .query_one("SELECT current_database()::text", &[])
@@ -293,7 +411,10 @@ async fn clear_async_failpoint(client: &tokio_postgres::Client) -> Result<()> {
         .get(0);
     client
         .batch_execute(&format!(
-            "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; RESET koldstore.failpoint"
+            "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
+             ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+             RESET koldstore.failpoint; \
+             RESET koldstore.internal_async_mirror_worker"
         ))
         .await?;
     Ok(())

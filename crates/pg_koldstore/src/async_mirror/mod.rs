@@ -16,6 +16,8 @@ pub mod lifecycle;
 #[cfg(feature = "pg")]
 pub mod provision;
 #[cfg(feature = "pg")]
+pub mod status;
+#[cfg(feature = "pg")]
 pub(crate) mod task;
 #[cfg(feature = "pg")]
 pub mod worker;

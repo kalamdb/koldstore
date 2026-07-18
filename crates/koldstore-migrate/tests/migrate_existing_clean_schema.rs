@@ -75,14 +75,13 @@ fn populated_table_initialization_inserts_existing_primary_keys_without_touching
         .statement
         .sql
         .contains("INSERT INTO \"koldstore\".\"items__cl\""));
+    assert!(plan.statement.sql.contains("(\"id\", \"seq\", \"op\")"));
+    assert!(!plan.statement.sql.contains("commit_lsn"));
     assert!(plan
         .statement
         .sql
-        .contains("(\"id\", \"seq\", \"op\", \"commit_lsn\")"));
-    assert!(plan
-        .statement
-        .sql
-        .contains("SELECT \"id\", SNOWFLAKE_ID(), 1, pg_current_wal_lsn()"));
+        .contains("SELECT \"id\", SNOWFLAKE_ID(), 1"));
+    assert!(!plan.statement.sql.contains("pg_current_wal_lsn()"));
     assert!(plan
         .statement
         .sql

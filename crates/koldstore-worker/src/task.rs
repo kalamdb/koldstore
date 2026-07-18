@@ -6,8 +6,11 @@
 /// Outcome of one worker tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickResult {
-    /// Continue polling.
+    /// Continue polling; no urgent pending apply work.
     Continue,
+    /// Tick budget exhausted with more WAL remaining — poll again without
+    /// waiting for a new WAL insert position.
+    ContinuePending,
     /// Exit the worker loop (for example when infrastructure was removed).
     Stop,
 }

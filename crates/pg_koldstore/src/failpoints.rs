@@ -28,6 +28,7 @@ pub const FAILPOINT_NAMES: &[&str] = &[
     "after_cleanup_before_job_complete",
     "after_job_complete_before_temp_cleanup",
     "async_mirror_apply",
+    "async_mirror_apply_after_batch",
 ];
 
 /// Hits a named failpoint if the session GUC arms it.

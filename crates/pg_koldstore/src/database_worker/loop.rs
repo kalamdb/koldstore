@@ -3,18 +3,25 @@
 //! Each wake: apply async mirror when WAL advanced (if a slot exists), then on
 //! `koldstore.flush_check_interval_seconds` evaluate auto-flush tables.
 //!
-//! The auto-flush catalog probe is not run on the 100ms latch path — only when a
-//! flush check is due (or when deciding whether a slot-less worker should exit).
+//! Apply wakes use `koldstore.async_apply_poll_interval_ms` (default 100). The
+//! auto-flush catalog probe is not run on every latch wake — only when a flush
+//! check is due (or when deciding whether a slot-less worker should exit).
+//!
+//! Apply failures soft-fail with exponential backoff instead of FATAL so a
+//! transient SPI error does not permanently stop catch-up.
 
 use std::ffi::CString;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use koldstore_worker::{flush_check_due, DatabaseWorkerTask, TickResult, APPLY_POLL_INTERVAL_MS};
+use koldstore_worker::{flush_check_due, DatabaseWorkerTask, TickResult};
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 
 use crate::async_mirror::task::AsyncMirrorTask;
 
 use super::flush_task::{database_has_auto_flush_tables, run_flush_scheduler_tick};
+
+const SOFT_FAIL_BACKOFF_MIN_MS: u64 = 100;
+const SOFT_FAIL_BACKOFF_MAX_MS: u64 = 30_000;
 
 /// Runs the persistent database worker until neither async nor auto-flush work remains.
 pub(crate) fn run_async_mirror_applier(database_oid: u32) {
@@ -25,16 +32,18 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     );
 
     let async_task = AsyncMirrorTask::new(database_oid);
-    let poll = Duration::from_millis(APPLY_POLL_INTERVAL_MS);
     let slot = crate::async_mirror::lifecycle::slot_name(database_oid);
     let slot_c = CString::new(slot.as_str()).expect("deterministic slot name contains no NUL");
 
     let mut last_checked_wal = None;
     let mut last_flush_check_secs: Option<i64> = None;
-    // Cached so the 100ms latch path does not open an SPI transaction every wake.
+    // Cached so the latch path does not open an SPI transaction every wake.
     let mut auto_flush_cached = true;
+    let mut apply_backoff_ms = 0_u64;
 
     loop {
+        let poll_ms = crate::guc::async_apply_poll_interval_ms().max(apply_backoff_ms);
+        let poll = Duration::from_millis(poll_ms);
         let slot_exists = crate::async_mirror::lifecycle::native_slot_exists_cstr(&slot_c);
         let now_secs = unix_now_secs();
         let interval = crate::guc::flush_check_interval_seconds();
@@ -42,16 +51,37 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
 
         if slot_exists {
             let current_wal = current_wal_position();
-            if last_checked_wal != Some(current_wal) {
-                worker_transaction(|| match async_task.tick() {
-                    Ok(TickResult::Continue) => {}
-                    Ok(TickResult::Stop) => {}
-                    Err(error) => {
-                        pgrx::error!("async mirror background apply failed: {error}")
+            if last_checked_wal != Some(current_wal) || apply_backoff_ms > 0 {
+                // One PostgreSQL transaction per apply tick: peek batches,
+                // mirror SPI writes, and applied_lsn commit together. Soft-fail
+                // logs and backs off instead of FATAL.
+                match worker_transaction_result(|| async_task.tick()) {
+                    Ok(TickResult::Continue) => {
+                        apply_backoff_ms = 0;
+                        last_checked_wal = Some(current_wal_position());
                     }
-                });
-                // Capture WAL after commit so SPI-generated WAL does not wake the loop again.
-                last_checked_wal = Some(current_wal_position());
+                    Ok(TickResult::ContinuePending) => {
+                        apply_backoff_ms = 0;
+                        last_checked_wal = None;
+                    }
+                    Ok(TickResult::Stop) => {
+                        apply_backoff_ms = 0;
+                    }
+                    Err(error) => {
+                        crate::observability::record_async_apply_error();
+                        pgrx::log!(
+                            "koldstore async mirror apply soft-failed (will retry): {error}"
+                        );
+                        apply_backoff_ms = if apply_backoff_ms == 0 {
+                            SOFT_FAIL_BACKOFF_MIN_MS
+                        } else {
+                            apply_backoff_ms
+                                .saturating_mul(2)
+                                .clamp(SOFT_FAIL_BACKOFF_MIN_MS, SOFT_FAIL_BACKOFF_MAX_MS)
+                        };
+                        last_checked_wal = None;
+                    }
+                }
             }
         }
 
@@ -117,6 +147,26 @@ pub(crate) fn worker_transaction<R>(body: impl FnOnce() -> R) -> R {
     unsafe {
         pgrx::pg_sys::PopActiveSnapshot();
         pgrx::pg_sys::CommitTransactionCommand();
+    }
+    result
+}
+
+/// Like [`worker_transaction`], but aborts the transaction when `body` returns `Err`.
+pub(crate) fn worker_transaction_result<R>(
+    body: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    unsafe {
+        pgrx::pg_sys::SetCurrentStatementStartTimestamp();
+        pgrx::pg_sys::StartTransactionCommand();
+        pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
+    }
+    let result = body();
+    unsafe {
+        pgrx::pg_sys::PopActiveSnapshot();
+        match &result {
+            Ok(_) => pgrx::pg_sys::CommitTransactionCommand(),
+            Err(_) => pgrx::pg_sys::AbortCurrentTransaction(),
+        }
     }
     result
 }

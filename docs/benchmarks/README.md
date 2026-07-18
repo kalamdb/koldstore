@@ -28,7 +28,7 @@ Typical published scale: **10,000,000 rows**, `hot_row_limit = 100000`,
 Parquet). Inserts alternate 100k-row committed batches so neither side is
 always measured first and logical decoding stays transaction-bounded. Numbers
 vary by machine; re-run for your hardware. The published async run uses local
-PG16.13 `release-pg` with `--mirror-capture-mode async`. The strict
+PG16.13 `release-pg` with `--mode async`. The strict
 transactional path remains the default; see
 [Mirror capture modes](../architecture/mirror-capture-modes.md).
 
@@ -124,10 +124,10 @@ gates: [plan](../plans/2026-07-15-managed-mirror-dml-performance.md). Architectu
 ```bash
 # Published RESULTS.md scale: 10M rows / 100k hot / 50k DML sample (~15.5 min/mode).
 scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000 \
-  --dml-sample 50000 --mirror-capture-mode async
+  --dml-sample 50000 --mode async
 # Default strong-consistency mode; mirror work is included in foreground DML:
 scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000 \
-  --dml-sample 50000 --mirror-capture-mode strict
+  --dml-sample 50000 --mode strict
 # Refresh docs/benchmarks/RESULTS.md for both managed columns:
 scripts/run-storage-comparison.sh --both-modes --update-results \
   --rows 10000000 --hot-limit 100000 --dml-sample 50000

@@ -47,6 +47,53 @@ pub const MIN_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 1;
 /// Maximum flush-check interval (1 day).
 pub const MAX_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 24 * 3600;
 
+/// Latch poll interval for the async mirror apply loop (milliseconds).
+pub const ASYNC_APPLY_POLL_INTERVAL_MS_GUC: &str = "koldstore.async_apply_poll_interval_ms";
+/// Default apply latch poll cadence (100 ms).
+pub const DEFAULT_ASYNC_APPLY_POLL_INTERVAL_MS: i32 = 100;
+/// Minimum apply poll interval (avoids busy-spin).
+pub const MIN_ASYNC_APPLY_POLL_INTERVAL_MS: i32 = 50;
+/// Maximum apply poll interval (5 seconds).
+pub const MAX_ASYNC_APPLY_POLL_INTERVAL_MS: i32 = 5_000;
+
+/// Per-tick row budget for bounded async apply (0 = unlimited within the tick).
+pub const ASYNC_APPLY_MAX_ROWS_PER_TICK_GUC: &str = "koldstore.async_apply_max_rows_per_tick";
+/// Default: drain available WAL in one tick (compatibility with prior behavior).
+pub const DEFAULT_ASYNC_APPLY_MAX_ROWS_PER_TICK: i32 = 0;
+/// Minimum rows-per-tick (0 disables the row budget).
+pub const MIN_ASYNC_APPLY_MAX_ROWS_PER_TICK: i32 = 0;
+/// Hard cap on rows processed in one apply tick.
+pub const MAX_ASYNC_APPLY_MAX_ROWS_PER_TICK: i32 = 1_000_000;
+
+/// Per-tick wall-time budget for bounded async apply (0 = unlimited).
+pub const ASYNC_APPLY_MAX_MS_PER_TICK_GUC: &str = "koldstore.async_apply_max_ms_per_tick";
+/// Default: no time budget (compatibility with prior drain-all behavior).
+pub const DEFAULT_ASYNC_APPLY_MAX_MS_PER_TICK: i32 = 0;
+/// Minimum ms-per-tick (0 disables the time budget).
+pub const MIN_ASYNC_APPLY_MAX_MS_PER_TICK: i32 = 0;
+/// Hard cap on wall time for one apply tick.
+pub const MAX_ASYNC_APPLY_MAX_MS_PER_TICK: i32 = 60_000;
+
+/// Maximum bounded apply passes during flush phase-5.5 pre-lock catch-up.
+pub const FLUSH_PRELOCK_MAX_PASSES_GUC: &str = "koldstore.flush_prelock_max_passes";
+pub const DEFAULT_FLUSH_PRELOCK_MAX_PASSES: i32 = 3;
+pub const MIN_FLUSH_PRELOCK_MAX_PASSES: i32 = 1;
+pub const MAX_FLUSH_PRELOCK_MAX_PASSES: i32 = 16;
+
+/// Wall-clock budget (ms) for all phase-5.5 pre-lock passes combined.
+pub const FLUSH_PRELOCK_MAX_MS_GUC: &str = "koldstore.flush_prelock_max_ms";
+pub const DEFAULT_FLUSH_PRELOCK_MAX_MS: i32 = 5_000;
+pub const MIN_FLUSH_PRELOCK_MAX_MS: i32 = 100;
+pub const MAX_FLUSH_PRELOCK_MAX_MS: i32 = 120_000;
+
+/// Optional admission limit on logical-slot retained WAL bytes (`0` = disabled).
+/// When exceeded, apply/flush fail closed — WAL is never silently dropped.
+pub const ASYNC_MIRROR_MAX_RETAINED_BYTES_GUC: &str = "koldstore.async_mirror_max_retained_bytes";
+pub const DEFAULT_ASYNC_MIRROR_MAX_RETAINED_BYTES: i32 = 0;
+pub const MIN_ASYNC_MIRROR_MAX_RETAINED_BYTES: i32 = 0;
+/// 64 GiB hard cap for the GUC (admission still never drops WAL).
+pub const MAX_ASYNC_MIRROR_MAX_RETAINED_BYTES: i32 = i32::MAX;
+
 /// Minimum accepted integer setting value for `min_max_rows_per_file`.
 pub const MIN_MIN_MAX_ROWS_PER_FILE: i32 = 1;
 /// Conservative hard cap for `min_max_rows_per_file`.

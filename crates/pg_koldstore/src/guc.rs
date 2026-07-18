@@ -37,6 +37,24 @@ static PENDING_SEGMENT_TTL_SECONDS: GucSetting<i32> =
 #[cfg(feature = "pg")]
 static FLUSH_CHECK_INTERVAL_SECONDS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS);
+#[cfg(feature = "pg")]
+static ASYNC_APPLY_POLL_INTERVAL_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_ASYNC_APPLY_POLL_INTERVAL_MS);
+#[cfg(feature = "pg")]
+static ASYNC_APPLY_MAX_ROWS_PER_TICK: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_ASYNC_APPLY_MAX_ROWS_PER_TICK);
+#[cfg(feature = "pg")]
+static ASYNC_APPLY_MAX_MS_PER_TICK: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_ASYNC_APPLY_MAX_MS_PER_TICK);
+#[cfg(feature = "pg")]
+static FLUSH_PRELOCK_MAX_PASSES: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_FLUSH_PRELOCK_MAX_PASSES);
+#[cfg(feature = "pg")]
+static FLUSH_PRELOCK_MAX_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_FLUSH_PRELOCK_MAX_MS);
+#[cfg(feature = "pg")]
+static ASYNC_MIRROR_MAX_RETAINED_BYTES: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_ASYNC_MIRROR_MAX_RETAINED_BYTES);
 
 /// Defines pg-koldstore configuration variables.
 #[cfg(feature = "pg")]
@@ -149,6 +167,66 @@ pub fn define_gucs() {
         GucContext::Userset,
         flags,
     );
+    GucRegistry::define_int_guc(
+        c"koldstore.async_apply_poll_interval_ms",
+        c"Async mirror latch poll interval in milliseconds.",
+        c"Database worker latch wait between apply wakes. Clamped to 50..=5000. Prefer ALTER DATABASE / ALTER SYSTEM + reload; session SET does not affect the bgworker. Workers pick up changes on SIGHUP.",
+        &ASYNC_APPLY_POLL_INTERVAL_MS,
+        settings::MIN_ASYNC_APPLY_POLL_INTERVAL_MS,
+        settings::MAX_ASYNC_APPLY_POLL_INTERVAL_MS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.async_apply_max_rows_per_tick",
+        c"Maximum source row changes applied in one async mirror tick.",
+        c"Bounds work per apply transaction. 0 drains all peekable WAL in the tick (legacy). Explicit fences (wait_for_async_mirror / flush) may loop with a higher effective budget.",
+        &ASYNC_APPLY_MAX_ROWS_PER_TICK,
+        settings::MIN_ASYNC_APPLY_MAX_ROWS_PER_TICK,
+        settings::MAX_ASYNC_APPLY_MAX_ROWS_PER_TICK,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.async_apply_max_ms_per_tick",
+        c"Maximum wall-clock milliseconds for one async mirror tick.",
+        c"Bounds apply transaction duration. 0 disables the time budget. Commit applied_lsn and continue on the next wake when the budget is exhausted.",
+        &ASYNC_APPLY_MAX_MS_PER_TICK,
+        settings::MIN_ASYNC_APPLY_MAX_MS_PER_TICK,
+        settings::MAX_ASYNC_APPLY_MAX_MS_PER_TICK,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.flush_prelock_max_passes",
+        c"Maximum phase-5.5 pre-lock async apply passes during flush.",
+        c"Finite catch-up after Parquet upload and before SHARE ROW EXCLUSIVE. Fail closed when the budget is exhausted rather than holding writers indefinitely.",
+        &FLUSH_PRELOCK_MAX_PASSES,
+        settings::MIN_FLUSH_PRELOCK_MAX_PASSES,
+        settings::MAX_FLUSH_PRELOCK_MAX_PASSES,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.flush_prelock_max_ms",
+        c"Maximum wall-clock milliseconds for flush phase-5.5 pre-lock catch-up.",
+        c"Combined budget across pre-lock passes. Exceeding this fails the flush before taking the source relation lock.",
+        &FLUSH_PRELOCK_MAX_MS,
+        settings::MIN_FLUSH_PRELOCK_MAX_MS,
+        settings::MAX_FLUSH_PRELOCK_MAX_MS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.async_mirror_max_retained_bytes",
+        c"Fail-closed admission limit on async mirror retained WAL bytes.",
+        c"When > 0 and pg_wal_lsn_diff(current, confirmed_flush_lsn) exceeds this, apply and flush error instead of advancing. 0 disables. Never silently drops WAL.",
+        &ASYNC_MIRROR_MAX_RETAINED_BYTES,
+        settings::MIN_ASYNC_MIRROR_MAX_RETAINED_BYTES,
+        settings::MAX_ASYNC_MIRROR_MAX_RETAINED_BYTES,
+        GucContext::Userset,
+        flags,
+    );
 }
 
 /// No-op placeholder for non-PostgreSQL tests.
@@ -234,6 +312,36 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::FLUSH_CHECK_INTERVAL_SECONDS_GUC,
             internal: false,
             default_value: "30",
+        },
+        GucDefinition {
+            name: settings::ASYNC_APPLY_POLL_INTERVAL_MS_GUC,
+            internal: false,
+            default_value: "100",
+        },
+        GucDefinition {
+            name: settings::ASYNC_APPLY_MAX_ROWS_PER_TICK_GUC,
+            internal: false,
+            default_value: "0",
+        },
+        GucDefinition {
+            name: settings::ASYNC_APPLY_MAX_MS_PER_TICK_GUC,
+            internal: false,
+            default_value: "0",
+        },
+        GucDefinition {
+            name: settings::FLUSH_PRELOCK_MAX_PASSES_GUC,
+            internal: false,
+            default_value: "3",
+        },
+        GucDefinition {
+            name: settings::FLUSH_PRELOCK_MAX_MS_GUC,
+            internal: false,
+            default_value: "5000",
+        },
+        GucDefinition {
+            name: settings::ASYNC_MIRROR_MAX_RETAINED_BYTES_GUC,
+            internal: false,
+            default_value: "0",
         },
     ]
 }
@@ -386,5 +494,111 @@ pub fn flush_check_interval_seconds() -> i64 {
     #[cfg(not(feature = "pg"))]
     {
         i64::from(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS)
+    }
+}
+
+/// Latch poll interval for the async mirror apply loop, in milliseconds.
+#[must_use]
+pub fn async_apply_poll_interval_ms() -> u64 {
+    #[cfg(feature = "pg")]
+    {
+        let value = ASYNC_APPLY_POLL_INTERVAL_MS.get();
+        u64::try_from(value.clamp(
+            settings::MIN_ASYNC_APPLY_POLL_INTERVAL_MS,
+            settings::MAX_ASYNC_APPLY_POLL_INTERVAL_MS,
+        ))
+        .unwrap_or(u64::from(
+            settings::DEFAULT_ASYNC_APPLY_POLL_INTERVAL_MS as u32,
+        ))
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        u64::try_from(settings::DEFAULT_ASYNC_APPLY_POLL_INTERVAL_MS).unwrap_or(100)
+    }
+}
+
+/// Maximum source row changes applied in one background apply tick (`0` = unlimited).
+#[must_use]
+pub fn async_apply_max_rows_per_tick() -> i64 {
+    #[cfg(feature = "pg")]
+    {
+        i64::from(ASYNC_APPLY_MAX_ROWS_PER_TICK.get().clamp(
+            settings::MIN_ASYNC_APPLY_MAX_ROWS_PER_TICK,
+            settings::MAX_ASYNC_APPLY_MAX_ROWS_PER_TICK,
+        ))
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        i64::from(settings::DEFAULT_ASYNC_APPLY_MAX_ROWS_PER_TICK)
+    }
+}
+
+/// Maximum wall-clock milliseconds for one background apply tick (`0` = unlimited).
+#[must_use]
+pub fn async_apply_max_ms_per_tick() -> i64 {
+    #[cfg(feature = "pg")]
+    {
+        i64::from(ASYNC_APPLY_MAX_MS_PER_TICK.get().clamp(
+            settings::MIN_ASYNC_APPLY_MAX_MS_PER_TICK,
+            settings::MAX_ASYNC_APPLY_MAX_MS_PER_TICK,
+        ))
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        i64::from(settings::DEFAULT_ASYNC_APPLY_MAX_MS_PER_TICK)
+    }
+}
+
+/// Maximum phase-5.5 pre-lock apply passes during flush.
+#[must_use]
+pub fn flush_prelock_max_passes() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        FLUSH_PRELOCK_MAX_PASSES.get().clamp(
+            settings::MIN_FLUSH_PRELOCK_MAX_PASSES,
+            settings::MAX_FLUSH_PRELOCK_MAX_PASSES,
+        )
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_FLUSH_PRELOCK_MAX_PASSES
+    }
+}
+
+/// Combined wall-clock budget (ms) for flush phase-5.5 pre-lock catch-up.
+#[must_use]
+pub fn flush_prelock_max_ms() -> i64 {
+    #[cfg(feature = "pg")]
+    {
+        i64::from(FLUSH_PRELOCK_MAX_MS.get().clamp(
+            settings::MIN_FLUSH_PRELOCK_MAX_MS,
+            settings::MAX_FLUSH_PRELOCK_MAX_MS,
+        ))
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        i64::from(settings::DEFAULT_FLUSH_PRELOCK_MAX_MS)
+    }
+}
+
+/// Optional retained-WAL admission limit in bytes (`0` = disabled).
+#[must_use]
+pub fn async_mirror_max_retained_bytes() -> i64 {
+    #[cfg(feature = "pg")]
+    {
+        i64::from(ASYNC_MIRROR_MAX_RETAINED_BYTES.get().clamp(
+            settings::MIN_ASYNC_MIRROR_MAX_RETAINED_BYTES,
+            settings::MAX_ASYNC_MIRROR_MAX_RETAINED_BYTES,
+        ))
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        i64::from(settings::DEFAULT_ASYNC_MIRROR_MAX_RETAINED_BYTES)
     }
 }

@@ -291,8 +291,14 @@ jobs:
       - name: Compile pg_koldstore for PostgreSQL ${{ matrix.pg }}
         run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER},pg_test,s3 -- -D warnings
 
-      - name: Run example scenarios
-        run: bash scripts/run-examples.sh
+      - name: Run example scenarios (strict)
+        run: bash scripts/run-examples.sh --mode strict
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+
+      - name: Run example scenarios (async, PG 16 only)
+        if: matrix.pg == 16
+        run: bash scripts/run-examples.sh --mode async
         env:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 

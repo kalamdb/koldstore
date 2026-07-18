@@ -272,7 +272,12 @@ fn validate_slot(slot: &str) -> Result<(), String> {
 }
 
 /// Serializes logical decoding and explicit cleanup for one database.
-pub(super) fn lock_apply(database_oid: u32) -> Result<(), String> {
+///
+/// Uses a transaction-scoped advisory lock. Releasing during Parquet upload
+/// requires ending the flush transaction first (session locks deadlock with
+/// logical decoding waiting on the flush XID); that multi-txn redesign is
+/// deferred. Phase-5.5 still drains WAL before the relation lock.
+pub(crate) fn lock_apply(database_oid: u32) -> Result<(), String> {
     lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 

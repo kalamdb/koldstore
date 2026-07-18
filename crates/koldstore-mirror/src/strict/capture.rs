@@ -382,11 +382,7 @@ fn capture_function_sql(
         quoted_pk_columns(&pk_names).map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
     let insert_columns = {
         let mut columns = pk_columns.clone();
-        columns.extend([
-            "\"seq\"".to_string(),
-            "\"op\"".to_string(),
-            "\"commit_lsn\"".to_string(),
-        ]);
+        columns.extend(["\"seq\"".to_string(), "\"op\"".to_string()]);
         columns.join(", ")
     };
     let pk_select_src = pk_columns
@@ -413,12 +409,11 @@ fn capture_function_sql(
     let small_insert = format!(
         r#"
         INSERT INTO {mirror} ({insert_columns})
-        SELECT {pk_select_src}, {seq_expr}, {insert_op}, capture_wal_lsn
+        SELECT {pk_select_src}, {seq_expr}, {insert_op}
         FROM new_rows AS src
         ON CONFLICT ({conflict_columns}) DO UPDATE
         SET "seq" = EXCLUDED."seq",
-            "op" = EXCLUDED."op",
-            "commit_lsn" = EXCLUDED."commit_lsn""#,
+            "op" = EXCLUDED."op""#,
         mirror = mirror.quoted(),
     );
 
@@ -433,11 +428,10 @@ fn capture_function_sql(
         ON {merge_on}
         WHEN MATCHED THEN
             UPDATE SET "seq" = incoming.next_seq,
-                       "op" = {insert_op},
-                       "commit_lsn" = capture_wal_lsn
+                       "op" = {insert_op}
         WHEN NOT MATCHED THEN
             INSERT ({insert_columns})
-            VALUES ({pk_select_incoming}, incoming.next_seq, {insert_op}, capture_wal_lsn)"#,
+            VALUES ({pk_select_incoming}, incoming.next_seq, {insert_op})"#,
         mirror = mirror.quoted(),
     );
 
@@ -449,8 +443,7 @@ fn capture_function_sql(
         r#"
         UPDATE {mirror} AS mirror
         SET "seq" = {seq_expr},
-            "op" = {update_op},
-            "commit_lsn" = capture_wal_lsn
+            "op" = {update_op}
         FROM new_rows AS src
         WHERE {pk_join};
         GET DIAGNOSTICS affected = ROW_COUNT;
@@ -469,8 +462,7 @@ fn capture_function_sql(
         r#"
         UPDATE {mirror} AS mirror
         SET "seq" = {seq_expr},
-            "op" = {delete_op},
-            "commit_lsn" = capture_wal_lsn
+            "op" = {delete_op}
         FROM old_rows AS src
         WHERE {pk_join};
         GET DIAGNOSTICS affected = ROW_COUNT;
@@ -497,7 +489,6 @@ AS $$
 DECLARE
     affected bigint;
     existing_mirror_rows bigint := 0;
-    capture_wal_lsn pg_lsn := pg_current_wal_lsn();
 BEGIN
     IF TG_OP = 'INSERT' THEN
         -- Pre-count overlapping PKs so reinserts over tombstones do not inflate
