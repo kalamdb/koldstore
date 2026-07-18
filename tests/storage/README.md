@@ -9,19 +9,24 @@ This package is excluded from the default workspace `cargo nextest` run (same as
 
 Schema: [`schema.sql`](schema.sql)
 
-Order of measurement:
+Order of measurement (isolated `--side` / `--all-sides`):
 
-1. Seed + DML on both tables
+1. Seed + DML on **one** table only (that column’s side)
 2. In async mode, time a separate mirror catch-up after each DML phase
 3. Snapshot dead tuples (`pg_stat_user_tables`, pre-flush)
-4. **Hot-only PK lookups before flush** (both heaps still hold all rows)
-5. Flush older managed rows to zstd Parquet (duration + peak cluster RSS)
-6. Time `VACUUM (FULL, ANALYZE)` on both heaps, then REINDEX
-7. Hot+cold PK lookups + heap/index size comparison
+4. **Hot-only PK lookups before flush** (full heap still present)
+5. Flush older managed rows to zstd Parquet (duration + peak cluster RSS) —
+   skipped for PostgreSQL-only
+6. Time `VACUUM (FULL, ANALYZE)`, then REINDEX
+7. Hot+cold PK lookups + heap/index size snapshot
 
-The insert phase alternates baseline-first and managed-first 100k-row committed
-batches, accumulating only each side's execution time. This avoids fixed-order
-writeback/thermal bias and bounds logical-decoding transaction memory.
+Published RESULTS.md always use `--all-sides`: stop PostgreSQL, recreate empty
+worker DBs, measure `pg`, then `async`, then `strict` — each alone. That avoids
+dual-table I/O contention and shared-buffer warm-up from a prior mode.
+
+Interleaved smoke (default without `--side`/`--all-sides`) still seeds both
+tables with alternating 100k-row batches for a quick local check; do **not**
+publish those numbers.
 
 Both source tables have autovacuum disabled by the schema, and the harness
 applies the same benchmark-only setting to the generated mirror. A long async
@@ -34,9 +39,9 @@ section. Columns are **PostgreSQL only**, **PG + KoldStore (async)**, and
 run). Flush rows report duration, rows/s, and peak RSS while `flush_table`
 runs. Storage is split into **local PostgreSQL** versus **total hot+cold**.
 
-Pass `--update-results` to merge the run into `docs/benchmarks/RESULTS.md`
-(JSON cache under `docs/benchmarks/.storage-results/`). Use `--both-modes` to
-fill both managed columns in one invocation.
+Pass `--update-results` with `--all-sides` (or `--side …`) to merge into
+`docs/benchmarks/RESULTS.md` (JSON cache under
+`docs/benchmarks/.storage-results/{pg,async,strict}.json`).
 
 TODO rows not measured yet include: sustainable throughput, p99 latency, peak
 memory under the full workload, CPU/WAL/I/O, object-store efficiency, open

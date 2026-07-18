@@ -21,7 +21,9 @@ async fn ordered_limit_after_multi_wave_flush_returns_cold_rows() -> Result<()> 
         let db = common::TestDb::start(target, "merge_ordered_limit").await?;
         // Seed in waves so cold grows across multiple segments (high CustomScan
         // cost makes a leaked heap-only ordered path look attractive).
-        let table = db.create_indexed_items_table("ordered_items", 2_000).await?;
+        let table = db
+            .create_indexed_items_table("ordered_items", 2_000)
+            .await?;
         db.manage_shared(&table.relation, "id").await?;
         db.client
             .execute(
@@ -325,7 +327,10 @@ async fn ordered_limit_during_flush_sees_all_rows() -> Result<()> {
             .query_one(&format!("SELECT count(*) FROM {}", table.relation), &[])
             .await?
             .get(0);
-        anyhow::ensure!(after == 800, "post-flush count must remain 800, got {after}");
+        anyhow::ensure!(
+            after == 800,
+            "post-flush count must remain 800, got {after}"
+        );
     }
     Ok(())
 }

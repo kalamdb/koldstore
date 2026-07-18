@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge async/strict storage-comparison JSON snapshots into RESULTS.md."""
+"""Merge isolated pg/async/strict storage-comparison JSON into RESULTS.md."""
 
 from __future__ import annotations
 
@@ -28,11 +28,13 @@ def cell(report: dict[str, Any] | None, section: str, metric: str, field: str) -
     return MISSING
 
 
-def ordered_metrics(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | None, section: str) -> list[str]:
+def ordered_metrics(*reports: dict[str, Any] | None, section: str) -> list[str]:
+    # Prefer the report with the most rows (async includes catch-up metrics) so
+    # nested rows land next to their parent operations instead of at the end.
+    present = [r for r in reports if r is not None]
+    present.sort(key=lambda r: len(r.get(section, [])), reverse=True)
     seen: list[str] = []
-    for report in (async_report, strict_report):
-        if report is None:
-            continue
+    for report in present:
         for row in report.get(section, []):
             metric = row.get("metric")
             if metric and metric not in seen:
@@ -40,19 +42,10 @@ def ordered_metrics(async_report: dict[str, Any] | None, strict_report: dict[str
     return seen
 
 
-def pick_pg(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | None, section: str, metric: str) -> str:
-    reports = [r for r in (async_report, strict_report) if r is not None]
-    reports.sort(key=lambda r: r.get("generated_at", ""), reverse=True)
-    for report in reports:
-        value = cell(report, section, metric, "postgres_only")
-        if value != MISSING:
-            return value
-    return MISSING
-
-
 def render_table(
     label: str,
     section: str,
+    pg_report: dict[str, Any] | None,
     async_report: dict[str, Any] | None,
     strict_report: dict[str, Any] | None,
 ) -> str:
@@ -60,22 +53,37 @@ def render_table(
         f"| {label} | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |",
         "| --- | --- | --- | --- |",
     ]
-    for metric in ordered_metrics(async_report, strict_report, section):
-        pg = pick_pg(async_report, strict_report, section, metric)
+    for metric in ordered_metrics(
+        pg_report, async_report, strict_report, section=section
+    ):
+        # Prefer the dedicated pg-side snapshot; fall back to legacy interleaved
+        # JSON that still embeds postgres_only beside a managed column.
+        pg = cell(pg_report, section, metric, "postgres_only")
+        if pg == MISSING:
+            for report in (async_report, strict_report):
+                pg = cell(report, section, metric, "postgres_only")
+                if pg != MISSING:
+                    break
         async_val = cell(async_report, section, metric, "koldstore")
         strict_val = cell(strict_report, section, metric, "koldstore")
         lines.append(f"| {metric} | {pg} | {async_val} | {strict_val} |")
     return "\n".join(lines)
 
 
-def run_meta(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | None) -> str:
-    source = async_report or strict_report or {}
+def run_meta(
+    pg_report: dict[str, Any] | None,
+    async_report: dict[str, Any] | None,
+    strict_report: dict[str, Any] | None,
+) -> str:
+    source = pg_report or async_report or strict_report or {}
     rows = source.get("rows", "?")
     hot = source.get("hot_limit", "?")
     dml = source.get("dml_sample", "?")
     batch = source.get("insert_batch_rows", "?")
     max_rows = source.get("max_rows_per_file", "?")
     modes = []
+    if pg_report is not None:
+        modes.append("pg")
     if async_report is not None:
         modes.append("async")
     if strict_report is not None:
@@ -84,20 +92,24 @@ def run_meta(async_report: dict[str, Any] | None, strict_report: dict[str, Any] 
     return (
         f"**Run:** {rows} rows · `hot_row_limit = {hot}` · `max_rows_per_file = {max_rows}` "
         f"· `--dml-sample {dml}` · `insert_batch_rows = {batch}` · zstd Parquet · "
-        f"modes measured: **{mode_text}**"
+        f"isolated fresh server per side · sides measured: **{mode_text}**"
     )
 
 
-def render(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | None) -> str:
+def render(
+    pg_report: dict[str, Any] | None,
+    async_report: dict[str, Any] | None,
+    strict_report: dict[str, Any] | None,
+) -> str:
     parts = [
         "# Latest benchmark results",
         "",
         "Published numbers from the most recent storage comparison run(s). Re-run",
-        "`scripts/run-storage-comparison.sh --update-results` (once per mode, or",
-        "with `--both-modes`) to refresh this file. Methodology:",
-        "[README.md](README.md).",
+        "`scripts/run-storage-comparison.sh --all-sides --update-results` to refresh",
+        "this file. Each column is measured alone on a fresh pgrx PostgreSQL",
+        "(stop → recreate DBs → one side). Methodology: [README.md](README.md).",
         "",
-        run_meta(async_report, strict_report),
+        run_meta(pg_report, async_report, strict_report),
         "",
         "Managed PostgreSQL sizes include hot heap + `koldstore.<table>__cl` + mirror",
         "indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are",
@@ -105,7 +117,7 @@ def render(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | 
         "",
         "## Main comparison",
         "",
-        render_table("Metric", "main", async_report, strict_report),
+        render_table("Metric", "main", pg_report, async_report, strict_report),
         "",
         "‡ Hot+cold PK lookups open matching Parquet segments; footer open + merge-scan",
         "setup can dominate vs a pure B-tree probe at large segment sizes. See",
@@ -113,7 +125,7 @@ def render(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | 
         "",
         "## Detail (throughput and storage)",
         "",
-        render_table("Operation", "detail", async_report, strict_report),
+        render_table("Operation", "detail", pg_report, async_report, strict_report),
         "",
         "† Strict DML updates the change-log mirror in the foreground. Async DML",
         "records heap WAL in the foreground; catch-up rows appear only in the async",
@@ -125,18 +137,24 @@ def render(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pg-json", type=Path, default=None)
     parser.add_argument("--async-json", type=Path, default=None)
     parser.add_argument("--strict-json", type=Path, default=None)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
+    pg_report = load_report(args.pg_json)
     async_report = load_report(args.async_json)
     strict_report = load_report(args.strict_json)
-    if async_report is None and strict_report is None:
-        raise SystemExit("at least one of --async-json / --strict-json must exist")
+    if pg_report is None and async_report is None and strict_report is None:
+        raise SystemExit(
+            "at least one of --pg-json / --async-json / --strict-json must exist"
+        )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(render(async_report, strict_report), encoding="utf-8")
+    args.out.write_text(
+        render(pg_report, async_report, strict_report), encoding="utf-8"
+    )
     print(f"wrote {args.out}")
 
 

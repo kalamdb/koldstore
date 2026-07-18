@@ -7,8 +7,8 @@ table.
 
 **Latest numbers:** [RESULTS.md](RESULTS.md) — columns are PostgreSQL only,
 PG + KoldStore (async), and PG + KoldStore (strict). Refresh with
-`scripts/run-storage-comparison.sh --update-results` (add `--both-modes` to
-measure both managed columns in one invocation).
+`scripts/run-storage-comparison.sh --all-sides --update-results` (each column
+gets a fresh pgrx PostgreSQL: stop → recreate DBs → measure one side alone).
 
 ## Documents in this folder
 
@@ -25,11 +25,10 @@ from [`tests/storage/schema.sql`](../../tests/storage/schema.sql).
 
 Typical published scale: **10,000,000 rows**, `hot_row_limit = 100000`,
 `max_rows_per_file = 1000000`, `--dml-sample 50000` (~9.9M rows flushed, zstd
-Parquet). Inserts alternate 100k-row committed batches so neither side is
-always measured first and logical decoding stays transaction-bounded. Numbers
-vary by machine; re-run for your hardware. The published async run uses local
-PG16.13 `release-pg` with `--mode async`. The strict
-transactional path remains the default; see
+Parquet). Published RESULTS use `--all-sides`: each column alone on a fresh
+pgrx PostgreSQL (pg-only and strict without logical WAL; async with
+`wal_level=logical`). Inserts use committed 100k-row batches. Numbers vary by
+machine; re-run for your hardware. See
 [Mirror capture modes](../architecture/mirror-capture-modes.md).
 
 **Managed PostgreSQL sizes always include** the hot user heap **plus**
@@ -68,74 +67,47 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
   **not** include the following explicit `koldstore.wait_for_async_mirror()`
   fence. Catch-up rows are therefore part of the result, not optional context.
   Do not publish comparisons from the default 1k-row sample—it is too noisy.
-- Insert throughput accumulates only each side's execution time across
-  alternating 100k-row batches. Alternating order removes sustained-load bias;
-  bounded source transactions also avoid presenting one large logical-decoding
-  transaction as a representative application insert.
+- **Published runs isolate each column** on its own fresh pgrx PostgreSQL
+  (`--all-sides`): stop the cluster, recreate empty worker DBs, then measure
+  only that side. This avoids dual-table I/O contention and shared-buffer /
+  page-cache warm-up from a previous mode. PostgreSQL-only and strict prepare
+  without `wal_level=logical`; async prepares with logical WAL (required for
+  the mirror). Do not compare numbers from an interleaved dual-table smoke run
+  to published RESULTS.md.
+- Insert throughput for isolated sides uses committed 100k-row batches on that
+  side alone. Bounded source transactions also avoid presenting one large
+  logical-decoding transaction as a representative application insert.
 - For deterministic phase accounting, the harness keeps the worker GUC on for
   `manage_table` (required for async activation), then sets
   `koldstore.internal_async_mirror_worker` to `off` and terminates the worker so
   each explicit fence receives the full insert, update, or delete phase. This is
   a measurement control only: its default is `on`, and normal async tables keep
   the bounded-lag background worker running without application fences. The
-  harness also performs untimed `CHECKPOINT`s before the interleaved insert
-  phase and before each compared update/delete side, so prior writeback is not
-  charged to the next measurement.
+  harness also performs untimed `CHECKPOINT`s before the insert phase and
+  before each timed update/delete, so prior writeback is not charged to the
+  next measurement.
 - Hot+cold PK lookups open matching Parquet segments (min/max prune +
   row-group stats / bloom). At published scale each surviving segment is ~1M
   wide rows, so footer open + merge-scan setup dominates vs a pure B-tree
   probe; streaming execution and tighter segment sizing are follow-ups. See
   [performance](../performance.md).
 
-## Strict DML capture history (before → trigger rewrite)
-
-This section is retained as historical evidence for the default strict mode;
-it is not the async 10M run in [RESULTS.md](RESULTS.md). Capture is synchronous
-in the user transaction (`AFTER … FOR EACH STATEMENT` with transition tables).
-The rewrite keeps small INSERTs on `ON CONFLICT`, uses `MERGE` for bulk INSERT,
-updates the mirror directly for UPDATE/DELETE, and moves PK rejection to a
-separate `BEFORE UPDATE OF pk…` row trigger so ordinary UPDATEs no longer
-materialize `OLD TABLE`.
-
-Local PG16.13, `release-pg`, median of three runs
-(`scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000`):
-
-| Managed op | Before (5k sample) | After (5k sample) | Speedup |
-| --- | ---: | ---: | ---: |
-| INSERT | 26.7k ops/s | 50.3k ops/s | **1.9×** |
-| UPDATE | 887 ops/s | 43.0k ops/s | **48×** |
-| DELETE | 39.7k ops/s | 123k ops/s | **3.1×** |
-
-Absolute after numbers at a **100k-row** DML sample (same machine/profile):
-
-| Managed op | After (100k sample) |
-| --- | ---: |
-| INSERT | 50.5k ops/s |
-| UPDATE | 34.9k ops/s |
-| DELETE | 87.3k ops/s |
-
-Task-1 UPDATE of 100k rows with the old OLD/NEW PK guard did not finish in
->6 minutes here, so the fair before/after ratio uses the 5k sample. Design and
-gates: [plan](../plans/2026-07-15-managed-mirror-dml-performance.md). Architecture:
-[dml-table](../architecture/dml-table.md).
-
 ## Reproduce
 
 ```bash
-# Published RESULTS.md scale: 10M rows / 100k hot / 50k DML sample (~15.5 min/mode).
-scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000 \
-  --dml-sample 50000 --mode async
-# Default strong-consistency mode; mirror work is included in foreground DML:
-scripts/run-storage-comparison.sh --rows 10000000 --hot-limit 100000 \
-  --dml-sample 50000 --mode strict
-# Refresh docs/benchmarks/RESULTS.md for both managed columns:
-scripts/run-storage-comparison.sh --both-modes --update-results \
+# Published RESULTS.md (fair): fresh server per column, ~15–20+ min/side.
+scripts/run-storage-comparison.sh --all-sides --update-results \
   --rows 10000000 --hot-limit 100000 --dml-sample 50000
-# Faster local smoke (defaults: 100k rows / 10k hot / 1k DML sample):
+# Single isolated side (also fresh-prepares that side's server):
+scripts/run-storage-comparison.sh --side pg --update-results \
+  --rows 10000000 --hot-limit 100000 --dml-sample 50000
+scripts/run-storage-comparison.sh --side async --update-results \
+  --rows 10000000 --hot-limit 100000 --dml-sample 50000
+scripts/run-storage-comparison.sh --side strict --update-results \
+  --rows 10000000 --hot-limit 100000 --dml-sample 50000
+# Faster local smoke (interleaved dual-table; not for RESULTS.md):
 scripts/run-storage-comparison.sh
-# Managed DML before/after-style sample (UPDATE/DELETE size):
 scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 5000
-scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
 ```
 
 Additional pgbench-oriented suites live under [`benchmarks/`](../../benchmarks/).

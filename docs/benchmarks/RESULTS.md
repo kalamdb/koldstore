@@ -1,11 +1,16 @@
 # Latest benchmark results
 
-Published numbers from the most recent storage comparison run(s). Re-run
-`scripts/run-storage-comparison.sh --update-results` (once per mode, or
-with `--both-modes`) to refresh this file. Methodology:
-[README.md](README.md).
+> **Published 10M `--all-sides` run in progress.** The tables below are from a
+> small methodology smoke (10k rows) and will be replaced when the full run
+> finishes. Each column uses a fresh pgrx PostgreSQL. Methodology:
+> [README.md](README.md).
 
-**Run:** 10000000 rows · `hot_row_limit = 100000` · `max_rows_per_file = 1000000` · `--dml-sample 50000` · `insert_batch_rows = 100000` · zstd Parquet · modes measured: **async + strict**
+Published numbers from the most recent storage comparison run(s). Re-run
+`scripts/run-storage-comparison.sh --all-sides --update-results` to refresh
+this file. Each column is measured alone on a fresh pgrx PostgreSQL
+(stop → recreate DBs → one side). Methodology: [README.md](README.md).
+
+**Run:** 10000 rows · `hot_row_limit = 1000` · `max_rows_per_file = 1000` · `--dml-sample 500` · `insert_batch_rows = 10000` · zstd Parquet · isolated fresh server per side · sides measured: **pg + async + strict** (smoke only — not published scale)
 
 Managed PostgreSQL sizes include hot heap + `koldstore.<table>__cl` + mirror
 indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
@@ -15,24 +20,24 @@ indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
 
 | Metric | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |
 | --- | --- | --- | --- |
-| foreground insert throughput | 46915 ops/s | 91864 ops/s | 21957 ops/s |
+| foreground insert throughput | 95987 ops/s | 98298 ops/s | 52040 ops/s |
 | sustainable insert throughput | TODO | TODO | TODO |
 | insert p99 latency | TODO | TODO | TODO |
 | update p99 latency | TODO | TODO | TODO |
 | hot-query p99 latency | TODO | TODO | TODO |
 | cold-query p99 latency | TODO | TODO | TODO |
-| hot+cold query throughput | 1420 ops/s | 1262 ops/s | 1175 ops/s |
+| hot+cold query throughput | 1493 ops/s | 1147 ops/s | 1095 ops/s |
 | cold files fetched/query | — | TODO | TODO |
 | cold bytes fetched/query | — | TODO | TODO |
 | peak memory under workload | TODO | TODO | TODO |
-| peak RSS during flush | — | 450.52 MiB (before=351.64 MiB, after=450.52 MiB) | 1.95 GiB (before=198.66 MiB, after=1.95 GiB) |
-| flush duration | — | 152.18 s (65054 rows/s) | 212.23 s (46647 rows/s) |
+| peak RSS during flush | — | 95.89 MiB (before=64.59 MiB, after=95.89 MiB) | 78.55 MiB (before=47.59 MiB, after=78.55 MiB) |
+| flush duration | — | 485.4 ms (18543 rows/s) | 382.8 ms (23512 rows/s) |
 | CPU seconds per 1M operations | TODO | TODO | TODO |
 | WAL generated per 1M operations | TODO | TODO | TODO |
 | local bytes written | TODO | TODO | TODO |
-| VACUUM duration | 112.79 s | 3.40 s | 6.01 s |
-| local PostgreSQL storage | 5.85 GiB | 73.01 MiB | 73.01 MiB |
-| total hot+cold storage | 5.85 GiB | 670.06 MiB | 671.68 MiB |
+| VACUUM duration | 165.1 ms | 25.2 ms | 24.1 ms |
+| local PostgreSQL storage | 6.42 MiB | 880.0 KiB | 880.0 KiB |
+| total hot+cold storage | 6.42 MiB | 1.44 MiB | 1.44 MiB |
 | peak open file descriptors | TODO | TODO | TODO |
 | combined backup size | TODO | TODO | TODO |
 | full query-ready restore time | TODO | TODO | TODO |
@@ -47,24 +52,24 @@ setup can dominate vs a pure B-tree probe at large segment sizes. See
 
 | Operation | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |
 | --- | --- | --- | --- |
-| insert speed† | 46915 ops/s (21 µs/op) | 91864 ops/s (11 µs/op) | 21957 ops/s (46 µs/op) |
-| update speed† | 21194 ops/s (47 µs/op) | 22486 ops/s (44 µs/op) | 19055 ops/s (52 µs/op) |
-| delete speed† | 129358 ops/s (8 µs/op) | 147819 ops/s (7 µs/op) | 48357 ops/s (21 µs/op) |
-| └ async insert mirror catch-up | — | 29225 ops/s (34 µs/op) | — |
-| └ async update mirror catch-up | — | 1197 ops/s (835 µs/op) | — |
-| └ async delete mirror catch-up | — | 73630 ops/s (14 µs/op) | — |
-| └ async restore mirror catch-up | — | 26388 ops/s (38 µs/op) | — |
-| query hot only (before flush) | 1562 ops/s (640 µs/op) | 1844 ops/s (542 µs/op) | 1715 ops/s (583 µs/op) |
-| query with hot+cold (after flush) | 1420 ops/s (704 µs/op) | 1262 ops/s (793 µs/op) | 1175 ops/s (851 µs/op) |
-| VACUUM time (after flush) | 112.79 s | 3.40 s | 6.01 s |
-| dead tuples after workload | 100000 (live=10000000) | 100000 (live=10000000) | 100000 (live=10000000) |
-| index storage (hot + __cl) | 414.86 MiB | 11.45 MiB | 11.45 MiB |
-| table storage (hot + __cl) | 5.45 GiB | 61.56 MiB | 61.56 MiB |
-| └ cold Parquet | — | 597.05 MiB | 598.67 MiB |
-| └ hot heap only | 5.45 GiB | 55.81 MiB | 55.81 MiB |
-| └ __cl mirror heap | — | 5.75 MiB | 5.75 MiB |
-| └ __cl mirror indexes | — | 4.32 MiB | 4.32 MiB |
-| PostgreSQL heap + indexes (after flush) | 5.85 GiB | 73.01 MiB | 73.01 MiB |
+| insert speed† | 95987 ops/s (10 µs/op) | 98298 ops/s (10 µs/op) | 52040 ops/s (19 µs/op) |
+| update speed† | 80233 ops/s (12 µs/op) | 43505 ops/s (23 µs/op) | 50559 ops/s (20 µs/op) |
+| delete speed† | 821524 ops/s (1 µs/op) | 86473 ops/s (12 µs/op) | 91735 ops/s (11 µs/op) |
+| └ async insert mirror catch-up | — | 23989 ops/s (42 µs/op) | — |
+| └ async update mirror catch-up | — | 5014 ops/s (199 µs/op) | — |
+| └ async delete mirror catch-up | — | 7686 ops/s (130 µs/op) | — |
+| └ async restore mirror catch-up | — | 8394 ops/s (119 µs/op) | — |
+| query hot only (before flush) | 1586 ops/s (631 µs/op) | 1724 ops/s (580 µs/op) | 1592 ops/s (628 µs/op) |
+| query with hot+cold (after flush) | 1493 ops/s (670 µs/op) | 1147 ops/s (872 µs/op) | 1095 ops/s (913 µs/op) |
+| VACUUM time (after flush) | 165.1 ms | 25.2 ms | 24.1 ms |
+| dead tuples after workload | 1000 (live=10000) | 1000 (live=10000) | 1000 (live=10000) |
+| index storage (hot + __cl) | 856.0 KiB | 240.0 KiB | 240.0 KiB |
+| table storage (hot + __cl) | 5.59 MiB | 640.0 KiB | 640.0 KiB |
+| └ cold Parquet | — | 596.9 KiB | 597.1 KiB |
+| └ hot heap only | 5.59 MiB | 584.0 KiB | 584.0 KiB |
+| └ __cl mirror heap | — | 56.0 KiB | 56.0 KiB |
+| └ __cl mirror indexes | — | 88.0 KiB | 88.0 KiB |
+| PostgreSQL heap + indexes (after flush) | 6.42 MiB | 880.0 KiB | 880.0 KiB |
 | total PG backup size | TODO | TODO | TODO |
 | restore time | TODO | TODO | TODO |
 

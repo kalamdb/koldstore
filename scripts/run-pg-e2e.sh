@@ -86,22 +86,26 @@ fi
 echo "starting pgrx-managed PostgreSQL ${PG_VERSION}"
 cargo pgrx start "$PG_FEATURE"
 
-echo "installing koldstore into pgrx PostgreSQL ${PG_VERSION}"
-INSTALL_ARGS=(
-  -p pg_koldstore
-  --no-default-features
-  --features "$PG_FEATURE s3"
-  --pg-config "$PG_CONFIG"
-)
-if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "true" ]]; then
-  # release-pg: optimized + panic=unwind (plain --release uses panic=abort and
-  # aborts on PostgreSQL ereport/longjmp from extension hooks).
-  INSTALL_ARGS+=(--profile release-pg)
+if [[ "${KOLDSTORE_E2E_SKIP_INSTALL:-}" == "1" || "${KOLDSTORE_E2E_SKIP_INSTALL:-}" == "true" ]]; then
+  echo "skipping cargo pgrx install (KOLDSTORE_E2E_SKIP_INSTALL=1; extension already installed)"
+else
+  echo "installing koldstore into pgrx PostgreSQL ${PG_VERSION}"
+  INSTALL_ARGS=(
+    -p pg_koldstore
+    --no-default-features
+    --features "$PG_FEATURE s3"
+    --pg-config "$PG_CONFIG"
+  )
+  if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "true" ]]; then
+    # release-pg: optimized + panic=unwind (plain --release uses panic=abort and
+    # aborts on PostgreSQL ereport/longjmp from extension hooks).
+    INSTALL_ARGS+=(--profile release-pg)
+  fi
+  if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then
+    INSTALL_ARGS+=(--sudo)
+  fi
+  cargo pgrx install "${INSTALL_ARGS[@]}"
 fi
-if [[ "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_SUDO:-}" == "true" ]]; then
-  INSTALL_ARGS+=(--sudo)
-fi
-cargo pgrx install "${INSTALL_ARGS[@]}"
 
 PGRX_START_ARGS=("$PG_FEATURE")
 if [[ "$MIRROR_CAPTURE_MODE" == "async" ]]; then
@@ -110,11 +114,11 @@ if [[ "$MIRROR_CAPTURE_MODE" == "async" ]]; then
     --postgresql-conf wal_level=logical
     --postgresql-conf "max_worker_processes=${WORKER_PROCESSES}"
   )
+else
+  # Explicitly clear a prior async prepare that left wal_level=logical in the
+  # pgrx datadir so pg-only / strict measurements are not charged for logical WAL.
+  PGRX_START_ARGS+=(--postgresql-conf wal_level=replica)
 fi
-
-echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
-cargo pgrx stop "$PG_FEATURE" || true
-cargo pgrx start "${PGRX_START_ARGS[@]}"
 
 wait_for_postgres() {
   local attempts=30
@@ -129,6 +133,28 @@ wait_for_postgres() {
   echo "error: PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT} did not become ready" >&2
   return 1
 }
+
+echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension / apply wal conf"
+cargo pgrx stop "$PG_FEATURE" || true
+
+# Lowering wal_level below logical fails if any logical slots remain from a
+# prior async prepare. Boot once with logical (if needed), drop slots, then
+# apply the target wal_level for this prepare.
+if [[ "$MIRROR_CAPTURE_MODE" != "async" ]]; then
+  echo "clearing logical replication slots so wal_level can leave logical"
+  cargo pgrx start "$PG_FEATURE" --postgresql-conf wal_level=logical || cargo pgrx start "$PG_FEATURE" || true
+  if wait_for_postgres; then
+    "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
+      -c "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE active AND active_pid IS NOT NULL;" \
+      >/dev/null || true
+    "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
+      -c "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_type = 'logical';" \
+      >/dev/null || true
+  fi
+  cargo pgrx stop "$PG_FEATURE" || true
+fi
+
+cargo pgrx start "${PGRX_START_ARGS[@]}"
 
 wait_for_postgres
 

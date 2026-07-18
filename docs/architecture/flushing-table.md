@@ -322,16 +322,22 @@ SELECT count(removed_mirror), count(deleted_hot)
 - Bind parameter: single `bigint max_seq`
 - Runs under `SET LOCAL session_replication_role = replica` so strict-mode
   source triggers do not capture KoldStore's own pruning
-- The hot DELETE runs with PostgreSQL's internal replication origin temporarily
-  set to `DoNotReplicateId`; the prior origin is restored even if SPI returns an
-  error
+- The hot DELETE runs with PostgreSQL's session replication origin set to the
+  named origin `koldstore_flush` for the remainder of the flush transaction
+  (restored after commit/abort). pgoutput emits ORIGIN from the commit
+  record's origin, so clearing the origin before commit left PG15 streams with
+  prune DELETEs but no ORIGIN name for apply to skip.
 - Mirror rows removed first; hot rows removed only for `op IN (1,2)` (insert/update)
 - Delete tombstones (`op = 3`) stay in cold after flush; mirror copy is removed
 
-`DoNotReplicateId` matters in async mode: pruning hot source rows is KoldStore
+`koldstore_flush` matters in async mode: pruning hot source rows is KoldStore
 maintenance, not application DML, and must not be decoded later into fresh
-tombstones. Replication-origin marking uses the backend C API boundary directly
-instead of SQL `pg_replication_origin_session_setup/reset`; the trigger-control
+tombstones. On PG16+ peek uses `origin=none` as defense in depth; on PG15
+(no that filter) apply skips ORIGIN-stamped prune transactions by name.
+Replication-origin marking uses `replorigin_session_setup` / `reset` via the
+backend C API (not SQL `pg_replication_origin_session_setup`, which is awkward
+mid-flush); the origin stays armed through COMMIT so pgoutput emits ORIGIN,
+then a xact callback restores the prior session state. The trigger-control
 setting above remains transaction-local SQL state.
 
 `plan_clean_schema_cleanup` (JSON `jsonb_to_recordset`) remains for tests only.

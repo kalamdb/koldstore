@@ -220,6 +220,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
     let mut type_names = HashMap::<(u32, i32), String>::new();
     let mut transaction_lsn = None::<u64>;
     let mut skipping_transaction = false;
+    let mut skipping_flush_origin = false;
     let mut applied_end_lsn = None::<u64>;
     let mut batch = None::<ApplyBatch>;
     let mut applied = 0_i64;
@@ -253,9 +254,18 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                             &request,
                         )?;
                         transaction_lsn = Some(final_lsn);
+                        skipping_flush_origin = false;
                         skipping_transaction = skip_through
                             .map(|boundary| final_lsn <= boundary)
                             .unwrap_or(false);
+                    }
+                    PgOutputMessage::Origin { name } => {
+                        // Flush prune stamps this origin so async apply does not
+                        // re-insert tombstones for rows already published to cold.
+                        // Critical on PG15 (no peek origin=none filter).
+                        if name == super::lifecycle::FLUSH_REPLICATION_ORIGIN {
+                            skipping_flush_origin = true;
+                        }
                     }
                     PgOutputMessage::Commit { end_lsn, .. } => {
                         let lsn = transaction_lsn
@@ -269,10 +279,13 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                             &request,
                         )?;
                         transaction_lsn = None;
+                        // Flush-origin txns are intentionally not mirrored but must
+                        // still advance applied_lsn so the slot can move past them.
                         if !skipping_transaction {
                             applied_end_lsn = Some(end_lsn);
                         }
                         skipping_transaction = false;
+                        skipping_flush_origin = false;
                         // Stop only at commit boundaries so mirror + applied_lsn stay atomic.
                         if budget_hit(row_budget, time_budget, applied, tick_started) {
                             budget_exhausted = true;
@@ -287,7 +300,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                         }
                     }
                     PgOutputMessage::Insert { relation_id, new } => {
-                        if skipping_transaction {
+                        if skipping_transaction || skipping_flush_origin {
                             continue;
                         }
                         if !saw_row_change {
@@ -310,7 +323,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                     PgOutputMessage::Update {
                         relation_id, new, ..
                     } => {
-                        if skipping_transaction {
+                        if skipping_transaction || skipping_flush_origin {
                             continue;
                         }
                         if !saw_row_change {
@@ -331,7 +344,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                         applied = applied.saturating_add(1);
                     }
                     PgOutputMessage::Delete { relation_id, old } => {
-                        if skipping_transaction {
+                        if skipping_transaction || skipping_flush_origin {
                             continue;
                         }
                         if !saw_row_change {
@@ -437,9 +450,9 @@ fn budget_hit(
 }
 
 fn open_decode_cursor(slot: &str, upper_bound: Option<WalFenceLsn>) -> Result<String, String> {
-    // `origin=none` is PG16+ only. On PG15, flush prune still uses
-    // `DoNotReplicateId`, which keeps those WAL records out of logical decoding
-    // entirely; the filter is defense-in-depth for ordinary origin-stamped WAL.
+    // `origin=none` is PG16+ only. On PG15, flush prune stamps the named
+    // `koldstore_flush` origin and apply skips those changes when ORIGIN is
+    // decoded. On PG16+ the peek filter is defense-in-depth.
     let upto = upper_bound.map(|lsn| format_pg_lsn(lsn.get()));
     let upto_sql = if upto.is_some() { "$3::pg_lsn" } else { "NULL" };
     #[cfg(feature = "pg15")]

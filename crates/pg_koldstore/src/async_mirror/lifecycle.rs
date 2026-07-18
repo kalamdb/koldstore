@@ -18,6 +18,12 @@ const LIFECYCLE_LOCK_NAMESPACE: i32 = 1_263_354_735;
 /// Publication shared by async managed tables in one database.
 pub const PUBLICATION_NAME: &str = "koldstore_async_mirror";
 
+/// Replication origin stamped on flush prune WAL so async apply skips it.
+///
+/// PG16+ peek uses `origin=none` (defense in depth). PG15 has no that filter, so
+/// apply must honor ORIGIN messages with this name.
+pub const FLUSH_REPLICATION_ORIGIN: &str = "koldstore_flush";
+
 /// Returns the cluster-unique logical slot name for a database OID.
 #[must_use]
 pub(crate) fn slot_name(database_oid: u32) -> String {

@@ -74,5 +74,6 @@ pub extern "C" fn _PG_init() {
     catalog::cache::register_invalidation_callback();
     hooks::register_hooks();
     row_counter_cache::register_xact_callbacks();
+    sql::flush::spi::register_flush_origin_xact_callback();
     database_worker::register_launcher_if_shared_preload();
 }

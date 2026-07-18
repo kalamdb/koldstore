@@ -397,22 +397,15 @@ fn execute_seq_range_cleanup(
             client
                 .update("SET LOCAL session_replication_role = replica", None, &[])
                 .map_err(|error| error.to_string())?;
-            // Stamp only cleanup WAL with PostgreSQL's non-replicated origin.
-            // Restoring the backend global immediately avoids the session-origin
-            // lifecycle and error-recursion hazards of SQL origin setup/reset.
-            //
-            // `DoNotReplicateId` is `#define DoNotReplicateId PG_UINT16_MAX` in
-            // replication/origin.h. Use `u16::MAX` directly: Windows pgrx
-            // bindgen does not always export that macro into `pg_sys`.
-            let previous_origin = unsafe { pgrx::pg_sys::replorigin_session_origin };
-            unsafe {
-                pgrx::pg_sys::replorigin_session_origin = u16::MAX;
-            }
-            let cleanup_result = client.update(&plan.statement.sql, None, &cleanup_arg);
-            unsafe {
-                pgrx::pg_sys::replorigin_session_origin = previous_origin;
-            }
-            let tuples = cleanup_result.map_err(|error| error.to_string())?;
+            // Stamp prune WAL with a named origin (`koldstore_flush`) and keep
+            // it set through COMMIT. pgoutput emits ORIGIN from the commit
+            // record's origin — restoring before commit left PG15 streams with
+            // prune DELETEs but no ORIGIN message, so async apply re-applied
+            // them as mirror tombstones. PG16+ also filters via peek origin=none.
+            arm_flush_replication_origin()?;
+            let tuples = client
+                .update(&plan.statement.sql, None, &cleanup_arg)
+                .map_err(|error| error.to_string())?;
             if tuples.is_empty() {
                 return Ok((0_i64, 0_i64));
             }
@@ -427,6 +420,83 @@ fn execute_seq_range_cleanup(
                 .unwrap_or(0);
             Ok((mirror_pruned, hot_pruned))
         })
+    })
+}
+
+std::thread_local! {
+    /// Prior `replorigin_session_origin` to restore after the flush xact ends.
+    static FLUSH_ORIGIN_RESTORE: std::cell::Cell<Option<pgrx::pg_sys::RepOriginId>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Registers the xact callback that clears the flush origin after commit/abort.
+pub(crate) fn register_flush_origin_xact_callback() {
+    unsafe {
+        pgrx::pg_sys::RegisterXactCallback(Some(flush_origin_xact_callback), std::ptr::null_mut());
+    }
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn flush_origin_xact_callback(
+    event: pgrx::pg_sys::XactEvent::Type,
+    _arg: *mut std::ffi::c_void,
+) {
+    // Restore only after the commit/abort WAL is written. Pre-commit would
+    // clear the origin before the commit record is stamped, which is exactly
+    // the PG15 ORIGIN-message failure mode we are fixing.
+    match event {
+        pgrx::pg_sys::XactEvent::XACT_EVENT_COMMIT
+        | pgrx::pg_sys::XactEvent::XACT_EVENT_PARALLEL_COMMIT
+        | pgrx::pg_sys::XactEvent::XACT_EVENT_ABORT
+        | pgrx::pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT => {
+            FLUSH_ORIGIN_RESTORE.with(|slot| {
+                if let Some(previous) = slot.take() {
+                    unsafe {
+                        pgrx::pg_sys::replorigin_session_reset();
+                        pgrx::pg_sys::replorigin_session_origin = previous;
+                    }
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Sets `koldstore_flush` as the session replication origin until xact end.
+///
+/// Must call `replorigin_session_setup`: assigning `replorigin_session_origin`
+/// alone makes `RecordTransactionCommit` assert in `replorigin_session_advance`.
+fn arm_flush_replication_origin() -> Result<(), String> {
+    use std::ffi::CString;
+
+    FLUSH_ORIGIN_RESTORE.with(|slot| {
+        if slot.get().is_some() {
+            return Ok(());
+        }
+        let origin_name = CString::new(crate::async_mirror::lifecycle::FLUSH_REPLICATION_ORIGIN)
+            .map_err(|_| "flush replication origin name contains NUL".to_string())?;
+        let origin_id = unsafe {
+            let mut id = pgrx::pg_sys::replorigin_by_name(origin_name.as_ptr(), true);
+            if id == pgrx::pg_sys::InvalidRepOriginId as pgrx::pg_sys::RepOriginId {
+                id = pgrx::pg_sys::replorigin_create(origin_name.as_ptr());
+            }
+            id
+        };
+        if origin_id == pgrx::pg_sys::InvalidRepOriginId as pgrx::pg_sys::RepOriginId {
+            return Err("failed to create koldstore_flush replication origin".to_string());
+        }
+        unsafe {
+            let previous = pgrx::pg_sys::replorigin_session_origin;
+            // Acquire progress state so commit can advance this origin safely.
+            // PG16+ added `acquired_by` (0 = this backend acquires exclusively).
+            #[cfg(feature = "pg15")]
+            pgrx::pg_sys::replorigin_session_setup(origin_id);
+            #[cfg(not(feature = "pg15"))]
+            pgrx::pg_sys::replorigin_session_setup(origin_id, 0);
+            pgrx::pg_sys::replorigin_session_origin = origin_id;
+            slot.set(Some(previous));
+        }
+        Ok(())
     })
 }
 
