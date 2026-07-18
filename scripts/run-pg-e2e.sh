@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=lib/pgrx-lifecycle.sh
+source "${ROOT_DIR}/scripts/lib/pgrx-lifecycle.sh"
 
 usage() {
   cat <<'EOF'
@@ -84,7 +86,8 @@ if [[ "$WORKER_PROCESSES" -lt 16 ]]; then
 fi
 
 echo "starting pgrx-managed PostgreSQL ${PG_VERSION}"
-cargo pgrx start "$PG_FEATURE"
+pgrx_force_stop "${PG_VERSION}" || true
+pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE"
 
 if [[ "${KOLDSTORE_E2E_SKIP_INSTALL:-}" == "1" || "${KOLDSTORE_E2E_SKIP_INSTALL:-}" == "true" ]]; then
   echo "skipping cargo pgrx install (KOLDSTORE_E2E_SKIP_INSTALL=1; extension already installed)"
@@ -117,8 +120,8 @@ if [[ "$MIRROR_CAPTURE_MODE" == "async" ]]; then
 fi
 
 echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
-cargo pgrx stop "$PG_FEATURE" || true
-cargo pgrx start "${PGRX_START_ARGS[@]}"
+pgrx_force_stop "${PG_VERSION}" || true
+pgrx_start_or_dump "${PG_VERSION}" "${PGRX_START_ARGS[@]}"
 
 wait_for_postgres() {
   local attempts=30

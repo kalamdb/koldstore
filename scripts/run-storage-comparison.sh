@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=lib/pgrx-lifecycle.sh
+source "${ROOT_DIR}/scripts/lib/pgrx-lifecycle.sh"
 
 PG_VERSION="${KOLDSTORE_STORAGE_PGVERSION:-${KOLDSTORE_E2E_PGVERSION:-16}}"
 PREPARE_ONLY="${KOLDSTORE_STORAGE_PREPARE_ONLY:-0}"
@@ -149,7 +151,9 @@ prepare_fresh_server() {
   echo "────────────────────────────────────────────────────────────"
   echo "fresh PostgreSQL ${PG_VERSION} for next side (skip_install=${skip_install})"
   echo "────────────────────────────────────────────────────────────"
-  cargo pgrx stop "${PG_FEATURE}" || true
+  # Async sides leave bgworkers that make a plain `cargo pgrx stop` race the
+  # next start ("could not start server"). Force-stop until the port is free.
+  pgrx_force_stop "${PG_VERSION}" || true
   if [[ "${skip_install}" == "1" ]]; then
     KOLDSTORE_E2E_SKIP_INSTALL=1 \
       KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
