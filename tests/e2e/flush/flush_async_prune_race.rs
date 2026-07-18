@@ -1,11 +1,74 @@
-//! Concurrent UPDATE during async flush must survive prune via the phase-6 fence.
+//! Concurrent DML during async flush must survive prune via the phase-6 fence.
 
 use anyhow::{bail, Context, Result};
 use tokio::task::JoinHandle;
 use tokio_postgres::Row;
 
 use crate::common;
-use crate::flush::harness::{barrier_lock, barrier_unlock, connect_peer};
+use crate::flush::harness::{
+    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter, WORKER_COUNT,
+};
+
+async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> Result<String> {
+    let relation = db.relation(table_name);
+    db.client
+        .batch_execute(&format!(
+            r#"
+            CREATE TABLE {relation} (
+              id bigint PRIMARY KEY,
+              body text NOT NULL
+            );
+            "#
+        ))
+        .await?;
+    db.manage_shared(&relation, "id").await?;
+    db.client
+        .batch_execute(&format!(
+            r#"
+            INSERT INTO {relation} (id, body)
+            SELECT g, 'seed-' || g::text FROM generate_series(1, {rows}) AS g;
+            "#
+        ))
+        .await?;
+    common::fence_async_mirror_if_needed(&db.client).await?;
+    Ok(relation)
+}
+
+async fn pause_flush_after_manifest(
+    db: &common::TestDb,
+    relation: &str,
+) -> Result<(tokio_postgres::Client, JoinHandle<Result<Row>>)> {
+    let coordinator = connect_peer(db).await?;
+    barrier_lock(&coordinator).await?;
+
+    let flush_client = connect_peer(db).await?;
+    let flush_relation = relation.to_string();
+    let flush_handle: JoinHandle<Result<Row>> = tokio::spawn(async move {
+        flush_client
+            .batch_execute("SET koldstore.failpoint = 'wait:after_manifest_publish';")
+            .await?;
+        let row = flush_client
+            .query_one(
+                "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                &[&flush_relation],
+            )
+            .await
+            .context("flush_table during prune-race pause")?;
+        flush_client
+            .batch_execute("SET koldstore.failpoint = '';")
+            .await
+            .ok();
+        Ok(row)
+    });
+
+    if let Err(error) = wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await
+    {
+        barrier_unlock(&coordinator).await.ok();
+        let _ = flush_handle.await;
+        return Err(error);
+    }
+    Ok((coordinator, flush_handle))
+}
 
 /// Reproduces the async flush prune race: UPDATE a selected PK after manifest
 /// publish and before prune. The writer fence + bounded apply must keep the
@@ -20,30 +83,8 @@ async fn update_during_async_flush_prune_keeps_newer_hot_row() -> Result<()> {
 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "flush_prune_race").await?;
-        let table_name = "prune_race_items";
-        let relation = db.relation(table_name);
+        let relation = seed_async_table(&db, "prune_race_items", 32).await?;
         let mirror = common::change_log_mirror_relation(&relation);
-
-        db.client
-            .batch_execute(&format!(
-                r#"
-                CREATE TABLE {relation} (
-                  id bigint PRIMARY KEY,
-                  body text NOT NULL
-                );
-                "#
-            ))
-            .await?;
-        db.manage_shared(&relation, "id").await?;
-        db.client
-            .batch_execute(&format!(
-                r#"
-                INSERT INTO {relation} (id, body)
-                SELECT g, 'seed-' || g::text FROM generate_series(1, 32) AS g;
-                "#
-            ))
-            .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
 
         let max_seq_before: i64 = db
             .client
@@ -54,61 +95,8 @@ async fn update_during_async_flush_prune_keeps_newer_hot_row() -> Result<()> {
             .await?
             .get(0);
 
-        let coordinator = connect_peer(&db).await?;
-        barrier_lock(&coordinator).await?;
+        let (coordinator, flush_handle) = pause_flush_after_manifest(&db, &relation).await?;
 
-        let flush_client = connect_peer(&db).await?;
-        let flush_relation = relation.clone();
-        let flush_handle: JoinHandle<Result<Row>> = tokio::spawn(async move {
-            flush_client
-                .batch_execute("SET koldstore.failpoint = 'wait:after_manifest_publish';")
-                .await?;
-            let row = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-                    &[&flush_relation],
-                )
-                .await
-                .context("flush_table during prune-race pause")?;
-            flush_client
-                .batch_execute("SET koldstore.failpoint = '';")
-                .await
-                .ok();
-            Ok(row)
-        });
-
-        // Wait until flush is blocked on the failpoint barrier.
-        let mut paused = false;
-        for _ in 0..200 {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            let waiting = coordinator
-                .query_one(
-                    "SELECT EXISTS (\
-                       SELECT 1 FROM pg_catalog.pg_locks \
-                       WHERE locktype = 'advisory' \
-                         AND classid = 0 \
-                         AND objid = $1::bigint \
-                         AND granted = false\
-                     )",
-                    &[&crate::flush::harness::BARRIER_LOCK_KEY],
-                )
-                .await?
-                .get::<_, bool>(0);
-            if waiting {
-                paused = true;
-                break;
-            }
-            if flush_handle.is_finished() {
-                break;
-            }
-        }
-        if !paused {
-            barrier_unlock(&coordinator).await.ok();
-            let _ = flush_handle.await;
-            bail!("flush did not reach wait:after_manifest_publish");
-        }
-
-        // Concurrent commit while mirror still lags (apply lock held by flush).
         let peer = connect_peer(&db).await?;
         peer.execute(
             &format!("UPDATE {relation} SET body = 'raced-update' WHERE id = 5"),
@@ -119,11 +107,10 @@ async fn update_during_async_flush_prune_keeps_newer_hot_row() -> Result<()> {
 
         barrier_unlock(&coordinator).await?;
         let _job = flush_handle.await??;
-
-        db.client
+        let _ = db
+            .client
             .batch_execute("SET koldstore.failpoint = '';")
-            .await
-            .ok();
+            .await;
 
         let hot = db
             .client
@@ -132,34 +119,189 @@ async fn update_during_async_flush_prune_keeps_newer_hot_row() -> Result<()> {
         let Some(hot) = hot else {
             bail!("expected id=5 to remain hot after async flush prune race");
         };
-        let body: String = hot.get(0);
-        assert_eq!(
-            body, "raced-update",
-            "newer hot body must survive prune after concurrent async UPDATE"
+        assert_eq!(hot.get::<_, String>(0), "raced-update");
+
+        let mirror_row = db
+            .client
+            .query_one(
+                &format!(
+                    "SELECT seq::bigint, op::smallint FROM {mirror} \
+                     WHERE id = 5 ORDER BY seq DESC LIMIT 1"
+                ),
+                &[],
+            )
+            .await?;
+        let seq: i64 = mirror_row.get(0);
+        assert!(seq > max_seq_before, "mirror seq must exceed watermark");
+        assert_eq!(mirror_row.get::<_, i16>(1), 2);
+    }
+
+    Ok(())
+}
+
+/// DELETE during the publish→prune window must leave a tombstone that masks cold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delete_during_async_flush_prune_keeps_tombstone() -> Result<()> {
+    if !common::selected_mirror_capture_mode()?.is_async() {
+        common::log_always("skipping async prune DELETE race in strict mode");
+        return Ok(());
+    }
+    common::require_pgrx_server().await?;
+
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "flush_prune_del").await?;
+        let relation = seed_async_table(&db, "prune_del_items", 32).await?;
+        let mirror = common::change_log_mirror_relation(&relation);
+        let max_seq_before: i64 = db
+            .client
+            .query_one(
+                &format!("SELECT COALESCE(max(seq), 0)::bigint FROM {mirror}"),
+                &[],
+            )
+            .await?
+            .get(0);
+
+        let (coordinator, flush_handle) = pause_flush_after_manifest(&db, &relation).await?;
+        let peer = connect_peer(&db).await?;
+        peer.execute(&format!("DELETE FROM {relation} WHERE id = 5"), &[])
+            .await
+            .context("concurrent delete during flush prune window")?;
+
+        barrier_unlock(&coordinator).await?;
+        let _job = flush_handle.await??;
+        let _ = db
+            .client
+            .batch_execute("SET koldstore.failpoint = '';")
+            .await;
+
+        let visible = db
+            .client
+            .query_opt(&format!("SELECT 1 FROM {relation} WHERE id = 5"), &[])
+            .await?;
+        assert!(
+            visible.is_none(),
+            "deleted id=5 must stay masked after prune fence"
         );
 
         let mirror_row = db
             .client
             .query_one(
-                &format!("SELECT seq::bigint, op::smallint FROM {mirror} WHERE id = 5"),
+                &format!(
+                    "SELECT seq::bigint, op::smallint FROM {mirror} \
+                     WHERE id = 5 ORDER BY seq DESC LIMIT 1"
+                ),
                 &[],
             )
             .await?;
-        let seq: i64 = mirror_row.get(0);
-        let op: i16 = mirror_row.get(1);
-        assert!(
-            seq > max_seq_before,
-            "mirror seq for raced PK must exceed pre-flush watermark ({seq} <= {max_seq_before})"
-        );
-        assert_eq!(op, 2, "raced UPDATE should leave a live update mirror op");
+        assert!(mirror_row.get::<_, i64>(0) > max_seq_before);
+        assert_eq!(mirror_row.get::<_, i16>(1), 3, "expected delete op");
+    }
 
-        // Visible merged read must prefer the newer hot overlay.
-        let merged: String = db
+    Ok(())
+}
+
+/// DELETE then re-INSERT the same PK during the fence window must keep the new row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reinsert_during_async_flush_prune_keeps_new_row() -> Result<()> {
+    if !common::selected_mirror_capture_mode()?.is_async() {
+        common::log_always("skipping async prune reinsert race in strict mode");
+        return Ok(());
+    }
+    common::require_pgrx_server().await?;
+
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "flush_prune_reins").await?;
+        let relation = seed_async_table(&db, "prune_reins_items", 32).await?;
+
+        let (coordinator, flush_handle) = pause_flush_after_manifest(&db, &relation).await?;
+        let peer = connect_peer(&db).await?;
+        peer.batch_execute(&format!(
+            "DELETE FROM {relation} WHERE id = 5; INSERT INTO {relation} (id, body) VALUES (5, 'reinserted');"
+        ))
+        .await
+        .context("concurrent delete+reinsert during flush prune window")?;
+
+        barrier_unlock(&coordinator).await?;
+        let _job = flush_handle.await??;
+        let _ = db
+            .client
+            .batch_execute("SET koldstore.failpoint = '';")
+            .await;
+
+        let body: String = db
             .client
             .query_one(&format!("SELECT body FROM {relation} WHERE id = 5"), &[])
             .await?
             .get(0);
-        assert_eq!(merged, "raced-update");
+        assert_eq!(body, "reinserted");
+    }
+
+    Ok(())
+}
+
+/// High DML during the publish→prune window must not lose newer hot winners.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn firehose_during_async_flush_prune_preserves_hot_winners() -> Result<()> {
+    if !common::selected_mirror_capture_mode()?.is_async() {
+        common::log_always("skipping async prune firehose in strict mode");
+        return Ok(());
+    }
+    common::require_pgrx_server().await?;
+
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "flush_prune_fire").await?;
+        let relation = seed_async_table(&db, "prune_fire_items", 64).await?;
+
+        let (coordinator, flush_handle) = pause_flush_after_manifest(&db, &relation).await?;
+
+        let mut workers = Vec::new();
+        for worker_id in 0..WORKER_COUNT {
+            let peer = connect_peer(&db).await?;
+            let rel = relation.clone();
+            workers.push(tokio::spawn(async move {
+                for seq in 0..10i64 {
+                    let id = 1_000_000i64 + (worker_id as i64) * 10_000 + seq;
+                    peer.execute(
+                        &format!("INSERT INTO {rel} (id, body) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET body = EXCLUDED.body"),
+                        &[&id, &format!("w{worker_id}-{seq}")],
+                    )
+                    .await?;
+                    if seq % 3 == 0 {
+                        peer.execute(
+                            &format!("UPDATE {rel} SET body = body || '-u' WHERE id = $1"),
+                            &[&id],
+                        )
+                        .await?;
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            }));
+        }
+
+        for handle in workers {
+            handle.await??;
+        }
+
+        barrier_unlock(&coordinator).await?;
+        let _job = flush_handle.await??;
+        let _ = db
+            .client
+            .batch_execute("SET koldstore.failpoint = '';")
+            .await;
+
+        common::assert_pk_unique(&db.client, &relation, &["id"]).await?;
+        let hot_new: i64 = db
+            .client
+            .query_one(
+                &format!("SELECT count(*) FROM {relation} WHERE id >= 1000000"),
+                &[],
+            )
+            .await?
+            .get(0);
+        assert!(
+            hot_new > 0,
+            "firehose inserts during prune window must remain visible"
+        );
     }
 
     Ok(())

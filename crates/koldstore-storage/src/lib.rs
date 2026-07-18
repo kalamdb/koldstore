@@ -3,6 +3,11 @@
 //! Owns backend configuration, durable `object_store` client construction,
 //! publish-safe action planning/execution, object metadata, and the storage
 //! client trait. Must not depend on `pgrx`.
+//!
+//! The `s3` feature (on by default for this crate) enables S3/MinIO via
+//! `object_store` `aws-base` with rustls (ring crypto provider) and `ring`
+//! for SigV4. Dependents that want a filesystem-only build should use
+//! `default-features = false` and omit `s3`.
 
 pub mod backend;
 pub mod client;
@@ -31,3 +36,19 @@ pub use registration::{
     AlterStorageLocationPlan, DdlError, DdlResult, StorageRegistration, StorageRegistrationPlan,
     DEFAULT_SHARED_PATH_TEMPLATE, DEFAULT_USER_PATH_TEMPLATE, SUPPORTED_STORAGE_TYPES,
 };
+
+/// Installs the rustls `ring` crypto provider once.
+///
+/// Required when reqwest is built with `rustls-no-provider` (no aws-lc). Safe
+/// to call repeatedly; later calls are no-ops if a provider is already set.
+///
+/// Call from extension `_PG_init` and before the first S3 HTTPS request.
+#[cfg(feature = "s3")]
+pub fn ensure_rustls_ring_provider() {
+    use std::sync::Once;
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        // Ignore `Err` when another crate already installed a provider.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}

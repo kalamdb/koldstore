@@ -737,7 +737,7 @@ if [[ "${KOLDSTORE_BENCH_START_PGRX:-1}" != "0" ]]; then
   INSTALL_ARGS=(
     -p pg_koldstore
     --no-default-features
-    --features "$PG_FEATURE"
+    --features "$PG_FEATURE s3"
     --pg-config "$PG_CONFIG"
   )
   # release-pg: optimized + panic=unwind (plain --release aborts on ereport/longjmp).

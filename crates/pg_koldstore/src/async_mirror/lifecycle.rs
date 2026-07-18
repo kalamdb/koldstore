@@ -283,8 +283,10 @@ const SLOT_INACTIVE_MAX_WAIT: Duration = Duration::from_secs(2);
 
 /// Returns the PID holding `slot`, if any.
 fn slot_active_pid(slot: &str) -> Result<Option<i32>, String> {
+    // Scalar subquery always returns exactly one row (NULL when missing), so SPI
+    // never hits "SpiTupleTable positioned before the start or after the end".
     pgrx::Spi::get_one_with_args::<i32>(
-        "SELECT active_pid FROM pg_catalog.pg_replication_slots WHERE slot_name = $1",
+        "SELECT (SELECT active_pid FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)",
         &[DatumWithOid::from(slot)],
     )
     .map_err(|error| error.to_string())
@@ -335,11 +337,15 @@ pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
 /// before acquiring the slot is also cleared.
 fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
     let worker_type = koldstore_worker::async_mirror_worker_type(DatabaseOid::new(database_oid));
-    // Terminate returns false when the PID already exited; either outcome is fine.
-    pgrx::Spi::run_with_args(
-        "SELECT pg_catalog.pg_terminate_backend(pid) \
-         FROM pg_catalog.pg_stat_activity \
-         WHERE backend_type = $1",
+    // Always return a row: an empty SELECT through Spi::run_with_args errors with
+    // "SpiTupleTable positioned before the start or after the end" when no
+    // applier is running (common under parallel E2E once the worker already exited).
+    let _ = pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT COALESCE(\
+           (SELECT bool_or(pg_catalog.pg_terminate_backend(pid)) \
+            FROM pg_catalog.pg_stat_activity \
+            WHERE backend_type = $1), \
+           false)",
         &[DatumWithOid::from(worker_type.as_str())],
     )
     .map_err(|error| error.to_string())?;
@@ -347,7 +353,7 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
     if let Some(active_pid) = slot_active_pid(slot)? {
         let my_pid = unsafe { pgrx::pg_sys::MyProcPid };
         if active_pid != my_pid {
-            pgrx::Spi::run_with_args(
+            let _ = pgrx::Spi::get_one_with_args::<bool>(
                 "SELECT pg_catalog.pg_terminate_backend($1)",
                 &[DatumWithOid::from(active_pid)],
             )
@@ -456,8 +462,9 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     // Stop the applier before lock_apply: a peek blocked on concurrent XIDs
     // (including this backend's open transaction) holds the apply lock and
     // would otherwise deadlock with disable.
-    stop_async_mirror_applier(database_oid, &slot)?;
-    lock_apply(database_oid)?;
+    stop_async_mirror_applier(database_oid, &slot)
+        .map_err(|error| format!("stop applier: {error}"))?;
+    lock_apply(database_oid).map_err(|error| format!("lock apply: {error}"))?;
     let slot_exists = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)",
         &[DatumWithOid::from(slot.as_str())],
@@ -467,25 +474,29 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     let publication_exists = publication_exists()?;
     if slot_exists {
         // Drop uses nowait acquire; wait out abort/exit windows first.
-        wait_until_slot_inactive(&slot)?;
-        pgrx::Spi::run_with_args(
-            "SELECT pg_catalog.pg_drop_replication_slot($1)",
+        wait_until_slot_inactive(&slot).map_err(|error| format!("wait slot inactive: {error}"))?;
+        // Void-returning drop must still produce a readable SPI row.
+        let _ = pgrx::Spi::get_one_with_args::<bool>(
+            "SELECT (pg_catalog.pg_drop_replication_slot($1) IS NULL)",
             &[DatumWithOid::from(slot.as_str())],
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("drop slot: {error}"))?;
     }
     if publication_exists {
         pgrx::Spi::run(&format!(
             "DROP PUBLICATION IF EXISTS {}",
             quote_ident(PUBLICATION_NAME)
         ))
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("drop publication: {error}"))?;
     }
-    pgrx::Spi::run_with_args(
-        "DELETE FROM koldstore.async_mirror_state WHERE database_oid = $1",
+    // DELETE may affect zero rows; SELECT-wrap keeps SPI positioning safe.
+    let _ = pgrx::Spi::get_one_with_args::<i64>(
+        "WITH deleted AS (\
+           DELETE FROM koldstore.async_mirror_state WHERE database_oid = $1 RETURNING 1\
+         ) SELECT count(*)::bigint FROM deleted",
         &[DatumWithOid::from(pgrx::pg_sys::Oid::from(database_oid))],
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| format!("clear async_mirror_state: {error}"))?;
     crate::database_worker::mark_worker_not_ensured();
     Ok(slot_exists || publication_exists)
 }

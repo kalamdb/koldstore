@@ -13,7 +13,7 @@ path = "pg_vs_koldstore.rs"
 anyhow.workspace = true
 chrono.workspace = true
 koldstore-memory-tests = { path = "../memory" }
-koldstore-storage.workspace = true
+koldstore-storage = { workspace = true, features = ["s3"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros"] }

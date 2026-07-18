@@ -1,5 +1,7 @@
 //! Opt-in MinIO integration tests.
 
+#![cfg(feature = "s3")]
+
 use koldstore_storage::{
     open_client_from_catalog_fields, publish_immutable_object, publish_mutable_object,
     temp_object_key, ObjectStoreClient, PutPrecondition, StorageClient, StorageClientError,

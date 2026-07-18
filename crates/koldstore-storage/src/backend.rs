@@ -1,11 +1,16 @@
 //! Storage backend configuration and client factory.
 
 use std::path::{Path, PathBuf};
+#[cfg(feature = "s3")]
 use std::sync::Arc;
 
+#[cfg(feature = "s3")]
 use object_store::aws::AmazonS3Builder;
+#[cfg(feature = "s3")]
 use object_store::path::Path as ObjectPath;
+#[cfg(feature = "s3")]
 use object_store::prefix::PrefixStore;
+#[cfg(feature = "s3")]
 use object_store::ObjectStore;
 use serde::{Deserialize, Serialize};
 
@@ -116,12 +121,14 @@ pub struct StorageBackend {
 ///
 /// Filesystem backends use [`LocalFileSystem`](object_store::local::LocalFileSystem)
 /// with `with_fsync(true)`. S3-compatible backends (including MinIO) use
-/// [`AmazonS3Builder`](object_store::aws::AmazonS3Builder).
+/// [`AmazonS3Builder`](object_store::aws::AmazonS3Builder) when the `s3`
+/// cargo feature is enabled.
 ///
 /// # Errors
 ///
 /// Returns an error when the backend kind is unsupported, credentials are
-/// missing, or the client cannot be constructed.
+/// missing, the `s3` feature is disabled for an S3 config, or the client
+/// cannot be constructed.
 pub fn open_storage_client(
     config: &BackendConfig,
     credentials: &serde_json::Value,
@@ -171,11 +178,13 @@ pub fn open_filesystem_client(base_path: impl AsRef<str>) -> StorageResult<Objec
     ObjectStoreClient::local_filesystem(root)
 }
 
+#[cfg(feature = "s3")]
 fn open_s3_client(
     base_path: &str,
     credentials: &serde_json::Value,
     config: &serde_json::Value,
 ) -> StorageResult<ObjectStoreClient> {
+    crate::ensure_rustls_ring_provider();
     let (bucket, key_prefix) = parse_s3_base_path(base_path)?;
     let access_key = json_string(credentials, "access_key_id")
         .or_else(|| json_string(credentials, "access_key"));
@@ -224,7 +233,20 @@ fn open_s3_client(
     Ok(ObjectStoreClient::from_store(store, None))
 }
 
+#[cfg(not(feature = "s3"))]
+fn open_s3_client(
+    _base_path: &str,
+    _credentials: &serde_json::Value,
+    _config: &serde_json::Value,
+) -> StorageResult<ObjectStoreClient> {
+    Err(StorageClientError::Backend {
+        message: "s3 backend requires the `s3` cargo feature (not enabled in this build)"
+            .to_string(),
+    })
+}
+
 /// Parses `s3://bucket` or `s3://bucket/optional/prefix` into bucket + prefix.
+#[cfg(any(feature = "s3", test))]
 fn parse_s3_base_path(base_path: &str) -> StorageResult<(String, String)> {
     let rest = base_path
         .strip_prefix("s3://")
@@ -275,6 +297,7 @@ fn parse_filesystem_root(base_path: &str) -> StorageResult<PathBuf> {
     }
 }
 
+#[cfg(feature = "s3")]
 fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -284,6 +307,7 @@ fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(feature = "s3")]
 fn json_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
     match value.get(key)? {
         serde_json::Value::Bool(flag) => Some(*flag),

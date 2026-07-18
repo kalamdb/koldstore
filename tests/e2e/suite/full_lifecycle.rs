@@ -25,9 +25,9 @@ async fn full_lifecycle_wide_table_migrates_flushes_in_batches_and_queries_all_r
             target.version, target.port
         ));
 
-        let client = common::wait_for_postgres(&target).await?;
-        let storage_root = storage_root_for(target.version)?;
-        run_full_lifecycle(&client, target.version, &storage_root).await?;
+        let server = common::PgrxServer::start(target).await?;
+        let storage_root = storage_root_for(server.target.version)?;
+        run_full_lifecycle(&server.client, server.target.version, &storage_root).await?;
     }
 
     Ok(())

@@ -9,6 +9,7 @@ use tokio_postgres::Client;
 
 use super::catalog;
 use super::cluster::{PgTarget, PgrxServer};
+use super::db_pool::DatabaseLease;
 use super::minio::MinioConfig;
 
 static NEXT_FIXTURE_ID: AtomicU64 = AtomicU64::new(1);
@@ -41,7 +42,7 @@ pub enum FixtureStorage {
 /// Isolated pgrx-backed test database fixture.
 #[derive(Debug)]
 pub struct TestDb {
-    /// Active PostgreSQL target.
+    /// Active PostgreSQL target (includes the claimed worker database name).
     pub target: PgTarget,
     /// Connected PostgreSQL client.
     pub client: Client,
@@ -53,6 +54,8 @@ pub struct TestDb {
     pub storage_root: PathBuf,
     /// Cold storage backend for this fixture.
     pub storage: FixtureStorage,
+    /// Keeps the pooled worker database reserved until this fixture drops.
+    _db_lease: DatabaseLease,
 }
 
 impl TestDb {
@@ -79,7 +82,7 @@ impl TestDb {
             .batch_execute(&format!("CREATE SCHEMA {schema};"))
             .await
             .with_context(|| format!("create schema {schema}"))?;
-        // Clear any database-level failpoint left by a prior crashed async test.
+        // Clear any database-level GUCs left by a prior crashed async test.
         let dbname: String = server
             .client
             .query_one("SELECT current_database()::text", &[])
@@ -89,7 +92,10 @@ impl TestDb {
         let _ = server
             .client
             .batch_execute(&format!(
-                "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; RESET koldstore.failpoint"
+                "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
+                 ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+                 RESET koldstore.failpoint; \
+                 RESET koldstore.internal_async_mirror_worker"
             ))
             .await;
         register_filesystem_storage(&server.client, &storage_name, &storage_root).await?;
@@ -101,6 +107,7 @@ impl TestDb {
             storage_name,
             storage_root,
             storage: FixtureStorage::Filesystem,
+            _db_lease: server._lease,
         })
     }
 
@@ -140,6 +147,7 @@ impl TestDb {
                 config,
                 object_prefix,
             },
+            _db_lease: server._lease,
         })
     }
 

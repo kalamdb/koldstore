@@ -69,7 +69,7 @@ if (-not $SkipBuild) {
     -p $ExtensionCrate `
     --profile $CargoProfile `
     --no-default-features `
-    --features "pg$Pg,cshim" `
+    --features "pg$Pg,s3,cshim" `
     --pg-config $PgConfig
 }
 

@@ -7,6 +7,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tokio_postgres::{Client, NoTls};
 
+use super::db_pool::{
+    claim_database, e2e_db_pool_enabled, ensure_pool_config, shared_database_name,
+    worker_database_name, DatabaseLease,
+};
+
 const FAST_CONNECT_ATTEMPTS: usize = 3;
 const FAST_CONNECT_DELAY: Duration = Duration::from_millis(200);
 const STARTUP_CONNECT_ATTEMPTS: usize = 30;
@@ -19,18 +24,29 @@ pub struct PgTarget {
     pub version: u16,
     /// TCP port.
     pub port: u16,
+    /// Database name (pooled worker DB or shared fallback).
+    pub dbname: String,
 }
 
 impl PgTarget {
-    /// Builds a libpq connection string.
+    /// Builds a matrix target that still needs a concrete database assignment.
+    #[must_use]
+    pub fn new(version: u16, port: u16) -> Self {
+        Self {
+            version,
+            port,
+            // Placeholder replaced when a fixture claims a pooled database.
+            dbname: shared_database_name(),
+        }
+    }
+
+    /// Builds a libpq connection string for this target's database.
     #[must_use]
     pub fn connection_string(&self) -> String {
         let host =
             std::env::var("KOLDSTORE_E2E_PGHOST").unwrap_or_else(|_| "127.0.0.1".to_string());
         let user = std::env::var("KOLDSTORE_E2E_PGUSER")
             .unwrap_or_else(|_| std::env::var("USER").unwrap_or_else(|_| "postgres".to_string()));
-        let dbname = std::env::var("KOLDSTORE_E2E_PGDATABASE")
-            .unwrap_or_else(|_| "koldstore_pgrx_e2e".to_string());
         let password = std::env::var("KOLDSTORE_E2E_PGPASSWORD")
             .ok()
             .filter(|password| !password.is_empty())
@@ -38,8 +54,8 @@ impl PgTarget {
             .unwrap_or_default();
 
         format!(
-            "host={host} port={} user={user}{password} dbname={dbname}",
-            self.port
+            "host={host} port={} user={user}{password} dbname={}",
+            self.port, self.dbname
         )
     }
 }
@@ -51,6 +67,8 @@ pub struct PgrxServer {
     pub target: PgTarget,
     /// Connected client.
     pub client: Client,
+    /// Pool lease keeping this fixture's database reserved.
+    pub(crate) _lease: DatabaseLease,
 }
 
 impl PgrxServer {
@@ -61,15 +79,24 @@ impl PgrxServer {
     /// this helper run `cargo pgrx start pgN` before connecting, which is useful
     /// for a single test binary during local development.
     ///
+    /// Claims one pooled worker database when `KOLDSTORE_E2E_DB_POOL=1`.
+    ///
     /// # Errors
     ///
-    /// Returns an error when `cargo pgrx start` fails or PostgreSQL cannot be
-    /// reached.
+    /// Returns an error when `cargo pgrx start` fails, the pool is exhausted, or
+    /// PostgreSQL cannot be reached.
     pub async fn start(target: PgTarget) -> Result<Self> {
+        ensure_pool_config()?;
         maybe_start_pgrx(&target)?;
+        let (dbname, lease) = claim_database()?;
+        let target = PgTarget { dbname, ..target };
         let client = wait_for_postgres(&target).await?;
         ensure_koldstore_extension(&client).await?;
-        Ok(Self { target, client })
+        Ok(Self {
+            target,
+            client,
+            _lease: lease,
+        })
     }
 }
 
@@ -81,10 +108,10 @@ pub fn local_pg_matrix() -> Vec<PgTarget> {
             .ok()
             .and_then(|version| version.parse().ok())
             .unwrap_or(16);
-        return vec![PgTarget {
+        return vec![PgTarget::new(
             version,
-            port: port.parse().expect("KOLDSTORE_E2E_PGPORT must be a u16"),
-        }];
+            port.parse().expect("KOLDSTORE_E2E_PGPORT must be a u16"),
+        )];
     }
 
     if let Ok(versions) = std::env::var("KOLDSTORE_E2E_PGVERSIONS") {
@@ -96,10 +123,7 @@ pub fn local_pg_matrix() -> Vec<PgTarget> {
                 let version = version
                     .parse::<u16>()
                     .expect("KOLDSTORE_E2E_PGVERSIONS must contain PostgreSQL major versions");
-                PgTarget {
-                    version,
-                    port: 28800 + version,
-                }
+                PgTarget::new(version, 28800 + version)
             })
             .collect::<Vec<_>>();
         assert!(
@@ -109,10 +133,7 @@ pub fn local_pg_matrix() -> Vec<PgTarget> {
         return targets;
     }
 
-    vec![PgTarget {
-        version: 16,
-        port: 28816,
-    }]
+    vec![PgTarget::new(16, 28816)]
 }
 
 /// PostgreSQL targets for scenario tests.
@@ -156,6 +177,7 @@ pub fn expected_pg_ports() -> Vec<u16> {
 /// Returns an error when PostgreSQL is unreachable, the server version/port do not
 /// match the configured target, or the extension is missing.
 pub async fn require_pgrx_server() -> Result<()> {
+    ensure_pool_config()?;
     let targets = local_pg_matrix();
     anyhow::ensure!(
         !targets.is_empty(),
@@ -163,12 +185,26 @@ pub async fn require_pgrx_server() -> Result<()> {
     );
 
     for target in &targets {
+        let probe = probe_target(target);
         let client =
-            connect_with_retries(target, FAST_CONNECT_ATTEMPTS, FAST_CONNECT_DELAY).await?;
-        verify_pgrx_target(&client, target).await?;
+            connect_with_retries(&probe, FAST_CONNECT_ATTEMPTS, FAST_CONNECT_DELAY).await?;
+        verify_pgrx_target(&client, &probe).await?;
     }
 
     Ok(())
+}
+
+fn probe_target(target: &PgTarget) -> PgTarget {
+    let dbname = if e2e_db_pool_enabled() {
+        worker_database_name(0)
+    } else {
+        shared_database_name()
+    };
+    PgTarget {
+        dbname,
+        version: target.version,
+        port: target.port,
+    }
 }
 
 /// Synchronous wrapper used by non-async E2E tests.
@@ -204,8 +240,8 @@ pub async fn connect(target: &PgTarget) -> Result<Client> {
         .await
         .with_context(|| {
             format!(
-                "connect PostgreSQL {} on port {}",
-                target.version, target.port
+                "connect PostgreSQL {} on port {} db={}",
+                target.version, target.port, target.dbname
             )
         })?;
     tokio::spawn(async move {
@@ -244,9 +280,10 @@ async fn connect_with_retries(
 
     Err(last_error.unwrap_or_else(|| {
         anyhow::anyhow!(
-            "PostgreSQL {} on port {} did not become ready",
+            "PostgreSQL {} on port {} db={} did not become ready",
             target.version,
-            target.port
+            target.port,
+            target.dbname
         )
     }))
 }
@@ -294,9 +331,10 @@ async fn verify_pgrx_target(client: &Client, target: &PgTarget) -> Result<()> {
         .get::<_, bool>(0);
     anyhow::ensure!(
         extension_present,
-        "koldstore extension is not available on PostgreSQL {}:{}",
+        "koldstore extension is not available on PostgreSQL {}:{} db={}",
         target.version,
-        target.port
+        target.port,
+        target.dbname
     );
 
     Ok(())

@@ -97,7 +97,7 @@ run_cargo_pgrx_package() {
     -p "${EXTENSION_CRATE}" \
     --profile "${CARGO_PROFILE}" \
     --no-default-features \
-    --features "pg${pg}" \
+    --features "pg${pg} s3" \
     --pg-config "${pg_config}"
   local root
   root="$(pgrx_package_root "${pg}")"

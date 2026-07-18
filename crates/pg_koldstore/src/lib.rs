@@ -18,11 +18,11 @@ pub mod settings;
 pub mod spi;
 pub mod sql;
 
-#[cfg(any(test, feature = "pg_test"))]
+#[cfg(feature = "pg_test")]
 mod pg_tests;
 
 /// Required by `cargo pgrx test` invocations. Must remain at the crate root.
-#[cfg(any(test, feature = "pg_test"))]
+#[cfg(feature = "pg_test")]
 pub mod pg_test {
     /// One-off initialization when the pgrx test framework starts.
     pub fn setup(_options: Vec<&str>) {}
@@ -67,6 +67,8 @@ pub fn koldstore_version() -> &'static str {
 #[cfg(feature = "pg")]
 #[no_mangle]
 pub extern "C" fn _PG_init() {
+    #[cfg(feature = "s3")]
+    koldstore_storage::ensure_rustls_ring_provider();
     observability::init_tracing();
     guc::define_gucs();
     catalog::cache::register_invalidation_callback();

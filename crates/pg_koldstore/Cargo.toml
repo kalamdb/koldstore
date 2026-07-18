@@ -16,17 +16,22 @@ crate-type = ["lib", "cdylib"]
 default = []
 pg = ["dep:pgrx"]
 # `pgrx-tests` stays optional so workspace `cargo nextest --no-default-features`
-# does not build `pgrx-pg-sys` without a `pgXX` feature.
-pg15 = ["pg", "pgrx/pg15", "dep:pgrx-tests", "pgrx-tests/pg15"]
-pg16 = ["pg", "pgrx/pg16", "dep:pgrx-tests", "pgrx-tests/pg16"]
-pg17 = ["pg", "pgrx/pg17", "dep:pgrx-tests", "pgrx-tests/pg17"]
-pg18 = ["pg", "pgrx/pg18", "dep:pgrx-tests", "pgrx-tests/pg18"]
+# does not build `pgrx-pg-sys` without a `pgXX` feature. Weak `pgrx-tests?/pgXX`
+# only activates when `pg_test` enables the dependency — release builds with
+# just `pg16 s3` do not compile clap/sysinfo/postgres test harness code.
+pg15 = ["pg", "pgrx/pg15", "pgrx-tests?/pg15"]
+pg16 = ["pg", "pgrx/pg16", "pgrx-tests?/pg16"]
+pg17 = ["pg", "pgrx/pg17", "pgrx-tests?/pg17"]
+pg18 = ["pg", "pgrx/pg18", "pgrx-tests?/pg18"]
 cshim = ["dep:pgrx", "pgrx/cshim"]
-# Enabled by `cargo pgrx test`. Distinct from the `#[pg_test]` attribute macro.
-# Also used to shim Snowflake worker id for in-server tests (see sql/session.rs).
-pg_test = []
+# Enables `pgrx-tests` for in-server `#[pg_test]`. Pair with a `pgXX` feature.
+# Distinct from the `#[pg_test]` attribute macro. Also used to shim Snowflake
+# worker id for in-server tests (see sql/session.rs).
+pg_test = ["dep:pgrx-tests"]
 # Test-only flush failpoints for crash-recovery suites. No-op in release unless enabled.
 test-failpoints = []
+# S3 / MinIO via object_store (rustls + ring, no aws-lc/OpenSSL). Keep enabled for release installs.
+s3 = ["koldstore-storage/s3"]
 
 [dependencies]
 chrono.workspace = true

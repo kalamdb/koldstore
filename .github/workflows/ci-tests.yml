@@ -99,7 +99,7 @@ jobs:
       # `cargo pgrx test`, which defaults to parallel libtest threads.
       - name: "Run pg_test suite (nextest, serial)"
         run: |
-          features="pg${PG_VER} pg_test"
+          features="pg${PG_VER} pg_test s3"
           manifest="${GITHUB_WORKSPACE}/crates/pg_koldstore/Cargo.toml"
           CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target" \
             PGRX_FEATURES="${features}" \
@@ -132,6 +132,7 @@ jobs:
       KOLDSTORE_E2E_PGHOST: 127.0.0.1
       KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
       KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      KOLDSTORE_E2E_THREADS: "4"
       PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
     steps:
       - uses: actions/checkout@v4
@@ -190,6 +191,7 @@ jobs:
       KOLDSTORE_E2E_PGHOST: 127.0.0.1
       KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
       KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      KOLDSTORE_E2E_THREADS: "4"
       PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
     steps:
       - uses: actions/checkout@v4
@@ -287,7 +289,7 @@ jobs:
         run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
 
       - name: Compile pg_koldstore for PostgreSQL ${{ matrix.pg }}
-        run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER} -- -D warnings
+        run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER},pg_test,s3 -- -D warnings
 
       - name: Run example scenarios
         run: bash scripts/run-examples.sh

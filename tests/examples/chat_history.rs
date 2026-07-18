@@ -34,7 +34,7 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
         .next()
         .context("no local pg target configured")?;
 
-    let db = support::e2e::TestDb::start(target.clone(), "chat_history").await?;
+    let db = support::e2e::TestDb::start(target, "chat_history").await?;
     let table_name = "messages";
     let relation = db.relation(table_name);
     log_scenario_start("chat_history", &relation, &db.storage_root, config);
@@ -81,7 +81,7 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
             "seed {} rows across {} tenants",
             config.rows, config.scopes
         ));
-        seed_messages_parallel(&target, &relation, &config).await?;
+        seed_messages_parallel(&db.target, &relation, &config).await?;
         support::wait_for_jobs(&db.client, &relation).await?;
     }
 
@@ -100,7 +100,7 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
     // Waves 2/3: concurrent burst inserts across tenants, then flush again.
     for wave in 0..2 {
         let burst = MIN_FLUSH_ROWS + 150;
-        concurrent_burst_inserts(&target, &relation, &config, next_id, burst, wave).await?;
+        concurrent_burst_inserts(&db.target, &relation, &config, next_id, burst, wave).await?;
         next_id += burst * config.scopes as i64;
 
         let flushed = support::flush_table(
@@ -121,7 +121,7 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
 
     {
         let _step = log_step("concurrent hot UPDATE/DELETE");
-        concurrent_hot_dml(&target, &relation, &config).await?;
+        concurrent_hot_dml(&db.target, &relation, &config).await?;
     }
 
     // Verify tenant isolation before the cold-delete overlay drives additional
@@ -254,7 +254,7 @@ async fn chat_history_parallel_tenants_flush_policy_and_cold_scrollback_inner() 
     // the newly inserted burst is moved cold without depending on excess policy.
     let post_burst = (hot_row_limit + MIN_FLUSH_ROWS).max(MIN_FLUSH_ROWS * 2);
     let rows_per_scope = (post_burst / config.scopes as i64).max(1);
-    concurrent_burst_inserts(&target, &relation, &config, next_id, rows_per_scope, 9).await?;
+    concurrent_burst_inserts(&db.target, &relation, &config, next_id, rows_per_scope, 9).await?;
     let post_flushed =
         force_flush_table(&db.client, &relation, Some(flush("post-churn-force"))).await?;
     assert!(
