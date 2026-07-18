@@ -94,10 +94,31 @@ fn worker_transaction<R>(body: impl FnOnce() -> Result<R, String>) -> Result<R, 
         pgrx::pg_sys::StartTransactionCommand();
         pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
     }
-    let result = body();
+    let result = std::panic::AssertUnwindSafe(|| body());
+    let result = pgrx::PgTryBuilder::new(result)
+        .catch_others(|error| {
+            let message = match error {
+                pgrx::pg_sys::panic::CaughtError::PostgresError(report)
+                | pgrx::pg_sys::panic::CaughtError::ErrorReport(report) => {
+                    report.message().to_string()
+                }
+                pgrx::pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
+                    ereport.message().to_string()
+                }
+            };
+            Err(format!("async mirror launcher: {message}"))
+        })
+        .execute();
     unsafe {
-        pgrx::pg_sys::PopActiveSnapshot();
-        pgrx::pg_sys::CommitTransactionCommand();
+        if !pgrx::pg_sys::IsTransactionOrTransactionBlock() {
+            return result;
+        }
+        if result.is_err() || pgrx::pg_sys::IsAbortedTransactionBlockState() {
+            pgrx::pg_sys::AbortCurrentTransaction();
+        } else {
+            pgrx::pg_sys::PopActiveSnapshot();
+            pgrx::pg_sys::CommitTransactionCommand();
+        }
     }
     result
 }

@@ -543,23 +543,52 @@ fn arm_named_flush_origin_pg15(
     let origin_name = crate::async_mirror::lifecycle::flush_replication_origin_name(database_oid);
     let origin_name = CString::new(origin_name)
         .map_err(|_| "flush replication origin name contains NUL".to_string())?;
-    let origin_id = unsafe {
+    let origin_id = pgrx::PgTryBuilder::new(|| unsafe {
         let mut id = pgrx::pg_sys::replorigin_by_name(origin_name.as_ptr(), true);
         if id == pgrx::pg_sys::InvalidRepOriginId as pgrx::pg_sys::RepOriginId {
             id = pgrx::pg_sys::replorigin_create(origin_name.as_ptr());
         }
-        id
-    };
+        Ok(id)
+    })
+    .catch_others(|error| {
+        let message = match error {
+            pgrx::pg_sys::panic::CaughtError::PostgresError(report)
+            | pgrx::pg_sys::panic::CaughtError::ErrorReport(report) => report.message().to_string(),
+            pgrx::pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
+                ereport.message().to_string()
+            }
+        };
+        Err(format!("flush replication origin lookup/create: {message}"))
+    })
+    .execute()?;
     if origin_id == pgrx::pg_sys::InvalidRepOriginId as pgrx::pg_sys::RepOriginId {
         return Err("failed to create koldstore_flush replication origin".to_string());
     }
+    let previous = unsafe { pgrx::pg_sys::replorigin_session_origin };
+    // `replorigin_session_setup` ereports if another backend holds the origin;
+    // convert that to a Rust Err so flush soft-fails instead of aborting mid-prune.
+    pgrx::PgTryBuilder::new(|| {
+        unsafe {
+            pgrx::pg_sys::replorigin_session_setup(origin_id);
+        }
+        Ok(())
+    })
+    .catch_others(|error| {
+        let message = match error {
+            pgrx::pg_sys::panic::CaughtError::PostgresError(report)
+            | pgrx::pg_sys::panic::CaughtError::ErrorReport(report) => report.message().to_string(),
+            pgrx::pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
+                ereport.message().to_string()
+            }
+        };
+        Err(format!("replorigin_session_setup({origin_id}): {message}"))
+    })
+    .execute()?;
     unsafe {
-        let previous = pgrx::pg_sys::replorigin_session_origin;
-        pgrx::pg_sys::replorigin_session_setup(origin_id);
         pgrx::pg_sys::replorigin_session_origin = origin_id;
-        FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.set(true));
-        slot.set(Some(previous));
     }
+    FLUSH_ORIGIN_NEEDS_SESSION_RESET.with(|flag| flag.set(true));
+    slot.set(Some(previous));
     Ok(())
 }
 

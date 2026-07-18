@@ -40,10 +40,10 @@ async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Re
 
         assert!(common::terminate_async_worker(&db.client).await?);
 
-        // Launcher re-registers the applier after a crash; fall back to ensure.
-        if wait_until_worker_running(&db.client).await.is_err() {
-            common::wait_for_async_worker(&db.client).await?;
-        }
+        // Dynamic appliers are BGW_NEVER_RESTART and E2E does not preload the
+        // launcher — bounce via ensure instead of waiting for auto-restart.
+        force_stop_async_worker(&db.client).await?;
+        common::wait_for_async_worker(&db.client).await?;
         common::log_always("worker available again after kill");
 
         db.client
@@ -412,6 +412,16 @@ async fn clear_async_failpoint(client: &tokio_postgres::Client) -> Result<()> {
              RESET koldstore.internal_async_mirror_worker"
         ))
         .await?;
+    let armed: String = client
+        .query_one("SHOW koldstore.failpoint", &[])
+        .await?
+        .get(0);
+    anyhow::ensure!(
+        armed.is_empty(),
+        "failpoint GUC still armed after clear: {armed:?}"
+    );
+    // Running workers keep prior ALTER DATABASE GUCs until reconnect.
+    force_stop_async_worker(client).await?;
     Ok(())
 }
 
@@ -438,7 +448,7 @@ async fn cleanup_leftover_async_tables(client: &tokio_postgres::Client) -> Resul
     Ok(())
 }
 
-/// Terminates the applier until it stays down (slot must already be gone).
+/// Terminates the applier until it stays down.
 async fn force_stop_async_worker(client: &tokio_postgres::Client) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -451,22 +461,6 @@ async fn force_stop_async_worker(client: &tokio_postgres::Client) -> Result<()> 
             Instant::now() < deadline,
             "async worker did not stay stopped within 10s"
         );
-    }
-}
-
-/// Waits for postmaster auto-restart without calling ensure (no DML kick).
-async fn wait_until_worker_running(client: &tokio_postgres::Client) -> Result<Duration> {
-    let started = Instant::now();
-    let deadline = Duration::from_secs(15);
-    loop {
-        if common::async_worker_running(client).await? {
-            return Ok(started.elapsed());
-        }
-        anyhow::ensure!(
-            started.elapsed() <= deadline,
-            "async worker did not auto-restart within {deadline:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 

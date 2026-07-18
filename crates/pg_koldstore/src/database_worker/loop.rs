@@ -149,25 +149,7 @@ unsafe extern "C-unwind" fn applier_sigterm(signal: std::os::raw::c_int) {
     unsafe { pgrx::pg_sys::die(signal) }
 }
 
-/// Runs `body` in a worker transaction that does not use pgrx's guarded helper.
-///
-/// pgrx's guarded worker transaction assigns an XID even to a read-only poll,
-/// which would make the applier continuously wake itself via its own commits.
-///
-/// Prefer [`worker_transaction_result`] when `body` can fail: this helper always
-/// commits and must not be used for fallible apply work.
-pub(crate) fn worker_transaction<R>(body: impl FnOnce() -> R) -> R {
-    unsafe {
-        pgrx::pg_sys::SetCurrentStatementStartTimestamp();
-        pgrx::pg_sys::StartTransactionCommand();
-        pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
-    }
-    let result = body();
-    finish_outer_transaction(true);
-    result
-}
-
-/// Like [`worker_transaction`], but rolls back when `body` returns `Err`.
+/// Runs `body` in a recoverable worker transaction.
 ///
 /// Soft-fail uses an internal subtransaction so a failpoint / SPI apply error
 /// does not `AbortCurrentTransaction` the top-level worker txn (that path can
@@ -229,7 +211,7 @@ fn finish_outer_transaction(commit: bool) {
 fn format_caught_error(context: &str, error: CaughtError) -> String {
     match error {
         CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
-            format!("{context}: {}", report.inner.message())
+            format!("{context}: {}", report.message())
         }
         CaughtError::RustPanic { ereport, payload } => {
             let detail = payload
@@ -237,7 +219,7 @@ fn format_caught_error(context: &str, error: CaughtError) -> String {
                 .map(String::as_str)
                 .or_else(|| payload.downcast_ref::<&str>().copied())
                 .unwrap_or("rust panic");
-            format!("{context}: {} ({detail})", ereport.inner.message())
+            format!("{context}: {} ({detail})", ereport.message())
         }
     }
 }

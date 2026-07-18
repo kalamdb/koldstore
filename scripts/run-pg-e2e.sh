@@ -78,6 +78,11 @@ if ! [[ "$THREADS" =~ ^[1-9][0-9]*$ ]]; then
   echo "error: KOLDSTORE_E2E_THREADS must be a positive integer (got '$THREADS')" >&2
   exit 2
 fi
+# Keep SQL interpolation safe: only plain identifiers are accepted.
+if ! [[ "$PG_DATABASE" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  echo "error: KOLDSTORE_E2E_PGDATABASE must be a plain SQL identifier (got '$PG_DATABASE')" >&2
+  exit 2
+fi
 TEMPLATE_DB="${PG_DATABASE}_template"
 # Async needs one applier per worker DB plus headroom for the launcher.
 WORKER_PROCESSES=$((THREADS + 8))
@@ -86,7 +91,7 @@ if [[ "$WORKER_PROCESSES" -lt 16 ]]; then
 fi
 
 echo "starting pgrx-managed PostgreSQL ${PG_VERSION}"
-pgrx_force_stop "${PG_VERSION}" || true
+pgrx_force_stop "${PG_VERSION}"
 # Always enable logical WAL on every start. Async slots persist in the pgrx data
 # directory across mode/side restarts; starting with wal_level < logical makes
 # startup FATAL ("slot exists, but wal_level < logical") and looks like a crash.
@@ -120,7 +125,7 @@ else
 fi
 
 echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
-pgrx_force_stop "${PG_VERSION}" || true
+pgrx_force_stop "${PG_VERSION}"
 # Keep wal_level=logical on every restart. Do not force shared_preload here:
 # the async launcher would hold logical slots across DROP DATABASE and race
 # failpoint bounce tests. Session ensure() still starts appliers on demand.
@@ -198,7 +203,7 @@ drop_database_retry() {
     release_db_slots_and_backends "${db}"
     # WITH (FORCE) clears remaining backends; slots must already be inactive.
     if "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-      -c "DROP DATABASE IF EXISTS ${db} WITH (FORCE)" >/dev/null 2>&1; then
+      -c "DROP DATABASE IF EXISTS \"${db}\" WITH (FORCE)" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.3
@@ -229,7 +234,7 @@ done < <("$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 -tAc
 drop_database_retry "${TEMPLATE_DB}"
 
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-  -c "CREATE DATABASE ${TEMPLATE_DB}"
+  -c "CREATE DATABASE \"${TEMPLATE_DB}\""
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$TEMPLATE_DB" -v ON_ERROR_STOP=1 \
   -c "CREATE EXTENSION IF NOT EXISTS koldstore;"
 # Template must have no open connections before CREATE DATABASE ... TEMPLATE.
@@ -237,13 +242,13 @@ drop_database_retry "${TEMPLATE_DB}"
   -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '${TEMPLATE_DB}' AND pid <> pg_backend_pid();" \
   >/dev/null || true
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-  -c "ALTER DATABASE ${TEMPLATE_DB} WITH IS_TEMPLATE true"
+  -c "ALTER DATABASE \"${TEMPLATE_DB}\" WITH IS_TEMPLATE true"
 
 for ((i = 0; i < THREADS; i++)); do
   worker_db="${PG_DATABASE}_w${i}"
   echo "  creating ${worker_db}"
   "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-    -c "CREATE DATABASE ${worker_db} TEMPLATE ${TEMPLATE_DB}"
+    -c "CREATE DATABASE \"${worker_db}\" TEMPLATE \"${TEMPLATE_DB}\""
 done
 
 server_version="$("$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "${PG_DATABASE}_w0" -tAc "SHOW server_version")"

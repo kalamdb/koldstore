@@ -102,7 +102,8 @@ impl TestDb {
                    SET active = false \
                  WHERE active"
             ))
-            .await;
+            .await
+            .context("reset leftover async GUC / schema state for fixture")?;
         // Running workers keep prior ALTER DATABASE GUCs until restart; bounce any
         // leftover applier so the next test inherits the reset defaults.
         let _ = super::async_mirror::terminate_async_worker(&server.client).await;

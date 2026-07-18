@@ -394,7 +394,7 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
             .map_err(|error| error.to_string())?;
         }
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let my_pid = unsafe { pgrx::pg_sys::MyProcPid };
     loop {
         let slot_idle = match slot_active_pid(slot)? {
@@ -414,8 +414,27 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
-                "async mirror applier for slot {slot} did not stop after terminate"
+                "async mirror applier for slot {slot} did not stop after terminate \
+                 (slot_idle={slot_idle}, worker_gone={worker_gone})"
             ));
+        }
+        // Re-signal in case the first SIGTERM arrived during a non-interruptible
+        // decoding window; NEVER_RESTART workers exit via die() once they notice.
+        let _ = pgrx::Spi::get_one_with_args::<bool>(
+            "SELECT COALESCE(\
+               (SELECT bool_or(pg_catalog.pg_terminate_backend(pid)) \
+                FROM pg_catalog.pg_stat_activity \
+                WHERE backend_type = $1), \
+               false)",
+            &[DatumWithOid::from(worker_type.as_str())],
+        );
+        if let Some(active_pid) = slot_active_pid(slot)? {
+            if active_pid != my_pid {
+                let _ = pgrx::Spi::get_one_with_args::<bool>(
+                    "SELECT pg_catalog.pg_terminate_backend($1)",
+                    &[DatumWithOid::from(active_pid)],
+                );
+            }
         }
         std::thread::sleep(SLOT_INACTIVE_POLL);
         pgrx::check_for_interrupts!();
