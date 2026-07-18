@@ -337,6 +337,10 @@ if [[ "${SKIP_PG_TEST}" -eq 0 ]]; then
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
       run_local_pg_test "${pg}"
+      # #[pg_test] builds with the pg_test feature and can overwrite the installed
+      # shared library. Reinstall the production feature set before E2E/examples.
+      step "reinstall production koldstore after #[pg_test] (PostgreSQL ${pg})"
+      cargo_pgrx_install_koldstore "pg${pg}" "$(configured_pg_config "${pg}")"
     fi
   done
 fi

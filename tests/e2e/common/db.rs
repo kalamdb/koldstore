@@ -89,7 +89,7 @@ impl TestDb {
             .await
             .context("read current database")?
             .get(0);
-        let _ = server
+        server
             .client
             .batch_execute(&format!(
                 "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \

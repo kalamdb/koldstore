@@ -94,8 +94,7 @@ fn worker_transaction<R>(body: impl FnOnce() -> Result<R, String>) -> Result<R, 
         pgrx::pg_sys::StartTransactionCommand();
         pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
     }
-    let result = std::panic::AssertUnwindSafe(|| body());
-    let result = pgrx::PgTryBuilder::new(result)
+    let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(body))
         .catch_others(|error| {
             let message = match error {
                 pgrx::pg_sys::panic::CaughtError::PostgresError(report)
