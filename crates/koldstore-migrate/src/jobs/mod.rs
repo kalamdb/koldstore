@@ -1,14 +1,12 @@
 //! Durable migration job planning.
 //!
-//! Existing-row migration is intentionally split into small catalog-visible
-//! phases. A worker can crash after any committed batch; the next worker claims
-//! the same job through the `koldstore.jobs` lease and skips rows that already
-//! have a change-log mirror row.
+//! Owns enqueue and inline-completion SQL for `migrate_backfill` jobs. Live
+//! migration runs in the calling backend (`pg_koldstore`); there is no separate
+//! leased claim worker for migrations.
 
 use std::num::NonZeroUsize;
 
 use koldstore_common::TableKind;
-use koldstore_jobs::{LeaseEpoch, LeaseSeconds};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -42,71 +40,6 @@ impl MigrationBatchSize {
     #[must_use]
     pub const fn get(self) -> usize {
         self.0.get()
-    }
-}
-
-/// Positive migration job lease duration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MigrationLeaseSeconds(LeaseSeconds);
-
-impl MigrationLeaseSeconds {
-    /// Creates a positive lease duration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the duration is zero.
-    pub fn new(value: u32) -> Result<Self, MigrationJobError> {
-        LeaseSeconds::new(value)
-            .map(Self)
-            .ok_or(MigrationJobError::InvalidLeaseSeconds)
-    }
-
-    /// Returns the raw seconds value.
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.0.get()
-    }
-}
-
-/// Monotonic lease epoch for migration jobs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MigrationLeaseEpoch(LeaseEpoch);
-
-impl MigrationLeaseEpoch {
-    /// Creates a non-negative lease epoch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the epoch is negative.
-    pub const fn new(value: i64) -> Result<Self, MigrationJobError> {
-        match LeaseEpoch::new(value) {
-            Some(value) => Ok(Self(value)),
-            None => Err(MigrationJobError::InvalidLeaseEpoch),
-        }
-    }
-
-    /// Returns the raw epoch value.
-    #[must_use]
-    pub const fn get(self) -> i64 {
-        self.0.get()
-    }
-}
-
-/// Migration job type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MigrationJobKind {
-    /// Initializes existing rows into the clean-schema mirror.
-    Backfill,
-}
-
-impl MigrationJobKind {
-    /// Returns the `koldstore.jobs.job_type` value.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Backfill => "migrate_backfill",
-        }
     }
 }
 
@@ -218,51 +151,6 @@ pub struct MigrationJobEnqueuePlan {
     pub statement: SqlStatement,
 }
 
-/// Planned migration job claim statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationJobClaimPlan {
-    /// Maximum jobs to claim.
-    pub limit: u32,
-    /// Maximum concurrently running jobs allowed before this claim pauses.
-    pub max_running_jobs: u32,
-    /// Lease duration.
-    pub lease_seconds: MigrationLeaseSeconds,
-    /// Parameterized claim SQL.
-    pub statement: SqlStatement,
-}
-
-/// Planned migration progress statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationJobProgressPlan {
-    /// Job id.
-    pub job_id: Uuid,
-    /// Lease owner.
-    pub lease_owner: Uuid,
-    /// Lease epoch.
-    pub lease_epoch: MigrationLeaseEpoch,
-    /// Durable phase.
-    pub phase: MigrationJobPhase,
-    /// Rows processed by this progress update.
-    pub rows_processed_increment: u64,
-    /// Parameterized progress SQL.
-    pub statement: SqlStatement,
-}
-
-/// Planned mirror-initialization completion statement.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrationMirrorInitializationFinishPlan {
-    /// Job id.
-    pub job_id: Uuid,
-    /// Lease owner.
-    pub lease_owner: Uuid,
-    /// Lease epoch.
-    pub lease_epoch: MigrationLeaseEpoch,
-    /// Durable phase after completion.
-    pub phase: MigrationJobPhase,
-    /// Parameterized completion SQL.
-    pub statement: SqlStatement,
-}
-
 /// Migration job planning error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum MigrationJobError {
@@ -272,12 +160,6 @@ pub enum MigrationJobError {
     /// Batch size must be positive.
     #[error("migration batch_size must be greater than zero")]
     InvalidBatchSize,
-    /// Lease seconds must be positive.
-    #[error("migration lease_seconds must be greater than zero")]
-    InvalidLeaseSeconds,
-    /// Lease epoch must be non-negative.
-    #[error("migration lease_epoch must be non-negative")]
-    InvalidLeaseEpoch,
     /// Identifier is unsafe to quote.
     #[error("invalid migration identifier `{0}`")]
     InvalidIdentifier(String),
@@ -339,173 +221,6 @@ RETURNING id
         job_id: request.job_id,
         table_oid: request.table_oid,
         payload,
-        statement,
-    })
-}
-
-/// Builds a scalable migration-job claim plan.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata cannot be prepared.
-pub fn claim_migration_jobs_plan(
-    limit: u32,
-    max_running_jobs: u32,
-    lease_seconds: MigrationLeaseSeconds,
-) -> Result<MigrationJobClaimPlan, MigrationJobError> {
-    let statement = SqlStatement::write(
-        "claim migration jobs",
-        r#"
-WITH running_jobs AS (
-    SELECT count(*)::integer AS count
-    FROM koldstore.jobs
-    WHERE status = 'running'
-      AND (
-          lease_expires_at IS NULL
-          OR lease_expires_at >= now()
-      )
-),
-candidate AS (
-    SELECT j.id
-    FROM koldstore.jobs AS j
-    CROSS JOIN running_jobs
-    WHERE j.job_type IN ('migrate_backfill')
-      AND j.status IN ('pending', 'running')
-      AND running_jobs.count < $4::integer
-      AND j.run_after <= now()
-      AND (
-          j.status = 'pending'
-          OR j.lease_expires_at IS NULL
-          OR j.lease_expires_at < now()
-      )
-      AND NOT EXISTS (
-          SELECT 1
-          FROM koldstore.jobs AS table_running
-          WHERE table_running.table_oid = j.table_oid
-            AND table_running.id <> j.id
-            AND table_running.job_type IN ('flush', 'migrate_backfill')
-            AND table_running.status = 'running'
-            AND (
-                table_running.lease_expires_at IS NULL
-                OR table_running.lease_expires_at >= now()
-            )
-      )
-    ORDER BY j.priority DESC, j.updated_at, j.id
-    LIMIT $1
-    FOR UPDATE SKIP LOCKED
-)
-UPDATE koldstore.jobs AS j
-SET status = 'running',
-    phase = CASE WHEN j.phase = 'pending' THEN 'initialize_mirror' ELSE j.phase END,
-    attempts = CASE WHEN j.status = 'pending' THEN j.attempts + 1 ELSE j.attempts END,
-    lease_owner = $2::uuid,
-    lease_expires_at = now() + ($3::integer * interval '1 second'),
-    lease_epoch = j.lease_epoch + 1,
-    updated_at = now(),
-    last_heartbeat_at = now()
-FROM candidate
-WHERE j.id = candidate.id
-RETURNING j.id, j.table_oid, j.phase, j.lease_epoch, j.checkpoint_seq, j.rows_processed, j.payload
-"#,
-    )
-    .map_err(|error| MigrationJobError::Spi(error.to_string()))?;
-
-    Ok(MigrationJobClaimPlan {
-        limit,
-        max_running_jobs,
-        lease_seconds,
-        statement,
-    })
-}
-
-/// Builds a lease-guarded migration progress update.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata cannot be prepared.
-pub fn migration_job_progress_plan(
-    job_id: Uuid,
-    lease_owner: Uuid,
-    lease_epoch: MigrationLeaseEpoch,
-    phase: MigrationJobPhase,
-    rows_processed_increment: u64,
-) -> Result<MigrationJobProgressPlan, MigrationJobError> {
-    let statement = SqlStatement::write(
-        "migration job progress",
-        r#"
-UPDATE koldstore.jobs
-SET phase = $4::text,
-    rows_processed = rows_processed + $5::bigint,
-    batches_completed = batches_completed + 1,
-    payload = jsonb_set(payload, '{processed_rows}', to_jsonb(rows_processed + $5::bigint), true),
-    last_heartbeat_at = now(),
-    updated_at = now()
-WHERE id = $1::uuid
-  AND lease_owner = $2::uuid
-  AND lease_epoch = $3::bigint
-  AND status = 'running'
-RETURNING id
-"#,
-    )
-    .map_err(|error| MigrationJobError::Spi(error.to_string()))?;
-
-    Ok(MigrationJobProgressPlan {
-        job_id,
-        lease_owner,
-        lease_epoch,
-        phase,
-        rows_processed_increment,
-        statement,
-    })
-}
-
-/// Builds the lease-guarded clean-schema mirror initialization completion plan.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata cannot be prepared.
-pub fn finish_mirror_initialization_plan(
-    job_id: Uuid,
-    lease_owner: Uuid,
-    lease_epoch: MigrationLeaseEpoch,
-) -> Result<MigrationMirrorInitializationFinishPlan, MigrationJobError> {
-    let statement = SqlStatement::write(
-        "finish mirror initialization",
-        r#"
-WITH finished AS (
-    UPDATE koldstore.jobs
-    SET status = 'completed',
-        phase = 'finished',
-        lease_owner = NULL,
-        lease_expires_at = NULL,
-        last_heartbeat_at = now(),
-        updated_at = now()
-    WHERE id = $1::uuid
-      AND lease_owner = $2::uuid
-      AND lease_epoch = $3::bigint
-      AND status = 'running'
-    RETURNING table_oid
-),
-activated AS (
-    UPDATE koldstore.schemas AS s
-    SET active = true,
-        initialization_state = 'complete',
-        options = jsonb_set(s.options, '{migration_status}', '"active"'::jsonb, true),
-        updated_at = now()
-    FROM finished
-    WHERE s.table_oid = finished.table_oid
-    RETURNING s.table_oid
-)
-SELECT count(*) FROM activated
-"#,
-    )
-    .map_err(|error| MigrationJobError::Spi(error.to_string()))?;
-
-    Ok(MigrationMirrorInitializationFinishPlan {
-        job_id,
-        lease_owner,
-        lease_epoch,
-        phase: MigrationJobPhase::Finished,
         statement,
     })
 }

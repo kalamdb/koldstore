@@ -14,7 +14,7 @@ on:
         required: false
         default: false
       pre_release:
-        description: "Mark GitHub Release as pre-release"
+        description: "Mark GitHub Release as pre-release when creating a new tag (ignored if that tag is already a full/latest release)"
         type: boolean
         required: false
         default: true
@@ -484,12 +484,43 @@ jobs:
           sha256sum "${assets[@]}" > SHA256SUMS
           ls -lh
 
+      - name: Resolve prerelease flag
+        id: prerelease
+        shell: bash
+        env:
+          REQUESTED_PRERELEASE: ${{ inputs.pre_release }}
+          TAG: ${{ needs.read_version.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          requested="${REQUESTED_PRERELEASE}"
+          effective="${requested}"
+          reason="new release; using workflow input pre_release=${requested}"
+
+          if release_json="$(gh release view "${TAG}" --json isPrerelease,isLatest 2>/dev/null)"; then
+            is_prerelease="$(printf '%s' "${release_json}" | jq -r '.isPrerelease')"
+            is_latest="$(printf '%s' "${release_json}" | jq -r '.isLatest')"
+            if [[ "${is_prerelease}" == "false" ]]; then
+              # Never demote a published full/latest release to pre-release.
+              effective="false"
+              reason="tag ${TAG} already published as a full release (isLatest=${is_latest}); preserving non-prerelease"
+            else
+              reason="tag ${TAG} already exists as a pre-release; using workflow input pre_release=${requested}"
+            fi
+          fi
+
+          {
+            echo "effective=${effective}"
+            echo "reason=${reason}"
+          } >> "$GITHUB_OUTPUT"
+          echo "::notice::GitHub Release prerelease=${effective} (${reason})"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.read_version.outputs.tag }}
           target_commitish: ${{ github.sha }}
-          prerelease: ${{ inputs.pre_release }}
+          prerelease: ${{ steps.prerelease.outputs.effective }}
           generate_release_notes: true
           files: |
             dist/${{ needs.read_version.outputs.version }}/*.deb

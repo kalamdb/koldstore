@@ -7,13 +7,11 @@ pub enum MirrorColumn {
     Seq,
     /// Mirror operation code.
     Op,
-    /// Captured WAL position, when available.
-    CommitLsn,
 }
 
 impl MirrorColumn {
     /// All metadata columns in storage order.
-    pub const ALL: [Self; 3] = [Self::Seq, Self::Op, Self::CommitLsn];
+    pub const ALL: [Self; 2] = [Self::Seq, Self::Op];
 
     /// Stable SQL column name.
     #[must_use]
@@ -21,7 +19,6 @@ impl MirrorColumn {
         match self {
             Self::Seq => "seq",
             Self::Op => "op",
-            Self::CommitLsn => "commit_lsn",
         }
     }
 
@@ -33,7 +30,7 @@ impl MirrorColumn {
 
     /// Quoted metadata column names for INSERT/SELECT lists.
     #[must_use]
-    pub fn insert_quoted_names() -> [String; 3] {
+    pub fn insert_quoted_names() -> [String; 2] {
         Self::ALL.map(Self::quoted_name)
     }
 
@@ -43,7 +40,6 @@ impl MirrorColumn {
         match self {
             Self::Seq => "\"seq\" bigint NOT NULL",
             Self::Op => "\"op\" smallint NOT NULL",
-            Self::CommitLsn => "\"commit_lsn\" pg_lsn NULL",
         }
     }
 }

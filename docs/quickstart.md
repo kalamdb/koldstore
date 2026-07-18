@@ -1,7 +1,9 @@
 # Quick Start (detailed)
 
 This walkthrough expands the short Docker demo in the [README](../README.md).
-It uses local filesystem storage so you can try the extension without S3.
+It configures KoldStore's two storage tiers: PostgreSQL for the hot working set
+and local Parquet files for cold historical rows. Local filesystem storage lets
+you try the extension without S3.
 
 ## 1. Create the extension and register storage
 

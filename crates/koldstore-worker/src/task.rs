@@ -1,13 +1,16 @@
 //! Task seam for work executed once per database-worker poll tick.
 //!
-//! Async mirror apply implements this today. Flush job claiming is a planned
-//! future implementor that can share the same ensure/poll shell.
+//! Async mirror apply and built-in flush scheduling both implement this trait
+//! and share the ensure/poll shell in `pg_koldstore::database_worker`.
 
 /// Outcome of one worker tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickResult {
-    /// Continue polling.
+    /// Continue polling; no urgent pending apply work.
     Continue,
+    /// Tick budget exhausted with more WAL remaining — poll again without
+    /// waiting for a new WAL insert position.
+    ContinuePending,
     /// Exit the worker loop (for example when infrastructure was removed).
     Stop,
 }

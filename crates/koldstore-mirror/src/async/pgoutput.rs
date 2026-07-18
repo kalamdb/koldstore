@@ -96,6 +96,11 @@ pub enum PgOutputMessage {
         /// Old key or full tuple.
         old: PgOutputTuple,
     },
+    /// Replication origin for the current transaction (when stamped).
+    Origin {
+        /// Origin name from `pg_replication_origin`.
+        name: String,
+    },
     /// A known protocol message not needed by protocol version 1 apply.
     Ignored {
         /// Message type byte.
@@ -174,10 +179,18 @@ pub fn decode_message(input: &[u8]) -> Result<PgOutputMessage, PgOutputDecodeErr
             let old = decode_tuple(&mut reader)?;
             PgOutputMessage::Delete { relation_id, old }
         }
-        // Origin, type, truncate, and logical-message records are intentionally
-        // ignored by protocol-v1 mirror apply. The publication excludes messages
-        // and managed tables reject TRUNCATE at their SQL boundary.
-        b'O' | b'Y' | b'T' | b'M' => PgOutputMessage::Ignored { tag },
+        // ORIGIN is required on PG15: flush prune stamps `koldstore_flush` and
+        // apply must skip those deletes (PG16+ also filters via origin=none).
+        // Wire order matches logicalrep_write_origin: LSN then cstring name.
+        b'O' => {
+            let _origin_lsn = reader.u64("origin lsn")?;
+            let name = reader.cstring("origin name")?.to_string();
+            PgOutputMessage::Origin { name }
+        }
+        // Type, truncate, and logical-message records are intentionally ignored
+        // by protocol-v1 mirror apply. The publication excludes messages and
+        // managed tables reject TRUNCATE at their SQL boundary.
+        b'Y' | b'T' | b'M' => PgOutputMessage::Ignored { tag },
         _ => return Err(PgOutputDecodeError::UnsupportedTag(tag)),
     };
     if !reader.is_empty() && !matches!(message, PgOutputMessage::Ignored { .. }) {
@@ -395,8 +408,21 @@ mod tests {
     }
 
     #[test]
-    fn origin_type_and_logical_message_tags_are_ignored() {
-        for tag in [b'O', b'Y', b'M'] {
+    fn origin_message_decodes_name_and_lsn() {
+        let mut message = vec![b'O'];
+        message.extend_from_slice(&0x11_22_33_44_55_66_77_88_u64.to_be_bytes());
+        message.extend_from_slice(b"koldstore_flush\0");
+        assert_eq!(
+            decode_message(&message),
+            Ok(PgOutputMessage::Origin {
+                name: "koldstore_flush".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn type_and_logical_message_tags_are_ignored() {
+        for tag in [b'Y', b'M'] {
             assert_eq!(
                 decode_message(&[tag, 0x01, 0x02, 0x03]),
                 Ok(PgOutputMessage::Ignored { tag })

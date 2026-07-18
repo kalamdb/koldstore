@@ -506,6 +506,7 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
               hot_row_limit  => $3,
               min_flush_rows => 1,
               migration_order_by => 'id',
+              auto_flush => false,
               mirror_capture_mode => $4
             )
             "#,
@@ -581,7 +582,7 @@ async fn assert_change_log_mirror(
     common::assert_primary_key_columns_match(client, &relation, &mirror).await?;
 
     let mirror_columns = relation_columns(client, &mirror).await?;
-    let expected_mirror_columns = ["tenant_id", "id", "seq", "op", "commit_lsn"];
+    let expected_mirror_columns = ["tenant_id", "id", "seq", "op"];
     for column in expected_mirror_columns {
         assert!(
             mirror_columns.iter().any(|name| name == column),

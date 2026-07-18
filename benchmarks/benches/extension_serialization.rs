@@ -2,12 +2,9 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
-use koldstore_catalog::{FkPolicyDecision, FlushPolicy, ManagedTableMeta};
-use koldstore_common::{
-    ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId, TableKind,
-};
+use koldstore_catalog::FlushPolicy;
+use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId};
 use koldstore_merge::resolve_rows;
-use koldstore_schema::MirrorInitializationState;
 use koldstore_storage::PathTemplate;
 use serde_json::json;
 
@@ -45,26 +42,14 @@ fn bench_path_and_policy(c: &mut Criterion) {
         })
     });
 
-    let meta = ManagedTableMeta {
-        table_oid: 42,
-        table_kind: TableKind::User,
-        scope_column: Some("user_id".to_string()),
-        mirror_relation: Some("koldstore.bench_events__cl".to_string()),
-        primary_key_shape: None,
-        initialization_state: MirrorInitializationState::Capturing,
-        flush_policy: Some(FlushPolicy {
-            hot_row_limit: Some(10_000),
-            min_flush_rows: None,
-            max_rows_per_file: None,
-            target_file_size_mb: None,
-        }),
-        schema_version: 1,
+    let policy = FlushPolicy {
+        hot_row_limit: Some(10_000),
+        min_flush_rows: None,
+        max_rows_per_file: None,
+        target_file_size_mb: None,
     };
     c.bench_function("policy_evaluation_for_hot_retention", |b| {
-        b.iter(|| should_flush_by_policy(black_box(&meta), 12_000))
-    });
-    c.bench_function("foreign_key_policy_classification", |b| {
-        b.iter(|| FkPolicyDecision::classify(true, false, true, false))
+        b.iter(|| should_flush_by_policy(black_box(&policy), 12_000))
     });
 }
 
@@ -167,14 +152,10 @@ fn render_cold_path(
     format!("{prefix}batch-{batch}.parquet")
 }
 
-fn should_flush_by_policy(meta: &ManagedTableMeta, pending_rows: u64) -> bool {
-    let Some(policy) = &meta.flush_policy else {
-        return false;
-    };
-    meta.validate().is_ok()
-        && policy
-            .hot_row_limit
-            .is_some_and(|rows| pending_rows >= rows)
+fn should_flush_by_policy(policy: &FlushPolicy, pending_rows: u64) -> bool {
+    policy
+        .hot_row_limit
+        .is_some_and(|rows| pending_rows >= rows)
 }
 
 #[derive(Debug, Clone, Copy)]

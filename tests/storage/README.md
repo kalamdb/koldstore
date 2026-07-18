@@ -9,19 +9,23 @@ This package is excluded from the default workspace `cargo nextest` run (same as
 
 Schema: [`schema.sql`](schema.sql)
 
-Order of measurement:
+Order of measurement (isolated `--side` / `--all-sides`):
 
-1. Seed + DML on both tables
+1. Seed + DML on **one** table only (that column’s side)
 2. In async mode, time a separate mirror catch-up after each DML phase
 3. Snapshot dead tuples (`pg_stat_user_tables`, pre-flush)
-4. **Hot-only PK lookups before flush** (both heaps still hold all rows)
-5. Flush older managed rows to zstd Parquet (duration + peak cluster RSS)
-6. Time `VACUUM (FULL, ANALYZE)` on both heaps, then REINDEX
-7. Hot+cold PK lookups + heap/index size comparison
+4. **Hot-only PK lookups before flush** (full heap still present)
+5. Flush older managed rows to zstd Parquet (duration + peak cluster RSS) —
+   skipped for PostgreSQL-only
+6. Time `VACUUM (FULL, ANALYZE)`, then REINDEX
+7. **Cold-only** PK lookups (`id = 1`) + **hot+cold 50/50 mix** + heap/index
+   size snapshot
+8. Report p99 from the same phases (insert batch / 1k-row update / PK lookup)
 
-The insert phase alternates baseline-first and managed-first 100k-row committed
-batches, accumulating only each side's execution time. This avoids fixed-order
-writeback/thermal bias and bounds logical-decoding transaction memory.
+Published RESULTS.md use `--all-sides`: stop PostgreSQL, recreate empty worker
+DBs, measure `pg`, then `async`, then `strict` — once each, alone (**sequential**,
+not parallel). That avoids dual-table I/O contention and shared-buffer warm-up
+from a prior side. Each side’s JSON records `generated_at` and `git_commit`.
 
 Both source tables have autovacuum disabled by the schema, and the harness
 applies the same benchmark-only setting to the generated mirror. A long async
@@ -34,9 +38,9 @@ section. Columns are **PostgreSQL only**, **PG + KoldStore (async)**, and
 run). Flush rows report duration, rows/s, and peak RSS while `flush_table`
 runs. Storage is split into **local PostgreSQL** versus **total hot+cold**.
 
-Pass `--update-results` to merge the run into `docs/benchmarks/RESULTS.md`
-(JSON cache under `docs/benchmarks/.storage-results/`). Use `--both-modes` to
-fill both managed columns in one invocation.
+Pass `--update-results` with `--all-sides` (or `--side …`) to merge into
+`docs/benchmarks/RESULTS.md` (JSON cache under
+`docs/benchmarks/.storage-results/{pg,async,strict}.json`).
 
 TODO rows not measured yet include: sustainable throughput, p99 latency, peak
 memory under the full workload, CPU/WAL/I/O, object-store efficiency, open
@@ -44,13 +48,12 @@ files, backup/restore, and mirror backlog. Autovacuum counters are not printed
 because autovacuum is intentionally disabled for both source relations and the
 generated mirror.
 ```bash
-# Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot, 1k DML sample):
-scripts/run-storage-comparison.sh
-scripts/run-storage-comparison.sh --rows 1000000 --hot-limit 50000
-scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 100000
-# Opt-in committed-WAL capture; wrapper prepares the server wal_level:
-scripts/run-storage-comparison.sh --rows 100000 --hot-limit 10000 --dml-sample 5000 \
-  --mirror-capture-mode async
+# Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot, 1k DML sample).
+# Requires --all-sides (pg + async + strict, fresh server each) or --side <one>:
+scripts/run-storage-comparison.sh --all-sides
+scripts/run-storage-comparison.sh --all-sides --rows 1000000 --hot-limit 50000
+scripts/run-storage-comparison.sh --all-sides --rows 100000 --hot-limit 10000 --dml-sample 100000
+scripts/run-storage-comparison.sh --side async --rows 100000 --hot-limit 10000 --dml-sample 5000
 
 # Or prepare wal_level manually, then run the test directly. CREATE EXTENSION
 # and the first async manage call create the publication and slot automatically:
@@ -61,7 +64,7 @@ cargo pgrx install -p pg_koldstore --profile release-pg --no-default-features --
   --pg-config "$(cargo pgrx info pg-config 16)"
 cargo pgrx stop pg16 && cargo pgrx start pg16
 KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 KOLDSTORE_STORAGE_DML_SAMPLE=1000 \
-  KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE=strict \
+  KOLDSTORE_STORAGE_SIDE=strict \
   cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
 ```
 

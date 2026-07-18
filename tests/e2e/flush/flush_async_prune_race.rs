@@ -11,6 +11,7 @@ use crate::flush::harness::{
 
 async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> Result<String> {
     let relation = db.relation(table_name);
+    let mode = common::selected_mirror_capture_mode()?.as_str();
     db.client
         .batch_execute(&format!(
             r#"
@@ -21,7 +22,27 @@ async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> R
             "#
         ))
         .await?;
-    db.manage_shared(&relation, "id").await?;
+    // Disable auto_flush so the background scheduler cannot race the failpoint
+    // prune window under test.
+    db.client
+        .execute(
+            r#"
+            SELECT koldstore.manage_table(
+              table_name => $1::text::regclass,
+              storage => $2,
+              hot_row_limit => NULL,
+              migration_order_by => $3,
+              auto_flush => false,
+              mirror_capture_mode => $4
+            )
+            "#,
+            &[&relation, &db.storage_name, &"id", &mode],
+        )
+        .await?;
+    common::assert_system_columns_absent(&db.client, &relation).await?;
+    common::assert_change_log_mirror_exists(&db.client, &format!("koldstore.{table_name}__cl"))
+        .await?;
+    common::assert_catalog_has_active_schema(&db.client, &relation).await?;
     db.client
         .batch_execute(&format!(
             r#"
@@ -185,14 +206,17 @@ async fn delete_during_async_flush_prune_keeps_tombstone() -> Result<()> {
 
         let mirror_row = db
             .client
-            .query_one(
+            .query_opt(
                 &format!(
                     "SELECT seq::bigint, op::smallint FROM {mirror} \
                      WHERE id = 5 ORDER BY seq DESC LIMIT 1"
                 ),
                 &[],
             )
-            .await?;
+            .await?
+            .with_context(|| {
+                format!("expected mirror tombstone for id=5 in {mirror} after prune fence")
+            })?;
         assert!(mirror_row.get::<_, i64>(0) > max_seq_before);
         assert_eq!(mirror_row.get::<_, i16>(1), 3, "expected delete op");
     }

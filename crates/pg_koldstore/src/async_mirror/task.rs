@@ -30,7 +30,16 @@ impl DatabaseWorkerTask for AsyncMirrorTask {
     /// Returns an error when apply fails fatally (including armed failpoints).
     fn tick(&self) -> Result<TickResult, String> {
         let _ = self.database_oid;
-        crate::async_mirror::apply::apply_available()?;
-        Ok(TickResult::Continue)
+        let started = std::time::Instant::now();
+        let outcome = crate::async_mirror::apply::apply_bounded(
+            crate::async_mirror::apply::BoundedApplyRequest::available(),
+        )?;
+        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        crate::observability::record_async_apply_tick(outcome.row_changes, elapsed_ms);
+        if outcome.budget_exhausted {
+            Ok(TickResult::ContinuePending)
+        } else {
+            Ok(TickResult::Continue)
+        }
     }
 }

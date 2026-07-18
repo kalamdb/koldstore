@@ -2,7 +2,7 @@
 
 use koldstore_common::{is_safe_identifier, TableName};
 
-use crate::{MirrorError, MirrorResult};
+use super::error::{MirrorError, MirrorResult};
 
 /// Schema that owns all clean-schema mirror tables.
 pub const KOLDSTORE_SCHEMA: &str = "koldstore";

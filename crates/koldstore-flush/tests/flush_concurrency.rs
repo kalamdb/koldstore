@@ -123,7 +123,7 @@ fn rollback_during_flush_does_not_block_cleanup_but_committed_update_does() {
 
 #[test]
 fn flush_batch_builder_keeps_mass_dml_memory_bounded() {
-    let config = FlushExecutionConfig::new(512, 512 * 128, 8, 30).unwrap();
+    let config = FlushExecutionConfig::new(512, 512 * 128, 8).unwrap();
     let mut builder = FlushBatchBuilder::new(config);
     let mut accepted = 0usize;
 

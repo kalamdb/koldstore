@@ -153,6 +153,30 @@ pub fn column_stats_min_max_map(
     stats
 }
 
+/// Like [`column_stats_min_max_map`], but takes ownership and moves min/max out.
+#[must_use]
+pub fn column_stats_min_max_map_into(
+    column_stats: serde_json::Value,
+) -> BTreeMap<String, (serde_json::Value, serde_json::Value)> {
+    let mut stats = BTreeMap::new();
+    let serde_json::Value::Object(columns) = column_stats else {
+        return stats;
+    };
+    for (column, value) in columns {
+        let serde_json::Value::Object(mut bounds) = value else {
+            continue;
+        };
+        let Some(min) = bounds.remove("min") else {
+            continue;
+        };
+        let Some(max) = bounds.remove("max") else {
+            continue;
+        };
+        stats.insert(column, (min, max));
+    }
+    stats
+}
+
 /// Decodes a flush storage context JSON payload.
 ///
 /// # Errors

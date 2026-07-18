@@ -195,6 +195,10 @@ pub struct ManageTableOptions {
     /// Mirror consistency/write-throughput mode. Missing means strict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mirror_capture_mode: Option<MirrorCaptureMode>,
+    /// Whether the built-in database worker may auto-enqueue and run flushes.
+    /// Missing or `true` means enabled; `false` reserves the table for manual/cron flush.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_flush: Option<bool>,
 }
 
 impl ManageTableOptions {
@@ -311,6 +315,22 @@ impl ManageTableOptions {
     pub fn allow_fk_hot_only(&self) -> bool {
         self.allow_fk_hot_only.unwrap_or(false)
     }
+
+    /// Returns whether the built-in flush scheduler may manage this table.
+    ///
+    /// Defaults to `true` when the option is omitted so existing managed tables
+    /// keep auto-flush behavior.
+    #[must_use]
+    pub fn auto_flush_enabled(&self) -> bool {
+        self.auto_flush.unwrap_or(true)
+    }
+
+    /// Sets whether the built-in scheduler may auto-flush this table.
+    #[must_use]
+    pub fn with_auto_flush(mut self, enabled: bool) -> Self {
+        self.auto_flush = if enabled { None } else { Some(false) };
+        self
+    }
 }
 
 /// Returns whether schema options configure automatic flush.
@@ -355,6 +375,25 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("SET koldstore.min_max_rows_per_file = 100"));
+    }
+
+    #[test]
+    fn auto_flush_defaults_enabled_and_omits_true_from_json() {
+        let default = ManageTableOptions::default();
+        assert!(default.auto_flush_enabled());
+        assert_eq!(default.to_value(), serde_json::json!({}));
+
+        let disabled = ManageTableOptions::default().with_auto_flush(false);
+        assert!(!disabled.auto_flush_enabled());
+        assert_eq!(
+            disabled.to_value(),
+            serde_json::json!({ "auto_flush": false })
+        );
+        assert!(ManageTableOptions::from_value(&serde_json::json!({})).auto_flush_enabled());
+        assert!(
+            !ManageTableOptions::from_value(&serde_json::json!({ "auto_flush": false }))
+                .auto_flush_enabled()
+        );
     }
 
     #[test]

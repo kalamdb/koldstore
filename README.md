@@ -2,7 +2,7 @@
 
 > **Keep hot data in PostgreSQL. Move historical rows to Parquet. Query one table.**
 
-KoldStore is an open-source PostgreSQL extension for application tables that grow forever: messages, audit logs, AI history, notifications, events, and IoT data.
+KoldStore is an open-source PostgreSQL tiered-storage extension for application tables that grow forever: messages, audit logs, AI history, notifications, events, and IoT data.
 
 Your table remains a normal PostgreSQL heap table. KoldStore keeps the active working set in PostgreSQL, flushes older rows into compressed Parquet on storage you control, and transparently reads hot and cold rows through the original table.
 
@@ -34,6 +34,22 @@ Hot rows  → PostgreSQL heap
 Old rows  → Parquet / object storage
 Queries   → same PostgreSQL table
 ```
+
+## What is tiered storage?
+
+**Tiered storage is a data management strategy that assigns data to different
+storage media based on performance, frequency of access, and cost.** KoldStore
+applies that strategy to rows in one PostgreSQL table:
+
+| Tier | Where rows live | Optimized for |
+| --- | --- | --- |
+| **Hot** | PostgreSQL heap and native indexes | Active data, low-latency reads, and normal transactional writes |
+| **Cold** | Compressed Parquet on filesystem or object storage | Historical data, lower storage cost, and longer retention |
+
+Applications continue to query the original PostgreSQL table; `KoldMergeScan`
+combines visible rows from both tiers. Placement is controlled by the table's
+flush policy—currently a hot-row limit with sequence-ordered eviction—rather
+than by automatically measuring how often each row is accessed.
 
 ## Why KoldStore?
 

@@ -8,16 +8,17 @@
 //! [`plan_activate_flush_segments`] CAS-bumps `manifest.generation` and flips
 //! those rows to `active` in one statement.
 
+use koldstore_catalog::SyncState;
 use koldstore_common::SqlStatement;
-use koldstore_manifest::SyncState;
 use koldstore_parquet::ColdMetadataColumn;
 use thiserror::Error;
 
 use crate::stats::FlushStats;
 
+pub use koldstore_catalog::CatalogManifestSegmentRow;
 pub use koldstore_manifest::{
     build_manifest_segment_from_catalog_row, load_manifest_from_path, manifest_from_catalog_rows,
-    write_manifest_to_path, CatalogManifestSegmentRow, ManifestAssemblyError,
+    write_manifest_to_path, ManifestAssemblyError,
 };
 
 /// Flush catalog planning error.

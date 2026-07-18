@@ -3,11 +3,10 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use koldstore::spi::prepared_plan_key;
-use koldstore_catalog::HintKind;
 use koldstore_common::{CommitSeq, SeqId, StablePkHash, TableName};
 use koldstore_flush::job::{
-    conditional_cleanup_allowed, plan_cold_pk_hint_updates, FlushBatchBuilder, FlushBatchInput,
-    FlushExecutionConfig, FlushWatermark, HotRowCandidate,
+    conditional_cleanup_allowed, FlushBatchBuilder, FlushBatchInput, FlushExecutionConfig,
+    FlushWatermark, HotRowCandidate,
 };
 use koldstore_merge::events::plan_mirror_changes_since;
 use koldstore_migrate::QualifiedTableName;
@@ -27,7 +26,7 @@ fn bench_flush_candidate_selection(c: &mut Criterion) {
 
 fn bench_flush_batch_builder(c: &mut Criterion) {
     let config =
-        FlushExecutionConfig::new(10_000, 128 * 1024 * 1024, 8, 60).expect("valid flush config");
+        FlushExecutionConfig::new(10_000, 128 * 1024 * 1024, 8).expect("valid flush config");
     let rows = hot_candidates(10_000);
 
     c.bench_function("bounded_flush_batch_builder", |b| {
@@ -48,9 +47,6 @@ fn bench_flush_metadata(c: &mut Criterion) {
     });
     c.bench_function("flush_column_stats", |b| {
         b.iter(|| black_box(&plan).column_stats(["created_day", "priority"]))
-    });
-    c.bench_function("cold_pk_hint_update_generation", |b| {
-        b.iter(|| plan_cold_pk_hint_updates(42, None, black_box(&plan), HintKind::Exact))
     });
 }
 

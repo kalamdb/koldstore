@@ -40,6 +40,7 @@ async fn baseline_equality_smoke_matches_after_shared_dml() -> Result<()> {
                   min_flush_rows => 1,
                   max_rows_per_file => 8,
                   migration_order_by => 'id',
+                  auto_flush => false,
                   mirror_capture_mode => $3
                 )
                 "#,

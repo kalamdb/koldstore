@@ -1,5 +1,4 @@
 use koldstore_flush::{cleanup, job, worker};
-use uuid::Uuid;
 
 #[test]
 fn hot_cleanup_waits_for_manifest_commit_and_retains_needed_tombstones() {
@@ -18,13 +17,8 @@ fn hot_cleanup_waits_for_manifest_commit_and_retains_needed_tombstones() {
 }
 
 #[test]
-fn flush_worker_registration_documents_builtin_and_sql_fallback_boundaries() {
-    let modes = worker::flush_worker_modes();
-
+fn flush_worker_registration_requires_shared_preload_for_launcher() {
     assert!(worker::requires_shared_preload());
-    assert!(modes.contains(&worker::FlushWorkerMode::BuiltInBackgroundWorker));
-    assert!(modes.contains(&worker::FlushWorkerMode::SqlFunctionFallback));
-    assert!(modes.contains(&worker::FlushWorkerMode::PgCronFallback));
 }
 
 #[test]
@@ -40,7 +34,7 @@ fn bounded_flush_batch_builder_stops_before_row_or_memory_limits() {
         FlushBatchBuilder, FlushBatchPush, FlushExecutionConfig, HotRowCandidate,
     };
 
-    let config = FlushExecutionConfig::new(2, 128, 2, 30).unwrap();
+    let config = FlushExecutionConfig::new(2, 128, 2).unwrap();
     let mut builder = FlushBatchBuilder::new(config);
 
     assert_eq!(
@@ -81,8 +75,7 @@ fn bounded_flush_batch_builder_stops_before_row_or_memory_limits() {
     assert_eq!(input.batch_size, 2);
     assert_eq!(input.rows.len(), 2);
 
-    let mut byte_limited =
-        FlushBatchBuilder::new(FlushExecutionConfig::new(10, 96, 2, 30).unwrap());
+    let mut byte_limited = FlushBatchBuilder::new(FlushExecutionConfig::new(10, 96, 2).unwrap());
     assert_eq!(
         byte_limited.push(
             HotRowCandidate::live(
@@ -176,22 +169,6 @@ fn flush_stats_omit_incomparable_columns_to_keep_pruning_conservative() {
 }
 
 #[test]
-fn flush_phase_order_defers_heap_cleanup_until_manifest_and_catalog_are_committed() {
-    use koldstore_flush::job::{can_cleanup_hot_rows, flush_execution_phases, FlushJobPhase};
-
-    let phases = flush_execution_phases();
-
-    assert_eq!(phases[0], FlushJobPhase::Claimed);
-    assert!(phases
-        .windows(2)
-        .any(|window| window == [FlushJobPhase::CommitCatalog, FlushJobPhase::PublishManifest]));
-    assert!(!can_cleanup_hot_rows(FlushJobPhase::PublishManifest));
-    assert!(!can_cleanup_hot_rows(FlushJobPhase::CommitCatalog));
-    assert!(can_cleanup_hot_rows(FlushJobPhase::CleanupHotRows));
-    assert_eq!(FlushJobPhase::CleanupHotRows.as_str(), "cleanup_hot_rows");
-}
-
-#[test]
 fn flush_watermark_skips_rows_changed_after_claimed_seqid() {
     use koldstore_common::{CommitSeq, SeqId, StablePkHash};
     use koldstore_flush::job::{conditional_cleanup_allowed, FlushWatermark, HotRowCandidate};
@@ -259,24 +236,4 @@ fn mirror_flush_selection_set_persists_selected_keys_and_seq_cutoff() {
             {"id": 2, "seq": 20, "op": 3}
         ])
     );
-}
-
-#[test]
-fn flush_leases_fence_stale_workers_by_owner_and_epoch() {
-    use koldstore_flush::job::{FlushJobLease, FlushLeaseSeconds, JobLeaseEpoch};
-
-    let job_id = Uuid::new_v4();
-    let worker_id = Uuid::new_v4();
-    let other_worker = Uuid::new_v4();
-    let lease = FlushJobLease::new(
-        job_id,
-        worker_id,
-        JobLeaseEpoch::new(7).unwrap(),
-        FlushLeaseSeconds::new(30).unwrap(),
-    );
-
-    assert!(lease.matches(worker_id, JobLeaseEpoch::new(7).unwrap()));
-    assert!(!lease.matches(other_worker, JobLeaseEpoch::new(7).unwrap()));
-    assert!(!lease.matches(worker_id, JobLeaseEpoch::new(8).unwrap()));
-    assert_eq!(lease.lease_seconds.get(), 30);
 }

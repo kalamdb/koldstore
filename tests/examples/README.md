@@ -50,6 +50,17 @@ Run one scenario:
 scripts/run-examples.sh chat_history
 ```
 
+Mirror capture mode (same contract as E2E):
+
+```bash
+scripts/run-examples.sh --mode strict          # default
+scripts/run-examples.sh --mode async
+scripts/run-examples.sh game_events --mode async
+```
+
+`--mode` prepares the pgrx cluster for that capture path and passes
+`mirror_capture_mode` into every scenario's `manage_table` call. Async mode
+enables logical WAL and fences mirror apply before flush/visibility checks.
 ## Live progress output
 
 `scripts/run-examples.sh` always runs with `--no-capture`, so progress prints while

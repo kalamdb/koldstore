@@ -1,7 +1,9 @@
 //! Low-level mirror read SQL builders.
 
-use crate::write::quoted_pk_columns;
-use crate::{MirrorRelation, MirrorResult, MirrorStatement, SqlParamType};
+use super::error::MirrorResult;
+use super::relation::MirrorRelation;
+use super::statement::{MirrorStatement, SqlParamType};
+use super::write::quoted_pk_columns;
 
 /// Plans the mirror half of `koldstore.changes_since`.
 ///

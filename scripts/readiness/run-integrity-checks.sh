@@ -6,16 +6,30 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 PG_VERSION="${1:-${KOLDSTORE_E2E_PGVERSION:-16}}"
-PG_PORT="${KOLDSTORE_E2E_PGPORT:-288${PG_VERSION}}"
-PG_HOST="${KOLDSTORE_E2E_PGHOST:-127.0.0.1}"
-PG_DATABASE="${KOLDSTORE_E2E_PGDATABASE:-koldstore_pgrx_e2e}"
 PG_CONFIG="${PGRX_PG_CONFIG:-$(cargo pgrx info pg-config "$PG_VERSION")}"
 PSQL="$(dirname "$PG_CONFIG")/psql"
 AMCHECK_BIN="$(dirname "$PG_CONFIG")/pg_amcheck"
+E2E_ENV_FILE="${KOLDSTORE_E2E_ENV_FILE:-$ROOT_DIR/.e2e-env}"
 
 if [[ "${KOLDSTORE_INTEGRITY_PREPARE:-1}" == "1" ]]; then
   export KOLDSTORE_E2E_PREPARE_ONLY=1
   bash scripts/run-pg-e2e.sh "$PG_VERSION"
+fi
+
+# Prefer env written by prepare-only (worker pool). Fall back to process env.
+if [[ -f "$E2E_ENV_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$E2E_ENV_FILE"
+fi
+
+PG_PORT="${KOLDSTORE_E2E_PGPORT:-288${PG_VERSION}}"
+PG_HOST="${KOLDSTORE_E2E_PGHOST:-127.0.0.1}"
+PG_DATABASE_PREFIX="${KOLDSTORE_E2E_PGDATABASE:-koldstore_pgrx_e2e}"
+# run-pg-e2e.sh drops the shared prefix DB and creates ${prefix}_wN workers.
+if [[ "${KOLDSTORE_E2E_DB_POOL:-0}" == "1" || "${KOLDSTORE_E2E_DB_POOL:-}" == "true" ]]; then
+  PG_DATABASE="${PG_DATABASE_PREFIX}_w0"
+else
+  PG_DATABASE="$PG_DATABASE_PREFIX"
 fi
 
 echo "running KoldStore integrity SQL against ${PG_HOST}:${PG_PORT}/${PG_DATABASE}"

@@ -9,7 +9,6 @@ members = [
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
     "crates/koldstore-mirror",
-    "crates/koldstore-jobs",
     "crates/koldstore-worker",
     "crates/koldstore-flush",
     "crates/koldstore-migrate",
@@ -31,7 +30,6 @@ default-members = [
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
     "crates/koldstore-mirror",
-    "crates/koldstore-jobs",
     "crates/koldstore-worker",
     "crates/koldstore-flush",
     "crates/koldstore-migrate",
@@ -60,7 +58,6 @@ koldstore-storage = { path = "crates/koldstore-storage", default-features = fals
 koldstore-parquet = { path = "crates/koldstore-parquet" }
 koldstore-merge = { path = "crates/koldstore-merge" }
 koldstore-mirror = { path = "crates/koldstore-mirror" }
-koldstore-jobs = { path = "crates/koldstore-jobs" }
 koldstore-worker = { path = "crates/koldstore-worker" }
 koldstore-flush = { path = "crates/koldstore-flush" }
 koldstore-migrate = { path = "crates/koldstore-migrate" }
@@ -90,7 +87,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.18"
 # Shared runtime features for library crates. Test binaries add `macros`;
 # benchmarks add `process` where `tokio::process` is used.
-tokio = { version = "1.52.4", features = ["rt-multi-thread", "time"] }
+tokio = { version = "1.53.0", features = ["rt-multi-thread", "time"] }
 tokio-postgres = "0.7.18"
 tracing = "0.1.44"
 uuid = { version = "1.24.0", features = ["v4", "serde"] }

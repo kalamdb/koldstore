@@ -1,19 +1,91 @@
-# Scheduling flushes with pg_cron
+# Scheduling flushes
 
-Flush is on-demand today. Until the built-in smart scheduler lands, use
-[pg_cron](https://github.com/citusdata/pg_cron) to call `flush_table` on a
-schedule. Policy-aware flushes are safe to run often: when nothing is eligible,
-the job completes with `rows_flushed = 0`.
+KoldStore includes a built-in flush scheduler on the per-database background
+worker (the same process that applies async mirror WAL). On each
+`koldstore.flush_check_interval_seconds` tick it:
 
-## Enable pg_cron
+1. Applies available async mirror WAL first (when an async slot exists)
+2. Evaluates active managed tables with `auto_flush` enabled
+3. When `hot_row_limit` / `min_flush_rows` say a flush is needed, runs one
+   `flush_table` (which ensures/claims the job inline)
 
-Install and enable `pg_cron` (requires `shared_preload_libraries = 'pg_cron'`
-and a restart), then schedule a table:
+## Built-in scheduler
+
+Requires `shared_preload_libraries = 'koldstore'` for the cluster launcher to
+re-register workers after postmaster restart. Without preload, `manage_table`
+and the first backend that needs the worker still start it for the life of the
+postmaster.
+
+```sql
+-- Per-database (preferred for the bgworker — new backends inherit this):
+ALTER DATABASE mydb SET koldstore.flush_check_interval_seconds = 5;
+-- Then restart the database worker (or wait for a new ensure after terminate).
+
+-- Or persist cluster-wide:
+ALTER SYSTEM SET koldstore.flush_check_interval_seconds = 60;
+SELECT pg_reload_conf();
+```
+
+Session `SET` only affects the current backend. The built-in worker reads GUCs
+from its own connection (database / system defaults), so use `ALTER DATABASE`
+or `ALTER SYSTEM` when changing scheduler cadence for background flushes.
+
+### Async apply poll interval
+
+The same worker peeks the logical slot on a latch cadence controlled by
+`koldstore.async_apply_poll_interval_ms` (default `100`, clamped to
+`50..=5000`). Each apply tick runs in **one** PostgreSQL transaction: mirror
+batch writes and `async_mirror_state.applied_lsn` commit together (or roll back
+together on ERROR).
+
+```sql
+-- Per-database (preferred for the bgworker):
+ALTER DATABASE mydb SET koldstore.async_apply_poll_interval_ms = 50;
+-- Restart the database worker (or terminate + ensure) so it reconnects with
+-- the new database default. SIGHUP also reloads ALTER SYSTEM values.
+
+-- Or persist cluster-wide:
+ALTER SYSTEM SET koldstore.async_apply_poll_interval_ms = 200;
+SELECT pg_reload_conf();
+```
+
+Session `SET` does not affect the background worker. Prefer `ALTER DATABASE`
+or `ALTER SYSTEM` + reload / worker restart, matching
+`flush_check_interval_seconds`.
+
+After a failed auto-flush (for example `max_rows_per_file` below the
+`koldstore.min_max_rows_per_file` floor), that table is skipped for 60 seconds
+so one bad table cannot monopolize every tick.
+
+### Per-table opt-out
+
+Tables that should only flush via cron or manual SQL:
+
+```sql
+SELECT koldstore.manage_table(
+  table_name => 'app.messages',
+  storage => 'local',
+  hot_row_limit => 1000,
+  auto_flush => false
+);
+
+-- Or flip later without remanaging:
+SELECT koldstore.set_table_auto_flush('app.messages'::regclass, false);
+```
+
+`flush_table` / `enqueue_flush_job` ignore `auto_flush` — opt-out is
+scheduler-only.
+
+## pg_cron fallback
+
+Use [pg_cron](https://github.com/citusdata/pg_cron) for `auto_flush => false`
+tables, or when the built-in worker is unavailable (no preload and no session
+ensure yet). Policy-aware flushes are safe to run often: when nothing is
+eligible, the job completes with `rows_flushed = 0`.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_cron;
 
--- Flush one managed table every 5 minutes.
 SELECT cron.schedule(
   'koldstore-flush-messages',
   '*/5 * * * *',
@@ -35,9 +107,7 @@ SELECT cron.schedule(
 );
 ```
 
-Inspect or remove jobs with `cron.job` / `cron.unschedule(...)`. Pick an
-interval that matches how fast the hot set grows; `min_flush_rows` still gates
-whether a flush writes cold segments.
+Inspect or remove jobs with `cron.job` / `cron.unschedule(...)`.
 
 ## Smoke-test against local pgrx
 

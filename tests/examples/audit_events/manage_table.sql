@@ -6,7 +6,8 @@ SELECT koldstore.manage_table(
   max_rows_per_file => 50000,
   table_type        => 'user',
   scope_column      => 'tenant_id',
-  migration_order_by => 'created_at'
+  migration_order_by => 'created_at',
+  mirror_capture_mode => 'strict'  -- or 'async'; scripts/run-examples.sh --mode selects this
 );
 
 -- Safe for immutable audit/event history. Do not use KoldStore v1 for mutable balances.

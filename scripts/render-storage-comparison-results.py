@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Merge async/strict storage-comparison JSON snapshots into RESULTS.md."""
+"""Merge isolated pg/async/strict storage-comparison JSON into RESULTS.md."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +30,9 @@ def cell(report: dict[str, Any] | None, section: str, metric: str, field: str) -
     return MISSING
 
 
-def ordered_metrics(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | None, section: str) -> list[str]:
+def ordered_metrics(*reports: dict[str, Any] | None, section: str) -> list[str]:
     seen: list[str] = []
-    for report in (async_report, strict_report):
+    for report in reports:
         if report is None:
             continue
         for row in report.get(section, []):
@@ -40,19 +42,10 @@ def ordered_metrics(async_report: dict[str, Any] | None, strict_report: dict[str
     return seen
 
 
-def pick_pg(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | None, section: str, metric: str) -> str:
-    reports = [r for r in (async_report, strict_report) if r is not None]
-    reports.sort(key=lambda r: r.get("generated_at", ""), reverse=True)
-    for report in reports:
-        value = cell(report, section, metric, "postgres_only")
-        if value != MISSING:
-            return value
-    return MISSING
-
-
 def render_table(
     label: str,
     section: str,
+    pg_report: dict[str, Any] | None,
     async_report: dict[str, Any] | None,
     strict_report: dict[str, Any] | None,
 ) -> str:
@@ -60,44 +53,171 @@ def render_table(
         f"| {label} | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |",
         "| --- | --- | --- | --- |",
     ]
-    for metric in ordered_metrics(async_report, strict_report, section):
-        pg = pick_pg(async_report, strict_report, section, metric)
+    for metric in ordered_metrics(
+        # async first so catch-up rows sit under DML rather than at the end
+        async_report, pg_report, strict_report, section=section
+    ):
+        # Prefer the dedicated pg-side snapshot; fall back to legacy interleaved
+        # JSON that still embeds postgres_only beside a managed column.
+        pg = cell(pg_report, section, metric, "postgres_only")
+        if pg == MISSING:
+            for report in (async_report, strict_report):
+                pg = cell(report, section, metric, "postgres_only")
+                if pg != MISSING:
+                    break
         async_val = cell(async_report, section, metric, "koldstore")
         strict_val = cell(strict_report, section, metric, "koldstore")
         lines.append(f"| {metric} | {pg} | {async_val} | {strict_val} |")
     return "\n".join(lines)
 
 
-def run_meta(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | None) -> str:
-    source = async_report or strict_report or {}
+def parse_rfc3339(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def format_when(
+    pg_report: dict[str, Any] | None,
+    async_report: dict[str, Any] | None,
+    strict_report: dict[str, Any] | None,
+) -> str:
+    stamps: list[tuple[str, datetime]] = []
+    for label, report in (
+        ("pg", pg_report),
+        ("async", async_report),
+        ("strict", strict_report),
+    ):
+        if report is None:
+            continue
+        dt = parse_rfc3339(str(report.get("generated_at") or ""))
+        if dt is not None:
+            stamps.append((label, dt.astimezone(timezone.utc)))
+    if not stamps:
+        return "unknown"
+    if len(stamps) == 1:
+        label, dt = stamps[0]
+        return f"{dt.date().isoformat()} UTC ({label} @ {dt.strftime('%H:%M:%SZ')})"
+    first = min(stamps, key=lambda x: x[1])[1]
+    last = max(stamps, key=lambda x: x[1])[1]
+    per_side = ", ".join(
+        f"{label} {dt.strftime('%H:%M:%SZ')}" for label, dt in stamps
+    )
+    if first.date() == last.date():
+        return f"{first.date().isoformat()} UTC ({per_side})"
+    return (
+        f"{first.date().isoformat()} → {last.date().isoformat()} UTC ({per_side})"
+    )
+
+
+def resolve_git_commit(
+    *reports: dict[str, Any] | None,
+    fallback: str | None,
+) -> tuple[str, bool, str]:
+    commits: list[str] = []
+    dirty = False
+    notes: list[str] = []
+    for report in reports:
+        if report is None:
+            continue
+        commit = str(report.get("git_commit") or "").strip()
+        if commit and commit not in commits:
+            commits.append(commit)
+        if report.get("git_dirty"):
+            dirty = True
+        note = str(report.get("git_note") or "").strip()
+        if note and note not in notes:
+            notes.append(note)
+    if commits:
+        commit = (
+            commits[0]
+            if len(commits) == 1
+            else " / ".join(commits) + " (sides disagree)"
+        )
+    elif fallback:
+        commit = fallback
+    else:
+        try:
+            commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            commit = "unknown"
+    return commit, dirty, "; ".join(notes)
+
+
+def short_commit(commit: str) -> str:
+    if commit in ("unknown", "") or "sides disagree" in commit:
+        return commit
+    if " / " in commit:
+        return commit
+    return commit[:12] if len(commit) > 12 else commit
+
+
+def run_meta(
+    pg_report: dict[str, Any] | None,
+    async_report: dict[str, Any] | None,
+    strict_report: dict[str, Any] | None,
+    git_commit: str,
+    git_dirty: bool,
+    git_note: str,
+) -> str:
+    source = pg_report or async_report or strict_report or {}
     rows = source.get("rows", "?")
     hot = source.get("hot_limit", "?")
     dml = source.get("dml_sample", "?")
     batch = source.get("insert_batch_rows", "?")
     max_rows = source.get("max_rows_per_file", "?")
     modes = []
+    if pg_report is not None:
+        modes.append("pg")
     if async_report is not None:
         modes.append("async")
     if strict_report is not None:
         modes.append("strict")
     mode_text = " + ".join(modes) if modes else "none"
-    return (
-        f"**Run:** {rows} rows · `hot_row_limit = {hot}` · `max_rows_per_file = {max_rows}` "
-        f"· `--dml-sample {dml}` · `insert_batch_rows = {batch}` · zstd Parquet · "
-        f"modes measured: **{mode_text}**"
+    when = format_when(pg_report, async_report, strict_report)
+    git_line = f"**Git:** `{short_commit(git_commit)}`"
+    if len(git_commit) > 12 and " " not in git_commit:
+        git_line += f" (`{git_commit}`)"
+    if git_dirty:
+        git_line += " · dirty tree"
+    if git_note:
+        git_line += f" — {git_note}"
+    return "\n".join(
+        [
+            f"**When:** {when}",
+            git_line,
+            f"**Run:** {rows} rows · `hot_row_limit = {hot}` · `max_rows_per_file = {max_rows}` "
+            f"· `--dml-sample {dml}` · `insert_batch_rows = {batch}` · zstd Parquet · "
+            f"**sequential** isolated fresh server per side (pg → async → strict; not parallel) · "
+            f"sides measured: **{mode_text}**",
+        ]
     )
 
 
-def render(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | None) -> str:
+def render(
+    pg_report: dict[str, Any] | None,
+    async_report: dict[str, Any] | None,
+    strict_report: dict[str, Any] | None,
+    git_commit: str,
+    git_dirty: bool = False,
+    git_note: str = "",
+) -> str:
     parts = [
         "# Latest benchmark results",
         "",
         "Published numbers from the most recent storage comparison run(s). Re-run",
-        "`scripts/run-storage-comparison.sh --update-results` (once per mode, or",
-        "with `--both-modes`) to refresh this file. Methodology:",
-        "[README.md](README.md).",
+        "`scripts/run-storage-comparison.sh --all-sides --update-results` to refresh",
+        "this file. Each column is measured alone on a fresh pgrx PostgreSQL",
+        "(stop → recreate DBs → one side). Methodology: [README.md](README.md).",
         "",
-        run_meta(async_report, strict_report),
+        run_meta(
+            pg_report, async_report, strict_report, git_commit, git_dirty, git_note
+        ),
         "",
         "Managed PostgreSQL sizes include hot heap + `koldstore.<table>__cl` + mirror",
         "indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are",
@@ -105,19 +225,39 @@ def render(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | 
         "",
         "## Main comparison",
         "",
-        render_table("Metric", "main", async_report, strict_report),
+        render_table("Metric", "main", pg_report, async_report, strict_report),
         "",
-        "‡ Hot+cold PK lookups open matching Parquet segments; footer open + merge-scan",
-        "setup can dominate vs a pure B-tree probe at large segment sizes. See",
-        "[performance](../performance.md).",
+        "‡ **Hot+cold query** alternates newest hot PK (`id = <rows>`) and oldest",
+        "cold PK (`id = 1`) after flush — **50/50** of the lookup loop.",
+        "**Cold-only** repeatedly looks up only `id = 1` (Parquet on managed).",
+        "**Hot-only** (before flush) repeatedly looks up `id = <rows>`.",
+        "p99 insert = per insert-batch; update = per 1k-row batch; queries = per",
+        "PK lookup (`QUERY_LOOPS = 100`). See [README.md](README.md).",
         "",
         "## Detail (throughput and storage)",
         "",
-        render_table("Operation", "detail", async_report, strict_report),
+        render_table("Operation", "detail", pg_report, async_report, strict_report),
         "",
         "† Strict DML updates the change-log mirror in the foreground. Async DML",
         "records heap WAL in the foreground; catch-up rows appear only in the async",
         "column.",
+        "",
+        "### Why does async insert look faster than PostgreSQL only?",
+        "",
+        "It is **not** a KoldStore acceleration of `INSERT`. Both columns time the same",
+        "kind of work: committed 100k-row batches into the user heap (+ indexes). Async",
+        "does **not** update `koldstore.<table>__cl` in that timed window — that cost is",
+        "the separate **async insert mirror catch-up** row. Strict pays mirror work in",
+        "the foreground, which is why it is slower.",
+        "",
+        "Sides are **not** run in parallel and do **not** share a live server during",
+        "measurement: `--all-sides` runs **pg, then async, then strict**, each after",
+        "`cargo pgrx stop` + empty DB recreate. So the ~20% foreground gap here is not",
+        "cross-column I/O contention. It is still a **single sample per side** hours",
+        "apart on one machine (load / disk cache / thermal can move ~tens of percent).",
+        "Do not treat async > PostgreSQL-only insert as a product claim until repeated",
+        "isolated runs agree. For end-to-end “row is mirrored” cost, add catch-up (or",
+        "run with the background worker and measure lag).",
         "",
     ]
     return "\n".join(parts)
@@ -125,18 +265,41 @@ def render(async_report: dict[str, Any] | None, strict_report: dict[str, Any] | 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pg-json", type=Path, default=None)
     parser.add_argument("--async-json", type=Path, default=None)
     parser.add_argument("--strict-json", type=Path, default=None)
+    parser.add_argument(
+        "--git-commit",
+        default=None,
+        help="Fallback git SHA when JSON lacks git_commit (default: git rev-parse HEAD)",
+    )
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
 
+    pg_report = load_report(args.pg_json)
     async_report = load_report(args.async_json)
     strict_report = load_report(args.strict_json)
-    if async_report is None and strict_report is None:
-        raise SystemExit("at least one of --async-json / --strict-json must exist")
+    if pg_report is None and async_report is None and strict_report is None:
+        raise SystemExit(
+            "at least one of --pg-json / --async-json / --strict-json must exist"
+        )
+
+    git_commit, git_dirty, git_note = resolve_git_commit(
+        pg_report, async_report, strict_report, fallback=args.git_commit
+    )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(render(async_report, strict_report), encoding="utf-8")
+    args.out.write_text(
+        render(
+            pg_report,
+            async_report,
+            strict_report,
+            git_commit,
+            git_dirty=git_dirty,
+            git_note=git_note,
+        ),
+        encoding="utf-8",
+    )
     print(f"wrote {args.out}")
 
 

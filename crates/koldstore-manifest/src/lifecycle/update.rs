@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 
-use super::model::{Manifest, ManifestBatchAppend, ManifestSegment, SegmentStatus};
+use crate::model::{Manifest, ManifestBatchAppend, ManifestSegment, SegmentStatus};
 
 impl Manifest {
     /// Appends a segment and updates watermarks for visible committed segments.

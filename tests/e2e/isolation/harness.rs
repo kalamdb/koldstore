@@ -74,6 +74,7 @@ pub async fn seed_managed_items(db: &TestDb, table: &str, rows: i64) -> Result<S
               min_flush_rows => 1,
               max_rows_per_file => 16,
               migration_order_by => 'id',
+              auto_flush => false,
               mirror_capture_mode => $3
             )
             "#,

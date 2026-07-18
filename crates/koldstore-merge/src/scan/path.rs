@@ -116,7 +116,10 @@ pub const fn replace_heap_final_path(is_managed: bool) -> bool {
 /// Builds the pure path replacement decision for a relation.
 ///
 /// Managed relations expose only the KoldMergeScan final path; the best
-/// hot heap path remains available as the custom child.
+/// hot heap path remains available as the custom child. Callers that model
+/// PostgreSQL's planner must also drop parallel partial heap paths: Gather /
+/// Gather Merge are built after `set_rel_pathlist` and would otherwise leak
+/// hot-heap-only ordered scans after flush.
 #[must_use]
 pub fn build_path_replacement(
     is_managed: bool,
@@ -139,4 +142,40 @@ pub fn build_path_replacement(
         custom_child_paths: vec![best_child],
         removed_heap_final_paths: hot_heap_paths.len(),
     })
+}
+
+/// Returns whether parallel partial heap paths must be cleared for a managed
+/// relation (same contract as clearing `RelOptInfo.partial_pathlist`).
+#[must_use]
+pub const fn clear_partial_heap_paths(is_managed: bool) -> bool {
+    is_managed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_relations_clear_partial_heap_paths() {
+        assert!(clear_partial_heap_paths(true));
+        assert!(!clear_partial_heap_paths(false));
+    }
+
+    #[test]
+    fn managed_path_replacement_drops_heap_finals() {
+        let decision = build_path_replacement(
+            true,
+            vec![
+                PlannerPath::seq_scan("heap", 100.0),
+                PlannerPath::index_scan("pk", 40.0),
+            ],
+        )
+        .expect("managed relation with heap paths");
+        assert_eq!(decision.final_paths.len(), 1);
+        assert_eq!(decision.final_paths[0].kind, PlannerPathKind::CustomScan);
+        assert_eq!(decision.custom_child_paths.len(), 1);
+        assert_eq!(decision.custom_child_paths[0].cost, 40.0);
+        assert_eq!(decision.removed_heap_final_paths, 2);
+        assert!(clear_partial_heap_paths(true));
+    }
 }

@@ -6,9 +6,6 @@ until after that baseline is stable.
 
 ## Near-term product surface
 
-- **Smart flush scheduler** — built-in scheduling that triggers flushes
-  automatically without relying on `pg_cron` (operators can keep using
-  `pg_cron` + `koldstore.flush_table` until this lands).
 - **Improve `KoldMergeScan`** — prioritize cold PK point-lookup latency
   (backend footer/reader cache, cold-native emit without JSON merge), then
   remaining streaming polish, bounded-memory execution, rescans, and broader
@@ -20,6 +17,11 @@ until after that baseline is stable.
 - **Import / export** — table-level archive import and export of managed data.
 - **Backup / restore** — coordinated PostgreSQL + cold-storage backup and
   restore workflows.
+
+Built-in row-limit auto-flush scheduling is available on the database worker
+(`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Time-based
+`max_flush_interval` and predicate move policies remain deferred. See
+[operations/scheduling.md](operations/scheduling.md).
 
 ## Change cursors (`changes_since`)
 

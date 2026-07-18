@@ -1,4 +1,9 @@
 //! Change-log mirror orchestration for clean-schema managed tables.
+//!
+//! Combines [`koldstore_mirror::shared`] DDL with [`koldstore_mirror::strict`]
+//! capture planners into a migrate-facing [`ChangeLogMirrorPlan`]. Storage
+//! errors map into this module's [`MirrorError`], which also covers capture and
+//! statement-metadata failures.
 
 use koldstore_common::{PrimaryKeyColumnShape, PrimaryKeyShape, SqlStatement};
 use koldstore_mirror::{
@@ -11,7 +16,10 @@ use crate::QualifiedTableName;
 
 pub type MirrorResult<T> = Result<T, MirrorError>;
 
-/// Change-log mirror planning error.
+/// Change-log mirror planning error (migrate orchestration layer).
+///
+/// Storage-level variants mirror [`koldstore_mirror::MirrorError`]; `Sql` and
+/// `Capture` wrap statement/trigger planning failures unique to this crate.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MirrorError {
     /// A source table without a primary key cannot have a latest-state mirror.

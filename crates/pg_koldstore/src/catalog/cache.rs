@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 #[cfg(feature = "pg")]
 use koldstore_catalog::{
-    decode::InSyncManifestScanContext, decode_managed_table_snapshot_str, ManagedTableSnapshot,
-    ManagedTableSnapshotCache, OptionalLookupCache,
+    decode::InSyncManifestScanContext, decode_managed_table_snapshot_str, BoundedOidCache,
+    ManagedTableSnapshot, ManagedTableSnapshotCache, OptionalLookupCache,
 };
 #[cfg(feature = "pg")]
 use koldstore_merge::scan::plan::SegmentStatsHint;
@@ -28,8 +28,8 @@ thread_local! {
     static SEGMENT_STATS_CACHE: std::cell::RefCell<SegmentStatsCache> =
         std::cell::RefCell::new(OptionalLookupCache::default());
     static MIGRATION_CATALOG_CACHE: std::cell::RefCell<
-        std::collections::HashMap<u32, Arc<koldstore_migrate::ExistingTableCatalog>>
-    > = std::cell::RefCell::new(std::collections::HashMap::new());
+        BoundedOidCache<Arc<koldstore_migrate::ExistingTableCatalog>>,
+    > = std::cell::RefCell::new(BoundedOidCache::default());
 }
 
 /// Cached cold-segment metadata for one managed table.
@@ -102,7 +102,7 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
             .retain(|(table_oid, _)| *table_oid != key);
     });
     MIGRATION_CATALOG_CACHE.with(|cache| {
-        cache.borrow_mut().remove(&key);
+        cache.borrow_mut().invalidate(key);
     });
     // Footers are path-keyed across tables; drop them on any managed-table change.
     koldstore_parquet::parquet_footer_cache::clear();
@@ -136,7 +136,7 @@ pub fn cached_migration_catalog(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<Arc<koldstore_migrate::ExistingTableCatalog>, String> {
     let key = table_oid.to_u32();
-    if let Some(cached) = MIGRATION_CATALOG_CACHE.with(|cache| cache.borrow().get(&key).cloned()) {
+    if let Some(cached) = MIGRATION_CATALOG_CACHE.with(|cache| cache.borrow().get(key).cloned()) {
         return Ok(cached);
     }
     let catalog = crate::sql::migrate_pg::load_migration_catalog(key)?;

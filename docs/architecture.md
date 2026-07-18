@@ -1,9 +1,17 @@
 # Architecture
 
-pg-koldstore is a PostgreSQL extension for normal heap tables. PostgreSQL
-remains the transaction, locking, and hot-row authority. KoldStore adds a
-change-log mirror, cold Parquet segments, and a `KoldMergeScan` custom scan so
-SQL, MVCC, permissions, and RLS stay PostgreSQL-owned.
+pg-koldstore adds tiered storage to normal PostgreSQL heap tables. Tiered
+storage places data on different storage media according to performance,
+access, and cost needs. In KoldStore, the hot tier is the PostgreSQL heap and
+its native indexes; the cold tier is compressed Parquet on a configured
+filesystem or object store.
+
+PostgreSQL remains the transaction, locking, and hot-row authority. KoldStore
+adds a change-log mirror, cold Parquet segments, and a `KoldMergeScan` custom
+scan so SQL, MVCC, permissions, and RLS stay PostgreSQL-owned. Applications
+query the original table across both tiers. Tier placement is policy-driven:
+today, a hot-row limit selects older mirror sequence values for flush rather
+than measuring row access frequency automatically.
 
 ## Workflow documentation
 

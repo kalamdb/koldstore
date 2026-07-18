@@ -5,13 +5,13 @@ pub use koldstore_flush::ops::*;
 #[cfg(feature = "pg")]
 pub(crate) mod counters;
 #[cfg(feature = "pg")]
-mod execute;
+pub(crate) mod execute;
 #[cfg(feature = "pg")]
 mod jobs;
 #[cfg(feature = "pg")]
 mod mirror_fetch;
 #[cfg(feature = "pg")]
-mod spi;
+pub(crate) mod spi;
 
 #[cfg(feature = "pg")]
 use koldstore_common::TableName;

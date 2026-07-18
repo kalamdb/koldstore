@@ -14,9 +14,38 @@ const APPLY_LOCK_NAMESPACE: i32 = 1_263_354_732;
 const WORKER_LOCK_NAMESPACE: i32 = 1_263_354_733;
 const SLOT_PROVISION_LOCK_NAMESPACE: i32 = 1_263_354_734;
 const LIFECYCLE_LOCK_NAMESPACE: i32 = 1_263_354_735;
+/// Serializes PG15 flush-origin `replorigin_session_setup` within one database.
+#[cfg(feature = "pg15")]
+pub(crate) const FLUSH_ORIGIN_LOCK_NAMESPACE: i32 = 1_263_354_736;
 
 /// Publication shared by async managed tables in one database.
 pub const PUBLICATION_NAME: &str = "koldstore_async_mirror";
+
+/// Prefix for flush-prune replication origins stamped on async cleanup WAL.
+///
+/// PG16+ peek uses `origin=none` (defense in depth) and prune stamps
+/// `DoNotReplicateId` instead. PG15 has no that filter, so apply must honor
+/// ORIGIN messages whose name matches this database's flush origin.
+const FLUSH_REPLICATION_ORIGIN_PREFIX: &str = "koldstore_flush";
+
+/// Returns the database-scoped flush replication origin name (PG15 prune path).
+///
+/// Replication-origin sessions are cluster-global and exclusive. Including the
+/// database OID lets independent databases flush concurrently; same-DB parallel
+/// prunes serialize on an advisory xact lock in `arm_flush_replication_origin`.
+#[must_use]
+pub(crate) fn flush_replication_origin_name(database_oid: DatabaseOid) -> String {
+    format!("{FLUSH_REPLICATION_ORIGIN_PREFIX}_{}", database_oid.get())
+}
+
+/// Returns true when `name` is a flush-prune origin for `database_oid`.
+///
+/// Matches `koldstore_flush_<oid>` and the older bare `koldstore_flush` name so
+/// apply still skips prune WAL stamped before the naming change.
+#[must_use]
+pub(crate) fn is_flush_replication_origin(name: &str, database_oid: DatabaseOid) -> bool {
+    name == FLUSH_REPLICATION_ORIGIN_PREFIX || name == flush_replication_origin_name(database_oid)
+}
 
 /// Returns the cluster-unique logical slot name for a database OID.
 #[must_use]
@@ -204,12 +233,12 @@ pub(crate) fn activate_table(
         .map_err(|error| error.to_string())?;
     }
 
-    let drop = koldstore_migrate::capture::plan_drop_mirror_dml_triggers(source, mirror)
+    let drop = koldstore_mirror::plan_drop_mirror_dml_triggers(source, mirror)
         .map_err(|error| error.to_string())?;
     pgrx::Spi::run(&drop.sql).map_err(|error| error.to_string())?;
-    let kick_names = koldstore_migrate::capture::async_worker_kick_trigger_names(&mirror.name);
+    let kick_names = koldstore_mirror::async_worker_kick_trigger_names(&mirror.name);
     let legacy_kicks = [
-        koldstore_migrate::capture::async_worker_kick_trigger_name(&mirror.name),
+        koldstore_mirror::async_worker_kick_trigger_name(&mirror.name),
         // Truncated mid-migration names from the `_ins/_upd/_del` experiment.
         {
             let mut name = format!("{}_async_worker_kick_ins", mirror.name);
@@ -272,7 +301,12 @@ fn validate_slot(slot: &str) -> Result<(), String> {
 }
 
 /// Serializes logical decoding and explicit cleanup for one database.
-pub(super) fn lock_apply(database_oid: u32) -> Result<(), String> {
+///
+/// Uses a transaction-scoped advisory lock. Releasing during Parquet upload
+/// requires ending the flush transaction first (session locks deadlock with
+/// logical decoding waiting on the flush XID); that multi-txn redesign is
+/// deferred. Phase-5.5 still drains WAL before the relation lock.
+pub(crate) fn lock_apply(database_oid: u32) -> Result<(), String> {
     lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 
@@ -360,7 +394,7 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
             .map_err(|error| error.to_string())?;
         }
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let my_pid = unsafe { pgrx::pg_sys::MyProcPid };
     loop {
         let slot_idle = match slot_active_pid(slot)? {
@@ -380,8 +414,27 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
-                "async mirror applier for slot {slot} did not stop after terminate"
+                "async mirror applier for slot {slot} did not stop after terminate \
+                 (slot_idle={slot_idle}, worker_gone={worker_gone})"
             ));
+        }
+        // Re-signal in case the first SIGTERM arrived during a non-interruptible
+        // decoding window; NEVER_RESTART workers exit via die() once they notice.
+        let _ = pgrx::Spi::get_one_with_args::<bool>(
+            "SELECT COALESCE(\
+               (SELECT bool_or(pg_catalog.pg_terminate_backend(pid)) \
+                FROM pg_catalog.pg_stat_activity \
+                WHERE backend_type = $1), \
+               false)",
+            &[DatumWithOid::from(worker_type.as_str())],
+        );
+        if let Some(active_pid) = slot_active_pid(slot)? {
+            if active_pid != my_pid {
+                let _ = pgrx::Spi::get_one_with_args::<bool>(
+                    "SELECT pg_catalog.pg_terminate_backend($1)",
+                    &[DatumWithOid::from(active_pid)],
+                );
+            }
         }
         std::thread::sleep(SLOT_INACTIVE_POLL);
         pgrx::check_for_interrupts!();
@@ -472,6 +525,17 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     let publication_exists = publication_exists()?;
+    let flush_origin = flush_replication_origin_name(DatabaseOid::new(database_oid));
+    let flush_origins_dropped = pgrx::Spi::get_one_with_args::<i64>(
+        "WITH dropped AS (\
+           SELECT pg_catalog.pg_replication_origin_drop(roname) AS _ \
+           FROM pg_catalog.pg_replication_origin \
+           WHERE roname = 'koldstore_flush' OR roname = $1\
+         ) SELECT count(*)::bigint FROM dropped",
+        &[DatumWithOid::from(flush_origin.as_str())],
+    )
+    .map_err(|error| format!("drop flush replication origins: {error}"))?
+    .unwrap_or(0);
     if slot_exists {
         // Drop uses nowait acquire; wait out abort/exit windows first.
         wait_until_slot_inactive(&slot).map_err(|error| format!("wait slot inactive: {error}"))?;
@@ -498,5 +562,5 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     )
     .map_err(|error| format!("clear async_mirror_state: {error}"))?;
     crate::database_worker::mark_worker_not_ensured();
-    Ok(slot_exists || publication_exists)
+    Ok(slot_exists || publication_exists || flush_origins_dropped > 0)
 }

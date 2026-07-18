@@ -10,7 +10,6 @@ koldstore-common.workspace = true
 koldstore-schema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-uuid.workspace = true
 
 [lints]
 workspace = true

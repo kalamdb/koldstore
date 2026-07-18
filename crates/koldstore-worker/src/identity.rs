@@ -18,11 +18,10 @@ impl DatabaseOid {
     }
 }
 
-/// Backend type / bgworker name for the async mirror WAL applier.
+/// Backend type / bgworker name for the shared database worker.
 ///
 /// Kept as `koldstore async mirror {oid}` so existing e2e and storage probes
-/// keep working. A future rename to a generic `koldstore db worker` is fine
-/// once flush jobs share the same process and all probes are updated together.
+/// keep working. The same process now also runs built-in auto-flush ticks.
 #[must_use]
 pub fn async_mirror_worker_type(database_oid: DatabaseOid) -> String {
     format!("koldstore async mirror {}", database_oid.get())

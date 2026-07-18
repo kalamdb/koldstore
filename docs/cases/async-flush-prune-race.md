@@ -1087,6 +1087,7 @@ counter update.
 - [ ] Add overall flush/upload and retained-WAL admission limits
 - [x] Acquire `SHARE ROW EXCLUSIVE` by source table OID only for async tables
 - [x] Call final bounded apply after manifest publish and before cleanup
+- [x] Apply async `DELETE` via mirror upsert so prune-fence tombstones survive a missing row
 - [x] Keep mirror+hot delete as one atomic data-modifying CTE
 - [x] Add configurable local relation-lock/cleanup timeout behavior
 - [ ] Enforce or document autocommit/worker-owned flush transaction lifetime

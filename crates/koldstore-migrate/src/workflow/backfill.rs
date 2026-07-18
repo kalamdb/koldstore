@@ -104,11 +104,7 @@ pub fn plan_mirror_initialization_batch(
     let mut insert_columns = pk_columns.clone();
     insert_columns.extend(MirrorColumn::insert_quoted_names());
     let mut select_columns = pk_columns.clone();
-    select_columns.extend([
-        "SNOWFLAKE_ID()".to_string(),
-        "1".to_string(),
-        "pg_current_wal_lsn()".to_string(),
-    ]);
+    select_columns.extend(["SNOWFLAKE_ID()".to_string(), "1".to_string()]);
     let order_direction = if ordering.ascending_oldest_first {
         "ASC"
     } else {

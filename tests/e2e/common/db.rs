@@ -89,15 +89,24 @@ impl TestDb {
             .await
             .context("read current database")?
             .get(0);
-        let _ = server
+        server
             .client
             .batch_execute(&format!(
                 "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
                  ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+                 ALTER DATABASE \"{dbname}\" RESET koldstore.flush_check_interval_seconds; \
                  RESET koldstore.failpoint; \
-                 RESET koldstore.internal_async_mirror_worker"
+                 RESET koldstore.internal_async_mirror_worker; \
+                 RESET koldstore.flush_check_interval_seconds; \
+                 UPDATE koldstore.schemas \
+                   SET active = false \
+                 WHERE active"
             ))
-            .await;
+            .await
+            .context("reset leftover async GUC / schema state for fixture")?;
+        // Running workers keep prior ALTER DATABASE GUCs until restart; bounce any
+        // leftover applier so the next test inherits the reset defaults.
+        let _ = super::async_mirror::terminate_async_worker(&server.client).await;
         register_filesystem_storage(&server.client, &storage_name, &storage_root).await?;
 
         Ok(Self {

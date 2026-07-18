@@ -108,7 +108,7 @@ sequenceDiagram
   App->>Heap: INSERT / UPDATE / DELETE
   Heap-->>App: COMMIT (foreground completes)
   Heap->>WAL: committed PK-only pgoutput
-  Apply->>WAL: poll every 100 ms
+  Apply->>WAL: poll every koldstore.async_apply_poll_interval_ms (default 100)
   App->>Apply: optional wait_for_async_mirror() fence
   Apply->>WAL: peek committed changes
   Apply->>Mirror: apply set-based batches
@@ -118,15 +118,24 @@ sequenceDiagram
 ```
 
 Logical decoding, flush fences, and `disable_async_mirror` share a
-transaction-scoped advisory apply lock. PostgreSQL's SQL slot APIs acquire with
-`nowait`; disable terminates a stuck applier before taking that lock so a peek
-blocked on the caller's open XID cannot deadlock teardown.
+transaction-scoped advisory apply lock (held for the flush SQL transaction,
+including upload). Phase-5.5 drains accumulated WAL before the source relation
+lock. Releasing the apply lock during upload needs a multi-transaction flush
+redesign to avoid deadlocks with logical decoding waiting on the flush XID.
+PostgreSQL's SQL slot APIs acquire with `nowait`; disable terminates a stuck
+applier before taking that lock so a peek blocked on the caller's open XID
+cannot deadlock teardown.
+
+Each apply tick is **one** PostgreSQL transaction: peek, all mirror batch SPI
+writes, and `koldstore.async_mirror_state.applied_lsn` commit or roll back
+together. Mid-tick ERROR (including `error:async_mirror_apply_after_batch`)
+leaves neither a durable checkpoint advance nor partial mirror effects.
 
 The decoder reads pgoutput v1 in pages of 8,192 messages. The applier groups up
-to 8,192 compatible keys, converts each batch with `jsonb_to_recordset`, and
-runs one set-based mirror statement. INSERT upserts; UPDATE and DELETE modify an
-existing mirror row. Internal hot-row deletion during flush is marked
-`DoNotReplicateId` so maintenance deletes do not re-enter the async stream.
+to 8,192 compatible keys, binds typed `unnest` arrays (PK + Rust-allocated
+`seq`), and runs one set-based mirror upsert. INSERT, UPDATE, and DELETE all
+upsert. Internal hot-row deletion during flush is marked `DoNotReplicateId` so
+maintenance deletes do not re-enter the async stream.
 
 ### Crash and retry safety
 
@@ -154,6 +163,8 @@ that durable checkpoint on the next fence:
 Monitor slot retention and catch-up:
 
 ```sql
+SELECT koldstore.async_mirror_status();
+
 SELECT slot_name,
        active,
        confirmed_flush_lsn,
@@ -165,8 +176,11 @@ SELECT database_oid, applied_lsn, updated_at
 FROM koldstore.async_mirror_state;
 ```
 
-If the worker cannot run or repeatedly fails, the slot retains WAL and can fill
-`pg_wal`. Alert on retained bytes and the age of `updated_at`.
+If the worker cannot run or repeatedly soft-fails, the slot retains WAL and can
+fill `pg_wal`. Alert on retained bytes, `async_mirror_status()->'healthy'`, and
+the age of `updated_at`. Optionally set
+`koldstore.async_mirror_max_retained_bytes` to fail closed before disk
+exhaustion (WAL is never silently dropped).
 
 ### Explicit cleanup
 
@@ -187,6 +201,7 @@ infrastructure. The next async `manage_table` recreates publication and slot.
 | Worker startup, bounded lag, fence, rollback, cleanup | same + `change_log_mirror.rs` in `--mode async` |
 | Kill applier → launcher / ensure restart, no duplicate PKs | `tests/e2e/dml/async_mirror_worker.rs` |
 | Apply failpoint ERROR → recovery without duplicates | same |
+| Mid-tick after-batch abort → no durable applied_lsn / mirror | same |
 | GUC off blocks manage; cleanup stops applier | same |
 | Truncate noise in slot does not kill worker | same |
 | Flush / join fixtures fence before mirror-dependent asserts | `tests/e2e/join/fixtures.rs`, flush helpers |

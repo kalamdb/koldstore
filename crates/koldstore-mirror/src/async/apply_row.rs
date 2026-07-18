@@ -2,11 +2,9 @@
 //!
 //! SPI execution and managed-relation lookup stay in `pg_koldstore`.
 
-use std::collections::HashMap;
-
 use serde_json::{Map, Value};
 
-use crate::{PgOutputRelation, PgOutputTuple, PgOutputValue};
+use super::pgoutput::{PgOutputRelation, PgOutputTuple, PgOutputValue};
 
 /// Compact PK identity for in-batch dedupe (ordered values, NUL-separated).
 #[must_use]
@@ -29,6 +27,9 @@ pub fn pk_identity(row: &Map<String, Value>) -> String {
 
 /// Builds a primary-key JSON object from a decoded `pgoutput` tuple.
 ///
+/// Uses linear column lookup (typical PK width is tiny) to avoid per-row
+/// `HashMap` allocation on the apply hot path.
+///
 /// # Errors
 ///
 /// Returns an error when a managed primary-key column is missing from the
@@ -38,20 +39,18 @@ pub fn primary_key_json(
     primary_key: &[String],
     tuple: &PgOutputTuple,
 ) -> Result<Map<String, Value>, String> {
-    let column_index: HashMap<&str, usize> = relation
-        .columns
-        .iter()
-        .enumerate()
-        .map(|(index, column)| (column.name.as_str(), index))
-        .collect();
     let mut key_columns = Vec::with_capacity(primary_key.len());
     for key in primary_key {
-        let relation_index = column_index.get(key.as_str()).copied().ok_or_else(|| {
-            format!(
-                "pgoutput relation {}.{} does not publish managed primary-key column {key}",
-                relation.namespace, relation.name
-            )
-        })?;
+        let relation_index = relation
+            .columns
+            .iter()
+            .position(|column| column.name == *key)
+            .ok_or_else(|| {
+                format!(
+                    "pgoutput relation {}.{} does not publish managed primary-key column {key}",
+                    relation.namespace, relation.name
+                )
+            })?;
         key_columns.push(relation_index);
     }
     let compact_old_key =
@@ -94,7 +93,9 @@ pub fn pg_value_json(value: &PgOutputValue, column: &str) -> Result<Value, Strin
 #[cfg(test)]
 mod tests {
     use super::{pk_identity, primary_key_json};
-    use crate::{PgOutputColumn, PgOutputRelation, PgOutputTuple, PgOutputValue};
+    use crate::r#async::pgoutput::{
+        PgOutputColumn, PgOutputRelation, PgOutputTuple, PgOutputValue,
+    };
     use serde_json::{json, Map};
 
     #[test]

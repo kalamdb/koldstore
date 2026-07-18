@@ -3,7 +3,8 @@
 //! Owns PG-free object-path planning, Parquet encoding, durable object publish,
 //! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
 
-use koldstore_manifest::{table_object_prefix, CatalogManifestSegmentRow};
+use koldstore_catalog::CatalogManifestSegmentRow;
+use koldstore_manifest::table_object_prefix;
 use koldstore_parquet::validate_parquet_bytes;
 use koldstore_storage::{
     open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,

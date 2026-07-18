@@ -85,7 +85,11 @@ SQL
         hot_row_limit=""
         ;;
     esac
-    psql_in_mode \
+    # CREATE EXTENSION must not run under session_preload_libraries=koldstore:
+    # the merge-scan planner hook probes koldstore.schemas, which does not exist
+    # until catalog bootstrap finishes. Manage/register still use plain search_path.
+    PGOPTIONS="-c search_path=${BENCH_SCHEMA},public,koldstore" \
+      psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
       -v KOLDSTORE_BENCH_STORAGE_PATH="$KOLDSTORE_BENCH_STORAGE_PATH" \
       -v KOLDSTORE_BENCH_COMPRESSION="$KOLDSTORE_BENCH_COMPRESSION" \
       -v HOT_ROW_LIMIT="$hot_row_limit" \

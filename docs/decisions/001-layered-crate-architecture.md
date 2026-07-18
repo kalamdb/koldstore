@@ -23,7 +23,7 @@ Split pg-kalam into layered crates:
 - **Primitives:** `koldstore-catalog`, `koldstore-schema`, `koldstore-storage`,
   `koldstore-parquet`.
 - **Building blocks:** `koldstore-manifest`, `koldstore-mirror`, `koldstore-merge`,
-  `koldstore-jobs`, `koldstore-setup`.
+  `koldstore-worker`, `koldstore-setup`.
 - **Workflows:** `koldstore-flush`, `koldstore-migrate`.
 - **Integration:** `pg_koldstore` only — `pgrx`, SPI, hooks, merge scan FFI,
   thin SQL wrappers.

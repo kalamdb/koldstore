@@ -2,7 +2,8 @@
 //!
 //! Ordering (idempotent under crash):
 //! 1. Peek available WAL (`pg_logical_slot_peek_binary_changes`)
-//! 2. Write latest-state mirror rows (PK `ON CONFLICT` upsert / keyed update)
+//! 2. Write latest-state mirror rows (Insert/Delete: PK `ON CONFLICT` upsert;
+//!    Update: keyed update)
 //! 3. Record durable `applied_lsn` as the exact last decoded source commit
 //!    end-LSN in `koldstore.async_mirror_state` (never the global insert LSN)
 //! 4. On the **next** call, advance the slot to that LSN
@@ -18,13 +19,10 @@
 use std::collections::{HashMap, HashSet};
 
 use koldstore_catalog::queries::plan_async_managed_relation_by_oid;
-use koldstore_common::{
-    format_pg_lsn, next_id_after, quote_ident, snowflake_id_call_expression, MirrorOperation,
-};
+use koldstore_common::{format_pg_lsn, next_id_after, MirrorOperation};
 use koldstore_mirror::{
-    decode_message, must_flush_before_push, pk_identity, plan_async_mirror_batch_insert,
-    plan_async_mirror_batch_update, primary_key_json, PgOutputMessage, PgOutputRelation,
-    PgOutputTuple, APPLY_BATCH_ROWS,
+    decode_message, must_flush_before_push, pk_identity, plan_async_mirror_batch_upsert,
+    primary_key_json, PgOutputMessage, PgOutputRelation, PgOutputTuple, APPLY_BATCH_ROWS,
 };
 use pgrx::datum::DatumWithOid;
 use serde_json::Value;
@@ -37,6 +35,9 @@ const DECODE_FETCH_ROWS: std::os::raw::c_long = 8_192;
 
 /// Failpoint name: abort during async mirror apply (worker ERROR exit).
 pub const ASYNC_MIRROR_APPLY_FAILPOINT: &str = "async_mirror_apply";
+/// Failpoint name: abort after at least one mirror batch SPI write, before
+/// `applied_lsn` is recorded — asserts one-txn-per-tick rollback.
+pub const ASYNC_MIRROR_APPLY_AFTER_BATCH_FAILPOINT: &str = "async_mirror_apply_after_batch";
 
 /// Target-table mirror seq must be strictly greater than this floor after fence apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,10 +69,16 @@ pub struct BoundedApplyRequest {
     pub acknowledge_durable_checkpoint: bool,
     /// When set, allocate sequences for this table strictly above the floor.
     pub target_prune_floor: Option<(pgrx::pg_sys::Oid, PruneSeqFloor)>,
+    /// Optional row budget override. `None` uses the background GUC; `Some(0)`
+    /// means unlimited; `Some(n > 0)` caps source row changes in this pass.
+    pub max_rows: Option<i64>,
+    /// Optional wall-time budget override (milliseconds). Same semantics as
+    /// [`Self::max_rows`].
+    pub max_ms: Option<i64>,
 }
 
 impl BoundedApplyRequest {
-    /// Default worker / `wait_for_async_mirror` / phase-0 selection fence request.
+    /// Default worker apply request (honors per-tick GUC budgets).
     #[must_use]
     pub fn available() -> Self {
         Self {
@@ -79,6 +86,21 @@ impl BoundedApplyRequest {
             skip_through: None,
             acknowledge_durable_checkpoint: true,
             target_prune_floor: None,
+            max_rows: None,
+            max_ms: None,
+        }
+    }
+
+    /// Explicit fence / flush request: drain all peekable WAL in this pass.
+    #[must_use]
+    pub fn available_unlimited() -> Self {
+        Self {
+            upper_bound: None,
+            skip_through: None,
+            acknowledge_durable_checkpoint: true,
+            target_prune_floor: None,
+            max_rows: Some(0),
+            max_ms: Some(0),
         }
     }
 }
@@ -91,6 +113,8 @@ pub struct BoundedApplyOutcome {
     /// Exact last decoded commit end-LSN, or the request skip / durable boundary
     /// when the pass was empty. Never promoted to the fence upper bound alone.
     pub last_applied: Option<AppliedWalBoundary>,
+    /// True when a row/time budget stopped the pass with more WAL remaining.
+    pub budget_exhausted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -98,25 +122,16 @@ struct ManagedRelation {
     table_oid: pgrx::pg_sys::Oid,
     mirror: String,
     primary_key: Vec<String>,
-    /// Cached `jsonb_to_recordset` column DDL (`"id" bigint, ...`).
-    record_columns: Option<Vec<String>>,
-    /// Cached insert batch SQL for the current relation type fingerprint.
-    insert_sql: Option<String>,
-    /// Cached update/delete batch SQL for the current relation type fingerprint.
-    update_sql: Option<String>,
-    /// Floor-aware insert SQL using `incoming."seq"`.
-    floor_insert_sql: Option<String>,
-    /// Floor-aware update SQL using `incoming."seq"`.
-    floor_update_sql: Option<String>,
+    /// Cached `format_type` spellings for each primary-key column.
+    pk_type_names: Option<Vec<String>>,
+    /// Cached upsert SQL for typed `unnest` binds (Insert/Update/Delete).
+    upsert_sql: Option<String>,
 }
 
 impl ManagedRelation {
     fn invalidate_plans(&mut self) {
-        self.record_columns = None;
-        self.insert_sql = None;
-        self.update_sql = None;
-        self.floor_insert_sql = None;
-        self.floor_update_sql = None;
+        self.pk_type_names = None;
+        self.upsert_sql = None;
     }
 }
 
@@ -183,8 +198,11 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
         return Ok(BoundedApplyOutcome {
             row_changes: 0,
             last_applied: request.skip_through,
+            budget_exhausted: false,
         });
     }
+
+    crate::async_mirror::status::enforce_retained_wal_admission(&slot)?;
 
     let durable = read_durable_applied_lsn()?;
     if request.acknowledge_durable_checkpoint {
@@ -192,26 +210,39 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
         acknowledge_committed_apply(&slot, durable.as_ref())?;
     }
 
+    let row_budget = resolve_row_budget(&request);
+    let time_budget = resolve_time_budget(&request);
+    let tick_started = std::time::Instant::now();
+
     let cursor_name = open_decode_cursor(&slot, request.upper_bound)?;
     let mut relations = HashMap::<u32, PgOutputRelation>::new();
     let mut managed = HashMap::<u32, Option<ManagedRelation>>::new();
     let mut type_names = HashMap::<(u32, i32), String>::new();
     let mut transaction_lsn = None::<u64>;
     let mut skipping_transaction = false;
+    let mut skipping_flush_origin = false;
     let mut applied_end_lsn = None::<u64>;
     let mut batch = None::<ApplyBatch>;
     let mut applied = 0_i64;
     let mut saw_row_change = false;
+    let mut budget_exhausted = false;
+    let mut stop_after_commit = false;
     let skip_through = request.skip_through.map(AppliedWalBoundary::get);
 
     // Close the named portal on every exit path (including mid-apply errors).
     let result = (|| {
         loop {
+            if stop_after_commit {
+                break;
+            }
             let messages = fetch_decode_messages(&cursor_name)?;
             if messages.is_empty() {
                 break;
             }
             for data in messages {
+                if stop_after_commit {
+                    break;
+                }
                 match decode_message(&data).map_err(|error| error.to_string())? {
                     PgOutputMessage::Begin { final_lsn, .. } => {
                         flush_batch(
@@ -223,9 +254,23 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                             &request,
                         )?;
                         transaction_lsn = Some(final_lsn);
+                        skipping_flush_origin = false;
                         skipping_transaction = skip_through
                             .map(|boundary| final_lsn <= boundary)
                             .unwrap_or(false);
+                    }
+                    PgOutputMessage::Origin { name } => {
+                        // Flush prune stamps a database-scoped origin so async
+                        // apply does not re-insert tombstones for rows already
+                        // published to cold. Critical on PG15 (no peek
+                        // origin=none filter). PG16+ stamps DoNotReplicateId
+                        // instead and peeks with origin=none.
+                        let database_oid = koldstore_worker::DatabaseOid::new(
+                            unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32(),
+                        );
+                        if super::lifecycle::is_flush_replication_origin(&name, database_oid) {
+                            skipping_flush_origin = true;
+                        }
                     }
                     PgOutputMessage::Commit { end_lsn, .. } => {
                         let lsn = transaction_lsn
@@ -239,10 +284,18 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                             &request,
                         )?;
                         transaction_lsn = None;
+                        // Flush-origin txns are intentionally not mirrored but must
+                        // still advance applied_lsn so the slot can move past them.
                         if !skipping_transaction {
                             applied_end_lsn = Some(end_lsn);
                         }
                         skipping_transaction = false;
+                        skipping_flush_origin = false;
+                        // Stop only at commit boundaries so mirror + applied_lsn stay atomic.
+                        if budget_hit(row_budget, time_budget, applied, tick_started) {
+                            budget_exhausted = true;
+                            stop_after_commit = true;
+                        }
                     }
                     PgOutputMessage::Relation(relation) => {
                         let id = relation.id;
@@ -252,7 +305,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                         }
                     }
                     PgOutputMessage::Insert { relation_id, new } => {
-                        if skipping_transaction {
+                        if skipping_transaction || skipping_flush_origin {
                             continue;
                         }
                         if !saw_row_change {
@@ -275,7 +328,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                     PgOutputMessage::Update {
                         relation_id, new, ..
                     } => {
-                        if skipping_transaction {
+                        if skipping_transaction || skipping_flush_origin {
                             continue;
                         }
                         if !saw_row_change {
@@ -296,7 +349,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                         applied = applied.saturating_add(1);
                     }
                     PgOutputMessage::Delete { relation_id, old } => {
-                        if skipping_transaction {
+                        if skipping_transaction || skipping_flush_origin {
                             continue;
                         }
                         if !saw_row_change {
@@ -340,16 +393,71 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
         Ok(BoundedApplyOutcome {
             row_changes: applied,
             last_applied,
+            budget_exhausted,
         })
     })();
     let _ = drop_named_cursor(&cursor_name);
     result
 }
 
+fn resolve_row_budget(request: &BoundedApplyRequest) -> Option<i64> {
+    match request.max_rows {
+        Some(0) => None,
+        Some(limit) if limit > 0 => Some(limit),
+        Some(_) => None,
+        None => {
+            let guc = crate::guc::async_apply_max_rows_per_tick();
+            if guc > 0 {
+                Some(guc)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn resolve_time_budget(request: &BoundedApplyRequest) -> Option<std::time::Duration> {
+    let ms = match request.max_ms {
+        Some(0) => return None,
+        Some(limit) if limit > 0 => limit,
+        Some(_) => return None,
+        None => {
+            let guc = crate::guc::async_apply_max_ms_per_tick();
+            if guc > 0 {
+                guc
+            } else {
+                return None;
+            }
+        }
+    };
+    Some(std::time::Duration::from_millis(
+        u64::try_from(ms).unwrap_or(0),
+    ))
+}
+
+fn budget_hit(
+    row_budget: Option<i64>,
+    time_budget: Option<std::time::Duration>,
+    applied: i64,
+    started: std::time::Instant,
+) -> bool {
+    if let Some(limit) = row_budget {
+        if applied >= limit {
+            return true;
+        }
+    }
+    if let Some(limit) = time_budget {
+        if started.elapsed() >= limit {
+            return true;
+        }
+    }
+    false
+}
+
 fn open_decode_cursor(slot: &str, upper_bound: Option<WalFenceLsn>) -> Result<String, String> {
-    // `origin=none` is PG16+ only. On PG15, flush prune still uses
-    // `DoNotReplicateId`, which keeps those WAL records out of logical decoding
-    // entirely; the filter is defense-in-depth for ordinary origin-stamped WAL.
+    // `origin=none` is PG16+ only. On PG15, flush prune stamps the named
+    // database-scoped flush origin and apply skips those changes when ORIGIN
+    // is decoded. On PG16+ the peek filter is defense-in-depth.
     let upto = upper_bound.map(|lsn| format_pg_lsn(lsn.get()));
     let upto_sql = if upto.is_some() { "$3::pg_lsn" } else { "NULL" };
     #[cfg(feature = "pg15")]
@@ -393,12 +501,19 @@ fn open_decode_cursor(slot: &str, upper_bound: Option<WalFenceLsn>) -> Result<St
 }
 
 fn drop_named_cursor(cursor_name: &str) -> Result<(), String> {
-    pgrx::Spi::connect_mut(|client| {
-        if let Ok(cursor) = client.find_cursor(cursor_name) {
-            drop(cursor);
+    // Drop via portal APIs (not SPI CLOSE): on soft-fail / rollback paths an
+    // SPI ERROR here would FATAL a NEVER_RESTART applier before the worker
+    // soft-fail handler runs.
+    let Ok(name) = std::ffi::CString::new(cursor_name) else {
+        return Ok(());
+    };
+    unsafe {
+        let portal = pgrx::pg_sys::GetPortalByName(name.as_ptr());
+        if !portal.is_null() {
+            pgrx::pg_sys::PortalDrop(portal, false);
         }
-        Ok(())
-    })
+    }
+    Ok(())
 }
 
 fn fetch_decode_messages(cursor_name: &str) -> Result<Vec<Vec<u8>>, String> {
@@ -501,13 +616,18 @@ fn push_change(
         return Ok(());
     };
     let mut row = primary_key_json(relation, &config.primary_key, tuple)?;
-    if let Some((target_oid, floor)) = request.target_prune_floor {
+    // Always allocate seq in Rust (floor path stays strictly above prune watermark).
+    let seq = if let Some((target_oid, floor)) = request.target_prune_floor {
         if config.table_oid == target_oid {
-            let seq = next_id_after(crate::sql::session::snowflake_worker_id(), floor.get())
-                .map_err(|error| error.to_string())?;
-            row.insert("seq".to_string(), Value::from(seq));
+            next_id_after(crate::sql::session::snowflake_worker_id(), floor.get())
+                .map_err(|error| error.to_string())?
+        } else {
+            crate::sql::session::snowflake_id()
         }
-    }
+    } else {
+        crate::sql::session::snowflake_id()
+    };
+    row.insert("seq".to_string(), Value::from(seq));
     let identity = pk_identity(&row);
     let key = BatchKey {
         relation_id,
@@ -539,7 +659,7 @@ fn flush_batch(
     relations: &HashMap<u32, PgOutputRelation>,
     managed: &mut HashMap<u32, Option<ManagedRelation>>,
     type_names: &mut HashMap<(u32, i32), String>,
-    commit_lsn: u64,
+    _commit_lsn: u64,
     request: &BoundedApplyRequest,
 ) -> Result<(), String> {
     let Some(batch) = batch.take() else {
@@ -561,9 +681,11 @@ fn flush_batch(
         type_names,
         batch.key.operation,
         &batch.rows,
-        commit_lsn,
         request,
-    )
+    )?;
+    // After SPI mirror writes succeed but before applied_lsn is recorded.
+    crate::failpoints::hit(ASYNC_MIRROR_APPLY_AFTER_BATCH_FAILPOINT)?;
+    Ok(())
 }
 
 fn managed_relation(
@@ -613,57 +735,44 @@ fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
         table_oid,
         mirror,
         primary_key,
-        record_columns: None,
-        insert_sql: None,
-        update_sql: None,
-        floor_insert_sql: None,
-        floor_update_sql: None,
+        pk_type_names: None,
+        upsert_sql: None,
     })
 }
 
-fn resolve_record_columns(
+fn ensure_pk_type_names(
     config: &mut ManagedRelation,
     relation: &PgOutputRelation,
     type_names: &mut HashMap<(u32, i32), String>,
-) -> Result<Vec<String>, String> {
-    if config.record_columns.is_none() {
-        let mut record_columns = Vec::with_capacity(config.primary_key.len());
-        for key in &config.primary_key {
-            let column = relation
-                .columns
-                .iter()
-                .find(|column| &column.name == key)
-                .ok_or_else(|| format!("primary-key column {key} has no pgoutput type"))?;
-            let type_key = (column.type_oid, column.typmod);
-            if let std::collections::hash_map::Entry::Vacant(entry) = type_names.entry(type_key) {
-                let type_name = pgrx::Spi::get_one_with_args::<String>(
-                    "SELECT pg_catalog.format_type($1::oid, $2)",
-                    &[
-                        DatumWithOid::from(pgrx::pg_sys::Oid::from(column.type_oid)),
-                        DatumWithOid::from(column.typmod),
-                    ],
-                )
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| format!("PostgreSQL cannot format type OID {}", column.type_oid))?;
-                entry.insert(type_name);
-            }
-            let type_name = type_names.get(&type_key).expect("type name inserted above");
-            record_columns.push(format!("{} {type_name}", quote_ident(key)));
-        }
-        config.record_columns = Some(record_columns);
+) -> Result<(), String> {
+    if config.pk_type_names.is_some() {
+        return Ok(());
     }
-    Ok(config
-        .record_columns
-        .as_ref()
-        .expect("record columns populated")
-        .clone())
-}
-
-fn uses_floor_seq(config: &ManagedRelation, request: &BoundedApplyRequest) -> bool {
-    request
-        .target_prune_floor
-        .map(|(oid, _)| oid == config.table_oid)
-        .unwrap_or(false)
+    let mut pk_types = Vec::with_capacity(config.primary_key.len());
+    for key in &config.primary_key {
+        let column = relation
+            .columns
+            .iter()
+            .find(|column| &column.name == key)
+            .ok_or_else(|| format!("primary-key column {key} has no pgoutput type"))?;
+        let type_key = (column.type_oid, column.typmod);
+        if let std::collections::hash_map::Entry::Vacant(entry) = type_names.entry(type_key) {
+            let type_name = pgrx::Spi::get_one_with_args::<String>(
+                "SELECT pg_catalog.format_type($1::oid, $2)",
+                &[
+                    DatumWithOid::from(pgrx::pg_sys::Oid::from(column.type_oid)),
+                    DatumWithOid::from(column.typmod),
+                ],
+            )
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("PostgreSQL cannot format type OID {}", column.type_oid))?;
+            entry.insert(type_name);
+        }
+        let type_name = type_names.get(&type_key).expect("type name inserted above");
+        pk_types.push(type_name.clone());
+    }
+    config.pk_type_names = Some(pk_types);
+    Ok(())
 }
 
 fn apply_batch(
@@ -672,92 +781,60 @@ fn apply_batch(
     type_names: &mut HashMap<(u32, i32), String>,
     operation: MirrorOperation,
     rows: &[Value],
-    commit_lsn: u64,
-    request: &BoundedApplyRequest,
+    _request: &BoundedApplyRequest,
 ) -> Result<(), String> {
-    let mut record_columns = resolve_record_columns(config, relation, type_names)?;
-    let use_floor = uses_floor_seq(config, request);
-    if use_floor {
-        record_columns.push(format!("{} bigint", quote_ident("seq")));
+    ensure_pk_type_names(config, relation, type_names)?;
+    if config.upsert_sql.is_none() {
+        let pk_refs = config
+            .primary_key
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let pk_types = config
+            .pk_type_names
+            .as_ref()
+            .expect("pk types populated")
+            .clone();
+        let planned = plan_async_mirror_batch_upsert(&config.mirror, &pk_refs, &pk_types)
+            .map_err(|error| error.to_string())?;
+        config.upsert_sql = Some(planned);
     }
-    let pk_refs = config
-        .primary_key
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let seq_expression = if use_floor {
-        format!("incoming.{}", quote_ident("seq"))
-    } else {
-        snowflake_id_call_expression().to_string()
-    };
-    let sql = if operation == MirrorOperation::Insert {
-        if use_floor {
-            if config.floor_insert_sql.is_none() {
-                config.floor_insert_sql = Some(
-                    plan_async_mirror_batch_insert(
-                        &config.mirror,
-                        &pk_refs,
-                        &record_columns,
-                        &seq_expression,
-                    )
-                    .map_err(|error| error.to_string())?,
-                );
-            }
-            config.floor_insert_sql.as_ref().expect("floor insert SQL")
-        } else {
-            if config.insert_sql.is_none() {
-                config.insert_sql = Some(
-                    plan_async_mirror_batch_insert(
-                        &config.mirror,
-                        &pk_refs,
-                        &record_columns,
-                        &seq_expression,
-                    )
-                    .map_err(|error| error.to_string())?,
-                );
-            }
-            config.insert_sql.as_ref().expect("insert SQL cached")
+    let sql = config.upsert_sql.as_ref().expect("upsert SQL cached");
+
+    let mut pk_columns: Vec<Vec<String>> = (0..config.primary_key.len())
+        .map(|_| Vec::with_capacity(rows.len()))
+        .collect();
+    let mut seqs = Vec::with_capacity(rows.len());
+    for row in rows {
+        let object = row
+            .as_object()
+            .ok_or_else(|| "async mirror batch row is not an object".to_string())?;
+        for (index, key) in config.primary_key.iter().enumerate() {
+            let cell = object
+                .get(key)
+                .ok_or_else(|| format!("async mirror batch row missing primary key {key}"))?;
+            let text = match cell {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            pk_columns[index].push(text);
         }
-    } else if use_floor {
-        if config.floor_update_sql.is_none() {
-            config.floor_update_sql = Some(
-                plan_async_mirror_batch_update(
-                    &config.mirror,
-                    &pk_refs,
-                    &record_columns,
-                    &seq_expression,
-                )
-                .map_err(|error| error.to_string())?,
-            );
-        }
-        config.floor_update_sql.as_ref().expect("floor update SQL")
-    } else {
-        if config.update_sql.is_none() {
-            config.update_sql = Some(
-                plan_async_mirror_batch_update(
-                    &config.mirror,
-                    &pk_refs,
-                    &record_columns,
-                    &seq_expression,
-                )
-                .map_err(|error| error.to_string())?,
-            );
-        }
-        config.update_sql.as_ref().expect("update SQL cached")
-    };
-    let rows_json = serde_json::to_string(rows).map_err(|error| error.to_string())?;
-    let lsn = format_pg_lsn(commit_lsn);
+        let seq = object
+            .get("seq")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| "async mirror batch row missing seq".to_string())?;
+        seqs.push(seq);
+    }
+
     let result = pgrx::Spi::connect(|client| -> Result<(i64, i64), String> {
+        let mut args: Vec<DatumWithOid<'_>> = Vec::with_capacity(pk_columns.len() + 2);
+        args.push(DatumWithOid::from(operation.code()));
+        for column in &pk_columns {
+            args.push(DatumWithOid::from(column.clone()));
+        }
+        args.push(DatumWithOid::from(seqs.clone()));
         let table = client
-            .select(
-                sql,
-                None,
-                &[
-                    DatumWithOid::from(rows_json.as_str()),
-                    DatumWithOid::from(operation.code()),
-                    DatumWithOid::from(lsn.as_str()),
-                ],
-            )
+            .select(sql, None, &args)
             .map_err(|error| format!("execute async mirror batch: {error}"))?;
         if table.is_empty() {
             return Err("async mirror batch returned no result row".to_string());
@@ -777,9 +854,10 @@ fn apply_batch(
     // Hot and mirror counters update together with the apply transaction.
     // Deltas are derived from batch results so WAL replay after a crash does
     // not double-count (replayed upserts see existing rows; deletes affect 0).
+    // Updates are upserts too but do not change hot/mirror live counts.
     let hot_delta = match operation {
         MirrorOperation::Insert => result.0.saturating_sub(result.1),
-        MirrorOperation::Delete => -result.0,
+        MirrorOperation::Delete => -result.1,
         MirrorOperation::Update => 0,
     };
     let mirror_delta = if operation == MirrorOperation::Insert {
@@ -798,8 +876,33 @@ fn is_background_worker() -> bool {
 /// Applies available committed WAL and returns the number of row changes.
 ///
 /// SQL contract: `koldstore.wait_for_async_mirror()` is the explicit strong
-/// consistency fence for async mode and benchmark accounting.
+/// consistency fence for async mode and benchmark accounting. It loops with an
+/// unlimited per-pass budget until the stream is idle. The timeout is
+/// **idle-based**: progress (applied row changes) resets it, so a large catch-up
+/// that keeps applying does not fail solely because wall time exceeded 300s.
 #[pgrx::pg_extern(name = "wait_for_async_mirror", schema = "koldstore")]
 pub fn wait_for_async_mirror() -> i64 {
-    apply_available().unwrap_or_else(|error| pgrx::error!("async mirror apply failed: {error}"))
+    const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    const HARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+    let started = std::time::Instant::now();
+    let mut last_progress = started;
+    let mut total = 0_i64;
+    loop {
+        let outcome = apply_bounded(BoundedApplyRequest::available_unlimited())
+            .unwrap_or_else(|error| pgrx::error!("async mirror apply failed: {error}"));
+        total = total.saturating_add(outcome.row_changes);
+        if outcome.row_changes == 0 && !outcome.budget_exhausted {
+            break;
+        }
+        if outcome.row_changes > 0 {
+            last_progress = std::time::Instant::now();
+        }
+        if last_progress.elapsed() >= IDLE_TIMEOUT || started.elapsed() >= HARD_TIMEOUT {
+            pgrx::error!(
+                "async mirror fence timed out after {}s with {total} row changes applied",
+                started.elapsed().as_secs()
+            );
+        }
+    }
+    total
 }

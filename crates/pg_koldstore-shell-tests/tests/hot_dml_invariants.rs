@@ -49,7 +49,6 @@ fn executor_maps_user_dml_to_latest_state_mirror_operations() {
     assert_eq!(revive.operation, MirrorOperation::Insert);
     for effect in [insert, update, delete, revive] {
         assert_eq!(effect.seq_expression, "SNOWFLAKE_ID()");
-        assert_eq!(effect.commit_lsn_expression, "pg_current_wal_lsn()");
         assert!(effect.transactional);
     }
 }

@@ -40,7 +40,7 @@ pub use rls::{
     enforce_or_fail_closed, plan_security_quals, unsupported_rls_error, SecurityQualPlan,
 };
 pub use scan::{
-    begin_merge_scan, begin_merge_scan_with_plan, build_path_replacement,
+    begin_merge_scan, begin_merge_scan_with_plan, build_path_replacement, clear_partial_heap_paths,
     custom_scan_explain_label, evaluate_after_winner_resolution, execute_merge_scan,
     execute_merge_scan_with_filters, prune_segment_stats, prune_segment_stats_hints,
     replace_heap_final_path, ColdAvailability, FilterPlan, MergeMetadataAttnums, MergeScanError,

@@ -10,6 +10,7 @@ pub mod job;
 pub mod ops;
 pub mod policy;
 pub mod recovery;
+pub mod scheduler;
 pub mod segment_catalog;
 pub mod segment_write;
 pub mod stats;
@@ -24,9 +25,9 @@ pub use cleanup::{
     CleanSchemaCleanupPlan, CleanupCatalogColumn,
 };
 pub use encode::{stream_flush_chunks, StreamEncodeInput, StreamEncodeOutcome};
-pub use koldstore_jobs::{JobId, JobStatus, JobType, LeaseEpoch, StaleLeaseAction};
 pub use ops::*;
 pub use policy::policy_flush_row_count;
+pub use scheduler::{scheduler_should_flush, scheduler_should_flush_parsed};
 pub use segment_catalog::{
     indexed_column_stats_json, plan_activate_flush_segments, plan_flush_segments_batch_insert,
     SegmentCatalogError,
@@ -48,9 +49,10 @@ pub use table_flush::{
     TableFlushPreparedContext,
 };
 // Re-export manifest assembly/I/O so existing flush callers keep a stable path.
+pub use koldstore_catalog::CatalogManifestSegmentRow;
 pub use koldstore_manifest::{
     build_manifest_segment_from_catalog_row, load_manifest_from_path, manifest_from_catalog_rows,
-    write_manifest_to_path, CatalogManifestSegmentRow,
+    write_manifest_to_path,
 };
 pub use table_jobs::{
     plan_insert_inline_flush_job, plan_lookup_active_inline_flush_job,

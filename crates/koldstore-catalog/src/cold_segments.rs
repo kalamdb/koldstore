@@ -1,7 +1,6 @@
-//! Cold segment catalog rows.
+//! Cold segment visibility in `koldstore.cold_segments.status`.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 /// Segment visibility in `koldstore.cold_segments.status`.
 ///
@@ -23,18 +22,4 @@ impl SegmentVisibility {
     pub const fn is_query_visible(self) -> bool {
         matches!(self, Self::Active)
     }
-}
-
-/// Cold segment catalog row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ColdSegment {
-    pub segment_id: Uuid,
-    pub table_oid: u32,
-    pub scope_key: Option<String>,
-    pub object_path: String,
-    pub min_seq: i64,
-    pub max_seq: i64,
-    pub min_commit_seq: i64,
-    pub max_commit_seq: i64,
-    pub status: SegmentVisibility,
 }
