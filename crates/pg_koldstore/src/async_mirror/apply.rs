@@ -2,7 +2,8 @@
 //!
 //! Ordering (idempotent under crash):
 //! 1. Peek available WAL (`pg_logical_slot_peek_binary_changes`)
-//! 2. Write latest-state mirror rows (PK `ON CONFLICT` upsert / keyed update)
+//! 2. Write latest-state mirror rows (Insert/Delete: PK `ON CONFLICT` upsert;
+//!    Update: keyed update)
 //! 3. Record durable `applied_lsn` as the exact last decoded source commit
 //!    end-LSN in `koldstore.async_mirror_state` (never the global insert LSN)
 //! 4. On the **next** call, advance the slot to that LSN
@@ -674,7 +675,11 @@ fn apply_batch(
 ) -> Result<(), String> {
     ensure_record_columns(config, relation, type_names)?;
     let use_floor = uses_floor_seq(config, request);
-    let needs_plan = if operation == MirrorOperation::Insert {
+    // Latest-state deletes must upsert: an UPDATE-only apply silently no-ops when
+    // the mirror row was already pruned (or never present), dropping the tombstone
+    // the prune fence relies on.
+    let uses_upsert = matches!(operation, MirrorOperation::Insert | MirrorOperation::Delete);
+    let needs_plan = if uses_upsert {
         if use_floor {
             config.floor_insert_sql.is_none()
         } else {
@@ -704,7 +709,7 @@ fn apply_batch(
         } else {
             snowflake_id_call_expression().to_string()
         };
-        let planned = if operation == MirrorOperation::Insert {
+        let planned = if uses_upsert {
             plan_async_mirror_batch_insert(
                 &config.mirror,
                 &pk_refs,
@@ -720,7 +725,7 @@ fn apply_batch(
             )
         }
         .map_err(|error| error.to_string())?;
-        if operation == MirrorOperation::Insert {
+        if uses_upsert {
             if use_floor {
                 config.floor_insert_sql = Some(planned);
             } else {
@@ -732,7 +737,7 @@ fn apply_batch(
             config.update_sql = Some(planned);
         }
     }
-    let sql = if operation == MirrorOperation::Insert {
+    let sql = if uses_upsert {
         if use_floor {
             config.floor_insert_sql.as_ref().expect("floor insert SQL")
         } else {
@@ -777,7 +782,8 @@ fn apply_batch(
     // not double-count (replayed upserts see existing rows; deletes affect 0).
     let hot_delta = match operation {
         MirrorOperation::Insert => result.0.saturating_sub(result.1),
-        MirrorOperation::Delete => -result.0,
+        // Upsert tombstone: shrink hot only when a mirror row already existed.
+        MirrorOperation::Delete => -result.1,
         MirrorOperation::Update => 0,
     };
     let mirror_delta = if operation == MirrorOperation::Insert {

@@ -506,6 +506,7 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
               hot_row_limit  => $3,
               min_flush_rows => 1,
               migration_order_by => 'id',
+              auto_flush => false,
               mirror_capture_mode => $4
             )
             "#,

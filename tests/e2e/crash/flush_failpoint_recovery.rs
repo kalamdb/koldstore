@@ -62,6 +62,7 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
               min_flush_rows => 1,
               max_rows_per_file => 12,
               migration_order_by => 'id',
+              auto_flush => false,
               mirror_capture_mode => $3
             )
             "#,

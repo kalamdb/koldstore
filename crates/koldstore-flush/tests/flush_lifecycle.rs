@@ -1,5 +1,4 @@
 use koldstore_flush::{cleanup, job, worker};
-use uuid::Uuid;
 
 #[test]
 fn hot_cleanup_waits_for_manifest_commit_and_retains_needed_tombstones() {
