@@ -28,6 +28,7 @@ path = "game_events.rs"
 [dev-dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+# Shared via `#[path = "../../e2e/common/mod.rs"]` in support/.
 koldstore-memory-tests = { path = "../memory" }
 koldstore-storage = { workspace = true, features = ["s3"] }
 parquet.workspace = true

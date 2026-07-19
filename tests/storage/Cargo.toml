@@ -13,6 +13,7 @@ path = "pg_vs_koldstore.rs"
 anyhow.workspace = true
 chrono.workspace = true
 koldstore-memory-tests = { path = "../memory" }
+# Shared via `#[path = "../e2e/common/mod.rs"]`.
 koldstore-storage = { workspace = true, features = ["s3"] }
 serde.workspace = true
 serde_json.workspace = true

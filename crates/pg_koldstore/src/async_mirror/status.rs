@@ -22,16 +22,19 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
     let metrics = crate::observability::async_apply_metrics();
 
+    // Prefer CAST(... AS text) over `expr::text`: this SPI path failed with
+    // `syntax error at or near "."` when using `::` casts on nested
+    // jsonb_build_object results.
     let slot_row = pgrx::Spi::get_one_with_args::<String>(
         "SELECT COALESCE(\
-           (SELECT jsonb_build_object(\
+           (SELECT CAST(jsonb_build_object(\
               'slot_name', slot_name,\
               'active', active,\
-              'confirmed_flush_lsn', confirmed_flush_lsn::text,\
+              'confirmed_flush_lsn', CAST(confirmed_flush_lsn AS text),\
               'retained_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)\
-            )::text\
+            ) AS text)\
             FROM pg_catalog.pg_replication_slots WHERE slot_name = $1), \
-           jsonb_build_object('slot_name', $1::text, 'present', false)::text\
+           CAST(jsonb_build_object('slot_name', $1, 'present', false) AS text)\
          )",
         &[DatumWithOid::from(slot.as_str())],
     )
@@ -40,13 +43,13 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
 
     let state_row = pgrx::Spi::get_one_with_args::<String>(
         "SELECT COALESCE(\
-           (SELECT jsonb_build_object(\
-              'applied_lsn', applied_lsn::text,\
+           (SELECT CAST(jsonb_build_object(\
+              'applied_lsn', CAST(applied_lsn AS text),\
               'updated_at', updated_at,\
               'updated_at_age_seconds', EXTRACT(EPOCH FROM (now() - updated_at))\
-            )::text\
+            ) AS text)\
             FROM koldstore.async_mirror_state WHERE database_oid = $1), \
-           jsonb_build_object('present', false)::text\
+           CAST(jsonb_build_object('present', false) AS text)\
          )",
         &[DatumWithOid::from(database_oid)],
     )
@@ -99,11 +102,12 @@ pub(crate) fn enforce_retained_wal_admission(slot: &str) -> Result<(), String> {
     if max_retained <= 0 {
         return Ok(());
     }
+    // `pg_wal_lsn_diff` returns numeric; SPI i64 requires an explicit bigint cast.
     let retained = pgrx::Spi::get_one_with_args::<i64>(
         "SELECT COALESCE(\
-           (SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)\
+           (SELECT CAST(pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS bigint)\
             FROM pg_catalog.pg_replication_slots WHERE slot_name = $1), \
-           0)",
+           CAST(0 AS bigint))",
         &[DatumWithOid::from(slot)],
     )
     .map_err(|error| error.to_string())?

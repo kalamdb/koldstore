@@ -1,5 +1,12 @@
--- pg-koldstore extension bootstrap.
--- This migration owns catalog DDL only. SQL-callable behavior is implemented
+-- pg-koldstore extension bootstrap catalog fragment.
+--
+-- This file is embedded via `pgrx::extension_sql_file!(..., bootstrap)` and is
+-- NOT the packaged `koldstore--<default_version>.sql` install script (pgrx
+-- generates that from Rust + this fragment). Packaged extension version comes
+-- from `koldstore.control` (`default_version = '@CARGO_VERSION@'`). Upgrade
+-- scripts live beside this file as `koldstore--<from>--<to>.sql`.
+--
+-- This fragment owns catalog DDL only. SQL-callable behavior is implemented
 -- in Rust/pgrx modules and exposed by pgrx extension generation.
 -- The koldstore schema must exist before this catalog block creates typed
 -- objects under it. pgrx also emits a schema marker so schema-qualified Rust

@@ -53,6 +53,22 @@ Session `SET` does not affect the background worker. Prefer `ALTER DATABASE`
 or `ALTER SYSTEM` + reload / worker restart, matching
 `flush_check_interval_seconds`.
 
+### Async retained-WAL admission
+
+`koldstore.async_mirror_max_retained_bytes` defaults to **1 GiB**. When the
+logical slot’s retained WAL (`pg_wal_lsn_diff(current, confirmed_flush_lsn)`)
+exceeds the limit, async apply and flush fail closed instead of letting
+`pg_wal` grow without bound. WAL is never silently dropped.
+
+```sql
+-- Raise for large catch-up windows (cluster-wide example):
+ALTER SYSTEM SET koldstore.async_mirror_max_retained_bytes = 2147483647; -- ~2 GiB cap
+SELECT pg_reload_conf();
+
+-- Lab-only: disable admission (monitor pg_wal yourself):
+ALTER DATABASE mydb SET koldstore.async_mirror_max_retained_bytes = 0;
+```
+
 After a failed auto-flush (for example `max_rows_per_file` below the
 `koldstore.min_max_rows_per_file` floor), that table is skipped for 60 seconds
 so one bad table cannot monopolize every tick.

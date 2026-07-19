@@ -62,12 +62,12 @@ koldstore-worker = { path = "crates/koldstore-worker" }
 koldstore-flush = { path = "crates/koldstore-flush" }
 koldstore-migrate = { path = "crates/koldstore-migrate" }
 
-anyhow = "1.0.103"
+anyhow = "1.0.104"
 arrow-array = { version = "59.1.0", default-features = false }
 arrow-schema = { version = "59.1.0", default-features = false }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
-futures-util = "0.3.32"
+futures-util = "0.3.33"
 hex = "0.4.3"
 # Backend features (`fs`, and optionally S3 via `koldstore-storage`'s `s3`
 # feature: aws-base + rustls-no-provider/ring) stay out of crates that only
@@ -80,11 +80,11 @@ parquet = { version = "59.1.0", default-features = false, features = ["arrow", "
 # aws-lc and OpenSSL out of the extension (OpenSSL conflicts with PostgreSQL).
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
-thiserror = "2.0.18"
+thiserror = "2.0.19"
 # Shared runtime features for library crates. Test binaries add `macros`;
 # benchmarks add `process` where `tokio::process` is used.
 tokio = { version = "1.53.0", features = ["rt-multi-thread", "time"] }

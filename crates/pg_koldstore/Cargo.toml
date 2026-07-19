@@ -6,7 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-machete]
-ignored = ["cc"]
+# `cc` is used from build.rs; `pgrx-tests` is only linked under `pg_test`.
+ignored = ["cc", "pgrx-tests"]
 
 [lib]
 name = "koldstore"
@@ -34,7 +35,6 @@ test-failpoints = []
 s3 = ["koldstore-storage/s3"]
 
 [dependencies]
-chrono.workspace = true
 koldstore-catalog.workspace = true
 koldstore-common.workspace = true
 koldstore-flush.workspace = true
@@ -50,7 +50,6 @@ pgrx = { workspace = true, optional = true }
 pgrx-tests = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-thiserror.workspace = true
 tracing = { workspace = true, features = ["release_max_level_off"] }
 uuid.workspace = true
 
@@ -60,7 +59,6 @@ koldstore-flush.workspace = true
 koldstore-merge.workspace = true
 koldstore-migrate.workspace = true
 koldstore-schema.workspace = true
-koldstore-setup.workspace = true
 koldstore-storage.workspace = true
 
 [build-dependencies]

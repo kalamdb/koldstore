@@ -152,6 +152,9 @@ extension). The release image uses `docker/Dockerfile.release` and
 Flush is on-demand unless you schedule it. Operator recipe:
 [operations/scheduling.md](operations/scheduling.md).
 
+Extension install / `ALTER EXTENSION … UPDATE` and the production GUC baseline
+are documented in [operations/upgrade.md](operations/upgrade.md).
+
 To verify that recipe against local pgrx PostgreSQL (builds/installs `pg_cron`
 if needed, waits for a one-minute cron tick):
 

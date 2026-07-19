@@ -1,5 +1,6 @@
-comment = 'pg-koldstore hot/cold storage extension'
-default_version = '0.1.0'
+comment = 'pg-koldstore tiered-storage extension'
+# Substituted by cargo-pgrx at install/package time from [package].version.
+default_version = '@CARGO_VERSION@'
 module_pathname = '$libdir/koldstore'
 relocatable = false
 superuser = true

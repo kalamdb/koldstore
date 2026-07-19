@@ -15,8 +15,6 @@ koldstore-migrate.workspace = true
 koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-schema.workspace = true
-koldstore-setup.workspace = true
-koldstore-storage.workspace = true
 koldstore = { path = "../pg_koldstore", package = "pg_koldstore", default-features = false }
 serde_json.workspace = true
 

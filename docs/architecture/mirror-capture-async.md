@@ -178,9 +178,11 @@ FROM koldstore.async_mirror_state;
 
 If the worker cannot run or repeatedly soft-fails, the slot retains WAL and can
 fill `pg_wal`. Alert on retained bytes, `async_mirror_status()->'healthy'`, and
-the age of `updated_at`. Optionally set
-`koldstore.async_mirror_max_retained_bytes` to fail closed before disk
-exhaustion (WAL is never silently dropped).
+the age of `updated_at`. By default
+`koldstore.async_mirror_max_retained_bytes` is **1 GiB** so apply/flush fail
+closed before disk exhaustion (WAL is never silently dropped). Raise the limit
+for large catch-up windows, or set `0` only in lab environments that monitor
+`pg_wal` themselves.
 
 ### Explicit cleanup
 
