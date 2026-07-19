@@ -74,6 +74,7 @@ hex = "0.4.3"
 # need the `ObjectStore` trait.
 object_store = { version = "0.14.1", default-features = false }
 pgrx = { version = "0.19.1", default-features = false }
+pgrx-bench = { version = "0.19.1", default-features = false }
 pgrx-tests = { version = "0.19.1", default-features = false }
 parquet = { version = "59.1.0", default-features = false, features = ["arrow", "async", "zstd", "snap"] }
 # Shared with object_store's HTTP transport. `rustls-no-provider` + ring keeps

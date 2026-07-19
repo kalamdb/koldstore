@@ -6,8 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-machete]
-# `cc` is used from build.rs; `pgrx-tests` is only linked under `pg_test`.
-ignored = ["cc", "pgrx-tests"]
+# `cc` is used from build.rs; `pgrx-tests` / `pgrx-bench` are feature-gated.
+ignored = ["cc", "pgrx-tests", "pgrx-bench"]
 
 [lib]
 name = "koldstore"
@@ -29,6 +29,9 @@ cshim = ["dep:pgrx", "pgrx/cshim"]
 # Distinct from the `#[pg_test]` attribute macro. Also used to shim Snowflake
 # worker id for in-server tests (see sql/session.rs).
 pg_test = ["dep:pgrx-tests"]
+# Enables `pgrx-bench` for in-server `#[pg_bench]`. `cargo pgrx bench` enables
+# this feature automatically; keep it optional so normal installs stay lean.
+pg_bench = ["dep:pgrx-bench"]
 # Test-only flush failpoints for crash-recovery suites. No-op in release unless enabled.
 test-failpoints = []
 # S3 / MinIO via object_store (rustls + ring, no aws-lc/OpenSSL). Keep enabled for release installs.
@@ -47,6 +50,7 @@ koldstore-schema.workspace = true
 koldstore-storage.workspace = true
 koldstore-worker.workspace = true
 pgrx = { workspace = true, optional = true }
+pgrx-bench = { workspace = true, optional = true }
 pgrx-tests = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
