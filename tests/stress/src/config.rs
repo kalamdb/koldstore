@@ -102,8 +102,7 @@ impl StressConfig {
         let hot_row_limit = env_i64("HOT_ROW_LIMIT", 4_000)?.max(1_000);
         let min_flush_rows = env_i64("MIN_FLUSH_ROWS", 1_000)?.max(100);
         let max_rows_per_file = env_i64("MAX_ROWS_PER_FILE", 2_000)?.max(1_000);
-        let flush_interval =
-            Duration::from_millis(env_u64("FLUSH_INTERVAL_MS", 500)?.max(50));
+        let flush_interval = Duration::from_millis(env_u64("FLUSH_INTERVAL_MS", 500)?.max(50));
         let absolute_latency_floor_us = env_u64("LATENCY_FLOOR_US", 50_000)?;
         let max_open_fds = env_u64("MAX_OPEN_FDS", 10_000)?;
         let max_connections = env_i64(
@@ -113,8 +112,7 @@ impl StressConfig {
                 * 3
                 + 32,
         )?;
-        let progress_interval =
-            Duration::from_secs(env_u64("PROGRESS_INTERVAL_SECS", 5)?.max(1));
+        let progress_interval = Duration::from_secs(env_u64("PROGRESS_INTERVAL_SECS", 5)?.max(1));
         // Default 1ms (was 2ms) ≈ 2× writer insert/update rate.
         let writer_delay = Duration::from_millis(env_u64("WRITER_DELAY_MS", 1)?);
 
@@ -162,9 +160,7 @@ impl StressConfig {
 
     #[must_use]
     pub fn seed_total_rows(&self) -> i64 {
-        self.tenants as i64
-            * self.conversations_per_tenant as i64
-            * self.seed_rows_per_conversation
+        self.tenants as i64 * self.conversations_per_tenant as i64 * self.seed_rows_per_conversation
     }
 }
 

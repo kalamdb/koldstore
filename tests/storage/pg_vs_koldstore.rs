@@ -1026,7 +1026,10 @@ fn env_i64(name: &str, default: i64) -> i64 {
 
 /// Resolves warm-up row count: explicit env, else a scale-aware default, else 0.
 fn resolve_warmup_rows(rows: i64, insert_batch_rows: i64) -> i64 {
-    let configured = env_i64("KOLDSTORE_STORAGE_WARMUP_ROWS", DEFAULT_WARMUP_ROWS_SENTINEL);
+    let configured = env_i64(
+        "KOLDSTORE_STORAGE_WARMUP_ROWS",
+        DEFAULT_WARMUP_ROWS_SENTINEL,
+    );
     let warmup = if configured == DEFAULT_WARMUP_ROWS_SENTINEL {
         // Heat shared buffers / WAL / disk before timing. Cap at timed row count.
         rows.min((insert_batch_rows.saturating_mul(5)).max(1_000_000))

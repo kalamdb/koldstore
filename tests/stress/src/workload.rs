@@ -433,7 +433,10 @@ async fn cold_dml_loop(
             let started = Instant::now();
             match client
                 .execute(
-                    &format!("DELETE FROM {} WHERE id = $1 AND tenant_id = $2", schema.messages),
+                    &format!(
+                        "DELETE FROM {} WHERE id = $1 AND tenant_id = $2",
+                        schema.messages
+                    ),
                     &[&id, &tenant],
                 )
                 .await

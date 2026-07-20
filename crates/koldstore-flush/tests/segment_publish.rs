@@ -72,12 +72,10 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     .unwrap();
 
     assert!(
-        written
-            .object_path
-            .starts_with(&format!(
-                "app/items/001/segment-0000-{}.",
-                koldstore_manifest::segment_path_token(written.segment_id)
-            )),
+        written.object_path.starts_with(&format!(
+            "app/items/001/segment-0000-{}.",
+            koldstore_manifest::segment_path_token(written.segment_id)
+        )),
         "object path should use padded folder/segment + short token, got {}",
         written.object_path
     );

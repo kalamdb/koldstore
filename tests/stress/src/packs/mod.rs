@@ -27,9 +27,9 @@ impl Pack {
             "multi_table" | "multi-table" => Ok(Self::MultiTable),
             "joins" | "join" => Ok(Self::Joins),
             "async" => Ok(Self::Async),
-            "schema_evo" | "scheduler" | "s3" => bail!(
-                "pack {raw:?} is not implemented in v1 (see design doc later packs)"
-            ),
+            "schema_evo" | "scheduler" | "s3" => {
+                bail!("pack {raw:?} is not implemented in v1 (see design doc later packs)")
+            }
             other => bail!("unknown stress pack {other:?}"),
         }
     }

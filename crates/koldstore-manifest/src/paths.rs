@@ -59,11 +59,7 @@ pub fn segment_relative_object_path(batch_number: i32, path_token: impl AsRef<st
 
 /// Full object key under the table prefix.
 #[must_use]
-pub fn segment_object_path(
-    prefix: &str,
-    batch_number: i32,
-    path_token: impl AsRef<str>,
-) -> String {
+pub fn segment_object_path(prefix: &str, batch_number: i32, path_token: impl AsRef<str>) -> String {
     let prefix = prefix.trim_matches('/');
     format!(
         "{prefix}/{}",

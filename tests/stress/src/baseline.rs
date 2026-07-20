@@ -7,9 +7,7 @@ use anyhow::{Context, Result};
 use tokio_postgres::Client;
 
 use crate::config::StressConfig;
-use crate::metrics::{
-    Metrics, MetricsSnapshot, OP_COLD_UPDATE, OP_HISTORY, OP_INSERT, OP_JOIN,
-};
+use crate::metrics::{Metrics, MetricsSnapshot, OP_COLD_UPDATE, OP_HISTORY, OP_INSERT, OP_JOIN};
 use crate::schema::{fat_blob, fat_payload, StressSchema};
 use crate::support::{log_always, set_scope};
 
@@ -53,20 +51,14 @@ pub async fn run_baseline(
                      VALUES ($1,$2,$3,$4,$5,$6::text::jsonb,$7, now(), now(), 1, 0, 'active')",
                     schema.messages
                 ),
-                &[
-                    &id,
-                    &tenant,
-                    &conversation,
-                    &sender,
-                    &body,
-                    &payload,
-                    &blob,
-                ],
+                &[&id, &tenant, &conversation, &sender, &body, &payload, &blob],
             )
             .await
             .context("baseline insert")?;
         metrics.record(OP_INSERT, started.elapsed().as_micros() as u64);
-        metrics.inserts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .inserts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     for _ in 0..config.baseline_samples {

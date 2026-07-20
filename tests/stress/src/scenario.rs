@@ -30,8 +30,7 @@ fn project_storage_root() -> PathBuf {
 fn prepare_project_storage() -> Result<PathBuf> {
     let root = project_storage_root();
     if root.exists() {
-        std::fs::remove_dir_all(&root)
-            .with_context(|| format!("clear {}", root.display()))?;
+        std::fs::remove_dir_all(&root).with_context(|| format!("clear {}", root.display()))?;
     }
     std::fs::create_dir_all(&root).with_context(|| format!("create {}", root.display()))?;
     let abs = root

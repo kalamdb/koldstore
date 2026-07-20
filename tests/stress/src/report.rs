@@ -84,17 +84,11 @@ fn format_text(report: &StressReport) -> String {
     ));
     out.push_str("baseline ops:\n");
     for (op, pct) in &report.baseline.ops {
-        out.push_str(&format!(
-            "  {op}: n={} p95={}us\n",
-            pct.count, pct.p95_us
-        ));
+        out.push_str(&format!("  {op}: n={} p95={}us\n", pct.count, pct.p95_us));
     }
     out.push_str("soak ops:\n");
     for (op, pct) in &report.soak.ops {
-        out.push_str(&format!(
-            "  {op}: n={} p95={}us\n",
-            pct.count, pct.p95_us
-        ));
+        out.push_str(&format!("  {op}: n={} p95={}us\n", pct.count, pct.p95_us));
     }
     out.push_str(&format!(
         "counters inserts={} updates={} history={} joins={} cold_upd={} cold_del={} flushes={}\n",
@@ -130,10 +124,7 @@ pub fn log_config(config: &StressConfig) {
     ));
     log_always(format!(
         "flush policy hot_row_limit={} min_flush_rows={} max_rows_per_file={} writer_delay={:?}",
-        config.hot_row_limit,
-        config.min_flush_rows,
-        config.max_rows_per_file,
-        config.writer_delay
+        config.hot_row_limit, config.min_flush_rows, config.max_rows_per_file, config.writer_delay
     ));
 }
 

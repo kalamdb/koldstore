@@ -108,7 +108,9 @@ async fn sample_once(
     let conns: i64 = row.get(0);
     let prev = watchdog.peak_connections.load(Ordering::Relaxed);
     if (conns as u64) > prev {
-        watchdog.peak_connections.store(conns as u64, Ordering::Relaxed);
+        watchdog
+            .peak_connections
+            .store(conns as u64, Ordering::Relaxed);
     }
     if conns > max_connections {
         control.trip_fatal(format!(
