@@ -273,7 +273,7 @@ async fn writer_loop(
         let conv = config.conversation_id(tenant_idx, conv_idx);
         set_scope(&client, &tenant).await?;
 
-        if seq % 5 == 0 {
+        if seq.is_multiple_of(5) {
             // Hot update on a recent id band when possible.
             let id = ids.current().saturating_sub(1).max(1);
             let started = Instant::now();
@@ -429,7 +429,7 @@ async fn cold_dml_loop(
         let tenant_idx = ((id - 1) / per_tenant) as usize % config.tenants;
         let tenant = config.tenant_id(tenant_idx);
         set_scope(&client, &tenant).await?;
-        if seq % 4 == 0 {
+        if seq.is_multiple_of(4) {
             let started = Instant::now();
             match client
                 .execute(
@@ -508,7 +508,7 @@ async fn multi_table_loop(
         let conv = config.conversation_id(tenant_idx, conv_idx);
         set_scope(&client, &tenant).await?;
 
-        if seq % 2 == 0 {
+        if seq.is_multiple_of(2) {
             let _ = client
                 .execute(
                     &format!(

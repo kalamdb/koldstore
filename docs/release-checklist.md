@@ -5,10 +5,13 @@
   `default_version = '@CARGO_VERSION@'`, so packaged `extversion` tracks Cargo.
 - Add an extension upgrade script under `crates/pg_koldstore/sql/` named
   `koldstore--<previous>--<new>.sql` (PostgreSQL `ALTER EXTENSION … UPDATE`
-  path). Update `PREVIOUS_EXTENSION_SQL_VERSION` in
-  `crates/pg_koldstore/tests/extension_upgrade.rs` to the prior Cargo version.
-  Include catalog DDL deltas when schema changes; binary-only bumps may be
-  comment-only but the file must exist.
+  path). During `*-beta.*` pre-releases, keep one edge from the last non-beta
+  baseline (`0.1.0`) and rename that file to the new Cargo version — do not
+  chain beta→beta scripts. When cutting a non-beta release, add a real edge
+  from the prior Cargo version and update `PREVIOUS_EXTENSION_SQL_VERSION` in
+  `crates/pg_koldstore/tests/extension_upgrade.rs`. Include catalog DDL deltas
+  when schema changes; binary-only bumps may be comment-only but the file must
+  exist.
 - Build the full workspace with `cargo check --workspace --all-targets --no-default-features`.
 - Run `cargo fmt --all` and `cargo clippy --workspace --all-targets --no-default-features`.
 - Run Rust unit and regression tests with `cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison`.

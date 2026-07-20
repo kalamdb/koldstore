@@ -5,9 +5,11 @@ use std::path::PathBuf;
 
 /// Last packaged SQL baseline that still needs a direct upgrade edge to current.
 ///
-/// When bumping `[workspace.package].version`, add
-/// `sql/koldstore--{PREVIOUS}--{NEW}.sql` (or an intermediate chain) and update
-/// this constant to the previous Cargo package version.
+/// During pre-release (`*-beta.*`) bumps, keep a single
+/// `sql/koldstore--{PREVIOUS}--{NEW}.sql` edge from this baseline and rename it
+/// to the new Cargo version (do not accumulate beta→beta scripts). When cutting
+/// a non-beta release, add a real edge from the prior Cargo version and update
+/// this constant.
 const PREVIOUS_EXTENSION_SQL_VERSION: &str = "0.1.0";
 
 fn sql_dir() -> PathBuf {
