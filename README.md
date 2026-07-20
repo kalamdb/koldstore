@@ -247,7 +247,8 @@ Development loop and crate layout:
 ```bash
 cargo nextest run --workspace --no-default-features \
   --exclude e2e --exclude examples --exclude storage-comparison \
-  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
+  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests \
+  --exclude stress
 cargo pgrx install -p pg_koldstore --no-default-features --features "pg16 s3"
 scripts/run-pg-e2e.sh 16 --mode strict
 scripts/run-pg-e2e.sh 16 --mode async

@@ -332,7 +332,8 @@ fn slot_active_pid(slot: &str) -> Result<Option<i32>, String> {
 /// `pg_replication_slot_advance`, `pg_drop_replication_slot`) acquire with
 /// `nowait=true` and ERROR immediately when another PID holds the slot. Callers
 /// must already hold [`lock_apply`] so only abort/exit windows (locks released
-/// before `ReplicationSlotRelease`) can still show an active PID.
+/// before `ReplicationSlotRelease`) can still show an active PID. Also used by
+/// apply before peek/advance after a worker terminate.
 ///
 /// # Errors
 ///

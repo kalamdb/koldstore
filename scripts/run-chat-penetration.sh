@@ -22,6 +22,7 @@ Options:
                         v1: chat,cold_dml,multi_table,joins,async
 
 Environment (selected):
+  KOLDSTORE_STRESS_RUN=1            Set by this script before nextest
   KOLDSTORE_STRESS_MINUTES=5
   KOLDSTORE_STRESS_SOAK_SECONDS=…   Overrides minutes when set (local smoke)
   KOLDSTORE_STRESS_CLIENTS=24
@@ -125,6 +126,7 @@ if ! cargo nextest --version >/dev/null 2>&1; then
 fi
 
 echo "running chat penetration soak (packs=${PACKS}, mode=${MIRROR_CAPTURE_MODE})"
+export KOLDSTORE_STRESS_RUN=1
 cargo nextest run -p stress --test chat_penetration --no-capture
 
 echo "chat penetration passed (packs=${PACKS}, mode=${MIRROR_CAPTURE_MODE})"

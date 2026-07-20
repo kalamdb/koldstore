@@ -14,7 +14,7 @@
   exist.
 - Build the full workspace with `cargo check --workspace --all-targets --no-default-features`.
 - Run `cargo fmt --all` and `cargo clippy --workspace --all-targets --no-default-features`.
-- Run Rust unit and regression tests with `cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison`.
+- Run Rust unit and regression tests with `cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison --exclude stress`.
 - Run the supported PostgreSQL 15 through 18 pgrx matrix with `scripts/run-pgrx-matrix.sh`, which runs pgrx feature clippy, extension install, and E2E checks for each version.
 - Use `scripts/run-pgrx-matrix.sh --download-missing` when a supported PostgreSQL major is not already initialized in the local pgrx config; add `--without-icu` only for local downloaded builds on machines without ICU development packages.
 - Run MinIO-backed flush and merge tests (`flush_minio` via CI, or locally with `bash scripts/ci/start-minio.sh` then `KOLDSTORE_MINIO=1 scripts/run-pg-e2e.sh`).

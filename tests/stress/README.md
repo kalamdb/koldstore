@@ -5,6 +5,10 @@ with aggressive flush, history readers, and optional feature packs.
 
 Design: [`docs/plans/2026-07-19-chat-penetration-stress-design.md`](../../docs/plans/2026-07-19-chat-penetration-stress-design.md)
 
+**Not part of default CI unit tests.** Use `scripts/run-chat-penetration.sh` or the
+`chat-penetration` workflow. Workspace nextest excludes this package; the soak
+test also no-ops unless `KOLDSTORE_STRESS_RUN=1`.
+
 ## Run
 
 ```bash

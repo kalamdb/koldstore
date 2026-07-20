@@ -19,10 +19,11 @@ cargo fmt --all
 cargo check --workspace --all-targets --no-default-features
 cargo nextest run --workspace --no-default-features \
   --exclude e2e --exclude examples --exclude storage-comparison \
-  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
+  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests \
+  --exclude stress
 ```
 
-`e2e`, `examples`, and `storage-comparison` need a running pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh` (`--mode strict|async`), and `scripts/run-storage-comparison.sh`.
+`e2e`, `examples`, `storage-comparison`, and `stress` need a prepared pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh` (`--mode strict|async`), `scripts/run-storage-comparison.sh`, and `scripts/run-chat-penetration.sh`.
 
 ## Production-readiness test layers
 
@@ -30,7 +31,8 @@ cargo nextest run --workspace --no-default-features \
 # Unit
 cargo nextest run --workspace --no-default-features \
   --exclude e2e --exclude examples --exclude storage-comparison \
-  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
+  --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests \
+  --exclude stress
 
 # In-server pgrx #[pg_test]
 RUST_TEST_THREADS=1 cargo pgrx test --manifest-path crates/pg_koldstore/Cargo.toml pg16

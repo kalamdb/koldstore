@@ -9,7 +9,8 @@ lint:
 test:
 	cargo nextest run --workspace --no-default-features \
 		--exclude e2e --exclude examples --exclude storage-comparison \
-		--exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
+		--exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests \
+		--exclude stress
 
 pgrx-test:
 	cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg16 pg_test s3" -- -D warnings

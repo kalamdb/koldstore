@@ -44,7 +44,7 @@ jobs:
       - run: cargo install cargo-nextest --locked
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests
+      - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests --exclude stress
 
   pgrx-test:
     name: "pg_test (PG ${{ matrix.pg }})"

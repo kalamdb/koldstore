@@ -21,7 +21,8 @@ async fn alter_table_add_nullable_column_refreshes_schema_and_reads_old_cold_row
                 .get(0);
             db.client
                 .batch_execute(&format!(
-                    "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off"
+                    "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off; \
+                     SET koldstore.internal_async_mirror_worker = off"
                 ))
                 .await?;
             let _ = common::terminate_async_worker(&db.client).await?;
@@ -49,7 +50,8 @@ async fn alter_table_add_nullable_column_refreshes_schema_and_reads_old_cold_row
                 .get(0);
             db.client
                 .batch_execute(&format!(
-                    "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker"
+                    "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+                     RESET koldstore.internal_async_mirror_worker"
                 ))
                 .await?;
         }
