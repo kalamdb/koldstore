@@ -67,7 +67,11 @@ pub fn backend_safe_publish_actions(
     ]
 }
 
-/// Builds a unique temp object key under `{prefix}/.tmp/{writer_id}/`.
+/// Builds a unique temp object key under `{prefix}/.tmp/`.
+///
+/// Temps are **flat files** (no per-writer subdirectories). Uniqueness comes from
+/// `file_name` (callers typically pass [`unique_temp_file_name`]); when
+/// `writer_id` is non-empty it is prefixed onto the file name for attribution.
 ///
 /// Temp keys intentionally avoid the `object_store` reserved `/#\d+` staging
 /// suffix pattern used by [`LocalFileSystem`](object_store::local::LocalFileSystem).
@@ -76,10 +80,15 @@ pub fn temp_object_key(prefix: &str, writer_id: &str, file_name: &str) -> String
     let prefix = prefix.trim_matches('/');
     let writer_id = writer_id.trim_matches('/');
     let file_name = file_name.trim_matches('/');
-    if prefix.is_empty() {
-        format!(".tmp/{writer_id}/{file_name}")
+    let staged = if writer_id.is_empty() {
+        file_name.to_string()
     } else {
-        format!("{prefix}/.tmp/{writer_id}/{file_name}")
+        format!("{writer_id}-{file_name}")
+    };
+    if prefix.is_empty() {
+        format!(".tmp/{staged}")
+    } else {
+        format!("{prefix}/.tmp/{staged}")
     }
 }
 

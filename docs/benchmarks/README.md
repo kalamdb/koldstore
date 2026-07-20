@@ -113,7 +113,7 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
 ## Reproduce
 
 ```bash
-# Published RESULTS.md: three runs, fresh server each (~15–20+ min/side).
+# Published RESULTS.md: three runs, fresh server each, warm-up then timed 10M.
 scripts/run-storage-comparison.sh --all-sides --update-results \
   --rows 10000000 --hot-limit 100000 --dml-sample 50000
 # Or one side at a time:
@@ -121,6 +121,11 @@ scripts/run-storage-comparison.sh --side pg --rows 100000
 scripts/run-storage-comparison.sh --side async --rows 100000
 scripts/run-storage-comparison.sh --side strict --rows 100000
 ```
+
+Each side still uses a **fresh** pgrx PostgreSQL. Before timed seeding, the
+harness runs an **untimed warm-up** (throwaway table, same schema/manage mode,
+then `DROP` + `CHECKPOINT`) so the first heavy write after install is not the
+measured insert. Override with `--warmup-rows N` (`0` disables).
 
 Additional pgbench-oriented suites live under [`benchmarks/`](../../benchmarks/).
 HammerDB selective-manage comparison: [hammerdb.md](hammerdb.md).

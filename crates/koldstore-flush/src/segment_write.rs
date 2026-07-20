@@ -4,7 +4,7 @@
 //! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
 
 use koldstore_catalog::CatalogManifestSegmentRow;
-use koldstore_manifest::table_object_prefix;
+use koldstore_manifest::{segment_object_path, segment_path_token, table_object_prefix};
 use koldstore_parquet::validate_parquet_bytes;
 use koldstore_storage::{
     open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
@@ -24,7 +24,7 @@ use crate::write::FlushWriteChunk;
 pub struct WrittenFlushSegment {
     /// New segment id for catalog inserts.
     pub segment_id: uuid::Uuid,
-    /// Relative object path under the table prefix.
+    /// Full object path under the table prefix (also stored on the manifest).
     pub object_path: String,
     /// Final on-disk byte size.
     pub byte_size: i64,
@@ -40,13 +40,12 @@ pub struct WrittenFlushSegment {
 
 /// Builds the immutable object key for one flush segment write attempt.
 ///
-/// Keys include `segment_id` so a retry after a rolled-back flush cannot collide
-/// with an orphaned final object left by the previous attempt at the same
-/// `batch_number`.
+/// Layout: `{prefix}/{folder:03}/segment-{NNNN}-{token}.parquet` (100 segments
+/// per folder). `token` is 8 hex chars from `segment_id` so retries stay unique
+/// without embedding the full UUID in the filename.
 #[must_use]
 pub fn flush_segment_object_path(prefix: &str, batch_number: i32, segment_id: Uuid) -> String {
-    let prefix = prefix.trim_matches('/');
-    format!("{prefix}/batch-{batch_number}-{segment_id}.parquet")
+    segment_object_path(prefix, batch_number, segment_path_token(segment_id))
 }
 
 /// Writes one Parquet segment via encode → validate → durable Create publish.
@@ -109,11 +108,15 @@ pub fn write_flush_segment_with_client(
     // write attempt. Retries after abort must not reuse an orphaned object.
     let segment_id = Uuid::new_v4();
     let object_path = flush_segment_object_path(&prefix, batch_number, segment_id);
-    let writer_id = Uuid::new_v4().to_string();
+    // Flat temp under `{prefix}/.tmp/` — uniqueness is in the file name UUID.
+    // Avoids leaving empty per-attempt directories after temp cleanup.
     let temp_key = temp_object_key(
         &prefix,
-        &writer_id,
-        &unique_temp_file_name(&format!("batch-{batch_number}-{segment_id}.parquet")),
+        "",
+        &unique_temp_file_name(&format!(
+            "segment-{batch_number:04}-{}.parquet",
+            segment_path_token(segment_id)
+        )),
     );
 
     let bytes = &chunk.parquet_bytes;

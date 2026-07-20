@@ -69,7 +69,7 @@ impl TestDb {
         let server = PgrxServer::start(target).await?;
         let schema = unique_identifier(label);
         let storage_name = format!("{schema}_storage");
-        let storage_root = std::env::temp_dir().join(format!("pg-koldstore-e2e-{schema}"));
+        let storage_root = filesystem_storage_root(&schema)?;
         if storage_root.exists() {
             std::fs::remove_dir_all(&storage_root)
                 .with_context(|| format!("remove {}", storage_root.display()))?;
@@ -458,8 +458,12 @@ impl TestDb {
 
 impl Drop for TestDb {
     fn drop(&mut self) {
+        let keep = std::env::var("KOLDSTORE_E2E_KEEP_STORAGE")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
+            .unwrap_or(false);
         if matches!(self.storage, FixtureStorage::Filesystem)
             && !self.storage_root.as_os_str().is_empty()
+            && !keep
         {
             let _ = std::fs::remove_dir_all(&self.storage_root);
         }
@@ -477,6 +481,19 @@ impl Drop for TestDb {
             }
         }
     }
+}
+
+/// Resolves the filesystem cold-storage root for a fixture.
+///
+/// When `KOLDSTORE_E2E_STORAGE_ROOT` is set, objects are written under
+/// `{STORAGE_ROOT}/{schema}` so callers can point at a project-local directory.
+/// Otherwise uses the process temp dir (`pg-koldstore-e2e-{schema}`).
+fn filesystem_storage_root(schema: &str) -> Result<PathBuf> {
+    if let Ok(root) = std::env::var("KOLDSTORE_E2E_STORAGE_ROOT") {
+        let root = PathBuf::from(root);
+        return Ok(root.join(schema));
+    }
+    Ok(std::env::temp_dir().join(format!("pg-koldstore-e2e-{schema}")))
 }
 
 async fn register_filesystem_storage(

@@ -226,7 +226,7 @@ The manifest is the visibility boundary for object-store files. Temp files and u
 
 | Property | Value |
 |----------|-------|
-| Naming | `batch-N.parquet` or compaction-specific name. |
+| Naming | `{folder:03}/segment-{NNNN}-{token}.parquet` under `{namespace}/{table}/` (100 segments per folder; `token` = 8 hex from segment UUID). Manifest stores the table-relative path. |
 | Publish | Backend-safe temp/final write; no portable atomic rename assumption. |
 | Columns | PK, `_seq`, `_commit_seq`, `_deleted`, app columns for schema version. |
 | Sort | `_seq` or PK/_seq depending on flush policy; metadata must record ordering. |

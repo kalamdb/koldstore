@@ -171,6 +171,7 @@ def run_meta(
     dml = source.get("dml_sample", "?")
     batch = source.get("insert_batch_rows", "?")
     max_rows = source.get("max_rows_per_file", "?")
+    warmup = source.get("warmup_rows", "?")
     modes = []
     if pg_report is not None:
         modes.append("pg")
@@ -192,7 +193,8 @@ def run_meta(
             f"**When:** {when}",
             git_line,
             f"**Run:** {rows} rows · `hot_row_limit = {hot}` · `max_rows_per_file = {max_rows}` "
-            f"· `--dml-sample {dml}` · `insert_batch_rows = {batch}` · zstd Parquet · "
+            f"· `--dml-sample {dml}` · `insert_batch_rows = {batch}` · "
+            f"`warmup_rows = {warmup}` · zstd Parquet · "
             f"**sequential** isolated fresh server per side (pg → async → strict; not parallel) · "
             f"sides measured: **{mode_text}**",
         ]
@@ -242,6 +244,36 @@ def render(
         "records heap WAL in the foreground; catch-up rows appear only in the async",
         "column.",
         "",
+        "## Storage wins at a glance (this run)",
+        "",
+        "KoldStore is a **storage lifecycle** tool. The durable wins after flush are heap",
+        "size, index size, and VACUUM time — not universal DML/query acceleration.",
+        "Recompute the glance table from the Metric / Operation rows above after each",
+        "`--update-results` run. Keep the narrative sections below in sync with the",
+        "numbers (especially DELETE — do not claim it is faster without repeated runs).",
+        "",
+        "### Why was delete reported faster before — and is it?",
+        "",
+        "Foreground delete is a single `DELETE … WHERE id BETWEEN …` over",
+        "`--dml-sample` rows **before flush**. Async does **not** update the mirror in",
+        "that window (catch-up is a separate row). Strict updates",
+        "`koldstore.<table>__cl` to `op = 3` in the same transaction, so strict being",
+        "slower than plain PostgreSQL is expected.",
+        "",
+        "Async can still land below PostgreSQL-only: one-shot bulk DELETE has high",
+        "variance across isolated sides, and the managed table still carries a logical",
+        "publication. Prior “async delete much faster” tables mixed mismatched side",
+        "JSON. Do **not** publish “KoldStore makes DELETE faster” from a single sample.",
+        "",
+        "### Segment object-path layout",
+        "",
+        "Flush keys use `{namespace}/{table}/{folder:03}/segment-{NNNN}-{8hex}.parquet`",
+        "(100 segments per folder). Manifest stores the table-relative path. This does",
+        "**not** change DML, VACUUM, or Parquet byte size; it only improves listing",
+        "hygiene vs a flat `batch-*` / full-UUID layout. Keep the short token for",
+        "orphan-retry uniqueness; week/Hive folders are unnecessary while catalog stats",
+        "prune reads.",
+        "",
         "### Why does async insert look faster than PostgreSQL only?",
         "",
         "It is **not** a KoldStore acceleration of `INSERT`. Both columns time the same",
@@ -252,12 +284,15 @@ def render(
         "",
         "Sides are **not** run in parallel and do **not** share a live server during",
         "measurement: `--all-sides` runs **pg, then async, then strict**, each after",
-        "`cargo pgrx stop` + empty DB recreate. So the ~20% foreground gap here is not",
-        "cross-column I/O contention. It is still a **single sample per side** hours",
-        "apart on one machine (load / disk cache / thermal can move ~tens of percent).",
-        "Do not treat async > PostgreSQL-only insert as a product claim until repeated",
-        "isolated runs agree. For end-to-end “row is mirrored” cost, add catch-up (or",
-        "run with the background worker and measure lag).",
+        "`cargo pgrx stop` + empty DB recreate. Large foreground gaps are still a",
+        "**single sample per side** on one machine. Do not treat async > PostgreSQL-only",
+        "insert as a product claim until repeated isolated runs agree. For end-to-end",
+        "“row is mirrored” cost, add catch-up (or run with the background worker and",
+        "measure lag).",
+        "",
+        "Lab note: the storage harness may set `koldstore.async_mirror_max_retained_bytes = 0`",
+        "while the worker is off so 10M-row seeding can retain multi-GiB slot WAL until",
+        "the post-insert fence. Production keeps the default 1 GiB fail-closed cap.",
         "",
     ]
     return "\n".join(parts)

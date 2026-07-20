@@ -419,8 +419,9 @@ impl ParquetSegmentWriter {
         max_commit_seq: i64,
     ) -> SegmentWritePlan {
         let prefix = prefix.trim_matches('/');
+        let folder = (batch.max(1) - 1) / 100 + 1;
         SegmentWritePlan {
-            object_path: format!("{prefix}/batch-{batch}.parquet"),
+            object_path: format!("{prefix}/{folder:03}/segment-{batch:04}.parquet"),
             min_seq,
             max_seq,
             min_commit_seq,

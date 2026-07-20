@@ -1,0 +1,115 @@
+name: chat-penetration
+
+# Manual penetration soak: wide chat rows, aggressive flush, history readers,
+# optional packs (cold_dml, multi_table, joins, async), same-run latency gates.
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Soak duration in minutes (after baseline)"
+        required: true
+        default: "5"
+        type: string
+      packs:
+        description: "Comma-separated packs (chat always on)"
+        required: true
+        default: "chat"
+        type: string
+      mirror_mode:
+        description: "Mirror capture mode (async pack forces async)"
+        required: true
+        default: "strict"
+        type: choice
+        options:
+          - strict
+          - async
+      clients:
+        description: "Writer client count"
+        required: true
+        default: "24"
+        type: string
+      history_clients:
+        description: "History reader count"
+        required: true
+        default: "8"
+        type: string
+      payload_bytes:
+        description: "Approximate JSONB payload size"
+        required: true
+        default: "2048"
+        type: string
+      bytea_bytes:
+        description: "BYTEA blob size"
+        required: true
+        default: "2048"
+        type: string
+      latency_multiplier:
+        description: "Fail if soak p95 > baseline p95 × this"
+        required: true
+        default: "4"
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+  PG_VER: "16"
+
+jobs:
+  chat-penetration:
+    name: Chat penetration soak
+    runs-on: ubuntu-latest
+    # Install/seed budget (~60m) + requested soak minutes.
+    timeout-minutes: ${{ fromJSON(inputs.minutes) + 60 }}
+    env:
+      KOLDSTORE_E2E_PGVERSION: "16"
+      KOLDSTORE_E2E_PGPORT: "28816"
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
+      KOLDSTORE_STRESS_MINUTES: ${{ inputs.minutes }}
+      KOLDSTORE_STRESS_PACKS: ${{ inputs.packs }}
+      KOLDSTORE_STRESS_MIRROR_MODE: ${{ inputs.mirror_mode }}
+      KOLDSTORE_STRESS_CLIENTS: ${{ inputs.clients }}
+      KOLDSTORE_STRESS_HISTORY_CLIENTS: ${{ inputs.history_clients }}
+      KOLDSTORE_STRESS_PAYLOAD_BYTES: ${{ inputs.payload_bytes }}
+      KOLDSTORE_STRESS_BYTEA_BYTES: ${{ inputs.bytea_bytes }}
+      KOLDSTORE_STRESS_LATENCY_MULTIPLIER: ${{ inputs.latency_multiplier }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL 16 development packages
+        run: |
+          bash scripts/ci/disable-broken-runner-apt-sources.sh
+          sudo apt-get update -y -qq
+          sudo apt-get install -y wget gnupg lsb-release
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
+          sudo apt-get update -y -qq
+          sudo apt-get install -y \
+            build-essential libssl-dev pkg-config \
+            postgresql-16 postgresql-server-dev-16
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 "${PGRX_PG_CONFIG}"
+
+      - name: Run chat penetration soak
+        run: bash scripts/run-chat-penetration.sh
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+
+      - name: Upload stress report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chat-penetration-report
+          path: target/stress
+          if-no-files-found: warn

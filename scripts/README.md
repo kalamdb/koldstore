@@ -10,6 +10,7 @@ suites live in subfolders so the top level stays scannable.
 | `run-pg-e2e.sh` | Prepare pgrx cluster + run `tests/e2e` in `--mode strict` or `--mode async` |
 | `run-pgrx-bench.sh` | In-process `#[pg_bench]` timings inside a live backend (`cargo pgrx bench`) |
 | `run-examples.sh` | Real-world example scenarios (`--mode strict|async`) |
+| `run-chat-penetration.sh` | Manual chat penetration soak (`tests/stress`, configurable minutes/packs) |
 | `run-storage-comparison.sh` | Heap vs managed storage comparison (`--all-sides` or `--side pg|async|strict`) |
 | `run-sql-regression.sh` | KoldStore SQL regression (`tests/sql/`) |
 | `run-all-tests.sh` | Full local aggregator: unit, `#[pg_test]`, E2E strict+async, examples, storage, SQL, memory, benchmarks |

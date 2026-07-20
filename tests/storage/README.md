@@ -11,7 +11,13 @@ Schema: [`schema.sql`](schema.sql)
 
 Order of measurement (isolated `--side` / `--all-sides`):
 
-1. Seed + DML on **one** table only (that column’s side)
+0. **Warm-up (untimed):** insert into a throwaway table with the same schema
+   (and manage mode for async/strict), drain async mirror if needed, `DROP` the
+   throwaway table, then `CHECKPOINT`. Default warm-up size is
+   `min(rows, max(1_000_000, 5 * insert_batch_rows))`; override with
+   `--warmup-rows` / `KOLDSTORE_STORAGE_WARMUP_ROWS` (`0` disables). This rejects
+   cold-start insert skew after a fresh pgrx start.
+1. Seed + DML on **one** table only (that column’s side) — **timed**
 2. In async mode, time a separate mirror catch-up after each DML phase
 3. Snapshot dead tuples (`pg_stat_user_tables`, pre-flush)
 4. **Hot-only PK lookups before flush** (full heap still present)

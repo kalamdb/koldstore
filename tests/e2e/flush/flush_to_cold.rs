@@ -51,7 +51,7 @@ fn flush_to_cold_plan_writes_parquet_manifest_and_segments() {
     let segment = plan_cold_segment_insert(
         42,
         Some(ScopeKey::new("tenant-a").unwrap()),
-        "app/items/batch-0.parquet",
+        "app/items/001/segment-0001.parquet",
         footer,
         "abc123checksum",
         "object-etag-1",
@@ -60,7 +60,7 @@ fn flush_to_cold_plan_writes_parquet_manifest_and_segments() {
 
     assert_eq!(batch.live_rows, 2);
     assert_eq!(batch.tombstones_retained, 1);
-    assert_eq!(segment.object_path, "app/items/batch-0.parquet");
+    assert_eq!(segment.object_path, "app/items/001/segment-0001.parquet");
     assert_eq!(segment.status, "pending");
     assert_eq!(segment.checksum, "abc123checksum");
     assert_eq!(segment.object_etag, "object-etag-1");

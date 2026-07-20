@@ -24,12 +24,17 @@ use anyhow::{Context, Result};
 use koldstore_memory::matched_processes_rss_bytes;
 use tokio_postgres::Client;
 
-/// Local default keeps the harness usable; set `KOLDSTORE_STORAGE_ROWS=1000000`
-/// for the README-scale demonstration.
+/// Local default keeps the harness usable; set `KOLDSTORE_STORAGE_ROWS=10000000`
+/// for published RESULTS scale.
 const DEFAULT_ROWS: i64 = 100_000;
 const DEFAULT_HOT_LIMIT: i64 = 10_000;
 const DEFAULT_DML_SAMPLE: i64 = 1_000;
 const DEFAULT_INSERT_BATCH_ROWS: i64 = 100_000;
+/// Untimed warm-up inserts before the timed seed (0 disables).
+///
+/// Default when unset: `min(rows, max(1_000_000, 5 * insert_batch_rows))` so
+/// published 10M runs heat the server before measurement.
+const DEFAULT_WARMUP_ROWS_SENTINEL: i64 = -1;
 /// Point-lookup iterations for throughput + p99 (needs enough samples for p99).
 const QUERY_LOOPS: usize = 100;
 /// Update/delete latency sample size when splitting the DML sample into batches.
@@ -209,6 +214,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         DEFAULT_INSERT_BATCH_ROWS,
     )
     .clamp(1, rows);
+    let warmup_rows = resolve_warmup_rows(rows, insert_batch_rows);
     let mirror_capture_mode = std::env::var("KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE")
         .unwrap_or_else(|_| "strict".to_string());
     anyhow::ensure!(
@@ -239,12 +245,13 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         .await?;
 
     common::log_always(format!(
-        "storage_cmp: side={} rows={} hot_limit={} dml_sample={} insert_batch_rows={}",
+        "storage_cmp: side={} rows={} hot_limit={} dml_sample={} insert_batch_rows={} warmup_rows={}",
         side_mode_label(side, &mirror_capture_mode),
         rows,
         hot_limit,
         dml_sample,
-        insert_batch_rows
+        insert_batch_rows,
+        warmup_rows
     ));
 
     match side {
@@ -255,11 +262,13 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
             run_pg_only_body(
                 &db,
                 &relation,
+                &table,
                 rows,
                 hot_limit,
                 dml_sample,
                 insert_batch_rows,
                 max_rows_per_file,
+                warmup_rows,
             )
             .await
         }
@@ -285,6 +294,26 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                 )
                 .await?;
             }
+            // Warm-up / large catch-up can retain >1 GiB slot WAL. Raise the lab
+            // cap before warm-up (production keeps the 1 GiB default).
+            if mode == "async" {
+                relax_async_retained_wal_cap_for_benchmark(&db.client, &dbname).await?;
+            }
+            // Warm-up before pinning the worker off: async manage_table needs the
+            // worker GUC enabled for activation on the throwaway table.
+            warm_up_before_timed_seed(
+                &db.client,
+                &db.schema,
+                &table,
+                Some(&db.storage_name),
+                Some(mode),
+                mode,
+                warmup_rows,
+                insert_batch_rows,
+                hot_limit,
+                max_rows_per_file,
+            )
+            .await?;
             let worker_guc_pinned =
                 disable_async_worker_for_benchmark(&db.client, &dbname, mode).await?;
             let result = run_managed_only_body(
@@ -297,6 +326,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                 insert_batch_rows,
                 max_rows_per_file,
                 mode,
+                warmup_rows,
             )
             .await;
             if worker_guc_pinned {
@@ -356,12 +386,27 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
 async fn run_pg_only_body(
     db: &common::TestDb,
     baseline: &str,
+    baseline_table: &str,
     rows: i64,
     hot_limit: i64,
     dml_sample: i64,
     insert_batch_rows: i64,
     max_rows_per_file: i64,
+    warmup_rows: i64,
 ) -> Result<()> {
+    warm_up_before_timed_seed(
+        &db.client,
+        &db.schema,
+        baseline_table,
+        None,
+        None,
+        "pg",
+        warmup_rows,
+        insert_batch_rows,
+        hot_limit,
+        max_rows_per_file,
+    )
+    .await?;
     common::log_always(format!(
         "storage_cmp: seeding {rows} rows on PostgreSQL only (insert_batch_rows={insert_batch_rows})"
     ));
@@ -448,6 +493,7 @@ async fn run_pg_only_body(
         dml_sample,
         insert_batch_rows,
         max_rows_per_file,
+        warmup_rows,
         None,
         Some(metrics),
         None,
@@ -467,6 +513,7 @@ async fn run_managed_only_body(
     insert_batch_rows: i64,
     max_rows_per_file: i64,
     mirror_capture_mode: &str,
+    warmup_rows: i64,
 ) -> Result<()> {
     assert_async_worker_disabled_for_benchmark(&db.client, mirror_capture_mode).await?;
     db.client
@@ -476,7 +523,7 @@ async fn run_managed_only_body(
         .await
         .context("disable autovacuum on benchmark mirror")?;
     common::log_always(format!(
-        "storage_cmp: seeding {rows} rows on managed-only ({mirror_capture_mode}, insert_batch_rows={insert_batch_rows}, hot_row_limit={hot_limit}, max_rows_per_file={max_rows_per_file})"
+        "storage_cmp: seeding {rows} rows on managed-only ({mirror_capture_mode}, insert_batch_rows={insert_batch_rows}, hot_row_limit={hot_limit}, max_rows_per_file={max_rows_per_file}, warmup_rows={warmup_rows})"
     ));
     checkpoint_before_timing(&db.client, "managed-only inserts").await?;
     let insert = {
@@ -644,6 +691,7 @@ async fn run_managed_only_body(
         dml_sample,
         insert_batch_rows,
         max_rows_per_file,
+        warmup_rows,
         Some(flush),
         None,
         Some(metrics),
@@ -920,6 +968,7 @@ async fn run_storage_comparison_body(
         dml_sample,
         insert_batch_rows,
         max_rows_per_file,
+        0, // combined smoke path: no warm-up accounting
         Some(flush),
         Some(baseline_metrics),
         Some(managed_metrics),
@@ -973,6 +1022,94 @@ fn env_i64(name: &str, default: i64) -> i64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+/// Resolves warm-up row count: explicit env, else a scale-aware default, else 0.
+fn resolve_warmup_rows(rows: i64, insert_batch_rows: i64) -> i64 {
+    let configured = env_i64("KOLDSTORE_STORAGE_WARMUP_ROWS", DEFAULT_WARMUP_ROWS_SENTINEL);
+    let warmup = if configured == DEFAULT_WARMUP_ROWS_SENTINEL {
+        // Heat shared buffers / WAL / disk before timing. Cap at timed row count.
+        rows.min((insert_batch_rows.saturating_mul(5)).max(1_000_000))
+    } else {
+        configured
+    };
+    warmup.clamp(0, rows)
+}
+
+/// Untimed warm-up on a throwaway table, then drop it so the timed table stays empty.
+///
+/// This rejects cold-start insert skew (first heavy write after install/start)
+/// while keeping the measured relation empty for a clean 10M seed + flush.
+#[allow(clippy::too_many_arguments)]
+async fn warm_up_before_timed_seed(
+    client: &Client,
+    schema: &str,
+    main_table: &str,
+    storage: Option<&str>,
+    mirror_capture_mode: Option<&str>,
+    side_label: &str,
+    warmup_rows: i64,
+    insert_batch_rows: i64,
+    hot_limit: i64,
+    max_rows_per_file: i64,
+) -> Result<()> {
+    if warmup_rows <= 0 {
+        common::log_always(format!(
+            "storage_cmp: warm-up skipped for {side_label} (warmup_rows=0)"
+        ));
+        return Ok(());
+    }
+
+    let warmup_table = format!("{main_table}_warmup");
+    let warmup_relation = format!("{schema}.{warmup_table}");
+    let _step = common::log_step_always(format!(
+        "storage_cmp: warm-up {side_label} ({warmup_rows} rows into {warmup_relation}, untimed)"
+    ));
+
+    apply_schema_sql(client, schema, &warmup_table).await?;
+    if let (Some(storage_name), Some(mode)) = (storage, mirror_capture_mode) {
+        manage_with_hot_limit(
+            client,
+            storage_name,
+            &warmup_relation,
+            hot_limit,
+            1,
+            max_rows_per_file,
+            mode,
+        )
+        .await?;
+        if mode == "async" {
+            client
+                .batch_execute(&format!(
+                    "ALTER TABLE koldstore.{warmup_table}__cl SET (autovacuum_enabled = false)"
+                ))
+                .await
+                .context("disable autovacuum on warm-up mirror")?;
+        }
+    }
+
+    let started = Instant::now();
+    let _ = time_batched_inserts(client, &warmup_relation, warmup_rows, insert_batch_rows).await?;
+    if let Some(mode) = mirror_capture_mode {
+        // Drain whatever the launcher/worker already applied plus the remainder.
+        // Do not require an exact applied count — warm-up may race a live worker.
+        async_catchup_drain(client, mode).await?;
+    }
+    common::log_always(format!(
+        "storage_cmp: warm-up inserts finished in {:.3}s",
+        started.elapsed().as_secs_f64()
+    ));
+
+    // DROP removes managed catalog/mirror via the extension ProcessUtility path.
+    client
+        .batch_execute(&format!("DROP TABLE {warmup_relation}"))
+        .await
+        .with_context(|| format!("drop warm-up table {warmup_relation}"))?;
+    checkpoint_before_timing(client, &format!("{side_label} after warm-up")).await?;
+    common::log_always(format!(
+        "storage_cmp: warm-up complete; timed table {schema}.{main_table} is empty"
+    ));
+    Ok(())
 }
 
 fn mirror_relation(managed: &str) -> Option<String> {
@@ -1073,6 +1210,41 @@ async fn async_catchup(
     }))
 }
 
+/// Drain async mirror to idle without requiring an exact applied row count.
+async fn async_catchup_drain(client: &Client, mirror_capture_mode: &str) -> Result<()> {
+    if mirror_capture_mode != "async" {
+        return Ok(());
+    }
+    let _ = terminate_async_workers_until_idle(client).await;
+    loop {
+        let applied: i64 = client
+            .query_one("SELECT koldstore.wait_for_async_mirror()", &[])
+            .await?
+            .get(0);
+        if applied == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+async fn relax_async_retained_wal_cap_for_benchmark(client: &Client, dbname: &str) -> Result<()> {
+    // With the worker off (or lagging), multi-million-row seeding retains
+    // multi-GiB slot WAL until the fence. Raise the fail-closed admission cap
+    // for this lab run only (default 1 GiB). Production keeps the 1 GiB default.
+    client
+        .batch_execute(&format!(
+            "ALTER DATABASE \"{dbname}\" SET koldstore.async_mirror_max_retained_bytes = 0"
+        ))
+        .await
+        .context("raise async mirror retained-WAL cap for storage comparison")?;
+    client
+        .batch_execute("SET koldstore.async_mirror_max_retained_bytes = 0")
+        .await
+        .context("disable async mirror retained-WAL cap in benchmark session")?;
+    Ok(())
+}
+
 async fn disable_async_worker_for_benchmark(
     client: &Client,
     dbname: &str,
@@ -1094,6 +1266,7 @@ async fn disable_async_worker_for_benchmark(
         .batch_execute("SET koldstore.internal_async_mirror_worker = off")
         .await
         .context("disable async mirror worker GUC in benchmark session")?;
+    relax_async_retained_wal_cap_for_benchmark(client, dbname).await?;
     terminate_async_workers_until_idle(client).await?;
     Ok(true)
 }
@@ -1118,14 +1291,18 @@ async fn terminate_async_workers_until_idle(client: &Client) -> Result<()> {
 async fn reset_async_worker_guc(client: &Client, dbname: &str) -> Result<()> {
     client
         .batch_execute(&format!(
-            "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker"
+            "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+             ALTER DATABASE \"{dbname}\" RESET koldstore.async_mirror_max_retained_bytes"
         ))
         .await
-        .context("reset async mirror worker GUC after benchmark")?;
+        .context("reset async mirror GUCs after benchmark")?;
     client
-        .batch_execute("RESET koldstore.internal_async_mirror_worker")
+        .batch_execute(
+            "RESET koldstore.internal_async_mirror_worker; \
+             RESET koldstore.async_mirror_max_retained_bytes",
+        )
         .await
-        .context("reset async mirror worker GUC in benchmark session")?;
+        .context("reset async mirror GUCs in benchmark session")?;
     Ok(())
 }
 
@@ -1668,6 +1845,7 @@ fn print_comparison_table(
     dml_sample: i64,
     insert_batch_rows: i64,
     max_rows_per_file: i64,
+    warmup_rows: i64,
     flush: Option<FlushMetrics>,
     baseline: Option<SideMetrics>,
     managed: Option<SideMetrics>,
@@ -1679,6 +1857,7 @@ fn print_comparison_table(
         dml_sample,
         insert_batch_rows,
         max_rows_per_file,
+        warmup_rows,
         flush,
         baseline,
         managed,
@@ -1722,6 +1901,9 @@ struct ComparisonReport {
     dml_sample: i64,
     insert_batch_rows: i64,
     max_rows_per_file: i64,
+    /// Untimed warm-up inserts before the timed seed (`0` = disabled).
+    #[serde(default)]
+    warmup_rows: i64,
     flushed: i64,
     main: Vec<ComparisonRow>,
     detail: Vec<ComparisonRow>,
@@ -1742,6 +1924,7 @@ fn build_comparison_report(
     dml_sample: i64,
     insert_batch_rows: i64,
     max_rows_per_file: i64,
+    warmup_rows: i64,
     flush: Option<FlushMetrics>,
     baseline: Option<SideMetrics>,
     managed: Option<SideMetrics>,
@@ -1996,6 +2179,11 @@ fn build_comparison_report(
     notes.push(
         "† Strict DML updates the change-log mirror in the foreground. Async DML records heap WAL in the foreground and catch-up rows are reported separately.".to_string(),
     );
+    if warmup_rows > 0 {
+        notes.push(format!(
+            "warm-up: untimed insert of {warmup_rows} rows into a throwaway table (same schema/manage mode), then DROP + CHECKPOINT before the timed seed — rejects cold-start insert skew."
+        ));
+    }
     notes.push(
         "p99: insert = per insert-batch commit; update = per 1k-row update batch; hot/cold query = per PK lookup (100 loops).".to_string(),
     );
@@ -2023,6 +2211,7 @@ fn build_comparison_report(
         dml_sample,
         insert_batch_rows,
         max_rows_per_file,
+        warmup_rows,
         flushed: flushed_rows,
         main,
         detail,
@@ -2047,12 +2236,13 @@ fn render_comparison_markdown(report: &ComparisonReport) -> String {
     out.push_str("## Main comparison\n\n");
     out.push_str(&format!(
         "schema=tests/storage/schema.sql rows={} hot_row_limit={} \
-         dml_sample={} insert_batch_rows={} max_rows_per_file={} flushed={} \
+         dml_sample={} insert_batch_rows={} warmup_rows={} max_rows_per_file={} flushed={} \
          compression=zstd mirror_capture_mode={}\n\n",
         report.rows,
         report.hot_limit,
         report.dml_sample,
         report.insert_batch_rows,
+        report.warmup_rows,
         report.max_rows_per_file,
         report.flushed,
         report.mode

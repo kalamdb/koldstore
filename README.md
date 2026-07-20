@@ -90,18 +90,22 @@ KoldStore extends PostgreSQL instead of replacing it. Applications keep using th
 KoldStore is a **storage lifecycle tool**, not a universal query accelerator. After older rows are flushed, PostgreSQL keeps a smaller hot working set; cold data lives in zstd Parquet outside the primary heap.
 
 <p align="center">
-  <img src="docs/assets/benchmark-storage-wins.svg" alt="After flush: heap and indexes 99% smaller, indexes 97% smaller, VACUUM FULL 17 times faster" width="900" />
+  <img src="docs/assets/benchmark-storage-wins.svg" alt="After flush: 72 MiB hot in PostgreSQL plus 599 MiB cold Parquet (671 MiB total) versus 5.85 GiB all-in-PostgreSQL; indexes 97% smaller; VACUUM FULL 43× faster" width="900" />
 </p>
 
 | Result | Before → after flush | Tradeoff |
 | --- | --- | --- |
-| PostgreSQL heap + indexes (includes `__cl`) | 5.85 GiB → 73 MiB | **99% smaller** |
+| Total footprint (hot + cold) | 5.85 GiB → 671 MiB | **89% smaller** |
+| └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB | **99% smaller** |
+| └ cold Parquet | — → 599 MiB | outside the database |
 | Indexes (hot + `__cl`) | 415 MiB → 11.5 MiB | **97% smaller** |
-| `VACUUM (FULL, ANALYZE)` | 57.01 s → 3.43 s | **17× faster** |
+| `VACUUM (FULL, ANALYZE)` | 149.29 s → 3.44 s | **43× faster** |
 
-Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000` (local
-PG16.13 `release-pg`). Managed PostgreSQL sizes include the hot heap **and**
-`koldstore.<table>__cl` plus its indexes.
+Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000`,
+`--warmup-rows 1000000` (local PG16.13 `release-pg`, 2026-07-20). Each side
+gets a fresh pgrx server, an untimed 1M warm-up, then the timed run. Managed
+PostgreSQL sizes include the hot heap **and** `koldstore.<table>__cl` plus its
+indexes. Full tables: [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
 
 ### Latest 10M-row throughput
 
@@ -111,17 +115,17 @@ strict mode includes mirror maintenance in the application transaction.
 
 | Operation | PostgreSQL only | KoldStore async | Trade-off |
 | --- | ---: | ---: | ---: |
-| INSERT | 98,978 ops/s | 98,454 ops/s | **1% slower** |
-| UPDATE | 22,001 ops/s | 21,546 ops/s | **2% slower** |
-| DELETE | 112,889 ops/s | 130,241 ops/s | **15% faster** |
-| Hot-only PK lookup | 1,568 ops/s | 1,731 ops/s | **10% faster** |
-| Hot+cold PK lookup | 1,591 ops/s | 506 ops/s | **3× slower** |
+| INSERT | 94,302 ops/s | 107,030 ops/s | ≈ within noise (not a product win) |
+| UPDATE | 69,239 ops/s | 52,446 ops/s | **24% slower** |
+| DELETE | 119,350 ops/s | 179,882 ops/s | single-sample — do not claim faster |
+| Hot-only PK lookup | 1,800 ops/s | 1,825 ops/s | ≈ same |
+| Hot+cold PK lookup | 1,793 ops/s | 1,529 ops/s | **15% slower** |
+| Cold-only PK lookup | 1,762 ops/s | 1,242 ops/s | **30% slower** |
 
-Async mirror catch-up measured 28,881 INSERT, 1,170 UPDATE, 58,976 DELETE,
-and 24,440 restore operations per second. The foreground INSERT result meets
-the project acceptance target of staying within 10% of plain PostgreSQL; async
-UPDATE catch-up remains the main DML bottleneck. These are results from one
-machine, not universal capacity claims.
+Async mirror catch-up measured 30,173 INSERT, 914 UPDATE, 28,417 DELETE, and
+24,906 restore operations per second. Published runs now warm up before timing
+so cold-start after install does not fake an async insert win. Full methodology
+and strict-mode column: [docs/benchmarks/](docs/benchmarks/README.md).
 
 Managed tables support two mirror paths. The default `strict` mode writes the
 latest-state mirror in the heap transaction for immediate consistency. The
@@ -130,9 +134,7 @@ PK-only WAL with a 100 ms polling interval, while an explicit fence remains
 available for strong reads. This reduces foreground insert overhead while
 reporting catch-up as separate work. `CREATE EXTENSION` and the first async
 `manage_table` create the publication and slot automatically; only
-`wal_level=logical` requires administrator setup. Full methodology, phase
-definitions, current 10M-row results, and strict-mode history:
-[docs/benchmarks/](docs/benchmarks/README.md).
+`wal_level=logical` requires administrator setup.
 
 ## How it works
 

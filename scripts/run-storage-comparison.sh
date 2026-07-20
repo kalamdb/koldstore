@@ -12,6 +12,7 @@ ROWS="${KOLDSTORE_STORAGE_ROWS:-100000}"
 HOT_LIMIT="${KOLDSTORE_STORAGE_HOT_LIMIT:-10000}"
 DML_SAMPLE="${KOLDSTORE_STORAGE_DML_SAMPLE:-1000}"
 INSERT_BATCH_ROWS="${KOLDSTORE_STORAGE_INSERT_BATCH_ROWS:-100000}"
+WARMUP_ROWS="${KOLDSTORE_STORAGE_WARMUP_ROWS:-}"
 SIDE="${KOLDSTORE_STORAGE_SIDE:-}"
 UPDATE_RESULTS=0
 ALL_SIDES=0
@@ -37,6 +38,8 @@ Options:
   --hot-limit N     Rows kept hot after flush (default: 10000)
   --dml-sample N    Rows for timed UPDATE/DELETE samples (default: 1000)
   --insert-batch-rows N  Rows per committed insert batch (default: 100000)
+  --warmup-rows N   Untimed warm-up inserts before timed seed (default: scale-aware,
+                      min(rows, max(1M, 5*batch)); 0 disables)
   --side SIDE       Run one side only: pg | async | strict
   --all-sides       Run all three sides once each (fresh server per side)
   --both-modes      Deprecated alias for --all-sides
@@ -68,6 +71,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --insert-batch-rows)
       INSERT_BATCH_ROWS="${2:?missing value for --insert-batch-rows}"
+      shift 2
+      ;;
+    --warmup-rows)
+      WARMUP_ROWS="${2:?missing value for --warmup-rows}"
       shift 2
       ;;
     --side)
@@ -186,7 +193,7 @@ run_isolated_side() {
   fi
   prepare_fresh_server "${skip_install}"
   EXTENSION_INSTALLED=1
-  echo "running side=${side} once (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS})"
+  echo "running side=${side} once (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, warmup_rows=${WARMUP_ROWS:-auto})"
   if [[ "${UPDATE_RESULTS}" == "1" ]]; then
     mkdir -p "${RESULTS_DIR}"
     results_json="${RESULTS_DIR}/${side}.json"
@@ -199,14 +206,20 @@ run_isolated_side() {
   elif [[ -n "${git_commit}" ]] && ! git -C "${ROOT_DIR}" diff --cached --quiet 2>/dev/null; then
     git_dirty=1
   fi
-  KOLDSTORE_STORAGE_ROWS="${ROWS}" \
-    KOLDSTORE_STORAGE_HOT_LIMIT="${HOT_LIMIT}" \
-    KOLDSTORE_STORAGE_DML_SAMPLE="${DML_SAMPLE}" \
-    KOLDSTORE_STORAGE_INSERT_BATCH_ROWS="${INSERT_BATCH_ROWS}" \
-    KOLDSTORE_STORAGE_SIDE="${side}" \
-    KOLDSTORE_STORAGE_GIT_COMMIT="${git_commit}" \
-    KOLDSTORE_STORAGE_GIT_DIRTY="${git_dirty}" \
-    KOLDSTORE_STORAGE_RESULTS_JSON="${results_json}" \
+  local -a env_args=(
+    "KOLDSTORE_STORAGE_ROWS=${ROWS}"
+    "KOLDSTORE_STORAGE_HOT_LIMIT=${HOT_LIMIT}"
+    "KOLDSTORE_STORAGE_DML_SAMPLE=${DML_SAMPLE}"
+    "KOLDSTORE_STORAGE_INSERT_BATCH_ROWS=${INSERT_BATCH_ROWS}"
+    "KOLDSTORE_STORAGE_SIDE=${side}"
+    "KOLDSTORE_STORAGE_GIT_COMMIT=${git_commit}"
+    "KOLDSTORE_STORAGE_GIT_DIRTY=${git_dirty}"
+    "KOLDSTORE_STORAGE_RESULTS_JSON=${results_json}"
+  )
+  if [[ -n "${WARMUP_ROWS}" ]]; then
+    env_args+=("KOLDSTORE_STORAGE_WARMUP_ROWS=${WARMUP_ROWS}")
+  fi
+  env "${env_args[@]}" \
     cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
 }
 
