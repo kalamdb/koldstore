@@ -8,8 +8,10 @@
 #
 #   docker build -f docker/Dockerfile.release -t pg-koldstore:16 .
 #
-# Base is Ubuntu 24.04 + PGDG PostgreSQL so the prebuilt ubuntu24.04 amd64
-# package matches the runtime glibc (official postgres:16-bookworm would not).
+# Base is Ubuntu 24.04 + PGDG PostgreSQL so the prebuilt ubuntu24.04
+# package (amd64 or arm64) matches the runtime glibc (official
+# postgres:16-bookworm would not). Build each arch with its matching
+# docker-artifacts/koldstore.so; release CI publishes a multi-arch manifest.
 
 ARG PG_MAJOR=16
 ARG OCI_IMAGE_DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly."

@@ -18,7 +18,7 @@ docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore
 psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
 ```
 
-Default database is `koldstore`. Extension `koldstore` is created on first init.
+Multi-arch (`linux/amd64`, `linux/arm64`). Default database is `koldstore`. Extension `koldstore` is created on first init.
 
 ```sql
 SELECT koldstore.register_storage(
