@@ -178,6 +178,7 @@ run_workspace_unit_tests() {
     --exclude storage-comparison
     --exclude pg-koldstore-benchmarks
     --exclude koldstore-memory-tests
+    --exclude stress
   )
 
   ensure_cargo_nextest

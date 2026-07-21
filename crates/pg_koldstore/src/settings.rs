@@ -86,12 +86,17 @@ pub const DEFAULT_FLUSH_PRELOCK_MAX_MS: i32 = 5_000;
 pub const MIN_FLUSH_PRELOCK_MAX_MS: i32 = 100;
 pub const MAX_FLUSH_PRELOCK_MAX_MS: i32 = 120_000;
 
-/// Optional admission limit on logical-slot retained WAL bytes (`0` = disabled).
-/// When exceeded, apply/flush fail closed — WAL is never silently dropped.
+/// Health threshold for logical-slot retained WAL bytes.
+///
+/// Exceeding it marks async status unhealthy but never blocks the applier that
+/// can drain the slot. WAL is never silently dropped.
+/// `0` disables the limit (not recommended for production async deployments).
 pub const ASYNC_MIRROR_MAX_RETAINED_BYTES_GUC: &str = "koldstore.async_mirror_max_retained_bytes";
-pub const DEFAULT_ASYNC_MIRROR_MAX_RETAINED_BYTES: i32 = 0;
+/// Default: 1 GiB. Protects `pg_wal` from unbounded slot retention when the
+/// async apply worker stalls; operators can raise, lower, or set `0` to disable.
+pub const DEFAULT_ASYNC_MIRROR_MAX_RETAINED_BYTES: i32 = 1_073_741_824;
 pub const MIN_ASYNC_MIRROR_MAX_RETAINED_BYTES: i32 = 0;
-/// 64 GiB hard cap for the GUC (admission still never drops WAL).
+/// Hard cap for the GUC (`i32::MAX` ≈ 2 GiB; monitoring never drops WAL).
 pub const MAX_ASYNC_MIRROR_MAX_RETAINED_BYTES: i32 = i32::MAX;
 
 /// Minimum accepted integer setting value for `min_max_rows_per_file`.

@@ -35,7 +35,7 @@ fn backend_config_validates_supported_storage_urls() {
 #[test]
 fn backend_safe_publish_actions_never_use_rename() {
     let actions = backend_safe_publish_actions(
-        "scope/.tmp/writer/batch-0.parquet.tmp",
+        "scope/.tmp/writer-batch-0.parquet.tmp",
         "scope/batch-0.parquet",
         "scope/manifest.json",
     );
@@ -43,13 +43,13 @@ fn backend_safe_publish_actions_never_use_rename() {
     assert_eq!(
         actions,
         vec![
-            PublishAction::PutTemp("scope/.tmp/writer/batch-0.parquet.tmp".to_string()),
+            PublishAction::PutTemp("scope/.tmp/writer-batch-0.parquet.tmp".to_string()),
             PublishAction::CopyTempToFinal {
-                temp: "scope/.tmp/writer/batch-0.parquet.tmp".to_string(),
+                temp: "scope/.tmp/writer-batch-0.parquet.tmp".to_string(),
                 final_path: "scope/batch-0.parquet".to_string(),
             },
             PublishAction::ValidateFinal("scope/batch-0.parquet".to_string()),
-            PublishAction::DeleteTemp("scope/.tmp/writer/batch-0.parquet.tmp".to_string()),
+            PublishAction::DeleteTemp("scope/.tmp/writer-batch-0.parquet.tmp".to_string()),
             PublishAction::PutManifest("scope/manifest.json".to_string()),
         ]
     );
@@ -252,7 +252,7 @@ fn list_prefix_combinations_return_only_matching_keys() {
 #[test]
 fn temp_object_key_avoids_hash_digit_staging_pattern() {
     let key = temp_object_key("app/items", "writer-1", "batch-0.parquet.abc.tmp");
-    assert_eq!(key, "app/items/.tmp/writer-1/batch-0.parquet.abc.tmp");
+    assert_eq!(key, "app/items/.tmp/writer-1-batch-0.parquet.abc.tmp");
     assert!(!key.split('/').any(|part| {
         part.rsplit_once('#').is_some_and(|(_, suffix)| {
             !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())

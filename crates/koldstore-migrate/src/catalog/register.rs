@@ -95,6 +95,16 @@ pub enum RegistryError {
     /// Exact primary-key shape is missing.
     #[error("primary_key_shape cannot be empty")]
     MissingPrimaryKeyShape,
+    /// PostgreSQL equality can collapse byte-distinct primary-key values.
+    #[error(
+        "primary-key column `{column}` uses unsupported nondeterministic collation `{collation}`"
+    )]
+    NondeterministicPrimaryKeyCollation {
+        /// Primary-key column using the collation.
+        column: String,
+        /// Qualified collation identity, or `default` for the database default.
+        collation: String,
+    },
     /// User-scoped table metadata is missing its scope column.
     #[error("user-scoped table requires scope_column")]
     MissingScopeColumn,
@@ -540,6 +550,9 @@ pub struct PrimaryKeyShapeCatalogRow {
     pub typmod: i32,
     /// Optional non-default collation identity.
     pub collation: Option<String>,
+    /// Whether PostgreSQL requires byte-identical strings for collation equality.
+    #[serde(default)]
+    pub collation_deterministic: Option<bool>,
     /// Optional domain type identity.
     pub domain_identity: Option<String>,
     /// Whether PostgreSQL marks the column as non-null.
@@ -572,6 +585,7 @@ SELECT COALESCE(
                 WHEN coll.oid IS NULL OR coll.collname = 'default' THEN NULL
                 ELSE format('%I.%I', coll_ns.nspname, coll.collname)
             END,
+            'collation_deterministic', coll.collisdeterministic,
             'domain_identity', CASE
                 WHEN t.typtype = 'd' THEN format('%I.%I', type_ns.nspname, t.typname)
                 ELSE NULL
@@ -613,6 +627,18 @@ WHERE i.indrelid = $1::oid
 pub fn primary_key_shape_from_catalog_rows(
     rows: Vec<PrimaryKeyShapeCatalogRow>,
 ) -> RegistryResult<PrimaryKeyShape> {
+    if let Some(row) = rows
+        .iter()
+        .find(|row| row.collation_deterministic == Some(false))
+    {
+        return Err(RegistryError::NondeterministicPrimaryKeyCollation {
+            column: row.column.clone(),
+            collation: row
+                .collation
+                .clone()
+                .unwrap_or_else(|| "default".to_string()),
+        });
+    }
     let columns = rows
         .into_iter()
         .map(|row| {

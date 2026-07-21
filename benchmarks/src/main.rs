@@ -18,9 +18,57 @@ mod verdict;
 use pgbench::{PgbenchConfig, PgbenchMeasurement, PgbenchWorkload};
 use report::{BenchmarkReport, BenchmarkResult, MachineMetadata};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BenchmarkMirrorMode {
+    Async,
+    Strict,
+}
+
+impl BenchmarkMirrorMode {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "async" => Ok(Self::Async),
+            "strict" => Ok(Self::Strict),
+            other => anyhow::bail!("--mirror-capture-mode must be async or strict (got: {other})"),
+        }
+    }
+
+    const fn as_sql(self) -> &'static str {
+        match self {
+            Self::Async => "async",
+            Self::Strict => "strict",
+        }
+    }
+
+    const fn update_max_overhead_ratio(self) -> f64 {
+        match self {
+            Self::Async => verdict::ASYNC_HOT_UPDATE_MAX_OVERHEAD_RATIO,
+            Self::Strict => verdict::STRICT_HOT_UPDATE_MAX_OVERHEAD_RATIO,
+        }
+    }
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::BenchmarkMirrorMode;
+
+    #[test]
+    fn benchmark_mode_selects_its_update_gate() {
+        let async_mode = BenchmarkMirrorMode::parse("async").unwrap();
+        let strict_mode = BenchmarkMirrorMode::parse("strict").unwrap();
+
+        assert_eq!(async_mode.as_sql(), "async");
+        assert_eq!(strict_mode.as_sql(), "strict");
+        assert_eq!(async_mode.update_max_overhead_ratio(), 1.10);
+        assert_eq!(strict_mode.update_max_overhead_ratio(), 2.00);
+        assert!(BenchmarkMirrorMode::parse("unknown").is_err());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkConfig {
     database_url: String,
+    mirror_capture_mode: BenchmarkMirrorMode,
     rows: u64,
     clients: usize,
     jobs: usize,
@@ -67,7 +115,7 @@ async fn run_real_pgbench_suite(config: BenchmarkConfig) -> Result<()> {
                 "bench.koldstore_items",
                 config.rows,
             ),
-            max_overhead_ratio: Some(verdict::HOT_DML_MAX_OVERHEAD_RATIO),
+            max_overhead_ratio: Some(config.mirror_capture_mode.update_max_overhead_ratio()),
         },
     )
     .await?;
@@ -103,7 +151,7 @@ async fn run_real_pgbench_suite(config: BenchmarkConfig) -> Result<()> {
     .await?;
 
     let report = BenchmarkReport {
-        suite: "pg-koldstore".to_string(),
+        suite: format!("pg-koldstore-{}", config.mirror_capture_mode.as_sql()),
         generated_at: chrono::Utc::now(),
         machine: MachineMetadata {
             postgres_version: Some(postgres_version),
@@ -175,8 +223,9 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
             SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
          INSERT INTO bench.koldstore_items
             SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
-         SELECT koldstore.manage_table(table_name => 'bench.koldstore_items'::regclass, storage => 'bench-local', hot_row_limit => NULL, migration_order_by => 'id');",
-        rows = config.rows
+         SELECT koldstore.manage_table(table_name => 'bench.koldstore_items'::regclass, storage => 'bench-local', hot_row_limit => NULL, migration_order_by => 'id', mirror_capture_mode => '{mirror_capture_mode}');",
+        rows = config.rows,
+        mirror_capture_mode = config.mirror_capture_mode.as_sql(),
     );
     client.batch_execute(&seed_sql).await?;
 
@@ -279,13 +328,15 @@ fn keep_contract_helpers_referenced() {
         selected_row_groups: 10,
     };
     let _thresholds = (
-        verdict::HOT_DML_MAX_OVERHEAD_RATIO,
+        verdict::ASYNC_HOT_UPDATE_MAX_OVERHEAD_RATIO,
+        verdict::STRICT_HOT_UPDATE_MAX_OVERHEAD_RATIO,
         verdict::HOT_INSERT_MAX_OVERHEAD_RATIO,
         verdict::PK_LOOKUP_MIN_ROW_GROUP_SKIP_RATIO,
     );
     let _suite = suite::FULL_SUITE;
     let _verdicts = (
-        verdict::hot_dml_within_threshold(1.0, 1.05),
+        verdict::async_hot_update_within_threshold(1.0, 1.05),
+        verdict::strict_hot_update_within_threshold(1.0, 1.05),
         pruning.meets_pk_lookup_target()
             && verdict::pk_lookup_pruning_within_threshold(pruning.skipped_ratio()),
     );
@@ -303,6 +354,10 @@ impl BenchmarkConfig {
             database_url: value_arg(&args, "--database-url")
                 .or_else(|| env::var("DATABASE_URL").ok())
                 .unwrap_or(default_database_url),
+            mirror_capture_mode: value_arg(&args, "--mirror-capture-mode")
+                .map(|value| BenchmarkMirrorMode::parse(&value))
+                .transpose()?
+                .unwrap_or(BenchmarkMirrorMode::Strict),
             rows: parse_arg(&args, "--rows", 10_000)?,
             clients: parse_arg(&args, "--clients", 4)?,
             jobs: parse_arg(&args, "--jobs", 4)?,

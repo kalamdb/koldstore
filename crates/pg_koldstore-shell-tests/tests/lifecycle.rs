@@ -71,7 +71,7 @@ fn guc_definitions_include_public_and_internal_settings() {
     assert!(gucs.iter().any(
         |guc| guc.name == "koldstore.async_mirror_max_retained_bytes"
             && !guc.internal
-            && guc.default_value == "0"
+            && guc.default_value == "1073741824"
     ));
     assert!(gucs
         .iter()

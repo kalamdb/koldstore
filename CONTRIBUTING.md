@@ -37,7 +37,8 @@ cargo clippy --workspace --all-targets --no-default-features -- -D warnings
 cargo nextest run --workspace --no-default-features \
   --exclude e2e \
   --exclude examples \
-  --exclude storage-comparison
+  --exclude storage-comparison \
+  --exclude stress
 ```
 
 Run in-server pgrx tests (`#[pg_test]` inside `crates/pg_koldstore/src/pg_tests/`):

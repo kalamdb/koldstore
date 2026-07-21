@@ -158,12 +158,11 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
                 .get(0);
             db.client
                 .batch_execute(&format!(
-                    "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off"
+                    "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off; \
+                     SET koldstore.internal_async_mirror_worker = off"
                 ))
                 .await?;
             let _ = common::terminate_async_worker(&db.client).await?;
-            // Give the launcher a moment; with the GUC off it should not restart.
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
         db.client
@@ -186,7 +185,8 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
                 .get(0);
             db.client
                 .batch_execute(&format!(
-                    "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker"
+                    "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+                     RESET koldstore.internal_async_mirror_worker"
                 ))
                 .await?;
         }

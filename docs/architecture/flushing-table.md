@@ -55,6 +55,9 @@ flush takes its table lock or resolves mirror statistics.
 This makes flush selection a strong consistency boundary for both capture modes:
 strict changes already exist in the mirror, and async changes are caught up
 before selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
+The retained-WAL health threshold never rejects this drain path: once retention
+is high, continuing apply is the recovery action. Slot loss/invalidation and
+flush lock/time budgets remain separate fail-closed correctness boundaries.
 
 ## Phase 6 — Async prune fence (after manifest publish)
 
@@ -246,13 +249,17 @@ in-file row-group prune already uses the footer. Details:
 
 `write_flush_segment_file` (`segment_write.rs`):
 
-1. Path: `{namespace}/{table}/batch-{n}-{segment_id}.parquet`
-   (`segment_id` makes each write attempt unique so a retry after abort cannot
-   collide with an orphaned final object at the same `batch_number`)
+1. Path: `{namespace}/{table}/{folder:03}/segment-{NNNN}-{token}.parquet`
+   (100 segments per folder; `token` is 8 hex chars from the catalog
+   `segment_id` so a retry after abort cannot collide with an orphaned final at
+   the same `batch_number`). Manifest stores the table-relative form
+   `{folder:03}/segment-{NNNN}-{token}.parquet`. One layout for all tables
+   (no per-scope object prefixes).
 2. Encode in memory via `encode_parquet_segment_bytes` (Arrow `RecordBatch` →
    native Parquet), then `validate_parquet_bytes` (magic + footer open)
 3. Durable publish through `koldstore-storage`:
-   - temp key under `{prefix}/.tmp/{writer_id}/…`
+   - temp key under `{prefix}/.tmp/…` (flat file; UUID in the name — no
+     per-attempt subdirectories that would linger empty after cleanup)
    - `PutMode::Create` / `copy_if_not_exists` to the final key
    - size validation; never truncate a final key in place
    - filesystem backends use `LocalFileSystem::with_fsync(true)`

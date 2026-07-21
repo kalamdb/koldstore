@@ -45,6 +45,9 @@ flowchart TD
   COMMIT --> WAL["PK-only pgoutput in logical slot"]
   WAL --> FENCE["wait_for_async_mirror or flush fence"]
   FENCE --> APPLY["Bounded set-based apply"]
+  APPLY --> AKIND{"Async operation"}
+  AKIND -->|"INSERT / DELETE"| AUPSERT["INSERT ... ON CONFLICT"]
+  AKIND -->|"UPDATE"| AUPDATE["UPDATE existing + upsert missing"]
   TRG --> CAP["koldstore.{table}__cl_capture()"]
   CAP --> KIND{"Operation"}
   KIND -->|"INSERT ≤32 rows"| UPSERT["INSERT ... ON CONFLICT"]
@@ -55,7 +58,8 @@ flowchart TD
   MERGE --> MIR
   DIRECTU --> MIR
   DIRECTD --> MIR
-  APPLY --> MIR
+  AUPSERT --> MIR
+  AUPDATE --> MIR
   CAP --> RC["internal_record_row_count_delta"]
   RC --> MEM["In-memory counter deltas"]
   MEM --> XACT["PRE_COMMIT → manifest counters"]
@@ -93,8 +97,8 @@ Installed by `koldstore.manage_table` (see [manage-table.md](manage-table.md)):
 7. Counter refresh so manifest hot/mirror counts match live heaps before capture
    takes over
 8. In async mode only: add the source's PK columns to the shared publication and
-   drop the three DML capture triggers; keep the PK guard, install the
-   worker-kick statement trigger, and start/reuse the database applier
+   drop the three DML capture triggers and any legacy worker-kick triggers; keep
+   the PK guard and start/reuse the always-on database applier
 
 For user-scoped tables, RLS policy `koldstore_user_scope_fail_closed` is also
 installed.
@@ -209,14 +213,22 @@ same path when the caller needs an explicit consistency boundary:
 | Source operation | Mirror apply |
 | --- | --- |
 | INSERT | Set-based `INSERT ... ON CONFLICT DO UPDATE` |
-| UPDATE | Set-based `UPDATE ... FROM` of the existing key |
-| DELETE | Set-based `UPDATE ... FROM`, setting `op = 3` |
+| UPDATE | Set-based `UPDATE ... FROM` for existing keys, then conflict-safe insert of only keys missing from the mirror |
+| DELETE | Set-based `INSERT ... ON CONFLICT DO UPDATE`, setting `op = 3`, so a missing mirror row still becomes a tombstone |
 
 Primary keys cross the pgoutput boundary as protocol text, are grouped in Rust,
-serialized once per batch, and are converted back to native PostgreSQL types
-with `jsonb_to_recordset`. Non-key source columns are not published or allocated.
-The mirror remains a metadata index; flush reads the current row image from the
-hot heap.
+bound as parallel `text[]` arrays, and converted back to native PostgreSQL types
+inside one typed `unnest`. No per-row JSON recordset is built. Compatible batches
+contain at most 8,192 unique keys; a duplicate key, relation change, operation
+change, or capacity boundary flushes the current batch. Non-key source columns
+are not published or allocated. The mirror remains a metadata index; flush
+reads the current row image from the hot heap.
+
+The async applier caches separate upsert and UPDATE plans for each relation.
+Pgoutput relation metadata changes invalidate both plans and the cached PK type
+names before another batch executes. UPDATE's direct write and insert-missing
+fallback are one data-modifying CTE, preserving atomicity while avoiding
+conflict arbitration for the normal existing-row path.
 
 The mirror batch, row-counter delta, and durable applied LSN commit together.
 The next fence advances the slot to that checkpoint before peeking more WAL.
@@ -224,9 +236,11 @@ The next fence advances the slot to that checkpoint before peeking more WAL.
 cleanup uses PostgreSQL's `DoNotReplicateId`, so maintenance deletes do not
 produce new mirror tombstones.
 
-Async capture is eventual within the worker polling interval. It is not a
-transparent read-your-writes mode; strong reads still use the fence. Full
-operational semantics are in
+When a configured row/time budget ends with WAL still pending, the database
+worker runs up to four more ticks immediately. The fifth pending result yields
+through the latch before a new burst, balancing catch-up latency with CPU and
+flush-scheduler fairness. Async capture is not a transparent read-your-writes
+mode; strong reads still use the fence. Full operational semantics are in
 [mirror-capture-modes.md](mirror-capture-modes.md).
 
 ---
@@ -313,7 +327,11 @@ RLS** installed at manage time (`plan_user_scope_policy` in
 `koldstore-migrate/src/security/scope.rs`):
 
 ```sql
-USING (scope_column = current_setting('koldstore.user_id', true))
+USING (
+  current_setting('koldstore.user_id', true) IS NOT NULL
+  AND current_setting('koldstore.user_id', true) <> ''
+  AND scope_column = current_setting('koldstore.user_id', true)
+)
 WITH CHECK (same)
 ```
 
@@ -328,7 +346,9 @@ reads.
 
 `hooks/executor.rs::enforce_dml_scope` is a pure helper used by unit/shell
 tests and planning code. It is **not** registered as a live executor hook;
-runtime row filtering for scoped tables is RLS.
+runtime row filtering for scoped tables is RLS. Native hot scans apply it in
+PostgreSQL's child plan; buffered cold and hot+cold scans apply the compiled
+security quals through PostgreSQL `ExecScan` after winner resolution.
 
 ---
 
@@ -401,8 +421,9 @@ no-op on the heap; durable cold masking requires a mirror tombstone + flush.
 
 Capture uses statement triggers in strict mode and logical decoding in async
 mode. There is no live `ExecutorStart` / `ProcessUtility` DML-rewrite hook that
-writes the mirror. Async tables have a lightweight statement trigger that only
-ensures one database-scoped background applier is running.
+writes the mirror. Async tables keep only the PK mutation guard; the always-on
+database worker is started during activation and restored by the shared-preload
+launcher or explicit ensure/fence paths, not by application DML triggers.
 
 ---
 
@@ -469,4 +490,6 @@ sequenceDiagram
 Related docs: [manage-table.md](manage-table.md),
 [mirror-capture-modes.md](mirror-capture-modes.md),
 [flushing-table.md](flushing-table.md), and
-[scanning-table.md](scanning-table.md).
+[scanning-table.md](scanning-table.md). See
+[ADR-005](../decisions/005-async-apply-progress-and-health.md) for the async
+UPDATE, retry-fairness, and retained-WAL health decisions.

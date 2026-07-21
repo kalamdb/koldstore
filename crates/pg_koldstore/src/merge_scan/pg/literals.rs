@@ -4,15 +4,10 @@
 //! prepared/parameterized queries (`WHERE id = $1`) prune cold segments and
 //! push equality into the hot SPI load the same way as literal SQL.
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 
-use koldstore_common::escape_sql_literal;
 use koldstore_schema::PgType;
 use pgrx::pg_sys;
-
-pub(super) fn sql_literal(value: &str) -> String {
-    escape_sql_literal(value)
-}
 
 /// Resolves a Const or bound Param into a typed SQL literal for SPI pushdown.
 pub(super) unsafe fn typed_literal_sql(
@@ -91,30 +86,24 @@ unsafe fn datum_typed_sql(
 ) -> Option<String> {
     let pg_type = column.pg_type;
     match pg_type {
-        // varlena text-like types only — UUID is fixed 16 bytes, not text.
-        PgType::Text | PgType::Numeric | PgType::Jsonb | PgType::TextArray => {
-            let text = datum.cast_mut_ptr::<pg_sys::text>();
-            if text.is_null() {
-                return None;
-            }
-            let cstr = pg_sys::text_to_cstring(text);
-            if cstr.is_null() {
-                return None;
-            }
-            let value = CStr::from_ptr(cstr).to_str().ok()?;
-            let literal = format!("'{}'", sql_literal(value));
-            pg_sys::pfree(cstr.cast());
-            Some(literal)
-        }
         PgType::Bool => Some((datum.value() != 0).to_string()),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => {
             pg_type.integer_sql_literal(datum.value() as i64)
         }
-        PgType::Uuid | PgType::Timestamptz | PgType::Bytea | PgType::Float4 | PgType::Float8 => {
-            // Fixed-length / typed output via the type's output function.
+        PgType::Text
+        | PgType::Numeric
+        | PgType::Uuid
+        | PgType::Jsonb
+        | PgType::TextArray
+        | PgType::Bytea
+        | PgType::Timestamptz
+        | PgType::Float4
+        | PgType::Float8 => {
+            // Use PostgreSQL's real output function: varlena binary formats
+            // such as numeric/jsonb/arrays are not compatible with `text`.
             let mut typoutput = pg_sys::InvalidOid;
             let mut typisvarlena = false;
-            let oid = column_type_oid(pg_type)?;
+            let oid = column_type_oid(pg_type);
             pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
             let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
             if out.is_null() {
@@ -122,9 +111,22 @@ unsafe fn datum_typed_sql(
             }
             let text = CStr::from_ptr(out).to_str().ok()?.to_string();
             pg_sys::pfree(out.cast());
-            Some(format!("'{}'", sql_literal(&text)))
+            quote_sql_literal(&text)
         }
     }
+}
+
+unsafe fn quote_sql_literal(value: &str) -> Option<String> {
+    let raw = CString::new(value).ok()?;
+    let quoted = pg_sys::quote_literal_cstr(raw.as_ptr());
+    if quoted.is_null() {
+        return None;
+    }
+    // PostgreSQL emits the appropriate ordinary or escape-string literal for
+    // the active `standard_conforming_strings` mode.
+    let literal = CStr::from_ptr(quoted).to_string_lossy().into_owned();
+    pg_sys::pfree(quoted.cast());
+    Some(literal)
 }
 
 unsafe fn datum_json_value(
@@ -148,7 +150,7 @@ unsafe fn datum_json_value(
         PgType::Uuid => {
             let mut typoutput = pg_sys::InvalidOid;
             let mut typisvarlena = false;
-            let oid = column_type_oid(PgType::Uuid)?;
+            let oid = column_type_oid(PgType::Uuid);
             pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
             let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
             if out.is_null() {
@@ -164,13 +166,8 @@ unsafe fn datum_json_value(
     }
 }
 
-fn column_type_oid(pg_type: PgType) -> Option<pg_sys::Oid> {
-    match pg_type {
-        PgType::Uuid | PgType::Timestamptz | PgType::Bytea | PgType::Float4 | PgType::Float8 => {
-            Some(pg_sys::Oid::from(pg_type.type_oid()))
-        }
-        _ => None,
-    }
+fn column_type_oid(pg_type: PgType) -> pg_sys::Oid {
+    pg_sys::Oid::from(pg_type.type_oid())
 }
 
 pub(super) unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {

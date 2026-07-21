@@ -64,3 +64,20 @@ fn async_worker_guc_off_skips_registration() {
     );
     Spi::run("RESET koldstore.internal_async_mirror_worker").expect("reset guc");
 }
+
+#[pg_test]
+fn async_retained_wal_health_status_is_exposed() {
+    let status = Spi::get_one::<pgrx::JsonB>("SELECT koldstore.async_mirror_status()")
+        .expect("async_mirror_status spi")
+        .expect("non-null status");
+    assert!(
+        status.0.get("retention").and_then(|v| v.get("ok")).is_some(),
+        "status must expose retention.ok; got {}",
+        status.0
+    );
+    assert!(
+        status.0.get("admission").and_then(|v| v.get("ok")).is_some(),
+        "status must preserve the admission.ok compatibility alias; got {}",
+        status.0
+    );
+}

@@ -161,7 +161,7 @@ Expected:
 
 - Flush job completed.
 - Manifest sync state is `in_sync`.
-- Object store contains `manifest.json` and `batch-*.parquet`.
+- Object store contains `manifest.json` and `{folder}/segment-*.parquet`.
 - Logical row count matches expected current rows.
 
 ## Scenario 6: Tombstone Only When Cold May Contain PK (P2)

@@ -6,7 +6,9 @@ bounded, set-based mirror batches. Foreground DML does **not** write the mirror
 and does **not** run a per-statement kick trigger.
 
 See also the [mode comparison](mirror-capture-modes.md) and
-[strict mode](mirror-capture-strict.md).
+[strict mode](mirror-capture-strict.md). The rationale for the specialized
+UPDATE and progress policy is in
+[ADR-005](../decisions/005-async-apply-progress-and-health.md).
 
 ## Enable
 
@@ -73,6 +75,8 @@ on the source relation.
 | --- | --- |
 | Async `manage_table` | Starts the database WAL applier (`wait_for_startup`; the worker finishes connecting after the manage transaction commits) |
 | Steady state | Applier polls every 100 ms; skips decode when WAL has not advanced |
+| Bounded backlog remains | Up to four `ContinuePending` ticks run immediately; the fifth yields through the latch before another burst so catch-up progresses without an unbounded CPU loop |
+| Apply error | The transaction rolls back, the immediate-retry budget resets, and polling backs off from 100 ms up to 30 s |
 | Applier crash | Shared-preload launcher re-registers the applier; otherwise the next session `ensure` / `wait_for_async_mirror` after commit does |
 | Postmaster restart | Shared-preload launcher (if `koldstore` is in `shared_preload_libraries`) and/or the next `wait_for_async_mirror` / `internal_ensure_async_mirror_worker` re-attaches appliers for databases that still have a slot |
 | `disable_async_mirror` | Terminates the applier if needed, then drops the slot (avoids deadlock when peek waits on the caller's open XID) |
@@ -132,10 +136,27 @@ together. Mid-tick ERROR (including `error:async_mirror_apply_after_batch`)
 leaves neither a durable checkpoint advance nor partial mirror effects.
 
 The decoder reads pgoutput v1 in pages of 8,192 messages. The applier groups up
-to 8,192 compatible keys, binds typed `unnest` arrays (PK + Rust-allocated
-`seq`), and runs one set-based mirror upsert. INSERT, UPDATE, and DELETE all
-upsert. Internal hot-row deletion during flush is marked `DoNotReplicateId` so
-maintenance deletes do not re-enter the async stream.
+to 8,192 compatible, unique keys and binds typed `unnest` arrays containing the
+PK columns plus Rust-allocated `seq` values. It caches separate SQL plans per
+relation and invalidates them when pgoutput relation metadata changes:
+
+| Source operation | Set-based mirror plan | Why |
+| --- | --- | --- |
+| INSERT | `INSERT ... ON CONFLICT DO UPDATE` | Reinserts and replay safely converge on the latest metadata row |
+| UPDATE | `UPDATE ... FROM incoming RETURNING <pk>` followed by `INSERT ... LEFT JOIN updated ... ON CONFLICT DO UPDATE` for only missing keys | Existing hot rows avoid conflict arbitration; a mirror row pruned by flush is recreated safely |
+| DELETE | `INSERT ... ON CONFLICT DO UPDATE` with `op = 3` | A tombstone must survive even if flush already removed the previous mirror row |
+
+The UPDATE statement and its insert-missing fallback are one data-modifying CTE,
+so they succeed or fail together. Duplicate keys force a batch boundary before
+execution, avoiding ambiguous multi-update joins. Internal hot-row deletion
+during flush is marked `DoNotReplicateId` so maintenance deletes do not re-enter
+the async stream.
+
+The mirror indexes remain part of this performance design: the primary-key
+index serves UPDATE joins and conflict fallback, the `seq` index serves ordered
+flush selection, and the partial tombstone `seq` index serves delete-only
+flushes. Dropping them would trade foreground write cost for degraded catch-up
+or flush scalability and requires separate measurement.
 
 ### Crash and retry safety
 
@@ -178,9 +199,17 @@ FROM koldstore.async_mirror_state;
 
 If the worker cannot run or repeatedly soft-fails, the slot retains WAL and can
 fill `pg_wal`. Alert on retained bytes, `async_mirror_status()->'healthy'`, and
-the age of `updated_at`. Optionally set
-`koldstore.async_mirror_max_retained_bytes` to fail closed before disk
-exhaustion (WAL is never silently dropped).
+the age of `updated_at`. `async_mirror_status()->'retention'` contains the
+threshold, observed bytes, and `ok`; `admission` remains a compatibility alias.
+By default
+`koldstore.async_mirror_max_retained_bytes` is a **1 GiB health threshold**.
+Crossing it marks async mirror status unhealthy and should alert operators, but
+apply keeps draining because blocking the consumer would increase retained WAL.
+Use PostgreSQL disk monitoring and slot-retention policy as independent hard
+safeguards. `max_slot_wal_keep_size` can invalidate an over-retained logical
+slot and require mirror rebuild, so it is a last-resort capacity bound rather
+than normal flow control. Setting `0` disables only this KoldStore health
+threshold.
 
 ### Explicit cleanup
 
@@ -202,6 +231,8 @@ infrastructure. The next async `manage_table` recreates publication and slot.
 | Kill applier → launcher / ensure restart, no duplicate PKs | `tests/e2e/dml/async_mirror_worker.rs` |
 | Apply failpoint ERROR → recovery without duplicates | same |
 | Mid-tick after-batch abort → no durable applied_lsn / mirror | same |
+| UPDATE direct path + missing-row fallback after flush pruning | `tests/e2e/dml/async_change_log_mirror.rs`, `crates/koldstore-mirror/tests/storage_contract.rs` |
+| Retained-WAL health threshold never blocks drain | `tests/e2e/dml/async_mirror_worker.rs` |
 | GUC off blocks manage; cleanup stops applier | same |
 | Truncate noise in slot does not kill worker | same |
 | Flush / join fixtures fence before mirror-dependent asserts | `tests/e2e/join/fixtures.rs`, flush helpers |

@@ -16,7 +16,7 @@ fn writer_plan_records_kalamdb_compatible_layout_metadata() {
     let writer = ParquetSegmentWriter::new(WriterOptions::default());
     let plan = writer.plan_segment("app/items", 7, 1, 10, 11, 20);
 
-    assert_eq!(plan.object_path, "app/items/batch-7.parquet");
+    assert_eq!(plan.object_path, "app/items/001/segment-0007.parquet");
     assert_eq!(plan.min_seq, 1);
     assert_eq!(plan.max_seq, 10);
     assert_eq!(plan.min_commit_seq, 11);
@@ -99,7 +99,7 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
         },
     );
 
-    assert_eq!(plan.object_path, "app/items/batch-7.parquet");
+    assert_eq!(plan.object_path, "app/items/001/segment-0007.parquet");
     assert_eq!(plan.row_count, 100);
     assert_eq!(plan.byte_size, 4096);
     assert_eq!(plan.pk_filter_kind.as_deref(), Some("bloom"));

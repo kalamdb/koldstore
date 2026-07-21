@@ -1,0 +1,12 @@
+-- Upgrade koldstore from 0.1.0 to 0.1.4-beta.1.
+--
+-- Catalog DDL is unchanged from the 0.1.0 bootstrap. SQL-callable entry points
+-- are LANGUAGE c / pgrx wrappers resolved through MODULE_PATHNAME; install the
+-- matching shared library before running ALTER EXTENSION koldstore UPDATE.
+--
+-- This script establishes a real ALTER EXTENSION UPDATE path so installed
+-- `extversion` can track the packaged default_version (Cargo package version).
+-- During the 0.1.4 beta series, keep a single edge from 0.1.0 to the current
+-- Cargo version (rename this file on each beta bump; do not chain beta→beta).
+
+-- no catalog migrations in this step

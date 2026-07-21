@@ -4,6 +4,8 @@ filter = 'test(full_lifecycle_wide_table_migrates_flushes_in_batches_and_queries
 success-output = "immediate"
 
 [[profile.default.overrides]]
-filter = 'package(examples)'
+filter = 'package(stress)'
 success-output = "immediate"
-slow-timeout = { period = "120s", terminate-after = 5, grace-period = "15s" }
+# Stress soaks are intentionally long; allow up to ~3h wall before terminate.
+slow-timeout = { period = "300s", terminate-after = 36, grace-period = "30s" }
+

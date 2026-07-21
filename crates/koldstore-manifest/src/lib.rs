@@ -25,4 +25,8 @@ pub use model::{
     FilesState, Manifest, ManifestBatchAppend, ManifestBloomFilter, ManifestColumnStats,
     ManifestSegment, PkFilter, PublishState, SegmentStatus,
 };
-pub use paths::{manifest_paths, relative_manifest_path, table_object_prefix};
+pub use paths::{
+    manifest_paths, relative_manifest_path, segment_folder_number, segment_object_path,
+    segment_path_token, segment_relative_object_path, table_object_prefix, SEGMENTS_PER_FOLDER,
+    SEGMENT_PATH_TOKEN_LEN,
+};

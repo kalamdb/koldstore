@@ -19,9 +19,14 @@ setup vs B-tree) is the main read-path focus.
 
 ## Success Criteria
 
-- SC-002: hot DML latency stays within 10 percent of a regular heap table for
-  small statements; bulk managed DML is dominated by mirror heap/index
-  maintenance (see [dml-table](architecture/dml-table.md)).
+- SC-002a: async foreground hot UPDATE throughput for small statements remains
+  within 10 percent of a regular heap table under the same isolated workload.
+- SC-002b: async sustainable UPDATE throughput is measured with the worker on;
+  at the supported rate, backlog must remain bounded and drain within the
+  documented SLO after load stops.
+- SC-002c: strict hot UPDATE may cost up to 2x the regular heap baseline because
+  the mirror is updated transactionally. This is an explicit consistency cost,
+  not a PostgreSQL-parity claim.
 - SC-006: PK point lookups skip at least 90 percent of cold row groups.
 
 ## Priority order (accepted direction)

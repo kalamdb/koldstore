@@ -14,7 +14,9 @@ use std::ffi::CString;
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use koldstore_worker::{flush_check_due, DatabaseWorkerTask, TickResult};
+use koldstore_worker::{
+    flush_check_due, DatabaseWorkerTask, PendingPollBudget, TickResult, MAX_IMMEDIATE_PENDING_TICKS,
+};
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::PgTryBuilder;
@@ -43,8 +45,10 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     // Cached so the latch path does not open an SPI transaction every wake.
     let mut auto_flush_cached = true;
     let mut apply_backoff_ms = 0_u64;
+    let mut pending_poll_budget = PendingPollBudget::new(MAX_IMMEDIATE_PENDING_TICKS);
 
     loop {
+        let mut should_wait = true;
         let poll_ms = crate::guc::async_apply_poll_interval_ms().max(apply_backoff_ms);
         let poll = Duration::from_millis(poll_ms);
         let slot_exists = crate::async_mirror::lifecycle::native_slot_exists_cstr(&slot_c);
@@ -59,18 +63,22 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                 // mirror SPI writes, and applied_lsn commit together. Soft-fail
                 // logs and backs off instead of FATAL.
                 match worker_transaction_result(|| async_task.tick()) {
-                    Ok(TickResult::Continue) => {
+                    Ok(result @ TickResult::Continue) => {
                         apply_backoff_ms = 0;
                         last_checked_wal = Some(current_wal_position());
+                        should_wait = pending_poll_budget.should_wait(result);
                     }
-                    Ok(TickResult::ContinuePending) => {
+                    Ok(result @ TickResult::ContinuePending) => {
                         apply_backoff_ms = 0;
                         last_checked_wal = None;
+                        should_wait = pending_poll_budget.should_wait(result);
                     }
-                    Ok(TickResult::Stop) => {
+                    Ok(result @ TickResult::Stop) => {
                         apply_backoff_ms = 0;
+                        should_wait = pending_poll_budget.should_wait(result);
                     }
                     Err(error) => {
+                        pending_poll_budget.reset();
                         crate::observability::record_async_apply_error();
                         pgrx::log!(
                             "koldstore async mirror apply soft-failed (will retry): {error}"
@@ -86,6 +94,8 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                     }
                 }
             }
+        } else {
+            pending_poll_budget.reset();
         }
 
         if flush_due {
@@ -123,7 +133,7 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
         if !slot_exists && !auto_flush_cached {
             break;
         }
-        if !BackgroundWorker::wait_latch(Some(poll)) {
+        if should_wait && !BackgroundWorker::wait_latch(Some(poll)) {
             break;
         }
         if BackgroundWorker::sighup_received() {

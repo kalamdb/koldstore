@@ -3,6 +3,11 @@
 //! These run inside a temporary cluster via `cargo pgrx test`. Keep multi-process,
 //! object-store, and crash/restart scenarios in `tests/e2e`.
 //!
+//! Cold-only multi-type query/join smoke coverage lives in `cold_queries.inc.rs`
+//! (filter with `cold_query`). Cold WHERE clauses must use indexed columns
+//! (created before `manage_table`); joins that need cold non-PK quals use
+//! `WITH … AS MATERIALIZED` so join predicates run on fetched rows.
+//!
 //! `#[pgrx::pg_schema]` only accepts inline `mod { ... }` blocks, so test bodies are
 //! `include!`d into the schema module below.
 
@@ -17,8 +22,9 @@ mod tests {
     use pgrx::prelude::*;
 
     use super::fixture::{
-        create_messages_table, flush_table_rows, manage_shared, register_temp_storage,
-        spi_get_explain, spi_get_i64, spi_get_text, spi_succeeds, unique_suffix,
+        assert_finishes_under, create_messages_table, flush_table_rows, jsonb_obj, manage_shared,
+        register_temp_storage, setup_cold_typed_join_fixture, spi_get_explain, spi_get_i64,
+        spi_get_text, spi_succeeds, unique_suffix, COLD_FACT_IDS, COLD_QUERY_BUDGET,
     };
 
     include!("lifecycle.inc.rs");
@@ -28,4 +34,5 @@ mod tests {
     include!("flush_scheduler.inc.rs");
     include!("session.inc.rs");
     include!("scan.inc.rs");
+    include!("cold_queries.inc.rs");
 }

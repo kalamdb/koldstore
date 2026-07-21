@@ -270,6 +270,7 @@ if [[ "${SKIP_UNIT}" -eq 0 ]]; then
     --exclude storage-comparison
     --exclude pg-koldstore-benchmarks
     --exclude koldstore-memory-tests
+    --exclude stress
   )
   step "workspace non-E2E tests (cargo nextest)"
   cargo nextest run --workspace --no-default-features "${unit_excludes[@]}"

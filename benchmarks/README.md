@@ -9,6 +9,15 @@ This directory contains the benchmark system for comparing plain PostgreSQL with
 
 The primary benchmark path is real PostgreSQL behavior through SQL and `pgbench`. Criterion.rs benchmarks under `benchmarks/benches/` cover extension internals only and do **not** feed the comparison tables.
 
+For **in-process** extension benches (`#[pg_bench]` inside a live backend), use:
+
+```bash
+scripts/run-pgrx-bench.sh 16
+scripts/run-pgrx-bench.sh 16 --list
+```
+
+Those live in `crates/pg_koldstore/src/pg_benches/` and are separate from this pgbench suite.
+
 ## Prerequisites
 
 - Rust stable

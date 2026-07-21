@@ -37,7 +37,9 @@ Rust crate layout and dependency graph.
 |-----|--------|
 | [ADR-001](decisions/001-layered-crate-architecture.md) | Layered crate architecture |
 | [ADR-002](decisions/002-footer-derived-catalog-stats.md) | Footer-derived catalog segment stats (accepted, deferred) |
-| [ADR-003](decisions/003-optional-async-mirror-capture.md) | Optional WAL-backed async mirror capture |
+| [ADR-003](decisions/003-optional-async-mirror-capture.md) | Optional WAL-backed async mirror capture (amended by ADR-005) |
+| [ADR-004](decisions/004-segment-publication-protocol.md) | Pending-to-active segment publication protocol |
+| [ADR-005](decisions/005-async-apply-progress-and-health.md) | Async UPDATE apply, worker progress, and retained-WAL health |
 
 ## Cases
 
@@ -55,7 +57,10 @@ Managed user tables keep application columns only. Sequence and delete state
 live in `koldstore.{table}__cl` and in cold Parquet metadata (`seq`, `deleted`).
 Strict capture updates the mirror in the source transaction; async capture
 applies committed primary-key-only WAL in a database worker, with an explicit
-consistency fence for strong reads.
+consistency fence for strong reads. Async UPDATE uses a direct set-based update
+for existing mirror keys and a conflict-safe insert-missing fallback for keys
+already pruned by flush. The worker drains bounded batches in short retry
+bursts and always yields between bursts.
 See [dml-table](architecture/dml-table.md) and
 [mirror capture modes](architecture/mirror-capture-modes.md).
 
@@ -74,4 +79,6 @@ serves rows from a buffer. See [scanning-table](architecture/scanning-table.md).
 
 Object storage is not part of PostgreSQL WAL. Operators must back up cold
 artifacts together with PostgreSQL base backups and validate manifest identity
-before PITR cutover.
+before PITR cutover. For async capture, retained WAL is health telemetry that
+must alert operators without disabling the applier; PostgreSQL disk and logical
+slot-retention controls remain independent hard safeguards.

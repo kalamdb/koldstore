@@ -245,10 +245,12 @@ pub fn plan_async_mirror_batch_insert(
     plan_async_mirror_batch_upsert(mirror_quoted, primary_key, pk_type_names)
 }
 
-/// Plans a set-based async-mirror update as the unified upsert path.
+/// Plans a set-based async-mirror update with an insert-missing fallback.
 ///
-/// UPDATE floods previously used a keyed `UPDATE` that missed pruned rows and
-/// paid a large planner/executor cost; upsert matches DELETE tombstone safety.
+/// Existing mirror rows take the direct `UPDATE` path. Rows absent after flush
+/// pruning are restored by the following conflict-safe insert, preserving
+/// latest-state replay semantics without paying conflict resolution for the
+/// common hot-row case.
 ///
 /// # Errors
 ///
@@ -259,5 +261,82 @@ pub fn plan_async_mirror_batch_update(
     pk_type_names: &[String],
     _seq_expression: &str,
 ) -> MirrorResult<String> {
-    plan_async_mirror_batch_upsert(mirror_quoted, primary_key, pk_type_names)
+    if primary_key.len() != pk_type_names.len() {
+        return Err(MirrorError::InvalidColumn(
+            "primary-key type count mismatch".to_string(),
+        ));
+    }
+    let quoted_keys = quoted_pk_columns(primary_key)?;
+    let conflict_keys = quoted_keys.join(", ");
+    let pk_count = quoted_keys.len();
+    let mut unnest_args = Vec::with_capacity(pk_count + 1);
+    let mut unnest_aliases = Vec::with_capacity(pk_count + 1);
+    let mut projected = Vec::with_capacity(pk_count + 1);
+    for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
+        let param = index + 2;
+        let alias = format!("pk_{index}");
+        unnest_args.push(format!("${param}::text[]"));
+        unnest_aliases.push(alias.clone());
+        projected.push(format!("incoming.{alias}::{type_name} AS {quoted}"));
+    }
+    let seq_param = pk_count + 2;
+    unnest_args.push(format!("${seq_param}::bigint[]"));
+    unnest_aliases.push("seq".to_string());
+    projected.push("incoming.seq AS \"seq\"".to_string());
+
+    let update_join = quoted_keys
+        .iter()
+        .map(|key| format!("mirror.{key} = incoming.{key}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let missing_join = quoted_keys
+        .iter()
+        .map(|key| format!("updated.{key} = incoming.{key}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let returning_keys = quoted_keys
+        .iter()
+        .map(|key| format!("mirror.{key}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let incoming_values = quoted_keys
+        .iter()
+        .map(|key| format!("incoming.{key}"))
+        .chain(["incoming.\"seq\"".to_string(), "$1::smallint".to_string()])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let insert_columns = format!("{conflict_keys}, \"seq\", \"op\"");
+    let missing_key = quoted_keys
+        .first()
+        .expect("primary-key planner rejects an empty key");
+
+    Ok(format!(
+        "WITH incoming AS (\
+           SELECT {projected} FROM unnest({unnest}) AS incoming({aliases})\
+         ), updated AS (\
+           UPDATE {mirror_quoted} AS mirror \
+           SET \"seq\" = incoming.\"seq\", \
+               \"op\" = $1::smallint \
+           FROM incoming \
+           WHERE {update_join} \
+           RETURNING {returning_keys}\
+         ), inserted AS (\
+           INSERT INTO {mirror_quoted} ({insert_columns}) \
+           SELECT {incoming_values} \
+           FROM incoming \
+           LEFT JOIN updated ON {missing_join} \
+           WHERE updated.{missing_key} IS NULL \
+           ON CONFLICT ({conflict_keys}) DO UPDATE \
+           SET \"seq\" = EXCLUDED.\"seq\", \
+               \"op\" = EXCLUDED.\"op\" \
+           RETURNING (xmax = 0) AS inserted\
+         ) \
+         SELECT ((SELECT count(*) FROM updated) + count(*))::bigint, \
+                ((SELECT count(*) FROM updated) + \
+                 count(*) FILTER (WHERE NOT inserted))::bigint \
+         FROM inserted",
+        projected = projected.join(", "),
+        unnest = unnest_args.join(", "),
+        aliases = unnest_aliases.join(", "),
+    ))
 }

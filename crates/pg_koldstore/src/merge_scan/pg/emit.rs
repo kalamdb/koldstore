@@ -5,6 +5,7 @@ use std::ffi::CString;
 use koldstore_schema::PgType;
 use pgrx::pg_sys;
 
+use super::qual::ScanProjection;
 use super::tuple::MaterializedRow;
 
 /// Builds one projected row from a winner `row_image` JSON object.
@@ -14,23 +15,26 @@ use super::tuple::MaterializedRow;
 /// # Errors
 ///
 /// Returns an error when a non-null cell cannot be converted to the catalog type.
-pub(super) unsafe fn materialize_row_from_image(
+pub(super) unsafe fn materialize_scan_row_from_image(
     row_image: &serde_json::Value,
-    columns: &[&koldstore_migrate::order::CatalogColumn],
+    projection: &ScanProjection<'_>,
 ) -> Result<MaterializedRow, String> {
-    let mut values = Vec::with_capacity(columns.len());
-    let mut is_null = Vec::with_capacity(columns.len());
-    for column in columns {
-        match row_image.get(&column.name) {
-            None | Some(serde_json::Value::Null) => {
-                values.push(pg_sys::Datum::null());
-                is_null.push(true);
-            }
-            Some(value) => {
-                values.push(json_value_to_datum(value, column.pg_type)?);
-                is_null.push(false);
-            }
+    let mut values = Vec::with_capacity(projection.columns.len());
+    let mut is_null = Vec::with_capacity(projection.columns.len());
+    for projected in &projection.columns {
+        let Some(value) = row_image.get(&projected.catalog.name) else {
+            return Err(format!(
+                "projected column `{}` is missing from merged row image",
+                projected.catalog.name
+            ));
+        };
+        if value.is_null() {
+            values.push(pg_sys::Datum::null());
+            is_null.push(true);
+            continue;
         }
+        values.push(json_value_to_datum(value, projected.catalog.pg_type)?);
+        is_null.push(false);
     }
     Ok(MaterializedRow { values, is_null })
 }

@@ -13,6 +13,7 @@ use koldstore_common::{
 use koldstore_merge::scan::HOT_SEQ_SENTINEL;
 use pgrx::pg_sys;
 
+use super::qual::ScanProjection;
 use super::tuple::{MaterializedRow, ScanMemory};
 use super::with_hook_disabled;
 
@@ -99,28 +100,36 @@ FROM (
 ///
 /// PERFORMANCE: skips `to_jsonb` / `jsonb_build_object` and JSON parse on the
 /// hot-only path used for PK lookups that miss every cold segment.
+///
+/// Plans such as `SELECT count(*)` reference no user Vars, so `projected_columns`
+/// may be empty. Those scans still need one ExecScan tuple per visible heap row.
 pub(super) fn load_hot_rows_native(
     relation: &str,
     equality_filters: &[HotEqualityFilter],
     projected_columns: &[&koldstore_migrate::order::CatalogColumn],
+    scan_projection: &ScanProjection<'_>,
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
-    if projected_columns.is_empty() {
-        return Ok(Vec::new());
-    }
     let table = QualifiedTableName::parse(relation).map_err(|error| error.to_string())?;
+    let where_clause = where_clause_sql(equality_filters);
+    if projected_columns.is_empty() {
+        let sql = format!(
+            "SELECT 1 FROM ONLY {table} AS hot {where_clause}",
+            table = table.quoted(),
+        );
+        return with_hook_disabled(|| unsafe { execute_hot_row_placeholders(&sql) });
+    }
     let select_list = projected_columns
         .iter()
         .map(|column| format!("hot.{}", quote_ident(&column.name)))
         .collect::<Vec<_>>()
         .join(", ");
-    let where_clause = where_clause_sql(equality_filters);
     let sql = format!(
         "SELECT {select_list} FROM ONLY {table} AS hot {where_clause}",
         table = table.quoted(),
     );
 
-    with_hook_disabled(|| unsafe { execute_hot_rows_native(&sql, projected_columns.len(), memory) })
+    with_hook_disabled(|| unsafe { execute_hot_rows_native(&sql, scan_projection, memory) })
 }
 
 fn where_clause_sql(equality_filters: &[HotEqualityFilter]) -> String {
@@ -187,9 +196,35 @@ unsafe fn execute_hot_rows_query(
     Ok(rows)
 }
 
+/// Counts visible hot rows without projecting attributes (for `count(*)` etc.).
+unsafe fn execute_hot_row_placeholders(query: &str) -> Result<Vec<MaterializedRow>, String> {
+    let query = CString::new(query).map_err(|error| error.to_string())?;
+    let connect = pg_sys::SPI_connect();
+    if connect < 0 {
+        return Err(format!("SPI_connect failed with code {connect}"));
+    }
+    let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
+    if execute < 0 {
+        let _ = pg_sys::SPI_finish();
+        return Err(format!("SPI_execute failed with code {execute}"));
+    }
+
+    let processed = usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
+    let finish = pg_sys::SPI_finish();
+    if finish < 0 {
+        return Err(format!("SPI_finish failed with code {finish}"));
+    }
+    Ok((0..processed)
+        .map(|_| MaterializedRow {
+            values: Vec::new(),
+            is_null: Vec::new(),
+        })
+        .collect())
+}
+
 unsafe fn execute_hot_rows_native(
     query: &str,
-    column_count: usize,
+    scan_projection: &ScanProjection<'_>,
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
     let query = CString::new(query).map_err(|error| error.to_string())?;
@@ -208,10 +243,11 @@ unsafe fn execute_hot_rows_native(
     let mut rows = Vec::with_capacity(processed);
     if !tuptable.is_null() {
         let tupdesc = (*tuptable).tupdesc;
-        let type_meta = column_type_meta(tupdesc, column_count)?;
+        let type_meta = column_type_meta(tupdesc, scan_projection.columns.len())?;
         for index in 0..processed {
             let tuple = *(*tuptable).vals.add(index);
-            let row = memory.switch(|| materialize_spi_tuple(tuple, tupdesc, &type_meta))?;
+            let row = memory
+                .switch(|| materialize_spi_tuple(tuple, tupdesc, &type_meta, scan_projection))?;
             rows.push(row);
         }
     }
@@ -277,9 +313,10 @@ unsafe fn materialize_spi_tuple(
     tuple: pg_sys::HeapTuple,
     tupdesc: pg_sys::TupleDesc,
     type_meta: &[ColumnTypeMeta],
+    scan_projection: &ScanProjection<'_>,
 ) -> Result<MaterializedRow, String> {
-    let mut values = Vec::with_capacity(type_meta.len());
-    let mut is_null = Vec::with_capacity(type_meta.len());
+    let mut values = Vec::with_capacity(scan_projection.columns.len());
+    let mut is_null = Vec::with_capacity(scan_projection.columns.len());
     for (index, meta) in type_meta.iter().enumerate() {
         let attno = (index + 1) as i32;
         let mut null_flag: bool = false;

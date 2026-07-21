@@ -17,7 +17,6 @@ path = "all.rs"
 anyhow.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-koldstore-catalog.workspace = true
 koldstore-common.workspace = true
 koldstore-flush.workspace = true
 koldstore-merge.workspace = true

@@ -147,6 +147,11 @@ rejected unless `allow_fk_hot_only = true`.
 | Capture triggers | on user heap | INSERT / UPDATE / DELETE AFTER STATEMENT with transition tables |
 | PK guard | on user heap | BEFORE UPDATE OF primary-key columns FOR EACH ROW |
 
+All three mirror indexes are architectural, not optional decoration: the PK
+supports strict/async key updates and conflict fallback, `seq` supports ordered
+flush prefixes, and the partial tombstone index supports delete-only flushes.
+Any index removal must be justified by write, catch-up, and flush benchmarks.
+
 The user heap is **not** altered. No `_seq`, `_commit_seq`, or `_deleted`
 columns are added (clean-schema contract).
 
@@ -189,8 +194,8 @@ When `EXISTS (SELECT 1 FROM ONLY table LIMIT 1)` is false:
 6. **Select capture path**:
    - `strict`: keep the statement triggers
    - `async`: add the source's primary-key columns to the shared publication,
-     drop only the three DML capture triggers, retain the PK guard, install the
-     worker-kick statement trigger, and ensure the database applier is running
+     drop the three DML capture triggers and any legacy worker-kick triggers,
+     retain the PK guard, and ensure the always-on database applier is running
 
 7. **Return** job UUID
 
@@ -229,7 +234,8 @@ When the heap already has rows:
 8. **Row counters**
 
 9. **Select capture path** — keep strict triggers, or atomically publish the
-   primary-key columns and remove the DML triggers for async mode
+   primary-key columns, remove the DML and legacy worker-kick triggers, retain
+   the PK guard, and ensure the database applier for async mode
 
 10. **Return** job UUID
 

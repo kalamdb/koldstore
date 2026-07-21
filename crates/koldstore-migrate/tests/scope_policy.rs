@@ -26,6 +26,7 @@ fn user_scope_policy_plan_enables_fail_closed_rls() {
     assert!(create_policy.contains("CREATE POLICY koldstore_user_scope_fail_closed"));
     assert!(create_policy.contains("FOR ALL"));
     assert!(create_policy.contains("current_setting('koldstore.user_id', true) IS NOT NULL"));
+    assert!(create_policy.contains("current_setting('koldstore.user_id', true) <> ''"));
     assert!(create_policy.contains("\"user_id\" = current_setting('koldstore.user_id', true)"));
     assert!(create_policy.contains("WITH CHECK"));
 }

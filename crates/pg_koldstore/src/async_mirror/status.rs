@@ -8,7 +8,7 @@ use super::lifecycle::current_slot_name;
 /// Returns async mirror lag, retained WAL, and process-local apply rates.
 ///
 /// SQL contract: `koldstore.async_mirror_status()` → `jsonb`. Never drops WAL;
-/// callers use this to alert and tune admission GUCs.
+/// callers use this to alert and tune the retained-WAL health threshold.
 #[pgrx::pg_extern(name = "async_mirror_status", schema = "koldstore")]
 pub fn async_mirror_status() -> pgrx::JsonB {
     pgrx::JsonB(
@@ -22,16 +22,19 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
     let metrics = crate::observability::async_apply_metrics();
 
+    // Prefer CAST(... AS text) over `expr::text`: this SPI path failed with
+    // `syntax error at or near "."` when using `::` casts on nested
+    // jsonb_build_object results.
     let slot_row = pgrx::Spi::get_one_with_args::<String>(
         "SELECT COALESCE(\
-           (SELECT jsonb_build_object(\
+           (SELECT CAST(jsonb_build_object(\
               'slot_name', slot_name,\
               'active', active,\
-              'confirmed_flush_lsn', confirmed_flush_lsn::text,\
+              'confirmed_flush_lsn', CAST(confirmed_flush_lsn AS text),\
               'retained_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)\
-            )::text\
+            ) AS text)\
             FROM pg_catalog.pg_replication_slots WHERE slot_name = $1), \
-           jsonb_build_object('slot_name', $1::text, 'present', false)::text\
+           CAST(jsonb_build_object('slot_name', $1, 'present', false) AS text)\
          )",
         &[DatumWithOid::from(slot.as_str())],
     )
@@ -40,13 +43,13 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
 
     let state_row = pgrx::Spi::get_one_with_args::<String>(
         "SELECT COALESCE(\
-           (SELECT jsonb_build_object(\
-              'applied_lsn', applied_lsn::text,\
+           (SELECT CAST(jsonb_build_object(\
+              'applied_lsn', CAST(applied_lsn AS text),\
               'updated_at', updated_at,\
               'updated_at_age_seconds', EXTRACT(EPOCH FROM (now() - updated_at))\
-            )::text\
+            ) AS text)\
             FROM koldstore.async_mirror_state WHERE database_oid = $1), \
-           jsonb_build_object('present', false)::text\
+           CAST(jsonb_build_object('present', false) AS text)\
          )",
         &[DatumWithOid::from(database_oid)],
     )
@@ -63,7 +66,12 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
         .and_then(|value| value.as_i64())
         .unwrap_or(0);
     let max_retained = crate::guc::async_mirror_max_retained_bytes();
-    let admission_ok = max_retained <= 0 || retained_bytes <= max_retained;
+    let retained_wal_within_threshold = max_retained <= 0 || retained_bytes <= max_retained;
+    let retention_health = json!({
+        "max_retained_bytes": max_retained,
+        "retained_bytes": retained_bytes,
+        "ok": retained_wal_within_threshold,
+    });
 
     Ok(json!({
         "slot": slot_json,
@@ -80,39 +88,10 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
                 0.0
             },
         },
-        "admission": {
-            "max_retained_bytes": max_retained,
-            "retained_bytes": retained_bytes,
-            "ok": admission_ok,
-        },
-        "healthy": metrics.healthy && admission_ok,
+        "retention": retention_health.clone(),
+        // Compatibility alias for clients written before the threshold became
+        // health-only. New consumers should read `retention`.
+        "admission": retention_health,
+        "healthy": metrics.healthy && retained_wal_within_threshold,
     }))
-}
-
-/// Fail closed when retained WAL exceeds the optional admission GUC.
-///
-/// # Errors
-///
-/// Returns an error when the configured limit is exceeded. Never drops WAL.
-pub(crate) fn enforce_retained_wal_admission(slot: &str) -> Result<(), String> {
-    let max_retained = crate::guc::async_mirror_max_retained_bytes();
-    if max_retained <= 0 {
-        return Ok(());
-    }
-    let retained = pgrx::Spi::get_one_with_args::<i64>(
-        "SELECT COALESCE(\
-           (SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)\
-            FROM pg_catalog.pg_replication_slots WHERE slot_name = $1), \
-           0)",
-        &[DatumWithOid::from(slot)],
-    )
-    .map_err(|error| error.to_string())?
-    .unwrap_or(0);
-    if retained > max_retained {
-        return Err(format!(
-            "async mirror retained WAL {retained} bytes exceeds koldstore.async_mirror_max_retained_bytes={max_retained}; \
-             refusing to proceed (WAL is not dropped — catch up or raise the limit)"
-        ));
-    }
-    Ok(())
 }

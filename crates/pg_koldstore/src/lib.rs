@@ -21,6 +21,9 @@ pub mod sql;
 #[cfg(feature = "pg_test")]
 mod pg_tests;
 
+#[cfg(feature = "pg_bench")]
+mod pg_benches;
+
 /// Required by `cargo pgrx test` invocations. Must remain at the crate root.
 #[cfg(feature = "pg_test")]
 pub mod pg_test {

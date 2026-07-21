@@ -1,0 +1,34 @@
+[package]
+name = "stress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[test]]
+name = "chat_penetration"
+path = "tests/chat_penetration.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+# Shared via `#[path = "../e2e/common/mod.rs"]` in lib.rs.
+koldstore-memory-tests = { path = "../memory" }
+koldstore-storage = { workspace = true, features = ["s3"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "sync"] }
+tokio-postgres.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+koldstore-memory-tests = { path = "../memory" }
+koldstore-storage = { workspace = true, features = ["s3"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "sync"] }
+tokio-postgres.workspace = true
+
+[lints]
+workspace = true

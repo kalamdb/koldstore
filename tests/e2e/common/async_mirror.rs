@@ -53,11 +53,16 @@ pub async fn async_worker_running(client: &tokio_postgres::Client) -> Result<boo
 
 /// Terminates the async mirror worker for the current database, if any.
 ///
+/// Waits until the worker is no longer visible in `pg_stat_activity`. Callers
+/// that then touch the logical slot (flush fence / peek) still rely on the
+/// extension waiting out PostgreSQL's post-abort slot-release window.
+///
 /// # Errors
 ///
-/// Returns an error when termination SQL fails.
+/// Returns an error when termination SQL fails or the worker does not exit in
+/// time.
 pub async fn terminate_async_worker(client: &tokio_postgres::Client) -> Result<bool> {
-    Ok(client
+    let terminated = client
         .query_one(
             "SELECT COALESCE((\
                SELECT pg_terminate_backend(pid) \
@@ -70,7 +75,30 @@ pub async fn terminate_async_worker(client: &tokio_postgres::Client) -> Result<b
             &[],
         )
         .await?
-        .get(0))
+        .get(0);
+    let started = Instant::now();
+    while async_worker_running(client).await? {
+        anyhow::ensure!(
+            started.elapsed() <= WORKER_START_DEADLINE,
+            "async WAL applier did not exit within {WORKER_START_DEADLINE:?} after terminate"
+        );
+        // Re-signal in case SIGTERM landed during a non-interruptible window.
+        let _ = client
+            .query_one(
+                "SELECT COALESCE((\
+                   SELECT pg_terminate_backend(pid) \
+                   FROM pg_catalog.pg_stat_activity \
+                   WHERE backend_type = 'koldstore async mirror ' \
+                     || (SELECT oid::text FROM pg_catalog.pg_database \
+                         WHERE datname = current_database()) \
+                   LIMIT 1\
+                 ), false)",
+                &[],
+            )
+            .await?;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    Ok(terminated)
 }
 
 /// Counts mirror rows with the given operation code.

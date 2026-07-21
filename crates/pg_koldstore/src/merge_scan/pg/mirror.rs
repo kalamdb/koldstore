@@ -97,7 +97,9 @@ WHERE {where_clause}
         where_clause = where_clauses.join(" AND "),
     );
 
-    with_hook_disabled(|| unsafe { execute_mirror_overlay_query(&sql, &pk_columns) })
+    crate::catalog::owner::with_extension_owner(|| {
+        with_hook_disabled(|| unsafe { execute_mirror_overlay_query(&sql, &pk_columns) })
+    })?
 }
 
 unsafe fn execute_mirror_overlay_query(

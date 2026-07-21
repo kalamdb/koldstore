@@ -72,10 +72,11 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     .unwrap();
 
     assert!(
-        written
-            .object_path
-            .starts_with(&format!("app/items/batch-0-{}.", written.segment_id)),
-        "object path should embed segment_id, got {}",
+        written.object_path.starts_with(&format!(
+            "app/items/001/segment-0000-{}.",
+            koldstore_manifest::segment_path_token(written.segment_id)
+        )),
+        "object path should use padded folder/segment + short token, got {}",
         written.object_path
     );
     assert!(written.object_path.ends_with(".parquet"));
@@ -93,7 +94,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     let temp = koldstore_storage::temp_object_key(
         "app/items",
         "retry-writer",
-        &koldstore_storage::unique_temp_file_name("batch-0.parquet"),
+        &koldstore_storage::unique_temp_file_name("segment-0000.parquet"),
     );
     let published = koldstore_storage::publish_immutable_object(
         &client,
@@ -152,6 +153,13 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
         first.object_path, second.object_path,
         "retry must not collide with orphaned final object"
     );
+    assert!(
+        first.object_path.contains("/001/segment-0001-")
+            && second.object_path.contains("/001/segment-0001-"),
+        "retries keep the same padded folder/segment number, got {} vs {}",
+        first.object_path,
+        second.object_path
+    );
     assert_ne!(first.segment_id, second.segment_id);
     assert_ne!(first.byte_size, second.byte_size);
     assert_eq!(
@@ -169,7 +177,10 @@ fn flush_segment_publish_rejects_corrupt_existing_final() {
     let root = tempfile::tempdir().unwrap();
     let client = open_filesystem_client(root.path().to_str().unwrap()).unwrap();
     let segment_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
-    let final_key = format!("app/items/batch-1-{segment_id}.parquet");
+    let final_key = format!(
+        "app/items/001/segment-0001-{}.parquet",
+        koldstore_manifest::segment_path_token(segment_id)
+    );
     client
         .put(
             &final_key,

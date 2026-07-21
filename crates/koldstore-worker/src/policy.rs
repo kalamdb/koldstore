@@ -13,5 +13,11 @@ pub const LIBRARY_NAME: &str = "koldstore";
 /// Runtime value is `koldstore.async_apply_poll_interval_ms` (default 100).
 pub const APPLY_POLL_INTERVAL_MS: u64 = 100;
 
+/// Maximum budget-exhausted apply ticks retried before yielding to the latch.
+///
+/// This lets bounded catch-up avoid a full poll delay between every chunk while
+/// ensuring foreground backends and scheduled flush work receive regular CPU.
+pub const MAX_IMMEDIATE_PENDING_TICKS: u8 = 4;
+
 /// Launcher poll interval while discovering databases that need an applier.
 pub const LAUNCHER_POLL_INTERVAL_MS: u64 = 250;

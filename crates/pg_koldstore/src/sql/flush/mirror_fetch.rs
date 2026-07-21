@@ -127,7 +127,11 @@ fn read_column(
             .get::<pgrx::JsonB>(ordinal)?
             .map(|json| FlushColumnValue::Utf8(json_to_utf8(&json.0)))
             .unwrap_or(FlushColumnValue::Null),
-        PgType::Numeric | PgType::TextArray | PgType::Bytea => tuple
+        PgType::Bytea => tuple
+            .get::<Vec<u8>>(ordinal)?
+            .map(|bytes| FlushColumnValue::Utf8(bytea_to_pg_hex(&bytes)))
+            .unwrap_or(FlushColumnValue::Null),
+        PgType::Numeric | PgType::TextArray => tuple
             .get::<String>(ordinal)?
             .map(FlushColumnValue::Utf8)
             .unwrap_or(FlushColumnValue::Null),
@@ -153,4 +157,14 @@ fn json_to_utf8(value: &serde_json::Value) -> String {
         serde_json::Value::String(text) => text.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     }
+}
+
+/// Encodes raw bytes in PostgreSQL `bytea` hex output form (`\xdeadbeef`).
+fn bytea_to_pg_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("\\x");
+    for byte in bytes {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
 }
