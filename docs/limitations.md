@@ -5,6 +5,20 @@ as Parquet plus manifest metadata. That boundary is important: cold row values
 can be preserved in cold files, but PostgreSQL-owned indexes remain attached to
 rows that still live inside PostgreSQL.
 
+## Shared preload is mandatory
+
+`shared_preload_libraries` must include `koldstore`. Planner hooks that inject
+`KoldMergeScan` are registered only when the library loads at postmaster start.
+Without preload, fresh sessions can silently run ordinary heap `Seq Scan` on
+managed tables and return **hot-only** rows after flush.
+
+- Install order: package files → set preload → **restart** → `CREATE EXTENSION`
+- `session_preload_libraries` is not sufficient
+- Removing preload after `manage_table` is **unsupported** (no extension code
+  runs to intercept heap reads; restore preload and restart)
+
+Check with `SELECT koldstore.preload_status();`.
+
 ## Unique and Foreign Key Constraints
 
 PostgreSQL `UNIQUE` and foreign-key constraints on managed tables are enforced on

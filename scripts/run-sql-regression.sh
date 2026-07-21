@@ -35,7 +35,8 @@ normalize_output() {
 
 prepare_cluster() {
   echo "starting pgrx-managed PostgreSQL ${PG_VERSION}"
-  cargo pgrx start "$PG_FEATURE"
+  cargo pgrx start "$PG_FEATURE" \
+    --postgresql-conf wal_level=logical
 
   echo "installing koldstore into pgrx PostgreSQL ${PG_VERSION}"
   INSTALL_ARGS=(
@@ -49,9 +50,11 @@ prepare_cluster() {
   fi
   cargo pgrx install "${INSTALL_ARGS[@]}"
 
-  echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
+  echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} with koldstore shared_preload"
   cargo pgrx stop "$PG_FEATURE"
-  cargo pgrx start "$PG_FEATURE"
+  cargo pgrx start "$PG_FEATURE" \
+    --postgresql-conf wal_level=logical \
+    --postgresql-conf shared_preload_libraries=koldstore
 
   echo "recreating SQL regression database ${PG_DATABASE}"
   "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \

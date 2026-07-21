@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
-# Inject pg_cron preload so cron.database_name tracks POSTGRES_DB.
+# Default POSTGRES_DB for the try-it image when callers omit it.
 #
-# Do not preload koldstore here: initdb loads shared_preload_libraries before
-# CREATE EXTENSION runs, and koldstore's hooks query koldstore.schemas.
-# SQL + pg_cron scheduling work without koldstore in shared_preload_libraries.
+# Force listen_addresses=* so published host ports reach Postgres (PGDG
+# defaults to localhost). Always preload koldstore so KoldMergeScan hooks
+# install in every backend (CREATE EXTENSION alone is not enough).
+# pg_cron is packaged but not preloaded.
 set -euo pipefail
 
-DB="${POSTGRES_DB:-koldstore}"
-# Default DB for try-it image when callers omit POSTGRES_DB.
-export POSTGRES_DB="${DB}"
+export POSTGRES_DB="${POSTGRES_DB:-koldstoredb}"
 export POSTGRES_USER="${POSTGRES_USER:-postgres}"
 
 if [[ "${1:-}" == "postgres" ]]; then
   shift
   exec docker-entrypoint.sh postgres \
-    -c shared_preload_libraries=pg_cron \
-    -c "cron.database_name=${DB}" \
+    -c listen_addresses='*' \
+    -c shared_preload_libraries=koldstore \
     "$@"
 fi
 

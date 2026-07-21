@@ -287,8 +287,12 @@ prepare_benchmark_database() {
   export PATH="$(dirname "${pg_config}"):${PATH}"
 
   step "preparing local pgrx benchmark database PostgreSQL ${pg}"
-  cargo pgrx start "${pg_feature}"
+  cargo pgrx start "${pg_feature}" --postgresql-conf wal_level=logical
   cargo_pgrx_install_koldstore "${pg_feature}" "${pg_config}"
+  cargo pgrx stop "${pg_feature}" >/dev/null 2>&1 || true
+  cargo pgrx start "${pg_feature}" \
+    --postgresql-conf wal_level=logical \
+    --postgresql-conf shared_preload_libraries=koldstore
 
   "${psql}" -h "${host}" -p "${port}" -d postgres -v ON_ERROR_STOP=1 \
     -c "DROP DATABASE IF EXISTS ${database}" \

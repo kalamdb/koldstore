@@ -101,6 +101,11 @@ PGRX_LOGICAL_CONF=(
   --postgresql-conf "max_replication_slots=${WORKER_PROCESSES}"
   --postgresql-conf "max_wal_senders=${WORKER_PROCESSES}"
 )
+# shared_preload requires the .so to exist; apply only after install.
+PGRX_PRELOAD_CONF=(
+  "${PGRX_LOGICAL_CONF[@]}"
+  --postgresql-conf shared_preload_libraries=koldstore
+)
 pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" "${PGRX_LOGICAL_CONF[@]}"
 
 if [[ "${KOLDSTORE_E2E_SKIP_INSTALL:-}" == "1" || "${KOLDSTORE_E2E_SKIP_INSTALL:-}" == "true" ]]; then
@@ -124,12 +129,11 @@ else
   cargo pgrx install "${INSTALL_ARGS[@]}"
 fi
 
-echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} to load extension"
+echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} with koldstore shared_preload"
 pgrx_force_stop "${PG_VERSION}"
-# Keep wal_level=logical on every restart. Do not force shared_preload here:
-# the async launcher would hold logical slots across DROP DATABASE and race
-# failpoint bounce tests. Session ensure() still starts appliers on demand.
-pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" "${PGRX_LOGICAL_CONF[@]}"
+# Merge-scan hooks must exist in every backend. Slot cleanup before DROP DATABASE
+# still runs below so the always-on async launcher does not race failpoint tests.
+pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" "${PGRX_PRELOAD_CONF[@]}"
 
 wait_for_postgres() {
   local attempts=30

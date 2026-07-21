@@ -10,7 +10,7 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 |--------|------------------|-------------------|
 | Setup | `koldstore-setup` | `pg_koldstore` bootstrap SQL + SPI |
 | Migrate | `koldstore-migrate` | `pg_koldstore::sql::ddl`, `migrate::*` |
-| Merge scan | `koldstore-merge` | `pg_koldstore::merge_scan` |
+| Merge scan | `koldstore-merge` | `pg_koldstore::merge_scan` — see [scanning-table.md](scanning-table.md) (shared preload required) |
 | DML | `koldstore-mirror` | `pg_koldstore::sql::dml`, `hooks::*` |
 | Flush | `koldstore-flush`, `koldstore-manifest` | `pg_koldstore::sql::flush` |
 | DB worker + shared jobs | `koldstore-worker` | `pg_koldstore::database_worker` |

@@ -84,10 +84,13 @@ RUN set -eux; \
     install -m 0755 /tmp/koldstore/koldstore.so "${LIBDIR}/koldstore.so"; \
     rm -rf /tmp/koldstore; \
     chmod +x /usr/local/bin/release-entrypoint.sh; \
+    # PGDG sample defaults to localhost; Docker port publish needs '*'.
+    # koldstore must be preloaded so every backend installs KoldMergeScan
+    # planner hooks — otherwise SELECT on managed tables is heap-only.
     conf_sample="$(pg_config --sharedir)/postgresql.conf.sample"; \
     printf "\n# pg-koldstore release image defaults\n" >> "${conf_sample}"; \
-    printf "shared_preload_libraries = 'pg_cron'\n" >> "${conf_sample}"; \
-    printf "cron.database_name = 'koldstore'\n" >> "${conf_sample}"
+    printf "listen_addresses = '*'\n" >> "${conf_sample}"; \
+    printf "shared_preload_libraries = 'koldstore'\n" >> "${conf_sample}"
 
 STOPSIGNAL SIGINT
 EXPOSE 5432

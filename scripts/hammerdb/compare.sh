@@ -126,8 +126,8 @@ prepare_db() {
     -c "DROP DATABASE IF EXISTS ${PG_DATABASE}" \
     -c "CREATE DATABASE ${PG_DATABASE}"
   psql_db \
-    -c "CREATE EXTENSION IF NOT EXISTS koldstore;" \
-    -c "ALTER DATABASE ${PG_DATABASE} SET session_preload_libraries = 'koldstore';"
+    -c "CREATE EXTENSION IF NOT EXISTS koldstore;"
+  # shared_preload_libraries=koldstore is set by run-pg-e2e.sh (required for merge scan).
 }
 
 build_schema() {

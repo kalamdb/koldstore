@@ -13,6 +13,8 @@ pub mod hooks;
 pub mod memory;
 pub mod merge_scan;
 pub mod observability;
+#[cfg(feature = "pg")]
+pub mod preload;
 pub mod row_counter_cache;
 pub mod settings;
 pub mod spi;
@@ -35,6 +37,8 @@ pub mod pg_test {
     pub fn postgresql_conf_options() -> Vec<&'static str> {
         vec![
             "wal_level=logical",
+            // Merge-scan hooks + launcher must exist in every backend.
+            "shared_preload_libraries=koldstore",
             // Launcher + provisioner + applier need headroom beyond defaults.
             "max_worker_processes=16",
         ]
@@ -67,9 +71,19 @@ pub fn koldstore_version() -> &'static str {
 }
 
 /// Initializes extension hooks when loaded by PostgreSQL.
+///
+/// Must run under `shared_preload_libraries`. Loading via `CREATE EXTENSION` /
+/// `LOAD` / `session_preload_libraries` alone is rejected so managed-table
+/// SELECTs cannot silently fall back to heap-only scans in fresh backends.
 #[cfg(feature = "pg")]
 #[no_mangle]
 pub extern "C" fn _PG_init() {
+    let preloading = unsafe { pgrx::pg_sys::process_shared_preload_libraries_in_progress };
+    if !preloading {
+        pgrx::error!("{}", preload::preload_required_message());
+    }
+    preload::mark_loaded_via_shared_preload();
+
     #[cfg(feature = "s3")]
     koldstore_storage::ensure_rustls_ring_provider();
     observability::init_tracing();

@@ -62,6 +62,7 @@ fn manage_table_pg_impl(
     mirror_capture_mode: &str,
     auto_flush: bool,
 ) -> pgrx::Uuid {
+    crate::preload::require_shared_preload();
     // Validate logical decoding before taking the transaction-scoped job lock.
     let requested_capture_mode =
         MirrorCaptureMode::parse(mirror_capture_mode).unwrap_or_else(|| {

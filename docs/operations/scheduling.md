@@ -11,10 +11,9 @@ worker (the same process that applies async mirror WAL). On each
 
 ## Built-in scheduler
 
-Requires `shared_preload_libraries = 'koldstore'` for the cluster launcher to
-re-register workers after postmaster restart. Without preload, `manage_table`
-and the first backend that needs the worker still start it for the life of the
-postmaster.
+Requires `shared_preload_libraries = 'koldstore'` so merge-scan hooks and the
+cluster launcher exist in every backend after postmaster restart. Shared preload
+is mandatory for correctness (not only for scheduling).
 
 ```sql
 -- Per-database (preferred for the bgworker — new backends inherit this):

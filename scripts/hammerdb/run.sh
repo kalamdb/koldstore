@@ -104,9 +104,7 @@ echo "recreating HammerDB database ${PG_DATABASE}"
   -c "CREATE DATABASE ${PG_DATABASE}"
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
   -c "CREATE EXTENSION IF NOT EXISTS koldstore;"
-# Merge scan requires the library loaded in-session / via preload.
-"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
-  -c "ALTER DATABASE ${PG_DATABASE} SET session_preload_libraries = 'koldstore';"
+# shared_preload_libraries=koldstore is set by run-pg-e2e.sh (required for merge scan).
 
 fill_tcl "$BUILD_TCL_SRC" "$BUILD_TCL"
 fill_tcl "$RUN_TCL_SRC" "$RUN_TCL"
