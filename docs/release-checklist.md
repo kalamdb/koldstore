@@ -26,11 +26,14 @@
 - Review backup/PITR documentation and object-store backup warnings.
 - Confirm SQL API, architecture, performance, and operations docs are updated.
 - To publish the try-it Docker image, run the Release workflow with `docker_push=true`
-  (requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets). The job reuses the
-  PG16 `ubuntu24.04` amd64 tarball, installs `pg_cron`, smoke-tests
+  (requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets). The Hub token needs
+  `read`/`write`/`delete` scope so the job can update the repository overview.
+  The job reuses the PG16 `ubuntu24.04` amd64 tarball, installs `pg_cron`, smoke-tests
   `CREATE EXTENSION` / `pg_extension`, then pushes both
   `jamals86/pg-koldstore` (Docker Hub) and `ghcr.io/kalamdb/pg-koldstore`
-  (GitHub Packages / GHCR) with `:VERSION-pg16` and `:latest`. After the first
+  (GitHub Packages / GHCR) with `:VERSION-pg16` and `:latest`. After promote it
+  PATCHes Docker Hub short description + full overview from
+  `docker/image-description.txt` (not the project README). After the first
   GHCR publish, set the package visibility to Public under
   [Packages](https://github.com/orgs/kalamdb/packages) if anonymous pulls should
   work without a GitHub token.

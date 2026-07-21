@@ -6,7 +6,7 @@ PostgreSQL 16 with the [KoldStore](https://github.com/kalamdb/koldstore) extensi
 
 KoldStore is an open-source PostgreSQL extension for tables that grow forever (messages, audit logs, AI history, notifications, events, IoT). The active working set stays in PostgreSQL; older rows flush to compressed Parquet on storage you control; reads still go through the original table.
 
-A built-in database worker auto-flushes managed tables when hot rows exceed `hot_row_limit` (`auto_flush` defaults to `true`). Manual `flush_table` / `flush_pending` remain available if you want to control flush yourself (for example with `pg_cron`).
+A built-in database worker auto-flushes managed tables when hot rows exceed `hot_row_limit` (`auto_flush` defaults to `true`). Manual `flush_table` remains available if you want to control flush yourself (for example with `pg_cron`).
 
 > **Early development — not production-ready.** Manage, flush, auto-flush scheduling, and hot/cold query work. Recovery, backup/restore, compaction, and schema evolution are still being hardened.
 

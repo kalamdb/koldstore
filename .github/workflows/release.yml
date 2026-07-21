@@ -591,8 +591,8 @@ jobs:
             exit 1
           fi
           CANDIDATE_TAG="${VERSION}-pg${DOCKER_PG_MAJOR}-ci-${SHORT_SHA}"
-          # OCI / Hub short description (≤100 chars). Full Hub Overview lives in
-          # docker/image-description.txt for manual paste (or a future Hub sync).
+          # OCI image label + Docker Hub short description (≤100 chars).
+          # Full Hub Overview is synced from docker/image-description.txt after promote.
           DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly."
           {
             echo "docker_repo=${DOCKER_REPO}"
@@ -718,3 +718,13 @@ jobs:
 
           echo "::notice::Published ${HUB_REPO}:${VERSION_TAG} and ${HUB_REPO}:${LATEST_TAG}"
           echo "::notice::Published ${GHCR_IMAGE}:${VERSION_TAG} and ${GHCR_IMAGE}:${LATEST_TAG}"
+
+      - name: Update Docker Hub repository overview
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.vars.outputs.docker_repo }}
+          short-description: ${{ steps.vars.outputs.description }}
+          readme-filepath: ./docker/image-description.txt
+          enable-url-completion: true
