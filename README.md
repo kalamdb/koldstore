@@ -15,7 +15,7 @@ Your table remains a normal PostgreSQL heap table. KoldStore keeps the active wo
 
 <p align="center">
   <a href="https://github.com/kalamdb/koldstore/releases"><img src="https://img.shields.io/github/v/release/kalamdb/koldstore?display_name=tag&amp;label=release" alt="Release" /></a>
-  <a href="https://github.com/kalamdb/koldstore/pkgs/container/pg-koldstore"><img src="https://img.shields.io/badge/docker-ghcr.io%2Fkalamdb%2Fpg--koldstore-2496ED?logo=docker&amp;logoColor=white" alt="Docker image" /></a>
+  <a href="https://hub.docker.com/r/jamals86/pg-koldstore"><img src="https://img.shields.io/docker/pulls/jamals86/pg-koldstore" alt="Docker Pulls" /></a>
   <a href="https://github.com/kalamdb/koldstore/actions/workflows/ci-tests.yml"><img src="https://github.com/kalamdb/koldstore/actions/workflows/ci-tests.yml/badge.svg" alt="CI Tests" /></a>
   <img src="https://img.shields.io/badge/PostgreSQL-15%E2%80%9318-336791" alt="PostgreSQL 15-18" />
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.96%2B-orange.svg" alt="Rust 1.96+" /></a>
