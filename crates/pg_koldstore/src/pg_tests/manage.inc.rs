@@ -99,6 +99,78 @@ fn manage_rejects_unsupported_column_type() {
 }
 
 #[pg_test]
+fn manage_table_accepts_unqualified_name_via_search_path() {
+    let suffix = unique_suffix("textname");
+    let schema = format!("pgtest_{suffix}");
+    let storage = register_temp_storage(&suffix);
+    create_messages_table(&schema, "messages");
+    Spi::run(&format!("SET search_path TO {schema}, public")).expect("search_path");
+
+    Spi::run(&format!(
+        r#"
+        SELECT koldstore.manage_table(
+          table_name => 'messages',
+          storage => '{storage}',
+          hot_row_limit => 1000,
+          migration_order_by => 'id'
+        )
+        "#
+    ))
+    .expect("manage_table with unqualified regclass name");
+
+    let managed = spi_get_text(&format!(
+        "SELECT count(*)::text FROM koldstore.schemas WHERE table_oid = '{schema}.messages'::regclass::oid AND active"
+    ));
+    assert_eq!(managed, "1");
+}
+
+#[pg_test]
+fn flush_table_accepts_unqualified_name_via_search_path() {
+    let suffix = unique_suffix("flushname");
+    let schema = format!("pgtest_{suffix}");
+    let storage = register_temp_storage(&suffix);
+    create_messages_table(&schema, "messages");
+    Spi::run(&format!("SET search_path TO {schema}, public")).expect("search_path");
+    manage_shared("messages", &storage);
+    Spi::run("INSERT INTO messages (id, body) VALUES (1, 'a'), (2, 'b')").expect("insert");
+
+    Spi::run("SELECT koldstore.flush_table(table_name => 'messages', force => true)")
+        .expect("flush_table with unqualified regclass name");
+}
+
+#[pg_test]
+#[should_panic(expected = "cross-database references are not implemented")]
+fn manage_table_rejects_cross_database_name() {
+    let suffix = unique_suffix("crossdb");
+    let storage = register_temp_storage(&suffix);
+    let _ = Spi::run(&format!(
+        r#"
+        SELECT koldstore.manage_table(
+          table_name => 'chat.public.messages',
+          storage => '{storage}',
+          hot_row_limit => 1000
+        )
+        "#
+    ));
+}
+
+#[pg_test]
+#[should_panic(expected = "does not exist")]
+fn manage_table_missing_name_errors_clearly() {
+    let suffix = unique_suffix("missing");
+    let storage = register_temp_storage(&suffix);
+    let _ = Spi::run(&format!(
+        r#"
+        SELECT koldstore.manage_table(
+          table_name => 'no_such_table_xyz',
+          storage => '{storage}',
+          hot_row_limit => 1000
+        )
+        "#
+    ));
+}
+
+#[pg_test]
 fn supported_datatypes_and_nulls_roundtrip() {
     let suffix = unique_suffix("types");
     let schema = format!("pgtest_{suffix}");

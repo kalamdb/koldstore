@@ -15,16 +15,16 @@ A built-in database worker auto-flushes managed tables when hot rows exceed `hot
 ```bash
 docker pull jamals86/pg-koldstore:latest
 docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
-psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
+psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
 ```
 
-Multi-arch (`linux/amd64`, `linux/arm64`). Default database is `koldstore`. Extension `koldstore` is created on first init.
+Multi-arch (`linux/amd64`, `linux/arm64`). Default database is `koldstoredb`. Extension `koldstore` is created on first init.
 
 ```sql
 SELECT koldstore.register_storage(
   name         => 'local-dev',
   storage_type => 'filesystem',
-  base_path    => '/tmp/koldstore-demo',
+  base_path    => '/koldstore/data',
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb
 );
@@ -43,7 +43,7 @@ SELECT koldstore.manage_table(
   storage            => 'local-dev',
   hot_row_limit      => 1000,
   min_flush_rows     => 1,
-  max_rows_per_file  => 500,
+  max_rows_per_file  => 1000,
   migration_order_by => 'id',
   auto_flush         => true   -- default; set false to drive flush yourself
 );
@@ -59,9 +59,10 @@ SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 | Component | Notes |
 | --- | --- |
 | PostgreSQL | 16 (Ubuntu 24.04 / PGDG) |
-| `koldstore` | Preinstalled extension (S3-capable build); built-in auto-flush worker |
+| `koldstore` | Preinstalled + in `shared_preload_libraries` (required for KoldMergeScan + auto-flush worker) |
 | `pg_cron` | Packaged only; not preloaded. Enable yourself if you want cron-based flush |
 | Entrypoint | Compatible with official `POSTGRES_*` env vars |
+| Cold data dir | `/koldstore/data` (postgres-owned; declare a volume to keep Parquet across restarts) |
 
 ## Tags
 
@@ -78,7 +79,7 @@ Same as the official Postgres image, including:
 
 - `POSTGRES_PASSWORD` (required)
 - `POSTGRES_USER` (default `postgres`)
-- `POSTGRES_DB` (default `koldstore`)
+- `POSTGRES_DB` (default `koldstoredb`)
 
 ## Links
 

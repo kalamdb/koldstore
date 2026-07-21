@@ -27,10 +27,10 @@ use koldstore_common::TableName;
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "enqueue_flush_job", schema = "koldstore", security_definer)]
 pub fn enqueue_flush_job_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
 ) -> i64 {
-    enqueue_flush_job_pg_impl(table_name, force)
+    enqueue_flush_job_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("enqueue flush job failed: {error}"))
 }
 
@@ -66,10 +66,10 @@ fn enqueue_flush_job_pg_impl(table_oid: pgrx::pg_sys::Oid, force: bool) -> Resul
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "recover_segments", schema = "koldstore", security_definer)]
 pub fn recover_segments_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     dry_run: pgrx::default!(bool, false),
 ) -> i64 {
-    recover_segments_pg_impl(table_name, dry_run)
+    recover_segments_pg_impl(table_name.oid(), dry_run)
         .unwrap_or_else(|error| pgrx::error!("recover segments failed: {error}"))
 }
 
@@ -188,9 +188,9 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
 pub fn flush_table_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
 ) -> pgrx::Uuid {
-    execute::flush_table_pg_impl(table_name, force)
+    execute::flush_table_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
 }

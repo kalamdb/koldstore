@@ -105,7 +105,7 @@ fi
 
 echo "==> waiting for PostgreSQL"
 deadline=$((SECONDS + 120))
-until compose exec -T postgres pg_isready -U postgres -d koldstore >/dev/null 2>&1; do
+until compose exec -T postgres pg_isready -U postgres -d koldstoredb >/dev/null 2>&1; do
   if (( SECONDS > deadline )); then
     echo "error: PostgreSQL did not become ready in time" >&2
     exit 1
@@ -114,7 +114,7 @@ until compose exec -T postgres pg_isready -U postgres -d koldstore >/dev/null 2>
 done
 
 until compose exec -T postgres \
-  psql -U postgres -d koldstore -tAc "SELECT 1 FROM pg_extension WHERE extname = 'koldstore'" \
+  psql -U postgres -d koldstoredb -tAc "SELECT 1 FROM pg_extension WHERE extname = 'koldstore'" \
   | grep -q 1; do
   if (( SECONDS > deadline )); then
     echo "error: koldstore extension was not installed" >&2
@@ -132,15 +132,15 @@ PostgreSQL:
   port:     ${PG_PORT}
   user:     postgres
   password: postgres
-  database: koldstore
-  url:      postgres://postgres:postgres@127.0.0.1:${PG_PORT}/koldstore
+  database: koldstoredb
+  url:      postgres://postgres:postgres@127.0.0.1:${PG_PORT}/koldstoredb
 
 Extension:
   CREATE EXTENSION koldstore;  -- already applied on first boot
   SELECT koldstore_version();
 
 Connect:
-  psql postgres://postgres:postgres@127.0.0.1:${PG_PORT}/koldstore
+  psql postgres://postgres:postgres@127.0.0.1:${PG_PORT}/koldstoredb
 
 EOF
 

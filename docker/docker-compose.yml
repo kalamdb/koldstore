@@ -9,14 +9,14 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: koldstore
+      POSTGRES_DB: koldstoredb
     ports:
       - "${PG_PORT:-5432}:5432"
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U postgres -d koldstore && psql -U postgres -d koldstore -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'koldstore'\" | grep -q 1",
+          "pg_isready -U postgres -d koldstoredb && psql -U postgres -d koldstoredb -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'koldstore'\" | grep -q 1",
         ]
       interval: 5s
       timeout: 5s

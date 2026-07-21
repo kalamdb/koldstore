@@ -25,7 +25,7 @@ Options:
   -h, --help     Show this help text
 
 Manual follow-up:
-  psql "postgres://postgres:postgres@127.0.0.1:5432/koldstore" -f docker/sql/example.sql
+  psql "postgres://postgres:postgres@127.0.0.1:5432/koldstoredb" -f docker/sql/example.sql
 EOF
 }
 
@@ -66,7 +66,7 @@ compose() {
 }
 
 psql_cmd() {
-  compose exec -T postgres psql -U postgres -d koldstore -v ON_ERROR_STOP=1 "$@"
+  compose exec -T postgres psql -U postgres -d koldstoredb -v ON_ERROR_STOP=1 "$@"
 }
 
 assert_eq() {
@@ -207,10 +207,10 @@ cat <<EOF
 docker/test.sh passed.
 
 Re-run the demo SQL manually:
-  psql "postgres://postgres:postgres@127.0.0.1:${PG_PORT}/koldstore" -f docker/sql/example.sql
+  psql "postgres://postgres:postgres@127.0.0.1:${PG_PORT}/koldstoredb" -f docker/sql/example.sql
 
 Connect:
-  psql "postgres://postgres:postgres@127.0.0.1:${PG_PORT}/koldstore"
+  psql "postgres://postgres:postgres@127.0.0.1:${PG_PORT}/koldstoredb"
 
 MinIO console:
   http://127.0.0.1:${MINIO_CONSOLE_PORT}  (minioadmin / minioadmin)

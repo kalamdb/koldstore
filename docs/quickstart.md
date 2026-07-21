@@ -13,7 +13,7 @@ CREATE EXTENSION koldstore;
 SELECT koldstore.register_storage(
   name         => 'local-dev',
   storage_type => 'filesystem',
-  base_path    => '/tmp/koldstore-demo',
+  base_path    => '/koldstore/data',
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb
 );
@@ -49,7 +49,7 @@ SELECT koldstore.manage_table(
   storage           => 'local-dev',
   hot_row_limit     => 1000,
   min_flush_rows    => 1,
-  max_rows_per_file => 500,
+  max_rows_per_file => 1000,
   migration_order_by => 'id'
 ) AS manage_job_id;
 ```
@@ -86,7 +86,7 @@ SELECT koldstore.manage_table(
   storage             => 'local-dev',
   hot_row_limit       => 1000,
   min_flush_rows      => 1,
-  max_rows_per_file   => 500,
+  max_rows_per_file   => 1000,
   migration_order_by  => 'id',
   mirror_capture_mode => 'async'
 ) AS manage_job_id;
@@ -221,7 +221,7 @@ SELECT count(*) FROM app.messages;
 Cold files are written below the storage root using the table namespace and name:
 
 ```text
-/tmp/koldstore-demo/app/messages/
+/koldstore/data/app/messages/
   manifest.json
   001/segment-0001-<8-hex>.parquet
 ```

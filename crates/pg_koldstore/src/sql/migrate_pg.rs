@@ -12,12 +12,15 @@ use uuid::Uuid;
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, mirror_capture_mode default 'strict', auto_flush default true)`.
+/// `koldstore.manage_table(table_name regclass, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, mirror_capture_mode default 'strict', auto_flush default true)`.
+///
+/// `table_name` is `regclass`: `'messages'` resolves via `search_path` in the
+/// current database; `'public.messages'` / `'schema.table'` also work.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
 pub fn manage_table_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     storage: &str,
     hot_row_limit: Option<i64>,
     min_flush_rows: pgrx::default!(i64, 1000),
@@ -31,7 +34,7 @@ pub fn manage_table_pg(
     auto_flush: pgrx::default!(bool, true),
 ) -> pgrx::Uuid {
     manage_table_pg_impl(
-        table_name,
+        table_name.oid(),
         table_type,
         storage,
         scope_column,
@@ -722,8 +725,8 @@ fn run_existing_table_mirror_initialization_inline(
 /// Manual `flush_table` / `enqueue_flush_job` / cron ignore this flag.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "set_table_auto_flush", schema = "koldstore", security_definer)]
-pub fn set_table_auto_flush_pg(table_name: pgrx::pg_sys::Oid, enabled: bool) -> bool {
-    set_table_auto_flush_pg_impl(table_name, enabled)
+pub fn set_table_auto_flush_pg(table_name: pgrx::PgRelation, enabled: bool) -> bool {
+    set_table_auto_flush_pg_impl(table_name.oid(), enabled)
         .unwrap_or_else(|error| pgrx::error!("set_table_auto_flush failed: {error}"))
 }
 
@@ -771,7 +774,7 @@ SELECT EXISTS (SELECT 1 FROM updated)
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "unmanage_table", schema = "koldstore", security_definer)]
 pub fn unmanage_table_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     rehydrate: pgrx::default!(Option<bool>, "NULL"),
     drop_cold: pgrx::default!(Option<bool>, "NULL"),
 ) -> i64 {
@@ -781,7 +784,7 @@ pub fn unmanage_table_pg(
         drop_cold,
     }
     .options();
-    unmanage_table_pg_impl(table_name, options)
+    unmanage_table_pg_impl(table_name.oid(), options)
         .unwrap_or_else(|error| pgrx::error!("unmanage table failed: {error}"))
 }
 

@@ -47,7 +47,11 @@ pub enum MigrationConstraintError {
     #[error("unsupported table type `{0}`")]
     UnsupportedTableType(String),
     /// The configured file row limit is below the runtime floor.
-    #[error("max_rows_per_file must be at least {minimum} (got {value})")]
+    #[error(
+        "max_rows_per_file must be at least {minimum} (got {value}); \
+omit max_rows_per_file to use the default ({minimum}), or temporarily \
+SET koldstore.min_max_rows_per_file lower for demos"
+    )]
     MaxRowsPerFileBelowFloor {
         /// Invalid row limit.
         value: u64,

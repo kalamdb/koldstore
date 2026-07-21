@@ -155,8 +155,8 @@ the Release workflow after setting `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
 docker pull ghcr.io/kalamdb/pg-koldstore:latest
 docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/kalamdb/pg-koldstore:latest
 # or: docker pull jamals86/pg-koldstore:latest
-# psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
-# koldstore is created on first boot; built-in auto-flush handles hot_row_limit
+# psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
+# koldstore extension is created on first boot; built-in auto-flush handles hot_row_limit
 # pg_cron is packaged but not enabled; preload it yourself only if needed
 ```
 

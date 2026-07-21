@@ -190,7 +190,7 @@ Published release images ship PostgreSQL 16 with `koldstore` already installed:
 ```bash
 docker pull ghcr.io/kalamdb/pg-koldstore:latest
 docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/kalamdb/pg-koldstore:latest
-psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
+psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
 ```
 
 The same tags are also published to Docker Hub as `jamals86/pg-koldstore`
@@ -201,7 +201,7 @@ CREATE EXTENSION IF NOT EXISTS koldstore;
 SELECT koldstore.register_storage(
   name         => 'local-dev',
   storage_type => 'filesystem',
-  base_path    => '/tmp/koldstore-demo',
+  base_path    => '/koldstore/data',
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb
 );

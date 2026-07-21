@@ -68,5 +68,7 @@ RUN EXTDIR="$(pg_config --sharedir)/extension" \
     && install -d "${EXTDIR}" "${LIBDIR}" \
     && install -m 0644 /tmp/koldstore-ext/* "${EXTDIR}/" \
     && install -m 0755 /tmp/koldstore-lib/pg_koldstore.so "${LIBDIR}/" \
-    && rm -rf /tmp/koldstore-ext /tmp/koldstore-lib
+    && rm -rf /tmp/koldstore-ext /tmp/koldstore-lib \
+    && mkdir -p /koldstore/data \
+    && chown -R postgres:postgres /koldstore
 USER postgres

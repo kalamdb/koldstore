@@ -4,11 +4,11 @@
 --   docker/run.sh                 # starts Postgres (koldstore preloaded) + MinIO
 --
 -- Run from the host:
---   psql "postgres://postgres:postgres@127.0.0.1:5432/koldstore" -f docker/sql/example.sql
+--   psql "postgres://postgres:postgres@127.0.0.1:5432/koldstoredb" -f docker/sql/example.sql
 --
 -- Or from inside the Postgres container:
 --   docker compose -f docker/docker-compose.yml exec -T postgres \
---     psql -U postgres -d koldstore -f - < docker/sql/example.sql
+--     psql -U postgres -d koldstoredb -f - < docker/sql/example.sql
 --
 -- Notes:
 --   * MinIO is reached at http://minio:9000 from inside the compose network.

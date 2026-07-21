@@ -16,7 +16,7 @@ they are not a second API.
 SELECT koldstore.register_storage(
   name         => 'local-dev',
   storage_type => 'filesystem',
-  base_path    => '/tmp/koldstore-demo',
+  base_path    => '/koldstore/data',
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb
 );
@@ -25,7 +25,7 @@ SELECT koldstore.register_storage(
 SELECT koldstore.register_storage(
   'local-dev',
   'filesystem',
-  '/tmp/koldstore-demo',
+  '/koldstore/data',
   '{}'::jsonb,
   '{}'::jsonb
 );
@@ -128,7 +128,7 @@ Two overloads are available. Both accept named arguments.
 SELECT koldstore.register_storage(
   name         => 'local-dev',
   storage_type => 'filesystem',
-  base_path    => '/tmp/koldstore-demo',
+  base_path    => '/koldstore/data',
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb
 );
@@ -137,7 +137,7 @@ SELECT koldstore.register_storage(
 SELECT koldstore.register_storage(
   name                 => 'local-dev',
   storage_type         => 'filesystem',
-  base_path            => '/tmp/koldstore-demo',
+  base_path            => '/koldstore/data',
   credentials          => '{}'::jsonb,
   config               => '{}'::jsonb,
   shared_path_template => '{namespace}/{tableName}/',
@@ -201,7 +201,7 @@ also available.
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `table_name` | required | Table to manage (`regclass`) |
+| `table_name` | required | Table to manage (`regclass`; `'messages'` uses `search_path`, or pass `'schema.table'`) |
 | `storage` | required | Registered storage backend name |
 | `hot_row_limit` | required (`NULL` allowed) | Maximum mirror rows to keep hot; `NULL` for hot-only tables |
 | `min_flush_rows` | `1000` | Minimum excess rows required before a flush moves data cold |

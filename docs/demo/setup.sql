@@ -4,15 +4,15 @@
 CREATE EXTENSION IF NOT EXISTS koldstore;
 
 -- Demo uses max_rows_per_file => 10000; default floor is 1000.
-ALTER DATABASE koldstore SET koldstore.min_max_rows_per_file = 10000;
+ALTER DATABASE koldstoredb SET koldstore.min_max_rows_per_file = 10000;
 
 -- Keep the visible recording free of trigger-create NOTICE spam.
-ALTER DATABASE koldstore SET client_min_messages TO warning;
+ALTER DATABASE koldstoredb SET client_min_messages TO warning;
 
 SELECT koldstore.register_storage(
   name         => 'local-dev',
   storage_type => 'filesystem',
-  base_path    => '/tmp/koldstore-demo',
+  base_path    => '/koldstore/data',
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb
 );

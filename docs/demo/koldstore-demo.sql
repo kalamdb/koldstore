@@ -97,9 +97,9 @@ WHERE id = 7;
 \echo '━━━ 9. Cold files written by KoldStore ━━━━━━━━━━━━━━━━━━━━━━━'
 \! sleep 0.5
 
-\! du -sh /tmp/koldstore-demo/app/messages
+\! du -sh /koldstore/data/app/messages
 \! echo
-\! ls -lh /tmp/koldstore-demo/app/messages/
+\! ls -lh /koldstore/data/app/messages/
 
 \! sleep 4
 
