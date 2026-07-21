@@ -37,7 +37,9 @@ SELECT koldstore.manage_table(
   storage => 'sqlsmith_fs',
   hot_row_limit => 40,
   min_flush_rows => 1,
-  max_rows_per_file => 50
+  max_rows_per_file => 50,
+  migration_order_by => 'id',
+  auto_flush => false
 );
 
 SELECT koldstore.flush_table('sqlsmith_ks.fuzz_rows'::regclass);

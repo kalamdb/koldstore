@@ -77,12 +77,14 @@ esac
 
 SQLSMITH_LOG="${LOG_DIR}/sqlsmith.log"
 COMPARE_LOG="${LOG_DIR}/compare.log"
+TARGET_URI="postgres://${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}?options=-csearch_path%3Ddiff_ks"
 
 set +e
 timeout "${SECONDS_LIMIT}" "${SQLSMITH_BIN}" \
   --verbose \
+  --exclude-catalog \
   --seed="${SEED}" \
-  --target="postgres://${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}" \
+  --target="${TARGET_URI}" \
   >"${SQLSMITH_LOG}" 2>&1
 rc=$?
 set -e
@@ -98,6 +100,27 @@ if grep -Eiq "${FATAL_PATTERNS}" "${SQLSMITH_LOG}"; then
   exit 1
 fi
 
-psql_db -f "${ROOT_DIR}/scripts/differential/compare_hashes.sql" >"${COMPARE_LOG}" 2>&1
+# Client timeout / backend abort can leave the postmaster in crash recovery.
+for _ in $(seq 1 45); do
+  if "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+compare_ok=0
+for attempt in 1 2 3 4 5; do
+  if psql_db -f "${ROOT_DIR}/scripts/differential/compare_hashes.sql" >"${COMPARE_LOG}" 2>&1; then
+    compare_ok=1
+    break
+  fi
+  echo "differential compare attempt ${attempt} failed; retrying after recovery wait"
+  sleep 2
+done
+if [[ "$compare_ok" -ne 1 ]]; then
+  echo "error: differential hash compare failed; see ${COMPARE_LOG}" >&2
+  cat "${COMPARE_LOG}" >&2 || true
+  exit 1
+fi
 
 echo "differential SQLsmith compare completed (seed=${SEED}, log=${LOG_DIR})"
