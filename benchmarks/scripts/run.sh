@@ -8,18 +8,14 @@ PGBENCH_DIR="$ROOT_DIR/benchmarks/pgbench"
 RESULTS_DIR="$ROOT_DIR/benchmarks/results"
 
 psql_in_mode() {
-  # Extension modes preload koldstore so planner hooks register before SELECT.
-  # Baseline must not preload: DROP EXTENSION removes catalog tables and the
-  # hook panics if the library is still injected into the session.
+  # Extension modes rely on shared_preload_libraries=koldstore (set when the
+  # pgrx server is started below). Baseline must not need the extension.
   #
   # Hot-only keeps merge scan OFF: all rows are still in the heap, so queries
   # must use normal Index/Seq Scan. Otherwise KoldMergeScan (cost 0) always
   # wins and the "hot-only" numbers measure merge-scan overhead, not mirror
   # overhead — which previously showed ~99% slower TPS vs baseline.
   local pgoptions="-c search_path=${BENCH_SCHEMA},public,koldstore"
-  if [[ "${MODE:-}" != baseline && "${MODE:-}" != "" ]]; then
-    pgoptions="-c session_preload_libraries=koldstore ${pgoptions}"
-  fi
   if [[ "${MODE:-}" == extension-hot ]]; then
     pgoptions="${pgoptions} -c koldstore.enable_merge_scan=off"
   fi
@@ -85,9 +81,8 @@ SQL
         hot_row_limit=""
         ;;
     esac
-    # CREATE EXTENSION must not run under session_preload_libraries=koldstore:
-    # the merge-scan planner hook probes koldstore.schemas, which does not exist
-    # until catalog bootstrap finishes. Manage/register still use plain search_path.
+    # CREATE EXTENSION runs with koldstore already shared-preloaded; the
+    # planner hook no-ops until koldstore.schemas exists (managed_catalog_ready).
     PGOPTIONS="-c search_path=${BENCH_SCHEMA},public,koldstore" \
       psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
       -v KOLDSTORE_BENCH_STORAGE_PATH="$KOLDSTORE_BENCH_STORAGE_PATH" \
@@ -528,9 +523,6 @@ run_benchmark() {
   local out_path="$RAW_DIR/${name}.out"
   local err_path="$RAW_DIR/${name}.err"
   local pgoptions="-c search_path=${BENCH_SCHEMA},public,koldstore"
-  if [[ "$MODE" != baseline ]]; then
-    pgoptions="-c session_preload_libraries=koldstore ${pgoptions}"
-  fi
   if [[ "$MODE" == extension-hot ]]; then
     # Measure mirror/trigger overhead on the normal PG plan, not KoldMergeScan.
     pgoptions="${pgoptions} -c koldstore.enable_merge_scan=off"
@@ -735,7 +727,8 @@ if [[ "${KOLDSTORE_BENCH_START_PGRX:-1}" != "0" ]]; then
   export PATH="$(dirname "$PG_CONFIG"):$PATH"
 
   echo "starting pgrx-managed PostgreSQL ${PG_VERSION}"
-  cargo pgrx start "$PG_FEATURE"
+  cargo pgrx start "$PG_FEATURE" \
+    --postgresql-conf wal_level=logical
 
   echo "installing pg_koldstore into pgrx PostgreSQL ${PG_VERSION}"
   INSTALL_ARGS=(
@@ -753,8 +746,11 @@ if [[ "${KOLDSTORE_BENCH_START_PGRX:-1}" != "0" ]]; then
   fi
   cargo pgrx install "${INSTALL_ARGS[@]}"
 
-  # Ensure the server is up after install (another harness may have stopped it).
-  cargo pgrx start "$PG_FEATURE" >/dev/null
+  # Restart with shared_preload so every backend has merge-scan hooks.
+  cargo pgrx stop "$PG_FEATURE" >/dev/null 2>&1 || true
+  cargo pgrx start "$PG_FEATURE" \
+    --postgresql-conf wal_level=logical \
+    --postgresql-conf shared_preload_libraries=koldstore >/dev/null
 
   echo "recreating benchmark database ${PG_DATABASE} on ${PG_HOST}:${PG_PORT}"
   "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \

@@ -82,6 +82,7 @@ ARGS=(
   --features "${FEATURES}"
   --postgresql-conf wal_level=logical
   --postgresql-conf max_worker_processes=16
+  --postgresql-conf shared_preload_libraries=koldstore
 )
 
 if [[ "${KOLDSTORE_PGRX_BENCH_DEBUG:-0}" == "1" || "${KOLDSTORE_PGRX_BENCH_DEBUG:-}" == "true" ]]; then

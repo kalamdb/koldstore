@@ -38,7 +38,7 @@ RUN cargo pgrx init --pg"${PG_MAJOR}" "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_co
 RUN mkdir -p /out/lib /out/extension \
     && SO_FILE="$(find "target/release/koldstore-pg${PG_MAJOR}" -type f -name '*.so' | head -n1)" \
     && test -n "${SO_FILE}" \
-    && cp "${SO_FILE}" /out/lib/pg_koldstore.so \
+    && cp "${SO_FILE}" /out/lib/koldstore.so \
     && cp "target/release/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore.control" /out/extension/koldstore.control \
     && cp "target/release/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore--0.1.0.sql" /out/extension/koldstore--0.1.0.sql
 
@@ -47,7 +47,7 @@ FROM postgres:${PG_MAJOR}-bookworm
 ARG PG_MAJOR
 
 COPY --from=builder /out/extension/ /tmp/koldstore-ext/
-COPY --from=builder /out/lib/pg_koldstore.so /tmp/koldstore-lib/pg_koldstore.so
+COPY --from=builder /out/lib/koldstore.so /tmp/koldstore-lib/koldstore.so
 COPY docker/init/ /docker-entrypoint-initdb.d/
 
 USER root
@@ -67,6 +67,9 @@ RUN EXTDIR="$(pg_config --sharedir)/extension" \
     && LIBDIR="$(pg_config --pkglibdir)" \
     && install -d "${EXTDIR}" "${LIBDIR}" \
     && install -m 0644 /tmp/koldstore-ext/* "${EXTDIR}/" \
-    && install -m 0755 /tmp/koldstore-lib/pg_koldstore.so "${LIBDIR}/" \
-    && rm -rf /tmp/koldstore-ext /tmp/koldstore-lib
+    && install -m 0755 /tmp/koldstore-lib/koldstore.so "${LIBDIR}/koldstore.so" \
+    && rm -rf /tmp/koldstore-ext /tmp/koldstore-lib \
+    && conf_sample="$(pg_config --sharedir)/postgresql.conf.sample" \
+    && printf "\n# pg-koldstore local image defaults\n" >> "${conf_sample}" \
+    && printf "shared_preload_libraries = 'koldstore'\n" >> "${conf_sample}"
 USER postgres

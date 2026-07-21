@@ -5,6 +5,28 @@ It configures KoldStore's two storage tiers: PostgreSQL for the hot working set
 and local Parquet files for cold historical rows. Local filesystem storage lets
 you try the extension without S3.
 
+## 0. Shared preload (required)
+
+KoldStore installs planner hooks in `_PG_init`. Those hooks must exist in
+**every** backend, or managed `SELECT`s silently fall back to heap-only scans
+after flush (missing cold rows).
+
+```bash
+# Ubuntu / Debian example (merge with any existing preload list)
+echo "shared_preload_libraries = 'koldstore'" | \
+  sudo tee /etc/postgresql/16/main/conf.d/koldstore.conf
+sudo systemctl restart postgresql@16-main   # reload is NOT enough
+```
+
+Docker release images already set this. Confirm:
+
+```sql
+SHOW shared_preload_libraries;          -- must include koldstore
+SELECT koldstore.preload_status();      -- loaded_via_shared_preload = true
+```
+
+`session_preload_libraries` is **not** sufficient.
+
 ## 1. Create the extension and register storage
 
 ```sql

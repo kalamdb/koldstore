@@ -20,7 +20,7 @@ pub mod sync_state;
 pub use cache::{
     decode_managed_table_snapshot, decode_managed_table_snapshot_str, BoundedOidCache,
     ManagedTableSnapshot, ManagedTableSnapshotCache, OptionalLookupCache,
-    DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT,
+    DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT, MANAGED_TABLE_SNAPSHOT_CACHE_LIMIT,
 };
 pub use cold_segments::SegmentVisibility;
 pub use decode::{column_stats_min_max_map, column_stats_min_max_map_into};

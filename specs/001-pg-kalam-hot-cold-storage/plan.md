@@ -18,7 +18,7 @@ Greenfield and existing tables use normal `CREATE TABLE`, then `koldstore.migrat
 | Cold storage | Object-store Parquet and kalamdb-compatible manifest. |
 | Cold reader | Direct Arrow/Parquet/object_store reader in `koldstore-parquet`; no full DataFusion in MVP. |
 | Commit ordering | `_commit_seq` allocated under a transaction-scoped pg-koldstore commit-order lock; `changes_since` uses `_commit_seq`. |
-| Scheduling | Built-in background worker when `shared_preload_libraries` includes `koldstore`; SQL/pg_cron fallback. |
+| Scheduling | Built-in background worker when `shared_preload_libraries` includes `koldstore` (required for merge-scan correctness); optional pg_cron for scheduling flush SQL. |
 | Testing | Rust unit, pgrx/pg_regress, PostgreSQL + MinIO integration, manifest/Parquet golden files. |
 
 ## Project Structure

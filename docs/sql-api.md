@@ -37,6 +37,7 @@ SELECT koldstore.register_storage(
 SELECT snowflake_id();
 SELECT koldstore_version();
 SELECT koldstore_user_id();
+SELECT koldstore.preload_status();
 ```
 
 | Function | Returns | Meaning |
@@ -44,6 +45,11 @@ SELECT koldstore_user_id();
 | `snowflake_id()` | `bigint` | Monotonic Snowflake-like id |
 | `koldstore_version()` | `text` | Extension version |
 | `koldstore_user_id()` | `text` | Active `koldstore.user_id` GUC value, or `NULL` when unset |
+| `koldstore.preload_status()` | `jsonb` | Whether `shared_preload_libraries` lists `koldstore`, whether this process loaded via shared preload, and `enable_merge_scan` |
+
+`shared_preload_libraries = 'koldstore'` is **mandatory** for correct managed-table
+reads. Without it, `_PG_init` / `CREATE EXTENSION` / `LOAD` fail closed, and
+`manage_table` errors. `session_preload_libraries` is not sufficient.
 
 ## Configuration
 

@@ -99,23 +99,6 @@ The useful pattern for KoldStore is:
 
 See [TigerData: manage storage and tiering](https://www.tigerdata.com/docs/use-timescale/latest/data-tiering/enabling-data-tiering).
 
-### pgEdge ColdFront
-
-ColdFront uses a `hot_period` and moves completed time partitions to Iceberg.
-It advances a durable archive watermark only after the corresponding partition
-has been handled. In partitioned deployments, the physical leaf remains the
-unit of archive work even though configuration belongs to the logical table.
-
-The useful pattern for KoldStore is:
-
-- keep one logical lifecycle configuration;
-- run jobs per leaf partition;
-- retain a durable progress boundary;
-- avoid treating a partitioned parent as physical storage.
-
-See [pgEdge ColdFront usage](https://docs.pgedge.com/coldfront/development/usage/)
-and [tiered-mode architecture](https://docs.pgedge.com/coldfront/v1-0-0-beta1/architecture_tiered/).
-
 ### Apache Doris
 
 Doris separates storage resources from storage policies. A policy contains a

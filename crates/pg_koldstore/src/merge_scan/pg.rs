@@ -209,13 +209,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     }
 
     let table_oid = (*rte).relid;
-    let managed = with_hook_disabled(|| {
-        crate::catalog::cache::managed_table_snapshot(table_oid)
-            .ok()
-            .flatten()
-            .map(|snapshot| snapshot.active)
-            .unwrap_or(false)
-    });
+    let managed = with_hook_disabled(|| crate::catalog::cache::is_managed_relation(table_oid));
     if !managed {
         return;
     }

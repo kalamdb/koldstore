@@ -17,9 +17,8 @@ if [[ -n "$KOLDSTORE_BENCH_STORAGE_PATH" && -d "$KOLDSTORE_BENCH_STORAGE_PATH" ]
 fi
 
 pgoptions="-c search_path=${BENCH_SCHEMA},public,koldstore"
-if [[ "$MODE" != baseline ]]; then
-  pgoptions="-c session_preload_libraries=koldstore ${pgoptions}"
-fi
+# Merge scan requires shared_preload_libraries=koldstore on the server (set by
+# benchmarks/scripts/run.sh). session_preload_libraries is not sufficient.
 
 PGOPTIONS="$pgoptions" \
 psql "$DATABASE_URL" \

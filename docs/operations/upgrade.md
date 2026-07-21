@@ -19,8 +19,21 @@ KoldStore packages as a normal PostgreSQL extension named `koldstore`.
 
 ## Install
 
+`koldstore` **must** be in `shared_preload_libraries` before
+`CREATE EXTENSION` (and before `manage_table`). Reload is not enough — restart
+PostgreSQL after changing the preload list. `session_preload_libraries` is not
+sufficient.
+
+```bash
+# Example: Ubuntu / Debian
+echo "shared_preload_libraries = 'koldstore'" | \
+  sudo tee /etc/postgresql/16/main/conf.d/koldstore.conf
+sudo systemctl restart postgresql@16-main
+```
+
 ```sql
 CREATE EXTENSION koldstore;
+SELECT koldstore.preload_status();  -- loaded_via_shared_preload must be true
 ```
 
 Requires the shared library and control/SQL files from `cargo pgrx install` or
@@ -30,7 +43,11 @@ a release package to be present on the server.
 
 1. Install the new `.so`, `.control`, install SQL, and upgrade SQL files onto
    the PostgreSQL host (same paths `pg_config` reports for extensions).
-2. In each database that has the extension:
+2. **Before** restarting onto a build that hard-requires shared preload, ensure
+   `shared_preload_libraries` already includes `koldstore`. Otherwise backends
+   never load merge-scan hooks and managed SELECTs can silently omit cold rows.
+3. Restart PostgreSQL.
+4. In each database that has the extension:
 
 ```sql
 ALTER EXTENSION koldstore UPDATE;
@@ -39,6 +56,7 @@ ALTER EXTENSION koldstore UPDATE;
 
 SELECT extversion FROM pg_extension WHERE extname = 'koldstore';
 SELECT koldstore.koldstore_version();
+SELECT koldstore.preload_status();
 ```
 
 `extversion` should match the packaged default version. `koldstore_version()`
@@ -67,7 +85,7 @@ Prefer `ALTER DATABASE` / `ALTER SYSTEM` for background-worker GUCs (session
 
 | GUC | Production baseline | Notes |
 |-----|---------------------|--------|
-| `shared_preload_libraries` | include `koldstore` | Re-register workers after postmaster restart |
+| `shared_preload_libraries` | include `koldstore` (**required**) | Merge-scan hooks + workers; removing preload after manage is unsupported |
 | `wal_level` | `logical` | Required for async mirror |
 | `koldstore.async_mirror_max_retained_bytes` | `1073741824` (default) | Retained-WAL health threshold; exceeding it alerts but never stops apply. Use PostgreSQL disk/slot safeguards independently; `0` disables this threshold. |
 | `koldstore.flush_check_interval_seconds` | `30` (default) or tuned | Built-in auto-flush cadence |

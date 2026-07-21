@@ -204,7 +204,10 @@ Persistent background workers are registered at server start. That means operato
 shared_preload_libraries = 'koldstore'
 ```
 
-Without preload, the extension still works for SQL-managed flushes, and pg_cron can call `koldstore.flush_pending()` if installed separately.
+Shared preload is **mandatory** for correctness: merge-scan planner hooks must
+exist in every backend. Without preload, `CREATE EXTENSION` / `LOAD` fail closed.
+pg_cron may still schedule `flush_table` if installed separately, but it is not
+a substitute for shared preload.
 
 Reference:
 

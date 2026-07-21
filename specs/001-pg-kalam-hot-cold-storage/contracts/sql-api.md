@@ -14,7 +14,11 @@ DROP EXTENSION koldstore;  -- fails if managed tables exist unless CASCADE
 
 Install creates `koldstore` and `system` schemas and catalog tables.
 
-Built-in background scheduling requires `shared_preload_libraries = 'koldstore'` because PostgreSQL background workers must be registered at server start. Without preload, SQL functions still work and operators can call `koldstore.flush_pending()` manually or through pg_cron.
+`shared_preload_libraries` **must** include `koldstore` before `CREATE EXTENSION`
+(and before `manage_table`). Restart PostgreSQL after changing the preload list.
+`session_preload_libraries` is not sufficient. Built-in background scheduling and
+merge-scan hooks both require shared preload. pg_cron remains an optional
+*scheduler* for manual `flush_table` calls; it does not replace shared preload.
 
 ## Built-in Functions
 

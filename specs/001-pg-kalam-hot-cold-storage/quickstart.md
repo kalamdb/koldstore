@@ -16,7 +16,7 @@
 - PostgreSQL 15+.
 - `koldstore` extension built and installed.
 - MinIO or another object-store-compatible test backend.
-- For built-in flush worker testing: `shared_preload_libraries = 'koldstore'` and PostgreSQL restarted.
+- `shared_preload_libraries = 'koldstore'` and PostgreSQL restarted (required for merge-scan correctness; `CREATE EXTENSION` fails closed without it).
 
 ```bash
 cargo pgrx install --release -p pg_koldstore --no-default-features --features pg16 --pg-config "$(cargo pgrx info pg-config 16)"

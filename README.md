@@ -183,18 +183,46 @@ flowchart TD
   Scan --> Cold[Manifest → Parquet / S3]
 ```
 
-## Try it in five minutes
+## Required preload
 
-Published release images ship PostgreSQL 16 with `koldstore` already installed:
+Add KoldStore to `shared_preload_libraries` **before** managing tables:
 
-```bash
-docker pull ghcr.io/kalamdb/pg-koldstore:latest
-docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/kalamdb/pg-koldstore:latest
-psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
+```conf
+shared_preload_libraries = 'koldstore'
 ```
 
-The same tags are also published to Docker Hub as `jamals86/pg-koldstore`
-(`linux/amd64` and `linux/arm64`).
+This is required so queries always include both hot and cold rows. Without
+shared preload, managed `SELECT`s can silently fall back to hot-only heap
+scans after flush and miss cold rows. `session_preload_libraries` is not
+sufficient — restart PostgreSQL after changing the list (reload is not enough).
+
+Confirm with:
+
+```sql
+SHOW shared_preload_libraries;       -- must include koldstore
+SELECT koldstore.preload_status();   -- loaded_via_shared_preload = true
+```
+
+Details: [Quickstart](docs/quickstart.md#0-shared-preload-required) · [SQL API](docs/sql-api.md).
+
+## Try it in five minutes
+
+Published release images ship PostgreSQL 16 with `koldstore` **shared-preloaded**
+and `CREATE EXTENSION` applied on first init:
+
+```bash
+docker pull jamals86/pg-koldstore:latest
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
+psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
+```
+
+Confirm preload (required for correct hot+cold reads on every connection):
+
+```sql
+SHOW shared_preload_libraries;       -- must include koldstore
+SELECT koldstore.preload_status();
+```
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS koldstore;
 
@@ -242,6 +270,7 @@ To build from this repo instead, use `docker/run.sh` (compiles the extension).
 ## Requirements
 
 - PostgreSQL 15–18
+- `shared_preload_libraries` must include `koldstore` (see [Required preload](#required-preload))
 - Managed tables need a primary key
 - Supported column types today: `boolean`, integer types, `real`, `double precision`, `text`, `varchar`, `uuid`, `jsonb`, `timestamptz`
 - Local development uses `pgrx`; Docker is for packaging and smoke checks

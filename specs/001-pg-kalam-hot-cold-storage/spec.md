@@ -234,7 +234,7 @@ Operators inspect status, validate cold storage, and export/import managed table
 
 ### Operations
 
-- **FR-070**: Built-in flush scheduling MUST document `shared_preload_libraries = 'koldstore'`; SQL/pg_cron fallback MUST be available.
+- **FR-070**: `shared_preload_libraries` MUST include `koldstore`. This is required for merge-scan planner hooks in every backend and for the built-in flush/async launcher. Without preload, `CREATE EXTENSION` / `LOAD` MUST fail closed. SQL/pg_cron MAY still be used to *schedule* `flush_table` when desired, but pg_cron is not a substitute for shared preload.
 - **FR-071**: Operators MUST be able to inspect table status, jobs, manifests, and cold validation through SQL.
 - **FR-072**: Object-store backup/recovery MUST be explicit; PostgreSQL backup alone is not a full managed-table backup.
 

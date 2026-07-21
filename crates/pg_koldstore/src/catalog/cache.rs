@@ -1,6 +1,8 @@
 //! Backend-local managed-table and merge-scan segment caches.
 
 #[cfg(feature = "pg")]
+use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "pg")]
 use std::sync::Arc;
 
 #[cfg(feature = "pg")]
@@ -20,6 +22,10 @@ use crate::spi::{
 type SegmentStatsCacheKey = (u32, Vec<String>);
 #[cfg(feature = "pg")]
 type SegmentStatsCache = OptionalLookupCache<SegmentStatsCacheKey, Arc<CachedSegmentStats>>;
+
+/// Counts SPI loads of managed-table snapshots (test / diagnostics).
+#[cfg(feature = "pg")]
+static MANAGED_TABLE_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "pg")]
 thread_local! {
@@ -149,7 +155,9 @@ pub fn cached_migration_catalog(
 
 /// Loads a managed-table snapshot from cache or catalog.
 ///
-/// Cache hits share an [`Arc`] so callers avoid cloning the full snapshot.
+/// Both present and absent lookups are cached so the planner hot path stays
+/// in-memory for unmanaged tables after the first miss. Cache hits share an
+/// [`Arc`] so callers avoid cloning the full snapshot.
 ///
 /// # Errors
 ///
@@ -159,17 +167,33 @@ pub fn managed_table_snapshot(
     table_oid: pgrx::pg_sys::Oid,
 ) -> SpiResult<Option<Arc<ManagedTableSnapshot>>> {
     let key = table_oid.to_u32();
-    if let Some(snapshot) = MANAGED_TABLE_CACHE.with(|cache| cache.borrow().get(key)) {
-        return Ok(Some(snapshot));
+    if let Some(cached) = MANAGED_TABLE_CACHE.with(|cache| cache.borrow().get(key)) {
+        return Ok(cached);
     }
 
     let snapshot = load_managed_table_snapshot(table_oid)?;
-    if let Some(snapshot) = snapshot.as_ref() {
-        MANAGED_TABLE_CACHE.with(|cache| {
-            cache.borrow_mut().insert_shared(Arc::clone(snapshot));
-        });
-    }
+    MANAGED_TABLE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match snapshot.as_ref() {
+            Some(snapshot) => cache.insert_shared(Arc::clone(snapshot)),
+            None => cache.insert_absent(key),
+        }
+    });
     Ok(snapshot)
+}
+
+/// Returns whether `table_oid` is an active managed table.
+///
+/// Planner hot path: uses the same optional lookup cache as
+/// [`managed_table_snapshot`] so unmanaged relations do not SPI after the first
+/// miss (or after invalidation).
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn is_managed_relation(table_oid: pgrx::pg_sys::Oid) -> bool {
+    managed_table_snapshot(table_oid)
+        .ok()
+        .flatten()
+        .is_some_and(|snapshot| snapshot.active)
 }
 
 /// Loads published manifest path, base path, and active segment stats for merge scan.
@@ -209,6 +233,7 @@ pub fn cached_manifest_segment_stats(
 fn load_managed_table_snapshot(
     table_oid: pgrx::pg_sys::Oid,
 ) -> SpiResult<Option<Arc<ManagedTableSnapshot>>> {
+    MANAGED_TABLE_SPI_LOADS.fetch_add(1, Ordering::Relaxed);
     super::owner::with_extension_owner(|| {
         let statement = koldstore_catalog::queries::plan_managed_table_snapshot()?;
         let json = select_one::<String>(&statement, &[pgrx::datum::DatumWithOid::from(table_oid)])?;
@@ -220,6 +245,24 @@ fn load_managed_table_snapshot(
         .transpose()
     })
     .map_err(|error| map_spi_error("read managed table snapshot", &error))?
+}
+
+/// Returns how many times managed-table snapshots were loaded via SPI.
+///
+/// Used by `#[pg_test]` to assert unmanaged planner lookups stay cache hits.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn managed_table_spi_load_count() -> u64 {
+    MANAGED_TABLE_SPI_LOADS.load(Ordering::Relaxed)
+}
+
+/// Resets the managed-table SPI load counter.
+///
+/// Intended for `#[pg_test]` assertions that unmanaged planner lookups stay
+/// cache hits after the first miss.
+#[cfg(feature = "pg")]
+pub fn reset_managed_table_spi_load_count() {
+    MANAGED_TABLE_SPI_LOADS.store(0, Ordering::Relaxed);
 }
 
 #[cfg(feature = "pg")]

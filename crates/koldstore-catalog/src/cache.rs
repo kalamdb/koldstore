@@ -15,6 +15,15 @@ use serde::Deserialize;
 /// Default cap for OID-keyed and optional lookup caches.
 pub const DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT: usize = 64;
 
+/// Cap for managed-table snapshot lookups (present + absent).
+///
+/// Planner hooks consult this on every base relation of a `SELECT`. Unmanaged
+/// tables must keep a cached `None` so the hot path stays in-memory; a larger
+/// budget avoids thrashing on databases with many ordinary heaps.
+pub const MANAGED_TABLE_SNAPSHOT_CACHE_LIMIT: usize = 1024;
+
+const _: () = assert!(MANAGED_TABLE_SNAPSHOT_CACHE_LIMIT >= 1024);
+
 /// Cache that distinguishes an unqueried key from a queried-but-absent value.
 ///
 /// Catalog lookups may legitimately return no row. Keeping that absence avoids
@@ -177,11 +186,19 @@ pub struct ManagedTableSnapshot {
 
 /// In-process cache keyed by table OID.
 ///
-/// Entries are stored behind [`Arc`] so cache hits can share ownership without
-/// cloning the full snapshot on every lookup. Capacity is capped.
-#[derive(Debug, Default)]
+/// Both present snapshots and successful absences (`None`) are cached so the
+/// planner hook does not SPI-query `koldstore.schemas` on every unmanaged
+/// `SELECT`. Entries are stored behind [`Arc`] so hits share ownership without
+/// cloning. Capacity is capped at [`MANAGED_TABLE_SNAPSHOT_CACHE_LIMIT`].
+#[derive(Debug)]
 pub struct ManagedTableSnapshotCache {
-    inner: BoundedOidCache<Arc<ManagedTableSnapshot>>,
+    inner: OptionalLookupCache<u32, Arc<ManagedTableSnapshot>>,
+}
+
+impl Default for ManagedTableSnapshotCache {
+    fn default() -> Self {
+        Self::with_limit(MANAGED_TABLE_SNAPSHOT_CACHE_LIMIT)
+    }
 }
 
 impl ManagedTableSnapshotCache {
@@ -189,39 +206,45 @@ impl ManagedTableSnapshotCache {
     #[must_use]
     pub fn with_limit(limit: usize) -> Self {
         Self {
-            inner: BoundedOidCache::with_limit(limit),
+            inner: OptionalLookupCache::with_limit(limit),
         }
     }
 
-    /// Returns a shared snapshot when present.
+    /// Returns `None` on cache miss, `Some(None)` for cached absence, and
+    /// `Some(Some(snapshot))` for a cached managed-table snapshot.
     #[must_use]
-    pub fn get(&self, table_oid: u32) -> Option<Arc<ManagedTableSnapshot>> {
-        self.inner.get(table_oid).cloned()
+    pub fn get(&self, table_oid: u32) -> Option<Option<Arc<ManagedTableSnapshot>>> {
+        self.inner.get(&table_oid)
     }
 
     /// Stores or replaces a snapshot for a table OID.
     pub fn insert(&mut self, snapshot: ManagedTableSnapshot) {
         let table_oid = snapshot.table_oid;
-        self.inner.insert(table_oid, Arc::new(snapshot));
+        self.inner.insert(table_oid, Some(Arc::new(snapshot)));
     }
 
     /// Stores an already-shared snapshot.
     pub fn insert_shared(&mut self, snapshot: Arc<ManagedTableSnapshot>) {
         let table_oid = snapshot.table_oid;
-        self.inner.insert(table_oid, snapshot);
+        self.inner.insert(table_oid, Some(snapshot));
     }
 
-    /// Removes one table from the cache.
+    /// Caches a successful lookup that found no managed-table row.
+    pub fn insert_absent(&mut self, table_oid: u32) {
+        self.inner.insert(table_oid, None);
+    }
+
+    /// Removes one table from the cache (present or absent entry).
     pub fn invalidate(&mut self, table_oid: u32) {
-        self.inner.invalidate(table_oid);
+        self.inner.retain(|oid| *oid != table_oid);
     }
 
-    /// Clears all cached snapshots.
+    /// Clears all cached snapshots and absences.
     pub fn clear(&mut self) {
         self.inner.clear();
     }
 
-    /// Returns the number of cached entries.
+    /// Returns the number of cached entries (present + absent).
     #[must_use]
     pub fn len(&self) -> usize {
         self.inner.len()
@@ -351,7 +374,7 @@ fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoundedOidCache, OptionalLookupCache};
+    use super::{BoundedOidCache, ManagedTableSnapshotCache, OptionalLookupCache};
 
     #[test]
     fn optional_lookup_cache_distinguishes_miss_from_cached_absence() {
@@ -387,5 +410,16 @@ mod tests {
         cache.insert(3, "c".to_string());
         assert_eq!(cache.len(), 2);
         assert!(cache.get(3).is_some());
+    }
+
+    #[test]
+    fn managed_table_snapshot_cache_stores_absence() {
+        let mut cache = ManagedTableSnapshotCache::default();
+        assert_eq!(cache.get(99), None);
+        cache.insert_absent(99);
+        assert_eq!(cache.get(99), Some(None));
+        assert_eq!(cache.len(), 1);
+        cache.invalidate(99);
+        assert_eq!(cache.get(99), None);
     }
 }
