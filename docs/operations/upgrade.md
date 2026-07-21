@@ -51,6 +51,15 @@ the `0.1.4` beta series, rename the single `0.1.0→current` script rather than
 adding beta→beta edges; update `PREVIOUS_EXTENSION_SQL_VERSION` only when
 cutting a non-beta release. See [release-checklist.md](../release-checklist.md).
 
+Live `ALTER EXTENSION koldstore UPDATE` is covered by
+`tests/e2e/suite/extension_upgrade.rs` (simulates the previous `extversion`,
+runs UPDATE, then asserts managed-table reads/flush still work). Packaging
+contract tests remain in `crates/pg_koldstore/tests/extension_upgrade.rs`.
+
+**Deferred:** cluster `pg_upgrade` across PostgreSQL major versions is not an
+automated gate yet. Treat it as an ops runbook item until a dedicated harness
+lands.
+
 ## Production GUC baseline (async)
 
 Prefer `ALTER DATABASE` / `ALTER SYSTEM` for background-worker GUCs (session

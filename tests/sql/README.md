@@ -4,14 +4,21 @@ KoldStore-specific SQL contracts exercised against a pgrx-managed PostgreSQL
 cluster via `scripts/run-sql-regression.sh`.
 
 These tests intentionally do **not** replicate PostgreSQL's upstream regression
-suite. They cover managed-table DDL/DML, hot+cold SELECT, empty/one-row edge
-cases, and before-flush vs after-flush result equality.
+suite (see `scripts/readiness/run-upstream-pg-regress.sh` for that optional
+external signal). They cover managed-table behavior only:
+
+| Case | Purpose |
+|---|---|
+| `lifecycle.sql` | manage / describe / flush / unmanage |
+| `dml.sql` | insert / update / delete / reinsert |
+| `query_semantics.sql` | empty/one-row, before==after flush, mixed hot+cold, `ORDER BY`/`LIMIT` |
+| `errors.sql` | missing PK and double-manage error contracts |
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| `*.sql` | Input scripts (run with `ON_ERROR_STOP`) |
+| `*.sql` | Behavior cases (run with `ON_ERROR_STOP`) |
 | `expected/*.out` | Normalized expected `psql` output |
 | `setup.sql` | Shared fixture: storage + schemas + test GUCs (same psql session as each case) |
 
