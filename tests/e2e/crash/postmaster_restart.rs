@@ -167,15 +167,37 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
     // Best-effort unlock if the lock survived (usually does not after immediate stop).
     let _ = client.execute("SELECT pg_advisory_unlock_all()", &[]).await;
 
+    // Same recover → retry path as failpoint crash recovery.
+    let _ = client
+        .query_one(
+            "SELECT koldstore.recover_segments($1::text::regclass, false)",
+            &[&relation],
+        )
+        .await
+        .context("recover_segments after postmaster restart")?;
+
+    // flush_table returns uuid; cast to text like other E2E flush callers.
     let flushed = client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)",
+            "SELECT koldstore.flush_table($1::text::regclass)::text",
             &[&relation],
         )
         .await
         .context("retry flush after postmaster restart")?;
-    let _rows: i64 = flushed.get(0);
+    let job_id: String = flushed.get(0);
+    let rows_flushed: i64 = client
+        .query_one(
+            "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
+            &[&job_id],
+        )
+        .await
+        .with_context(|| format!("load rows_flushed for flush job {job_id}"))?
+        .get(0);
+    common::log_always(format!(
+        "postmaster restart: retry flushed rows_flushed={rows_flushed}"
+    ));
 
+    common::fence_async_mirror_if_needed(&client).await?;
     common::assert_pk_unique(&client, &relation, &["id"]).await?;
     let visible = common::relation_row_count(&client, &relation).await?;
     assert_eq!(

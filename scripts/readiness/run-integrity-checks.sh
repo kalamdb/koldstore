@@ -32,8 +32,22 @@ else
   PG_DATABASE="$PG_DATABASE_PREFIX"
 fi
 
-echo "running KoldStore integrity SQL against ${PG_HOST}:${PG_PORT}/${PG_DATABASE}"
-"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 <<'SQL'
+wait_for_postgres() {
+  local attempts="${1:-45}"
+  local i
+  for ((i = 1; i <= attempts; i++)); do
+    if "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
+      -c "SELECT 1" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "error: PostgreSQL at ${PG_HOST}:${PG_PORT} did not become ready" >&2
+  return 1
+}
+
+run_integrity_sql() {
+  "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 <<'SQL'
 -- Missing cold segment objects referenced by active catalog rows.
 SELECT 'duplicate_active_segments' AS check_name, count(*)::bigint AS bad
 FROM (
@@ -64,13 +78,50 @@ SELECT 'orphan_error_jobs_without_trace' AS check_name, count(*)::bigint AS bad
 FROM koldstore.jobs
 WHERE status = 'error' AND coalesce(error_trace, '') = '';
 SQL
+}
+
+echo "waiting for PostgreSQL ${PG_HOST}:${PG_PORT} before integrity checks"
+wait_for_postgres 45
+
+echo "running KoldStore integrity SQL against ${PG_HOST}:${PG_PORT}/${PG_DATABASE}"
+# Prior SQLsmith steps can abort a backend (cassert) and force crash recovery;
+# retry briefly while the postmaster finishes reinit.
+integrity_ok=0
+for attempt in 1 2 3 4 5; do
+  if run_integrity_sql; then
+    integrity_ok=1
+    break
+  fi
+  echo "integrity SQL attempt ${attempt} failed; waiting for postmaster recovery"
+  wait_for_postgres 45 || true
+  sleep 2
+done
+if [[ "$integrity_ok" -ne 1 ]]; then
+  echo "error: integrity SQL failed after retries" >&2
+  exit 1
+fi
 
 if [[ -x "$AMCHECK_BIN" ]]; then
-  echo "running pg_amcheck"
-  "$AMCHECK_BIN" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" || {
-    echo "error: pg_amcheck reported problems" >&2
-    exit 1
-  }
+  echo "ensuring amcheck extension (skip when unavailable, e.g. bare pgrx install)"
+  if ! "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS amcheck;" >/dev/null 2>&1; then
+    echo "amcheck extension not available; skipping heap/index amcheck"
+  else
+    echo "running pg_amcheck"
+    amcheck_out="$("$AMCHECK_BIN" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" 2>&1)" || {
+      amcheck_rc=$?
+      echo "$amcheck_out"
+      if echo "$amcheck_out" | grep -Eqi 'amcheck is not installed|no relations to check'; then
+        echo "pg_amcheck skipped (extension/relations unavailable)"
+      else
+        echo "error: pg_amcheck reported problems (exit ${amcheck_rc})" >&2
+        exit 1
+      fi
+    }
+    if [[ -n "${amcheck_out:-}" ]]; then
+      echo "$amcheck_out"
+    fi
+  fi
 else
   echo "pg_amcheck not found at ${AMCHECK_BIN}; skipping heap/index amcheck"
 fi

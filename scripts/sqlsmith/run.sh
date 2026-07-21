@@ -51,11 +51,16 @@ SQLsmith run against ${CONN}
 Inspect PostgreSQL logs under ~/.pgrx/${PG_VERSION}*/ if backends die.
 EOF
 
+# Scope fuzz to the fixture schema and skip catalog relations so SQLsmith does
+# not DML system catalogs / unrelated DBs (which can abort cassert backends).
+TARGET_URI="postgres://${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}?options=-csearch_path%3Dsqlsmith_ks"
+
 set +e
 timeout "${SECONDS_LIMIT}" "${SQLSMITH_BIN}" \
   --verbose \
+  --exclude-catalog \
   --seed="${SEED}" \
-  --target="postgres://${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_DATABASE}" \
+  --target="${TARGET_URI}" \
   >"${SQLSMITH_LOG}" 2>&1
 rc=$?
 set -e
@@ -71,5 +76,13 @@ if grep -Eiq "${FATAL_PATTERNS}" "${SQLSMITH_LOG}"; then
   grep -Ein "${FATAL_PATTERNS}" "${SQLSMITH_LOG}" >&2 || true
   exit 1
 fi
+
+# Timeout kills the client mid-query; wait for postmaster recovery before exit.
+for _ in $(seq 1 45); do
+  if "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
 
 echo "SQLsmith completed without observed PANIC/segfault patterns (seed=${SEED})"
