@@ -470,9 +470,8 @@ async fn toxiproxy_latency_fails_flush_without_corrupt_catalog() -> Result<()> {
             .await;
         let flush_result = db.flush_table(&table.relation).await;
         let _ = db.client.batch_execute("RESET statement_timeout;").await;
-        match flush_result {
-            Ok(rows) => assert_eq!(rows, 0, "latency toxic must not publish rows"),
-            Err(_) => {}
+        if let Ok(rows) = flush_result {
+            assert_eq!(rows, 0, "latency toxic must not publish rows");
         }
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 12);
         assert_eq!(
