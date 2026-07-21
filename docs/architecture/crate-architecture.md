@@ -101,7 +101,10 @@ flowchart BT
 
 `koldstore-setup` is a dependency-free SQL classifier (no `koldstore-*` edges).
 `koldstore-worker` is a leaf crate with no internal `koldstore-*` dependencies
-(shared job lease/status plus DB worker ensure/task/policy).
+(shared job lease/status plus DB worker ensure/task/policy). Pure scheduling
+policy, including the bounded immediate-pending retry budget, stays here;
+`pg_koldstore::database_worker` owns latch, signal, SPI-transaction, and GUC
+integration.
 **Rules:**
 
 1. Arrows point only into lower layers — no crate depends on `pg_koldstore`.
@@ -122,7 +125,7 @@ flowchart BT
 | Manifest sync-state FSM (`koldstore.manifest.sync_state`) | `koldstore-catalog` |
 | Mirror SQL / DML statements / pgoutput decoder / strict capture planners | `koldstore-mirror` (`shared` / `strict` / `async`) |
 | Hot+cold merge logic | `koldstore-merge` |
-| Database worker ensure / task / poll policy / flush-check cadence | `koldstore-worker` |
+| Database worker ensure / task / poll policy / pending retry fairness / flush-check cadence | `koldstore-worker` |
 | Flush workflow (selection, encode, segment write, catalog SQL plans, cleanup) | `koldstore-flush` |
 | Migration workflow | `koldstore-migrate` |
 | Shared privilege / LSN helpers | `koldstore-common` |

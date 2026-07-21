@@ -55,6 +55,9 @@ flush takes its table lock or resolves mirror statistics.
 This makes flush selection a strong consistency boundary for both capture modes:
 strict changes already exist in the mirror, and async changes are caught up
 before selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
+The retained-WAL health threshold never rejects this drain path: once retention
+is high, continuing apply is the recovery action. Slot loss/invalidation and
+flush lock/time budgets remain separate fail-closed correctness boundaries.
 
 ## Phase 6 — Async prune fence (after manifest publish)
 

@@ -60,7 +60,7 @@ Prefer `ALTER DATABASE` / `ALTER SYSTEM` for background-worker GUCs (session
 |-----|---------------------|--------|
 | `shared_preload_libraries` | include `koldstore` | Re-register workers after postmaster restart |
 | `wal_level` | `logical` | Required for async mirror |
-| `koldstore.async_mirror_max_retained_bytes` | `1073741824` (default) | Fail closed before `pg_wal` fills; raise for large catch-up, `0` only in monitored labs |
+| `koldstore.async_mirror_max_retained_bytes` | `1073741824` (default) | Retained-WAL health threshold; exceeding it alerts but never stops apply. Use PostgreSQL disk/slot safeguards independently; `0` disables this threshold. |
 | `koldstore.flush_check_interval_seconds` | `30` (default) or tuned | Built-in auto-flush cadence |
 | `koldstore.async_apply_poll_interval_ms` | `100` (default) or tuned | Apply latch poll |
 

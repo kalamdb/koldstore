@@ -11,16 +11,18 @@ use koldstore_parquet::{
     clean_cold_row_to_common, read_clean_cold_rows_from_object_store_with_size, ParquetReadOptions,
     PgColumn,
 };
+use koldstore_schema::PgType;
 use koldstore_storage::open_client_from_catalog_fields;
 use pgrx::pg_sys;
 
 use super::profile::{elapsed_ms, ColdReadProfile, SegmentReadProfile};
-use super::qual::{segment_prune_predicates, validate_filter_columns_indexed};
+use super::qual::segment_prune_predicates;
 use super::with_hook_disabled;
 
 /// Loads cold rows for merge, applying catalog prune and Parquet projection.
 pub(super) fn load_cold_rows_for_merge(
     table_oid: pg_sys::Oid,
+    scanrelid: pg_sys::Index,
     snapshot: &koldstore_catalog::ManagedTableSnapshot,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     qual: *mut pg_sys::List,
@@ -28,8 +30,23 @@ pub(super) fn load_cold_rows_for_merge(
     params: pg_sys::ParamListInfo,
 ) -> Result<(ColdReadProfile, Vec<ColdRow>), String> {
     with_hook_disabled(|| {
-        unsafe { validate_filter_columns_indexed(qual, catalog)? };
-        let prune_predicates = unsafe { segment_prune_predicates(qual, &catalog.columns, params) };
+        // Only primary-key predicates are safe before winner resolution. A
+        // mutable or security column can differ between older and newer cold
+        // versions; pruning its newer segment could resurrect the older row.
+        let cold_prunable_primary_keys = catalog
+            .columns
+            .iter()
+            .filter(|column| {
+                column.is_primary_key && cold_pruning_type_is_collation_independent(column.pg_type)
+            })
+            .map(|column| column.name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let prune_predicates = unsafe {
+            segment_prune_predicates(table_oid, scanrelid, qual, &catalog.columns, params)
+        }
+        .into_iter()
+        .filter(|predicate| cold_prunable_primary_keys.contains(predicate.column.as_str()))
+        .collect::<Vec<_>>();
         let predicate_columns = dedupe_nonblank(
             prune_predicates
                 .iter()
@@ -116,6 +133,20 @@ pub(super) fn load_cold_rows_for_merge(
 
         Ok((profile, cold_rows))
     })
+}
+
+/// Whether JSON/Parquet scalar comparison has the same semantics as the
+/// PostgreSQL type for conservative cold pruning.
+///
+/// Text and text arrays are deliberately excluded: PostgreSQL collation can
+/// make both range and equality semantics differ from byte-ordered segment
+/// stats and bloom filters. Unsupported literal types remain excluded until
+/// their exact PostgreSQL ordering is represented in cold metadata.
+const fn cold_pruning_type_is_collation_independent(pg_type: PgType) -> bool {
+    matches!(
+        pg_type,
+        PgType::Bool | PgType::Int2 | PgType::Int4 | PgType::Int8 | PgType::Uuid
+    )
 }
 
 /// Planned cold profile for EXPLAIN without opening Parquet files.
@@ -236,4 +267,21 @@ fn cold_rows_from_segments(
         }
     }
     Ok((rows, segments))
+}
+
+#[cfg(test)]
+mod tests {
+    use koldstore_schema::PgType;
+
+    use super::cold_pruning_type_is_collation_independent;
+
+    #[test]
+    fn text_like_types_are_not_safe_for_byte_ordered_cold_pruning() {
+        assert!(!cold_pruning_type_is_collation_independent(PgType::Text));
+        assert!(!cold_pruning_type_is_collation_independent(
+            PgType::TextArray
+        ));
+        assert!(cold_pruning_type_is_collation_independent(PgType::Int8));
+        assert!(cold_pruning_type_is_collation_independent(PgType::Uuid));
+    }
 }

@@ -21,8 +21,9 @@ use std::collections::{HashMap, HashSet};
 use koldstore_catalog::queries::plan_async_managed_relation_by_oid;
 use koldstore_common::{format_pg_lsn, next_id_after, MirrorOperation};
 use koldstore_mirror::{
-    decode_message, must_flush_before_push, pk_identity, plan_async_mirror_batch_upsert,
-    primary_key_json, PgOutputMessage, PgOutputRelation, PgOutputTuple, APPLY_BATCH_ROWS,
+    decode_message, must_flush_before_push, pk_identity, plan_async_mirror_batch_update,
+    plan_async_mirror_batch_upsert, primary_key_json, PgOutputMessage, PgOutputRelation,
+    PgOutputTuple, APPLY_BATCH_ROWS,
 };
 use pgrx::datum::DatumWithOid;
 use serde_json::Value;
@@ -126,12 +127,15 @@ struct ManagedRelation {
     pk_type_names: Option<Vec<String>>,
     /// Cached upsert SQL for typed `unnest` binds (Insert/Update/Delete).
     upsert_sql: Option<String>,
+    /// Cached direct-update plus insert-missing SQL for UPDATE batches.
+    update_sql: Option<String>,
 }
 
 impl ManagedRelation {
     fn invalidate_plans(&mut self) {
         self.pk_type_names = None;
         self.upsert_sql = None;
+        self.update_sql = None;
     }
 }
 
@@ -202,7 +206,6 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
         });
     }
 
-    crate::async_mirror::status::enforce_retained_wal_admission(&slot)?;
     // Peek/advance use nowait slot acquire. After terminate (or worker abort),
     // advisory locks can be released before ReplicationSlotRelease — wait out
     // that window under lock_apply before touching the slot.
@@ -742,6 +745,7 @@ fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
         primary_key,
         pk_type_names: None,
         upsert_sql: None,
+        update_sql: None,
     })
 }
 
@@ -789,22 +793,29 @@ fn apply_batch(
     _request: &BoundedApplyRequest,
 ) -> Result<(), String> {
     ensure_pk_type_names(config, relation, type_names)?;
-    if config.upsert_sql.is_none() {
-        let pk_refs = config
-            .primary_key
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let pk_types = config
-            .pk_type_names
-            .as_ref()
-            .expect("pk types populated")
-            .clone();
-        let planned = plan_async_mirror_batch_upsert(&config.mirror, &pk_refs, &pk_types)
-            .map_err(|error| error.to_string())?;
-        config.upsert_sql = Some(planned);
-    }
-    let sql = config.upsert_sql.as_ref().expect("upsert SQL cached");
+    let pk_refs = config
+        .primary_key
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let pk_types = config.pk_type_names.as_ref().expect("pk types populated");
+    let sql = if operation == MirrorOperation::Update {
+        if config.update_sql.is_none() {
+            config.update_sql = Some(
+                plan_async_mirror_batch_update(&config.mirror, &pk_refs, pk_types, "unused")
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        config.update_sql.as_ref().expect("update SQL cached")
+    } else {
+        if config.upsert_sql.is_none() {
+            config.upsert_sql = Some(
+                plan_async_mirror_batch_upsert(&config.mirror, &pk_refs, pk_types)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        config.upsert_sql.as_ref().expect("upsert SQL cached")
+    };
 
     let mut pk_columns: Vec<Vec<String>> = (0..config.primary_key.len())
         .map(|_| Vec::with_capacity(rows.len()))
@@ -859,7 +870,8 @@ fn apply_batch(
     // Hot and mirror counters update together with the apply transaction.
     // Deltas are derived from batch results so WAL replay after a crash does
     // not double-count (replayed upserts see existing rows; deletes affect 0).
-    // Updates are upserts too but do not change hot/mirror live counts.
+    // Updates use direct writes with an insert-missing fallback, but do not
+    // change hot/mirror live counts.
     let hot_delta = match operation {
         MirrorOperation::Insert => result.0.saturating_sub(result.1),
         MirrorOperation::Delete => -result.1,

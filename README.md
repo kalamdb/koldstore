@@ -107,31 +107,60 @@ gets a fresh pgrx server, an untimed 1M warm-up, then the timed run. Managed
 PostgreSQL sizes include the hot heap **and** `koldstore.<table>__cl` plus its
 indexes. Full tables: [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
 
-### Latest 10M-row throughput
+### Latest UPDATE verification
 
-The latest run uses async capture and reports foreground DML separately from
-mirror catch-up. This matters because async commits the source heap first;
-strict mode includes mirror maintenance in the application transaction.
+Post-optimization PostgreSQL 16 smoke measurements put async foreground UPDATE
+at heap parity on both tested statement shapes:
+
+| UPDATE workload | PostgreSQL only | KoldStore async | Difference |
+| --- | ---: | ---: | ---: |
+| Single-row pgbench throughput | 26,482 ops/s | 26,152 ops/s | **1.25% lower** |
+| Single-row pgbench p95 | 0.211 ms | 0.213 ms | **0.95% higher** |
+| 1k-row batch foreground throughput | 77,166 ops/s | 76,030 ops/s | **1.47% lower** |
+| Async mirror catch-up | — | 49,358 ops/s | deferred work |
+
+The single-row run used 10k seeded rows, four clients, and five seconds with the
+background worker enabled. The batch run used 100k rows and a 50k-row UPDATE
+sample. Mirror and source row counts matched after catch-up. Strict single-row
+UPDATE measured 0.294 ms p95 versus its 0.208 ms heap baseline (**1.41×**),
+inside the separate 2.00× strict consistency gate.
+
+These are focused single-run verification measurements, not replacement 10M
+publication results. Release publication requires six clean-tree,
+counterbalanced samples plus worker-on backlog and drain metrics. See the
+[benchmark methodology](docs/benchmarks/README.md).
+
+### Published 10M-row snapshot (historical)
+
+This pre-optimization storage-scale run reports foreground DML separately from
+mirror catch-up. It was a dirty-tree single sample and remains here for 10M-row
+storage context until the guarded repeated publication run replaces it. Async
+commits the source heap first; strict mode includes mirror maintenance in the
+application transaction.
 
 | Operation | PostgreSQL only | KoldStore async | Trade-off |
 | --- | ---: | ---: | ---: |
 | INSERT | 94,302 ops/s | 107,030 ops/s | ≈ within noise (not a product win) |
-| UPDATE | 69,239 ops/s | 52,446 ops/s | **24% slower** |
+| UPDATE | 69,239 ops/s | 52,446 ops/s | historical pre-optimization single sample; **24% lower** |
 | DELETE | 119,350 ops/s | 179,882 ops/s | single-sample — do not claim faster |
 | Hot-only PK lookup | 1,800 ops/s | 1,825 ops/s | ≈ same |
 | Hot+cold PK lookup | 1,793 ops/s | 1,529 ops/s | **15% slower** |
 | Cold-only PK lookup | 1,762 ops/s | 1,242 ops/s | **30% slower** |
 
 Async mirror catch-up measured 30,173 INSERT, 914 UPDATE, 28,417 DELETE, and
-24,906 restore operations per second. Published runs now warm up before timing
-so cold-start after install does not fake an async insert win. Full methodology
-and strict-mode column: [docs/benchmarks/](docs/benchmarks/README.md).
+24,906 restore operations per second in that historical run. The current
+focused UPDATE catch-up result above is 49,358 ops/s. Published runs warm up
+before timing so cold-start after install does not fake an async insert win.
+Full methodology and strict-mode column:
+[docs/benchmarks/](docs/benchmarks/README.md).
 
 Managed tables support two mirror paths. The default `strict` mode writes the
 latest-state mirror in the heap transaction for immediate consistency. The
 opt-in `async` mode commits the heap first; a database worker applies committed
-PK-only WAL with a 100 ms polling interval, while an explicit fence remains
-available for strong reads. This reduces foreground insert overhead while
+PK-only WAL with a 100 ms polling interval and bounded immediate retry bursts,
+while an explicit fence remains available for strong reads. Async UPDATE uses a
+direct set-based update with a conflict-safe insert-missing fallback; application
+DML does not run a worker-kick trigger. This reduces foreground overhead while
 reporting catch-up as separate work. `CREATE EXTENSION` and the first async
 `manage_table` create the publication and slot automatically; only
 `wal_level=logical` requires administrator setup.

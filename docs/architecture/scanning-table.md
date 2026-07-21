@@ -157,6 +157,32 @@ A committed delete must never require a later flush to become invisible.
 | `koldstore.cold_reads=off` | Hot-only; ERROR when correctness would require opening cold segments. |
 | `koldstore.max_open_parquet_readers` | Per-backend open Parquet reader cap. |
 
+## Row-level security
+
+Native hot-child scans remain PostgreSQL-owned and apply permissions and RLS
+normally. Buffered cold and hot+cold winners are materialized in the base
+relation's scan-slot layout, then returned through PostgreSQL `ExecScan`; this
+evaluates the compiled `plan.qual`, including security quals, before normal
+projection. The cold projection includes every base attribute referenced by the
+target list or quals, discovered with PostgreSQL's generic Var walker, rather
+than attempting to reinterpret policy expressions in Rust.
+
+Fixed reads of extension-owned catalogs and mirror tombstones run under the
+extension owner because those internal relations are intentionally revoked from
+application roles. Buffered merge scans read the complete hot source under a
+tightly scoped relation-owner context so RLS cannot hide a newer winner; no
+non-PK predicate is pushed before winner resolution. PostgreSQL then evaluates
+the invoking role's compiled quals on the resolved tuples. Native hot-child
+scans stay entirely under the invoking role.
+
+Cold segment and Parquet pruning use only primary-key predicates whose scalar
+ordering is proven compatible with the stored metadata (`bool`, integer, and
+`uuid`). Text predicates are left to PostgreSQL because database collations can
+disagree with byte-ordered stats or bloom filters. Managed tables also reject
+nondeterministic primary-key collations: PostgreSQL can consider byte-distinct
+text values equal under those collations, while the persisted merge identity is
+byte-exact.
+
 ---
 
 ## EXPLAIN
@@ -197,8 +223,9 @@ Custom Scan (KoldMergeScan)
 
 1. Overlap merge path still uses SPI JSON hot load for winner resolution when a
    full PK equality probe is not available; PK point lookups use hot-native /
-   cold-native emit. Further pushdown of residual quals through PostgreSQL
-   `ExprState` and fully lazy cold segment iteration remain follow-ups.
+   cold-native emit. Further predicate pushdown into Parquet and fully lazy cold
+   segment iteration remain follow-ups; PostgreSQL still evaluates all executor
+   quals on buffered winners.
 2. User-scoped cold segment loading beyond `scope_key = ''` continues to land
    with catalog scope work (`Segments pruned by scope` stays 0 for shared-only).
 3. No DSM / parallel CustomScan workers yet.

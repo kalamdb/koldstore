@@ -7,8 +7,8 @@ table.
 
 **Latest numbers:** [RESULTS.md](RESULTS.md) — columns are PostgreSQL only,
 PG + KoldStore (async), and PG + KoldStore (strict). Refresh with
-`scripts/run-storage-comparison.sh --all-sides --update-results` (each column
-gets a fresh pgrx PostgreSQL: stop → recreate DBs → measure one side alone).
+`scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results`
+(each sample gets a fresh pgrx PostgreSQL; publication requires a clean tree).
 
 ## Documents in this folder
 
@@ -25,11 +25,12 @@ from [`tests/storage/schema.sql`](../../tests/storage/schema.sql).
 
 Typical published scale: **10,000,000 rows**, `hot_row_limit = 100000`,
 `max_rows_per_file = 1000000`, `--dml-sample 50000` (~9.9M rows flushed, zstd
-Parquet). Published RESULTS use `--all-sides`: exactly **three sequential** runs
-(pg → async → strict), each alone on a fresh pgrx PostgreSQL (stop → recreate
-DBs → measure that side once). They are **not** parallel and do **not** share
-a live server or dual-table I/O during measurement. Inserts use committed
-100k-row batches. Numbers vary by machine; re-run for your hardware. See
+Parquet). Published RESULTS use `--all-sides --repetitions 6`: six
+counterbalanced orders of pg, async, and strict, with every sample alone on a
+fresh pgrx PostgreSQL. They are **not** parallel and do **not** share a live
+server or dual-table I/O during measurement. Each cell reports the median and
+range. Inserts use committed 100k-row batches. Numbers vary by machine; re-run
+for your hardware. See
 [Mirror capture modes](../architecture/mirror-capture-modes.md).
 
 **Managed PostgreSQL sizes always include** the hot user heap **plus**
@@ -83,15 +84,15 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
   the catch-up rows; strict pays mirror work in the foreground (hence slower).
   When async’s foreground ops/s lands above PostgreSQL-only, that is **not**
   because the sides shared CPU/disk — they run **one after another** on fresh
-  servers. It is still only **one sample per side** (often hours apart), so
-  machine noise can move tens of percent; do not treat it as a product win
-  until repeated isolated runs agree. For “row is visible in the mirror” cost,
+  servers. Machine noise can still move results; do not treat it as a product
+  win unless the counterbalanced median and dispersion support the claim. For
+  “row is visible in the mirror” cost,
   include catch-up or measure backlog with the background worker on.
-- **Published runs are exactly three sequential sides**: `--all-sides` stops
-  PostgreSQL, recreates empty worker DBs, and measures `pg`, then `async`, then
-  `strict` — once each, alone. Not parallel; no dual-table I/O contention.
-  `RESULTS.md` records the UTC finish time per side and the git commit stamped
-  into each side’s JSON.
+- **Published runs use six counterbalanced repetitions** (or another multiple
+  of six): every sample stops
+  PostgreSQL, recreates empty worker DBs, and measures one side alone. The six
+  orders balance first/second/third position across pg, async, and strict.
+  `RESULTS.md` reports per-cell median and range and records the git commit.
 - Insert throughput uses committed 100k-row batches on that side alone.
   Bounded source transactions also avoid presenting one large logical-decoding
   transaction as a representative application insert.
@@ -104,6 +105,11 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
   harness also performs untimed `CHECKPOINT`s before the insert phase and
   before each timed update/delete, so prior writeback is not charged to the
   next measurement.
+- The storage table's foreground DML rows use 1k-row batches and deliberately
+  fence async catch-up separately. The `pg-koldstore-benchmarks` hot-DML suite
+  covers single-row OLTP. A production release also needs worker-on sustainable
+  UPDATE throughput, bounded peak backlog, and drain time; foreground parity
+  alone is insufficient.
 - Hot+cold PK lookups open matching Parquet segments (min/max prune +
   row-group stats / bloom). At published scale each surviving segment is ~1M
   wide rows, so footer open + merge-scan setup dominates vs a pure B-tree
@@ -113,8 +119,8 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
 ## Reproduce
 
 ```bash
-# Published RESULTS.md: three runs, fresh server each, warm-up then timed 10M.
-scripts/run-storage-comparison.sh --all-sides --update-results \
+# Published RESULTS.md: six counterbalanced samples/side, fresh server each.
+scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results \
   --rows 10000000 --hot-limit 100000 --dml-sample 50000
 # Or one side at a time:
 scripts/run-storage-comparison.sh --side pg --rows 100000
@@ -128,4 +134,11 @@ then `DROP` + `CHECKPOINT`) so the first heavy write after install is not the
 measured insert. Override with `--warmup-rows N` (`0` disables).
 
 Additional pgbench-oriented suites live under [`benchmarks/`](../../benchmarks/).
+Run the single-row hot-DML gate explicitly by consistency mode:
+
+```bash
+cargo run -p pg-koldstore-benchmarks -- --mirror-capture-mode async
+cargo run -p pg-koldstore-benchmarks -- --mirror-capture-mode strict
+```
+
 HammerDB selective-manage comparison: [hammerdb.md](hammerdb.md).

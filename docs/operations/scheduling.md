@@ -53,21 +53,27 @@ Session `SET` does not affect the background worker. Prefer `ALTER DATABASE`
 or `ALTER SYSTEM` + reload / worker restart, matching
 `flush_check_interval_seconds`.
 
-### Async retained-WAL admission
+### Async retained-WAL health threshold
 
 `koldstore.async_mirror_max_retained_bytes` defaults to **1 GiB**. When the
 logical slot’s retained WAL (`pg_wal_lsn_diff(current, confirmed_flush_lsn)`)
-exceeds the limit, async apply and flush fail closed instead of letting
-`pg_wal` grow without bound. WAL is never silently dropped.
+exceeds the threshold, `koldstore.async_mirror_status()` becomes unhealthy and
+operators should alert. The applier keeps draining: stopping it when WAL is
+already high makes the incident worse.
 
 ```sql
--- Raise for large catch-up windows (cluster-wide example):
+-- Raise the health threshold for expected catch-up windows:
 ALTER SYSTEM SET koldstore.async_mirror_max_retained_bytes = 2147483647; -- ~2 GiB cap
 SELECT pg_reload_conf();
 
--- Lab-only: disable admission (monitor pg_wal yourself):
+-- Disable only this health alarm (monitor pg_wal yourself):
 ALTER DATABASE mydb SET koldstore.async_mirror_max_retained_bytes = 0;
 ```
+
+Use PostgreSQL disk monitoring and a deliberate `max_slot_wal_keep_size` policy
+as independent hard safeguards. Reaching PostgreSQL's slot retention limit may
+invalidate the logical slot and require mirror rebuild; it is not a normal
+backpressure mechanism.
 
 After a failed auto-flush (for example `max_rows_per_file` below the
 `koldstore.min_max_rows_per_file` floor), that table is skipped for 60 seconds

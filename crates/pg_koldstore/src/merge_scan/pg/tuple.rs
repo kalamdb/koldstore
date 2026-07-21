@@ -36,24 +36,30 @@ impl ScanMemory {
 pub(super) unsafe fn store_materialized_row(
     slot: *mut pg_sys::TupleTableSlot,
     row: &MaterializedRow,
+    slot_indexes: &[usize],
+    tuple_width: usize,
 ) {
     // Virtual slots only clear validity flags; they do not free external Datums.
     clear_slot(slot);
 
-    let slot_natts = slot_attribute_count(slot).unwrap_or(row.values.len());
-    let copied = row.values.len().min(slot_natts);
-    for (index, (value, is_null)) in row
-        .values
+    let slot_natts = slot_attribute_count(slot).unwrap_or(tuple_width);
+    let width = tuple_width.min(slot_natts);
+    for index in 0..width {
+        *(*slot).tts_values.add(index) = pg_sys::Datum::null();
+        *(*slot).tts_isnull.add(index) = true;
+    }
+    for (slot_index, (value, is_null)) in slot_indexes
         .iter()
         .copied()
-        .zip(row.is_null.iter().copied())
-        .take(copied)
-        .enumerate()
+        .zip(row.values.iter().copied().zip(row.is_null.iter().copied()))
     {
-        *(*slot).tts_values.add(index) = value;
-        *(*slot).tts_isnull.add(index) = is_null;
+        if slot_index >= width {
+            continue;
+        }
+        *(*slot).tts_values.add(slot_index) = value;
+        *(*slot).tts_isnull.add(slot_index) = is_null;
     }
-    (*slot).tts_nvalid = copied as pg_sys::AttrNumber;
+    (*slot).tts_nvalid = width as pg_sys::AttrNumber;
     pg_sys::ExecStoreVirtualTuple(slot);
 }
 
@@ -65,7 +71,7 @@ unsafe fn clear_slot(slot: *mut pg_sys::TupleTableSlot) {
     }
 }
 
-unsafe fn slot_attribute_count(slot: *mut pg_sys::TupleTableSlot) -> Option<usize> {
+pub(super) unsafe fn slot_attribute_count(slot: *mut pg_sys::TupleTableSlot) -> Option<usize> {
     if (*slot).tts_tupleDescriptor.is_null() {
         return None;
     }

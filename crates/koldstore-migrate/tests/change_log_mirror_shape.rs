@@ -96,8 +96,31 @@ fn primary_key_shape_probe_reads_exact_catalog_metadata() {
     assert!(probe.sql.contains("pg_attribute"));
     assert!(probe.sql.contains("pg_type"));
     assert!(probe.sql.contains("pg_collation"));
+    assert!(probe.sql.contains("collisdeterministic"));
     assert!(probe.sql.contains("domain_identity"));
     assert!(probe.sql.contains("$1::oid"));
+}
+
+#[test]
+fn nondeterministic_primary_key_collation_is_rejected() {
+    let error =
+        register::primary_key_shape_from_catalog_rows(vec![register::PrimaryKeyShapeCatalogRow {
+            column: "id".to_string(),
+            ordinal: 1,
+            type_oid: 25,
+            type_name: "text".to_string(),
+            typmod: -1,
+            collation: Some("app.case_insensitive".to_string()),
+            collation_deterministic: Some(false),
+            domain_identity: None,
+            not_null: true,
+        }])
+        .unwrap_err();
+
+    assert_eq!(
+        error.to_string(),
+        "primary-key column `id` uses unsupported nondeterministic collation `app.case_insensitive`"
+    );
 }
 
 #[test]

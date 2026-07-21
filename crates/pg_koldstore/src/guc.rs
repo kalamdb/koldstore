@@ -219,8 +219,8 @@ pub fn define_gucs() {
     );
     GucRegistry::define_int_guc(
         c"koldstore.async_mirror_max_retained_bytes",
-        c"Fail-closed admission limit on async mirror retained WAL bytes (default 1 GiB).",
-        c"When > 0 and pg_wal_lsn_diff(current, confirmed_flush_lsn) exceeds this, apply and flush error instead of advancing. Default 1073741824 (1 GiB). 0 disables (not recommended for production async). Never silently drops WAL.",
+        c"Unhealthy threshold for async mirror retained WAL bytes (default 1 GiB).",
+        c"When > 0 and pg_wal_lsn_diff(current, confirmed_flush_lsn) exceeds this, async_mirror_status reports unhealthy. Apply always remains enabled so it can drain the slot. Default 1073741824 (1 GiB). 0 disables this health threshold. Never silently drops WAL.",
         &ASYNC_MIRROR_MAX_RETAINED_BYTES,
         settings::MIN_ASYNC_MIRROR_MAX_RETAINED_BYTES,
         settings::MAX_ASYNC_MIRROR_MAX_RETAINED_BYTES,
@@ -586,7 +586,7 @@ pub fn flush_prelock_max_ms() -> i64 {
     }
 }
 
-/// Retained-WAL admission limit in bytes (`0` = disabled).
+/// Retained-WAL unhealthy threshold in bytes (`0` = disabled).
 #[must_use]
 pub fn async_mirror_max_retained_bytes() -> i64 {
     #[cfg(feature = "pg")]

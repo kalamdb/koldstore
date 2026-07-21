@@ -1,6 +1,5 @@
-//! Planner qual walking for prune predicates, residual filters, and indexed checks.
+//! Planner qual walking for safe prune predicates and post-merge filters.
 
-use std::collections::BTreeSet;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
@@ -9,158 +8,195 @@ use pgrx::pg_sys;
 
 use super::literals::{list_node_pointers, literal_json_value, typed_literal_sql, unwrap_relabel};
 
-/// Residual filters extracted from planner quals for Rust merge.
+/// One base-relation attribute required by output projection or executor quals.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ScanProjectionColumn<'a> {
+    pub(super) catalog: &'a koldstore_migrate::order::CatalogColumn,
+    /// Zero-based position in the base relation's scan tuple.
+    pub(super) slot_index: usize,
+}
+
+/// Minimal base-relation projection used to build tuples for PostgreSQL `ExecScan`.
+#[derive(Debug)]
+pub(super) struct ScanProjection<'a> {
+    pub(super) columns: Vec<ScanProjectionColumn<'a>>,
+    pub(super) tuple_width: usize,
+}
+
+impl<'a> ScanProjection<'a> {
+    pub(super) fn catalog_columns(&self) -> Vec<&'a koldstore_migrate::order::CatalogColumn> {
+        self.columns.iter().map(|column| column.catalog).collect()
+    }
+}
+
+/// Canonical equality predicates safe for primary-key source pruning.
 #[derive(Debug, Default)]
 pub(super) struct ResidualFilters {
-    pub(super) equality: Vec<(String, String)>,
-    pub(super) membership: Vec<(String, Vec<String>)>,
-    /// Typed SQL equality predicates safe to push into the hot SPI load.
     pub(super) hot_equality: Vec<super::hot::HotEqualityFilter>,
 }
 
-pub(super) unsafe fn requested_target_columns(
+#[derive(Debug, Clone, Copy)]
+struct QualCatalog<'a> {
+    table_oid: pg_sys::Oid,
+    scanrelid: pg_sys::Index,
+    columns: &'a [koldstore_migrate::order::CatalogColumn],
+}
+
+/// Collects every base-table attribute referenced by the target list or quals.
+///
+/// PostgreSQL's generic Var walker covers arbitrary RLS expressions and planned
+/// subqueries, so cold enforcement does not depend on KoldStore understanding a
+/// policy's expression shape.
+pub(super) unsafe fn required_scan_projection(
+    table_oid: pg_sys::Oid,
+    scanrelid: pg_sys::Index,
     targetlist: *mut pg_sys::List,
+    qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
-) -> Vec<&koldstore_migrate::order::CatalogColumn> {
-    if targetlist.is_null() {
-        return Vec::new();
+    tuple_width: usize,
+) -> Result<ScanProjection<'_>, String> {
+    let mut attrs: *mut pg_sys::Bitmapset = std::ptr::null_mut();
+    unsafe {
+        pg_sys::pull_varattnos(targetlist.cast::<pg_sys::Node>(), scanrelid, &mut attrs);
+        pg_sys::pull_varattnos(qual.cast::<pg_sys::Node>(), scanrelid, &mut attrs);
     }
-    let mut requested = Vec::new();
-    let len = usize::try_from((*targetlist).length).unwrap_or(0);
-    for index in 0..len {
-        let entry = (*(*targetlist).elements.add(index))
-            .ptr_value
-            .cast::<pg_sys::TargetEntry>();
-        if entry.is_null() || (*entry).resjunk {
-            continue;
-        }
-        let expr = (*entry).expr;
-        if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Var {
-            continue;
-        }
-        let var = expr.cast::<pg_sys::Var>();
-        let attno = (*var).varattno;
-        if attno <= 0 {
-            continue;
-        }
-        if let Some(column) = columns.get(usize::try_from(attno - 1).unwrap_or(usize::MAX)) {
-            requested.push(column);
+
+    let whole_row_member = -pg_sys::FirstLowInvalidHeapAttributeNumber;
+    let whole_row = unsafe { pg_sys::bms_is_member(whole_row_member, attrs) };
+    let mut system_column = None;
+    for attnum in (pg_sys::FirstLowInvalidHeapAttributeNumber + 1)..0 {
+        if unsafe {
+            pg_sys::bms_is_member(attnum - pg_sys::FirstLowInvalidHeapAttributeNumber, attrs)
+        } {
+            system_column = Some(attnum);
+            break;
         }
     }
-    requested
+
+    let mut required = Vec::with_capacity(tuple_width);
+    for attnum in 1..=tuple_width {
+        required.push(
+            whole_row
+                || unsafe {
+                    pg_sys::bms_is_member(
+                        i32::try_from(attnum).map_err(|error| error.to_string())?
+                            - pg_sys::FirstLowInvalidHeapAttributeNumber,
+                        attrs,
+                    )
+                },
+        );
+    }
+    unsafe {
+        pg_sys::bms_free(attrs);
+    }
+
+    if let Some(attnum) = system_column {
+        return Err(format!(
+            "KoldMergeScan cannot materialize PostgreSQL system attribute {attnum}"
+        ));
+    }
+
+    let mut projection = Vec::new();
+    for (slot_index, is_required) in required.into_iter().enumerate() {
+        if !is_required {
+            continue;
+        }
+        let attnum =
+            pg_sys::AttrNumber::try_from(slot_index + 1).map_err(|error| error.to_string())?;
+        let name = unsafe { pg_sys::get_attname(table_oid, attnum, true) };
+        if name.is_null() {
+            return Err(format!(
+                "required base-relation attribute {} does not exist",
+                slot_index + 1
+            ));
+        }
+        let name_text = unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .map_err(|error| error.to_string())?
+            .to_string();
+        unsafe {
+            pg_sys::pfree(name.cast());
+        }
+        let Some(catalog) = columns.iter().find(|column| column.name == name_text) else {
+            if whole_row {
+                // PostgreSQL represents a dropped attribute in a whole-row
+                // value as NULL; it is intentionally absent from our catalog.
+                continue;
+            }
+            return Err(format!(
+                "required base-relation attribute {} (`{name_text}`) is not present in the managed schema",
+                slot_index + 1,
+            ));
+        };
+        projection.push(ScanProjectionColumn {
+            catalog,
+            slot_index,
+        });
+    }
+
+    Ok(ScanProjection {
+        columns: projection,
+        tuple_width,
+    })
+}
+
+#[cfg(test)]
+mod projection_tests {
+    #[test]
+    fn whole_row_bitmap_offset_matches_postgresql_contract() {
+        assert_eq!(-pgrx::pg_sys::FirstLowInvalidHeapAttributeNumber, 7);
+    }
 }
 
 pub(super) unsafe fn residual_filters(
+    table_oid: pg_sys::Oid,
+    scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
     params: pg_sys::ParamListInfo,
 ) -> ResidualFilters {
+    let catalog = QualCatalog {
+        table_oid,
+        scanrelid,
+        columns,
+    };
     let mut filters = ResidualFilters::default();
     for node in list_node_pointers(qual) {
-        collect_residual_filters(node.cast::<pg_sys::Expr>(), columns, params, &mut filters);
+        collect_residual_filters(node.cast::<pg_sys::Expr>(), catalog, params, &mut filters);
     }
     filters
 }
 
 pub(super) unsafe fn segment_prune_predicates(
+    table_oid: pg_sys::Oid,
+    scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
     params: pg_sys::ParamListInfo,
 ) -> Vec<SegmentPrunePredicate> {
+    let catalog = QualCatalog {
+        table_oid,
+        scanrelid,
+        columns,
+    };
     list_node_pointers(qual)
         .into_iter()
         .flat_map(|node| {
-            segment_prune_node_predicates(node.cast::<pg_sys::Expr>(), columns, params)
+            segment_prune_node_predicates(node.cast::<pg_sys::Expr>(), catalog, params)
         })
         .collect()
 }
 
-pub(super) unsafe fn validate_filter_columns_indexed(
-    qual: *mut pg_sys::List,
-    catalog: &koldstore_migrate::ExistingTableCatalog,
-) -> Result<(), String> {
-    let indexed = catalog
-        .primary_key
-        .columns
-        .iter()
-        .map(String::as_str)
-        .chain(catalog.indexed_columns.iter().map(String::as_str))
-        .collect::<BTreeSet<_>>();
-    for column in filter_column_names(qual, &catalog.columns) {
-        if !indexed.contains(column.as_str()) {
-            return Err(format!(
-                "cold filter column `{column}` is not indexed; koldstore cold reads require WHERE filters on indexed columns"
-            ));
-        }
-    }
-    Ok(())
-}
-
-unsafe fn filter_column_names(
-    qual: *mut pg_sys::List,
-    columns: &[koldstore_migrate::order::CatalogColumn],
-) -> BTreeSet<String> {
-    list_node_pointers(qual)
-        .into_iter()
-        .flat_map(|node| filter_node_column_names(node.cast::<pg_sys::Expr>(), columns))
-        .collect()
-}
-
-unsafe fn filter_node_column_names(
-    expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
-) -> BTreeSet<String> {
-    let mut names = BTreeSet::new();
-    if expr.is_null() {
-        return names;
-    }
-    match (*expr).type_ {
-        pg_sys::NodeTag::T_OpExpr => {
-            let op_expr = expr.cast::<pg_sys::OpExpr>();
-            for arg in list_node_pointers((*op_expr).args) {
-                collect_var_column_names(arg.cast::<pg_sys::Expr>(), columns, &mut names);
-            }
-        }
-        pg_sys::NodeTag::T_ScalarArrayOpExpr => {
-            let scalar = expr.cast::<pg_sys::ScalarArrayOpExpr>();
-            for arg in list_node_pointers((*scalar).args) {
-                collect_var_column_names(arg.cast::<pg_sys::Expr>(), columns, &mut names);
-            }
-        }
-        pg_sys::NodeTag::T_BoolExpr => {
-            let bool_expr = expr.cast::<pg_sys::BoolExpr>();
-            for arg in list_node_pointers((*bool_expr).args) {
-                names.extend(filter_node_column_names(
-                    arg.cast::<pg_sys::Expr>(),
-                    columns,
-                ));
-            }
-        }
-        _ => collect_var_column_names(expr, columns, &mut names),
-    }
-    names
-}
-
-unsafe fn collect_var_column_names(
-    expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
-    names: &mut BTreeSet<String>,
-) {
-    if let Some(column) = var_column(expr, columns) {
-        names.insert(column.name.clone());
-    }
-}
-
 unsafe fn segment_prune_node_predicates(
     expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
 ) -> Vec<SegmentPrunePredicate> {
     if expr.is_null() {
         return Vec::new();
     }
     match (*expr).type_ {
-        pg_sys::NodeTag::T_OpExpr => segment_prune_op_expr(expr, columns, params)
+        pg_sys::NodeTag::T_OpExpr => segment_prune_op_expr(expr, catalog, params)
             .into_iter()
             .collect(),
         pg_sys::NodeTag::T_BoolExpr => {
@@ -171,7 +207,7 @@ unsafe fn segment_prune_node_predicates(
             list_node_pointers((*bool_expr).args)
                 .into_iter()
                 .flat_map(|node| {
-                    segment_prune_node_predicates(node.cast::<pg_sys::Expr>(), columns, params)
+                    segment_prune_node_predicates(node.cast::<pg_sys::Expr>(), catalog, params)
                 })
                 .collect()
         }
@@ -181,12 +217,13 @@ unsafe fn segment_prune_node_predicates(
 
 unsafe fn segment_prune_op_expr(
     expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
 ) -> Option<SegmentPrunePredicate> {
     let op_expr = expr.cast::<pg_sys::OpExpr>();
     let opname = cstr_to_str(pg_sys::get_opname((*op_expr).opno))?;
-    if !matches!(opname, "=" | "<" | "<=" | ">" | ">=") {
+    if !matches!(opname, "=" | "<" | "<=" | ">" | ">=") || !operator_is_pg_catalog((*op_expr).opno)
+    {
         return None;
     }
     let args = list_node_pointers((*op_expr).args);
@@ -194,10 +231,10 @@ unsafe fn segment_prune_op_expr(
         return None;
     }
 
-    if let Some((column, literal)) = var_and_json_literal(args[0], args[1], columns, params) {
+    if let Some((column, literal)) = var_and_json_literal(args[0], args[1], catalog, params) {
         return prune_predicate_from_op(column, literal, opname, false);
     }
-    if let Some((column, literal)) = var_and_json_literal(args[1], args[0], columns, params) {
+    if let Some((column, literal)) = var_and_json_literal(args[1], args[0], catalog, params) {
         return prune_predicate_from_op(column, literal, opname, true);
     }
     None
@@ -224,17 +261,17 @@ fn prune_predicate_from_op(
 unsafe fn var_and_json_literal(
     column_expr: *mut std::ffi::c_void,
     literal_expr: *mut std::ffi::c_void,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
 ) -> Option<(&koldstore_migrate::order::CatalogColumn, serde_json::Value)> {
-    let column = var_column(column_expr.cast::<pg_sys::Expr>(), columns)?;
+    let column = var_column(column_expr.cast::<pg_sys::Expr>(), catalog)?;
     let literal = literal_json_value(literal_expr.cast::<pg_sys::Expr>(), column, params)?;
     Some((column, literal))
 }
 
 unsafe fn collect_residual_filters(
     expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
     filters: &mut ResidualFilters,
 ) {
@@ -243,19 +280,11 @@ unsafe fn collect_residual_filters(
     }
     match (*expr).type_ {
         pg_sys::NodeTag::T_OpExpr => {
-            if let Some((column, expected, sql_literal)) =
-                op_expr_equality_filter(expr, columns, params)
-            {
-                filters.equality.push((column.clone(), expected));
+            if let Some((column, sql_literal)) = op_expr_equality_filter(expr, catalog, params) {
                 filters.hot_equality.push(super::hot::HotEqualityFilter {
                     column,
                     sql_literal,
                 });
-            }
-        }
-        pg_sys::NodeTag::T_ScalarArrayOpExpr => {
-            if let Some(membership) = scalar_array_membership_filter(expr, columns) {
-                filters.membership.push(membership);
             }
         }
         pg_sys::NodeTag::T_BoolExpr => {
@@ -264,7 +293,7 @@ unsafe fn collect_residual_filters(
                 return;
             }
             for arg in list_node_pointers((*bool_expr).args) {
-                collect_residual_filters(arg.cast::<pg_sys::Expr>(), columns, params, filters);
+                collect_residual_filters(arg.cast::<pg_sys::Expr>(), catalog, params, filters);
             }
         }
         _ => {}
@@ -273,171 +302,43 @@ unsafe fn collect_residual_filters(
 
 unsafe fn op_expr_equality_filter(
     expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
-) -> Option<(String, String, String)> {
+) -> Option<(String, String)> {
     let op_expr = expr.cast::<pg_sys::OpExpr>();
     let opname = cstr_to_str(pg_sys::get_opname((*op_expr).opno))?;
-    if opname != "=" {
+    if opname != "=" || !operator_is_pg_catalog((*op_expr).opno) {
         return None;
     }
     let args = list_node_pointers((*op_expr).args);
     if args.len() != 2 {
         return None;
     }
-    let (column, literal) = equality_var_and_literal(args[0], args[1], columns, params)?;
-    let expected = strip_sql_literal(&literal);
-    Some((column.name.clone(), expected, literal))
-}
-
-unsafe fn scalar_array_membership_filter(
-    expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
-) -> Option<(String, Vec<String>)> {
-    let scalar = expr.cast::<pg_sys::ScalarArrayOpExpr>();
-    if !(*scalar).useOr {
-        return None;
-    }
-    let args = list_node_pointers((*scalar).args);
-    if args.len() != 2 {
-        return None;
-    }
-    let column = var_column(args[0].cast::<pg_sys::Expr>(), columns)?;
-    let values = array_literal_filter_values(args[1].cast::<pg_sys::Expr>())?;
-    if values.is_empty() {
-        return None;
-    }
-    Some((column.name.clone(), values))
-}
-
-unsafe fn array_literal_filter_values(expr: *mut pg_sys::Expr) -> Option<Vec<String>> {
-    use super::literals::list_node_pointers;
-    if expr.is_null() {
-        return None;
-    }
-    match (*expr).type_ {
-        pg_sys::NodeTag::T_ArrayExpr => {
-            let array = expr.cast::<pg_sys::ArrayExpr>();
-            Some(
-                list_node_pointers((*array).elements)
-                    .into_iter()
-                    .filter_map(|node| const_filter_value(node.cast::<pg_sys::Expr>()))
-                    .collect(),
-            )
-        }
-        // Planner often folds `IN (1,2,4)` into a single array Const (`{1,2,4}`).
-        // Expanding that Const is required; treating the whole array output as one
-        // membership value filters every row out.
-        pg_sys::NodeTag::T_Const => const_array_filter_values(expr),
-        _ => None,
-    }
-}
-
-/// Expands an array Const into per-element filter strings, or a scalar Const.
-unsafe fn const_array_filter_values(expr: *mut pg_sys::Expr) -> Option<Vec<String>> {
-    let expr = unwrap_relabel(expr);
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
-        return None;
-    }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
-
-    let elmtype = pg_sys::get_element_type((*konst).consttype);
-    if elmtype == pg_sys::InvalidOid {
-        return const_filter_value(expr).map(|value| vec![value]);
-    }
-
-    let mut elmlen: i16 = 0;
-    let mut elmbyval = false;
-    let mut elmalign: std::os::raw::c_char = 0;
-    pg_sys::get_typlenbyvalalign(elmtype, &mut elmlen, &mut elmbyval, &mut elmalign);
-
-    let varlena = (*konst).constvalue.cast_mut_ptr::<pg_sys::varlena>();
-    if varlena.is_null() {
-        return None;
-    }
-    let array = pg_sys::pg_detoast_datum(varlena).cast::<pg_sys::ArrayType>();
-    if array.is_null() {
-        return None;
-    }
-
-    let mut elems: *mut pg_sys::Datum = std::ptr::null_mut();
-    let mut nulls: *mut bool = std::ptr::null_mut();
-    let mut nelems: i32 = 0;
-    pg_sys::deconstruct_array(
-        array,
-        elmtype,
-        i32::from(elmlen),
-        elmbyval,
-        elmalign,
-        &mut elems,
-        &mut nulls,
-        &mut nelems,
-    );
-    if elems.is_null() || nelems < 0 {
-        return None;
-    }
-
-    let mut typoutput = pg_sys::InvalidOid;
-    let mut typisvarlena = false;
-    pg_sys::getTypeOutputInfo(elmtype, &mut typoutput, &mut typisvarlena);
-
-    let mut values = Vec::with_capacity(nelems as usize);
-    for index in 0..nelems as usize {
-        if !nulls.is_null() && *nulls.add(index) {
-            continue;
-        }
-        let out = pg_sys::OidOutputFunctionCall(typoutput, *elems.add(index));
-        if out.is_null() {
-            continue;
-        }
-        if let Ok(text) = CStr::from_ptr(out).to_str() {
-            values.push(text.to_string());
-        }
-        pg_sys::pfree(out.cast());
-    }
-    if values.is_empty() {
-        None
-    } else {
-        Some(values)
-    }
-}
-
-unsafe fn const_filter_value(expr: *mut pg_sys::Expr) -> Option<String> {
-    let expr = unwrap_relabel(expr);
-    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Const {
-        return None;
-    }
-    let konst = expr.cast::<pg_sys::Const>();
-    if (*konst).constisnull {
-        return None;
-    }
-    let mut typoutput = pg_sys::InvalidOid;
-    let mut typisvarlena = false;
-    pg_sys::getTypeOutputInfo((*konst).consttype, &mut typoutput, &mut typisvarlena);
-    let out = pg_sys::OidOutputFunctionCall(typoutput, (*konst).constvalue);
-    if out.is_null() {
-        return None;
-    }
-    let text = CStr::from_ptr(out).to_str().ok()?.to_string();
-    pg_sys::pfree(out.cast());
-    Some(text)
+    let (column, literal) = equality_var_and_literal(args[0], args[1], catalog, params)?;
+    Some((column.name.clone(), literal))
 }
 
 unsafe fn equality_var_and_literal(
     left: *mut std::ffi::c_void,
     right: *mut std::ffi::c_void,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
 ) -> Option<(&koldstore_migrate::order::CatalogColumn, String)> {
-    if let Some(column) = var_column(left.cast::<pg_sys::Expr>(), columns) {
+    // Cross-type PostgreSQL equality operators can be canonical while their
+    // Datum representations differ (for example float4 = float8). The literal
+    // formatter below uses the column's type, so only exact operand types are
+    // safe to reconstruct as a source predicate.
+    if pg_sys::exprType(left.cast::<pg_sys::Node>())
+        != pg_sys::exprType(right.cast::<pg_sys::Node>())
+    {
+        return None;
+    }
+    if let Some(column) = var_column(left.cast::<pg_sys::Expr>(), catalog) {
         if let Some(literal) = typed_literal_sql(right.cast::<pg_sys::Expr>(), column, params) {
             return Some((column, literal));
         }
     }
-    if let Some(column) = var_column(right.cast::<pg_sys::Expr>(), columns) {
+    if let Some(column) = var_column(right.cast::<pg_sys::Expr>(), catalog) {
         if let Some(literal) = typed_literal_sql(left.cast::<pg_sys::Expr>(), column, params) {
             return Some((column, literal));
         }
@@ -447,7 +348,7 @@ unsafe fn equality_var_and_literal(
 
 unsafe fn var_column(
     expr: *mut pg_sys::Expr,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: QualCatalog<'_>,
 ) -> Option<&koldstore_migrate::order::CatalogColumn> {
     let expr = unwrap_relabel(expr);
     if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Var {
@@ -455,18 +356,34 @@ unsafe fn var_column(
     }
     let var = expr.cast::<pg_sys::Var>();
     let attno = (*var).varattno;
-    if attno <= 0 {
+    let scanrelid = i32::try_from(catalog.scanrelid).ok()?;
+    if attno <= 0 || (*var).varlevelsup != 0 || (*var).varno != scanrelid {
         return None;
     }
-    columns.get(usize::try_from(attno - 1).ok()?)
+    let name = pg_sys::get_attname(catalog.table_oid, attno, true);
+    if name.is_null() {
+        return None;
+    }
+    let name_text = CStr::from_ptr(name).to_string_lossy().into_owned();
+    pg_sys::pfree(name.cast());
+    catalog
+        .columns
+        .iter()
+        .find(|column| column.name == name_text)
 }
 
-fn strip_sql_literal(literal: &str) -> String {
-    if literal.starts_with('\'') && literal.ends_with('\'') && literal.len() >= 2 {
-        literal[1..literal.len() - 1].replace("''", "'")
-    } else {
-        literal.to_string()
+unsafe fn operator_is_pg_catalog(operator: pg_sys::Oid) -> bool {
+    let tuple = pg_sys::SearchSysCache1(
+        pg_sys::SysCacheIdentifier::OPEROID as i32,
+        pg_sys::Datum::from(operator),
+    );
+    if tuple.is_null() {
+        return false;
     }
+    let form = pg_sys::GETSTRUCT(tuple).cast::<pg_sys::FormData_pg_operator>();
+    let is_pg_catalog = (*form).oprnamespace == pg_sys::PG_CATALOG_NAMESPACE.into();
+    pg_sys::ReleaseSysCache(tuple);
+    is_pg_catalog
 }
 
 fn cstr_to_str(value: *const c_char) -> Option<&'static str> {

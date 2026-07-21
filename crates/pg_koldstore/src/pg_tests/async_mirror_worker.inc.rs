@@ -66,18 +66,18 @@ fn async_worker_guc_off_skips_registration() {
 }
 
 #[pg_test]
-fn async_admission_lsn_diff_ok() {
-    // Regression: non-zero async_mirror_max_retained_bytes always queries
-    // pg_wal_lsn_diff (numeric). Without CAST(... AS bigint), SPI i64 fails and
-    // apply/flush fail closed incorrectly. Missing slot still exercises the type.
-    crate::async_mirror::status::enforce_retained_wal_admission("koldstore_no_such_slot")
-        .expect("admission must accept pg_wal_lsn_diff via bigint cast");
+fn async_retained_wal_health_status_is_exposed() {
     let status = Spi::get_one::<pgrx::JsonB>("SELECT koldstore.async_mirror_status()")
         .expect("async_mirror_status spi")
         .expect("non-null status");
     assert!(
+        status.0.get("retention").and_then(|v| v.get("ok")).is_some(),
+        "status must expose retention.ok; got {}",
+        status.0
+    );
+    assert!(
         status.0.get("admission").and_then(|v| v.get("ok")).is_some(),
-        "status must expose admission.ok; got {}",
+        "status must preserve the admission.ok compatibility alias; got {}",
         status.0
     );
 }

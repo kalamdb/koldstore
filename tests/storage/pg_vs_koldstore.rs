@@ -294,10 +294,11 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                 )
                 .await?;
             }
-            // Warm-up / large catch-up can retain >1 GiB slot WAL. Raise the lab
-            // cap before warm-up (production keeps the 1 GiB default).
+            // Warm-up / large catch-up can retain >1 GiB slot WAL. Disable the
+            // lab health alarm before warm-up; apply remains enabled.
             if mode == "async" {
-                relax_async_retained_wal_cap_for_benchmark(&db.client, &dbname).await?;
+                disable_async_retained_wal_health_threshold_for_benchmark(&db.client, &dbname)
+                    .await?;
             }
             // Warm-up before pinning the worker off: async manage_table needs the
             // worker GUC enabled for activation on the throwaway table.
@@ -1231,20 +1232,23 @@ async fn async_catchup_drain(client: &Client, mirror_capture_mode: &str) -> Resu
     Ok(())
 }
 
-async fn relax_async_retained_wal_cap_for_benchmark(client: &Client, dbname: &str) -> Result<()> {
+async fn disable_async_retained_wal_health_threshold_for_benchmark(
+    client: &Client,
+    dbname: &str,
+) -> Result<()> {
     // With the worker off (or lagging), multi-million-row seeding retains
-    // multi-GiB slot WAL until the fence. Raise the fail-closed admission cap
-    // for this lab run only (default 1 GiB). Production keeps the 1 GiB default.
+    // multi-GiB slot WAL until the fence. Disable the health alarm for this
+    // controlled lab run; apply remains enabled regardless of this threshold.
     client
         .batch_execute(&format!(
             "ALTER DATABASE \"{dbname}\" SET koldstore.async_mirror_max_retained_bytes = 0"
         ))
         .await
-        .context("raise async mirror retained-WAL cap for storage comparison")?;
+        .context("disable async mirror retained-WAL health threshold for storage comparison")?;
     client
         .batch_execute("SET koldstore.async_mirror_max_retained_bytes = 0")
         .await
-        .context("disable async mirror retained-WAL cap in benchmark session")?;
+        .context("disable async mirror retained-WAL health threshold in benchmark session")?;
     Ok(())
 }
 
@@ -1269,7 +1273,7 @@ async fn disable_async_worker_for_benchmark(
         .batch_execute("SET koldstore.internal_async_mirror_worker = off")
         .await
         .context("disable async mirror worker GUC in benchmark session")?;
-    relax_async_retained_wal_cap_for_benchmark(client, dbname).await?;
+    disable_async_retained_wal_health_threshold_for_benchmark(client, dbname).await?;
     terminate_async_workers_until_idle(client).await?;
     Ok(true)
 }
@@ -1962,6 +1966,7 @@ fn build_comparison_report(
             mg_ops(managed.map(|m| m.insert)),
         ),
         row("sustainable insert throughput", "TODO", "TODO"),
+        row("sustainable update throughput", "TODO", "TODO"),
         row(
             "insert p99 latency",
             pg_p99(baseline.map(|m| m.insert)),

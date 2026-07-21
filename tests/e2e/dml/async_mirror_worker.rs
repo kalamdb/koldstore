@@ -5,6 +5,64 @@ use anyhow::Result;
 use std::time::{Duration, Instant};
 
 #[tokio::test]
+async fn async_apply_drains_above_retained_wal_health_threshold() -> Result<()> {
+    if !common::selected_mirror_capture_mode()?.is_async() {
+        common::log_always("skipping async retained-WAL drain assertion in strict mode");
+        return Ok(());
+    }
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "async_retained_wal_drain").await?;
+        clear_async_failpoint(&db.client).await?;
+        cleanup_leftover_async_tables(&db.client).await?;
+        let table_name = format!("{}_events", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        ensure_publication(&db.client).await?;
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        manage_async(&db.client, &relation, &db.storage_name).await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        db.client
+            .batch_execute(
+                "SET koldstore.internal_async_mirror_worker = off; \
+                 SET koldstore.async_mirror_max_retained_bytes = 1",
+            )
+            .await?;
+        force_stop_async_worker(&db.client).await?;
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} \
+                     SELECT id, 'body-' || id FROM generate_series(1, 100) id"
+                ),
+                &[],
+            )
+            .await?;
+
+        let applied = common::wait_for_async_mirror(&db.client).await?;
+        assert_eq!(
+            applied, 100,
+            "the fence must drain retained WAL above the health threshold"
+        );
+        assert_eq!(common::mirror_op_count(&db.client, &mirror, 1).await?, 100);
+
+        db.client
+            .batch_execute(
+                "RESET koldstore.async_mirror_max_retained_bytes; \
+                 RESET koldstore.internal_async_mirror_worker",
+            )
+            .await?;
+        cleanup_async_table(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Result<()> {
     if !common::selected_mirror_capture_mode()?.is_async() {
         common::log_always("skipping async worker lifecycle assertions in strict mode");

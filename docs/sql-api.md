@@ -80,7 +80,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.async_apply_max_ms_per_tick` | int | `0` | Max wall-clock ms per apply tick (`0` = unlimited). When exhausted, commit `applied_lsn` and continue next wake. |
 | `koldstore.flush_prelock_max_passes` | int | `3` | Max phase-5.5 pre-lock async apply passes during flush before failing closed. |
 | `koldstore.flush_prelock_max_ms` | int | `5000` | Combined wall-clock budget (ms) for flush phase-5.5 pre-lock catch-up. |
-| `koldstore.async_mirror_max_retained_bytes` | int | `1073741824` (1 GiB) | Fail-closed admission limit on slot retained WAL bytes. When exceeded, async apply/flush error instead of advancing. `0` disables (not recommended for production async). Never silently drops WAL. |
+| `koldstore.async_mirror_max_retained_bytes` | int | `1073741824` (1 GiB) | Health threshold for slot-retained WAL bytes. Exceeding it marks `async_mirror_status().retention.ok` false but never blocks the applier from draining WAL. `admission` remains a compatibility alias. `0` disables this health threshold. Configure PostgreSQL retention/disk safeguards independently. |
 
 ### Internal GUCs
 

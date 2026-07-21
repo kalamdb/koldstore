@@ -497,10 +497,11 @@ CTE’s `RETURNING` tuplestore for wide/composite primary keys.
 The row cap bounds cleanup work, but it does **not** by itself bound WAL apply
 work. Use the phase-5.5 pre-lock catch-up to process accumulated global-slot WAL
 while target-table writers are still allowed. Before taking the relation lock,
-enforce a configurable admission target such as `max_prune_fence_wal_bytes` (or
-an equivalent decoded-work/time estimate). If the remaining final delta is too
-large, run another finite pre-lock pass or fail/retry; do not knowingly enter an
-unbounded writer-pause window.
+enforce a configurable **finalize-entry** target such as
+`max_prune_fence_wal_bytes` (or an equivalent decoded-work/time estimate). This
+is distinct from the global retained-WAL health threshold. If the remaining
+final delta is too large, run another finite pre-lock pass or fail/retry; do not
+knowingly enter an unbounded writer-pause window.
 
 After the relation lock is granted, capture `F1` immediately. If the gap grew
 past the configured hard safety limit while waiting for an in-flight writer,
@@ -1039,10 +1040,12 @@ Prefer deterministic failpoints and isolation schedules over sleeps.
 20. **`strict_flush_avoids_async_fence`**
     - Keep an async slot for another table, flush a strict table, and assert no
       source writer fence/database apply work is taken for the strict table.
-21. **`stalled_upload_retained_wal_fails_closed`**
+21. **`stalled_upload_timeout_reports_retained_wal_health`**
     - Pause object upload while producing WAL on another async table.
-    - Assert timeout/retention admission aborts without prune, releases the apply
-      lock, and leaves any uploaded-but-unreferenced object collectible.
+    - Assert crossing the retained-WAL threshold reports unhealthy without
+      disabling apply; the independent upload timeout aborts without prune,
+      releases the apply lock, and lets the applier drain afterward. Any
+      uploaded-but-unreferenced object remains collectible.
 22. **`schema_ddl_waits_for_flush_snapshot`**
     - Pause after source selection and request schema-changing DDL.
     - Assert DDL cannot commit before flush releases its source relation locks.
@@ -1084,7 +1087,8 @@ counter update.
 - [ ] Add `max_rows_per_flush` and cap the selected seq prefix for policy/force flush
 - [ ] Prove sequence uniqueness or implement a stable composite cleanup watermark
 - [ ] Add finite pre-lock catch-up budgets and a final-delta safety limit
-- [ ] Add overall flush/upload and retained-WAL admission limits
+- [ ] Add overall flush/upload timeouts, retained-WAL health alerts, and
+      PostgreSQL slot/disk safeguards (the applier itself must keep draining)
 - [x] Acquire `SHARE ROW EXCLUSIVE` by source table OID only for async tables
 - [x] Call final bounded apply after manifest publish and before cleanup
 - [x] Apply async `DELETE` via mirror upsert so prune-fence tombstones survive a missing row

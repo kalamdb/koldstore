@@ -12,8 +12,7 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
 use koldstore_merge::scan::{
-    execute_merge_scan_with_filters, FilterPlan, MergeScanPlan, MirrorOverlayStrategy,
-    CUSTOM_PATH_NAME,
+    execute_merge_scan, MergeScanPlan, MirrorOverlayStrategy, CUSTOM_PATH_NAME,
 };
 use pgrx::pg_sys;
 
@@ -27,12 +26,12 @@ mod qual;
 mod tuple;
 
 use cold::{load_cold_rows_for_merge, planned_cold_read_profile};
-use emit::materialize_row_from_image;
+use emit::materialize_scan_row_from_image;
 use hot::{load_hot_rows_for_merge, load_hot_rows_native};
 use mirror::{load_mirror_tombstone_overlay, MirrorOverlay};
 use profile::{ColdReadProfile, EmitPath};
-use qual::{requested_target_columns, residual_filters};
-use tuple::{store_materialized_row, MaterializedRow, ScanMemory};
+use qual::{required_scan_projection, residual_filters};
+use tuple::{slot_attribute_count, store_materialized_row, MaterializedRow, ScanMemory};
 
 const CUSTOM_SCAN_NAME: &[u8] = b"KoldMergeScan\0";
 
@@ -55,7 +54,24 @@ enum ScanEmitMode {
     Buffer {
         rows: Vec<MaterializedRow>,
         next: usize,
+        slot_indexes: Vec<usize>,
+        tuple_width: usize,
     },
+}
+
+impl ScanEmitMode {
+    fn buffer(rows: Vec<MaterializedRow>, projection: &qual::ScanProjection<'_>) -> Self {
+        Self::Buffer {
+            rows,
+            next: 0,
+            slot_indexes: projection
+                .columns
+                .iter()
+                .map(|column| column.slot_index)
+                .collect(),
+            tuple_width: projection.tuple_width,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -74,14 +90,20 @@ struct ScanExecutionState {
 
 impl ScanExecutionState {
     unsafe fn store_next_buffered_row(&mut self, slot: *mut pg_sys::TupleTableSlot) -> bool {
-        let ScanEmitMode::Buffer { rows, next } = &mut self.mode else {
+        let ScanEmitMode::Buffer {
+            rows,
+            next,
+            slot_indexes,
+            tuple_width,
+        } = &mut self.mode
+        else {
             return false;
         };
         let Some(row) = rows.get(*next) else {
             return false;
         };
         *next += 1;
-        store_materialized_row(slot, row);
+        store_materialized_row(slot, row, slot_indexes, *tuple_width);
         true
     }
 }
@@ -327,6 +349,10 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     }
 
     let table_oid = (*(*node).ss.ss_currentRelation).rd_id;
+    let relation_owner = (*(*node).ss.ss_currentRelation)
+        .rd_rel
+        .as_ref()
+        .map_or(pg_sys::InvalidOid, |relation| relation.relowner);
     let plan = (*node).ss.ps.plan;
     let targetlist = if plan.is_null() {
         std::ptr::null_mut()
@@ -356,34 +382,43 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     })
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} catalog lookup failed: {error}"));
 
-    let requested = unsafe { requested_target_columns(targetlist, &catalog.columns) };
-    let residual = unsafe { residual_filters(qual, &catalog.columns, params) };
-    let emit_columns: Vec<&koldstore_migrate::order::CatalogColumn> = if requested.is_empty() {
-        catalog.columns.iter().collect()
-    } else {
-        requested
-    };
-    let mut image_columns = emit_columns.clone();
-    for column in residual
-        .equality
-        .iter()
-        .map(|(column, _)| column.as_str())
-        .chain(
-            residual
-                .membership
-                .iter()
-                .map(|(column, _)| column.as_str()),
+    let scanrelid = plan
+        .cast::<pg_sys::CustomScan>()
+        .as_ref()
+        .map_or(0, |scan| scan.scan.scanrelid);
+    let tuple_width = unsafe { slot_attribute_count((*node).ss.ss_ScanTupleSlot) }
+        .unwrap_or_else(|| pgrx::error!("{CUSTOM_PATH_NAME} scan tuple descriptor is unavailable"));
+    let scan_projection = unsafe {
+        required_scan_projection(
+            table_oid,
+            scanrelid,
+            targetlist,
+            qual,
+            &catalog.columns,
+            tuple_width,
         )
-    {
-        if let Some(catalog_column) = catalog.columns.iter().find(|c| c.name == column) {
-            if !image_columns.iter().any(|c| c.name == catalog_column.name) {
-                image_columns.push(catalog_column);
-            }
-        }
     }
+    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} projection failed: {error}"));
+    let residual =
+        unsafe { residual_filters(table_oid, scanrelid, qual, &catalog.columns, params) };
+    // Source reads may only push immutable primary-key equality. All other
+    // predicates, especially RLS/security quals, run after winner resolution.
+    let primary_keys = snapshot
+        .primary_key_columns
+        .iter()
+        .map(String::as_str)
+        .collect::<std::collections::HashSet<_>>();
+    let pk_equality = residual
+        .hot_equality
+        .iter()
+        .filter(|filter| primary_keys.contains(filter.column.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let image_columns = scan_projection.catalog_columns();
 
     let (mut cold_profile, cold_rows) = match load_cold_rows_for_merge(
         table_oid,
+        scanrelid,
         &snapshot,
         catalog.as_ref(),
         qual,
@@ -402,7 +437,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         match load_mirror_tombstone_overlay(
             &snapshot.mirror_relation,
             &snapshot.primary_key_columns,
-            &residual.hot_equality,
+            &pk_equality,
         ) {
             Ok(overlay) => overlay,
             Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} mirror overlay failed: {error}"),
@@ -418,24 +453,23 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     // Hot-only fast path: stream the native child when present and cold is empty.
     let (mode, emit_path, hot_rows_count) = if cold_rows.is_empty()
         && cold_profile.segments.is_empty()
-        && residual.membership.is_empty()
         && has_hot_child
     {
         (ScanEmitMode::HotChild, EmitPath::HotChild, 0)
-    } else if cold_rows.is_empty()
-        && cold_profile.segments.is_empty()
-        && residual.membership.is_empty()
-    {
-        match load_hot_rows_native(
-            &relation,
-            &residual.hot_equality,
-            &emit_columns,
-            &mut memory,
-        ) {
+    } else if cold_rows.is_empty() && cold_profile.segments.is_empty() {
+        match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
+            load_hot_rows_native(
+                &relation,
+                &pk_equality,
+                &image_columns,
+                &scan_projection,
+                &mut memory,
+            )
+        }) {
             Ok(rows) => {
                 let hot_count = rows.len();
                 (
-                    ScanEmitMode::Buffer { rows, next: 0 },
+                    ScanEmitMode::buffer(rows, &scan_projection),
                     EmitPath::HotNative,
                     hot_count,
                 )
@@ -443,32 +477,30 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot-only read failed: {error}"),
         }
     } else if !cold_rows.is_empty()
-        && residual.membership.is_empty()
-        && hot_equality_covers_primary_key(&residual.hot_equality, &snapshot.primary_key_columns)
+        && hot_equality_covers_primary_key(&pk_equality, &snapshot.primary_key_columns)
     {
         // PK point-lookup fast path: probe hot with native Datums (no to_jsonb).
         // Hot always wins for the same PK, so a hit skips cold merge entirely.
         // A miss materializes cold winners without the JSON hot merge path.
-        match load_hot_rows_native(
-            &relation,
-            &residual.hot_equality,
-            &emit_columns,
-            &mut memory,
-        ) {
+        match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
+            load_hot_rows_native(
+                &relation,
+                &pk_equality,
+                &image_columns,
+                &scan_projection,
+                &mut memory,
+            )
+        }) {
             Ok(rows) if !rows.is_empty() => {
                 let hot_count = rows.len();
                 (
-                    ScanEmitMode::Buffer { rows, next: 0 },
+                    ScanEmitMode::buffer(rows, &scan_projection),
                     EmitPath::HotNative,
                     hot_count,
                 )
             }
             Ok(_) => {
-                let mut filters = FilterPlan::new();
-                for (column, expected) in &residual.equality {
-                    filters = filters.with_required_json_eq(column.clone(), expected.clone());
-                }
-                let merged = match execute_merge_scan_with_filters(Vec::new(), cold_rows, filters) {
+                let merged = match execute_merge_scan(Vec::new(), cold_rows) {
                     Ok(result) => result,
                     Err(error) => {
                         pgrx::error!("{CUSTOM_PATH_NAME} cold-native merge failed: {error}")
@@ -479,7 +511,9 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                         merged
                             .rows
                             .iter()
-                            .map(|row| materialize_row_from_image(&row.row_image, &emit_columns))
+                            .map(|row| {
+                                materialize_scan_row_from_image(&row.row_image, &scan_projection)
+                            })
                             .collect::<Result<Vec<_>, _>>()
                     })
                 }
@@ -487,7 +521,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                     pgrx::error!("{CUSTOM_PATH_NAME} cold-native emit failed: {error}")
                 });
                 (
-                    ScanEmitMode::Buffer { rows, next: 0 },
+                    ScanEmitMode::buffer(rows, &scan_projection),
                     EmitPath::ColdNative,
                     0,
                 )
@@ -495,26 +529,15 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot probe failed: {error}"),
         }
     } else {
-        let mut filters = FilterPlan::new();
-        for (column, expected) in &residual.equality {
-            filters = filters.with_required_json_eq(column.clone(), expected.clone());
-        }
-        for (column, values) in residual.membership {
-            filters = filters.with_required_json_in(column, values);
-        }
-
-        let hot_rows = match load_hot_rows_for_merge(
-            &relation,
-            &snapshot,
-            &residual.hot_equality,
-            &image_columns,
-        ) {
-            Ok(rows) => rows,
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot read failed: {error}"),
-        };
+        let hot_rows =
+            match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
+                load_hot_rows_for_merge(&relation, &snapshot, &pk_equality, &image_columns)
+            }) {
+                Ok(rows) => rows,
+                Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot read failed: {error}"),
+            };
         let hot_count = hot_rows.len();
-
-        let merged = match execute_merge_scan_with_filters(hot_rows, cold_rows, filters) {
+        let merged = match execute_merge_scan(hot_rows, cold_rows) {
             Ok(result) => result,
             Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} merge failed: {error}"),
         };
@@ -524,13 +547,13 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 merged
                     .rows
                     .iter()
-                    .map(|row| materialize_row_from_image(&row.row_image, &emit_columns))
+                    .map(|row| materialize_scan_row_from_image(&row.row_image, &scan_projection))
                     .collect::<Result<Vec<_>, _>>()
             })
         }
         .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} emit failed: {error}"));
         (
-            ScanEmitMode::Buffer { rows, next: 0 },
+            ScanEmitMode::buffer(rows, &scan_projection),
             EmitPath::MergeBuffer,
             hot_count,
         )
@@ -586,6 +609,29 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         return exec_hot_child_slot(node, slot);
     }
 
+    // Buffered merge rows are base-relation scan tuples. ExecScan applies the
+    // ExprState compiled from plan.qual (including RLS/security quals), counts
+    // rejected rows, and projects into ps_ResultTupleSlot.
+    pg_sys::ExecScan(
+        &raw mut (*node).ss,
+        Some(next_buffered_scan_tuple),
+        Some(recheck_buffered_scan_tuple),
+    )
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn next_buffered_scan_tuple(
+    scan_state: *mut pg_sys::ScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    if scan_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let node = scan_state.cast::<pg_sys::CustomScanState>();
+    let slot = (*scan_state).ss_ScanTupleSlot;
+    if slot.is_null() {
+        return std::ptr::null_mut();
+    }
+
     let stored = SCAN_STATES.with(|states| {
         let mut states = states.borrow_mut();
         let scan = states.get_mut(&(node as usize))?;
@@ -597,6 +643,14 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     } else {
         std::ptr::null_mut()
     }
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn recheck_buffered_scan_tuple(
+    _scan_state: *mut pg_sys::ScanState,
+    _slot: *mut pg_sys::TupleTableSlot,
+) -> bool {
+    true
 }
 
 #[pgrx::pg_guard]
@@ -629,6 +683,7 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
     if node.is_null() {
         return;
     }
+    pg_sys::ExecScanReScan(&raw mut (*node).ss);
     if let Some(child) = hot_child_planstate(node) {
         pg_sys::ExecReScan(child);
     }

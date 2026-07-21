@@ -65,6 +65,7 @@ pub fn plan_user_scope_policy(
     let quoted_scope_column = format!("\"{scope_column}\"");
     let predicate = format!(
         "current_setting('koldstore.user_id', true) IS NOT NULL AND \
+         current_setting('koldstore.user_id', true) <> '' AND \
          {quoted_scope_column} = current_setting('koldstore.user_id', true)"
     );
 

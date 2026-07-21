@@ -3,9 +3,10 @@ use koldstore_common::{
     TableName,
 };
 use koldstore_mirror::{
-    mirror_relation_for_source, plan_async_mirror_batch_upsert, plan_delete_selected_mirror_rows,
-    plan_mirror_schema, plan_mirror_stats, plan_select_mirror_rows_after_seq,
-    plan_upsert_mirror_row, MirrorAccess, MirrorColumn, SqlParamType,
+    mirror_relation_for_source, plan_async_mirror_batch_update, plan_async_mirror_batch_upsert,
+    plan_delete_selected_mirror_rows, plan_mirror_schema, plan_mirror_stats,
+    plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorAccess, MirrorColumn,
+    SqlParamType,
 };
 
 fn pk_shape(name: &str, type_name: &str) -> PrimaryKeyColumnShape {
@@ -101,6 +102,25 @@ fn async_mirror_batch_upsert_uses_typed_unnest_and_xmax_counters() {
     assert!(!sql.contains("jsonb_to_recordset"));
     assert!(!sql.contains("commit_lsn"));
     assert!(!sql.contains("existing AS"));
+}
+
+#[test]
+fn async_mirror_batch_update_updates_existing_rows_then_upserts_missing_rows() {
+    let sql = plan_async_mirror_batch_update(
+        "\"koldstore\".\"items__cl\"",
+        &["tenant_id", "id"],
+        &["uuid".to_string(), "bigint".to_string()],
+        "unused",
+    )
+    .unwrap();
+
+    assert!(sql.contains("UPDATE \"koldstore\".\"items__cl\" AS mirror"));
+    assert!(sql.contains("FROM incoming"));
+    assert!(sql.contains("RETURNING mirror.\"tenant_id\", mirror.\"id\""));
+    assert!(sql.contains("LEFT JOIN updated"));
+    assert!(sql.contains("WHERE updated.\"tenant_id\" IS NULL"));
+    assert!(sql.contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE"));
+    assert!(sql.contains("count(*) FILTER (WHERE NOT inserted)"));
 }
 
 #[test]

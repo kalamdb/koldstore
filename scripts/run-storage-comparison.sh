@@ -13,17 +13,20 @@ HOT_LIMIT="${KOLDSTORE_STORAGE_HOT_LIMIT:-10000}"
 DML_SAMPLE="${KOLDSTORE_STORAGE_DML_SAMPLE:-1000}"
 INSERT_BATCH_ROWS="${KOLDSTORE_STORAGE_INSERT_BATCH_ROWS:-100000}"
 WARMUP_ROWS="${KOLDSTORE_STORAGE_WARMUP_ROWS:-}"
+REPETITIONS="${KOLDSTORE_STORAGE_REPETITIONS:-1}"
 SIDE="${KOLDSTORE_STORAGE_SIDE:-}"
 UPDATE_RESULTS=0
 ALL_SIDES=0
 RESULTS_DIR="${KOLDSTORE_STORAGE_RESULTS_DIR:-${ROOT_DIR}/docs/benchmarks/.storage-results}"
 RESULTS_MD="${KOLDSTORE_STORAGE_RESULTS_MD:-${ROOT_DIR}/docs/benchmarks/RESULTS.md}"
+CURRENT_REPETITION=1
+MIN_PUBLISH_REPETITIONS=6
 
 usage() {
   cat <<'EOF'
 Run the PostgreSQL vs KoldStore storage comparison harness (tests/storage/).
 
-Exactly three measurements, each on a fresh pgrx PostgreSQL:
+Three isolated sides, each on a fresh pgrx PostgreSQL:
 
   1. pg      — PostgreSQL only
   2. async   — PG + KoldStore (async mirror)
@@ -40,16 +43,18 @@ Options:
   --insert-batch-rows N  Rows per committed insert batch (default: 100000)
   --warmup-rows N   Untimed warm-up inserts before timed seed (default: scale-aware,
                       min(rows, max(1M, 5*batch)); 0 disables)
+  --repetitions N    Isolated samples per side (default: 1; publishing requires
+                      a multiple of 6)
   --side SIDE       Run one side only: pg | async | strict
-  --all-sides       Run all three sides once each (fresh server per side)
+  --all-sides       Run all three sides per repetition (fresh server per side)
   --both-modes      Deprecated alias for --all-sides
-  --update-results  Merge JSON into docs/benchmarks/RESULTS.md
+  --update-results  Merge JSON into docs/benchmarks/RESULTS.md (clean tree required)
   --pg-version N    PostgreSQL major version (default: 16)
   --prepare-only    Prepare pgrx + extension only, skip the test
   -h, --help        Show this help text
 
 Examples:
-  scripts/run-storage-comparison.sh --all-sides --update-results \
+  scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results \
     --rows 10000000 --hot-limit 100000 --dml-sample 50000
   scripts/run-storage-comparison.sh --side async --rows 100000
 EOF
@@ -75,6 +80,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --warmup-rows)
       WARMUP_ROWS="${2:?missing value for --warmup-rows}"
+      shift 2
+      ;;
+    --repetitions)
+      REPETITIONS="${2:?missing value for --repetitions}"
       shift 2
       ;;
     --side)
@@ -137,8 +146,33 @@ if [[ "${ALL_SIDES}" == "1" && -n "${SIDE}" ]]; then
 fi
 
 if [[ "${ALL_SIDES}" != "1" && -z "${SIDE}" && "${PREPARE_ONLY}" != "1" && "${PREPARE_ONLY}" != "true" ]]; then
-  echo "error: pass --all-sides (run pg+async+strict once each) or --side pg|async|strict" >&2
+  echo "error: pass --all-sides (run pg+async+strict per repetition) or --side pg|async|strict" >&2
   usage >&2
+  exit 1
+fi
+
+if ! [[ "${REPETITIONS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "error: --repetitions must be a positive integer (got: ${REPETITIONS})" >&2
+  exit 1
+fi
+
+if [[ "${UPDATE_RESULTS}" == "1" && "${ALL_SIDES}" != "1" ]]; then
+  echo "error: --update-results requires --all-sides" >&2
+  exit 1
+fi
+
+if [[ "${UPDATE_RESULTS}" == "1" && "${REPETITIONS}" -lt "${MIN_PUBLISH_REPETITIONS}" ]]; then
+  echo "error: --update-results requires at least ${MIN_PUBLISH_REPETITIONS} counterbalanced repetitions per side" >&2
+  exit 1
+fi
+
+if [[ "${UPDATE_RESULTS}" == "1" && $((REPETITIONS % 6)) -ne 0 ]]; then
+  echo "error: --update-results requires a multiple of 6 repetitions for balanced side ordering" >&2
+  exit 1
+fi
+
+if [[ "${UPDATE_RESULTS}" == "1" ]] && [[ -n "$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=normal)" ]]; then
+  echo "error: --update-results requires a clean git worktree; commit or stash changes before publishing" >&2
   exit 1
 fi
 
@@ -193,10 +227,12 @@ run_isolated_side() {
   fi
   prepare_fresh_server "${skip_install}"
   EXTENSION_INSTALLED=1
-  echo "running side=${side} once (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, warmup_rows=${WARMUP_ROWS:-auto})"
+  echo "running repetition=${CURRENT_REPETITION}/${REPETITIONS} side=${side} (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, warmup_rows=${WARMUP_ROWS:-auto})"
   if [[ "${UPDATE_RESULTS}" == "1" ]]; then
-    mkdir -p "${RESULTS_DIR}"
-    results_json="${RESULTS_DIR}/${side}.json"
+    local repetition_dir
+    repetition_dir="${RESULTS_DIR}/run-$(printf '%02d' "${CURRENT_REPETITION}")"
+    mkdir -p "${repetition_dir}"
+    results_json="${repetition_dir}/${side}.json"
   fi
   local git_commit
   local git_dirty=0
@@ -224,12 +260,29 @@ run_isolated_side() {
 }
 
 render_results() {
-  python3 "${ROOT_DIR}/scripts/render-storage-comparison-results.py" \
-    --pg-json "${RESULTS_DIR}/pg.json" \
-    --async-json "${RESULTS_DIR}/async.json" \
-    --strict-json "${RESULTS_DIR}/strict.json" \
-    --out "${RESULTS_MD}"
+  local -a render_args=(--out "${RESULTS_MD}")
+  local repetition
+  for ((repetition = 1; repetition <= REPETITIONS; repetition++)); do
+    local repetition_dir="${RESULTS_DIR}/run-$(printf '%02d' "${repetition}")"
+    render_args+=(
+      --pg-json "${repetition_dir}/pg.json"
+      --async-json "${repetition_dir}/async.json"
+      --strict-json "${repetition_dir}/strict.json"
+    )
+  done
+  python3 "${ROOT_DIR}/scripts/render-storage-comparison-results.py" "${render_args[@]}"
   echo "updated ${RESULTS_MD}"
+}
+
+counterbalanced_order() {
+  case "$(( (CURRENT_REPETITION - 1) % 6 ))" in
+    0) echo "pg async strict" ;;
+    1) echo "async strict pg" ;;
+    2) echo "strict pg async" ;;
+    3) echo "strict async pg" ;;
+    4) echo "async pg strict" ;;
+    5) echo "pg strict async" ;;
+  esac
 }
 
 if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
@@ -244,11 +297,15 @@ if ! cargo nextest --version >/dev/null 2>&1; then
 fi
 
 if [[ "${ALL_SIDES}" == "1" ]]; then
-  run_isolated_side pg
-  run_isolated_side async
-  run_isolated_side strict
+  for ((CURRENT_REPETITION = 1; CURRENT_REPETITION <= REPETITIONS; CURRENT_REPETITION++)); do
+    for side_name in $(counterbalanced_order); do
+      run_isolated_side "${side_name}"
+    done
+  done
 else
-  run_isolated_side "${SIDE}"
+  for ((CURRENT_REPETITION = 1; CURRENT_REPETITION <= REPETITIONS; CURRENT_REPETITION++)); do
+    run_isolated_side "${SIDE}"
+  done
 fi
 
 if [[ "${UPDATE_RESULTS}" == "1" ]]; then

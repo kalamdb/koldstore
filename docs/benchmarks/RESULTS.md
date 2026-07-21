@@ -1,7 +1,8 @@
 # Latest benchmark results
 
 Published numbers from the most recent storage comparison run(s). Re-run
-`scripts/run-storage-comparison.sh --all-sides --update-results` to refresh
+`scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results`
+to refresh
 this file. Each column is measured alone on a fresh pgrx PostgreSQL
 (stop → recreate DBs → one side). Methodology: [README.md](README.md).
 
@@ -19,6 +20,7 @@ indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
 | --- | --- | --- | --- |
 | foreground insert throughput | 94302 ops/s | 107030 ops/s | 28537 ops/s |
 | sustainable insert throughput | TODO | TODO | TODO |
+| sustainable update throughput | TODO | TODO | TODO |
 | insert p99 latency | 2261.57 ms | 1143.11 ms | 5766.58 ms |
 | update p99 latency | 182.37 ms | 115.60 ms | 47.30 ms |
 | hot-query p99 latency | 650 µs | 889 µs | 878 µs |
@@ -98,7 +100,7 @@ rejects cold-start insert skew after install/start.
 | Operation | PG only | Async foreground | Strict | How to read |
 | --- | ---: | ---: | ---: | --- |
 | INSERT | 94.3k ops/s | 107.0k ops/s | 28.5k ops/s | Async ≈ PG (within noise). Strict pays mirror in-txn. |
-| UPDATE | 69.2k ops/s | 52.4k ops/s | 54.4k ops/s | Managed a bit slower. |
+| UPDATE | 69.2k ops/s | 52.4k ops/s | 54.4k ops/s | Historical single sample: async −24.3%; strict −21.5%. Async catch-up was only 0.9k ops/s, so this is not a sustainable-throughput result. |
 | DELETE | 119.4k ops/s | 179.9k ops/s | 27.0k ops/s | Strict slower (tombstone). Async gap is still single-sample noise — not a product claim. |
 | Hot-only PK | 1.80k ops/s | 1.83k ops/s | 1.68k ops/s | Comparable pre-flush. |
 | Hot+cold PK | 1.79k ops/s | 1.53k ops/s | 1.36k ops/s | Parquet open cost. |
@@ -139,14 +141,15 @@ does **not** update `koldstore.<table>__cl` in that timed window — that cost i
 the separate **async insert mirror catch-up** row. Strict pays mirror work in
 the foreground, which is why it is slower.
 
-Sides are **not** run in parallel and do **not** share a live server during
-measurement: `--all-sides` runs **pg, then async, then strict**, each after
-`cargo pgrx stop` + empty DB recreate. Large foreground gaps are still a
-**single sample per side** on one machine. Do not treat async > PostgreSQL-only
-insert as a product claim until repeated isolated runs agree. For end-to-end
+Sides were **not** run in parallel and did **not** share a live server during
+this historical measurement: it ran **pg, then async, then strict**, each after
+`cargo pgrx stop` + empty DB recreate. It also used a dirty tree and only one
+sample per side, so treat every delta as exploratory. Current publication
+requires six clean-tree counterbalanced samples. For end-to-end
 “row is mirrored” cost, add catch-up (or run with the background worker and
 measure lag).
 
 Lab note: the storage harness may set `koldstore.async_mirror_max_retained_bytes = 0`
 while the worker is off so 10M-row seeding can retain multi-GiB slot WAL until
-the post-insert fence. Production keeps the default 1 GiB fail-closed cap.
+the post-insert fence. Production keeps the default 1 GiB health threshold;
+crossing it alerts but never blocks apply from draining retained WAL.

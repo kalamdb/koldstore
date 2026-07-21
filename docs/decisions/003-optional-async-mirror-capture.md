@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+Accepted; amended by [ADR-005](005-async-apply-progress-and-health.md)
+
+ADR-003 records the original mode-selection and logical-slot decision. ADR-005
+is authoritative for the current no-kick worker lifecycle, specialized UPDATE
+apply, retry fairness, and retained-WAL health semantics.
 
 ## Date
 

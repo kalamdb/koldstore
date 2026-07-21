@@ -13,6 +13,7 @@ use koldstore_common::{
 use koldstore_merge::scan::HOT_SEQ_SENTINEL;
 use pgrx::pg_sys;
 
+use super::qual::ScanProjection;
 use super::tuple::{MaterializedRow, ScanMemory};
 use super::with_hook_disabled;
 
@@ -103,6 +104,7 @@ pub(super) fn load_hot_rows_native(
     relation: &str,
     equality_filters: &[HotEqualityFilter],
     projected_columns: &[&koldstore_migrate::order::CatalogColumn],
+    scan_projection: &ScanProjection<'_>,
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
     if projected_columns.is_empty() {
@@ -120,7 +122,7 @@ pub(super) fn load_hot_rows_native(
         table = table.quoted(),
     );
 
-    with_hook_disabled(|| unsafe { execute_hot_rows_native(&sql, projected_columns.len(), memory) })
+    with_hook_disabled(|| unsafe { execute_hot_rows_native(&sql, scan_projection, memory) })
 }
 
 fn where_clause_sql(equality_filters: &[HotEqualityFilter]) -> String {
@@ -189,7 +191,7 @@ unsafe fn execute_hot_rows_query(
 
 unsafe fn execute_hot_rows_native(
     query: &str,
-    column_count: usize,
+    scan_projection: &ScanProjection<'_>,
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
     let query = CString::new(query).map_err(|error| error.to_string())?;
@@ -208,10 +210,11 @@ unsafe fn execute_hot_rows_native(
     let mut rows = Vec::with_capacity(processed);
     if !tuptable.is_null() {
         let tupdesc = (*tuptable).tupdesc;
-        let type_meta = column_type_meta(tupdesc, column_count)?;
+        let type_meta = column_type_meta(tupdesc, scan_projection.columns.len())?;
         for index in 0..processed {
             let tuple = *(*tuptable).vals.add(index);
-            let row = memory.switch(|| materialize_spi_tuple(tuple, tupdesc, &type_meta))?;
+            let row = memory
+                .switch(|| materialize_spi_tuple(tuple, tupdesc, &type_meta, scan_projection))?;
             rows.push(row);
         }
     }
@@ -277,9 +280,10 @@ unsafe fn materialize_spi_tuple(
     tuple: pg_sys::HeapTuple,
     tupdesc: pg_sys::TupleDesc,
     type_meta: &[ColumnTypeMeta],
+    scan_projection: &ScanProjection<'_>,
 ) -> Result<MaterializedRow, String> {
-    let mut values = Vec::with_capacity(type_meta.len());
-    let mut is_null = Vec::with_capacity(type_meta.len());
+    let mut values = Vec::with_capacity(scan_projection.columns.len());
+    let mut is_null = Vec::with_capacity(scan_projection.columns.len());
     for (index, meta) in type_meta.iter().enumerate() {
         let attno = (index + 1) as i32;
         let mut null_flag: bool = false;
