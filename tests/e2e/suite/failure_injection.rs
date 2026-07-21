@@ -57,8 +57,7 @@ fn toxiproxy_enabled() -> bool {
 }
 
 fn toxiproxy_api() -> String {
-    std::env::var("KOLDSTORE_TOXIPROXY_API")
-        .unwrap_or_else(|_| "http://127.0.0.1:8474".to_string())
+    std::env::var("KOLDSTORE_TOXIPROXY_API").unwrap_or_else(|_| "http://127.0.0.1:8474".to_string())
 }
 
 fn toxiproxy_proxy_name() -> String {

@@ -165,9 +165,7 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
         .await
         .context("clear failpoint after restart")?;
     // Best-effort unlock if the lock survived (usually does not after immediate stop).
-    let _ = client
-        .execute("SELECT pg_advisory_unlock_all()", &[])
-        .await;
+    let _ = client.execute("SELECT pg_advisory_unlock_all()", &[]).await;
 
     let flushed = client
         .query_one(

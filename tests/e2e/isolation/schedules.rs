@@ -337,13 +337,13 @@ async fn query_during_flush() -> Result<()> {
         // Hammer reads while flush may be waiting at after_select_rows.
         for _ in 0..8 {
             let count: i64 = peer
-                .query_one(
-                    &format!("SELECT count(*)::bigint FROM {relation}"),
-                    &[],
-                )
+                .query_one(&format!("SELECT count(*)::bigint FROM {relation}"), &[])
                 .await?
                 .get(0);
-            assert!(count >= 40, "query during flush must not lose rows ({count})");
+            assert!(
+                count >= 40,
+                "query during flush must not lose rows ({count})"
+            );
             let _ = peer
                 .query(
                     &format!("SELECT id, title FROM {relation} ORDER BY id"),
@@ -433,10 +433,7 @@ async fn repeatable_read_snapshot_during_flush() -> Result<()> {
             .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ;")
             .await?;
         let snap_before: i64 = reader
-            .query_one(
-                &format!("SELECT count(*)::bigint FROM {relation}"),
-                &[],
-            )
+            .query_one(&format!("SELECT count(*)::bigint FROM {relation}"), &[])
             .await?
             .get(0);
 
@@ -469,10 +466,7 @@ async fn repeatable_read_snapshot_during_flush() -> Result<()> {
         let _ = flush_handle.await?;
 
         let snap_during: i64 = reader
-            .query_one(
-                &format!("SELECT count(*)::bigint FROM {relation}"),
-                &[],
-            )
+            .query_one(&format!("SELECT count(*)::bigint FROM {relation}"), &[])
             .await?
             .get(0);
         assert_eq!(
@@ -480,10 +474,7 @@ async fn repeatable_read_snapshot_during_flush() -> Result<()> {
             "repeatable read snapshot row count must not change mid-txn"
         );
         let title: String = reader
-            .query_one(
-                &format!("SELECT title FROM {relation} WHERE id = 1"),
-                &[],
-            )
+            .query_one(&format!("SELECT title FROM {relation} WHERE id = 1"), &[])
             .await?
             .get(0);
         assert!(
