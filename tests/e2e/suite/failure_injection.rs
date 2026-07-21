@@ -388,7 +388,7 @@ async fn partial_multi_segment_outage_fails_merge_scan_closed() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bad_credentials_fail_flush_closed() -> Result<()> {
     if !common::minio_enabled() {
         common::log_always("skipping bad_credentials fault (MinIO not enabled)");
@@ -399,55 +399,47 @@ async fn bad_credentials_fail_flush_closed() -> Result<()> {
         let table = db.create_indexed_items_table("bad_cred_items", 16).await?;
         db.manage_shared(&table.relation, "id").await?;
 
-        let endpoint = std::env::var("KOLDSTORE_MINIO_ENDPOINT")
-            .unwrap_or_else(|_| "http://127.0.0.1:19000".to_string());
-        let bucket = std::env::var("KOLDSTORE_MINIO_BUCKET")
-            .unwrap_or_else(|_| "koldstore-test".to_string());
-        let bad_storage = format!("{}_bad", db.storage_name);
-        let base = format!("s3://{bucket}/bad-creds-{}/", db.schema);
+        // Rotate the managed table's storage to invalid keys so flush auth fails.
         db.client
             .execute(
                 r#"
-                SELECT koldstore.register_storage(
+                SELECT koldstore.alter_storage_credentials(
                   $1,
-                  's3',
-                  $2,
                   jsonb_build_object(
                     'access_key_id', 'definitely-wrong',
                     'secret_access_key', 'also-wrong'
-                  ),
-                  jsonb_build_object(
-                    'endpoint', $3::text,
-                    'region', 'us-east-1',
-                    'path_style', true
                   )
                 )
                 "#,
-                &[&bad_storage, &base, &endpoint],
-            )
-            .await?;
-
-        // Re-manage is not allowed; alter the existing storage credentials by
-        // pointing the table's storage name at a bad binding via location update
-        // with unreachable/wrong auth on the same endpoint.
-        db.client
-            .execute(
-                "SELECT koldstore.alter_storage_location($1, $2, jsonb_build_object('endpoint', $3::text, 'region', 'us-east-1', 'path_style', true))",
-                &[&db.storage_name, &base, &endpoint],
+                &[&db.storage_name],
             )
             .await?;
 
         db.insert_pending_flush_job(&table.relation).await?;
-        let flushed = db.flush_table(&table.relation).await.unwrap_or(0);
-        // Wrong location/prefix under valid MinIO may still succeed or fail;
-        // require hot rows remain and no silent data loss.
+        assert_eq!(db.flush_table(&table.relation).await.unwrap_or(0), 0);
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 16);
-        let _ = flushed;
+        assert_eq!(
+            common::published_manifest_count(&db.client, &table.relation).await?,
+            0
+        );
+        assert_eq!(
+            common::cold_segment_count(&db.client, &table.relation).await?,
+            0
+        );
+        let job = db
+            .client
+            .query_one(
+                "SELECT status, phase FROM koldstore.jobs WHERE table_oid = $1::text::regclass::oid AND job_type = 'flush' ORDER BY updated_at DESC LIMIT 1",
+                &[&table.relation],
+            )
+            .await?;
+        assert_eq!(job.get::<_, String>(0), "error");
+        assert_eq!(job.get::<_, String>(1), "failed");
     }
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn toxiproxy_latency_fails_flush_without_corrupt_catalog() -> Result<()> {
     if !toxiproxy_enabled() {
         common::log_always(

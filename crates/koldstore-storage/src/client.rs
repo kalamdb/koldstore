@@ -399,11 +399,13 @@ fn block_on<F>(future: F) -> F::Output
 where
     F: Future,
 {
-    // Flush/SPI paths are sync. Prefer a dedicated runtime so we never nest
-    // `block_on` on a caller-owned tokio worker (which panics).
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| object_store_runtime().block_on(future))
-    } else {
-        object_store_runtime().block_on(future)
+    // Flush/SPI paths are sync and use a dedicated multi-thread runtime.
+    // `block_in_place` is only legal on multi-thread callers; current-thread
+    // test/runtime handles must fall back to a plain nested `block_on`.
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| object_store_runtime().block_on(future))
+        }
+        _ => object_store_runtime().block_on(future),
     }
 }
