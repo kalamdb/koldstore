@@ -1,1 +1,89 @@
-PostgreSQL 16 with the koldstore extension and pg_cron preinstalled so you can try pg-koldstore quickly without building from source.
+# pg-koldstore
+
+PostgreSQL 16 with the [KoldStore](https://github.com/kalamdb/koldstore) extension preinstalled. Use this image to try tiered storage without building from source.
+
+**Keep hot data in PostgreSQL. Move historical rows to Parquet. Query one table.**
+
+KoldStore is an open-source PostgreSQL extension for tables that grow forever (messages, audit logs, AI history, notifications, events, IoT). The active working set stays in PostgreSQL; older rows flush to compressed Parquet on storage you control; reads still go through the original table.
+
+A built-in database worker auto-flushes managed tables when hot rows exceed `hot_row_limit` (`auto_flush` defaults to `true`). Manual `flush_table` remains available if you want to control flush yourself (for example with `pg_cron`).
+
+> **Early development — not production-ready.** Manage, flush, auto-flush scheduling, and hot/cold query work. Recovery, backup/restore, compaction, and schema evolution are still being hardened.
+
+## Quick start
+
+```bash
+docker pull jamals86/pg-koldstore:latest
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
+psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
+```
+
+Default database is `koldstore`. Extension `koldstore` is created on first init.
+
+```sql
+SELECT koldstore.register_storage(
+  name         => 'local-dev',
+  storage_type => 'filesystem',
+  base_path    => '/tmp/koldstore-demo',
+  credentials  => '{}'::jsonb,
+  config       => '{}'::jsonb
+);
+
+CREATE TABLE messages (
+  id bigint PRIMARY KEY,
+  body text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO messages (id, body)
+SELECT gs, 'row ' || gs FROM generate_series(1, 1012) AS gs;
+
+SELECT koldstore.manage_table(
+  table_name         => 'messages',
+  storage            => 'local-dev',
+  hot_row_limit      => 1000,
+  min_flush_rows     => 1,
+  max_rows_per_file  => 500,
+  migration_order_by => 'id',
+  auto_flush         => true   -- default; set false to drive flush yourself
+);
+
+-- Optional: force a flush now. Otherwise the built-in worker auto-flushes
+-- when hot rows exceed hot_row_limit.
+SELECT koldstore.flush_table(table_name => 'messages');
+SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
+```
+
+## What’s in the image
+
+| Component | Notes |
+| --- | --- |
+| PostgreSQL | 16 (Ubuntu 24.04 / PGDG) |
+| `koldstore` | Preinstalled extension (S3-capable build); built-in auto-flush worker |
+| `pg_cron` | Optional; included if you want to schedule manual flushes yourself |
+| Entrypoint | Compatible with official `POSTGRES_*` env vars |
+
+## Tags
+
+| Tag | Meaning |
+| --- | --- |
+| `latest` | Latest published release image |
+| `<version>-pg16` | Specific KoldStore version on PostgreSQL 16 |
+
+Example: `jamals86/pg-koldstore:0.1.4-beta.1-pg16`
+
+## Environment
+
+Same as the official Postgres image, including:
+
+- `POSTGRES_PASSWORD` (required)
+- `POSTGRES_USER` (default `postgres`)
+- `POSTGRES_DB` (default `koldstore`)
+
+## Links
+
+- Source & docs: https://github.com/kalamdb/koldstore
+- Scheduling: https://github.com/kalamdb/koldstore/blob/main/docs/operations/scheduling.md
+- Quickstart: https://github.com/kalamdb/koldstore/blob/main/docs/quickstart.md
+- Limitations: https://github.com/kalamdb/koldstore/blob/main/docs/limitations.md
+- License: Apache-2.0

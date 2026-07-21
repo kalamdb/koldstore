@@ -19,7 +19,7 @@ on:
         required: false
         default: true
       docker_push:
-        description: "Build, smoke-test, and push PostgreSQL 16 + koldstore Docker image to Docker Hub"
+        description: "Build, smoke-test, and push PostgreSQL 16 + koldstore Docker image to Docker Hub and GHCR (GitHub Packages)"
         type: boolean
         required: false
         default: false
@@ -28,9 +28,15 @@ on:
         type: string
         required: false
         default: "jamals86/pg-koldstore"
+      ghcr_image:
+        description: "GHCR image (ghcr.io/owner/name) for the try-it PostgreSQL image"
+        type: string
+        required: false
+        default: "ghcr.io/kalamdb/pg-koldstore"
 
 permissions:
   contents: write
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -530,9 +536,9 @@ jobs:
             dist/${{ needs.read_version.outputs.version }}/SHA256SUMS
           fail_on_unmatched_files: true
 
-  # Publish PostgreSQL 16 + prebuilt koldstore + pg_cron to Docker Hub.
+  # Publish PostgreSQL 16 + prebuilt koldstore + pg_cron to Docker Hub and GHCR.
   docker_pg:
-    name: Push PG Docker image (Docker Hub)
+    name: Push PG Docker image (Hub + GHCR)
     runs-on: ubuntu-24.04
     needs:
       - read_version
@@ -547,6 +553,7 @@ jobs:
       }}
     env:
       DOCKER_REPO_INPUT: ${{ inputs.docker_repo }}
+      GHCR_IMAGE_INPUT: ${{ inputs.ghcr_image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -574,20 +581,29 @@ jobs:
           VERSION="${{ needs.read_version.outputs.version }}"
           SHORT_SHA="${GITHUB_SHA:0:7}"
           DOCKER_REPO="${DOCKER_REPO_INPUT:-jamals86/pg-koldstore}"
+          GHCR_IMAGE="${GHCR_IMAGE_INPUT:-ghcr.io/kalamdb/pg-koldstore}"
           if [[ ! "${DOCKER_REPO}" =~ ^[A-Za-z0-9]+([._-][A-Za-z0-9]+)*\/[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$ ]]; then
             echo "::error::Invalid docker_repo '${DOCKER_REPO}'. Expected owner/name." >&2
             exit 1
           fi
+          if [[ ! "${GHCR_IMAGE}" =~ ^ghcr\.io\/[A-Za-z0-9]+([._-][A-Za-z0-9]+)*\/[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$ ]]; then
+            echo "::error::Invalid ghcr_image '${GHCR_IMAGE}'. Expected ghcr.io/owner/name." >&2
+            exit 1
+          fi
           CANDIDATE_TAG="${VERSION}-pg${DOCKER_PG_MAJOR}-ci-${SHORT_SHA}"
-          DESCRIPTION="$(tr '\n' ' ' < docker/image-description.txt | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+          # OCI image label + Docker Hub short description (≤100 chars).
+          # Full Hub Overview is synced from docker/image-description.txt after promote.
+          DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly."
           {
             echo "docker_repo=${DOCKER_REPO}"
+            echo "ghcr_image=${GHCR_IMAGE}"
             echo "candidate_tag=${CANDIDATE_TAG}"
             echo "version_tag=${VERSION}-pg${DOCKER_PG_MAJOR}"
             echo "latest_tag=latest"
             echo "description=${DESCRIPTION}"
           } >> "$GITHUB_OUTPUT"
           echo "Docker Hub repo: ${DOCKER_REPO}"
+          echo "GHCR image: ${GHCR_IMAGE}"
           echo "Candidate tag: ${CANDIDATE_TAG}"
 
       - name: Download PG${{ env.DOCKER_PG_MAJOR }} package artifact
@@ -635,6 +651,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Build and push candidate image
         uses: docker/build-push-action@v6
         with:
@@ -653,6 +676,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
             ${{ steps.vars.outputs.docker_repo }}:${{ steps.vars.outputs.candidate_tag }}
+            ${{ steps.vars.outputs.ghcr_image }}:${{ steps.vars.outputs.candidate_tag }}
 
       - name: Smoke-test candidate image
         id: smoke
@@ -676,14 +700,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          REPO="${{ steps.vars.outputs.docker_repo }}"
+          HUB_REPO="${{ steps.vars.outputs.docker_repo }}"
+          GHCR_IMAGE="${{ steps.vars.outputs.ghcr_image }}"
           CANDIDATE="${{ steps.vars.outputs.candidate_tag }}"
           VERSION_TAG="${{ steps.vars.outputs.version_tag }}"
           LATEST_TAG="${{ steps.vars.outputs.latest_tag }}"
 
           docker buildx imagetools create \
-            -t "${REPO}:${VERSION_TAG}" \
-            -t "${REPO}:${LATEST_TAG}" \
-            "${REPO}:${CANDIDATE}"
+            -t "${HUB_REPO}:${VERSION_TAG}" \
+            -t "${HUB_REPO}:${LATEST_TAG}" \
+            "${HUB_REPO}:${CANDIDATE}"
 
-          echo "::notice::Published ${REPO}:${VERSION_TAG} and ${REPO}:${LATEST_TAG}"
+          docker buildx imagetools create \
+            -t "${GHCR_IMAGE}:${VERSION_TAG}" \
+            -t "${GHCR_IMAGE}:${LATEST_TAG}" \
+            "${GHCR_IMAGE}:${CANDIDATE}"
+
+          echo "::notice::Published ${HUB_REPO}:${VERSION_TAG} and ${HUB_REPO}:${LATEST_TAG}"
+          echo "::notice::Published ${GHCR_IMAGE}:${VERSION_TAG} and ${GHCR_IMAGE}:${LATEST_TAG}"
+
+      - name: Update Docker Hub repository overview
+        uses: peter-evans/dockerhub-description@v5
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ steps.vars.outputs.docker_repo }}
+          short-description: ${{ steps.vars.outputs.description }}
+          readme-filepath: ./docker/image-description.txt
+          enable-url-completion: true

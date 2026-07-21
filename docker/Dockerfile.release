@@ -12,7 +12,7 @@
 # package matches the runtime glibc (official postgres:16-bookworm would not).
 
 ARG PG_MAJOR=16
-ARG OCI_IMAGE_DESCRIPTION="PostgreSQL 16 with the koldstore extension and pg_cron preinstalled for trying pg-koldstore quickly."
+ARG OCI_IMAGE_DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly."
 
 FROM ubuntu:24.04
 
