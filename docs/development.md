@@ -133,13 +133,15 @@ KOLDSTORE_MINIO=1 cargo nextest run -p koldstore-storage --test storage_minio
 ## Published try-it Docker image
 
 Release builds can publish a PostgreSQL 16 image with prebuilt `koldstore` and
-`pg_cron` (no extension rebuild) to Docker Hub (`jamals86/pg-koldstore` by
-default). Enable `docker_push` on the Release workflow after setting
-`DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
+`pg_cron` (no extension rebuild) to Docker Hub (`jamals86/pg-koldstore`) and
+GitHub Packages / GHCR (`ghcr.io/kalamdb/pg-koldstore`). Enable `docker_push` on
+the Release workflow after setting `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
+(GHCR uses the workflow `GITHUB_TOKEN`).
 
 ```bash
-docker pull jamals86/pg-koldstore:latest
-docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
+docker pull ghcr.io/kalamdb/pg-koldstore:latest
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/kalamdb/pg-koldstore:latest
+# or: docker pull jamals86/pg-koldstore:latest
 # psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
 # koldstore + pg_cron are already created on first boot
 # shared_preload_libraries includes pg_cron (koldstore is SQL-loaded; use pg_cron to schedule flush)

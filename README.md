@@ -9,12 +9,13 @@ Your table remains a normal PostgreSQL heap table. KoldStore keeps the active wo
 **No replacement database. No proprietary archive format. No application query rewrite.**
 
 > [!WARNING]
-> **KoldStore is in early development and is not production-ready.** The core manage, flush, manifest, and hot/cold query flow works. Recovery, backup/restore, compaction, schema evolution, and background scheduling are still being hardened.
+> **KoldStore is in early development and is not production-ready.** The core manage, flush, manifest, hot/cold query, and built-in auto-flush scheduling flow works. Recovery, backup/restore, compaction, and schema evolution are still being hardened.
 
 ⭐ **Star the repository to follow the project as it moves toward the first production-ready release.**
 
 <p align="center">
   <a href="https://github.com/kalamdb/koldstore/releases"><img src="https://img.shields.io/github/v/release/kalamdb/koldstore?display_name=tag&amp;label=release" alt="Release" /></a>
+  <a href="https://github.com/kalamdb/koldstore/pkgs/container/pg-koldstore"><img src="https://img.shields.io/badge/docker-ghcr.io%2Fkalamdb%2Fpg--koldstore-2496ED?logo=docker&amp;logoColor=white" alt="Docker image" /></a>
   <a href="https://github.com/kalamdb/koldstore/actions/workflows/ci-tests.yml"><img src="https://github.com/kalamdb/koldstore/actions/workflows/ci-tests.yml/badge.svg" alt="CI Tests" /></a>
   <img src="https://img.shields.io/badge/PostgreSQL-15%E2%80%9318-336791" alt="PostgreSQL 15-18" />
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/rust-1.96%2B-orange.svg" alt="Rust 1.96+" /></a>
@@ -168,10 +169,11 @@ reporting catch-up as separate work. `CREATE EXTENSION` and the first async
 ## How it works
 
 1. `manage_table` registers the table and creates a small latest-state change-log mirror (one metadata row per primary key). Choose strict transactional capture or opt-in async committed-WAL capture.
-2. `flush_table` moves older rows to Parquet and prunes them from the hot heap when safe.
-3. `SELECT` on the original table uses `KoldMergeScan` so the newest visible row wins.
+2. A built-in database worker auto-flushes when hot rows exceed `hot_row_limit` (per-table `auto_flush`, default `true`). You can also call `flush_table` manually.
+3. Flush moves older rows to Parquet and prunes them from the hot heap when safe.
+4. `SELECT` on the original table uses `KoldMergeScan` so the newest visible row wins.
 
-Details: [Architecture](docs/architecture.md) · [Capture modes](docs/architecture/mirror-capture-modes.md) · [Manage](docs/architecture/manage-table.md) · [Flush](docs/architecture/flushing-table.md) · [Scan](docs/architecture/scanning-table.md)
+Details: [Architecture](docs/architecture.md) · [Capture modes](docs/architecture/mirror-capture-modes.md) · [Manage](docs/architecture/manage-table.md) · [Flush](docs/architecture/flushing-table.md) · [Scan](docs/architecture/scanning-table.md) · [Scheduling](docs/operations/scheduling.md)
 
 ```mermaid
 flowchart TD
@@ -183,14 +185,15 @@ flowchart TD
 
 ## Try it in five minutes
 
-Published release images ship PostgreSQL 16 with `koldstore` and `pg_cron` already installed:
+Published release images ship PostgreSQL 16 with `koldstore` already installed:
 
 ```bash
-docker pull jamals86/pg-koldstore:latest
-docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
+docker pull ghcr.io/kalamdb/pg-koldstore:latest
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/kalamdb/pg-koldstore:latest
 psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
 ```
 
+The same tags are also published to Docker Hub as `jamals86/pg-koldstore`.
 ```sql
 CREATE EXTENSION IF NOT EXISTS koldstore;
 
@@ -212,14 +215,17 @@ INSERT INTO messages (id, body)
 SELECT gs, 'row ' || gs FROM generate_series(1, 1012) AS gs;
 
 SELECT koldstore.manage_table(
-  table_name        => 'messages',
-  storage           => 'local-dev',
-  hot_row_limit     => 1000,
-  min_flush_rows    => 1,
-  max_rows_per_file => 500,
-  migration_order_by => 'id'
+  table_name         => 'messages',
+  storage            => 'local-dev',
+  hot_row_limit      => 100000,
+  min_flush_rows     => 1000,
+  max_rows_per_file  => 1000,
+  migration_order_by => 'id',
+  auto_flush         => true   -- default; set false to drive flush yourself
 );
 
+-- Optional: force a flush now. Otherwise the built-in worker auto-flushes
+-- when hot rows exceed hot_row_limit.
 SELECT koldstore.flush_table(table_name => 'messages');
 
 SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
@@ -228,7 +234,7 @@ SELECT jsonb_pretty(koldstore.describe_table(table_name => 'messages'));
 
 Mirror inspection, job UUIDs, `EXPLAIN`, shared/user tables, and storage backends: [docs/quickstart.md](docs/quickstart.md).
 
-Schedule periodic flush with pg_cron: [docs/operations/scheduling.md](docs/operations/scheduling.md).
+Auto-flush runs on the built-in database worker (`koldstore.flush_check_interval_seconds`). To control flushes yourself (for example with `pg_cron`), set `auto_flush => false` and schedule `koldstore.flush_table`: [docs/operations/scheduling.md](docs/operations/scheduling.md).
 
 To build from this repo instead, use `docker/run.sh` (compiles the extension).
 
@@ -254,7 +260,7 @@ Full list: [docs/limitations.md](docs/limitations.md).
 
 Grouped after the 0.1 hot/cold baseline:
 
-- **Operations** — smart flush scheduler, coordinated backup/restore, import/export
+- **Operations** — time-based / predicate flush policies, coordinated backup/restore, import/export
 - **Query path** — faster cold PK lookups, streaming `KoldMergeScan`, broader planner pushdown
 - **Change APIs** — public `changes_since` / change-cursor SQL on the existing `__cl` mirror
 - **Storage** — compaction, deleted-index in manifest, storage file datatype
