@@ -193,7 +193,8 @@ docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/kalamdb/pg-ko
 psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
 ```
 
-The same tags are also published to Docker Hub as `jamals86/pg-koldstore`.
+The same tags are also published to Docker Hub as `jamals86/pg-koldstore`
+(`linux/amd64` and `linux/arm64`).
 ```sql
 CREATE EXTENSION IF NOT EXISTS koldstore;
 
