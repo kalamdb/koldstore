@@ -22,6 +22,8 @@ jobs:
       KOLDSTORE_E2E_PGHOST: 127.0.0.1
       KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
       KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      # System apt Postgres needs --sudo for cargo pgrx install (prepare + sqlsmith).
+      KOLDSTORE_PGRX_INSTALL_SUDO: "1"
       PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
     steps:
       - uses: actions/checkout@v4
@@ -53,7 +55,6 @@ jobs:
         run: bash scripts/run-pg-e2e.sh 16
         env:
           KOLDSTORE_E2E_PREPARE_ONLY: "1"
-          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
       # prepare-only writes .e2e-env (KOLDSTORE_E2E_DB_POOL=1 + worker DBs).
       # Each step is a fresh shell, so source it before nextest/psql.
