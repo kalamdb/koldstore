@@ -209,7 +209,7 @@ pub fn cached_manifest_segment_stats(
 fn load_managed_table_snapshot(
     table_oid: pgrx::pg_sys::Oid,
 ) -> SpiResult<Option<Arc<ManagedTableSnapshot>>> {
-    let result = super::owner::with_extension_owner(|| {
+    super::owner::with_extension_owner(|| {
         let statement = koldstore_catalog::queries::plan_managed_table_snapshot()?;
         let json = select_one::<String>(&statement, &[pgrx::datum::DatumWithOid::from(table_oid)])?;
         json.map(|json| {
@@ -219,8 +219,7 @@ fn load_managed_table_snapshot(
         })
         .transpose()
     })
-    .map_err(|error| map_spi_error("read managed table snapshot", &error))?;
-    result
+    .map_err(|error| map_spi_error("read managed table snapshot", &error))?
 }
 
 #[cfg(feature = "pg")]

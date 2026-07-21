@@ -140,14 +140,6 @@ pub(super) unsafe fn required_scan_projection(
     })
 }
 
-#[cfg(test)]
-mod projection_tests {
-    #[test]
-    fn whole_row_bitmap_offset_matches_postgresql_contract() {
-        assert_eq!(-pgrx::pg_sys::FirstLowInvalidHeapAttributeNumber, 7);
-    }
-}
-
 pub(super) unsafe fn residual_filters(
     table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
@@ -391,4 +383,12 @@ fn cstr_to_str(value: *const c_char) -> Option<&'static str> {
         return None;
     }
     unsafe { CStr::from_ptr(value).to_str().ok() }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    #[test]
+    fn whole_row_bitmap_offset_matches_postgresql_contract() {
+        assert_eq!(-pgrx::pg_sys::FirstLowInvalidHeapAttributeNumber, 7);
+    }
 }

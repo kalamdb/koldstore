@@ -336,7 +336,7 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
 unsafe extern "C-unwind" fn begin_custom_scan(
     node: *mut pg_sys::CustomScanState,
     estate: *mut pg_sys::EState,
-    _eflags: c_int,
+    eflags: c_int,
 ) {
     if node.is_null() || (*node).ss.ss_currentRelation.is_null() {
         return;
@@ -445,6 +445,11 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     };
 
     let cold_rows = filter_cold_rows_with_overlay(cold_rows, &overlay);
+    // PostgreSQL does not initialize `custom_plans` for us; do it only on the
+    // hot-only path so cold merge does not pay for an unused heap child.
+    if cold_rows.is_empty() && cold_profile.segments.is_empty() {
+        initialize_custom_plan_children(node, estate, eflags);
+    }
     let hot_plan_label = hot_child_explain_label(node);
     let has_hot_child = hot_child_planstate(node).is_some();
 
@@ -675,7 +680,58 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                 // `scan` drops here: releases ScanMemory / buffered Datums.
             }
         });
+        end_custom_plan_children(node);
     }
+}
+
+/// Initializes planned native children selected for hot-only delegation.
+///
+/// PostgreSQL leaves `custom_plans` initialization to the custom provider.
+///
+/// # Safety
+///
+/// `node`, `estate`, and every entry in `custom_plans` must belong to the active
+/// executor invocation. The caller must invoke this at most once per node.
+unsafe fn initialize_custom_plan_children(
+    node: *mut pg_sys::CustomScanState,
+    estate: *mut pg_sys::EState,
+    eflags: c_int,
+) {
+    if node.is_null() || estate.is_null() || !(*node).custom_ps.is_null() {
+        return;
+    }
+    let plan = (*node).ss.ps.plan;
+    if plan.is_null() {
+        return;
+    }
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
+    let planned_children = (*custom_scan).custom_plans;
+    for index in 0..list_len(planned_children) {
+        let child_plan = list_nth_ptr(planned_children, index).cast::<pg_sys::Plan>();
+        if child_plan.is_null() {
+            continue;
+        }
+        let child_state = pg_sys::ExecInitNode(child_plan, estate, eflags);
+        if !child_state.is_null() {
+            (*node).custom_ps = pg_sys::lappend((*node).custom_ps, child_state.cast::<c_void>());
+        }
+    }
+}
+
+/// Ends native children initialized by [`initialize_custom_plan_children`].
+///
+/// # Safety
+///
+/// `node.custom_ps` must contain only live `PlanState` pointers owned by `node`.
+unsafe fn end_custom_plan_children(node: *mut pg_sys::CustomScanState) {
+    let children = (*node).custom_ps;
+    for index in 0..list_len(children) {
+        let child = list_nth_ptr(children, index).cast::<pg_sys::PlanState>();
+        if !child.is_null() {
+            pg_sys::ExecEndNode(child);
+        }
+    }
+    (*node).custom_ps = std::ptr::null_mut();
 }
 
 #[pgrx::pg_guard]

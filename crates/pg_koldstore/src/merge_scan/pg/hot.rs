@@ -100,6 +100,9 @@ FROM (
 ///
 /// PERFORMANCE: skips `to_jsonb` / `jsonb_build_object` and JSON parse on the
 /// hot-only path used for PK lookups that miss every cold segment.
+///
+/// Plans such as `SELECT count(*)` reference no user Vars, so `projected_columns`
+/// may be empty. Those scans still need one ExecScan tuple per visible heap row.
 pub(super) fn load_hot_rows_native(
     relation: &str,
     equality_filters: &[HotEqualityFilter],
@@ -107,16 +110,20 @@ pub(super) fn load_hot_rows_native(
     scan_projection: &ScanProjection<'_>,
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
-    if projected_columns.is_empty() {
-        return Ok(Vec::new());
-    }
     let table = QualifiedTableName::parse(relation).map_err(|error| error.to_string())?;
+    let where_clause = where_clause_sql(equality_filters);
+    if projected_columns.is_empty() {
+        let sql = format!(
+            "SELECT 1 FROM ONLY {table} AS hot {where_clause}",
+            table = table.quoted(),
+        );
+        return with_hook_disabled(|| unsafe { execute_hot_row_placeholders(&sql) });
+    }
     let select_list = projected_columns
         .iter()
         .map(|column| format!("hot.{}", quote_ident(&column.name)))
         .collect::<Vec<_>>()
         .join(", ");
-    let where_clause = where_clause_sql(equality_filters);
     let sql = format!(
         "SELECT {select_list} FROM ONLY {table} AS hot {where_clause}",
         table = table.quoted(),
@@ -187,6 +194,32 @@ unsafe fn execute_hot_rows_query(
         return Err(format!("SPI_finish failed with code {finish}"));
     }
     Ok(rows)
+}
+
+/// Counts visible hot rows without projecting attributes (for `count(*)` etc.).
+unsafe fn execute_hot_row_placeholders(query: &str) -> Result<Vec<MaterializedRow>, String> {
+    let query = CString::new(query).map_err(|error| error.to_string())?;
+    let connect = pg_sys::SPI_connect();
+    if connect < 0 {
+        return Err(format!("SPI_connect failed with code {connect}"));
+    }
+    let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
+    if execute < 0 {
+        let _ = pg_sys::SPI_finish();
+        return Err(format!("SPI_execute failed with code {execute}"));
+    }
+
+    let processed = usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
+    let finish = pg_sys::SPI_finish();
+    if finish < 0 {
+        return Err(format!("SPI_finish failed with code {finish}"));
+    }
+    Ok((0..processed)
+        .map(|_| MaterializedRow {
+            values: Vec::new(),
+            is_null: Vec::new(),
+        })
+        .collect())
 }
 
 unsafe fn execute_hot_rows_native(
