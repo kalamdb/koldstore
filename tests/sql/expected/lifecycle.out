@@ -1,0 +1,44 @@
+CREATE TABLE
+INSERT 0 2
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+ active_schemas
+----------------
+              1
+(1 row)
+
+ has_storage_binding
+---------------------
+ t
+(1 row)
+
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+ id | body
+----+------
+  1 | a
+  2 | b
+(2 rows)
+
+ unmanage_table
+----------------
+              1
+(1 row)
+
+ active_after_unmanage
+-----------------------
+                     0
+(1 row)
+
+ id | body
+----+------
+  1 | a
+  2 | b
+(2 rows)
+

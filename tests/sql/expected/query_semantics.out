@@ -1,0 +1,93 @@
+CREATE TABLE
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+ empty_count
+-------------
+           0
+(1 row)
+
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+ empty_after_flush
+-------------------
+                 0
+(1 row)
+
+CREATE TABLE
+INSERT 0 1
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+ id | body
+----+------
+  1 | only
+(1 row)
+
+CREATE TABLE
+INSERT 0 20
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+SELECT 20
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+SELECT 20
+ diff | id | body | qty
+------+----+------+-----
+(0 rows)
+
+ row_count
+-----------
+        20
+(1 row)
+
+CREATE TABLE
+INSERT 0 12
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+INSERT 0 1
+ id  |  body
+-----+---------
+   1 | v1
+   6 | v6
+ 100 | hot-new
+(3 rows)
+
+ total
+-------
+    13
+(1 row)
+
+ id | body
+----+------
+  1 | v1
+  2 | v2
+  3 | v3
+(3 rows)
+

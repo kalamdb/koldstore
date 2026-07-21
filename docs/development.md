@@ -50,15 +50,24 @@ scripts/readiness/run-isolation.sh 16
 # Crash / failpoint recovery (GUC koldstore.failpoint; see failpoints.rs)
 scripts/readiness/run-crash-recovery.sh 16
 # Full matrix: KOLDSTORE_CRASH_FULL_MATRIX=1 scripts/readiness/run-crash-recovery.sh 16
+# Real postmaster restart (serial; stops cluster):
+scripts/readiness/run-postmaster-restart.sh 16
 
 # SQLsmith (skips if not installed). CI default 30s; nightly may use 600.
 KOLDSTORE_SQLSMITH_SECONDS=30 scripts/readiness/run-sqlsmith.sh 16
+
+# Differential SQLsmith compare (baseline vs managed; skips if sqlsmith missing)
+KOLDSTORE_DIFF_STATE=mixed scripts/readiness/run-differential-sqlsmith.sh 16
 
 # Integrity (pg_amcheck if available + KS catalog queries)
 scripts/readiness/run-integrity-checks.sh 16
 
 # Optional upstream PG installcheck — external confidence signal only
 scripts/readiness/run-upstream-pg-regress.sh 16
+
+# Optional Toxiproxy+MinIO network faults (Docker; does not vendor Toxiproxy)
+# scripts/ci/start-toxiproxy.sh
+# cargo nextest run -p e2e -E 'test(failure_injection::)'
 
 # HammerDB (skips if not installed; manage append-heavy tables only)
 scripts/readiness/run-hammerdb.sh 16
@@ -67,8 +76,10 @@ scripts/readiness/run-hammerdb.sh 16
 scripts/readiness/run-readiness-report.sh 16
 ```
 
-Nightly workflow: `.github/workflows/nightly-readiness.yml` (isolation, crash, SQLsmith, integrity).
+Nightly workflow: `.github/workflows/nightly-readiness.yml` (isolation, crash,
+postmaster restart, SQLsmith, differential compare, integrity).
 Weekly HammerDB: `.github/workflows/weekly-hammerdb.yml`.
+External-tool layout: `docs/plans/2026-07-21-testing-gaps-external-tools.md`.
 Script layout: `scripts/README.md` (everyday runners at top level; readiness/CI/build in subfolders).
 
 PR / main CI: `.github/workflows/ci-tests.yml` runs fmt/clippy/unit and

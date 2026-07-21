@@ -999,9 +999,10 @@ fn block_on<F>(future: F) -> F::Output
 where
     F: std::future::Future,
 {
-    if tokio::runtime::Handle::try_current().is_ok() {
-        tokio::task::block_in_place(|| parquet_runtime().block_on(future))
-    } else {
-        parquet_runtime().block_on(future)
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| parquet_runtime().block_on(future))
+        }
+        _ => parquet_runtime().block_on(future),
     }
 }

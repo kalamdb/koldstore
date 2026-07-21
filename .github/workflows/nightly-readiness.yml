@@ -69,7 +69,16 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC1091
           source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
-          cargo nextest run -p e2e -E 'test(crash::)' --test-threads "${KOLDSTORE_E2E_THREADS:-1}"
+          # Exclude postmaster restart (separate serial step that stops the cluster).
+          cargo nextest run -p e2e -E 'test(crash::) & not test(postmaster_restart::)' --test-threads "${KOLDSTORE_E2E_THREADS:-1}"
+
+      - name: Postmaster immediate restart recovery
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
+          export KOLDSTORE_CRASH_POSTMASTER_RESTART=1
+          cargo nextest run -p e2e -E 'test(crash::postmaster_restart::)' --test-threads 1
 
       - name: Install SQLsmith
         run: bash scripts/ci/install-sqlsmith.sh
@@ -78,6 +87,13 @@ jobs:
         run: bash scripts/readiness/run-sqlsmith.sh 16
         env:
           KOLDSTORE_SQLSMITH_SECONDS: "30"
+          SQLSMITH_BIN: ${{ github.workspace }}/target/tools/sqlsmith/bin/sqlsmith
+
+      - name: Differential SQLsmith compare
+        run: bash scripts/readiness/run-differential-sqlsmith.sh 16
+        env:
+          KOLDSTORE_DIFF_SQLSMITH_SECONDS: "30"
+          KOLDSTORE_DIFF_STATE: mixed
           SQLSMITH_BIN: ${{ github.workspace }}/target/tools/sqlsmith/bin/sqlsmith
 
       - name: Integrity checks (pg_amcheck + KS SQL)
@@ -90,8 +106,10 @@ jobs:
           export KOLDSTORE_REPORT_CATEGORY=nightly-readiness
           export KOLDSTORE_REPORT_PASSED=true
           export KOLDSTORE_REPORT_SQLSMITH=ran
+          export KOLDSTORE_REPORT_DIFFERENTIAL=ran
           export KOLDSTORE_REPORT_ISOLATION=ran
           export KOLDSTORE_REPORT_CRASH=ran
+          export KOLDSTORE_REPORT_POSTMASTER_RESTART=ran
           export KOLDSTORE_REPORT_INTEGRITY=ran
           bash scripts/readiness/run-readiness-report.sh 16
 

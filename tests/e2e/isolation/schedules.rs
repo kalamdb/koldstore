@@ -306,3 +306,189 @@ async fn txn_rollback_mirror() -> Result<()> {
     }
     Ok(())
 }
+
+/// Concurrent queries during a paused flush must not drop or duplicate PKs.
+#[tokio::test]
+async fn query_during_flush() -> Result<()> {
+    common::require_pgrx_server().await?;
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "iso_qry").await?;
+        let relation = seed_managed_items(&db, "qry_items", 40).await?;
+        let baseline = mirror_baseline(&db.client, &db.schema, &relation).await?;
+        let peer = connect_peer(&db).await?;
+
+        barrier_lock(&peer).await?;
+        let flush_client = connect_peer(&db).await?;
+        let flush_relation = relation.clone();
+        let flush_handle = tokio::spawn(async move {
+            flush_client
+                .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
+                .await
+                .ok();
+            let _ = flush_client
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&flush_relation],
+                )
+                .await;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        // Hammer reads while flush may be waiting at after_select_rows.
+        for _ in 0..8 {
+            let count: i64 = peer
+                .query_one(&format!("SELECT count(*)::bigint FROM {relation}"), &[])
+                .await?
+                .get(0);
+            assert!(
+                count >= 40,
+                "query during flush must not lose rows ({count})"
+            );
+            let _ = peer
+                .query(
+                    &format!("SELECT id, title FROM {relation} ORDER BY id"),
+                    &[],
+                )
+                .await?;
+            common::assert_pk_unique(&peer, &relation, &["id"]).await?;
+        }
+
+        barrier_unlock(&peer).await?;
+        let _ = flush_handle.await?;
+
+        db.client
+            .batch_execute("SET koldstore.failpoint = '';")
+            .await
+            .ok();
+        let _ = db.flush_table(&relation).await;
+        assert_matches_baseline(&db.client, &baseline, &relation).await?;
+    }
+    Ok(())
+}
+
+/// Read Committed concurrent update during flush stays equal to the baseline twin.
+#[tokio::test]
+async fn read_committed_during_flush() -> Result<()> {
+    common::require_pgrx_server().await?;
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "iso_rc").await?;
+        let relation = seed_managed_items(&db, "rc_items", 40).await?;
+        let baseline = mirror_baseline(&db.client, &db.schema, &relation).await?;
+        let peer = connect_peer(&db).await?;
+
+        barrier_lock(&peer).await?;
+        let flush_client = connect_peer(&db).await?;
+        let flush_relation = relation.clone();
+        let flush_handle = tokio::spawn(async move {
+            flush_client
+                .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
+                .await
+                .ok();
+            let _ = flush_client
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&flush_relation],
+                )
+                .await;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        peer.batch_execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED;")
+            .await
+            .ok();
+        peer.batch_execute(&format!(
+            r#"
+            BEGIN;
+            UPDATE {relation} SET title = title || '-rc' WHERE id <= 5;
+            UPDATE {baseline} SET title = title || '-rc' WHERE id <= 5;
+            COMMIT;
+            "#
+        ))
+        .await?;
+        barrier_unlock(&peer).await?;
+        let _ = flush_handle.await?;
+
+        db.client
+            .batch_execute("SET koldstore.failpoint = '';")
+            .await
+            .ok();
+        let _ = db.flush_table(&relation).await;
+        assert_matches_baseline(&db.client, &baseline, &relation).await?;
+    }
+    Ok(())
+}
+
+/// Repeatable Read snapshot taken before flush completes must stay stable for that txn.
+#[tokio::test]
+async fn repeatable_read_snapshot_during_flush() -> Result<()> {
+    common::require_pgrx_server().await?;
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "iso_rr").await?;
+        let relation = seed_managed_items(&db, "rr_items", 40).await?;
+        let baseline = mirror_baseline(&db.client, &db.schema, &relation).await?;
+        let peer = connect_peer(&db).await?;
+        let reader = connect_peer(&db).await?;
+
+        reader
+            .batch_execute("BEGIN ISOLATION LEVEL REPEATABLE READ;")
+            .await?;
+        let snap_before: i64 = reader
+            .query_one(&format!("SELECT count(*)::bigint FROM {relation}"), &[])
+            .await?
+            .get(0);
+
+        barrier_lock(&peer).await?;
+        let flush_client = connect_peer(&db).await?;
+        let flush_relation = relation.clone();
+        let flush_handle = tokio::spawn(async move {
+            flush_client
+                .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
+                .await
+                .ok();
+            let _ = flush_client
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&flush_relation],
+                )
+                .await;
+            Ok::<(), anyhow::Error>(())
+        });
+
+        // Concurrent committed update on another session (baseline kept in sync).
+        peer.batch_execute(&format!(
+            r#"
+            UPDATE {relation} SET title = title || '-rr' WHERE id = 1;
+            UPDATE {baseline} SET title = title || '-rr' WHERE id = 1;
+            "#
+        ))
+        .await?;
+        barrier_unlock(&peer).await?;
+        let _ = flush_handle.await?;
+
+        let snap_during: i64 = reader
+            .query_one(&format!("SELECT count(*)::bigint FROM {relation}"), &[])
+            .await?
+            .get(0);
+        assert_eq!(
+            snap_before, snap_during,
+            "repeatable read snapshot row count must not change mid-txn"
+        );
+        let title: String = reader
+            .query_one(&format!("SELECT title FROM {relation} WHERE id = 1"), &[])
+            .await?
+            .get(0);
+        assert!(
+            !title.ends_with("-rr"),
+            "RR snapshot must not see concurrent committed update (got {title})"
+        );
+        reader.batch_execute("COMMIT;").await?;
+
+        db.client
+            .batch_execute("SET koldstore.failpoint = '';")
+            .await
+            .ok();
+        let _ = db.flush_table(&relation).await;
+        assert_matches_baseline(&db.client, &baseline, &relation).await?;
+    }
+    Ok(())
+}

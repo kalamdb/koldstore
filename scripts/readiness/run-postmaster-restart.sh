@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run flush failpoint crash-recovery E2E tests.
+# Run postmaster immediate-restart crash recovery (serial; stops the cluster).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,7 +17,7 @@ if ! cargo nextest --version >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "running crash/failpoint recovery against PostgreSQL ${PG_VERSION}"
-# Optional: KOLDSTORE_CRASH_FULL_MATRIX=1 or KOLDSTORE_CRASH_FAILPOINTS=a,b,c
-# Exclude postmaster restart (stops the shared cluster); use run-postmaster-restart.sh.
-cargo nextest run -p e2e -E 'test(crash::) & not test(postmaster_restart::)' --test-threads "${KOLDSTORE_E2E_THREADS:-4}"
+echo "running postmaster immediate-restart recovery against PostgreSQL ${PG_VERSION}"
+export KOLDSTORE_CRASH_POSTMASTER_RESTART=1
+# Must be serial: the test stops the shared pgrx postmaster.
+cargo nextest run -p e2e -E 'test(crash::postmaster_restart::)' --test-threads 1

@@ -18,7 +18,8 @@ suites live in subfolders so the top level stays scannable.
 
 ## `scripts/ci/`
 
-GitHub Actions helpers (apt source cleanup, MinIO bootstrap). Not for local day-to-day use.
+GitHub Actions helpers (apt source cleanup, MinIO bootstrap, Toxiproxy+MinIO).
+Not for local day-to-day use. Network-fault E2E: `scripts/ci/start-toxiproxy.sh`.
 
 ## `scripts/readiness/`
 
@@ -29,16 +30,19 @@ then run a focused E2E binary; SQLsmith and HammerDB skip when tools are missing
 |--------|---------|
 | `run-isolation.sh` | Multi-session isolation schedules |
 | `run-crash-recovery.sh` | Flush failpoint crash recovery |
+| `run-postmaster-restart.sh` | Real `pg_ctl -m immediate` mid-flush recovery |
 | `run-integrity-checks.sh` | `pg_amcheck` + catalog integrity SQL |
 | `run-sqlsmith.sh` | → `scripts/sqlsmith/run.sh` |
+| `run-differential-sqlsmith.sh` | → `scripts/differential/run-sqlsmith-compare.sh` |
 | `run-hammerdb.sh` | → `scripts/hammerdb/run.sh` |
 | `run-upstream-pg-regress.sh` | External PG `installcheck` signal |
 | `run-readiness-report.sh` | JSON/Markdown readiness report |
 | `run-test-with-cron.sh` | Manual `pg_cron` flush smoke |
 
-## `scripts/sqlsmith/` / `scripts/hammerdb/`
+## `scripts/sqlsmith/` / `scripts/differential/` / `scripts/hammerdb/`
 
-Tool-specific assets (setup SQL, TCL templates, real runners).
+Tool-specific assets (setup SQL, TCL templates, real runners). Differential
+compare reuses external SQLsmith rather than vendoring a query corpus.
 
 HammerDB compare (baseline vs HISTORY-only manage + SVG charts):
 

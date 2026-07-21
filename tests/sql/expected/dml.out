@@ -1,0 +1,22 @@
+CREATE TABLE
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+INSERT 0 3
+UPDATE 1
+DELETE 1
+INSERT 0 1
+ id |   body   | qty
+----+----------+-----
+  1 | one      |   1
+  2 | two-u    |  12
+  3 | reinsert |   9
+(3 rows)
+
+ row_count
+-----------
+         3
+(1 row)
+
