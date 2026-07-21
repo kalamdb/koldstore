@@ -83,11 +83,7 @@ RUN set -eux; \
     install -m 0644 /tmp/koldstore/koldstore--*.sql "${EXTDIR}/"; \
     install -m 0755 /tmp/koldstore/koldstore.so "${LIBDIR}/koldstore.so"; \
     rm -rf /tmp/koldstore; \
-    chmod +x /usr/local/bin/release-entrypoint.sh; \
-    conf_sample="$(pg_config --sharedir)/postgresql.conf.sample"; \
-    printf "\n# pg-koldstore release image defaults\n" >> "${conf_sample}"; \
-    printf "shared_preload_libraries = 'pg_cron'\n" >> "${conf_sample}"; \
-    printf "cron.database_name = 'koldstore'\n" >> "${conf_sample}"
+    chmod +x /usr/local/bin/release-entrypoint.sh
 
 STOPSIGNAL SIGINT
 EXPOSE 5432

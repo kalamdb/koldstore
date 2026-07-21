@@ -4,6 +4,7 @@
 //! only after strict capture has initialized their mirror, which prevents a gap
 //! while switching the write path from triggers to committed WAL.
 
+use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use koldstore_common::{quote_ident, MirrorCaptureMode, QualifiedTableName};
@@ -83,9 +84,8 @@ pub(crate) fn prepare_capture(mode: MirrorCaptureMode) -> Result<(), String> {
     // Native advisory locking and slot discovery avoid SPI assigning the
     // parent transaction an XID before the autonomous worker finds its
     // consistent point.
-    native_slot_provision_lock(database_oid, true);
-    let prepared = prepare_slot_locked(database_oid, &slot);
-    native_slot_provision_lock(database_oid, false);
+    let prepared =
+        with_native_slot_provision_lock(database_oid, || prepare_slot_locked(database_oid, &slot));
     prepared?;
     // Held until manage_table commits. Cleanup takes the same lock, preventing
     // it from removing infrastructure between slot preparation and catalog
@@ -177,6 +177,35 @@ fn native_slot_provision_lock(database_oid: u32, acquire: bool) {
             pgrx::pg_sys::Datum::from(database_oid as i32),
         );
     }
+}
+
+fn with_native_slot_provision_lock<T>(database_oid: u32, operation: impl FnOnce() -> T) -> T {
+    native_slot_provision_lock(database_oid, true);
+    pgrx::PgTryBuilder::new(AssertUnwindSafe(operation))
+        .finally(|| native_slot_provision_lock(database_oid, false))
+        .execute()
+}
+
+#[cfg(feature = "pg_test")]
+/// Forces a PostgreSQL error while holding the provision lock and reports a leak.
+pub(crate) fn slot_provision_lock_leaked_after_error_for_test(database_oid: u32) -> bool {
+    pgrx::PgTryBuilder::new(|| {
+        with_native_slot_provision_lock(database_oid, || {
+            pgrx::error!("forced slot-provision lock cleanup test error");
+        });
+    })
+    .catch_others(|_| ())
+    .execute();
+
+    let unlocked = unsafe {
+        pgrx::pg_sys::DirectFunctionCall2Coll(
+            Some(advisory_unlock_int4),
+            pgrx::pg_sys::InvalidOid,
+            pgrx::pg_sys::Datum::from(SLOT_PROVISION_LOCK_NAMESPACE),
+            pgrx::pg_sys::Datum::from(database_oid as i32),
+        )
+    };
+    unlocked.value() != 0
 }
 
 /// Atomically switches one initialized table from triggers to WAL capture.

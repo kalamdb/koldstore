@@ -5,7 +5,7 @@
 //!   with no JSON encode/decode.
 //! - **JSON** (hot+cold merge): build a row image for Rust winner resolution.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 
 use koldstore_common::{
     quote_ident, CommitSeq, HotRow, LogicalPk, PkColumn, QualifiedTableName, SeqId,
@@ -14,6 +14,7 @@ use koldstore_merge::scan::HOT_SEQ_SENTINEL;
 use pgrx::pg_sys;
 
 use super::qual::ScanProjection;
+use super::spi::{with_spi_connection, PgAllocatedCString};
 use super::tuple::{MaterializedRow, ScanMemory};
 use super::with_hook_disabled;
 
@@ -155,71 +156,59 @@ unsafe fn execute_hot_rows_query(
     pk_columns: &[PkColumn],
 ) -> Result<Vec<HotRow>, String> {
     let query = CString::new(query).map_err(|error| error.to_string())?;
-    let connect = pg_sys::SPI_connect();
-    if connect < 0 {
-        return Err(format!("SPI_connect failed with code {connect}"));
-    }
-    let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
-    if execute < 0 {
-        let _ = pg_sys::SPI_finish();
-        return Err(format!("SPI_execute failed with code {execute}"));
-    }
-
-    let processed = usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
-    let tuptable = pg_sys::SPI_tuptable;
-    let mut rows = Vec::with_capacity(processed);
-    if !tuptable.is_null() {
-        let tupdesc = (*tuptable).tupdesc;
-        for index in 0..processed {
-            let tuple = *(*tuptable).vals.add(index);
-            let row_image = spi_text_json(tuple, tupdesc, 1)?;
-            let pk_json = spi_text_json(tuple, tupdesc, 2)?;
-            let pk = LogicalPk::from_json_object(&pk_json, pk_columns)
-                .map_err(|error| error.to_string())?;
-            let seq = SeqId::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
-            let commit_seq = CommitSeq::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
-            rows.push(HotRow {
-                pk,
-                scope_key: None,
-                seq,
-                commit_seq,
-                deleted: false,
-                row_image,
-            });
+    with_spi_connection(|| {
+        let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
+        if execute < 0 {
+            return Err(format!("SPI_execute failed with code {execute}"));
         }
-    }
 
-    let finish = pg_sys::SPI_finish();
-    if finish < 0 {
-        return Err(format!("SPI_finish failed with code {finish}"));
-    }
-    Ok(rows)
+        let processed =
+            usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
+        let tuptable = pg_sys::SPI_tuptable;
+        let mut rows = Vec::with_capacity(processed);
+        if !tuptable.is_null() {
+            let tupdesc = (*tuptable).tupdesc;
+            for index in 0..processed {
+                let tuple = *(*tuptable).vals.add(index);
+                let row_image = spi_text_json(tuple, tupdesc, 1)?;
+                let pk_json = spi_text_json(tuple, tupdesc, 2)?;
+                let pk = LogicalPk::from_json_object(&pk_json, pk_columns)
+                    .map_err(|error| error.to_string())?;
+                let seq = SeqId::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
+                let commit_seq =
+                    CommitSeq::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
+                rows.push(HotRow {
+                    pk,
+                    scope_key: None,
+                    seq,
+                    commit_seq,
+                    deleted: false,
+                    row_image,
+                });
+            }
+        }
+        Ok(rows)
+    })
 }
 
 /// Counts visible hot rows without projecting attributes (for `count(*)` etc.).
 unsafe fn execute_hot_row_placeholders(query: &str) -> Result<Vec<MaterializedRow>, String> {
     let query = CString::new(query).map_err(|error| error.to_string())?;
-    let connect = pg_sys::SPI_connect();
-    if connect < 0 {
-        return Err(format!("SPI_connect failed with code {connect}"));
-    }
-    let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
-    if execute < 0 {
-        let _ = pg_sys::SPI_finish();
-        return Err(format!("SPI_execute failed with code {execute}"));
-    }
+    with_spi_connection(|| {
+        let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
+        if execute < 0 {
+            return Err(format!("SPI_execute failed with code {execute}"));
+        }
 
-    let processed = usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
-    let finish = pg_sys::SPI_finish();
-    if finish < 0 {
-        return Err(format!("SPI_finish failed with code {finish}"));
-    }
-    Ok((0..processed)
-        .map(|_| MaterializedRow {
-            values: Vec::new(),
-            is_null: Vec::new(),
-        })
-        .collect())
+        let processed =
+            usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
+        Ok((0..processed)
+            .map(|_| MaterializedRow {
+                values: Vec::new(),
+                is_null: Vec::new(),
+            })
+            .collect())
+    })
 }
 
 unsafe fn execute_hot_rows_native(
@@ -228,35 +217,29 @@ unsafe fn execute_hot_rows_native(
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
     let query = CString::new(query).map_err(|error| error.to_string())?;
-    let connect = pg_sys::SPI_connect();
-    if connect < 0 {
-        return Err(format!("SPI_connect failed with code {connect}"));
-    }
-    let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
-    if execute < 0 {
-        let _ = pg_sys::SPI_finish();
-        return Err(format!("SPI_execute failed with code {execute}"));
-    }
-
-    let processed = usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
-    let tuptable = pg_sys::SPI_tuptable;
-    let mut rows = Vec::with_capacity(processed);
-    if !tuptable.is_null() {
-        let tupdesc = (*tuptable).tupdesc;
-        let type_meta = column_type_meta(tupdesc, scan_projection.columns.len())?;
-        for index in 0..processed {
-            let tuple = *(*tuptable).vals.add(index);
-            let row = memory
-                .switch(|| materialize_spi_tuple(tuple, tupdesc, &type_meta, scan_projection))?;
-            rows.push(row);
+    with_spi_connection(|| {
+        let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
+        if execute < 0 {
+            return Err(format!("SPI_execute failed with code {execute}"));
         }
-    }
 
-    let finish = pg_sys::SPI_finish();
-    if finish < 0 {
-        return Err(format!("SPI_finish failed with code {finish}"));
-    }
-    Ok(rows)
+        let processed =
+            usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
+        let tuptable = pg_sys::SPI_tuptable;
+        let mut rows = Vec::with_capacity(processed);
+        if !tuptable.is_null() {
+            let tupdesc = (*tuptable).tupdesc;
+            let type_meta = column_type_meta(tupdesc, scan_projection.columns.len())?;
+            for index in 0..processed {
+                let tuple = *(*tuptable).vals.add(index);
+                let row = memory.switch(|| {
+                    materialize_spi_tuple(tuple, tupdesc, &type_meta, scan_projection)
+                })?;
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    })
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -347,10 +330,11 @@ unsafe fn spi_text_json(
     if cstr.is_null() {
         return Ok(serde_json::Value::Null);
     }
-    let text = CStr::from_ptr(cstr)
+    let cstr = PgAllocatedCString::from_raw(cstr);
+    let text = cstr
+        .as_c_str()
         .to_str()
         .map_err(|error| error.to_string())?
         .to_string();
-    pg_sys::pfree(cstr.cast());
     serde_json::from_str(&text).map_err(|error| error.to_string())
 }

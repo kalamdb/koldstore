@@ -9,6 +9,8 @@ use std::ffi::{CStr, CString};
 use koldstore_schema::PgType;
 use pgrx::pg_sys;
 
+use super::spi::PgAllocatedCString;
+
 /// Resolves a Const or bound Param into a typed SQL literal for SPI pushdown.
 pub(super) unsafe fn typed_literal_sql(
     expr: *mut pg_sys::Expr,
@@ -109,8 +111,8 @@ unsafe fn datum_typed_sql(
             if out.is_null() {
                 return None;
             }
-            let text = CStr::from_ptr(out).to_str().ok()?.to_string();
-            pg_sys::pfree(out.cast());
+            let out = PgAllocatedCString::from_raw(out);
+            let text = out.as_c_str().to_str().ok()?.to_string();
             quote_sql_literal(&text)
         }
     }
@@ -143,8 +145,8 @@ unsafe fn datum_json_value(
             if cstr.is_null() {
                 return None;
             }
-            let value = CStr::from_ptr(cstr).to_str().ok()?.to_string();
-            pg_sys::pfree(cstr.cast());
+            let cstr = PgAllocatedCString::from_raw(cstr);
+            let value = cstr.as_c_str().to_str().ok()?.to_string();
             Some(serde_json::Value::String(value))
         }
         PgType::Uuid => {
@@ -156,8 +158,8 @@ unsafe fn datum_json_value(
             if out.is_null() {
                 return None;
             }
-            let value = CStr::from_ptr(out).to_str().ok()?.to_string();
-            pg_sys::pfree(out.cast());
+            let out = PgAllocatedCString::from_raw(out);
+            let value = out.as_c_str().to_str().ok()?.to_string();
             Some(serde_json::Value::String(value))
         }
         PgType::Bool => Some(serde_json::Value::Bool(datum.value() != 0)),

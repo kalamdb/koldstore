@@ -1,3 +1,3 @@
--- Preinstall extensions for the published try-it image.
+-- Preinstall koldstore for the published try-it image.
+-- pg_cron is packaged in the image but not enabled by default.
 CREATE EXTENSION IF NOT EXISTS koldstore;
-CREATE EXTENSION IF NOT EXISTS pg_cron;

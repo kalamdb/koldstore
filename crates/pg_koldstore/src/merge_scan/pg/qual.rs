@@ -6,6 +6,8 @@ use std::os::raw::c_char;
 use koldstore_merge::scan::plan::SegmentPrunePredicate;
 use pgrx::pg_sys;
 
+use super::spi::PgAllocatedCString;
+
 use super::literals::{list_node_pointers, literal_json_value, typed_literal_sql, unwrap_relabel};
 
 /// One base-relation attribute required by output projection or executor quals.
@@ -110,13 +112,11 @@ pub(super) unsafe fn required_scan_projection(
                 slot_index + 1
             ));
         }
-        let name_text = unsafe { CStr::from_ptr(name) }
+        let name = unsafe { PgAllocatedCString::from_raw(name) };
+        let name_text = unsafe { name.as_c_str() }
             .to_str()
             .map_err(|error| error.to_string())?
             .to_string();
-        unsafe {
-            pg_sys::pfree(name.cast());
-        }
         let Some(catalog) = columns.iter().find(|column| column.name == name_text) else {
             if whole_row {
                 // PostgreSQL represents a dropped attribute in a whole-row

@@ -28,8 +28,8 @@
 - To publish the try-it Docker image, run the Release workflow with `docker_push=true`
   (requires `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` secrets). The Hub token needs
   `read`/`write`/`delete` scope so the job can update the repository overview.
-  The job reuses the PG16 `ubuntu24.04` amd64 tarball, installs `pg_cron`, smoke-tests
-  `CREATE EXTENSION` / `pg_extension`, then pushes both
+  The job reuses the PG16 `ubuntu24.04` amd64 tarball, packages `pg_cron` (not
+  enabled by default), smoke-tests `CREATE EXTENSION` / `pg_extension`, then pushes both
   `jamals86/pg-koldstore` (Docker Hub) and `ghcr.io/kalamdb/pg-koldstore`
   (GitHub Packages / GHCR) with `:VERSION-pg16` and `:latest`. After promote it
   PATCHes Docker Hub short description + full overview from

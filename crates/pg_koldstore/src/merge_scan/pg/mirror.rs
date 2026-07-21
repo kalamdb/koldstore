@@ -11,6 +11,7 @@ use koldstore_common::{quote_ident, LogicalPk, PkColumn, TableName};
 use pgrx::pg_sys;
 
 use super::hot::HotEqualityFilter;
+use super::spi::{with_spi_connection, PgAllocatedCString};
 use super::with_hook_disabled;
 
 /// Mirror tombstones that must mask cold Parquet rows until flush.
@@ -102,43 +103,36 @@ WHERE {where_clause}
     })?
 }
 
-unsafe fn execute_mirror_overlay_query(
+pub(super) unsafe fn execute_mirror_overlay_query(
     query: &str,
     pk_columns: &[PkColumn],
 ) -> Result<MirrorOverlay, String> {
     let query = CString::new(query).map_err(|error| error.to_string())?;
-    let connect = pg_sys::SPI_connect();
-    if connect < 0 {
-        return Err(format!("SPI_connect failed with code {connect}"));
-    }
-    let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
-    if execute < 0 {
-        let _ = pg_sys::SPI_finish();
-        return Err(format!("SPI_execute failed with code {execute}"));
-    }
-
-    let processed = usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
-    let tuptable = pg_sys::SPI_tuptable;
-    let mut overlay = MirrorOverlay::default();
-    if !tuptable.is_null() {
-        let tupdesc = (*tuptable).tupdesc;
-        for index in 0..processed {
-            let tuple = *(*tuptable).vals.add(index);
-            let pk_json_text = spi_text(tuple, tupdesc, 1)?;
-            let pk_value: serde_json::Value = serde_json::from_str(&pk_json_text)
-                .map_err(|error| format!("mirror overlay pk JSON: {error}"))?;
-            let pk = LogicalPk::from_json_object(&pk_value, pk_columns)
-                .map_err(|error| error.to_string())?;
-            overlay.tombstones += 1;
-            overlay.masked_pks.insert(pk);
+    with_spi_connection(|| {
+        let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
+        if execute < 0 {
+            return Err(format!("SPI_execute failed with code {execute}"));
         }
-    }
 
-    let finish = pg_sys::SPI_finish();
-    if finish < 0 {
-        return Err(format!("SPI_finish failed with code {finish}"));
-    }
-    Ok(overlay)
+        let processed =
+            usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
+        let tuptable = pg_sys::SPI_tuptable;
+        let mut overlay = MirrorOverlay::default();
+        if !tuptable.is_null() {
+            let tupdesc = (*tuptable).tupdesc;
+            for index in 0..processed {
+                let tuple = *(*tuptable).vals.add(index);
+                let pk_json_text = spi_text(tuple, tupdesc, 1)?;
+                let pk_value: serde_json::Value = serde_json::from_str(&pk_json_text)
+                    .map_err(|error| format!("mirror overlay pk JSON: {error}"))?;
+                let pk = LogicalPk::from_json_object(&pk_value, pk_columns)
+                    .map_err(|error| error.to_string())?;
+                overlay.tombstones += 1;
+                overlay.masked_pks.insert(pk);
+            }
+        }
+        Ok(overlay)
+    })
 }
 
 unsafe fn spi_text(
@@ -156,7 +150,6 @@ unsafe fn spi_text(
         let _ = datum;
         return Err(format!("mirror overlay column {attno} text is null"));
     }
-    Ok(std::ffi::CStr::from_ptr(cstr)
-        .to_string_lossy()
-        .into_owned())
+    let cstr = PgAllocatedCString::from_raw(cstr);
+    Ok(cstr.as_c_str().to_string_lossy().into_owned())
 }

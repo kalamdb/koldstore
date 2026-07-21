@@ -60,7 +60,7 @@ SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 | --- | --- |
 | PostgreSQL | 16 (Ubuntu 24.04 / PGDG) |
 | `koldstore` | Preinstalled extension (S3-capable build); built-in auto-flush worker |
-| `pg_cron` | Optional; included if you want to schedule manual flushes yourself |
+| `pg_cron` | Packaged only; not preloaded. Enable yourself if you want cron-based flush |
 | Entrypoint | Compatible with official `POSTGRES_*` env vars |
 
 ## Tags

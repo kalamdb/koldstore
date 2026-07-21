@@ -81,3 +81,14 @@ fn async_retained_wal_health_status_is_exposed() {
         status.0
     );
 }
+
+#[pg_test]
+fn async_slot_provision_lock_is_released_after_postgres_error() {
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    assert!(
+        !crate::async_mirror::lifecycle::slot_provision_lock_leaked_after_error_for_test(
+            database_oid
+        ),
+        "slot-provision advisory lock remained held after PostgreSQL ERROR"
+    );
+}

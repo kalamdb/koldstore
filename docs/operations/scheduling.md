@@ -143,5 +143,5 @@ This is intentionally outside the default E2E/CI loop because `pg_cron` needs
 `shared_preload_libraries` and a short wait for the scheduler. See
 [development](../development.md) for more local setup notes.
 
-Published Docker release images already include `pg_cron` with
-`shared_preload_libraries` configured.
+Published Docker release images package `pg_cron` but do not preload or create
+it; built-in auto-flush is the default scheduler.

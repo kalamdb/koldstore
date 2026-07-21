@@ -157,7 +157,7 @@ docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/kalamdb/pg-ko
 # or: docker pull jamals86/pg-koldstore:latest
 # psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
 # koldstore is created on first boot; built-in auto-flush handles hot_row_limit
-# pg_cron is optional if you want to schedule manual flush_table yourself
+# pg_cron is packaged but not enabled; preload it yourself only if needed
 ```
 
 Local source builds still use `docker/run.sh` / `docker/Dockerfile` (compiles the

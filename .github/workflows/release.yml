@@ -535,7 +535,7 @@ jobs:
             dist/${{ needs.read_version.outputs.version }}/SHA256SUMS
           fail_on_unmatched_files: true
 
-  # Publish PostgreSQL 16 + prebuilt koldstore + pg_cron to Docker Hub and GHCR.
+  # Publish PostgreSQL 16 + prebuilt koldstore (pg_cron packaged, not enabled).
   # Per-arch images use the matching ubuntu24.04 package artifact (native .so);
   # docker_pg_manifest then publishes a multi-arch :version / :latest index.
   docker_pg:

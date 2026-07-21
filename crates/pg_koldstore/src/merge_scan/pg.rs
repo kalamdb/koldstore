@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
+use std::panic::AssertUnwindSafe;
 
 use koldstore_merge::scan::{
     execute_merge_scan, MergeScanPlan, MirrorOverlayStrategy, CUSTOM_PATH_NAME,
@@ -23,6 +24,7 @@ mod literals;
 mod mirror;
 mod profile;
 mod qual;
+mod spi;
 mod tuple;
 
 use cold::{load_cold_rows_for_merge, planned_cold_read_profile};
@@ -155,13 +157,23 @@ pub fn with_custom_scan_disabled<T>(f: impl FnOnce() -> T) -> T {
 
 /// Disables the planner hook for nested catalog/SPI work.
 pub(crate) fn with_hook_disabled<T>(f: impl FnOnce() -> T) -> T {
-    DISABLE_HOOK.with(|disabled| {
-        let was_disabled = *disabled.borrow();
-        *disabled.borrow_mut() = true;
-        let result = f();
-        *disabled.borrow_mut() = was_disabled;
-        result
-    })
+    let was_disabled = DISABLE_HOOK.with(|disabled| disabled.replace(true));
+    pgrx::PgTryBuilder::new(AssertUnwindSafe(f))
+        .finally(|| DISABLE_HOOK.with(|disabled| *disabled.borrow_mut() = was_disabled))
+        .execute()
+}
+
+#[cfg(feature = "pg_test")]
+/// Returns the backend-local hook state for the in-server cleanup regression.
+pub(crate) fn hook_is_disabled_for_test() -> bool {
+    DISABLE_HOOK.with(|disabled| *disabled.borrow())
+}
+
+#[cfg(feature = "pg_test")]
+/// Executes a mirror overlay query through the production SPI cleanup path.
+pub(crate) unsafe fn execute_mirror_overlay_query_for_test(query: &str) -> Result<(), String> {
+    let pk_columns = [koldstore_common::PkColumn::new("id").map_err(|error| error.to_string())?];
+    mirror::execute_mirror_overlay_query(query, &pk_columns).map(|_| ())
 }
 
 /// Returns whether `koldstore.schemas` is present in the catalogs.

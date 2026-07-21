@@ -139,3 +139,30 @@ fn prepared_statement_repeated_execution_returns_stable_values() {
     assert_eq!(second, "one");
     assert_eq!(third, "two");
 }
+
+#[pg_test]
+fn merge_scan_spi_connection_is_closed_after_decode_error() {
+    let error = unsafe {
+        crate::merge_scan::pg::execute_mirror_overlay_query_for_test(
+            "SELECT 'not-json'::text AS pk_json, 3::smallint AS op",
+        )
+    }
+    .expect_err("invalid mirror JSON must fail decoding");
+    assert!(error.contains("mirror overlay pk JSON"), "{error}");
+
+    let finish = unsafe { pgrx::pg_sys::SPI_finish() };
+    assert_eq!(finish, pgrx::pg_sys::SPI_ERROR_UNCONNECTED);
+}
+
+#[pg_test]
+fn merge_scan_hook_state_is_restored_after_postgres_error() {
+    pgrx::PgTryBuilder::new(|| {
+        crate::merge_scan::pg::with_hook_disabled(|| {
+            pgrx::error!("forced merge-scan hook cleanup test error");
+        });
+    })
+    .catch_others(|_| ())
+    .execute();
+
+    assert!(!crate::merge_scan::pg::hook_is_disabled_for_test());
+}
