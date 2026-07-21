@@ -58,8 +58,9 @@ jobs:
   chat-penetration:
     name: Chat penetration soak
     runs-on: ubuntu-latest
-    # Install/seed budget (~60m) + requested soak minutes.
-    timeout-minutes: ${{ fromJSON(inputs.minutes) + 60 }}
+    # GitHub Actions expressions have no arithmetic; budget ~60m install/seed
+    # plus soak. Raise if you routinely dispatch soaks longer than ~2h.
+    timeout-minutes: 180
     env:
       KOLDSTORE_E2E_PGVERSION: "16"
       KOLDSTORE_E2E_PGPORT: "28816"

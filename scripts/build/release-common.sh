@@ -84,7 +84,24 @@ ensure_cargo_pgrx() {
     && cargo pgrx --version 2>/dev/null | grep -q "cargo-pgrx ${PGRX_VERSION}$"; then
     return 0
   fi
-  cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
+  # crates.io HTTP/2 framing flakes (curl error 16) are common on CI.
+  export CARGO_HTTP_MULTIPLEXING="${CARGO_HTTP_MULTIPLEXING:-false}"
+  local attempt=1
+  local max_attempts=5
+  local delay=5
+  while true; do
+    if cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked; then
+      return 0
+    fi
+    if (( attempt >= max_attempts )); then
+      echo "error: cargo install cargo-pgrx ${PGRX_VERSION} failed after ${max_attempts} attempts" >&2
+      return 1
+    fi
+    echo "warning: cargo install cargo-pgrx failed (attempt ${attempt}/${max_attempts}); retrying in ${delay}s..." >&2
+    sleep "${delay}"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
 }
 
 run_cargo_pgrx_package() {

@@ -140,9 +140,9 @@ jobs:
 
       - name: Install cargo-pgrx
         run: |
-          if ! command -v cargo-pgrx >/dev/null 2>&1 || ! cargo pgrx --version | grep -q "cargo-pgrx ${PGRX_VERSION}$"; then
-            cargo install cargo-pgrx --version "${PGRX_VERSION}" --locked
-          fi
+          # shellcheck source=scripts/build/release-common.sh
+          source scripts/build/release-common.sh
+          ensure_cargo_pgrx
 
       - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
         run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
