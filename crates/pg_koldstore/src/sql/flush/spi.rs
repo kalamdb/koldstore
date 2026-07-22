@@ -13,7 +13,7 @@ use koldstore_mirror::{
     MirrorRelation, MirrorSeqStats,
 };
 
-pub(super) fn resolve_flush_stats(
+pub(crate) fn resolve_flush_stats(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<ResolvedFlushSelection, String> {
@@ -33,11 +33,22 @@ pub(super) fn resolve_flush_stats(
     let cutoff = if pending == 0 {
         None
     } else if let Some(ref policy) = policy {
-        let flush_count = policy_flush_row_count(pending, policy);
-        if flush_count == 0 {
-            None
-        } else {
-            Some(mirror_oldest_rows_cutoff(table_oid, flush_count)?)
+        match policy {
+            FlushPolicy::RowLimit { .. } => {
+                let flush_count = policy_flush_row_count(pending, policy);
+                (flush_count > 0)
+                    .then(|| mirror_oldest_rows_cutoff(table_oid, flush_count))
+                    .transpose()?
+            }
+            FlushPolicy::OlderThan {
+                age,
+                min_flush_rows,
+                max_rows_per_flush,
+                ..
+            } => older_than_cutoff(table_oid, *age, *min_flush_rows, *max_rows_per_flush)?,
+            FlushPolicy::Filter { .. } => {
+                return Err("filter flush policy is not supported yet".into())
+            }
         }
     } else {
         None
@@ -58,6 +69,12 @@ pub(super) fn resolve_flush_stats(
 pub(super) fn active_flush_policy(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<Option<FlushPolicy>, String> {
+    Ok(active_manage_options(table_oid)?.and_then(|options| options.flush_policy()))
+}
+
+pub(super) fn active_manage_options(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<koldstore_common::ManageTableOptions>, String> {
     use pgrx::datum::DatumWithOid;
 
     let statement = koldstore_catalog::queries::plan_active_flush_policy_options()
@@ -68,9 +85,53 @@ pub(super) fn active_flush_policy(
     let Some(options) = options else {
         return Ok(None);
     };
-    Ok(koldstore_flush::policy::flush_policy_from_options(
+    Ok(Some(koldstore_common::ManageTableOptions::try_from_value(
         &options.0,
-    ))
+    )?))
+}
+
+fn older_than_cutoff(
+    table_oid: pgrx::pg_sys::Oid,
+    age: koldstore_common::MoveAfter,
+    min_flush_rows: u64,
+    max_rows_per_flush: u64,
+) -> Result<Option<(i64, i64)>, String> {
+    use pgrx::datum::DatumWithOid;
+    let cutoff_ms = pgrx::Spi::get_one_with_args::<f64>(
+        "SELECT extract(epoch FROM (statement_timestamp() - make_interval(months => $1::int, days => $2::int, secs => $3::double precision))) * 1000",
+        &[
+            DatumWithOid::from(age.months),
+            DatumWithOid::from(age.days),
+            DatumWithOid::from(age.microseconds as f64 / 1_000_000.0),
+        ],
+    ).map_err(|error| error.to_string())?.ok_or_else(|| "failed to compute move_after cutoff".to_string())?;
+    let Some(cutoff_seq) = koldstore_common::minimum_id_at_unix_millis(cutoff_ms.floor() as i64)
+    else {
+        return Ok(None);
+    };
+    let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
+    let mirror = MirrorRelation::new(snapshot.mirror_relation.clone()).quoted();
+    let sql = format!("SELECT count(*)::bigint, max(seq)::bigint FROM (SELECT seq FROM {mirror} WHERE seq < $1 ORDER BY seq LIMIT $2) eligible");
+    let (count, max_seq) = pgrx::Spi::connect(|client| {
+        let row = client
+            .select(
+                &sql,
+                None,
+                &[
+                    DatumWithOid::from(cutoff_seq),
+                    DatumWithOid::from(max_rows_per_flush as i64),
+                ],
+            )?
+            .first();
+        Ok::<_, pgrx::spi::SpiError>((row.get::<i64>(1)?.unwrap_or(0), row.get::<i64>(2)?))
+    })
+    .map_err(|error| error.to_string())?;
+    if count < min_flush_rows as i64 {
+        return Ok(None);
+    }
+    Ok(max_seq.map(|seq| (count, seq)))
 }
 
 /// Returns the managed table's mirror capture mode (defaults to strict).

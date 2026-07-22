@@ -151,6 +151,19 @@ pub(crate) fn native_slot_exists_cstr(slot: &std::ffi::CStr) -> bool {
     !unsafe { pgrx::pg_sys::SearchNamedReplicationSlot(slot.as_ptr(), true) }.is_null()
 }
 
+/// Returns the slot's `confirmed_flush` LSN from shared memory (no SPI).
+///
+/// Used by the applier idle gate: when insert LSN is still at or behind this
+/// value there is nothing new to decode.
+#[must_use]
+pub(crate) fn native_slot_confirmed_flush_cstr(slot: &std::ffi::CStr) -> Option<u64> {
+    let ptr = unsafe { pgrx::pg_sys::SearchNamedReplicationSlot(slot.as_ptr(), true) };
+    if ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { (*ptr).data.confirmed_flush })
+}
+
 unsafe extern "C-unwind" fn advisory_lock_int4(
     call_info: pgrx::pg_sys::FunctionCallInfo,
 ) -> pgrx::pg_sys::Datum {

@@ -50,8 +50,8 @@ koldstore.register_storage(
   base_path text,
   credentials jsonb,
   config jsonb DEFAULT '{}',
-  shared_path_template text DEFAULT '{namespace}/{tableName}/',
-  user_path_template text DEFAULT '{namespace}/{tableName}/{scopeId}/'
+  regular_path_tmpl text DEFAULT '{namespace}/{tableName}/',
+  scoped_path_tmpl text DEFAULT '{namespace}/{tableName}/{scopeId}/'
 ) RETURNS uuid
 
 koldstore.alter_storage_credentials(name text, credentials jsonb) RETURNS void

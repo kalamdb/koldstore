@@ -119,39 +119,126 @@ impl ParquetCompression {
     }
 }
 
-/// Row-limit flush policy stored in schema options.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FlushPolicy {
-    /// Maximum pending hot mirror rows to keep before flushing oldest rows.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hot_row_limit: Option<u64>,
-    /// Minimum excess rows required before a non-forced flush runs.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub min_flush_rows: Option<u64>,
-    /// Maximum rows written into one cold Parquet segment per flush batch.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_rows_per_file: Option<u64>,
-    /// Preferred compressed Parquet segment size in megabytes.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_file_size_mb: Option<u64>,
+/// Default bound for rows selected by one automatic flush transaction.
+pub const DEFAULT_MAX_ROWS_PER_FLUSH: u64 = 10_000;
+
+/// PostgreSQL interval components retained without flattening months or days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveAfter {
+    /// Calendar months.
+    pub months: i32,
+    /// Calendar days.
+    pub days: i32,
+    /// Sub-day microseconds.
+    pub microseconds: i64,
+}
+
+impl MoveAfter {
+    /// Builds a positive interval whose individual components are nonnegative.
+    pub fn new(months: i32, days: i32, microseconds: i64) -> Result<Self, String> {
+        if months < 0 || days < 0 || microseconds < 0 {
+            return Err("move_after must not contain negative or mixed-sign components".into());
+        }
+        if months == 0 && days == 0 && microseconds == 0 {
+            return Err("move_after must be greater than zero".into());
+        }
+        Ok(Self {
+            months,
+            days,
+            microseconds,
+        })
+    }
+}
+
+/// Executable flush policy persisted in managed-table options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum FlushPolicy {
+    /// Retain the newest bounded number of mirror rows in hot storage.
+    RowLimit {
+        hot_row_limit: u64,
+        min_flush_rows: u64,
+        max_rows_per_file: u64,
+        max_rows_per_flush: u64,
+    },
+    /// Flush rows whose latest mirror mutation predates a native PG interval.
+    OlderThan {
+        age: MoveAfter,
+        min_flush_rows: u64,
+        max_rows_per_file: u64,
+        max_rows_per_flush: u64,
+    },
+    /// Reserved representation; execution deliberately fails closed.
+    Filter {
+        expression: String,
+        min_flush_rows: u64,
+        max_rows_per_file: u64,
+        max_rows_per_flush: u64,
+    },
 }
 
 impl FlushPolicy {
     /// Builds a flush policy with all structured fields set.
     #[must_use]
     pub const fn new(hot_row_limit: u64, min_flush_rows: u64, max_rows_per_file: u64) -> Self {
-        Self {
-            hot_row_limit: Some(hot_row_limit),
-            min_flush_rows: Some(min_flush_rows),
-            max_rows_per_file: Some(max_rows_per_file),
-            target_file_size_mb: None,
+        Self::RowLimit {
+            hot_row_limit,
+            min_flush_rows,
+            max_rows_per_file,
+            max_rows_per_flush: DEFAULT_MAX_ROWS_PER_FLUSH,
         }
     }
 
     /// Returns true when automatic flush is configured.
     #[must_use]
     pub fn enabled(&self) -> bool {
-        self.hot_row_limit.is_some_and(|limit| limit > 0)
+        match self {
+            Self::RowLimit { hot_row_limit, .. } => *hot_row_limit > 0,
+            Self::OlderThan { .. } => true,
+            Self::Filter { .. } => false,
+        }
+    }
+
+    /// Returns the minimum batch threshold.
+    #[must_use]
+    pub const fn min_flush_rows(&self) -> u64 {
+        match self {
+            Self::RowLimit { min_flush_rows, .. }
+            | Self::OlderThan { min_flush_rows, .. }
+            | Self::Filter { min_flush_rows, .. } => *min_flush_rows,
+        }
+    }
+
+    /// Returns the maximum rows written to one segment.
+    #[must_use]
+    pub const fn max_rows_per_file(&self) -> u64 {
+        match self {
+            Self::RowLimit {
+                max_rows_per_file, ..
+            }
+            | Self::OlderThan {
+                max_rows_per_file, ..
+            }
+            | Self::Filter {
+                max_rows_per_file, ..
+            } => *max_rows_per_file,
+        }
+    }
+
+    /// Returns the transaction selection bound.
+    #[must_use]
+    pub const fn max_rows_per_flush(&self) -> u64 {
+        match self {
+            Self::RowLimit {
+                max_rows_per_flush, ..
+            }
+            | Self::OlderThan {
+                max_rows_per_flush, ..
+            }
+            | Self::Filter {
+                max_rows_per_flush, ..
+            } => *max_rows_per_flush,
+        }
     }
 
     /// Loads a flush policy from persisted schema options JSON.
@@ -165,15 +252,21 @@ impl FlushPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManageTableOptions {
-    /// Maximum pending hot mirror rows to keep before flushing oldest rows.
+    /// Canonical tagged policy. New writes use this field.
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub flush_policy: Option<FlushPolicy>,
+    /// Maximum pending hot mirror rows to keep before flushing oldest rows.
+    #[serde(skip_serializing)]
     pub hot_row_limit: Option<u64>,
     /// Minimum excess rows required before a non-forced flush runs.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub min_flush_rows: Option<u64>,
     /// Maximum rows written into one cold Parquet segment per flush batch.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub max_rows_per_file: Option<u64>,
+    /// Legacy transaction bound, accepted during rolling upgrades.
+    #[serde(skip_serializing)]
+    pub max_rows_per_flush: Option<u64>,
     /// Preferred Parquet segment size in megabytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_file_size_mb: Option<u64>,
@@ -202,44 +295,117 @@ pub struct ManageTableOptions {
 }
 
 impl ManageTableOptions {
+    /// Strictly decodes executable catalog options.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed tagged policies, zero execution bounds, invalid age
+    /// components, and the reserved filter policy.
+    pub fn try_from_value(value: &Value) -> Result<Self, String> {
+        let mut decoded: Self =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        decoded.normalize_flush_policy();
+        if let Some(policy) = decoded.flush_policy.as_ref() {
+            if policy.min_flush_rows() == 0
+                || policy.max_rows_per_file() == 0
+                || policy.max_rows_per_flush() == 0
+            {
+                return Err("flush policy row bounds must be greater than zero".into());
+            }
+            match policy {
+                FlushPolicy::RowLimit {
+                    hot_row_limit: 0, ..
+                } => return Err("hot_row_limit must be greater than zero".into()),
+                FlushPolicy::OlderThan { age, .. } => {
+                    MoveAfter::new(age.months, age.days, age.microseconds)?;
+                }
+                FlushPolicy::Filter { .. } => {
+                    return Err("filter flush policy is not supported yet".into())
+                }
+                FlushPolicy::RowLimit { .. } => {}
+            }
+        }
+        Ok(decoded)
+    }
+
     /// Decodes schema options from JSON, defaulting missing fields.
     #[must_use]
     pub fn from_value(value: &Value) -> Self {
         if value.is_null() {
             return Self::default();
         }
-        serde_json::from_value(value.clone()).unwrap_or_default()
+        let mut decoded: Self = serde_json::from_value(value.clone()).unwrap_or_default();
+        decoded.normalize_flush_policy();
+        decoded
     }
 
     /// Encodes schema options to JSON for catalog persistence.
     ///
     /// Derived fields such as `cold_metadata` are merged separately at registration time.
+    /// Legacy flat `hot_row_limit` inputs are promoted to tagged `flush_policy` on write so
+    /// catalog JSON never drops an effective policy.
     #[must_use]
     pub fn to_value(&self) -> Value {
-        serde_json::to_value(self).unwrap_or_else(|_| Value::Object(Default::default()))
+        let mut normalized = self.clone();
+        normalized.normalize_flush_policy();
+        serde_json::to_value(&normalized).unwrap_or_else(|_| Value::Object(Default::default()))
+    }
+
+    /// Promotes legacy flat flush fields into tagged `flush_policy` when needed.
+    fn normalize_flush_policy(&mut self) {
+        if self.flush_policy.is_some() {
+            return;
+        }
+        let Some(hot_row_limit) = self.hot_row_limit.filter(|value| *value > 0) else {
+            return;
+        };
+        self.flush_policy = Some(FlushPolicy::RowLimit {
+            hot_row_limit,
+            min_flush_rows: self.min_flush_rows.filter(|value| *value > 0).unwrap_or(1),
+            max_rows_per_file: self
+                .max_rows_per_file
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MIN_MAX_ROWS_PER_FILE),
+            max_rows_per_flush: self
+                .max_rows_per_flush
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MAX_ROWS_PER_FLUSH),
+        });
     }
 
     /// Returns true when automatic flush is configured.
     #[must_use]
     pub fn flush_enabled(&self) -> bool {
-        self.hot_row_limit().is_some()
+        self.flush_policy().is_some_and(|policy| policy.enabled())
     }
 
     /// Returns the configured hot-row limit when flush is enabled.
     #[must_use]
     pub fn hot_row_limit(&self) -> Option<u64> {
-        self.hot_row_limit.filter(|limit| *limit > 0)
+        match self.flush_policy() {
+            Some(FlushPolicy::RowLimit { hot_row_limit, .. }) => Some(hot_row_limit),
+            _ => None,
+        }
     }
 
     /// Returns the structured flush policy when flush is enabled.
     #[must_use]
     pub fn flush_policy(&self) -> Option<FlushPolicy> {
-        let hot_row_limit = self.hot_row_limit()?;
-        Some(FlushPolicy {
-            hot_row_limit: Some(hot_row_limit),
-            min_flush_rows: self.min_flush_rows.filter(|value| *value > 0),
-            max_rows_per_file: self.max_rows_per_file.filter(|value| *value > 0),
-            target_file_size_mb: self.target_file_size_mb.filter(|value| *value > 0),
+        if let Some(policy) = &self.flush_policy {
+            return Some(policy.clone());
+        }
+        let hot_row_limit = self.hot_row_limit.filter(|value| *value > 0)?;
+        Some(FlushPolicy::RowLimit {
+            hot_row_limit,
+            min_flush_rows: self.min_flush_rows.filter(|value| *value > 0).unwrap_or(1),
+            max_rows_per_file: self
+                .max_rows_per_file
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MIN_MAX_ROWS_PER_FILE),
+            max_rows_per_flush: self
+                .max_rows_per_flush
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MAX_ROWS_PER_FLUSH),
         })
     }
 
@@ -251,6 +417,13 @@ impl ManageTableOptions {
         min_flush_rows: u64,
         max_rows_per_file: u64,
     ) -> Self {
+        self.flush_policy = Some(FlushPolicy::new(
+            hot_row_limit,
+            min_flush_rows,
+            max_rows_per_file,
+        ));
+        // Keep the in-memory compatibility view for callers compiled against
+        // the original model; serde skips these fields on new writes.
         self.hot_row_limit = Some(hot_row_limit);
         self.min_flush_rows = Some(min_flush_rows);
         self.max_rows_per_file = Some(max_rows_per_file);
@@ -349,7 +522,7 @@ pub fn hot_row_limit_from_options(options: &Value) -> Option<u64> {
 mod tests {
     use super::{
         validate_max_rows_per_file, FlushPolicy, ManageTableOptions, MigrationStatus,
-        MirrorCaptureMode, ParquetCompression, DEFAULT_MIN_MAX_ROWS_PER_FILE,
+        MirrorCaptureMode, MoveAfter, ParquetCompression, DEFAULT_MIN_MAX_ROWS_PER_FILE,
     };
 
     #[test]
@@ -404,9 +577,13 @@ mod tests {
         assert_eq!(
             value,
             serde_json::json!({
-                "hot_row_limit": 10_000,
-                "min_flush_rows": 1_000,
-                "max_rows_per_file": 500,
+                "flush_policy": {
+                    "type": "row_limit",
+                    "hot_row_limit": 10_000,
+                    "min_flush_rows": 1_000,
+                    "max_rows_per_file": 500,
+                    "max_rows_per_flush": 10_000
+                }
             })
         );
 
@@ -415,6 +592,28 @@ mod tests {
         assert_eq!(
             decoded.flush_policy(),
             Some(FlushPolicy::new(10_000, 1_000, 500))
+        );
+    }
+
+    #[test]
+    fn legacy_flat_hot_row_limit_persists_as_tagged_flush_policy() {
+        let options = ManageTableOptions::from_value(&serde_json::json!({
+            "compression": "zstd",
+            "hot_row_limit": 1000,
+        }));
+        assert_eq!(options.hot_row_limit(), Some(1000));
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({
+                "compression": "zstd",
+                "flush_policy": {
+                    "type": "row_limit",
+                    "hot_row_limit": 1000,
+                    "min_flush_rows": 1,
+                    "max_rows_per_file": 1000,
+                    "max_rows_per_flush": 10_000
+                }
+            })
         );
     }
 
@@ -457,18 +656,50 @@ mod tests {
         }))
         .unwrap();
 
-        assert_eq!(policy.hot_row_limit, Some(500));
+        assert!(matches!(
+            policy,
+            FlushPolicy::RowLimit {
+                hot_row_limit: 500,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn flush_policy_preserves_optional_file_size_target() {
-        let policy = FlushPolicy::from_value(&serde_json::json!({
+        let options = ManageTableOptions::from_value(&serde_json::json!({
             "hot_row_limit": 500,
             "target_file_size_mb": 64,
-        }))
-        .unwrap();
+        }));
 
-        assert_eq!(policy.target_file_size_mb, Some(64));
+        assert_eq!(options.target_file_size_mb, Some(64));
+    }
+
+    #[test]
+    fn older_than_policy_round_trips_interval_components() {
+        let age = MoveAfter::new(3, 7, 123_456).unwrap();
+        let options = ManageTableOptions {
+            flush_policy: Some(FlushPolicy::OlderThan {
+                age,
+                min_flush_rows: 100,
+                max_rows_per_file: 1_000,
+                max_rows_per_flush: 10_000,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(ManageTableOptions::from_value(&options.to_value()), options);
+        assert!(MoveAfter::new(0, 0, 0).is_err());
+        assert!(MoveAfter::new(1, -1, 0).is_err());
+    }
+
+    #[test]
+    fn strict_policy_decode_rejects_filter_and_invalid_bounds() {
+        assert!(ManageTableOptions::try_from_value(&serde_json::json!({
+            "flush_policy": { "type": "filter", "expression": "status = 'closed'", "min_flush_rows": 1, "max_rows_per_file": 1000, "max_rows_per_flush": 10000 }
+        })).is_err());
+        assert!(ManageTableOptions::try_from_value(&serde_json::json!({
+            "flush_policy": { "type": "row_limit", "hot_row_limit": 0, "min_flush_rows": 1, "max_rows_per_file": 1000, "max_rows_per_flush": 10000 }
+        })).is_err());
     }
 
     #[test]

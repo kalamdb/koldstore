@@ -141,20 +141,22 @@ SELECT koldstore.register_storage(
 
 -- Custom path templates
 SELECT koldstore.register_storage(
-  name                 => 'local-dev',
-  storage_type         => 'filesystem',
-  base_path            => '/tmp/koldstore-demo',
-  credentials          => '{}'::jsonb,
-  config               => '{}'::jsonb,
-  shared_path_template => '{namespace}/{tableName}/',
-  user_path_template   => '{namespace}/{tableName}/{scopeId}/'
+  name               => 'local-dev',
+  storage_type       => 'filesystem',
+  base_path          => '/tmp/koldstore-demo',
+  credentials        => '{}'::jsonb,
+  config             => '{}'::jsonb,
+  regular_path_tmpl  => '{namespace}/{tableName}/',
+  scoped_path_tmpl   => '{namespace}/{tableName}/{scopeId}/'
 );
 ```
 
 `storage_type` must be one of `filesystem`, `s3`, `gcs`, or `azure`.
 
-**Returns:** `uuid` — the storage backend id (`koldstore.storage.id`). Upserts on
-`name`, so a re-register of an existing name returns the same id.
+**Returns:** `uuid` — the storage backend id (`koldstore.storage.id`). Fails with
+`storage \`<name>\` already exists` when the name is taken; use
+`alter_storage_credentials` / `alter_storage_location` to change an existing
+backend.
 
 ### `koldstore.alter_storage_credentials`
 
@@ -184,7 +186,30 @@ Updates storage location/configuration without direct catalog DML.
 **Returns:** `uuid` — the storage backend id. Errors if the storage name does
 not exist.
 
-### `koldstore.manage_table`
+### Default table management with `ALTER TABLE`
+
+```sql
+ALTER TABLE messages SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'cold_s3',
+  koldstore_move_after = '90 days',
+  koldstore_min_flush_rows = 1000,
+  koldstore_max_rows_per_file = 10000,
+  koldstore_max_rows_per_flush = 10000
+);
+```
+
+Use `koldstore_hot_row_limit` instead of `koldstore_move_after` to retain a
+fixed hot-row count. The selectors are mutually exclusive and replace one
+another atomically; omitted batching settings are preserved. Native PostgreSQL
+interval input such as `'90 days'`, `'3 months'`, and `'P90D'` is accepted.
+Age is measured from the latest captured mirror mutation encoded in `seq`.
+
+`koldstore_move_when` is reserved and fails closed. Use
+`koldstore.unmanage_table(...)` rather than `koldstore_enabled = false`.
+Storage cannot be changed after management.
+
+### Advanced and compatibility management: `koldstore.manage_table`
 
 ```sql
 SELECT koldstore.manage_table(
@@ -557,3 +582,10 @@ extension:
 User-scoped tables require `koldstore.user_id` and fail closed when it is
 missing. RLS/security qualifiers must be enforceable on cold rows or planning
 must fail closed.
+
+## Upgrade note
+
+Existing flat `hot_row_limit` catalog JSON remains readable; new policy writes
+use tagged `flush_policy` JSON and require no eager rewrite. The `ALTER TABLE`
+hook becomes available after installing the new shared library and restarting
+PostgreSQL with KoldStore in `shared_preload_libraries`.

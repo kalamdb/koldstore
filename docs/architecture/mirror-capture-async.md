@@ -74,10 +74,10 @@ on the source relation.
 | Event | Behavior |
 | --- | --- |
 | Async `manage_table` | Starts the database WAL applier (`wait_for_startup`; the worker finishes connecting after the manage transaction commits) |
-| Steady state | Applier polls every 100 ms; skips decode when WAL has not advanced |
+| Steady state | Applier polls every 100 ms; **O(1) skip** when insert LSN is still at/behind the slot's `confirmed_flush`. Empty peeks advance `confirmed_flush` past non-publication WAL and apply exponential idle backoff (cap 5 s) so a lagged `restart_lsn` cannot pin a core |
 | Bounded backlog remains | Up to four `ContinuePending` ticks run immediately; the fifth yields through the latch before another burst so catch-up progresses without an unbounded CPU loop |
 | Apply error | The transaction rolls back, the immediate-retry budget resets, and polling backs off from 100 ms up to 30 s |
-| Applier crash | Shared-preload launcher re-registers the applier; otherwise the next session `ensure` / `wait_for_async_mirror` after commit does |
+| Applier crash | Shared-preload launcher re-registers the applier (every 2 s); otherwise the next session `ensure` / `wait_for_async_mirror` after commit does |
 | Postmaster restart | Shared-preload launcher (if `koldstore` is in `shared_preload_libraries`) and/or the next `wait_for_async_mirror` / `internal_ensure_async_mirror_worker` re-attaches appliers for databases that still have a slot |
 | `disable_async_mirror` | Terminates the applier if needed, then drops the slot (avoids deadlock when peek waits on the caller's open XID) |
 

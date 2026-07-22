@@ -221,8 +221,14 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
     let row_budget = resolve_row_budget(&request);
     let time_budget = resolve_time_budget(&request);
     let tick_started = std::time::Instant::now();
+    // Always bound the peek. An empty stream can then advance `confirmed_flush`
+    // past non-publication WAL so idle ticks do not re-decode a growing
+    // restart→current gap (observed pinning a core at ~100% CPU).
+    let peek_upto = request
+        .upper_bound
+        .unwrap_or_else(|| WalFenceLsn::new(current_flush_lsn()));
 
-    let cursor_name = open_decode_cursor(&slot, request.upper_bound)?;
+    let cursor_name = open_decode_cursor(&slot, Some(peek_upto))?;
     let mut relations = HashMap::<u32, PgOutputRelation>::new();
     let mut managed = HashMap::<u32, Option<ManagedRelation>>::new();
     let mut type_names = HashMap::<(u32, i32), String>::new();
@@ -387,6 +393,11 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
         if request.acknowledge_durable_checkpoint {
             if let Some(end_lsn) = applied_end_lsn {
                 record_applied_lsn(end_lsn)?;
+            } else if applied == 0 && !budget_exhausted {
+                // No publication changes in [confirmed, peek_upto]. Advance the
+                // slot so the next idle wake is an O(1) confirmed_flush check
+                // instead of re-decoding the same retained WAL.
+                acknowledge_slot_lsn(&slot, peek_upto.get())?;
             }
         }
         // Persist hot/mirror counters in this transaction before commit. The
@@ -569,13 +580,32 @@ fn acknowledge_committed_apply(
     let Some(applied_lsn) = durable else {
         return Ok(());
     };
-    let text = format_pg_lsn(applied_lsn.get());
+    acknowledge_slot_lsn(slot, applied_lsn.get())
+}
+
+/// Advances `confirmed_flush` to `target_lsn` when the slot is behind it.
+///
+/// No-op when already at or past the target: PostgreSQL still starts logical
+/// decoding from `restart_lsn` for a redundant `pg_replication_slot_advance`,
+/// which is extremely expensive when restart lags by hundreds of MB.
+fn acknowledge_slot_lsn(slot: &str, target_lsn: u64) -> Result<(), String> {
+    let slot_c = std::ffi::CString::new(slot).map_err(|error| error.to_string())?;
+    if let Some(confirmed) = super::lifecycle::native_slot_confirmed_flush_cstr(&slot_c) {
+        if confirmed >= target_lsn {
+            return Ok(());
+        }
+    }
+    let text = format_pg_lsn(target_lsn);
     pgrx::Spi::run_with_args(
         "SELECT * FROM pg_catalog.pg_replication_slot_advance($1, $2::pg_lsn)",
         &[DatumWithOid::from(slot), DatumWithOid::from(text.as_str())],
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn current_flush_lsn() -> u64 {
+    unsafe { pgrx::pg_sys::GetFlushRecPtr(std::ptr::null_mut()) }
 }
 
 fn record_applied_lsn(applied_lsn: u64) -> Result<(), String> {

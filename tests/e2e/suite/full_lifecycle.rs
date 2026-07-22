@@ -605,7 +605,8 @@ async fn assert_hot_row_limit_registered(client: &Client, pg_version: u16) -> Re
     let row = client
         .query_one(
             r#"
-            SELECT (options->>'hot_row_limit')::bigint
+            SELECT options->'flush_policy'->>'type',
+                   (options->'flush_policy'->>'hot_row_limit')::bigint
             FROM koldstore.schemas
             WHERE table_oid = $1::text::regclass::oid
               AND active
@@ -615,7 +616,12 @@ async fn assert_hot_row_limit_registered(client: &Client, pg_version: u16) -> Re
             &[&relation(pg_version)],
         )
         .await?;
-    assert_eq!(row.get::<_, Option<i64>>(0), Some(FLUSH_POLICY_ROW_LIMIT));
+    assert_eq!(
+        row.get::<_, Option<String>>(0).as_deref(),
+        Some("row_limit"),
+        "manage_table must persist tagged flush_policy JSON"
+    );
+    assert_eq!(row.get::<_, Option<i64>>(1), Some(FLUSH_POLICY_ROW_LIMIT));
     Ok(())
 }
 

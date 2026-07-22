@@ -110,8 +110,8 @@ Change feed:
 | `base_path` | `text` | Object-store prefix. |
 | `credentials` | `jsonb` | Admin-only, encrypted/restricted. |
 | `config` | `jsonb` | Endpoint, region, path-style, etc. |
-| `shared_path_template` | `text` | Shared table path. |
-| `user_path_template` | `text` | Scoped table path. |
+| `regular_path_tmpl` | `text` | Regular (unscoped) table path. |
+| `scoped_path_tmpl` | `text` | Scoped table path. |
 
 Credential rotation changes future access only; existing object paths are not rewritten.
 

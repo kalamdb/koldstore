@@ -42,7 +42,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.4-beta.1"
+version = "0.1.5-beta.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/kalamdb/koldstore"
@@ -83,13 +83,13 @@ parquet = { version = "59.1.0", default-features = false, features = ["arrow", "
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.150"
+serde_json = "1.0.151"
 sha2 = "0.11.0"
 tempfile = "3.27.0"
 thiserror = "2.0.19"
 # Shared runtime features for library crates. Test binaries add `macros`;
 # benchmarks add `process` where `tokio::process` is used.
-tokio = { version = "1.53.0", features = ["rt-multi-thread", "time"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "time"] }
 tokio-postgres = "0.7.18"
 tracing = "0.1.44"
 uuid = { version = "1.24.0", features = ["v4", "serde"] }

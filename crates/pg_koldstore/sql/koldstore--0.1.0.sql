@@ -45,8 +45,8 @@ CREATE TABLE IF NOT EXISTS koldstore.storage (
   base_path text NOT NULL,
   credentials jsonb NOT NULL DEFAULT '{}'::jsonb,
   config jsonb NOT NULL DEFAULT '{}'::jsonb,
-  shared_path_template text NOT NULL DEFAULT '{namespace}/{tableName}/',
-  user_path_template text NOT NULL DEFAULT '{namespace}/{tableName}/{scopeId}/',
+  regular_path_tmpl text NOT NULL DEFAULT '{namespace}/{tableName}/',
+  scoped_path_tmpl text NOT NULL DEFAULT '{namespace}/{tableName}/{scopeId}/',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );

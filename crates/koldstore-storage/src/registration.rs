@@ -10,11 +10,11 @@ use uuid::Uuid;
 use crate::PathTemplate;
 use koldstore_common::SqlStatement;
 
-/// Default shared table object path template.
-pub const DEFAULT_SHARED_PATH_TEMPLATE: &str = "{namespace}/{tableName}/";
+/// Default regular (unscoped) table object path template.
+pub const DEFAULT_REGULAR_PATH_TMPL: &str = "{namespace}/{tableName}/";
 
-/// Default user-scoped table object path template.
-pub const DEFAULT_USER_PATH_TEMPLATE: &str = "{namespace}/{tableName}/{scopeId}/";
+/// Default scoped table object path template.
+pub const DEFAULT_SCOPED_PATH_TMPL: &str = "{namespace}/{tableName}/{scopeId}/";
 
 /// Supported storage backends.
 ///
@@ -25,36 +25,35 @@ pub const SUPPORTED_STORAGE_TYPES: &[&str] = &["filesystem", "s3", "gcs", "azure
 #[cfg(not(feature = "s3"))]
 pub const SUPPORTED_STORAGE_TYPES: &[&str] = &["filesystem", "gcs", "azure"];
 
+// Scalar subquery always returns exactly one row (NULL on name conflict) so
+// `Spi::get_one*` never hits "SpiTupleTable positioned before the start or
+// after the end" when ON CONFLICT DO NOTHING inserts nothing.
 const REGISTER_STORAGE_SQL: &str = r#"
-INSERT INTO koldstore.storage AS s (
-    id,
-    name,
-    storage_type,
-    base_path,
-    credentials,
-    config,
-    shared_path_template,
-    user_path_template
+WITH inserted AS (
+    INSERT INTO koldstore.storage AS s (
+        id,
+        name,
+        storage_type,
+        base_path,
+        credentials,
+        config,
+        regular_path_tmpl,
+        scoped_path_tmpl
+    )
+    VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        jsonb_strip_nulls($5::jsonb),
+        COALESCE($6::jsonb, '{}'::jsonb),
+        $7,
+        $8
+    )
+    ON CONFLICT (name) DO NOTHING
+    RETURNING s.id
 )
-VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    jsonb_strip_nulls($5::jsonb),
-    COALESCE($6::jsonb, '{}'::jsonb),
-    $7,
-    $8
-)
-ON CONFLICT (name) DO UPDATE
-SET storage_type = EXCLUDED.storage_type,
-    base_path = EXCLUDED.base_path,
-    credentials = EXCLUDED.credentials,
-    config = EXCLUDED.config,
-    shared_path_template = EXCLUDED.shared_path_template,
-    user_path_template = EXCLUDED.user_path_template,
-    updated_at = now()
-RETURNING s.id
+SELECT (SELECT id FROM inserted)
 "#;
 
 const ALTER_STORAGE_CREDENTIALS_SQL: &str = r#"
@@ -64,13 +63,17 @@ SET credentials = $2,
 WHERE name = $1
 "#;
 
+// Scalar subquery always returns exactly one row (NULL when no matching name).
 const ALTER_STORAGE_LOCATION_SQL: &str = r#"
-UPDATE koldstore.storage
-SET base_path = $2,
-    config = COALESCE($3::jsonb, config),
-    updated_at = now()
-WHERE name = $1
-RETURNING id
+WITH updated AS (
+    UPDATE koldstore.storage
+    SET base_path = $2,
+        config = COALESCE($3::jsonb, config),
+        updated_at = now()
+    WHERE name = $1
+    RETURNING id
+)
+SELECT (SELECT id FROM updated)
 "#;
 
 /// DDL SQL function planning result.
@@ -88,12 +91,15 @@ pub enum DdlError {
     /// Storage backend is not supported.
     #[error("unsupported storage_type `{0}`")]
     UnsupportedStorageType(String),
-    /// Shared table path template is invalid.
-    #[error("invalid shared_path_template: {0}")]
-    InvalidSharedPathTemplate(String),
-    /// User table path template is invalid.
-    #[error("invalid user_path_template: {0}")]
-    InvalidUserPathTemplate(String),
+    /// A storage row with this name already exists.
+    #[error("storage `{0}` already exists")]
+    StorageAlreadyExists(String),
+    /// Regular table path template is invalid.
+    #[error("invalid regular_path_tmpl: {0}")]
+    InvalidRegularPathTmpl(String),
+    /// Scoped table path template is invalid.
+    #[error("invalid scoped_path_tmpl: {0}")]
+    InvalidScopedPathTmpl(String),
     /// SQL statement metadata could not be prepared.
     #[error("{0}")]
     Sql(String),
@@ -112,10 +118,10 @@ pub struct StorageRegistration {
     pub credentials: serde_json::Value,
     /// Backend config.
     pub config: serde_json::Value,
-    /// Shared table path template.
-    pub shared_path_template: String,
-    /// User table path template.
-    pub user_path_template: String,
+    /// Regular (unscoped) table path template.
+    pub regular_path_tmpl: String,
+    /// Scoped table path template.
+    pub scoped_path_tmpl: String,
 }
 
 /// Planned storage registration catalog mutation.
@@ -162,25 +168,25 @@ impl StorageRegistration {
         copy
     }
 
-    /// Renders the shared object prefix for a managed table.
+    /// Renders the regular (unscoped) object prefix for a managed table.
     ///
     /// # Errors
     ///
-    /// Returns an error when the configured shared template is invalid.
-    pub fn render_shared_prefix(
+    /// Returns an error when the configured regular template is invalid.
+    pub fn render_regular_prefix(
         &self,
         namespace: &str,
         table_name: &str,
     ) -> Result<String, String> {
-        PathTemplate::new(&self.shared_path_template).render(namespace, table_name, None)
+        PathTemplate::new(&self.regular_path_tmpl).render(namespace, table_name, None)
     }
 
-    /// Renders the user-scoped object prefix for a managed table.
+    /// Renders the scoped object prefix for a managed table.
     ///
     /// # Errors
     ///
-    /// Returns an error when the configured user template is invalid or scope is blank.
-    pub fn render_user_prefix(
+    /// Returns an error when the configured scoped template is invalid or scope is blank.
+    pub fn render_scoped_prefix(
         &self,
         namespace: &str,
         table_name: &str,
@@ -190,7 +196,7 @@ impl StorageRegistration {
         if scope_id.is_empty() {
             return Err("scopeId is required by path template".to_string());
         }
-        PathTemplate::new(&self.user_path_template).render(namespace, table_name, Some(scope_id))
+        PathTemplate::new(&self.scoped_path_tmpl).render(namespace, table_name, Some(scope_id))
     }
 
     /// Validates storage registration inputs before catalog mutation planning.
@@ -210,16 +216,16 @@ impl StorageRegistration {
             return Err(DdlError::UnsupportedStorageType(self.storage_type.clone()));
         }
 
-        self.render_shared_prefix("namespace", "table")
-            .map_err(DdlError::InvalidSharedPathTemplate)?;
+        self.render_regular_prefix("namespace", "table")
+            .map_err(DdlError::InvalidRegularPathTmpl)?;
 
-        if !self.user_path_template.contains("{scopeId}") {
-            return Err(DdlError::InvalidUserPathTemplate(
-                "user path template must include {scopeId}".to_string(),
+        if !self.scoped_path_tmpl.contains("{scopeId}") {
+            return Err(DdlError::InvalidScopedPathTmpl(
+                "scoped path template must include {scopeId}".to_string(),
             ));
         }
-        self.render_user_prefix("namespace", "table", "scope")
-            .map_err(DdlError::InvalidUserPathTemplate)?;
+        self.render_scoped_prefix("namespace", "table", "scope")
+            .map_err(DdlError::InvalidScopedPathTmpl)?;
 
         Ok(())
     }

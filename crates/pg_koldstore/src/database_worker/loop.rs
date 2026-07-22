@@ -1,11 +1,13 @@
 //! Latch poll loop and signal handling for the shared database worker.
 //!
-//! Each wake: apply async mirror when WAL advanced (if a slot exists), then on
+//! Each wake: apply async mirror when WAL advanced past the slot's
+//! `confirmed_flush` (if a slot exists), then on
 //! `koldstore.flush_check_interval_seconds` evaluate auto-flush tables.
 //!
-//! Apply wakes use `koldstore.async_apply_poll_interval_ms` (default 100). The
-//! auto-flush catalog probe is not run on every latch wake — only when a flush
-//! check is due (or when deciding whether a slot-less worker should exit).
+//! Apply wakes use `koldstore.async_apply_poll_interval_ms` (default 100), with
+//! exponential idle backoff after empty peeks (capped at 5s). The auto-flush
+//! catalog probe is not run on every latch wake — only when a flush check is
+//! due (or when deciding whether a slot-less worker should exit).
 //!
 //! Apply failures soft-fail with exponential backoff instead of FATAL so a
 //! transient SPI error does not permanently stop catch-up.
@@ -15,7 +17,8 @@ use std::panic::AssertUnwindSafe;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use koldstore_worker::{
-    flush_check_due, DatabaseWorkerTask, PendingPollBudget, TickResult, MAX_IMMEDIATE_PENDING_TICKS,
+    flush_check_due, next_idle_backoff_ms, DatabaseWorkerTask, PendingPollBudget, TickResult,
+    MAX_IMMEDIATE_PENDING_TICKS,
 };
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
@@ -45,11 +48,14 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     // Cached so the latch path does not open an SPI transaction every wake.
     let mut auto_flush_cached = true;
     let mut apply_backoff_ms = 0_u64;
+    let mut idle_backoff_ms = 0_u64;
     let mut pending_poll_budget = PendingPollBudget::new(MAX_IMMEDIATE_PENDING_TICKS);
 
     loop {
         let mut should_wait = true;
-        let poll_ms = crate::guc::async_apply_poll_interval_ms().max(apply_backoff_ms);
+        let poll_ms = crate::guc::async_apply_poll_interval_ms()
+            .max(apply_backoff_ms)
+            .max(idle_backoff_ms);
         let poll = Duration::from_millis(poll_ms);
         let slot_exists = crate::async_mirror::lifecycle::native_slot_exists_cstr(&slot_c);
         let now_secs = unix_now_secs();
@@ -58,23 +64,44 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
 
         if slot_exists {
             let current_wal = current_wal_position();
-            if last_checked_wal != Some(current_wal) || apply_backoff_ms > 0 {
+            let confirmed =
+                crate::async_mirror::lifecycle::native_slot_confirmed_flush_cstr(&slot_c);
+            // O(1) idle skip: nothing to decode when insert LSN has not moved
+            // past the slot's confirmed_flush (shared-memory read, no SPI).
+            let wal_ahead_of_slot = confirmed
+                .map(|confirmed_lsn| current_wal > confirmed_lsn)
+                .unwrap_or(true);
+            let needs_apply = apply_backoff_ms > 0
+                || (wal_ahead_of_slot && last_checked_wal != Some(current_wal));
+            if needs_apply {
                 // One PostgreSQL transaction per apply tick: peek batches,
                 // mirror SPI writes, and applied_lsn commit together. Soft-fail
                 // logs and backs off instead of FATAL.
                 match worker_transaction_result(|| async_task.tick()) {
                     Ok(result @ TickResult::Continue) => {
                         apply_backoff_ms = 0;
+                        idle_backoff_ms = 0;
+                        last_checked_wal = Some(current_wal_position());
+                        should_wait = pending_poll_budget.should_wait(result);
+                    }
+                    Ok(result @ TickResult::ContinueIdle) => {
+                        apply_backoff_ms = 0;
+                        idle_backoff_ms = next_idle_backoff_ms(
+                            idle_backoff_ms,
+                            crate::guc::async_apply_poll_interval_ms(),
+                        );
                         last_checked_wal = Some(current_wal_position());
                         should_wait = pending_poll_budget.should_wait(result);
                     }
                     Ok(result @ TickResult::ContinuePending) => {
                         apply_backoff_ms = 0;
+                        idle_backoff_ms = 0;
                         last_checked_wal = None;
                         should_wait = pending_poll_budget.should_wait(result);
                     }
                     Ok(result @ TickResult::Stop) => {
                         apply_backoff_ms = 0;
+                        idle_backoff_ms = 0;
                         should_wait = pending_poll_budget.should_wait(result);
                     }
                     Err(error) => {
@@ -90,12 +117,14 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                                 .saturating_mul(2)
                                 .clamp(SOFT_FAIL_BACKOFF_MIN_MS, SOFT_FAIL_BACKOFF_MAX_MS)
                         };
+                        idle_backoff_ms = 0;
                         last_checked_wal = None;
                     }
                 }
             }
         } else {
             pending_poll_budget.reset();
+            idle_backoff_ms = 0;
         }
 
         if flush_due {

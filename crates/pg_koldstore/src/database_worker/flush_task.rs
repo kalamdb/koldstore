@@ -11,7 +11,10 @@ use serde_json::Value;
 /// Shared catalog predicates for managed tables the built-in scheduler may flush.
 const AUTO_FLUSH_TABLE_PREDICATE: &str = r#"
 s.active
-  AND COALESCE((s.options->>'hot_row_limit')::bigint, 0) > 0
+  AND (
+    COALESCE((s.options->>'hot_row_limit')::bigint, 0) > 0
+    OR s.options->'flush_policy'->>'type' IN ('row_limit', 'older_than')
+  )
   AND COALESCE((s.options->>'auto_flush')::boolean, true)
 "#;
 
@@ -70,7 +73,14 @@ ORDER BY s.created_at DESC, s.table_oid DESC
             let parsed = ManageTableOptions::from_value(&options);
             let (_, mirror_delta) = crate::row_counter_cache::pending_deltas(oid);
             let pending = catalog_pending.saturating_add(mirror_delta).max(0);
-            if scheduler_should_flush_parsed(&parsed, pending) {
+            let due = match parsed.flush_policy() {
+                Some(koldstore_common::FlushPolicy::OlderThan { .. }) => {
+                    crate::sql::flush::spi::resolve_flush_stats(oid, false)
+                        .map(|selection| selection.stats.row_count > 0)?
+                }
+                _ => scheduler_should_flush_parsed(&parsed, pending),
+            };
+            if due {
                 return Ok(Some(oid.to_u32()));
             }
         }

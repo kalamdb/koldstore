@@ -9,11 +9,11 @@ fn flush_policy_e2e_contract_selects_row_limit_candidates() {
 
     let flush_count = policy_flush_row_count(
         3,
-        &FlushPolicy {
-            hot_row_limit: Some(1),
-            min_flush_rows: None,
-            max_rows_per_file: None,
-            target_file_size_mb: None,
+        &FlushPolicy::RowLimit {
+            hot_row_limit: 1,
+            min_flush_rows: 1,
+            max_rows_per_file: 1_000,
+            max_rows_per_flush: 10_000,
         },
     );
 

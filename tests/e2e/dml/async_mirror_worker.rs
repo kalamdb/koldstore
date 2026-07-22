@@ -457,6 +457,185 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
     Ok(())
 }
 
+/// Regression: idle ticks must not re-decode retained WAL or rewrite mirror
+/// state when only non-publication WAL is generated.
+///
+/// Before the fix, every latch wake called `pg_replication_slot_advance` /
+/// peek against a lagged `restart_lsn`, pinning a core and flooding
+/// "starting logical decoding" logs while `applied_lsn` stayed put.
+#[tokio::test]
+async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Result<()> {
+    if !common::selected_mirror_capture_mode()?.is_async() {
+        common::log_always("skipping async idle WAL retention regression in strict mode");
+        return Ok(());
+    }
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "async_idle_wal_skip").await?;
+        clear_async_failpoint(&db.client).await?;
+        cleanup_leftover_async_tables(&db.client).await?;
+        let table_name = format!("{}_events", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+        let noise_name = format!("{}_noise", db.schema);
+        let noise = db.relation(&noise_name);
+
+        ensure_publication(&db.client).await?;
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL); \
+                 CREATE TABLE {noise} (id bigserial PRIMARY KEY, payload text NOT NULL)"
+            ))
+            .await?;
+        // auto_flush off so the flush scheduler cannot enqueue work during idle.
+        db.client
+            .execute(
+                r#"
+                SELECT koldstore.manage_table(
+                  table_name => $1::text::regclass,
+                  storage => $2,
+                  hot_row_limit => 1000,
+                  auto_flush => false,
+                  mirror_capture_mode => 'async'
+                )
+                "#,
+                &[&relation, &db.storage_name],
+            )
+            .await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} \
+                     SELECT id, 'body-' || id FROM generate_series(1, 50) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, 50).await?;
+        assert_eq!(common::wait_for_async_mirror(&db.client).await?, 0);
+
+        let baseline = common::async_mirror_progress(&db.client).await?;
+        anyhow::ensure!(
+            baseline.applied_lsn.is_some(),
+            "expected durable applied_lsn after initial catch-up"
+        );
+        let jobs_before: i64 = db
+            .client
+            .query_one("SELECT count(*)::bigint FROM koldstore.jobs", &[])
+            .await?
+            .get(0);
+
+        // Stop the applier so non-publication WAL accumulates behind confirmed_flush
+        // (the historical pin-CPU shape: large restart→current gap on every wake).
+        force_stop_async_worker(&db.client).await?;
+        db.client
+            .batch_execute(&format!(
+                "INSERT INTO {noise} (payload) \
+                 SELECT repeat('x', 4096) FROM generate_series(1, 2000); \
+                 SELECT pg_switch_wal()"
+            ))
+            .await?;
+        let blocked = common::async_mirror_progress(&db.client).await?;
+        anyhow::ensure!(
+            blocked.retained_bytes > 256 * 1024,
+            "expected retained WAL behind a stopped slot, got {} bytes",
+            blocked.retained_bytes
+        );
+        common::log_always(format!(
+            "accumulated {} bytes of non-publication WAL behind stopped applier",
+            blocked.retained_bytes
+        ));
+
+        common::wait_for_async_worker(&db.client).await?;
+        let drained = common::wait_for_confirmed_flush_past(
+            &db.client,
+            &baseline.confirmed_flush_lsn,
+            Duration::from_secs(15),
+        )
+        .await?;
+        common::log_always(format!(
+            "idle empty-peek advanced confirmed_flush {} -> {} (retained_bytes {} -> {})",
+            baseline.confirmed_flush_lsn,
+            drained.confirmed_flush_lsn,
+            blocked.retained_bytes,
+            drained.retained_bytes
+        ));
+
+        assert_eq!(
+            drained.applied_lsn, baseline.applied_lsn,
+            "empty non-publication WAL must not rewrite applied_lsn"
+        );
+        assert_eq!(
+            drained.updated_at, baseline.updated_at,
+            "empty non-publication WAL must not bump async_mirror_state.updated_at"
+        );
+        assert_eq!(
+            common::mirror_op_count(&db.client, &mirror, 1).await?,
+            50,
+            "idle path must not rewrite mirror rows"
+        );
+        assert!(
+            drained.retained_bytes < blocked.retained_bytes / 2,
+            "confirmed_flush advance must shrink retention substantially \
+             (before={}, after={})",
+            blocked.retained_bytes,
+            drained.retained_bytes
+        );
+        assert!(
+            drained.retained_bytes < 2 * 1024 * 1024,
+            "retention after idle advance should be small, got {} bytes",
+            drained.retained_bytes
+        );
+
+        // Once caught up, further idle wakes must stay quiet: confirmed_flush
+        // should not thrash and fences must remain empty/cheap.
+        let quiet = common::async_mirror_progress(&db.client).await?;
+        let mut confirmed_changes = 0_u32;
+        let mut last_confirmed = quiet.confirmed_flush_lsn.clone();
+        let sample_started = Instant::now();
+        while sample_started.elapsed() < Duration::from_secs(2) {
+            let sample = common::async_mirror_progress(&db.client).await?;
+            if sample.confirmed_flush_lsn != last_confirmed {
+                confirmed_changes += 1;
+                last_confirmed = sample.confirmed_flush_lsn;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            confirmed_changes <= 8,
+            "caught-up idle worker must not thrash confirmed_flush (saw {confirmed_changes} changes)"
+        );
+
+        for _ in 0..5 {
+            let fence_started = Instant::now();
+            let applied = common::wait_for_async_mirror(&db.client).await?;
+            assert_eq!(applied, 0, "idle fence must report no publication changes");
+            assert!(
+                fence_started.elapsed() < Duration::from_millis(500),
+                "idle fence took {:?}; decode path still looks hot",
+                fence_started.elapsed()
+            );
+        }
+
+        let jobs_after: i64 = db
+            .client
+            .query_one("SELECT count(*)::bigint FROM koldstore.jobs", &[])
+            .await?
+            .get(0);
+        assert_eq!(
+            jobs_after, jobs_before,
+            "idle non-publication WAL must not enqueue flush/migrate jobs"
+        );
+
+        cleanup_async_table(&db.client, &relation).await?;
+        db.client
+            .batch_execute(&format!("DROP TABLE IF EXISTS {noise}"))
+            .await?;
+    }
+    Ok(())
+}
+
 async fn clear_async_failpoint(client: &tokio_postgres::Client) -> Result<()> {
     let dbname: String = client
         .query_one("SELECT current_database()::text", &[])
