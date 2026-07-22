@@ -9,9 +9,15 @@ fn structured_schema_options_load_hot_row_limit_policy() {
     }))
     .unwrap();
 
-    assert_eq!(policy.hot_row_limit, Some(10_000));
-    assert_eq!(policy.min_flush_rows, Some(1_000));
-    assert_eq!(policy.max_rows_per_file, Some(500));
+    assert!(matches!(
+        policy,
+        FlushPolicy::RowLimit {
+            hot_row_limit: 10_000,
+            min_flush_rows: 1_000,
+            max_rows_per_file: 500,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -24,11 +30,11 @@ fn flush_rows_for_excess_honors_min_flush_rows_threshold() {
 
 #[test]
 fn policy_flush_row_count_honors_hot_row_limit_and_min_flush_rows() {
-    let policy = FlushPolicy {
-        hot_row_limit: Some(25_000),
-        min_flush_rows: Some(300),
-        max_rows_per_file: None,
-        target_file_size_mb: None,
+    let policy = FlushPolicy::RowLimit {
+        hot_row_limit: 25_000,
+        min_flush_rows: 300,
+        max_rows_per_file: 1_000,
+        max_rows_per_flush: 30_000,
     };
     assert_eq!(policy_flush_row_count(50_000, &policy), 24_900);
     assert_eq!(policy_flush_row_count(25_000, &policy), 0);
@@ -36,11 +42,11 @@ fn policy_flush_row_count_honors_hot_row_limit_and_min_flush_rows() {
 
 #[test]
 fn policy_flush_row_count_chunks_large_excess_like_row_selection_did() {
-    let policy = FlushPolicy {
-        hot_row_limit: Some(10_000),
-        min_flush_rows: Some(1_000),
-        max_rows_per_file: Some(500),
-        target_file_size_mb: None,
+    let policy = FlushPolicy::RowLimit {
+        hot_row_limit: 10_000,
+        min_flush_rows: 1_000,
+        max_rows_per_file: 500,
+        max_rows_per_flush: 10_000,
     };
     assert_eq!(policy_flush_row_count(11_250, &policy), 1_000);
 }

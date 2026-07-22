@@ -6,8 +6,10 @@
 /// Outcome of one worker tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TickResult {
-    /// Continue polling; no urgent pending apply work.
+    /// Continue polling; applied work this tick (or non-idle progress).
     Continue,
+    /// Peek found no publication changes; the latch may back off while idle.
+    ContinueIdle,
     /// Tick budget exhausted with more WAL remaining — poll again without
     /// waiting for a new WAL insert position.
     ContinuePending,
@@ -28,6 +30,7 @@ pub trait DatabaseWorkerTask {
     /// # Errors
     ///
     /// Returns an error when the tick fails fatally; the adapter treats that as
-    /// a worker ERROR exit. Transient empty work should return [`TickResult::Continue`].
+    /// a worker ERROR exit. Transient empty work should return
+    /// [`TickResult::ContinueIdle`].
     fn tick(&self) -> Result<TickResult, String>;
 }

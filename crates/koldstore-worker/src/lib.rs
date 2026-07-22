@@ -14,7 +14,8 @@ mod task;
 pub use ensure::{ensure_action, EnsureAction};
 pub use identity::{async_mirror_worker_type, DatabaseOid};
 pub use policy::{
-    APPLY_POLL_INTERVAL_MS, LAUNCHER_POLL_INTERVAL_MS, LIBRARY_NAME, MAX_IMMEDIATE_PENDING_TICKS,
+    APPLY_IDLE_BACKOFF_MAX_MS, APPLY_POLL_INTERVAL_MS, LAUNCHER_POLL_INTERVAL_MS, LIBRARY_NAME,
+    MAX_IMMEDIATE_PENDING_TICKS,
 };
-pub use scheduler::{flush_check_due, PendingPollBudget};
+pub use scheduler::{flush_check_due, next_idle_backoff_ms, PendingPollBudget};
 pub use task::{DatabaseWorkerTask, TickResult};

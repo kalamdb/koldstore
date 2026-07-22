@@ -42,12 +42,7 @@ fn bench_path_and_policy(c: &mut Criterion) {
         })
     });
 
-    let policy = FlushPolicy {
-        hot_row_limit: Some(10_000),
-        min_flush_rows: None,
-        max_rows_per_file: None,
-        target_file_size_mb: None,
-    };
+    let policy = FlushPolicy::new(10_000, 1, 1_000);
     c.bench_function("policy_evaluation_for_hot_retention", |b| {
         b.iter(|| should_flush_by_policy(black_box(&policy), 12_000))
     });
@@ -153,9 +148,7 @@ fn render_cold_path(
 }
 
 fn should_flush_by_policy(policy: &FlushPolicy, pending_rows: u64) -> bool {
-    policy
-        .hot_row_limit
-        .is_some_and(|rows| pending_rows >= rows)
+    matches!(policy, FlushPolicy::RowLimit { hot_row_limit, .. } if pending_rows >= *hot_row_limit)
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -163,12 +163,12 @@ while an explicit fence remains available for strong reads. Async UPDATE uses a
 direct set-based update with a conflict-safe insert-missing fallback; application
 DML does not run a worker-kick trigger. This reduces foreground overhead while
 reporting catch-up as separate work. `CREATE EXTENSION` and the first async
-`manage_table` create the publication and slot automatically; only
+table create the publication and slot automatically; only
 `wal_level=logical` requires administrator setup.
 
 ## How it works
 
-1. `manage_table` registers the table and creates a small latest-state change-log mirror (one metadata row per primary key). Choose strict transactional capture or opt-in async committed-WAL capture.
+1. KoldStore registers the table and creates a small latest-state change-log mirror (one metadata row per primary key). Choose strict transactional capture or opt-in async committed-WAL capture.
 2. A built-in database worker auto-flushes when hot rows exceed `hot_row_limit` (per-table `auto_flush`, default `true`). You can also call `flush_table` manually.
 3. Flush moves older rows to Parquet and prunes them from the hot heap when safe.
 4. `SELECT` on the original table uses `KoldMergeScan` so the newest visible row wins.
@@ -182,6 +182,53 @@ flowchart TD
   Scan --> Hot[Hot PG heap]
   Scan --> Cold[Manifest → Parquet / S3]
 ```
+
+For example, assume messages `1` and `2` have been flushed to Parquet while
+the newer message `3` remains in PostgreSQL. The application still issues one
+normal query against `messages`:
+
+```sql
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF)
+SELECT id, body
+FROM messages
+WHERE id IN (1, 3);
+```
+
+Captured from PostgreSQL 15 after flushing rows `1` and `2` while row `3`
+remained hot:
+
+```text
+Custom Scan (KoldMergeScan) on messages (actual rows=2 loops=1)
+  Filter: (id = ANY ('{1,3}'::bigint[]))
+  Rows Removed by Filter: 1
+  Hot Plan: Bitmap Heap Scan
+  Mirror Tombstones: 0
+  Mirror Overrides: 0
+  Emit path: merge_buffer
+  Hot rows: 1
+  Result rows: 3
+  Candidate segments: 1
+  Segments pruned by scope: 0
+  Segments pruned by min/max: 0
+  Parquet segments opened: 1
+  Row groups read: 1
+  Row groups skipped: 0 of 1
+  Bytes fetched: 1.5 kB
+  Manifest: readme_capture/messages/manifest.json, source=catalog, 0.002 ms
+  Cold storage: type=filesystem, base=/tmp/koldstore-readme-explain-storage
+  Cold segments: considered=1, pruned_scope=0, pruned_min_max=0, pruned_bloom=0, opened=1
+  Cold row groups: total=1, selected=1, skipped=0, bloom_filters_fetched=0
+  Cold projection: id, body
+  Parquet segment: readme_capture/messages/001/segment-0001-6afccda7.parquet, 1672 bytes, 2 rows, 2.897 ms
+    Parquet I/O: footer-first, range_gets=3, bytes_read=1498, 89.6% of object
+    Row groups: total=1, selected=[0], skipped=0, stats_pruned=false
+    Bloom: not_requested
+```
+
+KoldStore merges both sources and resolves newer mirror versions before rows
+reach the rest of the PostgreSQL plan. Here `Result rows: 3` is the internal
+merged candidate count; the SQL filter removes row `2`, producing the two
+final rows reported on the first line.
 
 ## Required preload
 
@@ -240,18 +287,16 @@ CREATE TABLE messages (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE messages SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'local-dev',
+  koldstore_hot_row_limit = 100000,
+  koldstore_min_flush_rows = 1000,
+  koldstore_max_rows_per_file = 1000
+);
+
 INSERT INTO messages (id, body)
 SELECT gs, 'row ' || gs FROM generate_series(1, 1012) AS gs;
-
-SELECT koldstore.manage_table(
-  table_name         => 'messages',
-  storage            => 'local-dev',
-  hot_row_limit      => 100000,
-  min_flush_rows     => 1000,
-  max_rows_per_file  => 1000,
-  migration_order_by => 'id',
-  auto_flush         => true   -- default; set false to drive flush yourself
-);
 
 -- Optional: force a flush now. Otherwise the built-in worker auto-flushes
 -- when hot rows exceed hot_row_limit.
@@ -263,7 +308,7 @@ SELECT jsonb_pretty(koldstore.describe_table(table_name => 'messages'));
 
 Mirror inspection, job UUIDs, `EXPLAIN`, shared/user tables, and storage backends: [docs/quickstart.md](docs/quickstart.md).
 
-Auto-flush runs on the built-in database worker (`koldstore.flush_check_interval_seconds`). To control flushes yourself (for example with `pg_cron`), set `auto_flush => false` and schedule `koldstore.flush_table`: [docs/operations/scheduling.md](docs/operations/scheduling.md).
+Auto-flush runs on the built-in database worker (`koldstore.flush_check_interval_seconds`). To control flushes yourself (for example with `pg_cron`), disable it with `SELECT koldstore.set_table_auto_flush('messages'::regclass, false)` and schedule `koldstore.flush_table`: [docs/operations/scheduling.md](docs/operations/scheduling.md).
 
 To build from this repo instead, use `docker/run.sh` (compiles the extension).
 

@@ -23,8 +23,8 @@ pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 pub use commit_sequence::{CommitSequenceDomain, COMMIT_SEQUENCE_LOCK_NAMESPACE};
 pub use config::{
     flush_enabled_from_options, hot_row_limit_from_options, validate_max_rows_per_file,
-    FlushPolicy, ManageTableOptions, MigrationStatus, MirrorCaptureMode, ParquetCompression,
-    DEFAULT_MIN_MAX_ROWS_PER_FILE,
+    FlushPolicy, ManageTableOptions, MigrationStatus, MirrorCaptureMode, MoveAfter,
+    ParquetCompression, DEFAULT_MAX_ROWS_PER_FLUSH, DEFAULT_MIN_MAX_ROWS_PER_FILE,
 };
 pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};
@@ -49,7 +49,10 @@ pub use session::{
     normalize_user_id, primary_key_default_clause, snowflake_default_expression,
     snowflake_id_call_expression, SessionSqlError, SessionSqlResult, SNOWFLAKE_ID_FUNCTION,
 };
-pub use snowflake::{next_id, next_id_after, worker_id, SnowflakeError, KOLDSTORE_EPOCH_MILLIS};
+pub use snowflake::{
+    minimum_id_at_unix_millis, next_id, next_id_after, worker_id, SnowflakeError,
+    KOLDSTORE_EPOCH_MILLIS,
+};
 pub use sql::{map_sql_error, SqlAccess, SqlError, SqlParamType, SqlResult, SqlStatement};
 pub use strings::dedupe_nonblank;
 pub use table_kind::TableKind;

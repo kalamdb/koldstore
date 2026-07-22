@@ -34,7 +34,7 @@ pub use publish::{
 pub use registration::{
     alter_storage_credentials_plan, alter_storage_location_plan, AlterStorageCredentialsPlan,
     AlterStorageLocationPlan, DdlError, DdlResult, StorageRegistration, StorageRegistrationPlan,
-    DEFAULT_SHARED_PATH_TEMPLATE, DEFAULT_USER_PATH_TEMPLATE, SUPPORTED_STORAGE_TYPES,
+    DEFAULT_REGULAR_PATH_TMPL, DEFAULT_SCOPED_PATH_TMPL, SUPPORTED_STORAGE_TYPES,
 };
 
 /// Installs the rustls `ring` crypto provider once.

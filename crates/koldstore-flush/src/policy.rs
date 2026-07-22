@@ -35,14 +35,16 @@ pub const fn flush_rows_for_excess(excess: u64, min_flush_rows: u64) -> u64 {
 /// needed to answer "how many rows should flush".
 #[must_use]
 pub fn policy_flush_row_count(pending: i64, policy: &FlushPolicy) -> i64 {
-    let Some(limit) = policy.hot_row_limit else {
-        return 0;
+    let limit = match policy {
+        FlushPolicy::RowLimit { hot_row_limit, .. } => *hot_row_limit,
+        FlushPolicy::OlderThan { .. } | FlushPolicy::Filter { .. } => return 0,
     };
     let pending = pending.max(0) as u64;
     if pending <= limit {
         return 0;
     }
     let excess = pending - limit;
-    let min_flush_rows = policy.min_flush_rows.unwrap_or(1);
-    i64::try_from(flush_rows_for_excess(excess, min_flush_rows)).unwrap_or(0)
+    let selected =
+        flush_rows_for_excess(excess, policy.min_flush_rows()).min(policy.max_rows_per_flush());
+    i64::try_from(selected).unwrap_or(0)
 }

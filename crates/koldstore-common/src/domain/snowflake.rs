@@ -14,6 +14,17 @@ const MAX_SEQUENCE: u16 = 4095;
 
 static LAST_TIMESTAMP_AND_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Returns the first possible Snowflake id at `unix_millis`.
+///
+/// A `None` result means the cutoff predates the KoldStore epoch, so no
+/// generated mirror sequence can be older than it.
+#[must_use]
+pub fn minimum_id_at_unix_millis(unix_millis: i64) -> Option<i64> {
+    let unix_millis = u64::try_from(unix_millis).ok()?;
+    let elapsed = unix_millis.checked_sub(KOLDSTORE_EPOCH_MILLIS)?;
+    i64::try_from(elapsed.checked_shl(TIMESTAMP_SHIFT as u32)?).ok()
+}
+
 /// Snowflake generation error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SnowflakeError {
@@ -206,5 +217,18 @@ mod tests {
     #[test]
     fn next_id_after_rejects_max_floor() {
         assert_eq!(next_id_after(1, i64::MAX), Err(SnowflakeError::IdOverflow));
+    }
+
+    #[test]
+    fn cutoff_id_excludes_every_id_in_cutoff_millisecond() {
+        let cutoff_ms = KOLDSTORE_EPOCH_MILLIS as i64 + 42;
+        let cutoff = minimum_id_at_unix_millis(cutoff_ms).unwrap();
+        assert_eq!(cutoff, 42_i64 << TIMESTAMP_SHIFT);
+        assert!(compose_id(41, MAX_WORKER_ID, MAX_SEQUENCE).unwrap() < cutoff);
+        assert_eq!(compose_id(42, 0, 0).unwrap(), cutoff);
+        assert_eq!(
+            minimum_id_at_unix_millis(KOLDSTORE_EPOCH_MILLIS as i64 - 1),
+            None
+        );
     }
 }

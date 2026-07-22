@@ -1,5 +1,22 @@
 # Scheduling flushes
 
+For common shared/strict tables, configure scheduling directly:
+
+```sql
+ALTER TABLE events SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'cold_s3',
+  koldstore_move_after = '7 days',
+  koldstore_min_flush_rows = 1000,
+  koldstore_max_rows_per_flush = 10000
+);
+```
+
+Age scheduling uses a bounded probe on the indexed mirror `seq`, never an
+application-table scan. Strict-mode age begins near statement execution;
+async-mode age begins when WAL is applied. Updating a row gives it a newer
+sequence and restarts inactivity. `seq` encodes age, not commit order.
+
 KoldStore includes a built-in flush scheduler on the per-database background
 worker (the same process that applies async mirror WAL). On each
 `koldstore.flush_check_interval_seconds` tick it:
@@ -36,6 +53,12 @@ The same worker peeks the logical slot on a latch cadence controlled by
 `50..=5000`). Each apply tick runs in **one** PostgreSQL transaction: mirror
 batch writes and `async_mirror_state.applied_lsn` commit together (or roll back
 together on ERROR).
+
+Idle path: when the cluster insert LSN is still at or behind the slot's
+`confirmed_flush`, the worker skips decode entirely (shared-memory check, no
+SPI). After an empty peek it advances `confirmed_flush` past non-publication
+WAL and backs off the latch up to 5 seconds so retained-WAL gaps cannot burn
+CPU on every checkpoint.
 
 ```sql
 -- Per-database (preferred for the bgworker):

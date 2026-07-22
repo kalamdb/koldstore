@@ -166,6 +166,80 @@ pub async fn wait_for_async_mirror(client: &tokio_postgres::Client) -> Result<i6
         .get(0))
 }
 
+/// Slot + durable apply watermark for idle-path assertions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncMirrorProgress {
+    pub confirmed_flush_lsn: String,
+    pub retained_bytes: i64,
+    pub applied_lsn: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Reads replication-slot retention and `async_mirror_state` for this database.
+///
+/// # Errors
+///
+/// Returns an error when the slot is missing or the probe queries fail.
+pub async fn async_mirror_progress(client: &tokio_postgres::Client) -> Result<AsyncMirrorProgress> {
+    let row = client
+        .query_one(
+            "SELECT \
+               s.confirmed_flush_lsn::text, \
+               pg_wal_lsn_diff(pg_current_wal_lsn(), s.confirmed_flush_lsn)::bigint, \
+               st.applied_lsn::text, \
+               st.updated_at::text \
+             FROM pg_catalog.pg_replication_slots s \
+             LEFT JOIN koldstore.async_mirror_state st \
+               ON st.database_oid = (SELECT oid FROM pg_catalog.pg_database \
+                                     WHERE datname = current_database()) \
+             WHERE s.slot_name = koldstore.async_mirror_slot_name()",
+            &[],
+        )
+        .await?;
+    Ok(AsyncMirrorProgress {
+        confirmed_flush_lsn: row.get(0),
+        retained_bytes: row.get(1),
+        applied_lsn: row.get(2),
+        updated_at: row.get(3),
+    })
+}
+
+/// Waits until `confirmed_flush_lsn` moves past `before_lsn`.
+///
+/// Used to assert empty peeks advance the slot past non-publication WAL.
+///
+/// # Errors
+///
+/// Returns an error when the deadline elapses or probes fail.
+pub async fn wait_for_confirmed_flush_past(
+    client: &tokio_postgres::Client,
+    before_lsn: &str,
+    deadline: Duration,
+) -> Result<AsyncMirrorProgress> {
+    let started = Instant::now();
+    loop {
+        let progress = async_mirror_progress(client).await?;
+        let advanced: bool = client
+            .query_one(
+                "SELECT $1::text::pg_lsn > $2::text::pg_lsn",
+                &[&progress.confirmed_flush_lsn, &before_lsn],
+            )
+            .await?
+            .get(0);
+        if advanced {
+            return Ok(progress);
+        }
+        anyhow::ensure!(
+            started.elapsed() <= deadline,
+            "confirmed_flush_lsn did not advance past {before_lsn} within {deadline:?} \
+             (still {}, retained_bytes={})",
+            progress.confirmed_flush_lsn,
+            progress.retained_bytes
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// When the suite runs in async capture mode, fence until mirror catch-up.
 ///
 /// Strict mode is a no-op. Call this before assertions that inspect `__cl`

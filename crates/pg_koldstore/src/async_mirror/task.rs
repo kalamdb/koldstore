@@ -38,6 +38,8 @@ impl DatabaseWorkerTask for AsyncMirrorTask {
         crate::observability::record_async_apply_tick(outcome.row_changes, elapsed_ms);
         if outcome.budget_exhausted {
             Ok(TickResult::ContinuePending)
+        } else if outcome.row_changes == 0 {
+            Ok(TickResult::ContinueIdle)
         } else {
             Ok(TickResult::Continue)
         }

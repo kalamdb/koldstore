@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
 use koldstore_catalog::ManagedTableSnapshot;
-use koldstore_common::{dedupe_nonblank, QualifiedTableName};
+use koldstore_common::{dedupe_nonblank, FlushPolicy, QualifiedTableName};
 use koldstore_flush::{
     manifest_paths, max_rows_per_file_from_policy, plan_apply_flush_row_count_deltas,
     stream_flush_chunks, validate_flush_row_selection, write_flush_segment_with_client, FlushStats,
@@ -91,8 +91,9 @@ fn load_flush_prepared_context(
     );
     let min_floor = u64::try_from(crate::guc::min_max_rows_per_file())
         .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
-    let policy = super::spi::active_flush_policy(table_oid)?;
-    let configured = policy.and_then(|policy| policy.max_rows_per_file);
+    let options = super::spi::active_manage_options(table_oid)?.unwrap_or_default();
+    let policy = options.flush_policy();
+    let configured = policy.as_ref().map(FlushPolicy::max_rows_per_file);
     if let Some(value) = configured {
         let hint = format!(
             "lower the floor for testing with SET {} = <value>",
@@ -101,8 +102,8 @@ fn load_flush_prepared_context(
         koldstore_common::validate_max_rows_per_file(value, min_floor, Some(&hint))?;
     }
     let max_rows_per_file = max_rows_per_file_from_policy(configured, min_floor)?;
-    let target_file_size_bytes = policy
-        .and_then(|policy| policy.target_file_size_mb)
+    let target_file_size_bytes = options
+        .target_file_size_mb
         .map(|megabytes| {
             megabytes
                 .checked_mul(1024 * 1024)

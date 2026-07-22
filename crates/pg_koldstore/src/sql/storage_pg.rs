@@ -3,10 +3,12 @@
 #[cfg(feature = "pg")]
 use koldstore_storage::registration::*;
 
-/// Registers or updates a storage backend from SQL.
+/// Registers a storage backend from SQL.
 ///
 /// SQL contract:
-/// `koldstore.register_storage(name, storage_type, base_path, credentials, config, shared_path_template, user_path_template)`.
+/// `koldstore.register_storage(name, storage_type, base_path, credentials, config, regular_path_tmpl, scoped_path_tmpl)`.
+///
+/// Errors when `name` already exists.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg(
@@ -15,8 +17,8 @@ pub fn register_storage_pg(
     base_path: &str,
     credentials: pgrx::JsonB,
     config: pgrx::JsonB,
-    shared_path_template: &str,
-    user_path_template: &str,
+    regular_path_tmpl: &str,
+    scoped_path_tmpl: &str,
 ) -> pgrx::Uuid {
     register_storage_pg_impl(
         name,
@@ -24,15 +26,17 @@ pub fn register_storage_pg(
         base_path,
         credentials,
         config,
-        shared_path_template,
-        user_path_template,
+        regular_path_tmpl,
+        scoped_path_tmpl,
     )
 }
 
-/// Registers or updates a storage backend from SQL using default path templates.
+/// Registers a storage backend from SQL using default path templates.
 ///
 /// SQL contract:
 /// `koldstore.register_storage(name, storage_type, base_path, credentials, config)`.
+///
+/// Errors when `name` already exists.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg_with_default_templates(
@@ -48,8 +52,8 @@ pub fn register_storage_pg_with_default_templates(
         base_path,
         credentials,
         config,
-        DEFAULT_SHARED_PATH_TEMPLATE,
-        DEFAULT_USER_PATH_TEMPLATE,
+        DEFAULT_REGULAR_PATH_TMPL,
+        DEFAULT_SCOPED_PATH_TMPL,
     )
 }
 
@@ -60,8 +64,8 @@ fn register_storage_pg_impl(
     base_path: &str,
     credentials: pgrx::JsonB,
     config: pgrx::JsonB,
-    shared_path_template: &str,
-    user_path_template: &str,
+    regular_path_tmpl: &str,
+    scoped_path_tmpl: &str,
 ) -> pgrx::Uuid {
     use pgrx::datum::DatumWithOid;
 
@@ -71,8 +75,8 @@ fn register_storage_pg_impl(
         base_path: base_path.to_string(),
         credentials: credentials.0,
         config: config.0,
-        shared_path_template: shared_path_template.to_string(),
-        user_path_template: user_path_template.to_string(),
+        regular_path_tmpl: regular_path_tmpl.to_string(),
+        scoped_path_tmpl: scoped_path_tmpl.to_string(),
     };
     let plan = registration
         .register_plan()
@@ -86,15 +90,17 @@ fn register_storage_pg_impl(
         DatumWithOid::from(plan.registration.base_path.as_str()),
         DatumWithOid::from(pgrx::JsonB(plan.registration.credentials)),
         DatumWithOid::from(pgrx::JsonB(plan.registration.config)),
-        DatumWithOid::from(plan.registration.shared_path_template.as_str()),
-        DatumWithOid::from(plan.registration.user_path_template.as_str()),
+        DatumWithOid::from(plan.registration.regular_path_tmpl.as_str()),
+        DatumWithOid::from(plan.registration.scoped_path_tmpl.as_str()),
     ];
 
     let returned = pgrx::Spi::get_one_with_args::<pgrx::Uuid>(&plan.statement.sql, &args)
-        .unwrap_or_else(|error| pgrx::error!("register storage failed: {error}"))
-        .unwrap_or_else(|| pgrx::error!("register storage did not return an id"));
+        .unwrap_or_else(|error| pgrx::error!("register storage failed: {error}"));
 
-    returned
+    match returned {
+        Some(id) => id,
+        None => pgrx::error!("{}", DdlError::StorageAlreadyExists(plan.registration.name)),
+    }
 }
 
 /// Rotates storage credentials from SQL without changing backend paths.

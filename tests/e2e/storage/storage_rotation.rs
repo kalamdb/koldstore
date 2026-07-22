@@ -13,10 +13,10 @@ fn storage_rotation_contract_keeps_existing_object_paths_stable() {
         base_path: "s3://koldstore-test/".to_string(),
         credentials: serde_json::json!({"access_key_id": "old"}),
         config: serde_json::json!({"endpoint": "http://localhost:9000"}),
-        shared_path_template: "{namespace}/{tableName}/".to_string(),
-        user_path_template: "{namespace}/{tableName}/{scopeId}/".to_string(),
+        regular_path_tmpl: "{namespace}/{tableName}/".to_string(),
+        scoped_path_tmpl: "{namespace}/{tableName}/{scopeId}/".to_string(),
     };
-    let old_path = registration.render_shared_prefix("app", "items").unwrap();
+    let old_path = registration.render_regular_prefix("app", "items").unwrap();
     let rotation = koldstore_storage::registration::alter_storage_credentials_plan(
         "local-minio",
         serde_json::json!({"access_key_id": "new"}),
@@ -105,8 +105,8 @@ async fn assert_storage_rotation(client: &tokio_postgres::Client, pg_version: u1
     let after = storage_record(client, &storage_name).await?;
     assert_eq!(after.base_path, before.base_path);
     assert_eq!(after.config, before.config);
-    assert_eq!(after.shared_path_template, before.shared_path_template);
-    assert_eq!(after.user_path_template, before.user_path_template);
+    assert_eq!(after.regular_path_tmpl, before.regular_path_tmpl);
+    assert_eq!(after.scoped_path_tmpl, before.scoped_path_tmpl);
     assert_eq!(
         after.credentials,
         serde_json::json!({"token": "new", "rotated": true})
@@ -119,8 +119,8 @@ struct StorageRecord {
     base_path: String,
     credentials: serde_json::Value,
     config: serde_json::Value,
-    shared_path_template: String,
-    user_path_template: String,
+    regular_path_tmpl: String,
+    scoped_path_tmpl: String,
 }
 
 async fn storage_record(
@@ -134,8 +134,8 @@ async fn storage_record(
               base_path,
               credentials::text,
               config::text,
-              shared_path_template,
-              user_path_template
+              regular_path_tmpl,
+              scoped_path_tmpl
             FROM koldstore.storage
             WHERE name = $1
             "#,
@@ -147,7 +147,7 @@ async fn storage_record(
         base_path: row.get(0),
         credentials: serde_json::from_str(&row.get::<_, String>(1))?,
         config: serde_json::from_str(&row.get::<_, String>(2))?,
-        shared_path_template: row.get(3),
-        user_path_template: row.get(4),
+        regular_path_tmpl: row.get(3),
+        scoped_path_tmpl: row.get(4),
     })
 }

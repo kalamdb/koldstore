@@ -1,7 +1,7 @@
 use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_storage::registration::{
     alter_storage_credentials_plan, alter_storage_location_plan, StorageRegistration,
-    DEFAULT_SHARED_PATH_TEMPLATE, DEFAULT_USER_PATH_TEMPLATE,
+    DEFAULT_REGULAR_PATH_TMPL, DEFAULT_SCOPED_PATH_TMPL,
 };
 use uuid::Uuid;
 
@@ -18,29 +18,29 @@ fn example_registration() -> StorageRegistration {
             "endpoint": "http://localhost:9000",
             "path_style": true
         }),
-        shared_path_template: DEFAULT_SHARED_PATH_TEMPLATE.to_string(),
-        user_path_template: DEFAULT_USER_PATH_TEMPLATE.to_string(),
+        regular_path_tmpl: DEFAULT_REGULAR_PATH_TMPL.to_string(),
+        scoped_path_tmpl: DEFAULT_SCOPED_PATH_TMPL.to_string(),
     }
 }
 
 #[test]
-fn storage_registration_renders_shared_and_user_templates() {
+fn storage_registration_renders_regular_and_scoped_templates() {
     let registration = example_registration();
 
     assert_eq!(
         registration
-            .render_shared_prefix("app", "shared_items")
+            .render_regular_prefix("app", "shared_items")
             .unwrap(),
         "app/shared_items/"
     );
     assert_eq!(
         registration
-            .render_user_prefix("app", "notes", "tenant-a")
+            .render_scoped_prefix("app", "notes", "tenant-a")
             .unwrap(),
         "app/notes/tenant-a/"
     );
     assert!(registration
-        .render_user_prefix("app", "notes", "  ")
+        .render_scoped_prefix("app", "notes", "  ")
         .is_err());
 }
 
@@ -51,11 +51,8 @@ fn storage_registration_redacts_credentials_without_losing_templates() {
     let redacted = registration.redacted();
 
     assert_eq!(redacted.credentials, serde_json::json!({"redacted": true}));
-    assert_eq!(
-        redacted.shared_path_template,
-        registration.shared_path_template
-    );
-    assert_eq!(redacted.user_path_template, registration.user_path_template);
+    assert_eq!(redacted.regular_path_tmpl, registration.regular_path_tmpl);
+    assert_eq!(redacted.scoped_path_tmpl, registration.scoped_path_tmpl);
     assert!(
         !redacted.credentials.to_string().contains("do-not-leak"),
         "redacted diagnostics must not leak storage secrets"
@@ -79,12 +76,12 @@ fn storage_registration_rejects_invalid_catalog_inputs() {
     assert!(registration.validate().is_err());
 
     registration = example_registration();
-    registration.user_path_template = "{namespace}/{tableName}/".to_string();
+    registration.scoped_path_tmpl = "{namespace}/{tableName}/".to_string();
     assert!(registration.validate().is_err());
 }
 
 #[test]
-fn storage_registration_builds_parameterized_catalog_upsert_plan() {
+fn storage_registration_builds_parameterized_catalog_insert_plan() {
     let registration = example_registration();
     let plan = registration
         .register_plan_with_id(Uuid::from_u128(42))
@@ -94,8 +91,10 @@ fn storage_registration_builds_parameterized_catalog_upsert_plan() {
     assert_eq!(plan.statement.operation, "register storage");
     assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
     assert!(plan.statement.sql.contains("INSERT INTO koldstore.storage"));
-    assert!(plan.statement.sql.contains("ON CONFLICT (name) DO UPDATE"));
+    assert!(plan.statement.sql.contains("ON CONFLICT (name) DO NOTHING"));
     assert!(plan.statement.sql.contains("RETURNING s.id"));
+    assert!(plan.statement.sql.contains("regular_path_tmpl"));
+    assert!(plan.statement.sql.contains("scoped_path_tmpl"));
 
     for placeholder in ["$1", "$2", "$3", "$4", "$5", "$6", "$7", "$8"] {
         assert!(
@@ -127,8 +126,8 @@ fn alter_storage_credentials_plan_updates_only_credentials() {
     assert!(plan.statement.sql.contains("SET credentials = $2"));
     assert!(plan.statement.sql.contains("WHERE name = $1"));
     assert!(!plan.statement.sql.contains("base_path"));
-    assert!(!plan.statement.sql.contains("shared_path_template"));
-    assert!(!plan.statement.sql.contains("user_path_template"));
+    assert!(!plan.statement.sql.contains("regular_path_tmpl"));
+    assert!(!plan.statement.sql.contains("scoped_path_tmpl"));
     assert!(!plan.statement.sql.contains("new-secret"));
 }
 

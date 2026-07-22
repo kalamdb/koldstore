@@ -1,4 +1,36 @@
 #[pg_test]
+fn alter_table_manages_and_replaces_flush_policy() {
+    let suffix = unique_suffix("alterpolicy");
+    let schema = format!("pgtest_{suffix}");
+    let relation = format!("{schema}.messages");
+    let storage = register_temp_storage(&suffix);
+    create_messages_table(&schema, "messages");
+
+    Spi::run(&format!(r#"
+        ALTER TABLE {relation} SET (
+          fillfactor = 80,
+          koldstore_enabled = true,
+          koldstore_storage = '{storage}',
+          koldstore_hot_row_limit = 1000,
+          koldstore_min_flush_rows = 10,
+          koldstore_max_rows_per_file = 1000
+        )
+    "#)).expect("manage through ALTER TABLE");
+    let options = Spi::get_one::<pgrx::JsonB>(&format!(
+        "SELECT options FROM koldstore.schemas WHERE table_oid='{relation}'::regclass"
+    )).unwrap().unwrap().0;
+    assert_eq!(options["flush_policy"]["type"], "row_limit");
+    assert!(Spi::get_one::<bool>(&format!("SELECT 'fillfactor=80' = ANY(reloptions) FROM pg_class WHERE oid='{relation}'::regclass")).unwrap().unwrap());
+
+    Spi::run(&format!("ALTER TABLE {relation} SET (koldstore_move_after = 'P90D')"))
+        .expect("replace policy through ALTER TABLE");
+    let policy_type = spi_get_text(&format!(
+        "SELECT options->'flush_policy'->>'type' FROM koldstore.schemas WHERE table_oid='{relation}'::regclass"
+    ));
+    assert_eq!(policy_type, "older_than");
+}
+
+#[pg_test]
 fn manage_describe_flush_unmanage_roundtrip_preserves_values() {
     let suffix = unique_suffix("lifecycle");
     let schema = format!("pgtest_{suffix}");

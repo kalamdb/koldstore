@@ -1,5 +1,6 @@
-//! Flush-check cadence helpers for the database worker.
+//! Flush-check and idle-poll cadence helpers for the database worker.
 
+use crate::policy::APPLY_IDLE_BACKOFF_MAX_MS;
 use crate::TickResult;
 
 /// Fairness budget for immediate retries after bounded apply work remains.
@@ -39,6 +40,23 @@ impl PendingPollBudget {
     }
 }
 
+/// Next idle latch wait after an empty apply peek (exponential, capped).
+#[must_use]
+pub const fn next_idle_backoff_ms(current_ms: u64, floor_ms: u64) -> u64 {
+    let floor = if floor_ms == 0 { 1 } else { floor_ms };
+    if current_ms == 0 {
+        return floor;
+    }
+    let doubled = current_ms.saturating_mul(2);
+    if doubled < floor {
+        floor
+    } else if doubled > APPLY_IDLE_BACKOFF_MAX_MS {
+        APPLY_IDLE_BACKOFF_MAX_MS
+    } else {
+        doubled
+    }
+}
+
 /// Returns whether a flush eligibility check is due.
 #[must_use]
 pub const fn flush_check_due(
@@ -55,7 +73,8 @@ pub const fn flush_check_due(
 
 #[cfg(test)]
 mod tests {
-    use super::{flush_check_due, PendingPollBudget};
+    use super::{flush_check_due, next_idle_backoff_ms, PendingPollBudget};
+    use crate::policy::APPLY_IDLE_BACKOFF_MAX_MS;
     use crate::TickResult;
 
     #[test]
@@ -95,5 +114,23 @@ mod tests {
         assert!(!budget.should_wait(TickResult::ContinuePending));
         budget.reset();
         assert!(!budget.should_wait(TickResult::ContinuePending));
+    }
+
+    #[test]
+    fn pending_poll_budget_waits_after_idle_tick() {
+        let mut budget = PendingPollBudget::new(4);
+        assert!(budget.should_wait(TickResult::ContinueIdle));
+    }
+
+    #[test]
+    fn idle_backoff_doubles_until_cap() {
+        assert_eq!(next_idle_backoff_ms(0, 100), 100);
+        assert_eq!(next_idle_backoff_ms(100, 100), 200);
+        assert_eq!(next_idle_backoff_ms(200, 100), 400);
+        let mut ms = 100_u64;
+        for _ in 0..20 {
+            ms = next_idle_backoff_ms(ms, 100);
+        }
+        assert_eq!(ms, APPLY_IDLE_BACKOFF_MAX_MS);
     }
 }
