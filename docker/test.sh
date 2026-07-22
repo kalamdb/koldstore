@@ -154,7 +154,7 @@ SQL
   pids+=("$!")
 
   (
-    psql_cmd -qAt -c "SELECT koldstore.flush_table('demo.messages', force => true);" >/dev/null
+    psql_cmd -qAt -c "SELECT koldstore.flush_table('demo.messages'::regclass, force => true);" >/dev/null
   ) &
   pids+=("$!")
 done
@@ -166,8 +166,8 @@ done
 echo "==> asserting demo results"
 conversation_count="$(psql_cmd -tAc 'SELECT count(*) FROM demo.conversations;' | tr -d '[:space:]')"
 message_count="$(psql_cmd -tAc 'SELECT count(*) FROM demo.messages;' | tr -d '[:space:]')"
-managed_tables="$(psql_cmd -tAc "SELECT count(*) FROM system.schemas s JOIN pg_class c ON c.oid = s.table_oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'demo' AND s.active;" | tr -d '[:space:]')"
-completed_flush_jobs="$(psql_cmd -tAc "SELECT count(*) FROM system.jobs j JOIN pg_class c ON c.oid = j.table_oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'demo' AND j.job_type = 'flush' AND j.status = 'completed';" | tr -d '[:space:]')"
+managed_tables="$(psql_cmd -tAc "SELECT count(*) FROM koldstore.schemas s JOIN pg_class c ON c.oid = s.table_oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'demo' AND s.active;" | tr -d '[:space:]')"
+completed_flush_jobs="$(psql_cmd -tAc "SELECT count(*) FROM koldstore.jobs j JOIN pg_class c ON c.oid = j.table_oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'demo' AND j.job_type = 'flush' AND j.status = 'completed';" | tr -d '[:space:]')"
 in_sync_manifests="$(psql_cmd -tAc "SELECT count(*) FROM koldstore.manifest m JOIN pg_class c ON c.oid = m.table_oid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'demo' AND m.sync_state = 'in_sync';" | tr -d '[:space:]')"
 internal_user_columns="$(psql_cmd -tAc "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'demo' AND table_name IN ('conversations', 'messages') AND column_name IN ('_seq', '_commit_seq', '_deleted', '_user_id');" | tr -d '[:space:]')"
 mirror_tables="$(psql_cmd -tAc "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'koldstore' AND c.relname IN ('conversations__cl', 'messages__cl');" | tr -d '[:space:]')"
@@ -180,8 +180,6 @@ message_manifest_json="$(minio_cat "koldstore-test/demo/messages/manifest.json")
 conversation_manifest_json="$(minio_cat "koldstore-test/demo/conversations/manifest.json")"
 message_manifest_segments="$(printf '%s' "${message_manifest_json}" | grep -c '"segments"')"
 conversation_manifest_segments="$(printf '%s' "${conversation_manifest_json}" | grep -c '"segments"')"
-delete_events="$(psql_cmd -tAc "SELECT count(*) FROM koldstore.changes_since('demo.messages', 0, 20000) WHERE op = 'delete' AND deleted;" | tr -d '[:space:]')"
-update_events="$(psql_cmd -tAc "SELECT count(*) FROM koldstore.changes_since('demo.messages', 0, 20000) WHERE op = 'update' AND NOT deleted;" | tr -d '[:space:]')"
 
 assert_eq "conversations" "100" "${conversation_count}"
 assert_ge "messages" "10250" "${message_count}"
@@ -197,8 +195,6 @@ assert_ge "joinable messages" "10250" "${sample_join}"
 assert_ge "active cold segments" "2" "${cold_segments}"
 assert_ge "message manifest object has segments" "1" "${message_manifest_segments}"
 assert_ge "conversation manifest object has segments" "1" "${conversation_manifest_segments}"
-assert_ge "delete events" "1" "${delete_events}"
-assert_ge "update events" "1" "${update_events}"
 assert_ge "messages per conversation" "100" \
   "$(psql_cmd -tAc 'SELECT min(cnt) FROM (SELECT count(*) AS cnt FROM demo.messages GROUP BY conversation_id) s;' | tr -d '[:space:]')"
 

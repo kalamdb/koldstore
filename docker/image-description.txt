@@ -38,22 +38,20 @@ CREATE TABLE messages (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+ALTER TABLE messages SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'local-dev',
+  koldstore_hot_row_limit = 1000,
+  koldstore_min_flush_rows = 1,
+  koldstore_max_rows_per_file = 1000
+);
+
 INSERT INTO messages (id, body)
 SELECT gs, 'row ' || gs FROM generate_series(1, 1012) AS gs;
 
-SELECT koldstore.manage_table(
-  table_name         => 'messages',
-  storage            => 'local-dev',
-  hot_row_limit      => 1000,
-  min_flush_rows     => 1,
-  max_rows_per_file  => 1000,
-  migration_order_by => 'id',
-  auto_flush         => true   -- default; set false to drive flush yourself
-);
-
--- Optional: force a flush now. Otherwise the built-in worker auto-flushes
+-- Optional: run a policy flush now. Otherwise the built-in worker auto-flushes
 -- when hot rows exceed hot_row_limit.
-SELECT koldstore.flush_table(table_name => 'messages');
+SELECT koldstore.flush_table(table_name => 'messages'::regclass);
 SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 ```
 

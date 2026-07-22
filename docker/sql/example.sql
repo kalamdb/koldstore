@@ -12,8 +12,7 @@
 --
 -- Notes:
 --   * MinIO is reached at http://minio:9000 from inside the compose network.
---   * hot_row_limit => 1000 keeps at most 1000 mirror rows hot before flushing oldest rows by seq.
---   * force => true queues a flush job immediately (scaffold queues jobs today).
+--   * koldstore_hot_row_limit = 1000 keeps at most 1000 mirror rows hot before flushing oldest rows by seq.
 
 \set ON_ERROR_STOP on
 
@@ -41,7 +40,7 @@ CREATE TABLE demo.conversations (
 
 CREATE TABLE demo.messages (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  conversation_id uuid NOT NULL REFERENCES demo.conversations (id),
+  conversation_id uuid NOT NULL,
   author text NOT NULL,
   body text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
@@ -49,19 +48,21 @@ CREATE TABLE demo.messages (
 
 CREATE INDEX messages_conversation_id_idx ON demo.messages (conversation_id);
 
-\echo '==> manage tables into koldstore (flush after 1000 hot rows)'
-SELECT koldstore.manage_table(
-  table_name     => 'demo.conversations',
-  storage        => 'local-minio',
-  hot_row_limit  => 1000,
-  min_flush_rows => 1
+\echo '==> manage tables with ALTER TABLE (flush after 1000 hot rows)'
+ALTER TABLE demo.conversations SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'local-minio',
+  koldstore_hot_row_limit = 1000,
+  koldstore_min_flush_rows = 1,
+  koldstore_max_rows_per_file = 1000
 );
 
-SELECT koldstore.manage_table(
-  table_name     => 'demo.messages',
-  storage        => 'local-minio',
-  hot_row_limit  => 1000,
-  min_flush_rows => 1
+ALTER TABLE demo.messages SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'local-minio',
+  koldstore_hot_row_limit = 1000,
+  koldstore_min_flush_rows = 1,
+  koldstore_max_rows_per_file = 1000
 );
 
 \echo '==> seed conversations'
@@ -116,13 +117,13 @@ SELECT
   to_regclass('koldstore.messages__cl') IS NOT NULL AS messages_mirror_exists,
   to_regclass('koldstore.row_events') IS NOT NULL AS global_row_events_exists;
 
-\echo '==> queue flush jobs (force)'
-SELECT koldstore.flush_table(table_name => 'demo.conversations') AS conversations_flush_job;
-SELECT koldstore.flush_table(table_name => 'demo.messages') AS messages_flush_job;
+\echo '==> run flush jobs (force)'
+SELECT koldstore.flush_table(table_name => 'demo.conversations'::regclass, force => true) AS conversations_flush_job;
+SELECT koldstore.flush_table(table_name => 'demo.messages'::regclass, force => true) AS messages_flush_job;
 
 \echo '==> table status'
-SELECT 'demo.conversations' AS table_name, koldstore.describe_table(table_name => 'demo.conversations');
-SELECT 'demo.messages' AS table_name, koldstore.describe_table(table_name => 'demo.messages');
+SELECT 'demo.conversations' AS table_name, koldstore.describe_table(table_name => 'demo.conversations'::regclass);
+SELECT 'demo.messages' AS table_name, koldstore.describe_table(table_name => 'demo.messages'::regclass);
 
 \echo '==> queued flush jobs'
 SELECT
@@ -132,7 +133,7 @@ SELECT
   j.job_type,
   j.status,
   j.created_at
-FROM system.jobs j
+FROM koldstore.jobs j
 JOIN pg_class c ON c.oid = j.table_oid
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'demo'
@@ -156,12 +157,6 @@ SELECT
   'completed' AS current_demo_state,
   'A completed flush has completed jobs, manifest sync_state = in_sync, segment_count > 0, active cold_segments, and manifest.json in MinIO.' AS how_to_verify;
 
-\echo '==> recent mirror-backed changes include normal insert/update/delete'
-SELECT op, deleted, count(*) AS events
-FROM koldstore.changes_since('demo.messages', 0, 20000)
-GROUP BY op, deleted
-ORDER BY op, deleted;
-
 \echo '==> sample queries'
 SELECT id, title, created_at
 FROM demo.conversations
@@ -182,8 +177,5 @@ JOIN demo.conversations c ON c.id = m.conversation_id
 GROUP BY c.title
 ORDER BY message_count DESC, c.title
 LIMIT 10;
-
-\echo '==> cold storage validation scaffold'
-SELECT koldstore.validate_cold_storage('demo.messages');
 
 \echo '==> demo complete'

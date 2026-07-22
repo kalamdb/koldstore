@@ -42,8 +42,8 @@ Set TypingSpeed 20ms
 Type "docker exec -it -e PAGER=cat koldstore-readme-demo psql -X -q -e -v ON_ERROR_STOP=1 -U postgres -d koldstore -f /tmp/koldstore-demo.sql"
 Enter
 
-# The SQL script controls pacing with hidden \! sleep commands (~45s runtime).
-Sleep 45s
+# The SQL script controls pacing with hidden \! sleep commands (~55s runtime).
+Sleep 55s
 
 Hide
 

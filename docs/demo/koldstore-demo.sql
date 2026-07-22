@@ -29,13 +29,13 @@ SELECT
 \echo '━━━ 3. Put the existing table under KoldStore management ━━━━━'
 \! sleep 0.5
 
-SELECT koldstore.manage_table(
-  table_name         => 'app.messages'::regclass,
-  storage            => 'local-dev',
-  hot_row_limit      => 100000,
-  min_flush_rows     => 1,
-  max_rows_per_file  => 250000,
-  migration_order_by => 'id'
+ALTER TABLE app.messages SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'local-dev',
+  koldstore_hot_row_limit = 100000,
+  koldstore_min_flush_rows = 1,
+  koldstore_max_rows_per_file = 250000,
+  koldstore_max_rows_per_flush = 900000
 );
 
 \echo ''

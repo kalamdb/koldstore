@@ -40,7 +40,7 @@ RUN mkdir -p /out/lib /out/extension \
     && test -n "${SO_FILE}" \
     && cp "${SO_FILE}" /out/lib/koldstore.so \
     && cp "target/release/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore.control" /out/extension/koldstore.control \
-    && cp "target/release/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore--0.1.0.sql" /out/extension/koldstore--0.1.0.sql
+    && cp target/release/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore--*.sql /out/extension/
 
 FROM postgres:${PG_MAJOR}-bookworm
 

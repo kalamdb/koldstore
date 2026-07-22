@@ -105,6 +105,39 @@ SELECT koldstore_version();
 SELECT extname FROM pg_extension WHERE extname = 'koldstore';
 SQL
 
+echo "==> ALTER TABLE management syntax works in the release image"
+psql_exec -v ON_ERROR_STOP=1 <<'SQL'
+SELECT koldstore.register_storage(
+  name         => 'release-smoke',
+  storage_type => 'filesystem',
+  base_path    => '/tmp/koldstore-release-smoke',
+  credentials  => '{}'::jsonb,
+  config       => '{}'::jsonb
+);
+CREATE TABLE release_smoke_messages (
+  id bigint PRIMARY KEY,
+  body text NOT NULL
+);
+ALTER TABLE release_smoke_messages SET (
+  koldstore_enabled = true,
+  koldstore_storage = 'release-smoke',
+  koldstore_hot_row_limit = 1000,
+  koldstore_min_flush_rows = 1,
+  koldstore_max_rows_per_file = 1000
+);
+DO $$
+BEGIN
+  IF (
+    SELECT options->'flush_policy'->>'type'
+    FROM koldstore.schemas
+    WHERE table_oid = 'release_smoke_messages'::regclass
+  ) IS DISTINCT FROM 'row_limit' THEN
+    RAISE EXCEPTION 'ALTER TABLE did not persist a row_limit policy';
+  END IF;
+END
+$$;
+SQL
+
 echo "==> virgin session merge-scan GUCs (no prior koldstore SQL beyond SHOW)"
 # Fresh client process + fresh backend via TCP to the container's Postgres port.
 psql_host -v ON_ERROR_STOP=1 \
