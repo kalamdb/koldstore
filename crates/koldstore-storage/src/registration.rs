@@ -25,29 +25,35 @@ pub const SUPPORTED_STORAGE_TYPES: &[&str] = &["filesystem", "s3", "gcs", "azure
 #[cfg(not(feature = "s3"))]
 pub const SUPPORTED_STORAGE_TYPES: &[&str] = &["filesystem", "gcs", "azure"];
 
+// Scalar subquery always returns exactly one row (NULL on name conflict) so
+// `Spi::get_one*` never hits "SpiTupleTable positioned before the start or
+// after the end" when ON CONFLICT DO NOTHING inserts nothing.
 const REGISTER_STORAGE_SQL: &str = r#"
-INSERT INTO koldstore.storage AS s (
-    id,
-    name,
-    storage_type,
-    base_path,
-    credentials,
-    config,
-    regular_path_tmpl,
-    scoped_path_tmpl
+WITH inserted AS (
+    INSERT INTO koldstore.storage AS s (
+        id,
+        name,
+        storage_type,
+        base_path,
+        credentials,
+        config,
+        regular_path_tmpl,
+        scoped_path_tmpl
+    )
+    VALUES (
+        $1,
+        $2,
+        $3,
+        $4,
+        jsonb_strip_nulls($5::jsonb),
+        COALESCE($6::jsonb, '{}'::jsonb),
+        $7,
+        $8
+    )
+    ON CONFLICT (name) DO NOTHING
+    RETURNING s.id
 )
-VALUES (
-    $1,
-    $2,
-    $3,
-    $4,
-    jsonb_strip_nulls($5::jsonb),
-    COALESCE($6::jsonb, '{}'::jsonb),
-    $7,
-    $8
-)
-ON CONFLICT (name) DO NOTHING
-RETURNING s.id
+SELECT (SELECT id FROM inserted)
 "#;
 
 const ALTER_STORAGE_CREDENTIALS_SQL: &str = r#"
@@ -57,13 +63,17 @@ SET credentials = $2,
 WHERE name = $1
 "#;
 
+// Scalar subquery always returns exactly one row (NULL when no matching name).
 const ALTER_STORAGE_LOCATION_SQL: &str = r#"
-UPDATE koldstore.storage
-SET base_path = $2,
-    config = COALESCE($3::jsonb, config),
-    updated_at = now()
-WHERE name = $1
-RETURNING id
+WITH updated AS (
+    UPDATE koldstore.storage
+    SET base_path = $2,
+        config = COALESCE($3::jsonb, config),
+        updated_at = now()
+    WHERE name = $1
+    RETURNING id
+)
+SELECT (SELECT id FROM updated)
 "#;
 
 /// DDL SQL function planning result.

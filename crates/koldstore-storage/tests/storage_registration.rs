@@ -93,6 +93,13 @@ fn storage_registration_builds_parameterized_catalog_insert_plan() {
     assert!(plan.statement.sql.contains("INSERT INTO koldstore.storage"));
     assert!(plan.statement.sql.contains("ON CONFLICT (name) DO NOTHING"));
     assert!(plan.statement.sql.contains("RETURNING s.id"));
+    assert!(
+        plan.statement
+            .sql
+            .contains("SELECT (SELECT id FROM inserted)"),
+        "conflict path must return a single NULL row for SPI get_one, got:\n{}",
+        plan.statement.sql
+    );
     assert!(plan.statement.sql.contains("regular_path_tmpl"));
     assert!(plan.statement.sql.contains("scoped_path_tmpl"));
 
@@ -149,6 +156,13 @@ fn alter_storage_location_plan_updates_base_path_and_config() {
         .sql
         .contains("config = COALESCE($3::jsonb, config)"));
     assert!(plan.statement.sql.contains("RETURNING id"));
+    assert!(
+        plan.statement
+            .sql
+            .contains("SELECT (SELECT id FROM updated)"),
+        "missing-name path must return a single NULL row for SPI get_one, got:\n{}",
+        plan.statement.sql
+    );
     assert!(!plan.statement.sql.contains("s3://new-bucket"));
 
     assert!(alter_storage_location_plan(" ", "s3://new-bucket", serde_json::json!({})).is_err());

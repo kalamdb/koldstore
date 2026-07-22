@@ -79,12 +79,17 @@ async fn install_storage_fixture(client: &tokio_postgres::Client) -> Result<()> 
             r#"
             CREATE EXTENSION IF NOT EXISTS koldstore;
 
+            -- Shared pooled DBs may already have this fixture name from another
+            -- matrix test; register only when missing.
             SELECT koldstore.register_storage(
               'local-minio',
               's3',
               's3://koldstore-test/',
               '{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}'::jsonb,
               '{"endpoint":"http://localhost:9000","region":"us-east-1","path_style":true}'::jsonb
+            )
+            WHERE NOT EXISTS (
+              SELECT 1 FROM koldstore.storage WHERE name = 'local-minio'
             );
             "#,
         )

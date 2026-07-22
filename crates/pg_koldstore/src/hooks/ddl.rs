@@ -30,6 +30,8 @@ mod process_utility {
         }
     }
 
+    // Signature must match PostgreSQL ProcessUtility_hook_type.
+    #[allow(clippy::too_many_arguments)]
     #[pgrx::pg_guard]
     unsafe extern "C-unwind" fn hook(
         pstmt: *mut pg_sys::PlannedStmt,
@@ -58,6 +60,8 @@ mod process_utility {
         }
     }
 
+    // Forwards the fixed ProcessUtility hook arity to the previous hook / standard path.
+    #[allow(clippy::too_many_arguments)]
     unsafe fn delegate(
         pstmt: *mut pg_sys::PlannedStmt,
         query: *const core::ffi::c_char,
