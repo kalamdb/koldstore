@@ -73,7 +73,7 @@ SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 | `latest` | Latest published release image |
 | `<version>-pg16` | Specific KoldStore version on PostgreSQL 16 |
 
-Example: `jamals86/pg-koldstore:0.1.4-beta.1-pg16`
+Example: `jamals86/pg-koldstore:0.1.5-beta.0-pg16`
 
 ## Environment
 
