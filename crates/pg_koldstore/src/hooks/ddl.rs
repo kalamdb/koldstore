@@ -159,14 +159,24 @@ mod process_utility {
                 std::ptr::null_mut(),
             )
         };
-        let owns_relation = unsafe {
-            pg_sys::object_ownercheck(pg_sys::RelationRelationId, oid, pg_sys::GetUserId())
-        };
+        let owns_relation = unsafe { relation_ownercheck(oid, pg_sys::GetUserId()) };
         if !owns_relation {
             pgrx::error!("must be owner of relation to configure KoldStore");
         }
         super::apply_management_options(oid, &values)
             .unwrap_or_else(|error| pgrx::error!("KoldStore ALTER TABLE failed: {error}"));
+    }
+
+    /// True when `role` owns relation `oid` (PG15 vs PG16+ ACL helper names differ).
+    unsafe fn relation_ownercheck(oid: pg_sys::Oid, role: pg_sys::Oid) -> bool {
+        #[cfg(feature = "pg15")]
+        unsafe {
+            pg_sys::pg_class_ownercheck(oid, role)
+        }
+        #[cfg(not(feature = "pg15"))]
+        unsafe {
+            pg_sys::object_ownercheck(pg_sys::RelationRelationId, oid, role)
+        }
     }
 }
 
