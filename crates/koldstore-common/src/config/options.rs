@@ -302,8 +302,9 @@ impl ManageTableOptions {
     /// Rejects malformed tagged policies, zero execution bounds, invalid age
     /// components, and the reserved filter policy.
     pub fn try_from_value(value: &Value) -> Result<Self, String> {
-        let decoded: Self =
+        let mut decoded: Self =
             serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        decoded.normalize_flush_policy();
         if let Some(policy) = decoded.flush_policy.as_ref() {
             if policy.min_flush_rows() == 0
                 || policy.max_rows_per_file() == 0
@@ -333,15 +334,43 @@ impl ManageTableOptions {
         if value.is_null() {
             return Self::default();
         }
-        serde_json::from_value(value.clone()).unwrap_or_default()
+        let mut decoded: Self = serde_json::from_value(value.clone()).unwrap_or_default();
+        decoded.normalize_flush_policy();
+        decoded
     }
 
     /// Encodes schema options to JSON for catalog persistence.
     ///
     /// Derived fields such as `cold_metadata` are merged separately at registration time.
+    /// Legacy flat `hot_row_limit` inputs are promoted to tagged `flush_policy` on write so
+    /// catalog JSON never drops an effective policy.
     #[must_use]
     pub fn to_value(&self) -> Value {
-        serde_json::to_value(self).unwrap_or_else(|_| Value::Object(Default::default()))
+        let mut normalized = self.clone();
+        normalized.normalize_flush_policy();
+        serde_json::to_value(&normalized).unwrap_or_else(|_| Value::Object(Default::default()))
+    }
+
+    /// Promotes legacy flat flush fields into tagged `flush_policy` when needed.
+    fn normalize_flush_policy(&mut self) {
+        if self.flush_policy.is_some() {
+            return;
+        }
+        let Some(hot_row_limit) = self.hot_row_limit.filter(|value| *value > 0) else {
+            return;
+        };
+        self.flush_policy = Some(FlushPolicy::RowLimit {
+            hot_row_limit,
+            min_flush_rows: self.min_flush_rows.filter(|value| *value > 0).unwrap_or(1),
+            max_rows_per_file: self
+                .max_rows_per_file
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MIN_MAX_ROWS_PER_FILE),
+            max_rows_per_flush: self
+                .max_rows_per_flush
+                .filter(|value| *value > 0)
+                .unwrap_or(DEFAULT_MAX_ROWS_PER_FLUSH),
+        });
     }
 
     /// Returns true when automatic flush is configured.
@@ -563,6 +592,28 @@ mod tests {
         assert_eq!(
             decoded.flush_policy(),
             Some(FlushPolicy::new(10_000, 1_000, 500))
+        );
+    }
+
+    #[test]
+    fn legacy_flat_hot_row_limit_persists_as_tagged_flush_policy() {
+        let options = ManageTableOptions::from_value(&serde_json::json!({
+            "compression": "zstd",
+            "hot_row_limit": 1000,
+        }));
+        assert_eq!(options.hot_row_limit(), Some(1000));
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({
+                "compression": "zstd",
+                "flush_policy": {
+                    "type": "row_limit",
+                    "hot_row_limit": 1000,
+                    "min_flush_rows": 1,
+                    "max_rows_per_file": 1000,
+                    "max_rows_per_flush": 10_000
+                }
+            })
         );
     }
 

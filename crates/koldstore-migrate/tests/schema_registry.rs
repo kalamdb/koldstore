@@ -80,7 +80,13 @@ fn schema_registry_plan_captures_greenfield_metadata() {
         plan.metadata.options,
         serde_json::json!({
             "compression": "zstd",
-            "hot_row_limit": 1000,
+            "flush_policy": {
+                "type": "row_limit",
+                "hot_row_limit": 1000,
+                "min_flush_rows": 1,
+                "max_rows_per_file": 1000,
+                "max_rows_per_flush": 10000
+            },
             "cold_metadata": {
                 "stats_columns": ["id", "created_at"],
                 "bloom_filter_columns": ["id", "created_at"],

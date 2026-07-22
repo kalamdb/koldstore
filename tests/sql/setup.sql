@@ -8,12 +8,17 @@ SET client_min_messages TO WARNING;
 DROP SCHEMA IF EXISTS sqlreg CASCADE;
 CREATE SCHEMA sqlreg;
 
+-- Catalog storage rows survive DROP SCHEMA; only register when missing so
+-- later cases on the shared regression DB do not hit "already exists".
 SELECT koldstore.register_storage(
   'sqlreg_fs',
   'filesystem',
   :'STORAGE_ROOT',
   '{}'::jsonb,
   '{}'::jsonb
+)
+WHERE NOT EXISTS (
+  SELECT 1 FROM koldstore.storage WHERE name = 'sqlreg_fs'
 );
 
 SET koldstore.min_max_rows_per_file = 1;
