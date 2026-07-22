@@ -8,7 +8,6 @@ fn alter_table_manages_and_replaces_flush_policy() {
 
     Spi::run(&format!(r#"
         ALTER TABLE {relation} SET (
-          fillfactor = 80,
           koldstore_enabled = true,
           koldstore_storage = '{storage}',
           koldstore_hot_row_limit = 1000,
@@ -20,14 +19,53 @@ fn alter_table_manages_and_replaces_flush_policy() {
         "SELECT options FROM koldstore.schemas WHERE table_oid='{relation}'::regclass"
     )).unwrap().unwrap().0;
     assert_eq!(options["flush_policy"]["type"], "row_limit");
-    assert!(Spi::get_one::<bool>(&format!("SELECT 'fillfactor=80' = ANY(reloptions) FROM pg_class WHERE oid='{relation}'::regclass")).unwrap().unwrap());
-
-    Spi::run(&format!("ALTER TABLE {relation} SET (koldstore_move_after = 'P90D')"))
+    Spi::run(&format!(
+        "ALTER TABLE {relation} SET (fillfactor = 80, koldstore_move_after = 'P90D')"
+    ))
         .expect("replace policy through ALTER TABLE");
+    assert!(Spi::get_one::<bool>(&format!("SELECT 'fillfactor=80' = ANY(reloptions) FROM pg_class WHERE oid='{relation}'::regclass")).unwrap().unwrap());
     let policy_type = spi_get_text(&format!(
         "SELECT options->'flush_policy'->>'type' FROM koldstore.schemas WHERE table_oid='{relation}'::regclass"
     ));
     assert_eq!(policy_type, "older_than");
+}
+
+#[pg_test]
+fn alter_table_manages_a_populated_table() {
+    let suffix = unique_suffix("alterpopulated");
+    let schema = format!("pgtest_{suffix}");
+    let relation = format!("{schema}.messages");
+    let storage = register_temp_storage(&suffix);
+    Spi::run(&format!("CREATE SCHEMA {schema}")).expect("create schema");
+    Spi::run(&format!(
+        "CREATE TABLE {relation} (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, body text NOT NULL)"
+    ))
+    .expect("create identity-backed table");
+    Spi::run(&format!(
+        "INSERT INTO {relation} (body) VALUES ('alpha'), ('beta')"
+    ))
+    .expect("seed populated table");
+
+    Spi::run(&format!(
+        r#"
+        ALTER TABLE {relation} SET (
+          koldstore_enabled = true,
+          koldstore_storage = '{storage}',
+          koldstore_hot_row_limit = 1,
+          koldstore_min_flush_rows = 1,
+          koldstore_max_rows_per_file = 1000,
+          koldstore_max_rows_per_flush = 1
+        )
+        "#
+    ))
+    .expect("manage populated table through ALTER TABLE");
+
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id) FROM {relation}"
+        )),
+        "alpha,beta"
+    );
 }
 
 #[pg_test]

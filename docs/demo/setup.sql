@@ -1,9 +1,9 @@
 -- Hidden VHS setup: prepare demo data without recording it.
--- Visible tape: baseline → manage → flush → hot/cold → sizes → count → EXPLAIN → Parquet ls.
+-- Visible tape: baseline → configure → flush → hot/cold → sizes → count → EXPLAIN → Parquet ls.
 
 CREATE EXTENSION IF NOT EXISTS koldstore;
 
--- Demo uses max_rows_per_file => 10000; default floor is 1000.
+-- Allow the demo's 250,000-row Parquet file target.
 ALTER DATABASE koldstore SET koldstore.min_max_rows_per_file = 10000;
 
 -- Keep the visible recording free of trigger-create NOTICE spam.
@@ -20,16 +20,15 @@ SELECT koldstore.register_storage(
 CREATE SCHEMA IF NOT EXISTS app;
 
 CREATE TABLE app.messages (
-  id bigint PRIMARY KEY,
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   account_id bigint NOT NULL,
   title text NOT NULL,
   body text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
-INSERT INTO app.messages (id, account_id, title, body)
+INSERT INTO app.messages (account_id, title, body)
 SELECT
-  gs,
   gs % 3,
   'message-' || lpad(gs::text, 6, '0'),
   'hello from row ' || gs

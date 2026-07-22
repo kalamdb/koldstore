@@ -46,14 +46,21 @@ mod process_utility {
         unsafe {
             let copied = pg_sys::copyObjectImpl(pstmt.cast()).cast::<pg_sys::PlannedStmt>();
             let mut captured = None;
+            let mut has_standard_actions = true;
             if !copied.is_null()
                 && !(*copied).utilityStmt.is_null()
                 && (*(*copied).utilityStmt).type_ == pg_sys::NodeTag::T_AlterTableStmt
             {
                 let stmt = (*copied).utilityStmt.cast::<pg_sys::AlterTableStmt>();
                 captured = strip_options(stmt);
+                has_standard_actions = !(*stmt).cmds.is_null();
             }
-            delegate(copied, query, read_only, context, params, env, dest, qc);
+            if has_standard_actions {
+                delegate(copied, query, read_only, context, params, env, dest, qc);
+            } else if !qc.is_null() {
+                (*qc).commandTag = pg_sys::CommandTag::CMDTAG_ALTER_TABLE;
+                (*qc).nprocessed = 0;
+            }
             if let Some((relation, options)) = captured {
                 apply_options(relation, options);
             }
@@ -152,6 +159,12 @@ mod process_utility {
                 std::ptr::null_mut(),
             )
         };
+        let owns_relation = unsafe {
+            pg_sys::object_ownercheck(pg_sys::RelationRelationId, oid, pg_sys::GetUserId())
+        };
+        if !owns_relation {
+            pgrx::error!("must be owner of relation to configure KoldStore");
+        }
         super::apply_management_options(oid, &values)
             .unwrap_or_else(|error| pgrx::error!("KoldStore ALTER TABLE failed: {error}"));
     }
