@@ -103,15 +103,21 @@ pub(super) fn mark_flush_job_running(
     Ok(())
 }
 
+/// Progress fields written to an inline flush job between phases/waves.
+pub(super) struct FlushJobProgressUpdate<'a> {
+    pub rows_flushed: i64,
+    pub batches_completed: i32,
+    pub checkpoint_seq: i64,
+    pub checkpoint_commit_seq: i64,
+    pub phase: &'a str,
+    pub progress_total: i64,
+}
+
+/// Persists mid-flush progress for operator visibility (`list_jobs` / job row).
 pub(super) fn update_flush_job_progress(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
-    rows_flushed: i64,
-    batches_completed: i32,
-    checkpoint_seq: i64,
-    checkpoint_commit_seq: i64,
-    phase: &str,
-    progress_total: i64,
+    progress: FlushJobProgressUpdate<'_>,
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
 
@@ -121,12 +127,12 @@ pub(super) fn update_flush_job_progress(
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
-            DatumWithOid::from(rows_flushed),
-            DatumWithOid::from(batches_completed),
-            DatumWithOid::from(checkpoint_seq),
-            DatumWithOid::from(checkpoint_commit_seq),
-            DatumWithOid::from(phase),
-            DatumWithOid::from(progress_total),
+            DatumWithOid::from(progress.rows_flushed),
+            DatumWithOid::from(progress.batches_completed),
+            DatumWithOid::from(progress.checkpoint_seq),
+            DatumWithOid::from(progress.checkpoint_commit_seq),
+            DatumWithOid::from(progress.phase),
+            DatumWithOid::from(progress.progress_total),
         ],
     )
     .map_err(|error| error.to_string())?;

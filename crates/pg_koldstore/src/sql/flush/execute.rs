@@ -21,7 +21,7 @@ use koldstore_storage::open_client_from_catalog_fields;
 use super::jobs::{
     ensure_flush_job, flush_cancel_requested, mark_flush_job_cancelled, mark_flush_job_completed,
     mark_flush_job_completed_after_cancel, mark_flush_job_failed, mark_flush_job_running,
-    update_flush_job_progress,
+    update_flush_job_progress, FlushJobProgressUpdate,
 };
 use super::mirror_fetch::fetch_mirror_batch;
 use super::spi::{
@@ -548,6 +548,26 @@ fn flush_prepared_table(
     )
     .map_err(|error| error.to_string())?;
 
+    let report_progress = |phase: &str,
+                           rows_flushed: i64,
+                           batches_completed: i32,
+                           checkpoint_seq: i64,
+                           checkpoint_commit_seq: i64|
+     -> Result<(), String> {
+        update_flush_job_progress(
+            ctx.job_id,
+            table_oid,
+            FlushJobProgressUpdate {
+                rows_flushed,
+                batches_completed,
+                checkpoint_seq,
+                checkpoint_commit_seq,
+                phase,
+                progress_total,
+            },
+        )
+    };
+
     loop {
         if flush_cancel_requested(ctx.job_id, table_oid)? {
             return finish_flush_after_cancel(
@@ -559,15 +579,12 @@ fn flush_prepared_table(
                 last_max_commit_seq,
             );
         }
-        update_flush_job_progress(
-            ctx.job_id,
-            table_oid,
+        report_progress(
+            flush_phase::SELECTING,
             total_rows_flushed,
             total_batches,
             last_max_seq,
             last_max_commit_seq,
-            flush_phase::SELECTING,
-            progress_total,
         )?;
         let selection = resolve_flush_stats(table_oid, ctx.force)?;
         crate::failpoints::hit("after_select_rows")?;
@@ -601,15 +618,12 @@ fn flush_prepared_table(
             ctx.force,
             catchup_upto_seq
         );
-        update_flush_job_progress(
-            ctx.job_id,
-            table_oid,
+        report_progress(
+            flush_phase::WRITING,
             total_rows_flushed,
             total_batches,
             last_max_seq,
             last_max_commit_seq,
-            flush_phase::WRITING,
-            progress_total,
         )?;
         let outcome = stream_write_flush_batches(table_oid, ctx, &selection, &client)?;
         let wave_batches =
@@ -627,15 +641,12 @@ fn flush_prepared_table(
                 last_max_commit_seq,
             );
         }
-        update_flush_job_progress(
-            ctx.job_id,
-            table_oid,
+        report_progress(
+            flush_phase::ACTIVATING,
             total_rows_flushed,
             total_batches,
             last_max_seq,
             last_max_commit_seq,
-            flush_phase::ACTIVATING,
-            progress_total,
         )?;
         finalize_flush(table_oid, ctx, &outcome, &client, skip_through)?;
         // Later waves have no async phase-0 boundary to skip through.
@@ -650,15 +661,12 @@ fn flush_prepared_table(
         drop(outcome);
         release_flush_memory(table_oid);
 
-        update_flush_job_progress(
-            ctx.job_id,
-            table_oid,
+        report_progress(
+            flush_phase::WRITING,
             total_rows_flushed,
             total_batches,
             last_max_seq,
             last_max_commit_seq,
-            flush_phase::WRITING,
-            progress_total,
         )?;
 
         // Policy and force waves are both row-capped; keep draining the pinned
