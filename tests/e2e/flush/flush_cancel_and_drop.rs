@@ -26,7 +26,7 @@ async fn cancel_pending_flush_job_marks_cancelled() -> Result<()> {
                 relation = table.relation
             ))
             .await
-            .ok();
+            .context("set_table_auto_flush(false)")?;
 
         let inserted = db
             .client
