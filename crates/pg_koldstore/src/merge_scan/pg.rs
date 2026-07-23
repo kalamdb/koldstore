@@ -11,25 +11,22 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 
-use koldstore_merge::scan::{
-    execute_merge_scan, MergeScanPlan, MirrorOverlayStrategy, CUSTOM_PATH_NAME,
-};
+use koldstore_merge::scan::{MergeScanPlan, MirrorOverlayStrategy, CUSTOM_PATH_NAME};
 use pgrx::pg_sys;
 
 mod cold;
 mod emit;
+mod execute;
 mod hot;
 mod literals;
 mod mirror;
 mod profile;
 mod qual;
+mod spi_query;
 mod tuple;
 
-use cold::{load_cold_rows_for_merge, planned_cold_read_profile};
-use emit::materialize_scan_row_from_image;
-use hot::{load_hot_rows_for_merge, load_hot_rows_native};
-use mirror::{load_mirror_tombstone_overlay, MirrorOverlay};
-use profile::{ColdReadProfile, EmitPath};
+use cold::planned_cold_read_profile;
+use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
 use qual::{required_scan_projection, residual_filters};
 use tuple::{slot_attribute_count, store_materialized_row, MaterializedRow, ScanMemory};
 
@@ -78,12 +75,10 @@ impl ScanEmitMode {
 struct ScanExecutionState {
     mode: ScanEmitMode,
     cold_profile: ColdReadProfile,
-    mirror_tombstones: usize,
-    mirror_live_overrides: usize,
     hot_plan_label: String,
     emit_path: EmitPath,
-    hot_rows: usize,
-    result_rows: usize,
+    /// Allocated only when PostgreSQL instruments this node for EXPLAIN.
+    execution: Option<Box<ScanExecutionProfile>>,
     /// Owns all Datums in buffered rows; deleted on EndCustomScan.
     _memory: ScanMemory,
 }
@@ -335,6 +330,14 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     if node.is_null() || (*node).ss.ss_currentRelation.is_null() {
         return;
     }
+    // PostgreSQL attaches PlanState.instrument only after BeginCustomScan
+    // returns. EState already carries the same native instrumentation request.
+    let instrumentation = estate.as_ref().map_or(0, |estate| estate.es_instrument);
+    let mut profiler = ScanProfiler::from_instrumentation(instrumentation);
+    if profiler.is_enabled() {
+        profile::clear_completed_explain_state(node as usize);
+    }
+    let scan_started = profiler.start_timer();
     if !crate::guc::enable_merge_scan() {
         pgrx::error!(
             "{CUSTOM_PATH_NAME} is required for managed-table SELECT; \
@@ -366,6 +369,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
 
     let _planned = deserialize_custom_private(plan);
 
+    let metadata_started = profiler.start_timer();
     let (relation, catalog, snapshot) = with_hook_disabled(|| {
         let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
         let catalog = crate::catalog::cache::cached_migration_catalog(table_oid)?;
@@ -409,160 +413,43 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         .cloned()
         .collect::<Vec<_>>();
     let image_columns = scan_projection.catalog_columns();
+    let pk_point_lookup =
+        hot::equality_covers_primary_key(&pk_equality, &snapshot.primary_key_columns);
 
-    let (mut cold_profile, cold_rows) = match load_cold_rows_for_merge(
+    profiler.record_metadata(metadata_started);
+    let source_inputs = execute::ScanSourceInputs {
+        node,
+        estate,
+        eflags,
         table_oid,
         scanrelid,
-        &snapshot,
-        catalog.as_ref(),
+        relation_owner,
+        relation: &relation,
+        snapshot: &snapshot,
+        catalog: catalog.as_ref(),
         qual,
-        &image_columns,
         params,
-    ) {
-        Ok(result) => result,
-        Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} cold read failed: {error}"),
+        projection: &scan_projection,
+        image_columns: &image_columns,
+        pk_equality: &pk_equality,
+        pk_point_lookup,
     };
-
-    // Only load mirror tombstones when cold rows could still be visible.
-    // Hot-only scans skip the overlay entirely (critical for pre-flush PK lookups).
-    let overlay = if cold_rows.is_empty() {
-        MirrorOverlay::default()
+    let source_execution = if profiler.is_enabled() {
+        unsafe { execute::execute_scan_sources(source_inputs, &mut profiler) }
     } else {
-        match load_mirror_tombstone_overlay(
-            &snapshot.mirror_relation,
-            &snapshot.primary_key_columns,
-            &pk_equality,
-        ) {
-            Ok(overlay) => overlay,
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} mirror overlay failed: {error}"),
-        }
+        unsafe { execute::execute_scan_sources_unprofiled(source_inputs) }
     };
+    let execute::ScanSourceExecution {
+        mode,
+        mut cold_profile,
+        emit_path,
+        hot_rows,
+        memory,
+    } = source_execution;
 
-    let cold_rows = filter_cold_rows_with_overlay(cold_rows, &overlay);
-    // PostgreSQL does not initialize `custom_plans` for us; do it only on the
-    // hot-only path so cold merge does not pay for an unused heap child.
-    if cold_rows.is_empty() && cold_profile.segments.is_empty() {
-        initialize_custom_plan_children(node, estate, eflags);
-    }
     let hot_plan_label = hot_child_explain_label(node);
-    let has_hot_child = hot_child_planstate(node).is_some();
-
-    let mut memory = ScanMemory::create("KoldMergeScan");
-
-    // Hot-only fast path: stream the native child when present and cold is empty.
-    let (mode, emit_path, hot_rows_count) = if cold_rows.is_empty()
-        && cold_profile.segments.is_empty()
-        && has_hot_child
-    {
-        (ScanEmitMode::HotChild, EmitPath::HotChild, 0)
-    } else if cold_rows.is_empty() && cold_profile.segments.is_empty() {
-        match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
-            load_hot_rows_native(
-                &relation,
-                &pk_equality,
-                &image_columns,
-                &scan_projection,
-                &mut memory,
-            )
-        }) {
-            Ok(rows) => {
-                let hot_count = rows.len();
-                (
-                    ScanEmitMode::buffer(rows, &scan_projection),
-                    EmitPath::HotNative,
-                    hot_count,
-                )
-            }
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot-only read failed: {error}"),
-        }
-    } else if !cold_rows.is_empty()
-        && hot_equality_covers_primary_key(&pk_equality, &snapshot.primary_key_columns)
-    {
-        // PK point-lookup fast path: probe hot with native Datums (no to_jsonb).
-        // Hot always wins for the same PK, so a hit skips cold merge entirely.
-        // A miss materializes cold winners without the JSON hot merge path.
-        match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
-            load_hot_rows_native(
-                &relation,
-                &pk_equality,
-                &image_columns,
-                &scan_projection,
-                &mut memory,
-            )
-        }) {
-            Ok(rows) if !rows.is_empty() => {
-                let hot_count = rows.len();
-                (
-                    ScanEmitMode::buffer(rows, &scan_projection),
-                    EmitPath::HotNative,
-                    hot_count,
-                )
-            }
-            Ok(_) => {
-                let merged = match execute_merge_scan(Vec::new(), cold_rows) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        pgrx::error!("{CUSTOM_PATH_NAME} cold-native merge failed: {error}")
-                    }
-                };
-                let rows = unsafe {
-                    memory.switch(|| {
-                        merged
-                            .rows
-                            .iter()
-                            .map(|row| {
-                                materialize_scan_row_from_image(&row.row_image, &scan_projection)
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                }
-                .unwrap_or_else(|error| {
-                    pgrx::error!("{CUSTOM_PATH_NAME} cold-native emit failed: {error}")
-                });
-                (
-                    ScanEmitMode::buffer(rows, &scan_projection),
-                    EmitPath::ColdNative,
-                    0,
-                )
-            }
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot probe failed: {error}"),
-        }
-    } else {
-        let hot_rows =
-            match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
-                load_hot_rows_for_merge(&relation, &snapshot, &pk_equality, &image_columns)
-            }) {
-                Ok(rows) => rows,
-                Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot read failed: {error}"),
-            };
-        let hot_count = hot_rows.len();
-        let merged = match execute_merge_scan(hot_rows, cold_rows) {
-            Ok(result) => result,
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} merge failed: {error}"),
-        };
-
-        let rows = unsafe {
-            memory.switch(|| {
-                merged
-                    .rows
-                    .iter()
-                    .map(|row| materialize_scan_row_from_image(&row.row_image, &scan_projection))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-        }
-        .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} emit failed: {error}"));
-        (
-            ScanEmitMode::buffer(rows, &scan_projection),
-            EmitPath::MergeBuffer,
-            hot_count,
-        )
-    };
-
     cold_profile.segments_opened = cold_profile.segments.len();
-    let result_rows = match &mode {
-        ScanEmitMode::HotChild => 0,
-        ScanEmitMode::Buffer { rows, .. } => rows.len(),
-    };
+    let execution = profiler.finish(hot_rows, scan_started);
 
     SCAN_STATES.with(|states| {
         states.borrow_mut().insert(
@@ -570,12 +457,9 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             ScanExecutionState {
                 mode,
                 cold_profile,
-                mirror_tombstones: overlay.tombstones,
-                mirror_live_overrides: overlay.live_overrides,
                 hot_plan_label,
                 emit_path,
-                hot_rows: hot_rows_count,
-                result_rows,
+                execution,
                 _memory: memory,
             },
         );
@@ -656,22 +540,26 @@ unsafe extern "C-unwind" fn recheck_buffered_scan_tuple(
 unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) {
     if !node.is_null() {
         SCAN_STATES.with(|states| {
-            if let Some(scan) = states.borrow_mut().remove(&(node as usize)) {
-                if should_keep_explain_profile(node) {
-                    profile::remember_explain_profile(
+            if let Some(mut scan) = states.borrow_mut().remove(&(node as usize)) {
+                if let Some(mut execution) = scan.execution.take() {
+                    if scan.emit_path == EmitPath::HotChild {
+                        if let Some(rows) = hot_child_instrumented_rows(node) {
+                            execution.hot_rows = rows;
+                            execution.merge_input_rows = rows;
+                            execution.merge_output_rows = rows;
+                        }
+                    }
+                    profile::remember_completed_explain_state(
                         node as usize,
-                        profile::ExplainScanMeta {
+                        profile::CompletedExplainState {
                             cold_profile: scan.cold_profile,
                             hot_plan_label: scan.hot_plan_label,
-                            mirror_tombstones: scan.mirror_tombstones,
-                            mirror_live_overrides: scan.mirror_live_overrides,
                             emit_path: scan.emit_path,
-                            hot_rows: scan.hot_rows,
-                            result_rows: scan.result_rows,
+                            execution,
                         },
                     );
                 }
-                // `scan` drops here: releases ScanMemory / buffered Datums.
+                // `scan` drops here, releasing ScanMemory and buffered Datums.
             }
         });
         end_custom_plan_children(node);
@@ -756,62 +644,73 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         return;
     }
 
-    let profile = SCAN_STATES.with(|states| {
-        states.borrow().get(&(node as usize)).map(|scan| {
-            (
-                scan.cold_profile.clone(),
-                scan.hot_plan_label.clone(),
-                scan.mirror_tombstones,
-                scan.mirror_live_overrides,
-                scan.emit_path,
-                scan.hot_rows,
-                scan.result_rows,
-            )
+    let execution_meta = if (*es).analyze {
+        let active = SCAN_STATES.with(|states| {
+            states.borrow().get(&(node as usize)).map(|scan| {
+                (
+                    scan.cold_profile.clone(),
+                    scan.hot_plan_label.clone(),
+                    scan.emit_path,
+                    scan.execution.as_deref().cloned(),
+                )
+            })
+        });
+        active.or_else(|| {
+            profile::take_completed_explain_state(node as usize).map(|scan| {
+                (
+                    scan.cold_profile,
+                    scan.hot_plan_label,
+                    scan.emit_path,
+                    Some(*scan.execution),
+                )
+            })
         })
-    });
-    let (profile, hot_label, tombstones, live_overrides, emit_path, hot_rows, result_rows) =
-        match profile {
-            Some(meta) => meta,
-            None => match profile::saved_explain_profile(node as usize) {
-                Some(meta) => (
-                    meta.cold_profile,
-                    meta.hot_plan_label,
-                    meta.mirror_tombstones,
-                    meta.mirror_live_overrides,
-                    meta.emit_path,
-                    meta.hot_rows,
-                    meta.result_rows,
-                ),
-                None => {
-                    // EXPLAIN without ANALYZE (or missing saved meta): plan-time cold profile only.
-                    // Do not touch custom_ps here — children may already be shut down.
-                    let profile = match resolve_table_oid(node).and_then(planned_cold_read_profile)
-                    {
-                        Ok(profile) => profile,
-                        Err(error) => {
-                            profile::explain_property(
-                                es,
-                                "Cold storage",
-                                &format!("unavailable: {error}"),
-                            );
-                            return;
-                        }
-                    };
-                    (profile, String::new(), 0, 0, EmitPath::default(), 0, 0)
+    } else {
+        None
+    };
+    let (cold_profile, hot_label, emit_path, mut execution) = match execution_meta {
+        Some((cold_profile, hot_plan_label, emit_path, execution)) => {
+            (cold_profile, hot_plan_label, emit_path, execution)
+        }
+        None => {
+            // EXPLAIN without ANALYZE: inspect catalog metadata, but do not claim
+            // that any source, overlay, or merge phase executed.
+            let cold_profile = match resolve_table_oid(node).and_then(planned_cold_read_profile) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    profile::explain_property(es, "Cold Storage", &format!("unavailable: {error}"));
+                    return;
                 }
-            },
-        };
+            };
+            (
+                cold_profile,
+                hot_child_explain_label(node),
+                EmitPath::default(),
+                None,
+            )
+        }
+    };
 
-    if !hot_label.is_empty() {
+    if emit_path == EmitPath::HotChild {
+        if let (Some(execution), Some(rows)) =
+            (execution.as_mut(), hot_child_instrumented_rows(node))
+        {
+            execution.hot_rows = rows;
+            execution.merge_input_rows = rows;
+            execution.merge_output_rows = rows;
+        }
+    }
+
+    if !hot_label.is_empty() && hot_child_planstate(node).is_none() {
+        // Fallback when the hot child was not initialized into custom_ps (cold
+        // emit paths). Graph clients that walk custom_ps still see nested Plans
+        // when the child was initialized for hot-only streaming.
         profile::explain_property(es, "Hot Plan", &hot_label);
     }
-    profile::explain_property(es, "Mirror Tombstones", &tombstones.to_string());
-    profile::explain_property(es, "Mirror Overrides", &live_overrides.to_string());
-    profile::explain_cold_read_profile(es, &profile, emit_path, hot_rows, result_rows);
-
-    if (*es).analyze {
-        profile::forget_explain_profile(node as usize);
+    if let Some(execution) = execution.as_ref() {
+        profile::explain_integer(es, "Mirror Tombstones", None, execution.mirror_rows as i64);
     }
+    profile::explain_scan_profile(es, &cold_profile, &hot_label, emit_path, execution.as_ref());
 }
 
 unsafe fn list_len(list: *mut pg_sys::List) -> i32 {
@@ -885,6 +784,21 @@ unsafe fn hot_child_planstate(
     }
 }
 
+/// Returns rows emitted by the native hot child from PostgreSQL instrumentation.
+///
+/// The child is instrumented whenever the parent is executing under
+/// `EXPLAIN ANALYZE`, so KoldMergeScan does not need per-row bookkeeping.
+unsafe fn hot_child_instrumented_rows(node: *mut pg_sys::CustomScanState) -> Option<usize> {
+    let child = hot_child_planstate(node)?;
+    let instrumentation = (*child).instrument.as_ref()?;
+    let rows = if instrumentation.nloops > 0.0 {
+        instrumentation.ntuples
+    } else {
+        instrumentation.tuplecount
+    };
+    rows.is_finite().then(|| rows.max(0.0).round() as usize)
+}
+
 unsafe fn hot_child_explain_label(node: *mut pg_sys::CustomScanState) -> String {
     let plan = (*node).ss.ps.plan;
     if plan.is_null() {
@@ -905,32 +819,6 @@ unsafe fn hot_child_explain_label(node: *mut pg_sys::CustomScanState) -> String 
         pg_sys::NodeTag::T_SeqScan => "Seq Scan".to_string(),
         _ => format!("{:?}", (*child).type_),
     }
-}
-
-/// Returns true when equality filters cover every primary-key column.
-fn hot_equality_covers_primary_key(
-    filters: &[hot::HotEqualityFilter],
-    primary_key_columns: &[String],
-) -> bool {
-    !primary_key_columns.is_empty()
-        && primary_key_columns.iter().all(|pk| {
-            filters
-                .iter()
-                .any(|filter| filter.column.eq_ignore_ascii_case(pk))
-        })
-}
-
-fn filter_cold_rows_with_overlay(
-    cold_rows: Vec<koldstore_common::ColdRow>,
-    overlay: &MirrorOverlay,
-) -> Vec<koldstore_common::ColdRow> {
-    if overlay.is_empty() {
-        return cold_rows;
-    }
-    cold_rows
-        .into_iter()
-        .filter(|row| !overlay.masks_pk(&row.pk))
-        .collect()
 }
 
 unsafe fn find_cheapest_path(pathlist: *mut pg_sys::List) -> Option<*mut pg_sys::Path> {
@@ -1030,8 +918,4 @@ unsafe fn resolve_table_oid(node: *mut pg_sys::CustomScanState) -> Result<pg_sys
         return Err("range table entry is missing".to_string());
     }
     Ok((*rte).relid)
-}
-
-unsafe fn should_keep_explain_profile(node: *mut pg_sys::CustomScanState) -> bool {
-    !(*node).ss.ps.instrument.is_null()
 }

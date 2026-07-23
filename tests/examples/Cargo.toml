@@ -5,6 +5,17 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+# These are referenced by support modules included through `#[path]`.
+ignored = [
+    "chrono",
+    "koldstore-common",
+    "koldstore-memory-tests",
+    "koldstore-storage",
+    "serde",
+    "serde_json",
+]
+
 [[test]]
 name = "chat_history"
 path = "chat_history.rs"
@@ -29,6 +40,7 @@ path = "game_events.rs"
 anyhow.workspace = true
 chrono.workspace = true
 # Shared via `#[path = "../../e2e/common/mod.rs"]` in support/.
+koldstore-common.workspace = true
 koldstore-memory-tests = { path = "../memory" }
 koldstore-storage = { workspace = true, features = ["s3"] }
 parquet.workspace = true

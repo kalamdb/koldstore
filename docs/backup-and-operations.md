@@ -26,8 +26,9 @@ state, pending jobs, storage binding, and the last recorded error.
 `koldstore.backup_manifest` exports the local manifest identity required to
 match a PostgreSQL backup to cold files. `koldstore.validate_cold_storage`
 checks manifest, Parquet, stats, PK hint, and catalog consistency surfaces.
-`koldstore.recover_segments` records idempotent recovery jobs for orphan
-cleanup, final-object quarantine, catalog repair, and manifest reload.
+`koldstore.recover_segments` discovers orphan cold objects under the table
+prefix (and expires stale `pending` catalog rows), then quarantines or deletes
+them inline. It does **not** enqueue recovery jobs.
 
 ## pg_dump, COPY, and Logical Replication
 

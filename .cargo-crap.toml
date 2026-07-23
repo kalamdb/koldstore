@@ -1,0 +1,5 @@
+# Without LCOV input, report cyclomatic complexity directly instead of
+# pretending every function has zero test coverage.
+missing = "optimistic"
+threshold = 30
+epsilon = 0.01

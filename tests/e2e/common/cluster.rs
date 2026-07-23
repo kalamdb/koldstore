@@ -392,11 +392,19 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
         .get::<_, bool>(0);
 
     if required_sql_present {
-        client
+        match client
             .batch_execute("ALTER EXTENSION koldstore UPDATE;")
             .await
-            .context("refresh koldstore extension SQL after install")?;
-        return Ok(());
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                // Beta bumps rename the single 0.1.0→current edge, so a worker
+                // cloned from a prior-beta template has no UPDATE path. Reinstall.
+                if !error_chain_contains(&error, "has no update path") {
+                    return Err(error).context("refresh koldstore extension SQL after install");
+                }
+            }
+        }
     }
 
     client
@@ -409,6 +417,17 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
         .await
         .context("reinstall koldstore extension to pick up new SQL entities")?;
     Ok(())
+}
+
+fn error_chain_contains(error: &dyn std::error::Error, needle: &str) -> bool {
+    let mut current: Option<&dyn std::error::Error> = Some(error);
+    while let Some(err) = current {
+        if err.to_string().contains(needle) {
+            return true;
+        }
+        current = err.source();
+    }
+    false
 }
 
 fn connect_retry_budget() -> (usize, Duration) {

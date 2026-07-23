@@ -1,6 +1,8 @@
 //! PostgreSQL hook integration.
 
 pub mod ddl;
+#[cfg(feature = "pg")]
+pub(crate) mod drop_cleanup;
 pub mod executor;
 pub mod planner;
 pub mod xact;

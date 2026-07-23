@@ -15,6 +15,7 @@ suites live in subfolders so the top level stays scannable.
 | `run-sql-regression.sh` | KoldStore SQL regression (`tests/sql/`) |
 | `run-all-tests.sh` | Full local aggregator: unit, `#[pg_test]`, E2E strict+async, examples, storage, SQL, memory, benchmarks |
 | `run-pgrx-matrix.sh` | Multi-PG local matrix |
+| `find-rust-duplicates.py` | Exact normalized Rust block duplicates (`--deny` is opt-in) |
 
 ## `scripts/ci/`
 

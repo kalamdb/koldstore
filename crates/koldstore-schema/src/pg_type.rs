@@ -251,6 +251,23 @@ impl PgType {
             _ => None,
         }
     }
+
+    /// Returns true when an equality literal of `literal` may be pushed into a
+    /// source predicate typed as `self`.
+    ///
+    /// PostgreSQL leaves untyped numeric consts as `int4` (or `int2`), so
+    /// `bigint_col = 100000` is a cross-type `int8 = int4` operator. Hot SPI
+    /// pushdown must accept those integer width promotions the same way cold
+    /// prune already does. Demotions and non-integer cross-types stay rejected.
+    #[must_use]
+    pub const fn accepts_integer_equality_literal(self, literal: Self) -> bool {
+        matches!(
+            (self, literal),
+            (Self::Int8, Self::Int2 | Self::Int4 | Self::Int8)
+                | (Self::Int4, Self::Int2 | Self::Int4)
+                | (Self::Int2, Self::Int2)
+        )
+    }
 }
 
 impl PgIntegerArrayOid {
@@ -336,5 +353,20 @@ mod tests {
         assert_eq!(PgType::Uuid.type_oid(), 2950);
         assert_eq!(PgType::Timestamptz.type_oid(), 1184);
         assert_eq!(PgType::Int8.integer_oid(), Some(20));
+    }
+
+    #[test]
+    fn integer_equality_accepts_width_promotions_not_demotions() {
+        assert!(PgType::Int8.accepts_integer_equality_literal(PgType::Int4));
+        assert!(PgType::Int8.accepts_integer_equality_literal(PgType::Int2));
+        assert!(PgType::Int8.accepts_integer_equality_literal(PgType::Int8));
+        assert!(PgType::Int4.accepts_integer_equality_literal(PgType::Int2));
+        assert!(PgType::Int4.accepts_integer_equality_literal(PgType::Int4));
+        assert!(PgType::Int2.accepts_integer_equality_literal(PgType::Int2));
+
+        assert!(!PgType::Int4.accepts_integer_equality_literal(PgType::Int8));
+        assert!(!PgType::Int2.accepts_integer_equality_literal(PgType::Int4));
+        assert!(!PgType::Int8.accepts_integer_equality_literal(PgType::Float8));
+        assert!(!PgType::Int8.accepts_integer_equality_literal(PgType::Text));
     }
 }

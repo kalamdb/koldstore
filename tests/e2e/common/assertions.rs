@@ -74,18 +74,15 @@ pub fn assert_kold_merge_scan_cold_reads(
 ) -> Result<()> {
     assert_kold_merge_scan_explain(plan)?;
     anyhow::ensure!(
-        plan.lines().any(|line| line.contains("Manifest:")),
-        "expected manifest read details in plan, got:\n{plan}"
+        plan.lines().any(|line| line.contains("Segment Catalog")),
+        "expected segment catalog details in plan, got:\n{plan}"
     );
     anyhow::ensure!(
         plan.contains(manifest_path_hint) || plan.contains("manifest.json"),
         "expected manifest path hint `{manifest_path_hint}` in plan, got:\n{plan}"
     );
 
-    let parquet_segments = plan
-        .lines()
-        .filter(|line| line.contains("Parquet segment:"))
-        .count();
+    let parquet_segments = count_parquet_segments(plan);
     anyhow::ensure!(
         parquet_segments >= min_parquet_segments,
         "expected at least {min_parquet_segments} parquet segment(s), got {parquet_segments} in plan:\n{plan}"
@@ -102,38 +99,36 @@ pub fn assert_kold_merge_scan_planned_cold_reads(
     assert_kold_merge_scan_cold_reads(plan, manifest_path_hint, min_parquet_segments)
 }
 
-/// Asserts an analyzed merge scan reports timed manifest and parquet reads.
+/// Asserts an analyzed merge scan reports executed cold catalog and parquet reads.
+///
+/// Timing lines are intentionally omitted: e2e `explain_analyze` uses
+/// `EXPLAIN (ANALYZE, TIMING OFF)`, matching native PostgreSQL and the
+/// `#[pg_test]` contract that TIMING OFF suppresses custom phase clocks.
 pub fn assert_kold_merge_scan_executed_cold_reads(
     plan: &str,
     min_parquet_segments: usize,
 ) -> Result<()> {
     assert_kold_merge_scan_explain(plan)?;
     anyhow::ensure!(
-        plan.lines()
-            .any(|line| line.contains("Manifest:") && line.contains(" ms")),
-        "expected timed manifest read in analyzed plan, got:\n{plan}"
+        plan.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("Status:") && trimmed.contains("executed")
+        }),
+        "expected executed cold scan status in analyzed plan, got:\n{plan}"
     );
 
-    let timed_segments = plan
-        .lines()
-        .filter(|line| {
-            line.contains("Parquet segment:")
-                && line.contains(" rows")
-                && line.contains(" ms")
-                && !line.contains("(planned)")
-        })
-        .count();
+    let opened = count_parquet_segments(plan);
     anyhow::ensure!(
-        timed_segments >= min_parquet_segments,
-        "expected at least {min_parquet_segments} timed parquet segment(s), got {timed_segments} in plan:\n{plan}"
+        opened >= min_parquet_segments,
+        "expected at least {min_parquet_segments} parquet segment(s), got {opened} in plan:\n{plan}"
     );
     anyhow::ensure!(
         plan.lines()
-            .any(|line| line.contains("Parquet I/O:") && line.contains("footer-first")),
+            .any(|line| line.contains("Footer First") && line.contains("true")),
         "expected footer-first Parquet I/O details in analyzed plan, got:\n{plan}"
     );
     anyhow::ensure!(
-        plan.lines().any(|line| line.contains("Row groups:")),
+        plan.lines().any(|line| line.contains("Row Groups Total")),
         "expected row-group prune details in analyzed plan, got:\n{plan}"
     );
     anyhow::ensure!(
@@ -141,11 +136,33 @@ pub fn assert_kold_merge_scan_executed_cold_reads(
         "expected bloom prune details in analyzed plan, got:\n{plan}"
     );
     anyhow::ensure!(
-        plan.lines()
-            .any(|line| line.contains("Manifest:") && line.contains("source=catalog")),
-        "expected catalog manifest source in analyzed plan, got:\n{plan}"
+        plan.lines().any(|line| {
+            line.contains("Segment Catalog Source")
+                && line.contains("postgres (koldstore.cold_segments)")
+        }),
+        "expected postgres cold_segments catalog source in analyzed plan, got:\n{plan}"
     );
     Ok(())
+}
+
+/// Counts cold Parquet segments reported by KoldMergeScan EXPLAIN.
+///
+/// Prefers the typed `Parquet Segments Opened` / `Planned` counter; falls back to
+/// per-segment `Object:` lines emitted under the nested Parquet Segments group.
+fn count_parquet_segments(plan: &str) -> usize {
+    if let Some(opened) = plan.lines().find_map(|line| {
+        let trimmed = line.trim_start();
+        trimmed
+            .strip_prefix("Parquet Segments Opened:")
+            .or_else(|| trimmed.strip_prefix("Parquet Segments Planned:"))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+    }) {
+        return opened;
+    }
+
+    plan.lines()
+        .filter(|line| line.trim_start().starts_with("Object:"))
+        .count()
 }
 
 /// Backward-compatible alias for older tests.

@@ -2,7 +2,8 @@
 //!
 //! DROP TABLE cleanup planning lives in `koldstore-migrate`; this module
 //! re-exports those plans for the extension shell and installs the live
-//! ProcessUtility hook used for `ALTER TABLE … SET/RESET` KoldStore options.
+//! ProcessUtility hook used for `ALTER TABLE … SET/RESET` KoldStore options
+//! and managed `DROP TABLE` teardown.
 
 pub use koldstore_migrate::drop_table::{
     plan_drop_table_cleanup, DropTableCleanupError, DropTableCleanupOutcome, DropTableCleanupPlan,
@@ -16,6 +17,10 @@ mod process_utility {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pgrx::pg_sys;
+
+    use crate::hooks::drop_cleanup::{
+        cleanup_managed_tables_before_drop, drop_captured_mirrors, drop_table_oids,
+    };
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     static mut PREVIOUS: pg_sys::ProcessUtility_hook_type = None;
@@ -47,19 +52,35 @@ mod process_utility {
             let copied = pg_sys::copyObjectImpl(pstmt.cast()).cast::<pg_sys::PlannedStmt>();
             let mut captured = None;
             let mut has_standard_actions = true;
-            if !copied.is_null()
-                && !(*copied).utilityStmt.is_null()
-                && (*(*copied).utilityStmt).type_ == pg_sys::NodeTag::T_AlterTableStmt
-            {
-                let stmt = (*copied).utilityStmt.cast::<pg_sys::AlterTableStmt>();
-                captured = strip_options(stmt);
-                has_standard_actions = !(*stmt).cmds.is_null();
+            let mut drop_oids = Vec::new();
+            if !copied.is_null() && !(*copied).utilityStmt.is_null() {
+                match (*(*copied).utilityStmt).type_ {
+                    pg_sys::NodeTag::T_AlterTableStmt => {
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::AlterTableStmt>();
+                        captured = strip_options(stmt);
+                        has_standard_actions = !(*stmt).cmds.is_null();
+                    }
+                    pg_sys::NodeTag::T_DropStmt => {
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::DropStmt>();
+                        drop_oids = drop_table_oids(stmt);
+                    }
+                    _ => {}
+                }
+            }
+            let mut mirrors = Vec::new();
+            if !drop_oids.is_empty() {
+                mirrors = cleanup_managed_tables_before_drop(&drop_oids).unwrap_or_else(|error| {
+                    pgrx::error!("KoldStore DROP TABLE cleanup failed: {error}")
+                });
             }
             if has_standard_actions {
                 delegate(copied, query, read_only, context, params, env, dest, qc);
             } else if !qc.is_null() {
                 (*qc).commandTag = pg_sys::CommandTag::CMDTAG_ALTER_TABLE;
                 (*qc).nprocessed = 0;
+            }
+            if !mirrors.is_empty() {
+                drop_captured_mirrors(&mirrors);
             }
             if let Some((relation, options)) = captured {
                 apply_options(relation, options);
@@ -186,106 +207,107 @@ pub(crate) fn register_process_utility_hook() {
 }
 
 #[cfg(feature = "pg")]
-fn apply_management_options(
-    table_oid: pgrx::pg_sys::Oid,
+fn option_value<'a>(
+    values: &'a std::collections::HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    values.get(name).map(String::as_str)
+}
+
+#[cfg(feature = "pg")]
+fn validate_management_option_conflicts(
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
-    use pgrx::datum::DatumWithOid;
-    let get = |name: &str| values.get(name).map(String::as_str);
-    if get("koldstore_move_when").is_some() {
+    if option_value(values, "koldstore_move_when").is_some() {
         return Err("filter policy is not supported yet".into());
     }
-    if get("koldstore_hot_row_limit").is_some() && get("koldstore_move_after").is_some() {
+    if option_value(values, "koldstore_hot_row_limit").is_some()
+        && option_value(values, "koldstore_move_after").is_some()
+    {
         return Err("hot_row_limit and move_after cannot be set together".into());
     }
-    if get("koldstore_enabled")
+    if option_value(values, "koldstore_enabled")
         .is_some_and(|v| !matches!(v.to_ascii_lowercase().as_str(), "true" | "on" | "1"))
     {
         return Err(
             "koldstore_enabled=false is not supported; use koldstore.unmanage_table(...)".into(),
         );
     }
-    let catalog_lookup = "SELECT (SELECT jsonb_build_object('storage', st.name, 'options', s.options) FROM koldstore.schemas s JOIN koldstore.storage st ON st.id=s.storage_id WHERE s.table_oid=$1)";
-    let row = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
-        catalog_lookup,
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map_err(|e| e.to_string())?;
-    if row.is_none() {
-        if get("koldstore_enabled") != Some("true") && get("koldstore_enabled") != Some("on") {
-            return Err("initial management requires koldstore_enabled = true".into());
-        }
-        let storage =
-            get("koldstore_storage").ok_or("initial management requires koldstore_storage")?;
-        let hot = get("koldstore_hot_row_limit")
-            .map(str::parse::<i64>)
-            .transpose()
-            .map_err(|_| "hot_row_limit must be a positive integer")?;
-        if hot.is_none() && get("koldstore_move_after").is_none() {
-            return Err("initial management requires hot_row_limit or move_after".into());
-        }
-        let min = get("koldstore_min_flush_rows")
-            .unwrap_or("1000")
-            .parse()
-            .map_err(|_| "min_flush_rows must be a positive integer")?;
-        let file = get("koldstore_max_rows_per_file")
-            .unwrap_or("1000")
-            .parse()
-            .map_err(|_| "max_rows_per_file must be a positive integer")?;
-        crate::sql::migrate_pg::manage_table_pg(
-            table_oid,
-            storage,
-            hot.or(Some(1)),
-            min,
-            file,
-            "shared",
-            None,
-            None,
-            None,
-            None,
-            "strict",
-            true,
-        );
+    Ok(())
+}
+
+#[cfg(feature = "pg")]
+fn ensure_initial_management(
+    table_oid: pgrx::pg_sys::Oid,
+    values: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let enabled = option_value(values, "koldstore_enabled")
+        .map(|value| value.to_ascii_lowercase());
+    if !matches!(enabled.as_deref(), Some("true" | "on" | "1")) {
+        return Err("initial management requires koldstore_enabled = true".into());
     }
-    let current = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
-        catalog_lookup,
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map_err(|e| e.to_string())?
-    .ok_or("table management catalog row is missing")?;
-    if let Some(requested) = get("koldstore_storage") {
-        if current.0["storage"].as_str() != Some(requested) {
-            return Err("storage cannot be changed after a table is managed".into());
-        }
+    let storage = option_value(values, "koldstore_storage")
+        .ok_or("initial management requires koldstore_storage")?;
+    let hot = option_value(values, "koldstore_hot_row_limit")
+        .map(str::parse::<i64>)
+        .transpose()
+        .map_err(|_| "hot_row_limit must be a positive integer")?;
+    if hot.is_none() && option_value(values, "koldstore_move_after").is_none() {
+        return Err("initial management requires hot_row_limit or move_after".into());
     }
-    let mut options = koldstore_common::ManageTableOptions::from_value(&current.0["options"]);
-    let old = options.flush_policy();
-    let min = get("koldstore_min_flush_rows")
+    let min = option_value(values, "koldstore_min_flush_rows")
+        .unwrap_or("1000")
+        .parse()
+        .map_err(|_| "min_flush_rows must be a positive integer")?;
+    let file = option_value(values, "koldstore_max_rows_per_file")
+        .unwrap_or("1000")
+        .parse()
+        .map_err(|_| "max_rows_per_file must be a positive integer")?;
+    crate::sql::migrate_pg::manage_table_pg(
+        table_oid,
+        storage,
+        hot.or(Some(1)),
+        min,
+        file,
+        "shared",
+        None,
+        None,
+        None,
+        None,
+        "strict",
+        true,
+    );
+    Ok(())
+}
+
+#[cfg(feature = "pg")]
+fn resolve_flush_batching(
+    values: &std::collections::HashMap<String, String>,
+    old: Option<&koldstore_common::FlushPolicy>,
+) -> Result<(u64, u64, u64), String> {
+    let min = option_value(values, "koldstore_min_flush_rows")
         .map(str::parse)
         .transpose()
         .map_err(|_| "min_flush_rows must be positive")?
         .unwrap_or_else(|| {
-            old.as_ref()
-                .map(koldstore_common::FlushPolicy::min_flush_rows)
-                .unwrap_or(1000)
+            old.map(koldstore_common::FlushPolicy::min_flush_rows)
+                .unwrap_or(1_000)
         });
-    let file = get("koldstore_max_rows_per_file")
+    let file = option_value(values, "koldstore_max_rows_per_file")
         .map(str::parse)
         .transpose()
         .map_err(|_| "max_rows_per_file must be positive")?
         .unwrap_or_else(|| {
-            old.as_ref()
-                .map(koldstore_common::FlushPolicy::max_rows_per_file)
-                .unwrap_or(1000)
+            old.map(koldstore_common::FlushPolicy::max_rows_per_file)
+                .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE)
         });
-    let max = get("koldstore_max_rows_per_flush")
+    let max = option_value(values, "koldstore_max_rows_per_flush")
         .map(str::parse)
         .transpose()
         .map_err(|_| "max_rows_per_flush must be positive")?
         .unwrap_or_else(|| {
-            old.as_ref()
-                .map(koldstore_common::FlushPolicy::max_rows_per_flush)
-                .unwrap_or(10_000)
+            old.map(koldstore_common::FlushPolicy::max_rows_per_flush)
+                .unwrap_or(koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH)
         });
     if min == 0 || file == 0 || max == 0 {
         return Err("flush batching settings must be greater than zero".into());
@@ -296,34 +318,30 @@ fn apply_management_options(
             .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE),
         None,
     )?;
-    let changes_batching = get("koldstore_min_flush_rows").is_some()
-        || get("koldstore_max_rows_per_file").is_some()
-        || get("koldstore_max_rows_per_flush").is_some();
+    Ok((min, file, max))
+}
+
+#[cfg(feature = "pg")]
+fn apply_flush_policy_updates(
+    options: &mut koldstore_common::ManageTableOptions,
+    values: &std::collections::HashMap<String, String>,
+    min: u64,
+    file: u64,
+    max: u64,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    let old = options.flush_policy();
+    let changes_batching = option_value(values, "koldstore_min_flush_rows").is_some()
+        || option_value(values, "koldstore_max_rows_per_file").is_some()
+        || option_value(values, "koldstore_max_rows_per_flush").is_some();
     if changes_batching
-        && get("koldstore_hot_row_limit").is_none()
-        && get("koldstore_move_after").is_none()
+        && option_value(values, "koldstore_hot_row_limit").is_none()
+        && option_value(values, "koldstore_move_after").is_none()
     {
-        options.flush_policy = old.clone().map(|policy| match policy {
-            koldstore_common::FlushPolicy::RowLimit { hot_row_limit, .. } => {
-                koldstore_common::FlushPolicy::RowLimit {
-                    hot_row_limit,
-                    min_flush_rows: min,
-                    max_rows_per_file: file,
-                    max_rows_per_flush: max,
-                }
-            }
-            koldstore_common::FlushPolicy::OlderThan { age, .. } => {
-                koldstore_common::FlushPolicy::OlderThan {
-                    age,
-                    min_flush_rows: min,
-                    max_rows_per_file: file,
-                    max_rows_per_flush: max,
-                }
-            }
-            policy @ koldstore_common::FlushPolicy::Filter { .. } => policy,
-        });
+        options.flush_policy = old.map(|policy| policy.with_batching(min, file, max));
     }
-    if let Some(value) = get("koldstore_hot_row_limit") {
+    if let Some(value) = option_value(values, "koldstore_hot_row_limit") {
         let hot_row_limit = value
             .parse()
             .map_err(|_| "hot_row_limit must be positive")?;
@@ -337,7 +355,7 @@ fn apply_management_options(
             max_rows_per_flush: max,
         });
     }
-    if let Some(value) = get("koldstore_move_after") {
+    if let Some(value) = option_value(values, "koldstore_move_after") {
         let interval = pgrx::Spi::get_one_with_args::<pgrx::datetime::Interval>(
             "SELECT $1::text::interval",
             &[DatumWithOid::from(value)],
@@ -356,6 +374,40 @@ fn apply_management_options(
             max_rows_per_flush: max,
         });
     }
+    Ok(())
+}
+
+#[cfg(feature = "pg")]
+fn apply_management_options(
+    table_oid: pgrx::pg_sys::Oid,
+    values: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    validate_management_option_conflicts(values)?;
+    let catalog_lookup = "SELECT (SELECT jsonb_build_object('storage', st.name, 'options', s.options) FROM koldstore.schemas s JOIN koldstore.storage st ON st.id=s.storage_id WHERE s.table_oid=$1)";
+    let row = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
+        catalog_lookup,
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|e| e.to_string())?;
+    if row.is_none() {
+        ensure_initial_management(table_oid, values)?;
+    }
+    let current = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
+        catalog_lookup,
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(|e| e.to_string())?
+    .ok_or("table management catalog row is missing")?;
+    if let Some(requested) = option_value(values, "koldstore_storage") {
+        if current.0["storage"].as_str() != Some(requested) {
+            return Err("storage cannot be changed after a table is managed".into());
+        }
+    }
+    let mut options = koldstore_common::ManageTableOptions::from_value(&current.0["options"]);
+    let (min, file, max) = resolve_flush_batching(values, options.flush_policy().as_ref())?;
+    apply_flush_policy_updates(&mut options, values, min, file, max)?;
     let json = pgrx::JsonB(options.to_value());
     pgrx::Spi::run_with_args(
         "UPDATE koldstore.schemas SET options=$2 WHERE table_oid=$1",

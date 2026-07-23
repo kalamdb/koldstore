@@ -2,6 +2,9 @@
 //!
 //! Hot path: one catalog scan that stops at the first due table, then
 //! `flush_table` (which ensures/claims the job). No separate enqueue SPI.
+//!
+//! Concurrent ticks never wait on an in-flight flush: if the table job lock is
+//! held (or a durable `running` flush job exists), the tick is skipped.
 
 use koldstore_common::ManageTableOptions;
 use koldstore_flush::scheduler_should_flush_parsed;
@@ -25,12 +28,16 @@ pub(crate) struct FlushTickResult {
     pub had_due_table: bool,
     /// True when the flush job finished as `completed`.
     pub completed: bool,
+    /// True when a due table was selected but skipped because a flush is already
+    /// running (advisory lock held or durable `running` job).
+    pub skipped_busy: bool,
 }
 
 /// Selects the first due auto-flush table, if any.
 ///
 /// Stops scanning as soon as one candidate passes policy (at most one flush
-/// per tick). Recent `error` jobs cool down for 60 seconds.
+/// per tick). Skips tables with an active `running` flush job and cools down
+/// recent `error` jobs for 60 seconds.
 fn select_first_due_auto_flush_table() -> Result<Option<u32>, String> {
     pgrx::Spi::connect(|client| -> Result<Option<u32>, String> {
         let sql = format!(
@@ -43,6 +50,13 @@ LEFT JOIN koldstore.manifest m
   ON m.table_oid = s.table_oid
  AND m.scope_key = ''
 WHERE {AUTO_FLUSH_TABLE_PREDICATE}
+  AND NOT EXISTS (
+        SELECT 1
+        FROM koldstore.jobs j
+        WHERE j.table_oid = s.table_oid
+          AND j.job_type = 'flush'
+          AND j.status = 'running'
+      )
   AND NOT EXISTS (
         SELECT 1
         FROM koldstore.jobs j
@@ -132,18 +146,43 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
 }
 
 /// Evaluates auto-flush eligibility and runs at most one `flush_table`.
+///
+/// If another backend already holds the table flush lock, this tick is skipped
+/// immediately (no wait, no second concurrent flush).
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
+    // Clear durable `running` rows left without an owner so auto-flush is not
+    // permanently blocked (Phase D crash hygiene; no lease claimer).
+    let abandoned = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()?;
+    if abandoned > 0 {
+        pgrx::log!("koldstore flush scheduler: abandoned {abandoned} stuck running flush job(s)");
+    }
+
     let Some(table_oid) = select_first_due_auto_flush_table()? else {
         return Ok(FlushTickResult {
             had_due_table: false,
             completed: false,
+            skipped_busy: false,
         });
     };
     let oid = pgrx::pg_sys::Oid::from(table_oid);
-    // `flush_table` ensures/claims the job; no separate enqueue SPI.
+    // Non-blocking: a mid-flight flush (worker or manual) owns the lock.
+    if !crate::sql::job_lock_pg::try_lock_table_job(oid)? {
+        pgrx::log!(
+            "koldstore flush scheduler: skipping table_oid={} (flush already running)",
+            table_oid
+        );
+        return Ok(FlushTickResult {
+            had_due_table: true,
+            completed: false,
+            skipped_busy: true,
+        });
+    }
+    // `flush_table` re-acquires the same xact lock (reentrant) and ensures/claims
+    // the job; no separate enqueue SPI.
     let job_id = crate::sql::flush::execute::flush_table_pg_impl(oid, false)?;
     Ok(FlushTickResult {
         had_due_table: true,
         completed: flush_job_completed(job_id)?,
+        skipped_busy: false,
     })
 }

@@ -22,7 +22,7 @@ pub enum DropTableCleanupPolicy {
 pub enum DropTableCleanupOutcome {
     /// Local metadata is deactivated and object artifacts remain.
     MetadataDeactivated,
-    /// Object deletion is queued after metadata cleanup.
+    /// Object deletion should run after metadata cleanup (inline in the DROP hook).
     DeleteArtifactsQueued,
     /// Cleanup failed and operator recovery is required.
     RecoveryRequired,
@@ -47,11 +47,19 @@ pub struct DropTableCleanupPlan {
     pub policy: DropTableCleanupPolicy,
     /// Cleanup outcome.
     pub outcome: DropTableCleanupOutcome,
-    /// Parameterized statements to run.
+    /// Catalog statements (`$1` = table oid). Object GC is not SQL.
     pub statements: Vec<SqlStatement>,
+    /// Optional audit job row to insert after object GC (`$1` = table oid).
+    pub audit_job: Option<SqlStatement>,
 }
 
 /// Plans local metadata and object artifact cleanup for a managed DROP TABLE.
+///
+/// Cancel of active jobs is owned by the extension shell (`plan_cancel_jobs_for_drop`)
+/// so migrate stays free of flush-crate dependencies. Object-store GC for
+/// [`DropTableCleanupPolicy::Delete`] runs inline in the ProcessUtility hook
+/// (no background claimer yet); [`DropTableCleanupPlan::audit_job`] records
+/// completion afterward.
 ///
 /// # Errors
 ///
@@ -63,23 +71,32 @@ pub fn plan_drop_table_cleanup(
 ) -> Result<DropTableCleanupPlan, DropTableCleanupError> {
     let deactivate = plan_catalog_deactivation(table_oid)
         .map_err(|error| DropTableCleanupError::Sql(error.to_string()))?;
-    let mut statements = vec![deactivate];
+    let statements = vec![
+        deactivate,
+        plan_delete_cold_segments()?,
+        plan_delete_manifest()?,
+    ];
 
-    let outcome = match policy {
-        DropTableCleanupPolicy::Retain => DropTableCleanupOutcome::MetadataDeactivated,
-        DropTableCleanupPolicy::Delete => {
-            statements.push(plan_drop_table_cleanup_job(table_oid, "pending", 0, None)?);
-            DropTableCleanupOutcome::DeleteArtifactsQueued
-        }
-        DropTableCleanupPolicy::Failed => {
-            statements.push(plan_drop_table_cleanup_job(
+    let (outcome, audit_job) = match policy {
+        DropTableCleanupPolicy::Retain => (DropTableCleanupOutcome::MetadataDeactivated, None),
+        DropTableCleanupPolicy::Delete => (
+            DropTableCleanupOutcome::DeleteArtifactsQueued,
+            Some(plan_drop_table_cleanup_job(
+                table_oid,
+                "completed",
+                0,
+                None,
+            )?),
+        ),
+        DropTableCleanupPolicy::Failed => (
+            DropTableCleanupOutcome::RecoveryRequired,
+            Some(plan_drop_table_cleanup_job(
                 table_oid,
                 "error",
                 1,
                 Some("$2::text"),
-            )?);
-            DropTableCleanupOutcome::RecoveryRequired
-        }
+            )?),
+        ),
     };
 
     Ok(DropTableCleanupPlan {
@@ -88,7 +105,24 @@ pub fn plan_drop_table_cleanup(
         policy,
         outcome,
         statements,
+        audit_job,
     })
+}
+
+fn plan_delete_cold_segments() -> Result<SqlStatement, DropTableCleanupError> {
+    SqlStatement::write(
+        "drop table delete cold segments",
+        "DELETE FROM koldstore.cold_segments WHERE table_oid = $1::oid",
+    )
+    .map_err(|error| DropTableCleanupError::Sql(error.to_string()))
+}
+
+fn plan_delete_manifest() -> Result<SqlStatement, DropTableCleanupError> {
+    SqlStatement::write(
+        "drop table delete manifest",
+        "DELETE FROM koldstore.manifest WHERE table_oid = $1::oid",
+    )
+    .map_err(|error| DropTableCleanupError::Sql(error.to_string()))
 }
 
 fn plan_drop_table_cleanup_job(
@@ -99,10 +133,28 @@ fn plan_drop_table_cleanup_job(
 ) -> Result<SqlStatement, DropTableCleanupError> {
     let _ = table_oid;
     let error_trace = error_trace_param.unwrap_or("NULL");
+    let phase = match status {
+        "completed" => "finished",
+        "error" => "failed",
+        _ => "pending",
+    };
     SqlStatement::write(
         "drop table queue artifact cleanup",
         &format!(
-            "INSERT INTO koldstore.jobs (id, table_oid, job_type, status, attempts, error_trace) VALUES (gen_random_uuid(), $1, 'drop_table_cleanup', '{status}', {attempts}, {error_trace})"
+            r#"
+INSERT INTO koldstore.jobs (
+    id, table_oid, job_type, status, phase, attempts, error_trace, payload
+) VALUES (
+    gen_random_uuid(),
+    $1::oid,
+    'drop_table_cleanup',
+    '{status}',
+    '{phase}',
+    {attempts},
+    {error_trace},
+    jsonb_build_object('policy', 'delete')
+)
+"#
         ),
     )
     .map_err(|error| DropTableCleanupError::Sql(error.to_string()))

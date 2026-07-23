@@ -27,6 +27,7 @@ pub const FAILPOINT_NAMES: &[&str] = &[
     "during_hot_cleanup",
     "after_cleanup_before_job_complete",
     "after_job_complete_before_temp_cleanup",
+    "after_wave_progress",
     "async_mirror_apply",
     "async_mirror_apply_after_batch",
 ];

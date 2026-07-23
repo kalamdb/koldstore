@@ -83,13 +83,15 @@ pub struct ValidateColdStoragePlan {
     pub statement: SqlStatement,
 }
 
-/// Planned recovery query.
+/// Planned recovery query metadata for library callers / tests.
+///
+/// Live orphan recovery is executed inline by
+/// `koldstore.recover_segments` in `pg_koldstore` (LIST + pending expiry). This
+/// plan only carries the request; it does **not** enqueue jobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoverSegmentsPlan {
     /// Recovery request.
     pub request: RecoverSegmentsRequest,
-    /// Parameterized recovery/job statement.
-    pub statement: SqlStatement,
 }
 
 /// Planned `koldstore_exec` export/import boundary.
@@ -486,8 +488,31 @@ LEFT JOIN LATERAL (
             'phase', job_snapshot.phase,
             'rows_processed', job_snapshot.rows_processed,
             'rows_flushed', job_snapshot.rows_flushed,
+            'batches_completed', job_snapshot.batches_completed,
+            'progress_current', job_snapshot.progress_current,
+            'progress_total', job_snapshot.progress_total,
+            'progress_unit', job_snapshot.progress_unit,
             'checkpoint_seq', job_snapshot.checkpoint_seq,
             'checkpoint_commit_seq', job_snapshot.checkpoint_commit_seq,
+            'duration_ms', COALESCE(
+                (job_snapshot.payload->>'duration_ms')::bigint,
+                GREATEST(
+                    0,
+                    (EXTRACT(EPOCH FROM (
+                        CASE
+                            WHEN job_snapshot.status IN (
+                                'completed', 'error', 'cancelled', 'dry_run'
+                            )
+                                THEN job_snapshot.updated_at
+                            ELSE now()
+                        END
+                        - COALESCE(
+                            (job_snapshot.payload->>'started_at')::timestamptz,
+                            job_snapshot.created_at
+                        )
+                    )) * 1000)::bigint
+                )
+            ),
             'updated_at', job_snapshot.updated_at
         )
         ORDER BY job_snapshot.updated_at DESC, job_snapshot.id
@@ -500,8 +525,14 @@ LEFT JOIN LATERAL (
             phase,
             rows_processed,
             rows_flushed,
+            batches_completed,
+            progress_current,
+            progress_total,
+            progress_unit,
             checkpoint_seq,
             checkpoint_commit_seq,
+            payload,
+            created_at,
             updated_at
         FROM koldstore.jobs
         WHERE table_oid = s.table_oid
@@ -570,27 +601,23 @@ pub fn validate_cold_storage_plan(
     })
 }
 
-/// Plans `koldstore.recover_segments`.
+/// Builds a recovery request plan for library callers / contract tests.
+///
+/// Live execution is inline in the extension (`LIST` orphans, expire pending
+/// catalog rows, quarantine/delete objects). This helper does not enqueue jobs.
 ///
 /// # Errors
 ///
-/// Returns an error when SPI statement metadata cannot be prepared.
+/// Currently infallible; kept as `Result` for API stability with other ops plans.
 pub fn recover_segments_plan(
     table_name: Option<TableName>,
     dry_run: bool,
 ) -> Result<RecoverSegmentsPlan, OpsError> {
-    let statement = SqlStatement::write(
-        "recover segments",
-        "INSERT INTO koldstore.jobs (id, table_oid, job_type, status, attempts, error_trace) SELECT gen_random_uuid(), $1::regclass::oid, 'recover_segments', CASE WHEN $2::boolean THEN 'dry_run' ELSE 'pending' END, 0, NULL RETURNING id",
-    )
-    .map_err(|error| OpsError::Sql(error.to_string()))?;
-
     Ok(RecoverSegmentsPlan {
         request: RecoverSegmentsRequest {
             table_name,
             dry_run,
         },
-        statement,
     })
 }
 

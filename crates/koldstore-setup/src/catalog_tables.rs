@@ -31,7 +31,11 @@ pub const REQUIRED_CATALOG_TABLES: &[CatalogTableSpec] = &[
     },
     CatalogTableSpec {
         name: "koldstore.jobs",
-        purpose: "flush and migration work queue with lease fencing",
+        purpose: "flush and migration job rows with uniqueness guards",
+    },
+    CatalogTableSpec {
+        name: "koldstore.table_cancel_requests",
+        purpose: "cross-session cancel signals that avoid jobs-row lock contention",
     },
     CatalogTableSpec {
         name: "koldstore.cold_segments",

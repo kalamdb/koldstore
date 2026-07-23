@@ -88,7 +88,7 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
                 0.0
             },
         },
-        "retention": retention_health.clone(),
+        "retention": retention_health,
         // Compatibility alias for clients written before the threshold became
         // health-only. New consumers should read `retention`.
         "admission": retention_health,

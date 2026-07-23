@@ -25,11 +25,6 @@ fn guc_definitions_include_public_and_internal_settings() {
         .any(|guc| guc.name == "koldstore.max_open_parquet_readers"
             && !guc.internal
             && guc.default_value == "32"));
-    assert!(gucs
-        .iter()
-        .any(|guc| guc.name == "koldstore.max_running_jobs"
-            && !guc.internal
-            && guc.default_value == "4"));
     assert!(gucs.iter().any(|guc| guc.name == "koldstore.log_level"
         && !guc.internal
         && guc.default_value == "info"));

@@ -13,14 +13,15 @@ fn jobs_and_recovery_contract_covers_status_retries_and_idempotence() {
     )
     .unwrap();
 
-    assert!(recovery.statement.sql.contains("koldstore.jobs"));
-    assert!(recovery.statement.sql.contains("recover_segments"));
-    assert!(recovery.statement.sql.contains("attempts"));
-    assert!(recovery.statement.sql.contains("dry_run"));
+    assert!(!recovery.request.dry_run);
+    assert_eq!(
+        recovery.request.table_name.as_ref().map(|t| t.to_string()),
+        Some("app.items".to_string())
+    );
 }
 
 #[tokio::test]
-async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<()> {
+async fn jobs_are_durable_idempotent_and_use_active_indexes_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "jobs_and_recovery").await?;
         let table = db.create_indexed_items_table("job_items", 16).await?;
@@ -56,32 +57,6 @@ async fn jobs_are_durable_idempotent_and_use_claim_indexes_on_pgrx() -> Result<(
             &pending_plan,
             &[
                 "jobs_pending_idx",
-                "jobs_claimable_by_type_idx",
-                "jobs_claimable_idx",
-                "jobs_one_active_flush_per_scope_idx",
-            ],
-        )?;
-
-        let claim_plan = common::explain_with_seqscan_disabled(
-            &db.client,
-            r#"
-            SELECT id
-            FROM koldstore.jobs
-            WHERE job_type = 'flush'
-              AND status IN ('pending', 'running')
-              AND run_after <= now()
-              AND (status = 'pending' OR lease_expires_at IS NULL OR lease_expires_at < now())
-            ORDER BY priority DESC, updated_at, id
-            LIMIT 1
-            "#,
-        )
-        .await?;
-        common::assertions::assert_catalog_index_plan_uses_any(
-            &claim_plan,
-            &[
-                "jobs_claimable_by_type_idx",
-                "jobs_claimable_idx",
-                "jobs_pending_idx",
                 "jobs_one_active_flush_per_scope_idx",
                 "jobs_one_active_table_work_idx",
             ],
@@ -109,7 +84,6 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
                 r#"
                 SET koldstore.cold_reads = 'auto';
                 SET koldstore.max_open_parquet_readers = 32;
-                SET koldstore.max_running_jobs = 4;
                 SET koldstore.log_level = 'info';
                 "#,
             )
@@ -125,11 +99,6 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
             .query_one("SHOW koldstore.max_open_parquet_readers", &[])
             .await?
             .get::<_, String>(0);
-        let max_jobs = db
-            .client
-            .query_one("SHOW koldstore.max_running_jobs", &[])
-            .await?
-            .get::<_, String>(0);
         let log_level = db
             .client
             .query_one("SHOW koldstore.log_level", &[])
@@ -138,7 +107,6 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
 
         assert_eq!(cold_reads, "auto");
         assert_eq!(max_readers, "32");
-        assert_eq!(max_jobs, "4");
         assert_eq!(log_level, "info");
     }
 
@@ -292,6 +260,10 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                             && job.get("status").is_some()
                             && job.get("phase").is_some()
                             && job.get("rows_flushed").is_some()
+                            && job
+                                .get("duration_ms")
+                                .and_then(serde_json::Value::as_i64)
+                                .is_some()
                     })
                 }),
             "describe_table should expose job progress, got {status}"

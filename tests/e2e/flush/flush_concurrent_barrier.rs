@@ -7,7 +7,8 @@ use tokio_postgres::Row;
 use crate::common;
 use crate::flush::harness::{
     assert_flush_load_invariants, barrier_lock, barrier_unlock, connect_peer, connect_workers,
-    join_workers, spawn_barrier_workers, BARRIER_WORKER_LOOPS, WORKER_COUNT,
+    join_workers, spawn_barrier_workers, wait_until_barrier_waiter, BARRIER_WORKER_LOOPS,
+    WORKER_COUNT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -59,26 +60,29 @@ async fn flush_barrier_overlaps_ten_mixed_workers() -> Result<()> {
             }
         });
 
-        // Allow flush to reach the wait failpoint before workers pile on.
-        tokio::task::yield_now().await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Workers must start only after flush has selected rows and parked, so
+        // concurrent mutations overlap mid-flush rather than racing selection.
+        wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await?;
 
         let peers = connect_workers(&db, WORKER_COUNT).await?;
         let workers = spawn_barrier_workers(peers, table.relation.clone(), BARRIER_WORKER_LOOPS);
         join_workers(workers).await?;
 
         barrier_unlock(&coordinator).await?;
-        let _ = flush_handle.await??;
+        let first = flush_handle.await??;
 
         db.client
             .batch_execute("SET koldstore.failpoint = '';")
             .await
             .ok();
-        // Clean follow-up flush archives seed + concurrent worker mutations.
+        // Multi-wave catch-up may finish draining inside the paused flush after
+        // unlock; otherwise a clean follow-up archives leftover mirror rows.
         let cleaned = db.flush_table(&table.relation).await?;
         assert!(
-            cleaned > 0,
-            "expected clean follow-up flush to archive rows, got rows_flushed={cleaned}"
+            first.is_some() || cleaned > 0,
+            "expected paused flush and/or cleanup flush to archive rows \
+             (first_completed={}, cleaned={cleaned})",
+            first.is_some()
         );
 
         assert_flush_load_invariants(&db.client, &table.relation).await?;

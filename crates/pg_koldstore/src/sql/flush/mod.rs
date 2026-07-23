@@ -7,7 +7,7 @@ pub(crate) mod counters;
 #[cfg(feature = "pg")]
 pub(crate) mod execute;
 #[cfg(feature = "pg")]
-mod jobs;
+pub(crate) mod jobs;
 #[cfg(feature = "pg")]
 mod mirror_fetch;
 #[cfg(feature = "pg")]
@@ -193,4 +193,48 @@ pub fn flush_table_pg(
 ) -> pgrx::Uuid {
     execute::flush_table_pg_impl(table_name, force)
         .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
+}
+
+/// Lists KoldStore jobs for operator / UI polling.
+///
+/// SQL contract:
+/// `koldstore.list_jobs(statuses jsonb default null, job_types jsonb default null, table_name regclass default null)`.
+///
+/// `statuses` / `job_types` are optional JSON arrays of strings, for example
+/// `'["running","pending"]'::jsonb`. Returns a JSON array of job objects.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "list_jobs", schema = "koldstore", security_definer)]
+pub fn list_jobs_pg(
+    statuses: pgrx::default!(Option<pgrx::JsonB>, "NULL"),
+    job_types: pgrx::default!(Option<pgrx::JsonB>, "NULL"),
+    table_name: pgrx::default!(Option<pgrx::pg_sys::Oid>, "NULL"),
+) -> pgrx::JsonB {
+    let statuses = statuses.map(|value| value.0);
+    let job_types = job_types.map(|value| value.0);
+    jobs::list_jobs_json(statuses, job_types, table_name)
+        .map(pgrx::JsonB)
+        .unwrap_or_else(|error| pgrx::error!("list jobs failed: {error}"))
+}
+
+/// Requests cooperative cancel for one job.
+///
+/// SQL contract: `koldstore.cancel_job(job_id uuid) → boolean`
+/// (`true` when an active job was signalled).
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "cancel_job", schema = "koldstore", security_definer)]
+pub fn cancel_job_pg(job_id: pgrx::Uuid) -> bool {
+    let job_id = crate::spi::uuid_from_pgrx(job_id);
+    jobs::request_cancel_job(job_id)
+        .unwrap_or_else(|error| pgrx::error!("cancel job failed: {error}"))
+}
+
+/// Requests cooperative cancel for all active jobs on a table.
+///
+/// SQL contract: `koldstore.cancel_table_jobs(table_name regclass) → bigint`
+/// (number of jobs signalled or hard-cancelled).
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "cancel_table_jobs", schema = "koldstore", security_definer)]
+pub fn cancel_table_jobs_pg(table_name: pgrx::pg_sys::Oid) -> i64 {
+    jobs::request_cancel_table_jobs(table_name)
+        .unwrap_or_else(|error| pgrx::error!("cancel table jobs failed: {error}"))
 }

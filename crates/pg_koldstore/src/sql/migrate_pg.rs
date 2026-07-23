@@ -218,9 +218,15 @@ fn manage_table_pg_impl(
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     enqueue_migration_job(&plan)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let processed_rows =
-        run_existing_table_mirror_initialization_inline(&plan, &mirror_plan, &primary_key_shape)
-            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    mark_migration_job_running(job_id, table_oid_u32, 0)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let processed_rows = run_existing_table_mirror_initialization_inline(
+        &plan,
+        &mirror_plan,
+        &primary_key_shape,
+        job_id,
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     apply_user_scope_policy(&plan.table, plan.effective_scope_column.as_deref())
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     complete_migration_job(job_id, table_oid_u32, processed_rows)
@@ -655,6 +661,54 @@ fn enqueue_migration_job(
 }
 
 #[cfg(feature = "pg")]
+fn mark_migration_job_running(
+    job_id: Uuid,
+    table_oid: u32,
+    progress_total: i64,
+) -> Result<(), String> {
+    use koldstore_migrate::jobs::plan_mark_migration_backfill_running;
+    use pgrx::datum::DatumWithOid;
+
+    let statement = plan_mark_migration_backfill_running().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
+        &[
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
+            DatumWithOid::from(progress_total),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(feature = "pg")]
+fn update_migration_job_progress(
+    job_id: Uuid,
+    table_oid: u32,
+    processed_rows: i64,
+    progress_total: i64,
+    batches_completed: i32,
+) -> Result<(), String> {
+    use koldstore_migrate::jobs::plan_update_migration_backfill_progress;
+    use pgrx::datum::DatumWithOid;
+
+    let statement = plan_update_migration_backfill_progress().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
+        &[
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
+            DatumWithOid::from(processed_rows),
+            DatumWithOid::from(progress_total),
+            DatumWithOid::from(batches_completed),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[cfg(feature = "pg")]
 fn complete_migration_job(job_id: Uuid, table_oid: u32, processed_rows: i64) -> Result<(), String> {
     use koldstore_migrate::jobs::plan_complete_migration_backfill_job;
     use pgrx::datum::DatumWithOid;
@@ -677,6 +731,7 @@ fn run_existing_table_mirror_initialization_inline(
     plan: &koldstore_migrate::ExistingTableMigrationPlan,
     mirror_plan: &koldstore_migrate::ChangeLogMirrorPlan,
     primary_key_shape: &koldstore_common::PrimaryKeyShape,
+    job_id: Uuid,
 ) -> Result<i64, String> {
     let batch = koldstore_migrate::backfill::plan_mirror_initialization_batch(
         &plan.table,
@@ -687,6 +742,7 @@ fn run_existing_table_mirror_initialization_inline(
     )
     .map_err(|error| error.to_string())?;
     let mut processed_rows = 0_i64;
+    let mut batches_completed = 0_i32;
     loop {
         let candidate_rows = crate::spi::execute_prepared(
             &batch.statement,
@@ -701,6 +757,14 @@ fn run_existing_table_mirror_initialization_inline(
             break;
         }
         processed_rows = processed_rows.saturating_add(candidate_rows);
+        batches_completed = batches_completed.saturating_add(1);
+        update_migration_job_progress(
+            job_id,
+            plan.table_oid,
+            processed_rows,
+            processed_rows,
+            batches_completed,
+        )?;
     }
 
     pgrx::Spi::run_with_args(
@@ -794,8 +858,7 @@ fn unmanage_table_pg_impl(
     use koldstore_migrate::rehydrate::{demigration_context, plan_demigration};
 
     let table_oid_u32 = table_oid.to_u32();
-    let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
-        .map_err(|error| error.to_string())?;
+    let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
     let table = koldstore_migrate::QualifiedTableName::parse(&relation)
         .map_err(|error| error.to_string())?;
     let mirror_table = crate::catalog::resolve::mirror_relation_by_table_oid(table_oid)?;

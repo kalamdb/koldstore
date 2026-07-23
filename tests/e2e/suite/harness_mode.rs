@@ -10,5 +10,5 @@ fn capture_mode_accepts_the_runner_values() {
         common::MirrorCaptureMode::parse("async").unwrap().as_str(),
         "async"
     );
-    assert!(common::MirrorCaptureMode::parse("unsupported").is_err());
+    assert!(common::MirrorCaptureMode::parse("unsupported").is_none());
 }

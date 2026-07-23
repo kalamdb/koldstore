@@ -1,6 +1,8 @@
 //! Existing-row mirror initialization settings and planning.
 
-use koldstore_common::{is_safe_identifier, quote_ident, PrimaryKeyColumnShape};
+use koldstore_common::{
+    is_safe_identifier, quote_ident, snowflake_default_expression, PrimaryKeyColumnShape,
+};
 use koldstore_mirror::{quoted_pk_columns, MirrorColumn};
 use thiserror::Error;
 
@@ -104,7 +106,7 @@ pub fn plan_mirror_initialization_batch(
     let mut insert_columns = pk_columns.clone();
     insert_columns.extend(MirrorColumn::insert_quoted_names());
     let mut select_columns = pk_columns.clone();
-    select_columns.extend(["SNOWFLAKE_ID()".to_string(), "1".to_string()]);
+    select_columns.extend([snowflake_default_expression().to_string(), "1".to_string()]);
     let order_direction = if ordering.ascending_oldest_first {
         "ASC"
     } else {

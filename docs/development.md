@@ -25,6 +25,32 @@ cargo nextest run --workspace --no-default-features \
 
 `e2e`, `examples`, `storage-comparison`, and `stress` need a prepared pgrx PostgreSQL; run them via `scripts/run-pg-e2e.sh`, `scripts/run-examples.sh` (`--mode strict|async`), `scripts/run-storage-comparison.sh`, and `scripts/run-chat-penetration.sh`.
 
+## Code-health audit
+
+Run these independently so each signal remains actionable:
+
+```bash
+# Unused direct dependencies. `#[path]`-included test modules are documented
+# through package-level cargo-machete ignores.
+cargo machete --with-metadata
+
+# Complexity. With no LCOV file, .cargo-crap.toml reports cyclomatic
+# complexity directly instead of assuming zero coverage.
+cargo crap --workspace --top 40
+
+# Exact normalized copy/paste blocks (report-only by default).
+scripts/find-rust-duplicates.py crates tests
+
+# Compiler-backed redundancy and complexity checks.
+cargo clippy -p pg_koldstore --no-default-features --features pg16 -- \
+  -W clippy::complexity -W clippy::perf -W clippy::redundant_clone
+```
+
+When LCOV data is available, pass it to `cargo crap --lcov path/to/lcov.info`
+to combine complexity with real line coverage. Use `--baseline` and
+`--fail-regression` for CI or review gates; do not fail legacy code merely
+because it predates the current threshold.
+
 ## Production-readiness test layers
 
 ```bash

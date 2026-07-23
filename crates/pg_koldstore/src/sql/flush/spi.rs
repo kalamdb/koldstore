@@ -18,13 +18,26 @@ pub(crate) fn resolve_flush_stats(
     force: bool,
 ) -> Result<ResolvedFlushSelection, String> {
     use koldstore_common::MirrorOperation;
-    use koldstore_flush::{resolve_force_flush_selection, resolve_policy_flush_selection};
+    use koldstore_flush::{
+        apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
+        FORCE_FLUSH_WAVE_ROW_CAP,
+    };
 
     if force {
         let all = mirror_flush_stats(table_oid)?;
         let delete_code = MirrorOperation::Delete.code();
         let delete_stats = mirror_op_stats(table_oid, delete_code)?;
-        return Ok(resolve_force_flush_selection(all, delete_stats));
+        let selection = resolve_force_flush_selection(all, delete_stats);
+        // Cap large force mirrors into waves so encode/publish peak stays bounded.
+        if selection.mirror_ops.is_none() && selection.stats.row_count > FORCE_FLUSH_WAVE_ROW_CAP {
+            let cutoff = mirror_oldest_rows_cutoff(table_oid, FORCE_FLUSH_WAVE_ROW_CAP)?;
+            return Ok(apply_force_flush_wave_cap(
+                selection,
+                FORCE_FLUSH_WAVE_ROW_CAP,
+                Some(cutoff),
+            ));
+        }
+        return Ok(selection);
     }
 
     // PERFORMANCE: Prefer O(1) manifest counters over COUNT(*) on the mirror.
@@ -231,16 +244,6 @@ pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i3
     crate::spi::select_one::<i32>(&statement, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "batch number lookup returned no rows".to_string())
-}
-
-pub(super) fn publishable_cold_segment_count(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
-    use pgrx::datum::DatumWithOid;
-
-    let statement = koldstore_catalog::queries::plan_publishable_cold_segment_count()
-        .map_err(|error| error.to_string())?;
-    crate::spi::select_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "cold segment count lookup returned no rows".to_string())
 }
 
 pub(super) fn manifest_from_publishable_cold_segments(
@@ -725,6 +728,23 @@ fn mirror_flush_stats(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStats, String
         .ok_or_else(|| "flush stats lookup returned no rows".to_string())?;
     let stats: MirrorSeqStats = serde_json::from_str(&json).map_err(|error| error.to_string())?;
     Ok(stats.into())
+}
+
+/// Mirror `max(seq)` at flush-job start, used to pin multi-wave catch-up.
+pub(super) fn mirror_catchup_watermark(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<i64>, String> {
+    let stats = mirror_flush_stats(table_oid)?;
+    if stats.row_count <= 0 || stats.max_seq <= 0 {
+        Ok(None)
+    } else {
+        Ok(Some(stats.max_seq))
+    }
+}
+
+/// Row count for the flush progress bar at claim time (mirror backlog size).
+pub(super) fn mirror_catchup_row_estimate(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    Ok(mirror_flush_stats(table_oid)?.row_count.max(0))
 }
 
 fn mirror_op_stats(table_oid: pgrx::pg_sys::Oid, op: i16) -> Result<FlushStats, String> {

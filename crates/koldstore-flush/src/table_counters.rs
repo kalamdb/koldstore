@@ -28,11 +28,25 @@ pub enum TableCounterError {
     Sql(String),
 }
 
-/// PERFORMANCE: Mirror rows fetched per SPI round-trip during flush.
+/// PERFORMANCE: Absolute ceiling for mirror rows fetched per SPI round-trip.
 ///
-/// Keeps peak memory bounded. Rows are decoded directly from SPI heap tuples (no `jsonb_agg`).
-/// Tune with care when changing flush latency or memory trade-offs.
-pub const FLUSH_MIRROR_FETCH_BATCH_SIZE: i64 = 32_768;
+/// Keep this modest so a misconfigured `max_rows_per_file` cannot decode tens of
+/// thousands of typed rows into backend RSS. Policy flushes further cap via
+/// [`flush_mirror_fetch_limit`].
+pub const FLUSH_MIRROR_FETCH_BATCH_SIZE: i64 = 4_096;
+
+/// Resolves the SPI page size for one mirror fetch during flush.
+///
+/// Caps by `max_rows_per_file` so decode + encode peak memory stays near one
+/// Parquet segment, not an unbounded SPI page.
+#[must_use]
+pub fn flush_mirror_fetch_limit(max_rows_per_file: usize) -> i64 {
+    if max_rows_per_file == 0 || max_rows_per_file == usize::MAX {
+        return FLUSH_MIRROR_FETCH_BATCH_SIZE;
+    }
+    let per_file = i64::try_from(max_rows_per_file).unwrap_or(FLUSH_MIRROR_FETCH_BATCH_SIZE);
+    per_file.clamp(1, FLUSH_MIRROR_FETCH_BATCH_SIZE)
+}
 
 /// Plans a read of cached row counters from `koldstore.manifest`.
 ///
@@ -129,4 +143,32 @@ SELECT koldstore.internal_refresh_row_counts(
         [koldstore_common::SqlParamType::Oid],
     )
     .map_err(|error| TableCounterError::Sql(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{flush_mirror_fetch_limit, FLUSH_MIRROR_FETCH_BATCH_SIZE};
+
+    #[test]
+    fn fetch_limit_caps_to_max_rows_per_file() {
+        assert_eq!(flush_mirror_fetch_limit(1_000), 1_000);
+        assert_eq!(flush_mirror_fetch_limit(100), 100);
+    }
+
+    #[test]
+    fn fetch_limit_uses_ceiling_when_file_cap_unbounded() {
+        assert_eq!(
+            flush_mirror_fetch_limit(usize::MAX),
+            FLUSH_MIRROR_FETCH_BATCH_SIZE
+        );
+        assert_eq!(flush_mirror_fetch_limit(0), FLUSH_MIRROR_FETCH_BATCH_SIZE);
+    }
+
+    #[test]
+    fn fetch_limit_never_exceeds_absolute_ceiling() {
+        assert_eq!(
+            flush_mirror_fetch_limit(100_000),
+            FLUSH_MIRROR_FETCH_BATCH_SIZE
+        );
+    }
 }

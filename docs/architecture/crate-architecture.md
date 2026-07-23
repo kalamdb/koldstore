@@ -101,10 +101,9 @@ flowchart BT
 
 `koldstore-setup` is a dependency-free SQL classifier (no `koldstore-*` edges).
 `koldstore-worker` is a leaf crate with no internal `koldstore-*` dependencies
-(shared job lease/status plus DB worker ensure/task/policy). Pure scheduling
-policy, including the bounded immediate-pending retry budget, stays here;
-`pg_koldstore::database_worker` owns latch, signal, SPI-transaction, and GUC
-integration.
+(DB worker ensure/task/policy). Pure scheduling policy, including the bounded
+immediate-pending retry budget, stays here; `pg_koldstore::database_worker`
+owns latch, signal, SPI-transaction, and GUC integration.
 **Rules:**
 
 1. Arrows point only into lower layers — no crate depends on `pg_koldstore`.

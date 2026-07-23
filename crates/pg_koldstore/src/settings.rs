@@ -5,8 +5,6 @@
 
 /// Default cold-read mode.
 pub const DEFAULT_COLD_READS: &str = "auto";
-/// Default maximum concurrently running background jobs.
-pub const DEFAULT_MAX_RUNNING_JOBS: i32 = 4;
 /// Default maximum globally open Parquet readers.
 pub const DEFAULT_MAX_OPEN_PARQUET_READERS: i32 = 32;
 /// Default extension log level.
@@ -20,7 +18,6 @@ pub const MAX_CONCURRENCY_LIMIT: i32 = 1024;
 /// Names of public GUCs owned by pg-koldstore.
 pub const COLD_READS_GUC: &str = "koldstore.cold_reads";
 pub const MAX_OPEN_PARQUET_READERS_GUC: &str = "koldstore.max_open_parquet_readers";
-pub const MAX_RUNNING_JOBS_GUC: &str = "koldstore.max_running_jobs";
 pub const LOG_LEVEL_GUC: &str = "koldstore.log_level";
 /// GUC that sets the minimum allowed `max_rows_per_file` for managed tables.
 pub const MIN_MAX_ROWS_PER_FILE_GUC: &str = "koldstore.min_max_rows_per_file";
