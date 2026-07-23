@@ -574,7 +574,11 @@ fn explain_mirror_scan(es: *mut pg_sys::ExplainState, execution: Option<&ScanExe
             explain_text(
                 es,
                 "Status",
-                if execution.cold_rows > 0 { "executed" } else { "not executed" },
+                if execution.cold_rows > 0 {
+                    "executed"
+                } else {
+                    "not executed"
+                },
             );
             explain_integer(es, "Rows Scanned", None, execution.mirror_rows as i64);
             explain_integer(
