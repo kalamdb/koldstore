@@ -89,7 +89,7 @@ UPDATE koldstore.jobs
 SET status = 'running',
     phase = 'writing',
     attempts = CASE WHEN attempts = 0 THEN 1 ELSE attempts END,
-    payload = payload || jsonb_build_object('started_at', now()),
+    payload = payload || jsonb_build_object('started_at', COALESCE(payload->'started_at', to_jsonb(now()))),
     last_heartbeat_at = now(),
     updated_at = now()
 WHERE id = $1::uuid
