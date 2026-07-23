@@ -241,8 +241,9 @@ fn ensure_initial_management(
     table_oid: pgrx::pg_sys::Oid,
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
-    let enabled = option_value(values, "koldstore_enabled");
-    if enabled != Some("true") && enabled != Some("on") {
+    let enabled = option_value(values, "koldstore_enabled")
+        .map(|value| value.to_ascii_lowercase());
+    if !matches!(enabled.as_deref(), Some("true" | "on" | "1")) {
         return Err("initial management requires koldstore_enabled = true".into());
     }
     let storage = option_value(values, "koldstore_storage")
