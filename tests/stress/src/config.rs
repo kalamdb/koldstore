@@ -48,11 +48,12 @@ impl StressConfig {
     /// Returns an error when packs or numeric knobs are invalid.
     pub fn from_env() -> Result<Self> {
         let packs = PackSet::from_env()?;
-        let mut mirror_mode = MirrorCaptureMode::parse(
-            &std::env::var(format!("{ENV_PREFIX}MIRROR_MODE")).unwrap_or_else(|_| "strict".into()),
-        )
-        .ok_or_else(|| {
-            anyhow::anyhow!("invalid {ENV_PREFIX}MIRROR_MODE; expected strict or async")
+        let mirror_mode_value =
+            std::env::var(format!("{ENV_PREFIX}MIRROR_MODE")).unwrap_or_else(|_| "strict".into());
+        let mut mirror_mode = MirrorCaptureMode::parse(&mirror_mode_value).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid {ENV_PREFIX}MIRROR_MODE={mirror_mode_value:?}; expected strict or async"
+            )
         })?;
         if packs.async_mirror() {
             mirror_mode = MirrorCaptureMode::Async;
