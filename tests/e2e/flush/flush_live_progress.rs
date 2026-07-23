@@ -17,7 +17,7 @@ async fn list_jobs_and_flush_progress_fields_are_populated() -> Result<()> {
                 relation = table.relation
             ))
             .await
-            .ok();
+            .context("set_table_auto_flush(false)")?;
 
         let job_id = db
             .client
