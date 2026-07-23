@@ -150,6 +150,13 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
 /// If another backend already holds the table flush lock, this tick is skipped
 /// immediately (no wait, no second concurrent flush).
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
+    // Clear durable `running` rows left without an owner so auto-flush is not
+    // permanently blocked (Phase D crash hygiene; no lease claimer).
+    let abandoned = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()?;
+    if abandoned > 0 {
+        pgrx::log!("koldstore flush scheduler: abandoned {abandoned} stuck running flush job(s)");
+    }
+
     let Some(table_oid) = select_first_due_auto_flush_table()? else {
         return Ok(FlushTickResult {
             had_due_table: false,

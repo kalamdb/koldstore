@@ -43,25 +43,7 @@ pub const REQUIRED_CATALOG_INDEXES: &[CatalogIndexSpec] = &[
         name: "jobs_pending_idx",
         table: "koldstore.jobs",
         unique: false,
-        purpose: "legacy pending/running job lookup compatibility",
-    },
-    CatalogIndexSpec {
-        name: "jobs_claimable_idx",
-        table: "koldstore.jobs",
-        unique: false,
-        purpose: "lease-aware job claiming across job types",
-    },
-    CatalogIndexSpec {
-        name: "jobs_claimable_by_type_idx",
-        table: "koldstore.jobs",
-        unique: false,
-        purpose: "lease-aware claiming for one job type",
-    },
-    CatalogIndexSpec {
-        name: "jobs_running_lease_idx",
-        table: "koldstore.jobs",
-        unique: false,
-        purpose: "stale running lease recovery",
+        purpose: "pending/running job lookup by table and scope",
     },
     CatalogIndexSpec {
         name: "jobs_one_active_flush_per_scope_idx",

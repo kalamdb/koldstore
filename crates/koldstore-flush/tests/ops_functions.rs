@@ -83,7 +83,11 @@ fn operational_functions_build_parameterized_catalog_plans() {
 
     let recovery = koldstore_flush::ops::recover_segments_plan(Some(table), false).unwrap();
     assert!(!recovery.request.dry_run);
-    assert!(recovery.statement.sql.contains("koldstore.jobs"));
+    assert!(recovery
+        .request
+        .table_name
+        .as_ref()
+        .is_some_and(|name| name.to_string() == "app.items"));
 }
 
 #[test]

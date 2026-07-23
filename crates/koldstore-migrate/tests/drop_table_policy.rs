@@ -24,12 +24,16 @@ fn drop_table_cleanup_plan_records_retain_delete_and_failed_policies() {
     assert!(delete
         .statements
         .iter()
-        .any(|statement| statement.sql.contains("drop_table_cleanup")));
+        .any(|statement| statement.sql.contains("cold_segments")));
+    assert!(delete
+        .audit_job
+        .as_ref()
+        .is_some_and(|statement| statement.sql.contains("drop_table_cleanup")));
 
     let failed = plan_drop_table_cleanup(table, 42, DropTableCleanupPolicy::Failed).unwrap();
     assert_eq!(failed.outcome, DropTableCleanupOutcome::RecoveryRequired);
     assert!(failed
-        .statements
-        .iter()
-        .any(|statement| statement.sql.contains("error_trace")));
+        .audit_job
+        .as_ref()
+        .is_some_and(|statement| statement.sql.contains("error_trace")));
 }

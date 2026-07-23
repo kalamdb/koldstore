@@ -14,9 +14,6 @@ static COLD_READS: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::
 static MAX_OPEN_PARQUET_READERS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_MAX_OPEN_PARQUET_READERS);
 #[cfg(feature = "pg")]
-static MAX_RUNNING_JOBS: GucSetting<i32> =
-    GucSetting::<i32>::new(settings::DEFAULT_MAX_RUNNING_JOBS);
-#[cfg(feature = "pg")]
 static LOG_LEVEL: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c"info"));
 #[cfg(feature = "pg")]
 static ENABLE_MERGE_SCAN: GucSetting<bool> = GucSetting::<bool>::new(true);
@@ -73,16 +70,6 @@ pub fn define_gucs() {
         c"Maximum open KoldStore Parquet readers.",
         c"Caps concurrent open Parquet readers per PostgreSQL backend (fail-fast when exceeded).",
         &MAX_OPEN_PARQUET_READERS,
-        settings::MIN_CONCURRENCY_LIMIT,
-        settings::MAX_CONCURRENCY_LIMIT,
-        GucContext::Userset,
-        flags,
-    );
-    GucRegistry::define_int_guc(
-        c"koldstore.max_running_jobs",
-        c"Maximum running KoldStore jobs.",
-        c"Caps concurrently claimed KoldStore jobs.",
-        &MAX_RUNNING_JOBS,
         settings::MIN_CONCURRENCY_LIMIT,
         settings::MAX_CONCURRENCY_LIMIT,
         GucContext::Userset,
@@ -269,11 +256,6 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "32",
         },
         GucDefinition {
-            name: settings::MAX_RUNNING_JOBS_GUC,
-            internal: false,
-            default_value: "4",
-        },
-        GucDefinition {
             name: settings::LOG_LEVEL_GUC,
             internal: false,
             default_value: settings::DEFAULT_LOG_LEVEL,
@@ -413,20 +395,6 @@ pub fn max_open_parquet_readers() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_MAX_OPEN_PARQUET_READERS
-    }
-}
-
-/// Current maximum running jobs.
-#[must_use]
-pub fn max_running_jobs() -> i32 {
-    #[cfg(feature = "pg")]
-    {
-        settings::bounded_concurrency_limit(MAX_RUNNING_JOBS.get())
-    }
-
-    #[cfg(not(feature = "pg"))]
-    {
-        settings::DEFAULT_MAX_RUNNING_JOBS
     }
 }
 

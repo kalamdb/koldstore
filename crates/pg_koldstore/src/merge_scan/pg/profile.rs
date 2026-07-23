@@ -445,10 +445,12 @@ fn explain_cold_scan(
     execution: Option<&ScanExecutionProfile>,
     show_timing: bool,
 ) {
-    let executed = execution.is_some();
+    // Plan-only EXPLAIN must not look "executed" just because a planned profile
+    // carries placeholder timing (e.g. manifest_read_ms: Some(0.0)).
+    let analyze = explain_is_analyze(es);
     explain_open_group(es, "Cold Scan", Some("Cold Scan"), true);
     let cold_accessed = profile.manifest_read_ms.is_some();
-    let status = if executed {
+    let status = if analyze {
         if cold_accessed {
             "executed"
         } else {
@@ -479,7 +481,7 @@ fn explain_cold_scan(
         None,
         profile.segments_pruned_min_max as i64,
     );
-    if executed {
+    if analyze {
         explain_integer(
             es,
             "Parquet Segments Opened",
@@ -506,7 +508,7 @@ fn explain_cold_scan(
     let bytes_fetched = profile.bytes_fetched();
     let footer_cache_hits = profile.footer_cache_hits();
 
-    if cold_accessed || row_groups_total > 0 || bytes_fetched > 0 {
+    if analyze && (cold_accessed || row_groups_total > 0 || bytes_fetched > 0) {
         explain_integer(es, "Row Groups Read", None, row_groups_selected as i64);
         if row_groups_total > 0 {
             explain_integer(es, "Row Groups Total", None, row_groups_total as i64);
@@ -558,7 +560,7 @@ fn explain_cold_scan(
     explain_open_group(es, "Parquet Segments", Some("Parquet Segments"), false);
     for segment in &profile.segments {
         explain_open_group(es, "Parquet Segment", None, true);
-        explain_segment(es, segment, show_timing, executed);
+        explain_segment(es, segment, show_timing, analyze);
         explain_close_group(es, "Parquet Segment", None, true);
     }
     explain_close_group(es, "Parquet Segments", Some("Parquet Segments"), false);
@@ -786,6 +788,13 @@ impl ColdReadProfile {
             .filter(|parquet| parquet.footer_cache_hit)
             .count()
     }
+}
+
+fn explain_is_analyze(es: *mut pg_sys::ExplainState) -> bool {
+    if es.is_null() {
+        return false;
+    }
+    unsafe { (*es).analyze }
 }
 
 fn explain_wants_timing(es: *mut pg_sys::ExplainState) -> bool {

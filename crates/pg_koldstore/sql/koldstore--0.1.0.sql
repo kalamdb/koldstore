@@ -144,45 +144,29 @@ CREATE TABLE IF NOT EXISTS koldstore.jobs (
   job_type text NOT NULL,
   status text NOT NULL CHECK (status IN ('pending', 'running', 'dry_run', 'completed', 'cancelled', 'error')),
   phase text NOT NULL DEFAULT 'pending',
-  priority integer NOT NULL DEFAULT 0,
-  run_after timestamptz NOT NULL DEFAULT now(),
-  lease_owner uuid,
-  lease_expires_at timestamptz,
-  lease_epoch bigint NOT NULL DEFAULT 0,
   flush_seq_upper_bound bigint,
   checkpoint_seq bigint NOT NULL DEFAULT 0,
   checkpoint_commit_seq bigint NOT NULL DEFAULT 0,
   batches_completed integer NOT NULL DEFAULT 0,
   rows_processed bigint NOT NULL DEFAULT 0,
   rows_flushed bigint NOT NULL DEFAULT 0,
+  progress_current bigint NOT NULL DEFAULT 0,
+  progress_total bigint NOT NULL DEFAULT 0,
+  progress_unit text NOT NULL DEFAULT '',
   attempts integer NOT NULL DEFAULT 0,
   error_trace text,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
-  last_heartbeat_at timestamptz,
+  cancel_requested_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
--- SCALABILITY: completed/cancelled/cancelled jobs are retained forever today. Add a
+-- SCALABILITY: completed/cancelled/error jobs are retained forever today. Add a
 -- retention/purge policy before high-frequency flush in production, or this
 -- table grows without bound (one row per flush/migrate).
 
 CREATE INDEX IF NOT EXISTS jobs_pending_idx
   ON koldstore.jobs (table_oid, scope_key, status, updated_at)
   WHERE status IN ('pending', 'running');
-
-CREATE INDEX IF NOT EXISTS jobs_claimable_idx
-  ON koldstore.jobs (status, run_after, priority DESC, updated_at, id)
-  INCLUDE (table_oid, scope_key, job_type, lease_expires_at, lease_epoch, flush_seq_upper_bound)
-  WHERE status IN ('pending', 'running');
-
-CREATE INDEX IF NOT EXISTS jobs_claimable_by_type_idx
-  ON koldstore.jobs (job_type, status, run_after, priority DESC, updated_at, id)
-  INCLUDE (table_oid, scope_key, lease_expires_at, lease_epoch, flush_seq_upper_bound)
-  WHERE status IN ('pending', 'running');
-
-CREATE INDEX IF NOT EXISTS jobs_running_lease_idx
-  ON koldstore.jobs (lease_expires_at, updated_at, id)
-  WHERE status = 'running';
 
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_flush_per_scope_idx
   ON koldstore.jobs (table_oid, scope_key)
@@ -195,6 +179,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_migration_per_table_idx
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_table_work_idx
   ON koldstore.jobs (table_oid)
   WHERE job_type IN ('flush', 'migrate_backfill') AND status IN ('pending', 'running');
+
+-- Cross-session cancel signal that does not contend with the flush transaction's
+-- row lock on koldstore.jobs (inline flush holds that lock for the whole statement).
+CREATE TABLE IF NOT EXISTS koldstore.table_cancel_requests (
+  table_oid oid PRIMARY KEY,
+  requested_at timestamptz NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   segment_id uuid PRIMARY KEY,
@@ -356,6 +347,7 @@ REVOKE ALL ON
   koldstore.schemas,
   koldstore.manifest,
   koldstore.jobs,
+  koldstore.table_cancel_requests,
   koldstore.cold_segments,
   koldstore.cold_segment_stats
 FROM PUBLIC;

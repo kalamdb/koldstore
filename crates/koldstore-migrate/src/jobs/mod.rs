@@ -196,7 +196,6 @@ INSERT INTO koldstore.jobs (
     job_type,
     status,
     phase,
-    priority,
     rows_processed,
     payload
 )
@@ -207,7 +206,6 @@ VALUES (
     'migrate_backfill',
     'pending',
     'initialize_mirror',
-    100,
     0,
     $3::jsonb
 )
@@ -241,10 +239,8 @@ INSERT INTO koldstore.jobs (
     job_type,
     status,
     phase,
-    priority,
     rows_processed,
     payload,
-    last_heartbeat_at,
     updated_at
 )
 VALUES (
@@ -254,7 +250,6 @@ VALUES (
     'migrate_backfill',
     'completed',
     'finished',
-    100,
     0,
     jsonb_build_object(
         'phase', 'finished',
@@ -264,9 +259,71 @@ VALUES (
         'scope_column', $6::text,
         'processed_rows', 0
     ),
-    now(),
     now()
 )
+"#,
+    )
+    .map_err(|error| MigrationJobError::Spi(error.to_string()))
+}
+
+/// Plans marking a migration backfill job as `running`.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_mark_migration_backfill_running() -> Result<SqlStatement, MigrationJobError> {
+    SqlStatement::write(
+        "mark migration backfill running",
+        r#"
+UPDATE koldstore.jobs
+SET status = 'running',
+    phase = 'initialize_mirror',
+    progress_unit = 'rows',
+    progress_total = GREATEST(progress_total, $3::bigint),
+    payload = jsonb_set(
+        jsonb_set(payload, '{phase}', '"initialize_mirror"'::jsonb, true),
+        '{started_at}',
+        to_jsonb(now()),
+        true
+    ),
+    updated_at = now()
+WHERE id = $1::uuid
+  AND table_oid = $2::oid
+  AND job_type = 'migrate_backfill'
+  AND status IN ('pending', 'running')
+"#,
+    )
+    .map_err(|error| MigrationJobError::Spi(error.to_string()))
+}
+
+/// Plans a mid-backfill progress update for a migration job.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_update_migration_backfill_progress() -> Result<SqlStatement, MigrationJobError> {
+    SqlStatement::write(
+        "update migration backfill progress",
+        r#"
+UPDATE koldstore.jobs
+SET status = 'running',
+    phase = 'initialize_mirror',
+    rows_processed = $3::bigint,
+    progress_current = $3::bigint,
+    progress_total = GREATEST(progress_total, $3::bigint, $4::bigint),
+    progress_unit = 'rows',
+    batches_completed = $5::integer,
+    payload = jsonb_set(
+        jsonb_set(payload, '{phase}', '"initialize_mirror"'::jsonb, true),
+        '{processed_rows}',
+        to_jsonb($3::bigint),
+        true
+    ),
+    updated_at = now()
+WHERE id = $1::uuid
+  AND table_oid = $2::oid
+  AND job_type = 'migrate_backfill'
+  AND status = 'running'
 "#,
     )
     .map_err(|error| MigrationJobError::Spi(error.to_string()))
@@ -285,6 +342,9 @@ UPDATE koldstore.jobs
 SET status = 'completed',
     phase = 'finished',
     rows_processed = $3::bigint,
+    progress_current = $3::bigint,
+    progress_total = GREATEST(progress_total, $3::bigint),
+    progress_unit = 'rows',
     batches_completed = GREATEST(batches_completed, CASE WHEN $3::bigint > 0 THEN 1 ELSE 0 END),
     payload = jsonb_set(
         jsonb_set(payload, '{phase}', '"finished"'::jsonb, true),
@@ -292,9 +352,6 @@ SET status = 'completed',
         to_jsonb($3::bigint),
         true
     ),
-    lease_owner = NULL,
-    lease_expires_at = NULL,
-    last_heartbeat_at = now(),
     updated_at = now()
 WHERE id = $1::uuid
   AND table_oid = $2::oid

@@ -730,6 +730,23 @@ fn mirror_flush_stats(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStats, String
     Ok(stats.into())
 }
 
+/// Mirror `max(seq)` at flush-job start, used to pin multi-wave catch-up.
+pub(super) fn mirror_catchup_watermark(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<i64>, String> {
+    let stats = mirror_flush_stats(table_oid)?;
+    if stats.row_count <= 0 || stats.max_seq <= 0 {
+        Ok(None)
+    } else {
+        Ok(Some(stats.max_seq))
+    }
+}
+
+/// Row count for the flush progress bar at claim time (mirror backlog size).
+pub(super) fn mirror_catchup_row_estimate(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+    Ok(mirror_flush_stats(table_oid)?.row_count.max(0))
+}
+
 fn mirror_op_stats(table_oid: pgrx::pg_sys::Oid, op: i16) -> Result<FlushStats, String> {
     let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
         .map_err(|error| error.to_string())?

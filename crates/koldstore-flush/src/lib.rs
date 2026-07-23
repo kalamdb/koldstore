@@ -38,8 +38,8 @@ pub use segment_write::{
 };
 pub use stats::{
     apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
-    validate_flush_row_selection, FlushStats, ResolvedFlushSelection, FORCE_FLUSH_WAVE_ROW_CAP,
-    FORCE_TOMBSTONE_ONLY_CAP,
+    should_continue_flush_catchup, should_start_catchup_wave, validate_flush_row_selection,
+    FlushStats, ResolvedFlushSelection, FORCE_FLUSH_WAVE_ROW_CAP, FORCE_TOMBSTONE_ONLY_CAP,
 };
 pub use table_counters::{
     flush_mirror_fetch_limit, plan_apply_flush_row_count_deltas, plan_bump_table_row_counts,
@@ -57,8 +57,12 @@ pub use koldstore_manifest::{
     write_manifest_to_path,
 };
 pub use table_jobs::{
-    plan_insert_inline_flush_job, plan_lookup_active_inline_flush_job,
-    plan_mark_inline_flush_job_completed, plan_mark_inline_flush_job_failed,
-    plan_mark_inline_flush_job_running, plan_update_inline_flush_job_progress, TableFlushJobError,
+    flush_phase, plan_abandon_running_flush_jobs, plan_cancel_jobs_for_drop,
+    plan_clear_table_cancel_request, plan_flush_cancel_requested, plan_insert_inline_flush_job,
+    plan_list_jobs, plan_list_running_flush_table_oids, plan_lookup_active_inline_flush_job,
+    plan_mark_inline_flush_job_cancelled, plan_mark_inline_flush_job_completed,
+    plan_mark_inline_flush_job_completed_after_cancel, plan_mark_inline_flush_job_failed,
+    plan_mark_inline_flush_job_running, plan_request_cancel_job, plan_request_cancel_table_jobs,
+    plan_update_inline_flush_job_progress, TableFlushJobError,
 };
 pub use write::FlushWriteChunk;

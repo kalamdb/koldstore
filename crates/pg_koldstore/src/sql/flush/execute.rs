@@ -9,8 +9,9 @@ use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
 use koldstore_catalog::ManagedTableSnapshot;
 use koldstore_common::{dedupe_nonblank, FlushPolicy, QualifiedTableName};
 use koldstore_flush::{
-    flush_mirror_fetch_limit, max_rows_per_file_from_policy, plan_apply_flush_row_count_deltas,
-    relative_manifest_path, stream_flush_chunks, validate_flush_row_selection,
+    flush_mirror_fetch_limit, flush_phase, max_rows_per_file_from_policy,
+    plan_apply_flush_row_count_deltas, relative_manifest_path, should_continue_flush_catchup,
+    should_start_catchup_wave, stream_flush_chunks, validate_flush_row_selection,
     write_flush_segment_with_client, FlushStats, FlushWriteChunk, ResolvedFlushSelection,
     StreamEncodeInput, TableFlushBatchOutcome, WrittenFlushSegment,
 };
@@ -18,14 +19,15 @@ use koldstore_manifest::write_manifest_with_client;
 use koldstore_storage::open_client_from_catalog_fields;
 
 use super::jobs::{
-    ensure_flush_job, mark_flush_job_completed, mark_flush_job_failed, mark_flush_job_running,
+    ensure_flush_job, flush_cancel_requested, mark_flush_job_cancelled, mark_flush_job_completed,
+    mark_flush_job_completed_after_cancel, mark_flush_job_failed, mark_flush_job_running,
     update_flush_job_progress,
 };
 use super::mirror_fetch::fetch_mirror_batch;
 use super::spi::{
     activate_flush_segments, capture_durable_wal_fence, lock_source_table_share_row_exclusive,
-    manifest_from_publishable_cold_segments, manifest_generation, next_flush_batch_number,
-    persist_flush_segment, prune_flushed_hot_rows, resolve_flush_stats,
+    manifest_from_publishable_cold_segments, manifest_generation, mirror_catchup_watermark,
+    next_flush_batch_number, persist_flush_segment, prune_flushed_hot_rows, resolve_flush_stats,
 };
 
 pub(super) struct FlushPreparedContext {
@@ -43,12 +45,14 @@ pub(super) struct FlushPreparedContext {
 fn claim_flush_job(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
-) -> Result<(uuid::Uuid, bool), String> {
+) -> Result<(uuid::Uuid, bool, i64), String> {
     crate::sql::job_lock_pg::lock_table_job(table_oid)?;
     let (job_id, force) = ensure_flush_job(table_oid, force)?;
-    mark_flush_job_running(job_id, table_oid)?;
+    // Estimate total rows for the progress bar from the current mirror backlog.
+    let progress_total = super::spi::mirror_catchup_row_estimate(table_oid)?;
+    mark_flush_job_running(job_id, table_oid, progress_total)?;
     crate::failpoints::hit("after_claim")?;
-    Ok((job_id, force))
+    Ok((job_id, force, progress_total))
 }
 
 fn load_flush_prepared_context(
@@ -474,9 +478,15 @@ pub(crate) fn flush_table_pg_impl(
     let phase0 = crate::async_mirror::apply::apply_bounded(
         crate::async_mirror::apply::BoundedApplyRequest::available_unlimited(),
     )?;
-    let (job_id, force) = claim_flush_job(table_oid, force)?;
+    let (job_id, force, progress_total) = claim_flush_job(table_oid, force)?;
     let job_uuid = crate::spi::uuid_to_pgrx(job_id);
-    match flush_after_claim(table_oid, force, job_id, phase0.last_applied) {
+    match flush_after_claim(
+        table_oid,
+        force,
+        job_id,
+        progress_total,
+        phase0.last_applied,
+    ) {
         Ok(()) => Ok(job_uuid),
         Err(error) => {
             mark_flush_job_failed(job_id, table_oid, &error)?;
@@ -492,6 +502,7 @@ fn flush_after_claim(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
     job_id: uuid::Uuid,
+    progress_total: i64,
     phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     let mut ctx = load_flush_prepared_context(table_oid, force, job_id)?;
@@ -502,7 +513,7 @@ fn flush_after_claim(
         Ok(false) => {}
         Err(error) => return Err(error),
     }
-    flush_prepared_table(table_oid, &ctx, phase0_applied)
+    flush_prepared_table(table_oid, &ctx, progress_total, phase0_applied)
 }
 
 /// Cap catch-up waves inside one flush job (each wave ≤ `max_rows_per_flush`).
@@ -514,6 +525,7 @@ const MAX_CATCHUP_WAVES_PER_JOB: u32 = 64;
 fn flush_prepared_table(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
+    progress_total: i64,
     phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     let mut total_rows_flushed = 0_i64;
@@ -522,6 +534,10 @@ fn flush_prepared_table(
     let mut last_max_commit_seq = 0_i64;
     let mut skip_through = phase0_applied;
     let mut waves = 0_u32;
+    // Pin the backlog visible at job start. Async fence apply can insert newer
+    // mirror rows while this transaction runs; chasing them turns one flush into
+    // an unbounded multi-wave hang under concurrent writers.
+    let catchup_upto_seq = mirror_catchup_watermark(table_oid)?;
 
     // One client per job: reused across waves for segment publish + manifest write.
     let client = open_client_from_catalog_fields(
@@ -533,23 +549,94 @@ fn flush_prepared_table(
     .map_err(|error| error.to_string())?;
 
     loop {
+        if flush_cancel_requested(ctx.job_id, table_oid)? {
+            return finish_flush_after_cancel(
+                ctx.job_id,
+                table_oid,
+                total_rows_flushed,
+                total_batches,
+                last_max_seq,
+                last_max_commit_seq,
+            );
+        }
+        update_flush_job_progress(
+            ctx.job_id,
+            table_oid,
+            total_rows_flushed,
+            total_batches,
+            last_max_seq,
+            last_max_commit_seq,
+            flush_phase::SELECTING,
+            progress_total,
+        )?;
         let selection = resolve_flush_stats(table_oid, ctx.force)?;
         crate::failpoints::hit("after_select_rows")?;
-        if selection.stats.row_count == 0 {
+        // Re-check after the select barrier so peer cancel/DROP can stop work
+        // before object writes begin.
+        if flush_cancel_requested(ctx.job_id, table_oid)? {
+            release_flush_memory(table_oid);
+            return finish_flush_after_cancel(
+                ctx.job_id,
+                table_oid,
+                total_rows_flushed,
+                total_batches,
+                last_max_seq,
+                last_max_commit_seq,
+            );
+        }
+        if !should_start_catchup_wave(
+            catchup_upto_seq,
+            selection.stats.row_count,
+            selection.stats.min_seq,
+        ) {
             break;
         }
         waves = waves.saturating_add(1);
         pgrx::log!(
-            "koldstore flush: starting table={} wave={} rows={} max_seq={} force={}",
+            "koldstore flush: starting table={} wave={} rows={} max_seq={} force={} catchup_upto={:?}",
             ctx.relation.name,
             waves,
             selection.stats.row_count,
             selection.stats.max_seq,
-            ctx.force
+            ctx.force,
+            catchup_upto_seq
         );
+        update_flush_job_progress(
+            ctx.job_id,
+            table_oid,
+            total_rows_flushed,
+            total_batches,
+            last_max_seq,
+            last_max_commit_seq,
+            flush_phase::WRITING,
+            progress_total,
+        )?;
         let outcome = stream_write_flush_batches(table_oid, ctx, &selection, &client)?;
         let wave_batches =
             i32::try_from(outcome.pending_segment_ids.len()).map_err(|error| error.to_string())?;
+        // Cooperative cancel before publish: do not activate this wave.
+        if flush_cancel_requested(ctx.job_id, table_oid)? {
+            drop(outcome);
+            release_flush_memory(table_oid);
+            return finish_flush_after_cancel(
+                ctx.job_id,
+                table_oid,
+                total_rows_flushed,
+                total_batches,
+                last_max_seq,
+                last_max_commit_seq,
+            );
+        }
+        update_flush_job_progress(
+            ctx.job_id,
+            table_oid,
+            total_rows_flushed,
+            total_batches,
+            last_max_seq,
+            last_max_commit_seq,
+            flush_phase::ACTIVATING,
+            progress_total,
+        )?;
         finalize_flush(table_oid, ctx, &outcome, &client, skip_through)?;
         // Later waves have no async phase-0 boundary to skip through.
         skip_through = None;
@@ -570,13 +657,18 @@ fn flush_prepared_table(
             total_batches,
             last_max_seq,
             last_max_commit_seq,
+            flush_phase::WRITING,
+            progress_total,
         )?;
 
-        // Policy and force waves are both row-capped; keep draining until under
-        // the catch-up budget (force no longer dumps the entire mirror in one wave).
-        if waves >= MAX_CATCHUP_WAVES_PER_JOB {
+        // Policy and force waves are both row-capped; keep draining the pinned
+        // start-of-job watermark (not rows applied during this flush).
+        let more_waves = waves < MAX_CATCHUP_WAVES_PER_JOB
+            && should_continue_flush_catchup(catchup_upto_seq, last_max_seq);
+        if !more_waves {
             break;
         }
+        crate::failpoints::hit("after_wave_progress")?;
     }
 
     mark_flush_job_completed(
@@ -587,6 +679,32 @@ fn flush_prepared_table(
         last_max_commit_seq,
         total_batches,
     )?;
+    release_flush_memory(table_oid);
+    Ok(())
+}
+
+fn finish_flush_after_cancel(
+    job_id: uuid::Uuid,
+    table_oid: pgrx::pg_sys::Oid,
+    total_rows_flushed: i64,
+    total_batches: i32,
+    last_max_seq: i64,
+    last_max_commit_seq: i64,
+) -> Result<(), String> {
+    if total_rows_flushed > 0 {
+        // Publish already committed in an earlier wave of this statement: do not
+        // pretend cold data was unpublished.
+        mark_flush_job_completed_after_cancel(
+            job_id,
+            table_oid,
+            total_rows_flushed,
+            last_max_seq,
+            last_max_commit_seq,
+            total_batches,
+        )?;
+    } else {
+        mark_flush_job_cancelled(job_id, table_oid)?;
+    }
     release_flush_memory(table_oid);
     Ok(())
 }

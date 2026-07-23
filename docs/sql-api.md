@@ -60,7 +60,6 @@ SET koldstore.user_id = 'tenant-a';
 SET koldstore.cold_reads = 'auto';
 SET koldstore.enable_merge_scan = on;
 SET koldstore.max_open_parquet_readers = 32;
-SET koldstore.max_running_jobs = 4;
 SET koldstore.log_level = 'info';
 SET koldstore.min_max_rows_per_file = 1000;
 ```
@@ -77,7 +76,6 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.cold_reads` | string | `auto` | `auto`: cold eligible by catalog/cost; `on`: cold eligible without forcing unnecessary object reads; `off`: hot-only and ERROR when correctness requires cold segments. |
 | `koldstore.enable_merge_scan` | bool | `on` | Required for managed-table SELECT. When `off`, `KoldMergeScan` errors at execution instead of allowing an incorrect heap-only read. |
 | `koldstore.max_open_parquet_readers` | int | `32` | Per-backend open Parquet reader cap for cold scans (fail-fast when exceeded). Clamped to `1..=1024`. |
-| `koldstore.max_running_jobs` | int | `4` | Maximum concurrently claimed KoldStore jobs. Clamped to `1..=1024`. |
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
 | `koldstore.flush_check_interval_seconds` | int | `30` | How often the database worker evaluates `auto_flush` tables and runs at most one needed flush. Clamped to `1..=86400`. |
@@ -420,6 +418,45 @@ executing the flush are intentionally separate operations.
 
 **Returns:** `uuid` — the flush job id (`koldstore.jobs.id`).
 
+### `koldstore.list_jobs`
+
+```sql
+SELECT koldstore.list_jobs();
+SELECT koldstore.list_jobs(
+  statuses  => '["running","pending"]'::jsonb,
+  job_types => '["flush"]'::jsonb,
+  table_name => 'chat.messages'::regclass
+);
+```
+
+Returns a JSON array of job objects (status, phase, progress fields, payload).
+Filters are optional. Progress updates from an in-progress flush are visible to
+other sessions when that flush statement ends (mid-statement live commits are
+not used).
+
+### `koldstore.cancel_job` / `koldstore.cancel_table_jobs`
+
+```sql
+SELECT koldstore.cancel_job(job_id => '…'::uuid);
+SELECT koldstore.cancel_table_jobs(table_name => 'chat.messages'::regclass);
+```
+
+Cooperative cancel:
+
+- **pending** jobs are marked `cancelled` immediately when unlocked
+- **running** jobs are signalled via `koldstore.table_cancel_requests` (avoids
+  blocking on the flush statement's jobs-row lock) and stop at the next wave
+  boundary (before activate when possible)
+
+If cancel is observed after cold publish already committed, the job finishes as
+`completed` with `payload.cancel_requested_after_publish = true` (data is not
+unpublished).
+
+`DROP TABLE` on a managed relation cancels active jobs, waits for any in-flight
+flush/migrate advisory lock to release, deactivates catalog metadata, deletes
+cold objects under the table prefix, drops the change-log mirror, and records a
+completed `drop_table_cleanup` job before PostgreSQL removes the heap.
+
 ### `koldstore.describe_table`
 
 ```sql
@@ -570,7 +607,7 @@ changed.
 - Standard SQL cold-only `UPDATE` affects zero rows in the MVP.
 
 The following explicit cold DML SQL functions are planned but not yet exposed by
-the extension:
+the extension (tracked: https://github.com/kalamdb/koldstore/issues/55):
 
 - `koldstore.hydrate_pk(...)`
 - `koldstore.update_row(...)`
@@ -579,7 +616,7 @@ the extension:
 ## Changes and Operations
 
 The following operator SQL functions are planned but not yet exposed by the
-extension:
+extension (tracked: https://github.com/kalamdb/koldstore/issues/56):
 
 - `koldstore.changes_since(...)`
 - `koldstore.backup_manifest(...)`

@@ -15,7 +15,7 @@ pub const FORCE_TOMBSTONE_ONLY_CAP: i64 = 4_096;
 ///
 /// Matches [`koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH`] so force and policy
 /// waves share the same memory ceiling; `flush_prepared_table` keeps draining
-/// until the mirror is empty (or the catch-up wave budget is exhausted).
+/// through the start-of-job seq watermark (or the catch-up wave budget).
 pub const FORCE_FLUSH_WAVE_ROW_CAP: i64 = koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH as i64;
 
 /// Aggregated mirror sequence bounds selected for one flush attempt.
@@ -159,6 +159,37 @@ pub fn resolve_force_flush_selection(
         };
     }
     ResolvedFlushSelection::new(all)
+}
+
+/// Whether a catch-up wave should run for `selection` under a start-of-job watermark.
+///
+/// `catchup_upto_seq` is the mirror `max(seq)` observed when the job began. Waves
+/// must not chase rows applied from concurrent WAL during flush fences — those
+/// always receive higher seq values and wait for a later job.
+#[must_use]
+pub fn should_start_catchup_wave(
+    catchup_upto_seq: Option<i64>,
+    selection_row_count: i64,
+    selection_min_seq: i64,
+) -> bool {
+    if selection_row_count <= 0 {
+        return false;
+    }
+    match catchup_upto_seq {
+        // No snapshot (empty mirror at claim): allow this selection, but the
+        // caller must not loop after the wave.
+        None => true,
+        Some(upto) => selection_min_seq <= upto,
+    }
+}
+
+/// Whether another catch-up wave is needed after flushing through `flushed_max_seq`.
+#[must_use]
+pub fn should_continue_flush_catchup(catchup_upto_seq: Option<i64>, flushed_max_seq: i64) -> bool {
+    match catchup_upto_seq {
+        None => false,
+        Some(upto) => flushed_max_seq < upto,
+    }
 }
 
 /// Caps a full-mirror force selection to one wave when a cutoff is available.

@@ -2,7 +2,8 @@
 //!
 //! DROP TABLE cleanup planning lives in `koldstore-migrate`; this module
 //! re-exports those plans for the extension shell and installs the live
-//! ProcessUtility hook used for `ALTER TABLE … SET/RESET` KoldStore options.
+//! ProcessUtility hook used for `ALTER TABLE … SET/RESET` KoldStore options
+//! and managed `DROP TABLE` teardown.
 
 pub use koldstore_migrate::drop_table::{
     plan_drop_table_cleanup, DropTableCleanupError, DropTableCleanupOutcome, DropTableCleanupPlan,
@@ -16,6 +17,10 @@ mod process_utility {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use pgrx::pg_sys;
+
+    use crate::hooks::drop_cleanup::{
+        cleanup_managed_tables_before_drop, drop_captured_mirrors, drop_table_oids,
+    };
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     static mut PREVIOUS: pg_sys::ProcessUtility_hook_type = None;
@@ -47,19 +52,35 @@ mod process_utility {
             let copied = pg_sys::copyObjectImpl(pstmt.cast()).cast::<pg_sys::PlannedStmt>();
             let mut captured = None;
             let mut has_standard_actions = true;
-            if !copied.is_null()
-                && !(*copied).utilityStmt.is_null()
-                && (*(*copied).utilityStmt).type_ == pg_sys::NodeTag::T_AlterTableStmt
-            {
-                let stmt = (*copied).utilityStmt.cast::<pg_sys::AlterTableStmt>();
-                captured = strip_options(stmt);
-                has_standard_actions = !(*stmt).cmds.is_null();
+            let mut drop_oids = Vec::new();
+            if !copied.is_null() && !(*copied).utilityStmt.is_null() {
+                match (*(*copied).utilityStmt).type_ {
+                    pg_sys::NodeTag::T_AlterTableStmt => {
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::AlterTableStmt>();
+                        captured = strip_options(stmt);
+                        has_standard_actions = !(*stmt).cmds.is_null();
+                    }
+                    pg_sys::NodeTag::T_DropStmt => {
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::DropStmt>();
+                        drop_oids = drop_table_oids(stmt);
+                    }
+                    _ => {}
+                }
+            }
+            let mut mirrors = Vec::new();
+            if !drop_oids.is_empty() {
+                mirrors = cleanup_managed_tables_before_drop(&drop_oids).unwrap_or_else(|error| {
+                    pgrx::error!("KoldStore DROP TABLE cleanup failed: {error}")
+                });
             }
             if has_standard_actions {
                 delegate(copied, query, read_only, context, params, env, dest, qc);
             } else if !qc.is_null() {
                 (*qc).commandTag = pg_sys::CommandTag::CMDTAG_ALTER_TABLE;
                 (*qc).nprocessed = 0;
+            }
+            if !mirrors.is_empty() {
+                drop_captured_mirrors(&mirrors);
             }
             if let Some((relation, options)) = captured {
                 apply_options(relation, options);

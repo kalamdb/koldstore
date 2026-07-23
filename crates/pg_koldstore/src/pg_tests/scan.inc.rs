@@ -256,9 +256,15 @@ fn plain_explain_never_reuses_prior_analyze_counters() {
         "plain EXPLAIN must report planned source state: {planned}"
     );
     assert!(
+        planned.contains("Parquet Segments Planned"),
+        "plain EXPLAIN must label cold segments as planned: {planned}"
+    );
+    assert!(
         !planned.contains("Emit Path:")
             && !planned.contains("Rows Scanned:")
-            && !planned.contains("Mirror Tombstones:"),
+            && !planned.contains("Mirror Tombstones:")
+            && !planned.contains("Parquet Segments Opened")
+            && !planned.contains("Status: executed"),
         "plain EXPLAIN must not reuse prior execution counters: {planned}"
     );
 }
