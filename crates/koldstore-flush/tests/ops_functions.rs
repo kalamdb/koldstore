@@ -55,6 +55,10 @@ fn operational_functions_build_parameterized_catalog_plans() {
     );
     assert!(status.statement.sql.contains("'mirror_rows'"));
     assert!(status.statement.sql.contains("'cold_row_count'"));
+    assert!(
+        status.statement.sql.contains("'duration_ms'"),
+        "describe_table jobs should expose duration_ms"
+    );
     assert!(status.statement.sql.contains("\"app\".\"items\""));
     assert!(status.statement.sql.contains("\"koldstore\".\"items__cl\""));
     assert_eq!(status.statement.access, SpiAccess::ReadOnly);

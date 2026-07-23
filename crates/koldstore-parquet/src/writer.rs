@@ -19,8 +19,9 @@ use parquet::{
     arrow::ArrowWriter,
     basic::{Compression, ZstdLevel},
     errors::ParquetError,
+    file::metadata::{PageIndexPolicy, ParquetMetaDataReader},
     file::properties::{EnabledStatistics, WriterProperties},
-    file::reader::{FileReader, SerializedFileReader},
+    file::reader::{ChunkReader, Length},
     schema::types::ColumnPath,
 };
 use serde_json::json;
@@ -72,10 +73,19 @@ struct SharedWriteBuffer {
 
 impl SharedWriteBuffer {
     fn into_bytes(self) -> Result<Vec<u8>, ParquetError> {
-        let bytes = self.bytes.lock().map_err(|_| {
-            ParquetError::General("parquet output buffer lock poisoned".to_string())
-        })?;
-        Ok(bytes.clone())
+        match Arc::try_unwrap(self.bytes) {
+            Ok(mutex) => mutex.into_inner().map_err(|_| {
+                ParquetError::General("parquet output buffer lock poisoned".to_string())
+            }),
+            // Fallback if another handle still shares the buffer (should be rare
+            // after ArrowWriter::close + drop). Avoids a silent hang/panic.
+            Err(shared) => {
+                let bytes = shared.lock().map_err(|_| {
+                    ParquetError::General("parquet output buffer lock poisoned".to_string())
+                })?;
+                Ok(bytes.clone())
+            }
+        }
     }
 }
 
@@ -142,8 +152,11 @@ impl StreamingParquetSegmentWriter {
     ///
     /// Returns an error when footer encoding fails or the output lock is poisoned.
     pub fn finish(self) -> Result<Vec<u8>, ParquetError> {
-        self.writer.close()?;
-        self.output.into_bytes()
+        let Self { writer, output } = self;
+        // `close` consumes the ArrowWriter and drops its SharedWriteBuffer clone,
+        // so `into_bytes` can take the Vec without cloning.
+        writer.close()?;
+        output.into_bytes()
     }
 }
 
@@ -268,6 +281,7 @@ pub fn encode_parquet_segment_bytes(
 /// Validates that `bytes` are a complete, readable Parquet file.
 ///
 /// Checks the 4-byte magic, footer length, and that metadata can be opened.
+/// Parses footer metadata in place — does not clone the full payload.
 ///
 /// # Errors
 ///
@@ -299,9 +313,13 @@ pub fn validate_parquet_bytes(bytes: &[u8]) -> Result<ParquetValidation, String>
         ));
     }
 
-    let reader = SerializedFileReader::new(Bytes::copy_from_slice(bytes))
+    // PERFORMANCE: parse footer via ranged reads so validation never doubles
+    // peak RSS by copying the entire Parquet buffer.
+    let metadata = ParquetMetaDataReader::new()
+        .with_column_index_policy(PageIndexPolicy::Skip)
+        .with_offset_index_policy(PageIndexPolicy::Skip)
+        .parse_and_finish(&SliceChunkReader(bytes))
         .map_err(|error| format!("parquet footer: {error}"))?;
-    let metadata = reader.metadata();
     let row_count = metadata.file_metadata().num_rows();
     if row_count < 0 {
         return Err("parquet footer reports negative row count".to_string());
@@ -311,6 +329,52 @@ pub fn validate_parquet_bytes(bytes: &[u8]) -> Result<ParquetValidation, String>
         row_count: u64::try_from(row_count).map_err(|error| error.to_string())?,
         row_group_count: metadata.num_row_groups(),
     })
+}
+
+/// Zero-copy [`ChunkReader`] over an in-memory Parquet buffer.
+///
+/// `get_bytes` only copies the requested range (footer-sized during validate).
+struct SliceChunkReader<'a>(&'a [u8]);
+
+impl Length for SliceChunkReader<'_> {
+    fn len(&self) -> u64 {
+        u64::try_from(self.0.len()).unwrap_or(u64::MAX)
+    }
+}
+
+impl ChunkReader for SliceChunkReader<'_> {
+    type T = std::io::Cursor<Bytes>;
+
+    fn get_read(&self, start: u64) -> Result<Self::T, ParquetError> {
+        let start = usize::try_from(start).map_err(|_| {
+            ParquetError::General(format!("parquet read offset {start} does not fit usize"))
+        })?;
+        if start > self.0.len() {
+            return Err(ParquetError::General(format!(
+                "Expected to read at offset {start}, while file has length {}",
+                self.0.len()
+            )));
+        }
+        Ok(std::io::Cursor::new(Bytes::copy_from_slice(
+            &self.0[start..],
+        )))
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> Result<Bytes, ParquetError> {
+        let start = usize::try_from(start).map_err(|_| {
+            ParquetError::General(format!("parquet read offset {start} does not fit usize"))
+        })?;
+        let end = start.checked_add(length).ok_or_else(|| {
+            ParquetError::General("parquet read range overflows usize".to_string())
+        })?;
+        if end > self.0.len() {
+            return Err(ParquetError::General(format!(
+                "Expected to read {length} bytes at offset {start}, while file has length {}",
+                self.0.len()
+            )));
+        }
+        Ok(Bytes::copy_from_slice(&self.0[start..end]))
+    }
 }
 
 /// Result of validating encoded Parquet bytes.

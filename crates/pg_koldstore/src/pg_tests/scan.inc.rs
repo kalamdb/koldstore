@@ -19,10 +19,56 @@ fn explain_shows_kold_merge_scan_for_managed_table() {
         "expected custom merge scan in EXPLAIN: {plan}"
     );
     assert!(
-        plan.contains("Candidate segments")
-            || plan.contains("Segments pruned by min/max")
-            || plan.contains("Parquet segments opened"),
+        plan.contains("Candidate Segments")
+            || plan.contains("Segments Pruned by Min/Max")
+            || plan.contains("Parquet Segments Opened"),
         "expected Timescale-style prune properties in EXPLAIN: {plan}"
+    );
+}
+
+#[pg_test]
+fn explain_json_nests_parquet_segment_groups() {
+    // Structured formats must use ExplainOpenGroup so graph clients can nest
+    // cold-segment timing under the Custom Scan node. YAML keeps a text result
+    // type while still exercising the same grouping APIs as JSON.
+    let suffix = unique_suffix("explain_json");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, FORMAT YAML, COSTS OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} WHERE id = 2"
+    ));
+    assert!(
+        plan.contains("Emit Path"),
+        "expected typed emit-path property in structured explain: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments"),
+        "expected nested Parquet Segments group for graph clients: {plan}"
+    );
+    assert!(
+        plan.contains("Timing"),
+        "expected Timing group for graph clients: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Read Time"),
+        "expected cold read timing in structured explain: {plan}"
+    );
+    assert!(
+        plan.contains("Read Time"),
+        "expected per-segment Read Time in structured explain: {plan}"
     );
 }
 
@@ -51,19 +97,109 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         "expected custom merge scan: {plan}"
     );
     for needle in [
-        "Emit path",
-        "Hot rows",
-        "Candidate segments",
-        "Segments pruned by scope",
-        "Segments pruned by min/max",
-        "Parquet segments opened",
-        "Bytes fetched",
+        "Emit Path",
+        "Hot Rows",
+        "Candidate Segments",
+        "Segments Pruned by Scope",
+        "Segments Pruned by Min/Max",
+        "Parquet Segments Opened",
+        "Bytes Fetched",
+        "Segment Catalog Source",
+        "Timing",
+        "Cold Read Time",
+        "Read Time",
     ] {
         assert!(
             plan.contains(needle),
             "EXPLAIN ANALYZE missing `{needle}`: {plan}"
         );
     }
+}
+
+#[pg_test]
+fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
+    // Untyped `2` is an int4 Const against bigint `id`. Hot pushdown must accept
+    // that promotion (same as `2::bigint`) so cold PK lookups do not fall through
+    // to merge_buffer and materialize the entire hot heap.
+    let suffix = unique_suffix("int4_pk");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} WHERE id = 2"
+    ));
+    assert!(
+        plan.contains("Emit Path: cold_native"),
+        "expected cold_native for untyped int4 literal on bigint PK, got: {plan}"
+    );
+    assert!(
+        plan.contains("Hot Rows: 0"),
+        "expected hot PK miss (0 rows), got: {plan}"
+    );
+    assert!(
+        !plan.contains("Emit Path: merge_buffer"),
+        "untyped bigint PK lookup must not merge-buffer the hot heap: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 2")),
+        "b"
+    );
+}
+
+#[pg_test]
+fn hot_pk_hit_skips_parquet_open_when_cold_segment_stats_overlap() {
+    // After flush, hot rows are pruned. Re-inserting the same PK leaves the old
+    // version in cold while the live row is hot. Catalog min/max still keeps the
+    // segment (PK is in range). Hot-first must return the hot row without opening
+    // Parquet.
+    let suffix = unique_suffix("hot_first");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'cold'), (3, 'c')"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (2, 'hot')"
+    ))
+    .expect("re-insert PK so live row is hot while cold still overlaps");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} WHERE id = 2"
+    ));
+    assert!(
+        plan.contains("Emit Path: hot_native"),
+        "expected hot_native for live PK that still overlaps cold stats, got: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened: 0"),
+        "hot PK hit must not open overlapping cold Parquet, got: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 2")),
+        "hot"
+    );
 }
 
 #[pg_test]

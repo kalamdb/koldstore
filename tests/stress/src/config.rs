@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 
+use crate::e2e::MirrorCaptureMode;
 use crate::packs::PackSet;
 
 const ENV_PREFIX: &str = "KOLDSTORE_STRESS_";
@@ -12,7 +13,7 @@ const ENV_PREFIX: &str = "KOLDSTORE_STRESS_";
 #[derive(Debug, Clone)]
 pub struct StressConfig {
     pub packs: PackSet,
-    pub mirror_mode: MirrorMode,
+    pub mirror_mode: MirrorCaptureMode,
     pub soak: Duration,
     pub clients: usize,
     pub history_clients: usize,
@@ -39,23 +40,6 @@ pub struct StressConfig {
     pub writer_delay: Duration,
 }
 
-/// Mirror capture mode for manage_table / fencing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MirrorMode {
-    Strict,
-    Async,
-}
-
-impl MirrorMode {
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Strict => "strict",
-            Self::Async => "async",
-        }
-    }
-}
-
 impl StressConfig {
     /// Loads configuration from the environment.
     ///
@@ -64,17 +48,14 @@ impl StressConfig {
     /// Returns an error when packs or numeric knobs are invalid.
     pub fn from_env() -> Result<Self> {
         let packs = PackSet::from_env()?;
-        let mut mirror_mode = match std::env::var(format!("{ENV_PREFIX}MIRROR_MODE"))
-            .unwrap_or_else(|_| "strict".into())
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "strict" => MirrorMode::Strict,
-            "async" => MirrorMode::Async,
-            other => bail!("invalid {ENV_PREFIX}MIRROR_MODE={other:?}; expected strict or async"),
-        };
+        let mut mirror_mode = MirrorCaptureMode::parse(
+            &std::env::var(format!("{ENV_PREFIX}MIRROR_MODE")).unwrap_or_else(|_| "strict".into()),
+        )
+        .ok_or_else(|| {
+            anyhow::anyhow!("invalid {ENV_PREFIX}MIRROR_MODE; expected strict or async")
+        })?;
         if packs.async_mirror() {
-            mirror_mode = MirrorMode::Async;
+            mirror_mode = MirrorCaptureMode::Async;
         }
 
         // Apply mirror mode early so e2e helpers see it during manage_table.

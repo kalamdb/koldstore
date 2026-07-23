@@ -63,3 +63,27 @@ fn force_selection_falls_back_to_full_mirror_when_tombstones_exceed_cap() {
     assert_eq!(selection.stats.row_count, 20_000);
     assert!(selection.mirror_ops.is_none());
 }
+
+#[test]
+fn force_wave_cap_limits_full_mirror_selection() {
+    use koldstore_flush::{apply_force_flush_wave_cap, FORCE_FLUSH_WAVE_ROW_CAP};
+
+    let selection = resolve_force_flush_selection(
+        FlushStats {
+            row_count: 50_000,
+            min_seq: 1,
+            max_seq: 50_000,
+            min_commit_seq: 1,
+            max_commit_seq: 50_000,
+        },
+        FlushStats::empty(),
+    );
+    let capped = apply_force_flush_wave_cap(
+        selection,
+        FORCE_FLUSH_WAVE_ROW_CAP,
+        Some((FORCE_FLUSH_WAVE_ROW_CAP, FORCE_FLUSH_WAVE_ROW_CAP)),
+    );
+    assert_eq!(capped.stats.row_count, FORCE_FLUSH_WAVE_ROW_CAP);
+    assert_eq!(capped.stats.max_seq, 10_000);
+    assert!(capped.mirror_ops.is_none());
+}

@@ -776,6 +776,7 @@ version = "0.1.5-beta.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "koldstore-common",
  "koldstore-memory-tests",
  "koldstore-storage",
  "parquet",
@@ -2804,6 +2805,7 @@ version = "0.1.5-beta.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "koldstore-common",
  "koldstore-memory-tests",
  "koldstore-storage",
  "serde",
@@ -2818,6 +2820,7 @@ version = "0.1.5-beta.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "koldstore-common",
  "koldstore-memory-tests",
  "koldstore-storage",
  "serde",

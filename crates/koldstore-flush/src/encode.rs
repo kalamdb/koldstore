@@ -4,6 +4,8 @@
 //! Post-flush cleanup uses a seq-range DELETE (see `cleanup::plan_seq_range_cleanup`)
 //! so this path no longer materializes per-row cleanup JSON.
 
+use std::collections::BTreeMap;
+
 use koldstore_common::{QualifiedTableName, SqlStatement};
 use koldstore_parquet::{
     CleanColdRecordBatchBuilder, ColdMetadataColumn, ColdRecordBatch, FlushMirrorRow, PgColumn,
@@ -11,8 +13,7 @@ use koldstore_parquet::{
 };
 
 use crate::ops::plan_mirror_flush_selection_batch;
-use crate::table_counters::FLUSH_MIRROR_FETCH_BATCH_SIZE;
-use crate::write::FlushWriteChunk;
+use crate::write::{merge_indexed_bounds, FlushWriteChunk};
 
 /// Input for one streaming flush encode pass.
 #[derive(Debug, Clone, PartialEq)]
@@ -35,6 +36,8 @@ pub struct StreamEncodeInput {
     pub max_seq: i64,
     /// Maximum rows per Parquet segment file.
     pub max_rows_per_file: usize,
+    /// SPI page size for mirror fetches (≤ [`crate::FLUSH_MIRROR_FETCH_BATCH_SIZE`]).
+    pub fetch_batch_size: i64,
     /// Optional compressed-byte target for each Parquet segment.
     pub target_file_size_bytes: Option<u64>,
     /// Parquet compression codec.
@@ -49,8 +52,10 @@ struct SegmentBuilder {
     options: WriterOptions,
     split_policy: SegmentSplitPolicy,
     writer: Option<StreamingParquetSegmentWriter>,
-    batches: Vec<ColdRecordBatch>,
     row_count: usize,
+    min_seq: Option<i64>,
+    max_seq: Option<i64>,
+    indexed_bounds: BTreeMap<String, (serde_json::Value, serde_json::Value)>,
 }
 
 impl SegmentBuilder {
@@ -74,8 +79,10 @@ impl SegmentBuilder {
                 input.max_rows_per_file,
             ),
             writer: None,
-            batches: Vec::new(),
             row_count: 0,
+            min_seq: None,
+            max_seq: None,
+            indexed_bounds: BTreeMap::new(),
         }
     }
 
@@ -96,7 +103,18 @@ impl SegmentBuilder {
             .write_batch(&batch.batch)
             .map_err(|error| error.to_string())?;
         self.row_count = self.row_count.saturating_add(batch.row_count);
-        self.batches.push(batch);
+        self.min_seq = Some(
+            self.min_seq
+                .map_or(batch.min_seq, |current| current.min(batch.min_seq)),
+        );
+        self.max_seq = Some(
+            self.max_seq
+                .map_or(batch.max_seq, |current| current.max(batch.max_seq)),
+        );
+        merge_indexed_bounds(&mut self.indexed_bounds, &batch.indexed_bounds);
+        // PERFORMANCE: drop Arrow immediately after encode so uncompressed row
+        // groups never sit beside the growing compressed Parquet buffer.
+        drop(batch);
         Ok(self
             .split_policy
             .should_close(writer.current_bytes(), self.row_count))
@@ -107,12 +125,17 @@ impl SegmentBuilder {
             return Ok(None);
         };
         let parquet_bytes = writer.finish().map_err(|error| error.to_string())?;
-        let batches = std::mem::take(&mut self.batches);
-        self.row_count = 0;
-        Ok(Some(FlushWriteChunk::from_encoded_batches(
+        let chunk = FlushWriteChunk::from_parts(
             parquet_bytes,
-            &batches,
-        )))
+            self.row_count,
+            self.min_seq.unwrap_or(0),
+            self.max_seq.unwrap_or(0),
+            std::mem::take(&mut self.indexed_bounds),
+        );
+        self.row_count = 0;
+        self.min_seq = None;
+        self.max_seq = None;
+        Ok(Some(chunk))
     }
 }
 
@@ -224,7 +247,7 @@ where
                 }
             }
         }
-        if (batch_len as i64) < FLUSH_MIRROR_FETCH_BATCH_SIZE {
+        if (batch_len as i64) < input.fetch_batch_size {
             break;
         }
     }
@@ -262,6 +285,7 @@ mod tests {
             schema_version: 1,
             max_seq: 5,
             max_rows_per_file,
+            fetch_batch_size: i64::try_from(max_rows_per_file.max(1)).unwrap_or(1),
             target_file_size_bytes,
             compression: "zstd".to_string(),
             row_group_size: 1,

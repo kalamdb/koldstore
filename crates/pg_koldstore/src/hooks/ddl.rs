@@ -267,7 +267,7 @@ fn apply_management_options(
         .unwrap_or_else(|| {
             old.as_ref()
                 .map(koldstore_common::FlushPolicy::min_flush_rows)
-                .unwrap_or(1000)
+                .unwrap_or(1_000)
         });
     let file = get("koldstore_max_rows_per_file")
         .map(str::parse)
@@ -276,7 +276,7 @@ fn apply_management_options(
         .unwrap_or_else(|| {
             old.as_ref()
                 .map(koldstore_common::FlushPolicy::max_rows_per_file)
-                .unwrap_or(1000)
+                .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE)
         });
     let max = get("koldstore_max_rows_per_flush")
         .map(str::parse)
@@ -285,7 +285,7 @@ fn apply_management_options(
         .unwrap_or_else(|| {
             old.as_ref()
                 .map(koldstore_common::FlushPolicy::max_rows_per_flush)
-                .unwrap_or(10_000)
+                .unwrap_or(koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH)
         });
     if min == 0 || file == 0 || max == 0 {
         return Err("flush batching settings must be greater than zero".into());

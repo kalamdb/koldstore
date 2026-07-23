@@ -445,6 +445,7 @@ Sample result after a small flush:
       "status": "completed",
       "job_type": "flush",
       "updated_at": "2026-07-07T16:56:10.123456+03:00",
+      "duration_ms": 842,
       "rows_flushed": 12,
       "checkpoint_seq": 332882280212668416,
       "rows_processed": 12,
@@ -456,6 +457,7 @@ Sample result after a small flush:
       "status": "completed",
       "job_type": "migrate_backfill",
       "updated_at": "2026-07-07T16:56:09.987654+03:00",
+      "duration_ms": 1205,
       "rows_flushed": 0,
       "checkpoint_seq": 0,
       "rows_processed": 1012,
@@ -507,6 +509,7 @@ Each element of `jobs`:
 | `rows_flushed` | `bigint` | Rows written cold by the job |
 | `checkpoint_seq` | `bigint` | Mirror `seq` checkpoint |
 | `checkpoint_commit_seq` | `bigint` | Commit-seq checkpoint |
+| `duration_ms` | `bigint` | Wall time from job start (flush run start when available) to last update; live for in-progress jobs |
 | `updated_at` | `timestamptz` | Last job update time |
 
 Size notes:
@@ -522,7 +525,14 @@ Size notes:
 For job-level progress, inspect `koldstore.jobs`:
 
 ```sql
-SELECT job_type, status, phase, rows_processed, rows_flushed, error_trace
+SELECT
+  job_type,
+  status,
+  phase,
+  rows_processed,
+  rows_flushed,
+  (payload->>'duration_ms')::bigint AS duration_ms,
+  error_trace
 FROM koldstore.jobs
 WHERE table_oid = 'chat.messages'::regclass
 ORDER BY created_at DESC

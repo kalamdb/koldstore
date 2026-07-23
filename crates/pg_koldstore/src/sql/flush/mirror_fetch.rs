@@ -1,7 +1,6 @@
 //! SPI mirror-row fetch and typed tuple decode for flush.
 
 use koldstore_common::SqlStatement;
-use koldstore_flush::FLUSH_MIRROR_FETCH_BATCH_SIZE;
 use koldstore_migrate::order::CatalogColumn;
 use koldstore_parquet::{FlushColumnValue, FlushMirrorRow};
 use koldstore_schema::PgType;
@@ -12,6 +11,10 @@ const PG_EPOCH_OFFSET_MICROS: i64 = 946_684_800_000_000;
 
 /// Fetches one keyset page of mirror rows selected for flush.
 ///
+/// `fetch_limit` is the SPI `LIMIT` (typically
+/// [`koldstore_flush::flush_mirror_fetch_limit`]) so callers can keep peak
+/// decode memory near one Parquet segment.
+///
 /// # Errors
 ///
 /// Returns an error when SPI preparation or execution fails.
@@ -20,9 +23,11 @@ pub(super) fn fetch_mirror_batch(
     statement: &SqlStatement,
     max_seq: i64,
     after_seq: i64,
+    fetch_limit: i64,
 ) -> Result<Vec<FlushMirrorRow>, String> {
     use pgrx::datum::DatumWithOid;
 
+    let limit = fetch_limit.max(1);
     let spi_statement = crate::spi::SpiStatement::read_with_params(
         statement.operation.as_str(),
         &statement.sql,
@@ -34,7 +39,7 @@ pub(super) fn fetch_mirror_batch(
         &[
             DatumWithOid::from(max_seq),
             DatumWithOid::from(after_seq),
-            DatumWithOid::from(FLUSH_MIRROR_FETCH_BATCH_SIZE),
+            DatumWithOid::from(limit),
         ],
         |tuples| decode_mirror_batch(tuples, columns),
     )

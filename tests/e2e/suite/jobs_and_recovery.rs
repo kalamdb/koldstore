@@ -292,6 +292,10 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                             && job.get("status").is_some()
                             && job.get("phase").is_some()
                             && job.get("rows_flushed").is_some()
+                            && job
+                                .get("duration_ms")
+                                .and_then(serde_json::Value::as_i64)
+                                .is_some()
                     })
                 }),
             "describe_table should expose job progress, got {status}"

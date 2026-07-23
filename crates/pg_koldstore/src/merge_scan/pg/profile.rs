@@ -1,4 +1,11 @@
 //! Cold-read profiling and EXPLAIN rendering for KoldMergeScan.
+//!
+//! Uses PostgreSQL's public Explain APIs (`ExplainPropertyText/Integer/UInteger/
+//! Float/Bool/List`, `ExplainOpenGroup` / `ExplainCloseGroup`) so TEXT / JSON /
+//! YAML / XML stay consistent with native plan nodes. TEXT section headers
+//! mirror JIT (`Label:\n` + indent) because `ExplainOpenGroup` is a no-op for
+//! TEXT. Graph clients that parse structured formats get nested Timing and
+//! Parquet Segments groups.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -45,6 +52,7 @@ pub(super) struct ExplainScanMeta {
     pub(super) emit_path: EmitPath,
     pub(super) hot_rows: usize,
     pub(super) result_rows: usize,
+    pub(super) hot_probe_ms: Option<f64>,
 }
 
 thread_local! {
@@ -65,10 +73,9 @@ pub(super) struct SegmentReadProfile {
 #[derive(Debug, Clone)]
 pub(super) struct ColdReadProfile {
     pub(super) manifest_path: String,
-    /// Always catalog (`koldstore.manifest` + `cold_segments`), never object-store JSON.
-    pub(super) manifest_source: &'static str,
     pub(super) storage_type: String,
     pub(super) base_path: String,
+    /// Catalog SPI time for `koldstore.cold_segments` listing (not object-store JSON).
     pub(super) manifest_read_ms: Option<f64>,
     /// Segments considered before any prune (catalog candidates).
     pub(super) segments_considered: usize,
@@ -88,7 +95,6 @@ impl ColdReadProfile {
     pub(super) fn empty(manifest_path: impl Into<String>) -> Self {
         Self {
             manifest_path: manifest_path.into(),
-            manifest_source: "catalog",
             storage_type: String::new(),
             base_path: String::new(),
             manifest_read_ms: None,
@@ -100,6 +106,22 @@ impl ColdReadProfile {
             projected_columns: Vec::new(),
             segments: vec![],
         }
+    }
+
+    /// Sum of per-segment Parquet open+decode times when available.
+    pub(super) fn cold_read_ms(&self) -> Option<f64> {
+        if self.segments.is_empty() {
+            return None;
+        }
+        let mut total = 0.0;
+        let mut any = false;
+        for segment in &self.segments {
+            if let Some(ms) = segment.read_ms {
+                total += ms;
+                any = true;
+            }
+        }
+        any.then_some(total)
     }
 }
 
@@ -131,8 +153,9 @@ pub(super) fn forget_explain_profile(node_key: usize) {
 }
 
 /// Formats a byte count for EXPLAIN (for example `1.8 MB`).
+#[cfg(test)]
 #[must_use]
-pub(super) fn format_bytes_human(bytes: u64) -> String {
+fn format_bytes_human(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     const MB: f64 = KB * 1024.0;
     const GB: f64 = MB * 1024.0;
@@ -148,44 +171,53 @@ pub(super) fn format_bytes_human(bytes: u64) -> String {
     }
 }
 
+/// Renders KoldMergeScan cold-path diagnostics using native Explain property APIs.
 pub(super) fn explain_cold_read_profile(
     es: *mut pg_sys::ExplainState,
     profile: &ColdReadProfile,
     emit_path: EmitPath,
     hot_rows: usize,
     result_rows: usize,
+    hot_probe_ms: Option<f64>,
 ) {
-    let executed = profile.manifest_read_ms.is_some()
-        && profile
-            .segments
-            .iter()
-            .all(|segment| segment.read_ms.is_some());
+    let show_timing = explain_wants_timing(es);
+    let executed = profile.manifest_read_ms.is_some();
 
-    // Timescale-style prune summary first — easy to scan while tuning.
-    explain_property(es, "Emit path", emit_path.as_str());
-    explain_property(es, "Hot rows", &hot_rows.to_string());
+    explain_text(es, "Emit Path", emit_path.as_str());
+    explain_integer(es, "Hot Rows", None, hot_rows as i64);
     if executed {
-        explain_property(es, "Result rows", &result_rows.to_string());
+        explain_integer(es, "Result Rows", None, result_rows as i64);
     }
-    explain_property(
+
+    explain_integer(
         es,
-        "Candidate segments",
-        &profile.segments_considered.to_string(),
+        "Candidate Segments",
+        None,
+        profile.segments_considered as i64,
     );
-    explain_property(
+    explain_integer(
         es,
-        "Segments pruned by scope",
-        &profile.segments_pruned_scope.to_string(),
+        "Segments Pruned by Scope",
+        None,
+        profile.segments_pruned_scope as i64,
     );
-    explain_property(
+    explain_integer(
         es,
-        "Segments pruned by min/max",
-        &profile.segments_pruned_min_max.to_string(),
+        "Segments Pruned by Min/Max",
+        None,
+        profile.segments_pruned_min_max as i64,
     );
-    explain_property(
+    explain_integer(
         es,
-        "Parquet segments opened",
-        &profile.segments_opened.to_string(),
+        "Parquet Segments Opened",
+        None,
+        profile.segments_opened as i64,
+    );
+    explain_integer(
+        es,
+        "Segments Pruned by Bloom",
+        None,
+        profile.segments_pruned_by_bloom() as i64,
     );
 
     let (row_groups_total, row_groups_selected, row_groups_skipped, bloom_filters_fetched) =
@@ -194,106 +226,158 @@ pub(super) fn explain_cold_read_profile(
     let footer_cache_hits = profile.footer_cache_hits();
 
     if executed || row_groups_total > 0 || bytes_fetched > 0 {
-        explain_property(es, "Row groups read", &row_groups_selected.to_string());
+        explain_integer(es, "Row Groups Read", None, row_groups_selected as i64);
         if row_groups_total > 0 {
-            explain_property(
+            explain_integer(es, "Row Groups Total", None, row_groups_total as i64);
+            explain_integer(es, "Row Groups Skipped", None, row_groups_skipped as i64);
+        }
+        // Unit on ExplainPropertyUInteger renders as "N bytes" — same as native PG.
+        explain_uinteger(es, "Bytes Fetched", Some("bytes"), bytes_fetched);
+        if footer_cache_hits > 0 {
+            explain_integer(es, "Footer Cache Hits", None, footer_cache_hits as i64);
+        }
+        if bloom_filters_fetched > 0 {
+            explain_integer(
                 es,
-                "Row groups skipped",
-                &format!("{row_groups_skipped} of {row_groups_total}"),
+                "Bloom Filters Fetched",
+                None,
+                bloom_filters_fetched as i64,
             );
         }
-        explain_property(es, "Bytes fetched", &format_bytes_human(bytes_fetched));
-        if footer_cache_hits > 0 {
-            explain_property(es, "Footer cache hits", &footer_cache_hits.to_string());
-        }
     }
 
-    let manifest_value = if executed {
-        format!(
-            "{}, source={}, {:.3} ms",
-            profile.manifest_path,
-            profile.manifest_source,
-            profile.manifest_read_ms.unwrap_or(0.0)
-        )
-    } else {
-        format!(
-            "{}, source={} (planned)",
-            profile.manifest_path, profile.manifest_source
-        )
-    };
-    explain_property(es, "Manifest", &manifest_value);
-
-    if !profile.storage_type.is_empty() || !profile.base_path.is_empty() {
-        explain_property(
-            es,
-            "Cold storage",
-            &format!(
-                "type={}, base={}",
-                if profile.storage_type.is_empty() {
-                    "unknown"
-                } else {
-                    &profile.storage_type
-                },
-                if profile.base_path.is_empty() {
-                    "(none)"
-                } else {
-                    &profile.base_path
-                }
-            ),
-        );
-    }
-
-    explain_property(
+    // Catalog listing — never opens object-store manifest.json.
+    explain_text(es, "Segment Catalog Path", &profile.manifest_path);
+    explain_text(
         es,
-        "Cold segments",
-        &format!(
-            "considered={}, pruned_scope={}, pruned_min_max={}, pruned_bloom={}, opened={}",
-            profile.segments_considered,
-            profile.segments_pruned_scope,
-            profile.segments_pruned_min_max,
-            profile.segments_pruned_by_bloom(),
-            profile.segments_opened
-        ),
+        "Segment Catalog Source",
+        "postgres (koldstore.cold_segments)",
     );
 
-    if row_groups_total > 0 || bloom_filters_fetched > 0 {
-        explain_property(
-            es,
-            "Cold row groups",
-            &format!(
-                "total={row_groups_total}, selected={row_groups_selected}, skipped={row_groups_skipped}, bloom_filters_fetched={bloom_filters_fetched}"
-            ),
-        );
+    explain_timing_group(es, show_timing, profile, hot_probe_ms);
+
+    if !profile.storage_type.is_empty() {
+        explain_text(es, "Cold Storage Type", &profile.storage_type);
+    }
+    if !profile.base_path.is_empty() {
+        explain_text(es, "Cold Storage Base", &profile.base_path);
     }
 
     if let Some((column, values)) = &profile.pk_probe {
-        explain_property(
-            es,
-            "PK probe",
-            &format!("{column} IN ({})", values.join(", ")),
-        );
+        explain_text(es, "PK Probe Column", column);
+        explain_list(es, "PK Probe Values", values);
     }
 
     if !profile.projected_columns.is_empty() {
-        explain_property(es, "Cold projection", &profile.projected_columns.join(", "));
+        explain_list(es, "Cold Projection", &profile.projected_columns);
     }
 
-    if profile.segments.is_empty() {
-        explain_property(es, "Parquet segment", "none");
+    // Nested group for JSON/YAML/XML graph clients; TEXT uses a native "Label:\n"
+    // section header. Empty arrays still emit so structured clients see a stable key.
+    explain_open_group(es, "Parquet Segments", Some("Parquet Segments"), false);
+    for segment in &profile.segments {
+        explain_open_group(es, "Parquet Segment", None, true);
+        explain_segment(es, segment, show_timing, executed);
+        explain_close_group(es, "Parquet Segment", None, true);
+    }
+    explain_close_group(es, "Parquet Segments", Some("Parquet Segments"), false);
+}
+
+/// Timing subgroup matching native JIT / Gather style (`Timing: { … }`).
+fn explain_timing_group(
+    es: *mut pg_sys::ExplainState,
+    show_timing: bool,
+    profile: &ColdReadProfile,
+    hot_probe_ms: Option<f64>,
+) {
+    if !show_timing {
+        return;
+    }
+    let catalog_ms = profile.manifest_read_ms;
+    let cold_ms = profile.cold_read_ms();
+    if catalog_ms.is_none() && hot_probe_ms.is_none() && cold_ms.is_none() {
         return;
     }
 
-    for segment in &profile.segments {
-        explain_property(
-            es,
-            "Parquet segment",
-            &format_segment_line(segment, executed),
-        );
-        if let Some(parquet) = &segment.parquet {
-            explain_property(es, "  Parquet I/O", &format_parquet_io(parquet));
-            explain_property(es, "  Row groups", &format_row_groups(parquet));
-            explain_property(es, "  Bloom", &format_bloom(parquet));
+    explain_open_group(es, "Timing", Some("Timing"), true);
+    if let Some(ms) = catalog_ms {
+        explain_float(es, "Segment Catalog Time", "ms", ms, 3);
+    }
+    if let Some(ms) = hot_probe_ms {
+        explain_float(es, "Hot Probe Time", "ms", ms, 3);
+    }
+    if let Some(ms) = cold_ms {
+        explain_float(es, "Cold Read Time", "ms", ms, 3);
+    }
+    explain_close_group(es, "Timing", Some("Timing"), true);
+}
+
+fn explain_segment(
+    es: *mut pg_sys::ExplainState,
+    segment: &SegmentReadProfile,
+    show_timing: bool,
+    executed: bool,
+) {
+    explain_text(es, "Object", &segment.object_path);
+    if let Some(size) = segment
+        .byte_size
+        .or_else(|| segment.parquet.as_ref().and_then(|p| p.file_size))
+    {
+        explain_uinteger(es, "Bytes", Some("bytes"), size);
+    }
+    if executed {
+        explain_integer(es, "Rows", None, segment.row_count as i64);
+        if show_timing {
+            if let Some(ms) = segment.read_ms {
+                explain_float(es, "Read Time", "ms", ms, 3);
+            }
         }
+    } else {
+        explain_text(es, "Status", "planned");
+    }
+
+    let Some(parquet) = &segment.parquet else {
+        return;
+    };
+    explain_bool(es, "Footer First", parquet.footer_first);
+    explain_bool(es, "Footer Cache Hit", parquet.footer_cache_hit);
+    explain_uinteger(es, "Range Gets", None, parquet.range_calls);
+    explain_uinteger(es, "Bytes Read", Some("bytes"), parquet.bytes_read);
+    explain_integer(
+        es,
+        "Row Groups Total",
+        None,
+        parquet.row_groups_total as i64,
+    );
+    explain_integer(
+        es,
+        "Row Groups Selected",
+        None,
+        parquet.row_groups_selected.len() as i64,
+    );
+    explain_integer(
+        es,
+        "Row Groups Skipped",
+        None,
+        parquet.row_groups_skipped as i64,
+    );
+    if !parquet.row_groups_selected.is_empty() {
+        let selected = parquet
+            .row_groups_selected
+            .iter()
+            .map(|idx| idx.to_string())
+            .collect::<Vec<_>>();
+        explain_list(es, "Selected Row Groups", &selected);
+    }
+    explain_bool(es, "Stats Pruned", parquet.stats_pruned);
+    explain_text(es, "Bloom", parquet.bloom.as_str());
+    if parquet.bloom_filters_fetched > 0 {
+        explain_integer(
+            es,
+            "Bloom Filters Fetched",
+            None,
+            parquet.bloom_filters_fetched as i64,
+        );
     }
 }
 
@@ -339,42 +423,164 @@ impl ColdReadProfile {
     }
 }
 
-fn format_segment_line(segment: &SegmentReadProfile, executed: bool) -> String {
-    let mut parts = vec![segment.object_path.clone()];
-    if let Some(size) = segment
-        .byte_size
-        .or_else(|| segment.parquet.as_ref().and_then(|p| p.file_size))
-    {
-        parts.push(format!("{size} bytes"));
+fn explain_wants_timing(es: *mut pg_sys::ExplainState) -> bool {
+    if es.is_null() {
+        return false;
     }
-    if executed {
-        if let Some(read_ms) = segment.read_ms {
-            parts.push(format!("{} rows", segment.row_count));
-            parts.push(format!("{read_ms:.3} ms"));
-        }
-    } else {
-        parts.push("(planned)".to_string());
-    }
-    parts.join(", ")
-}
-
-fn format_parquet_io(parquet: &ParquetReadProfile) -> String {
-    parquet.format_io_summary()
-}
-
-fn format_row_groups(parquet: &ParquetReadProfile) -> String {
-    parquet.format_row_groups_summary()
-}
-
-fn format_bloom(parquet: &ParquetReadProfile) -> String {
-    parquet.format_bloom_summary()
+    unsafe { (*es).analyze || (*es).timing }
 }
 
 pub(super) fn explain_property(es: *mut pg_sys::ExplainState, label: &str, value: &str) {
+    explain_text(es, label, value);
+}
+
+pub(super) fn explain_integer(
+    es: *mut pg_sys::ExplainState,
+    label: &str,
+    unit: Option<&str>,
+    value: i64,
+) {
+    let label = CString::new(label).unwrap_or_default();
+    let unit = unit.map(|u| CString::new(u).unwrap_or_default());
+    unsafe {
+        pg_sys::ExplainPropertyInteger(
+            label.as_ptr(),
+            unit.as_ref().map_or(std::ptr::null(), |u| u.as_ptr()),
+            value,
+            es,
+        );
+    }
+}
+
+fn explain_text(es: *mut pg_sys::ExplainState, label: &str, value: &str) {
     let label = CString::new(label).unwrap_or_default();
     let value = CString::new(value).unwrap_or_default();
     unsafe {
         pg_sys::ExplainPropertyText(label.as_ptr(), value.as_ptr(), es);
+    }
+}
+
+fn explain_uinteger(es: *mut pg_sys::ExplainState, label: &str, unit: Option<&str>, value: u64) {
+    let label = CString::new(label).unwrap_or_default();
+    let unit = unit.map(|u| CString::new(u).unwrap_or_default());
+    unsafe {
+        pg_sys::ExplainPropertyUInteger(
+            label.as_ptr(),
+            unit.as_ref().map_or(std::ptr::null(), |u| u.as_ptr()),
+            value,
+            es,
+        );
+    }
+}
+
+fn explain_float(es: *mut pg_sys::ExplainState, label: &str, unit: &str, value: f64, ndigits: i32) {
+    let label = CString::new(label).unwrap_or_default();
+    let unit = CString::new(unit).unwrap_or_default();
+    unsafe {
+        pg_sys::ExplainPropertyFloat(label.as_ptr(), unit.as_ptr(), value, ndigits, es);
+    }
+}
+
+fn explain_bool(es: *mut pg_sys::ExplainState, label: &str, value: bool) {
+    let label = CString::new(label).unwrap_or_default();
+    unsafe {
+        pg_sys::ExplainPropertyBool(label.as_ptr(), value, es);
+    }
+}
+
+/// Renders a list via `ExplainPropertyList` (TEXT comma-separated; JSON/YAML arrays).
+fn explain_list(es: *mut pg_sys::ExplainState, label: &str, items: &[impl AsRef<str>]) {
+    if items.is_empty() {
+        return;
+    }
+    let label = CString::new(label).unwrap_or_default();
+    unsafe {
+        let mut list: *mut pg_sys::List = std::ptr::null_mut();
+        for item in items {
+            let c = CString::new(item.as_ref()).unwrap_or_default();
+            // ExplainPropertyList expects a List of C strings (not String nodes).
+            let pg_str = pg_sys::pstrdup(c.as_ptr());
+            list = pg_sys::lappend(list, pg_str.cast());
+        }
+        pg_sys::ExplainPropertyList(label.as_ptr(), list, es);
+    }
+}
+
+fn explain_open_group(
+    es: *mut pg_sys::ExplainState,
+    objtype: &str,
+    labelname: Option<&str>,
+    labeled: bool,
+) {
+    let objtype_c = CString::new(objtype).unwrap_or_default();
+    let label_c = labelname.map(|l| CString::new(l).unwrap_or_default());
+    unsafe {
+        // ExplainOpenGroup is a no-op for TEXT; mirror JIT / Gather by writing
+        // "Label:\n" and bumping indent ourselves.
+        if (*es).format == pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT {
+            if let Some(label) = labelname {
+                explain_text_section_header(es, label);
+                (*es).indent = (*es).indent.saturating_add(1);
+            }
+        }
+        pg_sys::ExplainOpenGroup(
+            objtype_c.as_ptr(),
+            label_c
+                .as_ref()
+                .map_or(std::ptr::null(), |value| value.as_ptr()),
+            labeled,
+            es,
+        );
+    }
+}
+
+fn explain_close_group(
+    es: *mut pg_sys::ExplainState,
+    objtype: &str,
+    labelname: Option<&str>,
+    labeled: bool,
+) {
+    let objtype_c = CString::new(objtype).unwrap_or_default();
+    let label_c = labelname.map(|l| CString::new(l).unwrap_or_default());
+    unsafe {
+        pg_sys::ExplainCloseGroup(
+            objtype_c.as_ptr(),
+            label_c
+                .as_ref()
+                .map_or(std::ptr::null(), |value| value.as_ptr()),
+            labeled,
+            es,
+        );
+        if (*es).format == pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT && labelname.is_some() {
+            (*es).indent = (*es).indent.saturating_sub(1);
+        }
+    }
+}
+
+/// Replicates static `ExplainIndentText` + `"Label:\n"` used by JIT / Gather.
+fn explain_text_section_header(es: *mut pg_sys::ExplainState, label: &str) {
+    unsafe {
+        explain_indent_text(es);
+        let line = CString::new(format!("{label}:\n")).unwrap_or_default();
+        pg_sys::appendStringInfoString((*es).str_, line.as_ptr());
+    }
+}
+
+/// Port of PostgreSQL's static `ExplainIndentText` (not exported from explain.c).
+unsafe fn explain_indent_text(es: *mut pg_sys::ExplainState) {
+    if (*es).format != pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT {
+        return;
+    }
+    let str_info = (*es).str_;
+    if str_info.is_null() {
+        return;
+    }
+    let len = (*str_info).len;
+    if len > 0 {
+        let last = *((*str_info).data).offset((len - 1) as isize);
+        if last == b'\n' as std::os::raw::c_char {
+            pg_sys::appendStringInfoSpaces(str_info, (*es).indent * 2);
+        }
     }
 }
 

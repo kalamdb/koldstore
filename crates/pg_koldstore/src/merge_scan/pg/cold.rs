@@ -81,7 +81,6 @@ pub(super) fn load_cold_rows_for_merge(
 
         let mut profile = ColdReadProfile {
             manifest_path: manifest_stats.manifest_path.clone(),
-            manifest_source: "catalog",
             storage_type: manifest_stats.storage_type.clone(),
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: Some(manifest_read_ms),
@@ -159,7 +158,6 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
         };
         Ok(ColdReadProfile {
             manifest_path: manifest_stats.manifest_path.clone(),
-            manifest_source: "catalog",
             storage_type: manifest_stats.storage_type.clone(),
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: Some(0.0),

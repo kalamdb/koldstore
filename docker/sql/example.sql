@@ -132,6 +132,8 @@ SELECT
   j.scope_key,
   j.job_type,
   j.status,
+  j.rows_flushed,
+  (j.payload->>'duration_ms')::bigint AS duration_ms,
   j.created_at
 FROM koldstore.jobs j
 JOIN pg_class c ON c.oid = j.table_oid

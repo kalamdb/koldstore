@@ -316,26 +316,48 @@ unsafe fn equality_var_and_literal(
     catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
 ) -> Option<(&koldstore_migrate::order::CatalogColumn, String)> {
-    // Cross-type PostgreSQL equality operators can be canonical while their
-    // Datum representations differ (for example float4 = float8). The literal
-    // formatter below uses the column's type, so only exact operand types are
-    // safe to reconstruct as a source predicate.
-    if pg_sys::exprType(left.cast::<pg_sys::Node>())
-        != pg_sys::exprType(right.cast::<pg_sys::Node>())
-    {
-        return None;
-    }
     if let Some(column) = var_column(left.cast::<pg_sys::Expr>(), catalog) {
-        if let Some(literal) = typed_literal_sql(right.cast::<pg_sys::Expr>(), column, params) {
-            return Some((column, literal));
+        if hot_equality_operand_types_compatible(
+            column,
+            pg_sys::exprType(right.cast::<pg_sys::Node>()),
+        ) {
+            if let Some(literal) = typed_literal_sql(right.cast::<pg_sys::Expr>(), column, params) {
+                return Some((column, literal));
+            }
         }
     }
     if let Some(column) = var_column(right.cast::<pg_sys::Expr>(), catalog) {
-        if let Some(literal) = typed_literal_sql(left.cast::<pg_sys::Expr>(), column, params) {
-            return Some((column, literal));
+        if hot_equality_operand_types_compatible(
+            column,
+            pg_sys::exprType(left.cast::<pg_sys::Node>()),
+        ) {
+            if let Some(literal) = typed_literal_sql(left.cast::<pg_sys::Expr>(), column, params) {
+                return Some((column, literal));
+            }
         }
     }
     None
+}
+
+/// Returns true when a Const/Param OID can be reconstructed as a hot SPI
+/// equality against `column`.
+///
+/// Exact matches are always allowed. Integer width promotions (`int2`/`int4`
+/// literal against a wider integer column) are allowed so untyped numeric
+/// literals behave like an explicit cast. Float and other cross-types stay
+/// rejected because Datum layouts are not interchangeable for SPI literals.
+fn hot_equality_operand_types_compatible(
+    column: &koldstore_migrate::order::CatalogColumn,
+    literal_oid: pg_sys::Oid,
+) -> bool {
+    let literal_oid = u32::from(literal_oid);
+    if literal_oid == column.pg_type.type_oid() {
+        return true;
+    }
+    let Some(literal_ty) = koldstore_schema::PgType::from_integer_oid(literal_oid) else {
+        return false;
+    };
+    column.pg_type.accepts_integer_equality_literal(literal_ty)
 }
 
 unsafe fn var_column(

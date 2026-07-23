@@ -84,6 +84,7 @@ struct ScanExecutionState {
     emit_path: EmitPath,
     hot_rows: usize,
     result_rows: usize,
+    hot_probe_ms: Option<f64>,
     /// Owns all Datums in buffered rows; deleted on EndCustomScan.
     _memory: ScanMemory,
 }
@@ -409,155 +410,170 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         .cloned()
         .collect::<Vec<_>>();
     let image_columns = scan_projection.catalog_columns();
-
-    let (mut cold_profile, cold_rows) = match load_cold_rows_for_merge(
-        table_oid,
-        scanrelid,
-        &snapshot,
-        catalog.as_ref(),
-        qual,
-        &image_columns,
-        params,
-    ) {
-        Ok(result) => result,
-        Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} cold read failed: {error}"),
-    };
-
-    // Only load mirror tombstones when cold rows could still be visible.
-    // Hot-only scans skip the overlay entirely (critical for pre-flush PK lookups).
-    let overlay = if cold_rows.is_empty() {
-        MirrorOverlay::default()
-    } else {
-        match load_mirror_tombstone_overlay(
-            &snapshot.mirror_relation,
-            &snapshot.primary_key_columns,
-            &pk_equality,
-        ) {
-            Ok(overlay) => overlay,
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} mirror overlay failed: {error}"),
-        }
-    };
-
-    let cold_rows = filter_cold_rows_with_overlay(cold_rows, &overlay);
-    // PostgreSQL does not initialize `custom_plans` for us; do it only on the
-    // hot-only path so cold merge does not pay for an unused heap child.
-    if cold_rows.is_empty() && cold_profile.segments.is_empty() {
-        initialize_custom_plan_children(node, estate, eflags);
-    }
-    let hot_plan_label = hot_child_explain_label(node);
-    let has_hot_child = hot_child_planstate(node).is_some();
+    let pk_point_lookup =
+        hot_equality_covers_primary_key(&pk_equality, &snapshot.primary_key_columns);
 
     let mut memory = ScanMemory::create("KoldMergeScan");
+    let mut cold_profile = ColdReadProfile::empty("(none)");
+    let mut overlay = MirrorOverlay::default();
+    let mut hot_probe_ms = None;
 
-    // Hot-only fast path: stream the native child when present and cold is empty.
-    let (mode, emit_path, hot_rows_count) = if cold_rows.is_empty()
-        && cold_profile.segments.is_empty()
-        && has_hot_child
-    {
-        (ScanEmitMode::HotChild, EmitPath::HotChild, 0)
-    } else if cold_rows.is_empty() && cold_profile.segments.is_empty() {
-        match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
-            load_hot_rows_native(
-                &relation,
-                &pk_equality,
-                &image_columns,
-                &scan_projection,
-                &mut memory,
-            )
-        }) {
-            Ok(rows) => {
-                let hot_count = rows.len();
-                (
-                    ScanEmitMode::buffer(rows, &scan_projection),
-                    EmitPath::HotNative,
-                    hot_count,
-                )
-            }
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot-only read failed: {error}"),
-        }
-    } else if !cold_rows.is_empty()
-        && hot_equality_covers_primary_key(&pk_equality, &snapshot.primary_key_columns)
-    {
-        // PK point-lookup fast path: probe hot with native Datums (no to_jsonb).
-        // Hot always wins for the same PK, so a hit skips cold merge entirely.
-        // A miss materializes cold winners without the JSON hot merge path.
-        match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
-            load_hot_rows_native(
-                &relation,
-                &pk_equality,
-                &image_columns,
-                &scan_projection,
-                &mut memory,
-            )
-        }) {
-            Ok(rows) if !rows.is_empty() => {
-                let hot_count = rows.len();
-                (
-                    ScanEmitMode::buffer(rows, &scan_projection),
-                    EmitPath::HotNative,
-                    hot_count,
-                )
-            }
-            Ok(_) => {
-                let merged = match execute_merge_scan(Vec::new(), cold_rows) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        pgrx::error!("{CUSTOM_PATH_NAME} cold-native merge failed: {error}")
-                    }
-                };
-                let rows = unsafe {
-                    memory.switch(|| {
-                        merged
-                            .rows
-                            .iter()
-                            .map(|row| {
-                                materialize_scan_row_from_image(&row.row_image, &scan_projection)
-                            })
-                            .collect::<Result<Vec<_>, _>>()
-                    })
-                }
-                .unwrap_or_else(|error| {
-                    pgrx::error!("{CUSTOM_PATH_NAME} cold-native emit failed: {error}")
-                });
-                (
-                    ScanEmitMode::buffer(rows, &scan_projection),
-                    EmitPath::ColdNative,
-                    0,
-                )
-            }
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot probe failed: {error}"),
-        }
-    } else {
-        let hot_rows =
+    // PERFORMANCE: for full-PK equality, probe hot before any Parquet open.
+    // Hot always wins for the same PK, so a hit skips object-store I/O even when
+    // catalog min/max would keep overlapping cold segments.
+    let hot_first_hit = if pk_point_lookup {
+        let probe_started = std::time::Instant::now();
+        let rows =
             match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
-                load_hot_rows_for_merge(&relation, &snapshot, &pk_equality, &image_columns)
+                load_hot_rows_native(
+                    &relation,
+                    &pk_equality,
+                    &image_columns,
+                    &scan_projection,
+                    &mut memory,
+                )
             }) {
-                Ok(rows) => rows,
-                Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot read failed: {error}"),
+                Ok(rows) if !rows.is_empty() => Some(rows),
+                Ok(_) => None,
+                Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot probe failed: {error}"),
             };
-        let hot_count = hot_rows.len();
-        let merged = match execute_merge_scan(hot_rows, cold_rows) {
-            Ok(result) => result,
-            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} merge failed: {error}"),
-        };
-
-        let rows = unsafe {
-            memory.switch(|| {
-                merged
-                    .rows
-                    .iter()
-                    .map(|row| materialize_scan_row_from_image(&row.row_image, &scan_projection))
-                    .collect::<Result<Vec<_>, _>>()
-            })
-        }
-        .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} emit failed: {error}"));
-        (
-            ScanEmitMode::buffer(rows, &scan_projection),
-            EmitPath::MergeBuffer,
-            hot_count,
-        )
+        hot_probe_ms = Some(profile::elapsed_ms(probe_started));
+        rows
+    } else {
+        None
     };
 
+    let (mode, emit_path, hot_rows_count) = if let Some(rows) = hot_first_hit {
+        let hot_count = rows.len();
+        (
+            ScanEmitMode::buffer(rows, &scan_projection),
+            EmitPath::HotNative,
+            hot_count,
+        )
+    } else {
+        let (loaded_profile, cold_rows) = match load_cold_rows_for_merge(
+            table_oid,
+            scanrelid,
+            &snapshot,
+            catalog.as_ref(),
+            qual,
+            &image_columns,
+            params,
+        ) {
+            Ok(result) => result,
+            Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} cold read failed: {error}"),
+        };
+        cold_profile = loaded_profile;
+
+        // Only load mirror tombstones when cold rows could still be visible.
+        // Hot-only scans skip the overlay entirely (critical for pre-flush PK lookups).
+        overlay = if cold_rows.is_empty() {
+            MirrorOverlay::default()
+        } else {
+            match load_mirror_tombstone_overlay(
+                &snapshot.mirror_relation,
+                &snapshot.primary_key_columns,
+                &pk_equality,
+            ) {
+                Ok(overlay) => overlay,
+                Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} mirror overlay failed: {error}"),
+            }
+        };
+
+        let cold_rows = filter_cold_rows_with_overlay(cold_rows, &overlay);
+        // PostgreSQL does not initialize `custom_plans` for us; do it only on the
+        // hot-only path so cold merge does not pay for an unused heap child.
+        if cold_rows.is_empty() && cold_profile.segments.is_empty() {
+            initialize_custom_plan_children(node, estate, eflags);
+        }
+        let has_hot_child = hot_child_planstate(node).is_some();
+
+        if cold_rows.is_empty() && cold_profile.segments.is_empty() && has_hot_child {
+            (ScanEmitMode::HotChild, EmitPath::HotChild, 0)
+        } else if cold_rows.is_empty() && cold_profile.segments.is_empty() {
+            // Non-PK (or partial PK) path with no cold: load hot now.
+            // Full-PK point lookups already probed above and missed.
+            match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
+                load_hot_rows_native(
+                    &relation,
+                    &pk_equality,
+                    &image_columns,
+                    &scan_projection,
+                    &mut memory,
+                )
+            }) {
+                Ok(rows) => {
+                    let hot_count = rows.len();
+                    (
+                        ScanEmitMode::buffer(rows, &scan_projection),
+                        EmitPath::HotNative,
+                        hot_count,
+                    )
+                }
+                Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot-only read failed: {error}"),
+            }
+        } else if pk_point_lookup {
+            // Full-PK miss: cold winners only (hot already empty from probe).
+            let merged = match execute_merge_scan(Vec::new(), cold_rows) {
+                Ok(result) => result,
+                Err(error) => {
+                    pgrx::error!("{CUSTOM_PATH_NAME} cold-native merge failed: {error}")
+                }
+            };
+            let rows = unsafe {
+                memory.switch(|| {
+                    merged
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            materialize_scan_row_from_image(&row.row_image, &scan_projection)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            }
+            .unwrap_or_else(|error| {
+                pgrx::error!("{CUSTOM_PATH_NAME} cold-native emit failed: {error}")
+            });
+            (
+                ScanEmitMode::buffer(rows, &scan_projection),
+                EmitPath::ColdNative,
+                0,
+            )
+        } else {
+            let hot_rows =
+                match crate::catalog::owner::with_relation_owner_for_merge(relation_owner, || {
+                    load_hot_rows_for_merge(&relation, &snapshot, &pk_equality, &image_columns)
+                }) {
+                    Ok(rows) => rows,
+                    Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} hot read failed: {error}"),
+                };
+            let hot_count = hot_rows.len();
+            let merged = match execute_merge_scan(hot_rows, cold_rows) {
+                Ok(result) => result,
+                Err(error) => pgrx::error!("{CUSTOM_PATH_NAME} merge failed: {error}"),
+            };
+
+            let rows = unsafe {
+                memory.switch(|| {
+                    merged
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            materialize_scan_row_from_image(&row.row_image, &scan_projection)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+            }
+            .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} emit failed: {error}"));
+            (
+                ScanEmitMode::buffer(rows, &scan_projection),
+                EmitPath::MergeBuffer,
+                hot_count,
+            )
+        }
+    };
+
+    let hot_plan_label = hot_child_explain_label(node);
     cold_profile.segments_opened = cold_profile.segments.len();
     let result_rows = match &mode {
         ScanEmitMode::HotChild => 0,
@@ -576,6 +592,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 emit_path,
                 hot_rows: hot_rows_count,
                 result_rows,
+                hot_probe_ms,
                 _memory: memory,
             },
         );
@@ -668,6 +685,7 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                             emit_path: scan.emit_path,
                             hot_rows: scan.hot_rows,
                             result_rows: scan.result_rows,
+                            hot_probe_ms: scan.hot_probe_ms,
                         },
                     );
                 }
@@ -766,48 +784,76 @@ unsafe extern "C-unwind" fn explain_custom_scan(
                 scan.emit_path,
                 scan.hot_rows,
                 scan.result_rows,
+                scan.hot_probe_ms,
             )
         })
     });
-    let (profile, hot_label, tombstones, live_overrides, emit_path, hot_rows, result_rows) =
-        match profile {
-            Some(meta) => meta,
-            None => match profile::saved_explain_profile(node as usize) {
-                Some(meta) => (
-                    meta.cold_profile,
-                    meta.hot_plan_label,
-                    meta.mirror_tombstones,
-                    meta.mirror_live_overrides,
-                    meta.emit_path,
-                    meta.hot_rows,
-                    meta.result_rows,
-                ),
-                None => {
-                    // EXPLAIN without ANALYZE (or missing saved meta): plan-time cold profile only.
-                    // Do not touch custom_ps here — children may already be shut down.
-                    let profile = match resolve_table_oid(node).and_then(planned_cold_read_profile)
-                    {
-                        Ok(profile) => profile,
-                        Err(error) => {
-                            profile::explain_property(
-                                es,
-                                "Cold storage",
-                                &format!("unavailable: {error}"),
-                            );
-                            return;
-                        }
-                    };
-                    (profile, String::new(), 0, 0, EmitPath::default(), 0, 0)
-                }
-            },
-        };
+    let (
+        profile,
+        hot_label,
+        tombstones,
+        live_overrides,
+        emit_path,
+        hot_rows,
+        result_rows,
+        hot_probe_ms,
+    ) = match profile {
+        Some(meta) => meta,
+        None => match profile::saved_explain_profile(node as usize) {
+            Some(meta) => (
+                meta.cold_profile,
+                meta.hot_plan_label,
+                meta.mirror_tombstones,
+                meta.mirror_live_overrides,
+                meta.emit_path,
+                meta.hot_rows,
+                meta.result_rows,
+                meta.hot_probe_ms,
+            ),
+            None => {
+                // EXPLAIN without ANALYZE (or missing saved meta): plan-time cold profile only.
+                // Do not touch custom_ps here — children may already be shut down.
+                let profile = match resolve_table_oid(node).and_then(planned_cold_read_profile) {
+                    Ok(profile) => profile,
+                    Err(error) => {
+                        profile::explain_property(
+                            es,
+                            "Cold Storage",
+                            &format!("unavailable: {error}"),
+                        );
+                        return;
+                    }
+                };
+                (
+                    profile,
+                    String::new(),
+                    0,
+                    0,
+                    EmitPath::default(),
+                    0,
+                    0,
+                    None,
+                )
+            }
+        },
+    };
 
-    if !hot_label.is_empty() {
+    if !hot_label.is_empty() && hot_child_planstate(node).is_none() {
+        // Fallback when the hot child was not initialized into custom_ps (cold
+        // emit paths). Graph clients that walk custom_ps still see nested Plans
+        // when the child was initialized for hot-only streaming.
         profile::explain_property(es, "Hot Plan", &hot_label);
     }
-    profile::explain_property(es, "Mirror Tombstones", &tombstones.to_string());
-    profile::explain_property(es, "Mirror Overrides", &live_overrides.to_string());
-    profile::explain_cold_read_profile(es, &profile, emit_path, hot_rows, result_rows);
+    profile::explain_integer(es, "Mirror Tombstones", None, tombstones as i64);
+    profile::explain_integer(es, "Mirror Overrides", None, live_overrides as i64);
+    profile::explain_cold_read_profile(
+        es,
+        &profile,
+        emit_path,
+        hot_rows,
+        result_rows,
+        hot_probe_ms,
+    );
 
     if (*es).analyze {
         profile::forget_explain_profile(node as usize);

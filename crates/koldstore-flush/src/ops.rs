@@ -488,6 +488,25 @@ LEFT JOIN LATERAL (
             'rows_flushed', job_snapshot.rows_flushed,
             'checkpoint_seq', job_snapshot.checkpoint_seq,
             'checkpoint_commit_seq', job_snapshot.checkpoint_commit_seq,
+            'duration_ms', COALESCE(
+                (job_snapshot.payload->>'duration_ms')::bigint,
+                GREATEST(
+                    0,
+                    (EXTRACT(EPOCH FROM (
+                        CASE
+                            WHEN job_snapshot.status IN (
+                                'completed', 'error', 'cancelled', 'dry_run'
+                            )
+                                THEN job_snapshot.updated_at
+                            ELSE now()
+                        END
+                        - COALESCE(
+                            (job_snapshot.payload->>'started_at')::timestamptz,
+                            job_snapshot.created_at
+                        )
+                    )) * 1000)::bigint
+                )
+            ),
             'updated_at', job_snapshot.updated_at
         )
         ORDER BY job_snapshot.updated_at DESC, job_snapshot.id
@@ -502,6 +521,8 @@ LEFT JOIN LATERAL (
             rows_flushed,
             checkpoint_seq,
             checkpoint_commit_seq,
+            payload,
+            created_at,
             updated_at
         FROM koldstore.jobs
         WHERE table_oid = s.table_oid

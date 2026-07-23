@@ -70,6 +70,12 @@ impl MirrorCaptureMode {
             Self::Async => "async",
         }
     }
+
+    /// Returns whether mirror changes are applied out of band.
+    #[must_use]
+    pub const fn is_async(self) -> bool {
+        matches!(self, Self::Async)
+    }
 }
 
 impl MigrationStatus {
@@ -757,5 +763,7 @@ mod tests {
             Some(MirrorCaptureMode::Async)
         );
         assert_eq!(MirrorCaptureMode::parse("eventual"), None);
+        assert!(!MirrorCaptureMode::Strict.is_async());
+        assert!(MirrorCaptureMode::Async.is_async());
     }
 }

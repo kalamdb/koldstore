@@ -422,7 +422,7 @@ if [[ "${SKIP_BENCHMARKS}" -eq 0 ]]; then
     --rows 1000 \
     --clients 2 \
     --jobs 2 \
-    --seconds 5
+    --seconds 10
 fi
 
 step "all requested test suites passed"

@@ -4,11 +4,8 @@
 //! path helpers live in `koldstore-manifest`. SPI execution and file writes stay
 //! in `pg_koldstore`.
 
-use std::path::PathBuf;
-
 use koldstore_manifest::Manifest;
-
-pub use koldstore_manifest::manifest_paths;
+pub use koldstore_manifest::{manifest_paths, relative_manifest_path};
 
 /// Prepared context for one synchronous flush attempt.
 #[derive(Debug, Clone, PartialEq)]
@@ -48,12 +45,10 @@ pub struct TableFlushBatchOutcome {
     pub mirror_ops: Option<Vec<i16>>,
     /// Sequence watermark used for conditional mirror/hot cleanup.
     pub prune_max_seq: i64,
-    /// Manifest assembled from active catalog segments.
+    /// Manifest assembled from active+pending catalog segments.
     pub manifest: Manifest,
     /// Relative manifest path under the table prefix.
     pub manifest_path: String,
-    /// Absolute manifest path on local/object-store mount.
-    pub absolute_manifest_path: PathBuf,
     /// Segment ids inserted as `pending` this flush (activated at finalize).
     pub pending_segment_ids: Vec<uuid::Uuid>,
 }

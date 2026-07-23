@@ -37,15 +37,17 @@ pub use segment_write::{
     WrittenFlushSegment,
 };
 pub use stats::{
-    resolve_force_flush_selection, resolve_policy_flush_selection, validate_flush_row_selection,
-    FlushStats, ResolvedFlushSelection, FORCE_TOMBSTONE_ONLY_CAP,
+    apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
+    validate_flush_row_selection, FlushStats, ResolvedFlushSelection, FORCE_FLUSH_WAVE_ROW_CAP,
+    FORCE_TOMBSTONE_ONLY_CAP,
 };
 pub use table_counters::{
-    plan_apply_flush_row_count_deltas, plan_bump_table_row_counts, plan_read_table_row_counters,
-    plan_refresh_table_row_counters, TableRowCounters, FLUSH_MIRROR_FETCH_BATCH_SIZE,
+    flush_mirror_fetch_limit, plan_apply_flush_row_count_deltas, plan_bump_table_row_counts,
+    plan_read_table_row_counters, plan_refresh_table_row_counters, TableRowCounters,
+    FLUSH_MIRROR_FETCH_BATCH_SIZE,
 };
 pub use table_flush::{
-    manifest_paths, max_rows_per_file_from_policy, TableFlushBatchOutcome,
+    max_rows_per_file_from_policy, relative_manifest_path, TableFlushBatchOutcome,
     TableFlushPreparedContext,
 };
 // Re-export manifest assembly/I/O so existing flush callers keep a stable path.
@@ -57,6 +59,6 @@ pub use koldstore_manifest::{
 pub use table_jobs::{
     plan_insert_inline_flush_job, plan_lookup_active_inline_flush_job,
     plan_mark_inline_flush_job_completed, plan_mark_inline_flush_job_failed,
-    plan_mark_inline_flush_job_running, TableFlushJobError,
+    plan_mark_inline_flush_job_running, plan_update_inline_flush_job_progress, TableFlushJobError,
 };
 pub use write::FlushWriteChunk;

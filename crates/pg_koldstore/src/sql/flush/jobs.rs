@@ -3,7 +3,7 @@
 use koldstore_flush::{
     plan_insert_inline_flush_job, plan_lookup_active_inline_flush_job,
     plan_mark_inline_flush_job_completed, plan_mark_inline_flush_job_failed,
-    plan_mark_inline_flush_job_running,
+    plan_mark_inline_flush_job_running, plan_update_inline_flush_job_progress,
 };
 
 #[derive(serde::Deserialize)]
@@ -64,12 +64,39 @@ pub(super) fn mark_flush_job_running(
     Ok(())
 }
 
+pub(super) fn update_flush_job_progress(
+    job_id: uuid::Uuid,
+    table_oid: pgrx::pg_sys::Oid,
+    rows_flushed: i64,
+    batches_completed: i32,
+    checkpoint_seq: i64,
+    checkpoint_commit_seq: i64,
+) -> Result<(), String> {
+    use pgrx::datum::DatumWithOid;
+
+    let statement = plan_update_inline_flush_job_progress().map_err(|error| error.to_string())?;
+    crate::spi::update(
+        &statement,
+        &[
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(rows_flushed),
+            DatumWithOid::from(batches_completed),
+            DatumWithOid::from(checkpoint_seq),
+            DatumWithOid::from(checkpoint_commit_seq),
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 pub(super) fn mark_flush_job_completed(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
     rows_flushed: i64,
     checkpoint_seq: i64,
     checkpoint_commit_seq: i64,
+    batches_completed: i32,
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
 
@@ -82,6 +109,7 @@ pub(super) fn mark_flush_job_completed(
             DatumWithOid::from(rows_flushed),
             DatumWithOid::from(checkpoint_seq),
             DatumWithOid::from(checkpoint_commit_seq),
+            DatumWithOid::from(batches_completed),
         ],
     )
     .map_err(|error| error.to_string())?;

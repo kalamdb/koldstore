@@ -11,6 +11,13 @@ use crate::policy::policy_flush_row_count;
 /// Cap for force-flush tombstone-only selection.
 pub const FORCE_TOMBSTONE_ONLY_CAP: i64 = 4_096;
 
+/// Cap for one force-flush wave when draining a large mirror backlog.
+///
+/// Matches [`koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH`] so force and policy
+/// waves share the same memory ceiling; `flush_prepared_table` keeps draining
+/// until the mirror is empty (or the catch-up wave budget is exhausted).
+pub const FORCE_FLUSH_WAVE_ROW_CAP: i64 = koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH as i64;
+
 /// Aggregated mirror sequence bounds selected for one flush attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlushStats {
@@ -152,6 +159,33 @@ pub fn resolve_force_flush_selection(
         };
     }
     ResolvedFlushSelection::new(all)
+}
+
+/// Caps a full-mirror force selection to one wave when a cutoff is available.
+///
+/// Tombstone-only selections and already-small mirrors are returned unchanged.
+#[must_use]
+pub fn apply_force_flush_wave_cap(
+    selection: ResolvedFlushSelection,
+    wave_cap: i64,
+    cutoff: Option<(i64, i64)>,
+) -> ResolvedFlushSelection {
+    if selection.mirror_ops.is_some() || selection.stats.row_count <= wave_cap.max(0) {
+        return selection;
+    }
+    let Some((selected_count, max_seq)) = cutoff else {
+        return selection;
+    };
+    if selected_count <= 0 || max_seq <= 0 {
+        return selection;
+    }
+    ResolvedFlushSelection::new(FlushStats {
+        row_count: selected_count.min(selection.stats.row_count),
+        min_seq: selection.stats.min_seq,
+        max_seq,
+        min_commit_seq: selection.stats.min_commit_seq,
+        max_commit_seq: max_seq,
+    })
 }
 
 /// Validates that flush row selection matches resolved stats.
