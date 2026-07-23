@@ -2,11 +2,31 @@
 
 use std::ffi::CString;
 
+use koldstore_merge::scan::MergeScanResult;
 use koldstore_schema::PgType;
 use pgrx::pg_sys;
 
 use super::qual::ScanProjection;
-use super::tuple::MaterializedRow;
+use super::tuple::{MaterializedRow, ScanMemory};
+
+/// Materializes all winner rows inside the scan-owned PostgreSQL memory context.
+///
+/// # Errors
+///
+/// Returns an error when any projected row image cannot be converted to Datums.
+pub(super) unsafe fn materialize_merged_rows(
+    merged: &MergeScanResult,
+    projection: &ScanProjection<'_>,
+    memory: &mut ScanMemory,
+) -> Result<Vec<MaterializedRow>, String> {
+    memory.switch(|| {
+        merged
+            .rows
+            .iter()
+            .map(|row| materialize_scan_row_from_image(&row.row_image, projection))
+            .collect()
+    })
+}
 
 /// Builds one projected row from a winner `row_image` JSON object.
 ///

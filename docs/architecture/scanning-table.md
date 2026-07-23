@@ -248,26 +248,74 @@ PostgreSQL then evaluates the invoking role's compiled quals on resolved tuples.
 
 ## EXPLAIN
 
-`EXPLAIN` / `EXPLAIN ANALYZE` should show at least:
+KoldMergeScan uses PostgreSQL's native `ExplainProperty*` and
+`ExplainOpenGroup` APIs. Standard syntax works unchanged, including
+`ANALYZE`, `TIMING`, and `FORMAT TEXT | JSON | YAML | XML`:
 
-- Hot Plan (Index Scan / Bitmap Heap Scan / Seq Scan)
-- Emit path (`hot_child` / `hot_native` / `cold_native` / `merge_buffer`)
-- Hot rows / Result rows (ANALYZE)
-- Candidate segments / Segments pruned / Parquet segments opened
-- Bytes fetched (ANALYZE)
-- Mirror Tombstones / Mirror Overrides
+```sql
+EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)
+SELECT body FROM app.messages WHERE id IN (1, 4);
+```
 
-Example shape (ANALYZE):
+Plain `EXPLAIN` reports planned source state and never claims that a segment
+was opened or a row was scanned. `EXPLAIN ANALYZE` adds:
+
+- the selected emit path (`hot_child`, `hot_native`, `cold_native`, or
+  `merge_buffer`);
+- a nested `Scan Sources` flow with hot, cold Parquet, and mirror-overlay
+  access methods and rows scanned;
+- segment, row-group, bloom, range-request, byte, projection, and cache
+  diagnostics for the cold source;
+- a `Merge` stage with input/output rows and rows removed by overlay or
+  primary-key winner resolution;
+- PostgreSQL's normal `Filter` / `Rows Removed by Filter` properties after
+  winner resolution;
+- a nested `Timing` stage for initialization, metadata, hot scan, cold read,
+  mirror scan, overlay, merge, and tuple materialization.
+
+Custom phase timings follow PostgreSQL's `TIMING` option. They are present for
+`EXPLAIN (ANALYZE)` and omitted for `EXPLAIN (ANALYZE, TIMING OFF)`.
+`Initialization Time` is reported explicitly because source loading and merge
+setup run in `BeginCustomScan`, outside PostgreSQL's per-tuple Custom Scan node
+timer.
+
+Ordinary execution does not allocate an EXPLAIN profile, read custom phase
+clocks, or maintain EXPLAIN-only row counters. Collection is enabled only when
+PostgreSQL attaches native executor instrumentation to the plan node. For the
+streaming hot-child path, row totals are read from PostgreSQL's child-plan
+instrumentation after execution instead of adding work to each emitted row.
+
+Example shape (ANALYZE, TEXT):
 
 ```text
 Custom Scan (KoldMergeScan)
-  Hot Plan: Index Scan
-  Emit path: cold_native
-  Hot rows: 0
-  Result rows: 1
-  Candidate segments: 12
-  Segments pruned by min/max: 10
-  Parquet segments opened: 2
+  Emit Path: merge_buffer
+  Scan Sources:
+    Hot Scan:
+      Planned Access: Bitmap Heap Scan
+      Access Method: SPI JSON projection
+      Rows Scanned: 1
+    Cold Scan:
+      Status: executed
+      Rows Scanned: 3
+      Candidate Segments: 12
+      Segments Pruned by Min/Max: 10
+      Parquet Segments Opened: 2
+      Bytes Fetched: 16384 bytes
+    Mirror Scan:
+      Status: executed
+      Rows Scanned: 1
+      Rows Removed by Overlay: 1
+  Merge:
+    Strategy: Primary Key Winner Resolution
+    Input Rows: 3
+    Output Rows: 2
+    Rows Removed by Merge: 1
+  Timing:
+    Initialization Time: 4.812 ms
+    Hot Scan Time: 0.142 ms
+    Cold Read Time: 3.906 ms
+    Merge Time: 0.011 ms
 ```
 
 ---

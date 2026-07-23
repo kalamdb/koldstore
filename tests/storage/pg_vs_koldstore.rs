@@ -577,7 +577,8 @@ async fn run_managed_only_body(
         .await?;
         common::assert_kold_merge_scan_explain(&plan_pre_flush)?;
         anyhow::ensure!(
-            plan_pre_flush.contains("Parquet Segments Opened: 0"),
+            plan_pre_flush.contains("Parquet Segments Opened: 0")
+                || plan_pre_flush.contains("Parquet Segments Planned: 0"),
             "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
         );
     }
@@ -641,7 +642,8 @@ async fn run_managed_only_body(
         common::assert_kold_merge_scan_explain(&plan_cold)?;
         common::assert_kold_merge_scan_planned_cold_reads(&plan_cold, "manifest.json", 1)?;
         anyhow::ensure!(
-            !plan_cold.contains("Parquet Segments Opened: 0"),
+            !plan_cold.contains("Parquet Segments Opened: 0")
+                && !plan_cold.contains("Parquet Segments Planned: 0"),
             "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
         );
     }
@@ -816,7 +818,8 @@ async fn run_storage_comparison_body(
         .await?;
         common::assert_kold_merge_scan_explain(&plan_pre_flush)?;
         anyhow::ensure!(
-            plan_pre_flush.contains("Parquet Segments Opened: 0"),
+            plan_pre_flush.contains("Parquet Segments Opened: 0")
+                || plan_pre_flush.contains("Parquet Segments Planned: 0"),
             "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
         );
         assert_point_row_matches(&db.client, baseline, managed, hot_id).await?;
@@ -894,7 +897,8 @@ async fn run_storage_comparison_body(
         common::assert_kold_merge_scan_explain(&plan_cold)?;
         common::assert_kold_merge_scan_planned_cold_reads(&plan_cold, "manifest.json", 1)?;
         anyhow::ensure!(
-            !plan_cold.contains("Parquet Segments Opened: 0"),
+            !plan_cold.contains("Parquet Segments Opened: 0")
+                && !plan_cold.contains("Parquet Segments Planned: 0"),
             "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
         );
 

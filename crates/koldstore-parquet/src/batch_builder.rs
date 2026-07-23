@@ -164,6 +164,175 @@ enum TypedColumnBuilder {
     Timestamptz(TimestampMicrosecondBuilder),
 }
 
+/// Local adapter so typed append helpers share one null/value/mismatch path.
+trait AppendFlushCell<T> {
+    fn append_null_cell(&mut self);
+    fn append_value_cell(&mut self, value: T);
+}
+
+macro_rules! impl_append_flush_cell {
+    ($builder:ty, $value:ty) => {
+        impl AppendFlushCell<$value> for $builder {
+            fn append_null_cell(&mut self) {
+                self.append_null();
+            }
+
+            fn append_value_cell(&mut self, value: $value) {
+                self.append_value(value);
+            }
+        }
+    };
+}
+
+impl_append_flush_cell!(BooleanBuilder, bool);
+impl_append_flush_cell!(Int16Builder, i16);
+impl_append_flush_cell!(Int32Builder, i32);
+impl_append_flush_cell!(Int64Builder, i64);
+impl_append_flush_cell!(Float32Builder, f32);
+impl_append_flush_cell!(Float64Builder, f64);
+impl_append_flush_cell!(TimestampMicrosecondBuilder, i64);
+
+fn append_typed<B, T, F>(
+    builder: &mut B,
+    value: Option<&FlushColumnValue>,
+    extract: F,
+    expected: &str,
+) -> Result<(), String>
+where
+    B: AppendFlushCell<T>,
+    F: FnOnce(&FlushColumnValue) -> Option<T>,
+{
+    match value {
+        None | Some(FlushColumnValue::Null) => builder.append_null_cell(),
+        Some(cell) => match extract(cell) {
+            Some(typed) => builder.append_value_cell(typed),
+            None => {
+                return Err(format!("expected {expected} flush value, got {cell:?}"));
+            }
+        },
+    }
+    Ok(())
+}
+
+fn append_bool(
+    builder: &mut BooleanBuilder,
+    value: Option<&FlushColumnValue>,
+) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            FlushColumnValue::Bool(v) => Some(*v),
+            _ => None,
+        },
+        "boolean",
+    )
+}
+
+fn append_int16(
+    builder: &mut Int16Builder,
+    value: Option<&FlushColumnValue>,
+) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            FlushColumnValue::Int16(v) => Some(*v),
+            _ => None,
+        },
+        "int2",
+    )
+}
+
+fn append_int32(
+    builder: &mut Int32Builder,
+    value: Option<&FlushColumnValue>,
+) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            FlushColumnValue::Int32(v) => Some(*v),
+            _ => None,
+        },
+        "int4",
+    )
+}
+
+fn append_int64(
+    builder: &mut Int64Builder,
+    value: Option<&FlushColumnValue>,
+) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            FlushColumnValue::Int64(v) => Some(*v),
+            _ => None,
+        },
+        "int8",
+    )
+}
+
+fn append_float32(
+    builder: &mut Float32Builder,
+    value: Option<&FlushColumnValue>,
+) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            FlushColumnValue::Float32(v) => Some(*v),
+            _ => None,
+        },
+        "float4",
+    )
+}
+
+fn append_float64(
+    builder: &mut Float64Builder,
+    value: Option<&FlushColumnValue>,
+) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            FlushColumnValue::Float64(v) => Some(*v),
+            _ => None,
+        },
+        "float8",
+    )
+}
+
+fn append_utf8(
+    builder: &mut StringBuilder,
+    value: Option<&FlushColumnValue>,
+) -> Result<(), String> {
+    match value {
+        None | Some(FlushColumnValue::Null) => builder.append_null(),
+        Some(FlushColumnValue::Utf8(v)) => builder.append_value(v.as_str()),
+        Some(other) => {
+            return Err(format!("expected utf8 flush value, got {other:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn append_timestamptz(
+    builder: &mut TimestampMicrosecondBuilder,
+    value: Option<&FlushColumnValue>,
+) -> Result<(), String> {
+    append_typed(
+        builder,
+        value,
+        |cell| match cell {
+            FlushColumnValue::TimestamptzMicros(v) => Some(*v),
+            _ => None,
+        },
+        "timestamptz",
+    )
+}
+
 impl TypedColumnBuilder {
     fn new(pg_type: PgType) -> Self {
         match pg_type {
@@ -185,50 +354,15 @@ impl TypedColumnBuilder {
 
     fn append(&mut self, value: Option<&FlushColumnValue>) -> Result<(), String> {
         match self {
-            Self::Bool(builder) => match value {
-                None | Some(FlushColumnValue::Null) => builder.append_null(),
-                Some(FlushColumnValue::Bool(value)) => builder.append_value(*value),
-                Some(other) => return Err(format!("expected boolean flush value, got {other:?}")),
-            },
-            Self::Int16(builder) => match value {
-                None | Some(FlushColumnValue::Null) => builder.append_null(),
-                Some(FlushColumnValue::Int16(value)) => builder.append_value(*value),
-                Some(other) => return Err(format!("expected int2 flush value, got {other:?}")),
-            },
-            Self::Int32(builder) => match value {
-                None | Some(FlushColumnValue::Null) => builder.append_null(),
-                Some(FlushColumnValue::Int32(value)) => builder.append_value(*value),
-                Some(other) => return Err(format!("expected int4 flush value, got {other:?}")),
-            },
-            Self::Int64(builder) => match value {
-                None | Some(FlushColumnValue::Null) => builder.append_null(),
-                Some(FlushColumnValue::Int64(value)) => builder.append_value(*value),
-                Some(other) => return Err(format!("expected int8 flush value, got {other:?}")),
-            },
-            Self::Float32(builder) => match value {
-                None | Some(FlushColumnValue::Null) => builder.append_null(),
-                Some(FlushColumnValue::Float32(value)) => builder.append_value(*value),
-                Some(other) => return Err(format!("expected float4 flush value, got {other:?}")),
-            },
-            Self::Float64(builder) => match value {
-                None | Some(FlushColumnValue::Null) => builder.append_null(),
-                Some(FlushColumnValue::Float64(value)) => builder.append_value(*value),
-                Some(other) => return Err(format!("expected float8 flush value, got {other:?}")),
-            },
-            Self::Utf8(builder) => match value {
-                None | Some(FlushColumnValue::Null) => builder.append_null(),
-                Some(FlushColumnValue::Utf8(value)) => builder.append_value(value),
-                Some(other) => return Err(format!("expected utf8 flush value, got {other:?}")),
-            },
-            Self::Timestamptz(builder) => match value {
-                None | Some(FlushColumnValue::Null) => builder.append_null(),
-                Some(FlushColumnValue::TimestamptzMicros(value)) => builder.append_value(*value),
-                Some(other) => {
-                    return Err(format!("expected timestamptz flush value, got {other:?}"));
-                }
-            },
+            Self::Bool(builder) => append_bool(builder, value),
+            Self::Int16(builder) => append_int16(builder, value),
+            Self::Int32(builder) => append_int32(builder, value),
+            Self::Int64(builder) => append_int64(builder, value),
+            Self::Float32(builder) => append_float32(builder, value),
+            Self::Float64(builder) => append_float64(builder, value),
+            Self::Utf8(builder) => append_utf8(builder, value),
+            Self::Timestamptz(builder) => append_timestamptz(builder, value),
         }
-        Ok(())
     }
 
     fn finish(self) -> ArrayRef {

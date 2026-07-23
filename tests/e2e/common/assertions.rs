@@ -99,29 +99,28 @@ pub fn assert_kold_merge_scan_planned_cold_reads(
     assert_kold_merge_scan_cold_reads(plan, manifest_path_hint, min_parquet_segments)
 }
 
-/// Asserts an analyzed merge scan reports timed manifest and parquet reads.
+/// Asserts an analyzed merge scan reports executed cold catalog and parquet reads.
+///
+/// Timing lines are intentionally omitted: e2e `explain_analyze` uses
+/// `EXPLAIN (ANALYZE, TIMING OFF)`, matching native PostgreSQL and the
+/// `#[pg_test]` contract that TIMING OFF suppresses custom phase clocks.
 pub fn assert_kold_merge_scan_executed_cold_reads(
     plan: &str,
     min_parquet_segments: usize,
 ) -> Result<()> {
     assert_kold_merge_scan_explain(plan)?;
     anyhow::ensure!(
-        plan.lines()
-            .any(|line| line.contains("Segment Catalog Time") && line.contains("ms")),
-        "expected timed segment catalog read in analyzed plan, got:\n{plan}"
+        plan.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("Status:") && trimmed.contains("executed")
+        }),
+        "expected executed cold scan status in analyzed plan, got:\n{plan}"
     );
 
-    let timed_segments = plan
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            // Per-segment timing only — exclude aggregate "Cold Read Time".
-            trimmed.starts_with("Read Time:") && trimmed.contains("ms")
-        })
-        .count();
+    let opened = count_parquet_segments(plan);
     anyhow::ensure!(
-        timed_segments >= min_parquet_segments,
-        "expected at least {min_parquet_segments} timed parquet segment(s), got {timed_segments} in plan:\n{plan}"
+        opened >= min_parquet_segments,
+        "expected at least {min_parquet_segments} parquet segment(s), got {opened} in plan:\n{plan}"
     );
     anyhow::ensure!(
         plan.lines()
@@ -148,12 +147,14 @@ pub fn assert_kold_merge_scan_executed_cold_reads(
 
 /// Counts cold Parquet segments reported by KoldMergeScan EXPLAIN.
 ///
-/// Prefers the typed `Parquet Segments Opened` counter; falls back to per-segment
-/// `Object:` lines emitted under the nested Parquet Segments group.
+/// Prefers the typed `Parquet Segments Opened` / `Planned` counter; falls back to
+/// per-segment `Object:` lines emitted under the nested Parquet Segments group.
 fn count_parquet_segments(plan: &str) -> usize {
     if let Some(opened) = plan.lines().find_map(|line| {
-        line.trim_start()
+        let trimmed = line.trim_start();
+        trimmed
             .strip_prefix("Parquet Segments Opened:")
+            .or_else(|| trimmed.strip_prefix("Parquet Segments Planned:"))
             .and_then(|value| value.trim().parse::<usize>().ok())
     }) {
         return opened;

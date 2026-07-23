@@ -247,6 +247,33 @@ impl FlushPolicy {
         }
     }
 
+    /// Returns a copy with flush batching bounds replaced.
+    ///
+    /// Filter policies are left unchanged because execution rejects them.
+    #[must_use]
+    pub fn with_batching(
+        self,
+        min_flush_rows: u64,
+        max_rows_per_file: u64,
+        max_rows_per_flush: u64,
+    ) -> Self {
+        match self {
+            Self::RowLimit { hot_row_limit, .. } => Self::RowLimit {
+                hot_row_limit,
+                min_flush_rows,
+                max_rows_per_file,
+                max_rows_per_flush,
+            },
+            Self::OlderThan { age, .. } => Self::OlderThan {
+                age,
+                min_flush_rows,
+                max_rows_per_file,
+                max_rows_per_flush,
+            },
+            policy @ Self::Filter { .. } => policy,
+        }
+    }
+
     /// Loads a flush policy from persisted schema options JSON.
     #[must_use]
     pub fn from_value(value: &Value) -> Option<Self> {
@@ -530,6 +557,46 @@ mod tests {
         validate_max_rows_per_file, FlushPolicy, ManageTableOptions, MigrationStatus,
         MirrorCaptureMode, MoveAfter, ParquetCompression, DEFAULT_MIN_MAX_ROWS_PER_FILE,
     };
+
+    #[test]
+    fn with_batching_rewrites_row_limit_and_older_than_only() {
+        let row = FlushPolicy::new(10_000, 1, 1_000).with_batching(50, 200, 500);
+        assert_eq!(
+            row,
+            FlushPolicy::RowLimit {
+                hot_row_limit: 10_000,
+                min_flush_rows: 50,
+                max_rows_per_file: 200,
+                max_rows_per_flush: 500,
+            }
+        );
+
+        let age = MoveAfter::new(0, 1, 0).expect("valid age");
+        let older = FlushPolicy::OlderThan {
+            age,
+            min_flush_rows: 1,
+            max_rows_per_file: 1_000,
+            max_rows_per_flush: 10_000,
+        }
+        .with_batching(2, 3, 4);
+        assert_eq!(
+            older,
+            FlushPolicy::OlderThan {
+                age,
+                min_flush_rows: 2,
+                max_rows_per_file: 3,
+                max_rows_per_flush: 4,
+            }
+        );
+
+        let filter = FlushPolicy::Filter {
+            expression: "status = 'closed'".into(),
+            min_flush_rows: 1,
+            max_rows_per_file: 1_000,
+            max_rows_per_flush: 10_000,
+        };
+        assert_eq!(filter.clone().with_batching(9, 9, 9), filter);
+    }
 
     #[test]
     fn validate_max_rows_per_file_accepts_values_at_or_above_floor() {

@@ -5,12 +5,12 @@
 //! an overlay load: the hot heap already holds the current row and wins merge.
 
 use std::collections::HashSet;
-use std::ffi::CString;
 
-use koldstore_common::{quote_ident, LogicalPk, PkColumn, TableName};
+use koldstore_common::{quote_ident, ColdRow, LogicalPk, PkColumn, TableName};
 use pgrx::pg_sys;
 
 use super::hot::HotEqualityFilter;
+use super::spi_query::with_read_query;
 use super::with_hook_disabled;
 
 /// Mirror tombstones that must mask cold Parquet rows until flush.
@@ -20,8 +20,6 @@ pub(super) struct MirrorOverlay {
     pub masked_pks: HashSet<LogicalPk>,
     /// Count of tombstone (op = 3) rows in the overlay.
     pub tombstones: usize,
-    /// Live overrides are not loaded; kept for EXPLAIN compatibility (always 0).
-    pub live_overrides: usize,
 }
 
 impl MirrorOverlay {
@@ -35,6 +33,20 @@ impl MirrorOverlay {
     pub(super) fn is_empty(&self) -> bool {
         self.masked_pks.is_empty()
     }
+}
+
+/// Removes cold rows masked by unflushed mirror tombstones.
+pub(super) fn filter_cold_rows_with_overlay(
+    cold_rows: Vec<ColdRow>,
+    overlay: &MirrorOverlay,
+) -> Vec<ColdRow> {
+    if overlay.is_empty() {
+        return cold_rows;
+    }
+    cold_rows
+        .into_iter()
+        .filter(|row| !overlay.masks_pk(&row.pk))
+        .collect()
 }
 
 /// Loads mirror tombstones that can mask cold rows for this scan.
@@ -106,39 +118,23 @@ unsafe fn execute_mirror_overlay_query(
     query: &str,
     pk_columns: &[PkColumn],
 ) -> Result<MirrorOverlay, String> {
-    let query = CString::new(query).map_err(|error| error.to_string())?;
-    let connect = pg_sys::SPI_connect();
-    if connect < 0 {
-        return Err(format!("SPI_connect failed with code {connect}"));
-    }
-    let execute = pg_sys::SPI_execute(query.as_ptr(), true, 0);
-    if execute < 0 {
-        let _ = pg_sys::SPI_finish();
-        return Err(format!("SPI_execute failed with code {execute}"));
-    }
-
-    let processed = usize::try_from(pg_sys::SPI_processed).map_err(|error| error.to_string())?;
-    let tuptable = pg_sys::SPI_tuptable;
-    let mut overlay = MirrorOverlay::default();
-    if !tuptable.is_null() {
-        let tupdesc = (*tuptable).tupdesc;
-        for index in 0..processed {
-            let tuple = *(*tuptable).vals.add(index);
-            let pk_json_text = spi_text(tuple, tupdesc, 1)?;
-            let pk_value: serde_json::Value = serde_json::from_str(&pk_json_text)
-                .map_err(|error| format!("mirror overlay pk JSON: {error}"))?;
-            let pk = LogicalPk::from_json_object(&pk_value, pk_columns)
-                .map_err(|error| error.to_string())?;
-            overlay.tombstones += 1;
-            overlay.masked_pks.insert(pk);
+    with_read_query(query, |processed, tuptable| {
+        let mut overlay = MirrorOverlay::default();
+        if !tuptable.is_null() {
+            let tupdesc = (*tuptable).tupdesc;
+            for index in 0..processed {
+                let tuple = *(*tuptable).vals.add(index);
+                let pk_json_text = spi_text(tuple, tupdesc, 1)?;
+                let pk_value: serde_json::Value = serde_json::from_str(&pk_json_text)
+                    .map_err(|error| format!("mirror overlay pk JSON: {error}"))?;
+                let pk = LogicalPk::from_json_object(&pk_value, pk_columns)
+                    .map_err(|error| error.to_string())?;
+                overlay.tombstones += 1;
+                overlay.masked_pks.insert(pk);
+            }
         }
-    }
-
-    let finish = pg_sys::SPI_finish();
-    if finish < 0 {
-        return Err(format!("SPI_finish failed with code {finish}"));
-    }
-    Ok(overlay)
+        Ok(overlay)
+    })
 }
 
 unsafe fn spi_text(

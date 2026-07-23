@@ -160,7 +160,7 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             manifest_path: manifest_stats.manifest_path.clone(),
             storage_type: manifest_stats.storage_type.clone(),
             base_path: manifest_stats.base_path.clone(),
-            manifest_read_ms: Some(0.0),
+            manifest_read_ms: None,
             segments_considered: manifest_stats.segments.len(),
             segments_pruned_scope: 0,
             segments_pruned_min_max: 0,

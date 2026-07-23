@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[package.metadata.cargo-machete]
+# These are referenced by the shared e2e module included through `#[path]`.
+ignored = ["koldstore-common", "koldstore-storage"]
+
 [[test]]
 name = "pg_vs_koldstore"
 path = "pg_vs_koldstore.rs"

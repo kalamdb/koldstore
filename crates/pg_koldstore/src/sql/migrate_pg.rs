@@ -794,8 +794,7 @@ fn unmanage_table_pg_impl(
     use koldstore_migrate::rehydrate::{demigration_context, plan_demigration};
 
     let table_oid_u32 = table_oid.to_u32();
-    let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
-        .map_err(|error| error.to_string())?;
+    let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
     let table = koldstore_migrate::QualifiedTableName::parse(&relation)
         .map_err(|error| error.to_string())?;
     let mirror_table = crate::catalog::resolve::mirror_relation_by_table_oid(table_oid)?;

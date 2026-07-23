@@ -143,50 +143,16 @@ pub fn decode_message(input: &[u8]) -> Result<PgOutputMessage, PgOutputDecodeErr
     let mut reader = Reader::new(input);
     let tag = reader.byte("message tag")?;
     let message = match tag {
-        b'B' => {
-            let final_lsn = reader.u64("begin final_lsn")?;
-            let _commit_time = reader.i64("begin commit_time")?;
-            let xid = reader.u32("begin xid")?;
-            PgOutputMessage::Begin { final_lsn, xid }
-        }
-        b'C' => {
-            let _flags = reader.byte("commit flags")?;
-            let commit_lsn = reader.u64("commit lsn")?;
-            let end_lsn = reader.u64("commit end_lsn")?;
-            let _commit_time = reader.i64("commit time")?;
-            PgOutputMessage::Commit {
-                commit_lsn,
-                end_lsn,
-            }
-        }
+        b'B' => decode_begin(&mut reader)?,
+        b'C' => decode_commit(&mut reader)?,
         b'R' => PgOutputMessage::Relation(decode_relation(&mut reader)?),
-        b'I' => {
-            let relation_id = reader.u32("insert relation id")?;
-            expect_marker(&mut reader, b'N', "insert tuple")?;
-            let new = decode_tuple(&mut reader)?;
-            PgOutputMessage::Insert { relation_id, new }
-        }
+        b'I' => decode_insert(&mut reader)?,
         b'U' => decode_update(&mut reader)?,
-        b'D' => {
-            let relation_id = reader.u32("delete relation id")?;
-            let marker = reader.byte("delete tuple marker")?;
-            if !matches!(marker, b'K' | b'O') {
-                return Err(PgOutputDecodeError::InvalidMarker {
-                    kind: "delete tuple",
-                    marker,
-                });
-            }
-            let old = decode_tuple(&mut reader)?;
-            PgOutputMessage::Delete { relation_id, old }
-        }
+        b'D' => decode_delete(&mut reader)?,
         // ORIGIN is required on PG15: flush prune stamps `koldstore_flush` and
         // apply must skip those deletes (PG16+ also filters via origin=none).
         // Wire order matches logicalrep_write_origin: LSN then cstring name.
-        b'O' => {
-            let _origin_lsn = reader.u64("origin lsn")?;
-            let name = reader.cstring("origin name")?.to_string();
-            PgOutputMessage::Origin { name }
-        }
+        b'O' => decode_origin(&mut reader)?,
         // Type, truncate, and logical-message records are intentionally ignored
         // by protocol-v1 mirror apply. The publication excludes messages and
         // managed tables reject TRUNCATE at their SQL boundary.
@@ -197,6 +163,50 @@ pub fn decode_message(input: &[u8]) -> Result<PgOutputMessage, PgOutputDecodeErr
         return Err(PgOutputDecodeError::TrailingBytes(reader.remaining()));
     }
     Ok(message)
+}
+
+fn decode_begin(reader: &mut Reader<'_>) -> Result<PgOutputMessage, PgOutputDecodeError> {
+    let final_lsn = reader.u64("begin final_lsn")?;
+    let _commit_time = reader.i64("begin commit_time")?;
+    let xid = reader.u32("begin xid")?;
+    Ok(PgOutputMessage::Begin { final_lsn, xid })
+}
+
+fn decode_commit(reader: &mut Reader<'_>) -> Result<PgOutputMessage, PgOutputDecodeError> {
+    let _flags = reader.byte("commit flags")?;
+    let commit_lsn = reader.u64("commit lsn")?;
+    let end_lsn = reader.u64("commit end_lsn")?;
+    let _commit_time = reader.i64("commit time")?;
+    Ok(PgOutputMessage::Commit {
+        commit_lsn,
+        end_lsn,
+    })
+}
+
+fn decode_insert(reader: &mut Reader<'_>) -> Result<PgOutputMessage, PgOutputDecodeError> {
+    let relation_id = reader.u32("insert relation id")?;
+    expect_marker(reader, b'N', "insert tuple")?;
+    let new = decode_tuple(reader)?;
+    Ok(PgOutputMessage::Insert { relation_id, new })
+}
+
+fn decode_delete(reader: &mut Reader<'_>) -> Result<PgOutputMessage, PgOutputDecodeError> {
+    let relation_id = reader.u32("delete relation id")?;
+    let marker = reader.byte("delete tuple marker")?;
+    if !matches!(marker, b'K' | b'O') {
+        return Err(PgOutputDecodeError::InvalidMarker {
+            kind: "delete tuple",
+            marker,
+        });
+    }
+    let old = decode_tuple(reader)?;
+    Ok(PgOutputMessage::Delete { relation_id, old })
+}
+
+fn decode_origin(reader: &mut Reader<'_>) -> Result<PgOutputMessage, PgOutputDecodeError> {
+    let _origin_lsn = reader.u64("origin lsn")?;
+    let name = reader.cstring("origin name")?.to_string();
+    Ok(PgOutputMessage::Origin { name })
 }
 
 fn decode_relation(reader: &mut Reader<'_>) -> Result<PgOutputRelation, PgOutputDecodeError> {

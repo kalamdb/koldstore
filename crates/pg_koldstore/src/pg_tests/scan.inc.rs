@@ -21,9 +21,44 @@ fn explain_shows_kold_merge_scan_for_managed_table() {
     assert!(
         plan.contains("Candidate Segments")
             || plan.contains("Segments Pruned by Min/Max")
-            || plan.contains("Parquet Segments Opened"),
+            || plan.contains("Parquet Segments Opened")
+            || plan.contains("Parquet Segments Planned"),
         "expected Timescale-style prune properties in EXPLAIN: {plan}"
     );
+}
+
+#[pg_test]
+fn explain_analyze_uses_native_hot_child_counters() {
+    let suffix = unique_suffix("explain_hot_child");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_shared(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} ORDER BY id"
+    ));
+    for expected in [
+        "Emit Path: hot_child",
+        "Access Method: PostgreSQL child plan",
+        "Hot Rows: 3",
+        "Rows Scanned: 3",
+        "Input Rows: 3",
+        "Output Rows: 3",
+    ] {
+        assert!(
+            plan.contains(expected),
+            "EXPLAIN ANALYZE hot-child flow missing exact counter `{expected}`: {plan}"
+        );
+    }
 }
 
 #[pg_test]
@@ -57,6 +92,14 @@ fn explain_json_nests_parquet_segment_groups() {
     assert!(
         plan.contains("Parquet Segments"),
         "expected nested Parquet Segments group for graph clients: {plan}"
+    );
+    assert!(
+        plan.contains("Scan Sources") && plan.contains("Cold Scan"),
+        "expected nested scan-source flow for graph clients: {plan}"
+    );
+    assert!(
+        plan.contains("Merge"),
+        "expected nested merge stage for graph clients: {plan}"
     );
     assert!(
         plan.contains("Timing"),
@@ -105,13 +148,176 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         "Parquet Segments Opened",
         "Bytes Fetched",
         "Segment Catalog Source",
-        "Timing",
-        "Cold Read Time",
-        "Read Time",
     ] {
         assert!(
             plan.contains(needle),
             "EXPLAIN ANALYZE missing `{needle}`: {plan}"
+        );
+    }
+    assert!(
+        !plan.contains("Timing:") && !plan.contains("Cold Read Time"),
+        "TIMING OFF must suppress custom phase timing like native PostgreSQL nodes: {plan}"
+    );
+}
+
+#[pg_test]
+fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
+    let suffix = unique_suffix("explain_flow");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES \
+         (1, 'cold-a'), (2, 'cold-b'), (3, 'cold-c')"
+    ))
+    .expect("insert cold candidates");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (4, 'hot-d')"
+    ))
+    .expect("insert hot row");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} WHERE id IN (1, 4) ORDER BY id"
+    ));
+    for needle in [
+        "Scan Sources",
+        "Hot Scan",
+        "Cold Scan",
+        "Mirror Scan",
+        "Rows Scanned",
+        "Rows Removed by Overlay",
+        "Merge",
+        "Strategy",
+        "Input Rows",
+        "Output Rows",
+        "Rows Removed by Merge",
+        "Timing",
+        "Initialization Time",
+        "Metadata Time",
+        "Hot Scan Time",
+        "Cold Read Time",
+        "Mirror Scan Time",
+        "Merge Time",
+        "Materialization Time",
+    ] {
+        assert!(
+            plan.contains(needle),
+            "EXPLAIN ANALYZE flow missing `{needle}`: {plan}"
+        );
+    }
+    for expected in [
+        "Emit Path: merge_buffer",
+        "Hot Rows: 1",
+        "Rows Scanned: 3",
+        "Input Rows: 4",
+        "Output Rows: 4",
+        "Rows Removed by Merge: 0",
+        "Rows Removed by Filter: 2",
+    ] {
+        assert!(
+            plan.contains(expected),
+            "EXPLAIN ANALYZE flow missing exact counter `{expected}`: {plan}"
+        );
+    }
+}
+
+#[pg_test]
+fn plain_explain_never_reuses_prior_analyze_counters() {
+    let suffix = unique_suffix("explain_lifecycle");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b')"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+
+    let _analyzed = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) SELECT body FROM {relation}"
+    ));
+    let planned = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) SELECT body FROM {relation}"
+    ));
+    assert!(
+        planned.contains("Status: planned"),
+        "plain EXPLAIN must report planned source state: {planned}"
+    );
+    assert!(
+        !planned.contains("Emit Path:")
+            && !planned.contains("Rows Scanned:")
+            && !planned.contains("Mirror Tombstones:"),
+        "plain EXPLAIN must not reuse prior execution counters: {planned}"
+    );
+}
+
+#[pg_test]
+fn explain_analyze_counts_mirror_overlay_rows() {
+    let suffix = unique_suffix("explain_overlay");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    let mirror = spi_get_text(&format!(
+        "SELECT mirror_relation::text \
+         FROM koldstore.schemas \
+         WHERE table_oid = '{relation}'::regclass AND active"
+    ));
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+
+    // pg_test wraps the fixture in one transaction, so a row pruned earlier in
+    // this same transaction still conflicts in the heap's unique index. Seed
+    // the post-flush mirror state directly to isolate EXPLAIN's overlay metrics.
+    Spi::run(&format!(
+        "INSERT INTO {mirror} (id, seq, op) \
+         SELECT 2, last_flush_seq + 1, 3 \
+         FROM koldstore.schemas \
+         WHERE table_oid = '{relation}'::regclass AND active"
+    ))
+    .expect("seed unflushed tombstone");
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT COALESCE(max(op), -1)::bigint FROM {mirror} WHERE id = 2"
+        )),
+        3,
+        "expected strict mirror tombstone before EXPLAIN"
+    );
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} ORDER BY id"
+    ));
+    for expected in [
+        "Mirror Tombstones: 1",
+        "Mirror Scan:",
+        "Rows Scanned: 1",
+        "Rows Removed by Overlay: 1",
+        "Input Rows: 2",
+        "Output Rows: 2",
+    ] {
+        assert!(
+            plan.contains(expected),
+            "EXPLAIN ANALYZE overlay missing exact counter `{expected}`: {plan}"
         );
     }
 }
