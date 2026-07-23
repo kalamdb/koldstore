@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "e2e"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1421,7 +1421,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-catalog"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "koldstore-common",
  "koldstore-schema",
@@ -1431,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-common"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "hex",
  "serde",
@@ -1442,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-flush"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "koldstore-catalog",
  "koldstore-common",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-manifest"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "chrono",
  "koldstore-catalog",
@@ -1472,11 +1472,11 @@ dependencies = [
 
 [[package]]
 name = "koldstore-memory-tests"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 
 [[package]]
 name = "koldstore-merge"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "koldstore-catalog",
  "koldstore-common",
@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-migrate"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "koldstore-common",
  "koldstore-mirror",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-mirror"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "koldstore-common",
  "serde",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-parquet"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-schema"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "koldstore-common",
  "serde",
@@ -1544,11 +1544,11 @@ dependencies = [
 
 [[package]]
 name = "koldstore-setup"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 
 [[package]]
 name = "koldstore-storage"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-worker"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 
 [[package]]
 name = "libc"
@@ -1963,7 +1963,7 @@ dependencies = [
 
 [[package]]
 name = "pg-koldstore-benchmarks"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1987,7 +1987,7 @@ dependencies = [
 
 [[package]]
 name = "pg_koldstore"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "cc",
  "koldstore-catalog",
@@ -2012,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "pg_koldstore-shell-tests"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "koldstore-catalog",
  "koldstore-common",
@@ -2801,7 +2801,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "storage-comparison"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2816,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "stress"
-version = "0.1.5-beta.1"
+version = "0.1.6-beta.0"
 dependencies = [
  "anyhow",
  "chrono",
