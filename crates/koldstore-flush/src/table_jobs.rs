@@ -238,9 +238,13 @@ mod tests {
     fn inline_flush_job_running_stamps_started_at() {
         let statement = plan_mark_inline_flush_job_running().unwrap();
 
-        assert!(statement
-            .sql
-            .contains("jsonb_build_object('started_at', now())"));
+        assert!(
+            statement.sql.contains(
+                "jsonb_build_object('started_at', COALESCE(payload->'started_at', to_jsonb(now())))"
+            ),
+            "expected idempotent started_at stamp, got:\n{}",
+            statement.sql
+        );
     }
 
     #[test]
