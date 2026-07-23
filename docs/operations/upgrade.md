@@ -9,7 +9,7 @@ KoldStore packages as a normal PostgreSQL extension named `koldstore`.
 - Packaged SQL `default_version`: `crates/pg_koldstore/koldstore.control` uses
   `@CARGO_VERSION@`, which `cargo pgrx install` / `package` substitutes from
   Cargo. Fresh installs therefore get `extversion` equal to the Cargo version
-  (for example `0.1.5-beta.0`).
+  (for example `0.1.5-beta.1`).
 - Bootstrap catalog fragment: `crates/pg_koldstore/sql/koldstore--0.1.0.sql` is
   embedded into the generated install script; it is not the versioned install
   file name on disk after packaging.
@@ -52,7 +52,7 @@ a release package to be present on the server.
 ```sql
 ALTER EXTENSION koldstore UPDATE;
 -- or pin the target:
--- ALTER EXTENSION koldstore UPDATE TO '0.1.5-beta.0';
+-- ALTER EXTENSION koldstore UPDATE TO '0.1.5-beta.1';
 
 SELECT extversion FROM pg_extension WHERE extname = 'koldstore';
 SELECT koldstore.koldstore_version();

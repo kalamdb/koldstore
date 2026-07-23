@@ -1,4 +1,4 @@
--- Upgrade koldstore from 0.1.0 to 0.1.5-beta.0.
+-- Upgrade koldstore from 0.1.0 to 0.1.5-beta.1.
 --
 -- Catalog DDL is unchanged from the 0.1.0 bootstrap. SQL-callable entry points
 -- are LANGUAGE c / pgrx wrappers resolved through MODULE_PATHNAME; install the
