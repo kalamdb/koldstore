@@ -281,9 +281,7 @@ pub fn encode_parquet_segment_bytes(
 /// Validates that `bytes` are a complete, readable Parquet file.
 ///
 /// Checks the 4-byte magic, footer length, and that metadata can be opened.
-/// Parses footer metadata in place — does not clone the full payload.
-///
-/// # Errors
+/// Parses footer metadata without cloning the full payload (only footer-sized ranges are copied).
 ///
 /// Returns an error when the payload is truncated, missing magic, or has an
 /// unreadable footer.
