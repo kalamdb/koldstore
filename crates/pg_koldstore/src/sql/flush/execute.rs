@@ -351,7 +351,7 @@ pub(super) fn finalize_flush(
 pub(crate) fn release_flush_memory(table_oid: pgrx::pg_sys::Oid) {
     crate::catalog::cache::invalidate_table_globally(table_oid);
     // Linux glibc: return free heap pages to the OS after large temporary spikes.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         extern "C" {
             fn malloc_trim(pad: usize) -> std::os::raw::c_int;
