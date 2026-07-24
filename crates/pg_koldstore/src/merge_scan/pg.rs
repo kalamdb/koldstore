@@ -399,17 +399,23 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} projection failed: {error}"));
     let residual =
         unsafe { residual_filters(table_oid, scanrelid, qual, &catalog.columns, params) };
-    // Source reads may only push immutable primary-key equality. All other
-    // predicates, especially RLS/security quals, run after winner resolution.
-    let primary_keys = snapshot
+    // Hot heap is current-state only, so PK + scope equality can be pushed into
+    // the SPI load. Mutable columns stay residual for cold (pre-merge), but may
+    // still appear in hot_equality for post-merge ExecScan. Scope pushdown
+    // matches catalog min/max prune on the shared manifest until per-scope
+    // manifests land.
+    let mut source_equality_columns = snapshot
         .primary_key_columns
         .iter()
         .map(String::as_str)
         .collect::<std::collections::HashSet<_>>();
+    if let Some(scope) = snapshot.scope_column.as_deref() {
+        source_equality_columns.insert(scope);
+    }
     let pk_equality = residual
         .hot_equality
         .iter()
-        .filter(|filter| primary_keys.contains(filter.column.as_str()))
+        .filter(|filter| source_equality_columns.contains(filter.column.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     let image_columns = scan_projection.catalog_columns();
