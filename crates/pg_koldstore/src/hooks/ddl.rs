@@ -174,8 +174,8 @@ mod process_utility {
         let oid = unsafe {
             pg_sys::RangeVarGetRelidExtended(
                 relation,
-                pg_sys::AccessExclusiveLock as i32,
-                0,
+                pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
+                0u32,
                 None,
                 std::ptr::null_mut(),
             )
