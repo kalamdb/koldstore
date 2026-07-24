@@ -82,7 +82,7 @@ pub fn plan_drop_table_cleanup(
         DropTableCleanupPolicy::Delete => (
             DropTableCleanupOutcome::DeleteArtifactsQueued,
             Some(plan_drop_table_cleanup_job(
-                table_oid,
+                DropTableCleanupPolicy::Delete,
                 "completed",
                 0,
                 None,
@@ -91,7 +91,7 @@ pub fn plan_drop_table_cleanup(
         DropTableCleanupPolicy::Failed => (
             DropTableCleanupOutcome::RecoveryRequired,
             Some(plan_drop_table_cleanup_job(
-                table_oid,
+                DropTableCleanupPolicy::Failed,
                 "error",
                 1,
                 Some("$2::text"),
@@ -126,17 +126,21 @@ fn plan_delete_manifest() -> Result<SqlStatement, DropTableCleanupError> {
 }
 
 fn plan_drop_table_cleanup_job(
-    table_oid: u32,
+    policy: DropTableCleanupPolicy,
     status: &str,
     attempts: u32,
     error_trace_param: Option<&str>,
 ) -> Result<SqlStatement, DropTableCleanupError> {
-    let _ = table_oid;
     let error_trace = error_trace_param.unwrap_or("NULL");
     let phase = match status {
         "completed" => "finished",
         "error" => "failed",
         _ => "pending",
+    };
+    let policy_label = match policy {
+        DropTableCleanupPolicy::Retain => "retain",
+        DropTableCleanupPolicy::Delete => "delete",
+        DropTableCleanupPolicy::Failed => "failed",
     };
     SqlStatement::write(
         "drop table queue artifact cleanup",
@@ -152,7 +156,7 @@ INSERT INTO koldstore.jobs (
     '{phase}',
     {attempts},
     {error_trace},
-    jsonb_build_object('policy', 'delete')
+    jsonb_build_object('policy', '{policy_label}')
 )
 "#
         ),

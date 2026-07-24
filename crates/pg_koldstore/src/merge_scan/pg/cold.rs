@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use koldstore_common::{dedupe_nonblank, ColdRow};
 use koldstore_merge::scan::plan::{
-    prune_segment_stats_hints, validate_prune_predicates_indexed, SegmentPrunePredicate,
+    prune_segment_stats_hints, retain_pre_merge_cold_prune_predicates,
+    validate_prune_predicates_indexed, ColdPruneColumnPolicy, SegmentPrunePredicate,
     SegmentStatsHint,
 };
 use koldstore_parquet::{
@@ -30,23 +31,24 @@ pub(super) fn load_cold_rows_for_merge(
     params: pg_sys::ParamListInfo,
 ) -> Result<(ColdReadProfile, Vec<ColdRow>), String> {
     with_hook_disabled(|| {
-        // Only primary-key predicates are safe before winner resolution. A
-        // mutable or security column can differ between older and newer cold
-        // versions; pruning its newer segment could resurrect the older row.
-        let cold_prunable_primary_keys = catalog
-            .columns
-            .iter()
-            .filter(|column| {
-                column.is_primary_key && cold_pruning_type_is_collation_independent(column.pg_type)
-            })
-            .map(|column| column.name.as_str())
-            .collect::<std::collections::HashSet<_>>();
-        let prune_predicates = unsafe {
-            segment_prune_predicates(table_oid, scanrelid, qual, &catalog.columns, params)
-        }
-        .into_iter()
-        .filter(|predicate| cold_prunable_primary_keys.contains(predicate.column.as_str()))
-        .collect::<Vec<_>>();
+        // Pre-merge prune is limited to PK + scope. Mutable columns stay residual
+        // so an older cold version cannot resurrect after its newer segment is
+        // pruned away. Scope uses catalog min/max on the shared manifest today
+        // (`scope_key = ''`); later each scope_id gets its own manifest/folder
+        // and listing filters by scope_key first.
+        let scope_column = snapshot.scope_column.as_deref();
+        let prune_predicates = retain_pre_merge_cold_prune_predicates(
+            unsafe {
+                segment_prune_predicates(table_oid, scanrelid, qual, &catalog.columns, params)
+            },
+            |column_name| {
+                let column = catalog
+                    .columns
+                    .iter()
+                    .find(|column| column.name == column_name)?;
+                Some(cold_prune_column_policy(column, scope_column))
+            },
+        );
         let predicate_columns = dedupe_nonblank(
             prune_predicates
                 .iter()
@@ -59,21 +61,25 @@ pub(super) fn load_cold_rows_for_merge(
             return Ok((ColdReadProfile::empty("(none)"), Vec::new()));
         };
         let manifest_read_ms = elapsed_ms(manifest_started);
+        // Scope is always eligible for catalog stats prune even when it is not
+        // separately listed in indexed_columns (it usually is via secondary indexes).
         let indexed_filter_columns = dedupe_nonblank(
             catalog
                 .primary_key
                 .columns
                 .iter()
                 .map(String::as_str)
-                .chain(catalog.indexed_columns.iter().map(String::as_str)),
+                .chain(catalog.indexed_columns.iter().map(String::as_str))
+                .chain(scope_column),
         );
         validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_columns)
             .map_err(|error| error.to_string())?;
         let segments_considered = manifest_stats.segments.len();
         let segments = prune_segment_stats_hints(&manifest_stats.segments, &prune_predicates);
         let segments_pruned_min_max = segments_considered.saturating_sub(segments.len());
-        // Shared-scope catalog SQL already filters `scope_key = ''`; scoped prune
-        // counters stay 0 until multi-scope segments are returned to the scan.
+        // Shared-scope catalog SQL still filters `scope_key = ''`. When per-scope
+        // manifests land, listing will drop other scopes here and this counter
+        // will reflect that primary prune; min/max remains secondary.
         let segments_pruned_scope = 0usize;
 
         let projection = projection_column_names(projected_columns, &snapshot.primary_key_columns);
@@ -134,13 +140,28 @@ pub(super) fn load_cold_rows_for_merge(
     })
 }
 
+/// Builds the pre-merge prune policy for one catalog column.
+fn cold_prune_column_policy(
+    column: &koldstore_migrate::order::CatalogColumn,
+    scope_column: Option<&str>,
+) -> ColdPruneColumnPolicy {
+    let ordered_stats_safe = cold_pruning_type_is_collation_independent(column.pg_type);
+    ColdPruneColumnPolicy {
+        is_primary_key: column.is_primary_key,
+        is_scope: scope_column.is_some_and(|scope| scope == column.name),
+        ordered_stats_safe,
+        // Text scope ids compare as exact flush-encoded JSON strings.
+        equality_stats_safe: ordered_stats_safe || column.pg_type == PgType::Text,
+    }
+}
+
 /// Whether JSON/Parquet scalar comparison has the same semantics as the
 /// PostgreSQL type for conservative cold pruning.
 ///
-/// Text and text arrays are deliberately excluded: PostgreSQL collation can
-/// make both range and equality semantics differ from byte-ordered segment
-/// stats and bloom filters. Unsupported literal types remain excluded until
-/// their exact PostgreSQL ordering is represented in cold metadata.
+/// Text and text arrays are deliberately excluded from *ordered* prune:
+/// PostgreSQL collation can make range semantics differ from byte-ordered
+/// segment stats. Scope text equality is allowed separately via
+/// [`ColdPruneColumnPolicy::equality_stats_safe`].
 const fn cold_pruning_type_is_collation_independent(pg_type: PgType) -> bool {
     matches!(
         pg_type,

@@ -60,6 +60,15 @@ pub struct SegmentPrunePredicate {
 }
 
 impl SegmentPrunePredicate {
+    /// True when this predicate is a point equality (`min == max`).
+    #[must_use]
+    pub fn is_equality(&self) -> bool {
+        match (&self.min, &self.max) {
+            (Some(min), Some(max)) => min == max,
+            _ => false,
+        }
+    }
+
     /// Builds an equality pruning predicate.
     #[must_use]
     pub fn equality(column: impl Into<String>, value: serde_json::Value) -> Self {
@@ -103,6 +112,64 @@ impl SegmentPrunePredicate {
             max: Some(max),
         }
     }
+}
+
+/// Per-column policy for pre-merge cold segment prune via catalog min/max.
+///
+/// Mutable application columns stay residual: pruning their newer cold version
+/// can resurrect an older row. Scope is safe because the scope key does not
+/// change across versions of a row (RLS/user identity).
+///
+/// Today all active segments live under the shared catalog manifest
+/// (`scope_key = ''`); scope is treated like an indexed stats column. Later
+/// each `scope_id` will own its own `manifest.json` + folder, and listing will
+/// filter by `scope_key` first — min/max remains a secondary prune inside that
+/// scope's segment set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColdPruneColumnPolicy {
+    /// Column is part of the logical primary key.
+    pub is_primary_key: bool,
+    /// Column is the managed table `scope_column` (for example `tenant_id`).
+    pub is_scope: bool,
+    /// Min/max ordering matches PostgreSQL (int, bool, uuid, …).
+    pub ordered_stats_safe: bool,
+    /// Exact equality against catalog JSON encoding is safe (text scope ids).
+    pub equality_stats_safe: bool,
+}
+
+impl ColdPruneColumnPolicy {
+    /// Whether `predicate` may prune segments before winner resolution.
+    #[must_use]
+    pub fn allows_predicate(self, predicate: &SegmentPrunePredicate) -> bool {
+        if self.is_primary_key {
+            return self.ordered_stats_safe;
+        }
+        if self.is_scope {
+            if self.ordered_stats_safe {
+                return true;
+            }
+            // Text scope keys: equality-only against flush-encoded JSON stats.
+            return self.equality_stats_safe && predicate.is_equality();
+        }
+        false
+    }
+}
+
+/// Keeps only pre-merge-safe cold prune predicates (PK + scope today).
+///
+/// `policy_for` returns [`None`] for unknown columns (dropped).
+#[must_use]
+pub fn retain_pre_merge_cold_prune_predicates(
+    predicates: Vec<SegmentPrunePredicate>,
+    mut policy_for: impl FnMut(&str) -> Option<ColdPruneColumnPolicy>,
+) -> Vec<SegmentPrunePredicate> {
+    predicates
+        .into_iter()
+        .filter(|predicate| {
+            policy_for(predicate.column.as_str())
+                .is_some_and(|policy| policy.allows_predicate(predicate))
+        })
+        .collect()
 }
 
 /// Returns segment paths whose manifest min/max stats cannot prove non-overlap.

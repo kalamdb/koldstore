@@ -174,8 +174,8 @@ mod process_utility {
         let oid = unsafe {
             pg_sys::RangeVarGetRelidExtended(
                 relation,
-                pg_sys::AccessExclusiveLock as i32,
-                0,
+                pg_sys::AccessExclusiveLock as pg_sys::LOCKMODE,
+                0u32,
                 None,
                 std::ptr::null_mut(),
             )
@@ -241,8 +241,7 @@ fn ensure_initial_management(
     table_oid: pgrx::pg_sys::Oid,
     values: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
-    let enabled = option_value(values, "koldstore_enabled")
-        .map(|value| value.to_ascii_lowercase());
+    let enabled = option_value(values, "koldstore_enabled").map(|value| value.to_ascii_lowercase());
     if !matches!(enabled.as_deref(), Some("true" | "on" | "1")) {
         return Err("initial management requires koldstore_enabled = true".into());
     }

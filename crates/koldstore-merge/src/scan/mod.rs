@@ -20,6 +20,7 @@ pub use path::{
     CUSTOM_PATH_NAME,
 };
 pub use plan::{
-    prune_segment_stats, prune_segment_stats_hints, MergeMetadataAttnums, MergeScanPlan,
-    MirrorOverlayStrategy, SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
+    prune_segment_stats, prune_segment_stats_hints, retain_pre_merge_cold_prune_predicates,
+    ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, MirrorOverlayStrategy, SegmentHint,
+    SegmentPrunePredicate, SegmentStatsHint,
 };

@@ -4,8 +4,9 @@ use koldstore_merge::scan::exec::{
     ColdAvailability, FilterPlan, ScanResourceCounters,
 };
 use koldstore_merge::scan::plan::{
-    prune_segment_stats, validate_prune_predicates_indexed, MergeMetadataAttnums, MergeScanPlan,
-    SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
+    prune_segment_stats, retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
+    ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
+    SegmentStatsHint,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -224,6 +225,64 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
             "app/items/batch-missing-stats.parquet".to_string(),
         ]
     );
+}
+
+#[test]
+fn scope_equality_is_retained_for_pre_merge_cold_prune() {
+    let predicates = vec![
+        SegmentPrunePredicate::equality("id", json!(1)),
+        SegmentPrunePredicate::equality("tenant_id", json!("tenant-a")),
+        SegmentPrunePredicate::equality("conversation_id", json!("conv-1")),
+        SegmentPrunePredicate::lower_bound("tenant_id", json!("tenant-m")),
+    ];
+    let retained = retain_pre_merge_cold_prune_predicates(predicates, |column| match column {
+        "id" => Some(ColdPruneColumnPolicy {
+            is_primary_key: true,
+            is_scope: false,
+            ordered_stats_safe: true,
+            equality_stats_safe: true,
+        }),
+        "tenant_id" => Some(ColdPruneColumnPolicy {
+            is_primary_key: false,
+            is_scope: true,
+            ordered_stats_safe: false,
+            equality_stats_safe: true,
+        }),
+        "conversation_id" => Some(ColdPruneColumnPolicy {
+            is_primary_key: false,
+            is_scope: false,
+            ordered_stats_safe: false,
+            equality_stats_safe: true,
+        }),
+        _ => None,
+    });
+
+    assert_eq!(
+        retained,
+        vec![
+            SegmentPrunePredicate::equality("id", json!(1)),
+            SegmentPrunePredicate::equality("tenant_id", json!("tenant-a")),
+        ]
+    );
+}
+
+#[test]
+fn text_scope_range_predicates_are_not_pre_merge_safe() {
+    let retained = retain_pre_merge_cold_prune_predicates(
+        vec![SegmentPrunePredicate::lower_bound(
+            "tenant_id",
+            json!("tenant-m"),
+        )],
+        |_| {
+            Some(ColdPruneColumnPolicy {
+                is_primary_key: false,
+                is_scope: true,
+                ordered_stats_safe: false,
+                equality_stats_safe: true,
+            })
+        },
+    );
+    assert!(retained.is_empty());
 }
 
 #[test]
