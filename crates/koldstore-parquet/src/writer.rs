@@ -331,7 +331,8 @@ pub fn validate_parquet_bytes(bytes: &[u8]) -> Result<ParquetValidation, String>
 
 /// Zero-copy [`ChunkReader`] over an in-memory Parquet buffer.
 ///
-/// `get_bytes` only copies the requested range (footer-sized during validate).
+/// `get_read` returns a cursor over the original slice. `get_bytes` copies only
+/// the requested range (footer-sized during validate).
 struct SliceChunkReader<'a>(&'a [u8]);
 
 impl Length for SliceChunkReader<'_> {
@@ -340,8 +341,8 @@ impl Length for SliceChunkReader<'_> {
     }
 }
 
-impl ChunkReader for SliceChunkReader<'_> {
-    type T = std::io::Cursor<Bytes>;
+impl<'a> ChunkReader for SliceChunkReader<'a> {
+    type T = std::io::Cursor<&'a [u8]>;
 
     fn get_read(&self, start: u64) -> Result<Self::T, ParquetError> {
         let start = usize::try_from(start).map_err(|_| {
@@ -353,9 +354,7 @@ impl ChunkReader for SliceChunkReader<'_> {
                 self.0.len()
             )));
         }
-        Ok(std::io::Cursor::new(Bytes::copy_from_slice(
-            &self.0[start..],
-        )))
+        Ok(std::io::Cursor::new(&self.0[start..]))
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> Result<Bytes, ParquetError> {
