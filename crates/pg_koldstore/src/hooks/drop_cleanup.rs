@@ -128,6 +128,8 @@ pub(super) unsafe fn drop_table_oids(stmt: *mut pg_sys::DropStmt) -> Vec<pg_sys:
         let count = (*objects).length as usize;
         // RVROption is a C enum: MSVC bindgen often types it as signed `c_int`,
         // while `RangeVarGetRelidExtended` takes `uint32` flags on every PG major.
+        // On Unix the enum is already u32, so the cast is a no-op there.
+        #[allow(clippy::unnecessary_cast)]
         let flags: u32 = if (*stmt).missing_ok {
             pg_sys::RVROption::RVR_MISSING_OK as u32
         } else {
