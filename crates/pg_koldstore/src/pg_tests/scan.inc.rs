@@ -305,6 +305,21 @@ fn plain_explain_applies_catalog_prune_without_opening_parquet() {
         "expected multi-segment flush, rows_flushed={flushed}"
     );
 
+    // Catalog must publish PK min/max or EXPLAIN prune cannot work.
+    let id_stats_present = spi_get_i64(&format!(
+        "SELECT count(*)::bigint
+         FROM koldstore.cold_segments
+         WHERE table_oid = '{relation}'::regclass
+           AND status = 'active'
+           AND column_stats ? 'id'
+           AND column_stats->'id' ? 'min'
+           AND column_stats->'id' ? 'max'"
+    ));
+    assert_eq!(
+        id_stats_present, 3,
+        "every active segment must carry id min/max in column_stats"
+    );
+
     let planned = spi_get_explain(&format!(
         "EXPLAIN (COSTS OFF) SELECT body FROM {relation} WHERE id = 1"
     ));
@@ -327,10 +342,176 @@ fn plain_explain_applies_catalog_prune_without_opening_parquet() {
         "planned opens must equal prune survivors for a single PK: {planned}"
     );
     assert!(
+        planned.contains("PK Probe Column: id") && planned.contains("PK Probe Values: 1"),
+        "plain EXPLAIN must advertise the PK probe used for cold prune: {planned}"
+    );
+    assert!(
         !planned.contains("Parquet Segments Opened")
             && !planned.contains("Footer First")
             && !planned.contains("Status: executed"),
         "plain EXPLAIN must not open Parquet or report execution: {planned}"
+    );
+}
+
+#[pg_test]
+fn pk_filters_prune_cold_segments_before_parquet_open() {
+    // Shared fixture: 2501 rows → three cold segments with disjoint PK ranges
+    // (~1..1000, ~1001..2000, ~2001..2500) plus one hot PK (2501). Each case
+    // asserts EXPLAIN ANALYZE opens only the Parquet survivors needed.
+    let suffix = unique_suffix("pk_prune_cases");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        r#"
+        SELECT koldstore.manage_table(
+          table_name     => '{relation}'::regclass,
+          storage        => '{storage}',
+          hot_row_limit  => 1,
+          min_flush_rows => 1,
+          max_rows_per_file => 1000,
+          auto_flush => false,
+          migration_order_by => 'id'
+        )
+        "#
+    ))
+    .expect("manage_table");
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, 'row-' || gs::text FROM generate_series(1, 2501) AS gs"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(
+        flushed >= 2500,
+        "expected multi-segment flush, rows_flushed={flushed}"
+    );
+
+    // 1) Mid-range PK equality (int4 literal on bigint) → one segment.
+    assert_cold_parquet_opens(
+        &relation,
+        "id = 1500",
+        ColdOpenExpect {
+            candidates: 3,
+            pruned_min_max: 2,
+            opened: 1,
+        },
+        "mid-range PK equality",
+    );
+    assert_eq!(
+        spi_get_i64(&format!("SELECT count(*) FROM {relation} WHERE id = 1500")),
+        1
+    );
+
+    // 2) PK miss outside every segment range → open nothing.
+    assert_cold_parquet_opens(
+        &relation,
+        "id = 999999",
+        ColdOpenExpect {
+            candidates: 3,
+            pruned_min_max: 3,
+            opened: 0,
+        },
+        "out-of-range PK miss",
+    );
+
+    // 3) Closed range wholly inside one segment → one segment.
+    assert_cold_parquet_opens(
+        &relation,
+        "id BETWEEN 1100 AND 1200",
+        ColdOpenExpect {
+            candidates: 3,
+            pruned_min_max: 2,
+            opened: 1,
+        },
+        "intra-segment PK range",
+    );
+
+    // 4) Range crossing a segment boundary → exactly the two overlapping segments.
+    assert_cold_parquet_opens(
+        &relation,
+        "id BETWEEN 990 AND 1010",
+        ColdOpenExpect {
+            candidates: 3,
+            pruned_min_max: 1,
+            opened: 2,
+        },
+        "cross-boundary PK range",
+    );
+
+    // 5) One-sided bound that drops older segments → last cold segment only.
+    assert_cold_parquet_opens(
+        &relation,
+        "id >= 2001",
+        ColdOpenExpect {
+            candidates: 3,
+            pruned_min_max: 2,
+            opened: 1,
+        },
+        "lower-bound PK prune",
+    );
+
+    // 6) Hot-only PK inserted after flush → cold is skipped (hot_native) or
+    // every catalog segment is pruned before any Parquet open.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (3000, 'hot-only')"
+    ))
+    .expect("insert hot-only row");
+    let hot_only = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT count(*) FROM {relation} WHERE id = 3000"
+    ));
+    assert_eq!(
+        scan_explain_counter(&hot_only, "Parquet Segments Opened"),
+        0,
+        "hot-only PK must not open Parquet: {hot_only}"
+    );
+    assert!(
+        hot_only.contains("Emit Path: hot_native")
+            || scan_explain_counter(&hot_only, "Segments Pruned by Min/Max") == 3,
+        "hot-only PK must use hot_native or prune all cold segments: {hot_only}"
+    );
+    assert_eq!(
+        spi_get_i64(&format!("SELECT count(*) FROM {relation} WHERE id = 3000")),
+        1
+    );
+}
+
+#[derive(Clone, Copy)]
+struct ColdOpenExpect {
+    candidates: usize,
+    pruned_min_max: usize,
+    opened: usize,
+}
+
+/// Asserts ANALYZE cold counters for one WHERE clause against a shared fixture.
+fn assert_cold_parquet_opens(
+    relation: &str,
+    where_sql: &str,
+    expect: ColdOpenExpect,
+    label: &str,
+) {
+    let analyzed = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT count(*) FROM {relation} WHERE {where_sql}"
+    ));
+    assert_eq!(
+        scan_explain_counter(&analyzed, "Candidate Segments"),
+        expect.candidates,
+        "{label}: candidate segments: {analyzed}"
+    );
+    assert_eq!(
+        scan_explain_counter(&analyzed, "Segments Pruned by Min/Max"),
+        expect.pruned_min_max,
+        "{label}: min/max prune: {analyzed}"
+    );
+    assert_eq!(
+        scan_explain_counter(&analyzed, "Parquet Segments Opened"),
+        expect.opened,
+        "{label}: parquet opens: {analyzed}"
     );
 }
 
