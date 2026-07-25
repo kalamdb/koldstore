@@ -1,9 +1,10 @@
 //! CustomScan plan serialization and PG-free pruning helpers.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use koldstore_common::{compare_json_values, KoldstoreError, Predicate, Result, ScopeKey, SeqId};
+use koldstore_common::{
+    column_stats_range_may_overlap, KoldstoreError, Predicate, Result, ScopeKey, SeqId,
+};
 use serde::{Deserialize, Serialize};
 
 /// Attribute numbers for merge metadata projected during hot/cold reads.
@@ -118,7 +119,8 @@ impl SegmentPrunePredicate {
 ///
 /// Mutable application columns stay residual: pruning their newer cold version
 /// can resurrect an older row. Scope is safe because the scope key does not
-/// change across versions of a row (RLS/user identity).
+/// change across versions of a row (RLS/user identity). Version cursors
+/// (`seq` / `commit_seq`) identify specific versions and are safe to prune.
 ///
 /// Today all active segments live under the shared catalog manifest
 /// (`scope_key = ''`); scope is treated like an indexed stats column. Later
@@ -131,6 +133,8 @@ pub struct ColdPruneColumnPolicy {
     pub is_primary_key: bool,
     /// Column is the managed table `scope_column` (for example `tenant_id`).
     pub is_scope: bool,
+    /// Column is a version cursor (`seq` / `commit_seq`).
+    pub is_version_cursor: bool,
     /// Min/max ordering matches PostgreSQL (int, bool, uuid, …).
     pub ordered_stats_safe: bool,
     /// Exact equality against catalog JSON encoding is safe (text scope ids).
@@ -141,7 +145,7 @@ impl ColdPruneColumnPolicy {
     /// Whether `predicate` may prune segments before winner resolution.
     #[must_use]
     pub fn allows_predicate(self, predicate: &SegmentPrunePredicate) -> bool {
-        if self.is_primary_key {
+        if self.is_primary_key || self.is_version_cursor {
             return self.ordered_stats_safe;
         }
         if self.is_scope {
@@ -155,7 +159,7 @@ impl ColdPruneColumnPolicy {
     }
 }
 
-/// Keeps only pre-merge-safe cold prune predicates (PK + scope today).
+/// Keeps only pre-merge-safe cold prune predicates (PK + scope + version cursors).
 ///
 /// `policy_for` returns [`None`] for unknown columns (dropped).
 #[must_use]
@@ -206,6 +210,91 @@ pub fn prune_segment_stats_hints(
         .collect()
 }
 
+/// Groups catalog segments into exact newest-first merge batches.
+///
+/// Disjoint sequence ranges remain separate so the executor can drop one
+/// segment payload before opening the next. Transitively overlapping ranges
+/// stay together because winner resolution cannot safely emit either range
+/// until all overlapping candidates have been compared.
+///
+/// # Errors
+///
+/// Returns a catalog validation error when a segment lacks a valid closed
+/// `seq` range.
+pub fn group_segments_newest_first(
+    segments: Vec<SegmentStatsHint>,
+) -> Result<Vec<Vec<SegmentStatsHint>>> {
+    let mut ranged = segments
+        .into_iter()
+        .map(|segment| {
+            let (min, max) = segment_seq_range(&segment)?;
+            Ok((segment, min, max))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ranged.sort_by(|left, right| {
+        right
+            .2
+            .cmp(&left.2)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.0.object_path.cmp(&right.0.object_path))
+    });
+
+    let mut groups = Vec::new();
+    let mut current = Vec::new();
+    let mut current_min = None::<SeqId>;
+    for (segment, min, max) in ranged {
+        if current_min.is_some_and(|group_min| max < group_min) {
+            groups.push(std::mem::take(&mut current));
+            current_min = None;
+        }
+        current_min = Some(current_min.map_or(min, |group_min| group_min.min(min)));
+        current.push(segment);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    Ok(groups)
+}
+
+fn segment_seq_range(segment: &SegmentStatsHint) -> Result<(SeqId, SeqId)> {
+    let invalid = KoldstoreError::InvalidColdSegmentMetadata;
+    let stats = segment.column_stats.get("seq").ok_or_else(|| {
+        invalid(format!(
+            "cold segment `{}` is missing required `seq` statistics",
+            segment.object_path
+        ))
+    })?;
+    let min_raw = json_i64(&stats.min).ok_or_else(|| {
+        invalid(format!(
+            "cold segment `{}` has invalid minimum `seq` statistic",
+            segment.object_path
+        ))
+    })?;
+    let max_raw = json_i64(&stats.max).ok_or_else(|| {
+        invalid(format!(
+            "cold segment `{}` has invalid maximum `seq` statistic",
+            segment.object_path
+        ))
+    })?;
+    let min = SeqId::new(min_raw)?;
+    let max = SeqId::new(max_raw)?;
+    if min > max {
+        return Err(invalid(format!(
+            "cold segment `{}` has reversed `seq` range {min_raw}..={max_raw}",
+            segment.object_path
+        )));
+    }
+    Ok((min, max))
+}
+
+fn json_i64(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::Number(number) => number.as_i64(),
+        serde_json::Value::String(text) => text.parse().ok(),
+        _ => None,
+    }
+}
+
 /// Validates that all cold pruning predicates target indexed/stat columns.
 ///
 /// # Errors
@@ -231,29 +320,6 @@ pub fn validate_prune_predicates_indexed(
     Ok(())
 }
 
-/// Validates that selected indexed predicates have segment min/max metadata.
-///
-/// # Errors
-///
-/// Returns an unsafe predicate error when any active segment lacks min/max stats
-/// for a requested pruning column.
-pub fn validate_prune_predicate_stats(
-    segments: &[SegmentStatsHint],
-    predicates: &[SegmentPrunePredicate],
-) -> Result<()> {
-    for predicate in predicates {
-        for segment in segments {
-            if !segment.column_stats.contains_key(&predicate.column) {
-                return Err(KoldstoreError::UnsafePredicate(format!(
-                    "cold filter column `{}` is indexed but segment `{}` has no min/max stats",
-                    predicate.column, segment.object_path
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn segment_may_match_predicate(
     segment: &SegmentStatsHint,
     predicate: &SegmentPrunePredicate,
@@ -261,33 +327,12 @@ fn segment_may_match_predicate(
     let Some(stats) = segment.column_stats.get(&predicate.column) else {
         return true;
     };
-    if stats.min.is_null() || stats.max.is_null() {
-        return true;
-    }
-
-    if let Some(min) = &predicate.min {
-        if min.is_null() {
-            return true;
-        }
-        match compare_json_values(&stats.max, min) {
-            Some(Ordering::Less) => return false,
-            Some(_) => {}
-            None => return true,
-        }
-    }
-
-    if let Some(max) = &predicate.max {
-        if max.is_null() {
-            return true;
-        }
-        match compare_json_values(&stats.min, max) {
-            Some(Ordering::Greater) => return false,
-            Some(_) => {}
-            None => return true,
-        }
-    }
-
-    true
+    column_stats_range_may_overlap(
+        &stats.min,
+        &stats.max,
+        predicate.min.as_ref(),
+        predicate.max.as_ref(),
+    )
 }
 
 /// How unflushed mirror rows participate in merge reads.
@@ -321,6 +366,10 @@ pub struct MergeScanPlan {
     /// Required output/qual columns.
     pub projection: Vec<String>,
     /// Visible cold segment hints.
+    ///
+    /// Live CustomScan planning leaves this empty and prunes catalog segments at
+    /// execution time via [`prune_segment_stats_hints`]. Populated only by
+    /// library helpers / tests that drive [`crate::scan::begin_merge_scan_with_plan`].
     pub segment_hints: Vec<SegmentHint>,
     /// Mirror overlay strategy applied at execution.
     #[serde(default)]

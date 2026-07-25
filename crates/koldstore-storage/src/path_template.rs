@@ -46,3 +46,48 @@ impl PathTemplate {
         Ok(rendered)
     }
 }
+
+/// Normalizes a rendered table prefix to exactly one trailing slash.
+#[must_use]
+pub fn normalize_table_prefix(rendered: &str) -> String {
+    let trimmed = rendered.trim_matches('/');
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed}/")
+    }
+}
+
+/// Joins a relative object name below a table prefix.
+#[must_use]
+pub fn join_object_key(table_prefix: &str, relative: &str) -> String {
+    let prefix = table_prefix.trim_matches('/');
+    let relative = relative.trim_matches('/');
+    match (prefix.is_empty(), relative.is_empty()) {
+        (true, true) => String::new(),
+        (true, false) => relative.to_string(),
+        (false, true) => format!("{prefix}/"),
+        (false, false) => format!("{prefix}/{relative}"),
+    }
+}
+
+/// Returns the manifest object key below a table prefix.
+#[must_use]
+pub fn manifest_object_key(table_prefix: &str) -> String {
+    join_object_key(table_prefix, "manifest.json")
+}
+
+/// Renders and normalizes a regular table prefix.
+///
+/// # Errors
+///
+/// Returns the template rendering error when placeholders are invalid.
+pub fn render_regular_table_prefix(
+    template: &PathTemplate,
+    namespace: &str,
+    table_name: &str,
+) -> Result<String, String> {
+    template
+        .render(namespace, table_name, None)
+        .map(|rendered| normalize_table_prefix(&rendered))
+}

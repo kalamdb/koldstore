@@ -622,9 +622,16 @@ pub async fn load_cold_segments(client: &Client, relation: &str) -> Result<Vec<C
     let rows = client
         .query(
             r#"
-            SELECT scope_key, object_path, row_count, byte_size, batch_number
-            FROM koldstore.cold_segments
-            WHERE table_oid = $1::text::regclass::oid
+            SELECT
+              scope_key,
+              format('%s/%s/%s', n.nspname, c.relname, cs.path),
+              row_count,
+              byte_size,
+              batch_number
+            FROM koldstore.cold_segments cs
+            JOIN pg_class c ON c.oid = cs.table_oid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE cs.table_oid = $1::text::regclass::oid
               AND status = 'active'
             ORDER BY scope_key, batch_number
             "#,
@@ -652,9 +659,15 @@ pub async fn load_manifests(client: &Client, relation: &str) -> Result<Vec<Manif
     let rows = client
         .query(
             r#"
-            SELECT scope_key, manifest_path, sync_state, generation
-            FROM koldstore.manifest
-            WHERE table_oid = $1::text::regclass::oid
+            SELECT
+              scope_key,
+              format('%s/%s/manifest.json', n.nspname, c.relname),
+              sync_state,
+              generation
+            FROM koldstore.manifest m
+            JOIN pg_class c ON c.oid = m.table_oid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE m.table_oid = $1::text::regclass::oid
             ORDER BY scope_key
             "#,
             &[&relation],

@@ -143,7 +143,6 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         "Emit Path",
         "Hot Rows",
         "Candidate Segments",
-        "Segments Pruned by Scope",
         "Segments Pruned by Min/Max",
         "Parquet Segments Opened",
         "Bytes Fetched",
@@ -213,7 +212,7 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
         );
     }
     for expected in [
-        "Emit Path: merge_buffer",
+        "Emit Path: merge_stream",
         "Hot Rows: 1",
         "Rows Scanned: 3",
         "Input Rows: 4",
@@ -248,9 +247,7 @@ fn plain_explain_never_reuses_prior_analyze_counters() {
     let _analyzed = spi_get_explain(&format!(
         "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) SELECT body FROM {relation}"
     ));
-    let planned = spi_get_explain(&format!(
-        "EXPLAIN (COSTS OFF) SELECT body FROM {relation}"
-    ));
+    let planned = spi_get_explain(&format!("EXPLAIN (COSTS OFF) SELECT body FROM {relation}"));
     assert!(
         planned.contains("Status: planned"),
         "plain EXPLAIN must report planned source state: {planned}"
@@ -267,6 +264,249 @@ fn plain_explain_never_reuses_prior_analyze_counters() {
             && !planned.contains("Status: executed"),
         "plain EXPLAIN must not reuse prior execution counters: {planned}"
     );
+}
+
+#[pg_test]
+fn plain_explain_applies_catalog_prune_without_opening_parquet() {
+    // 2501 rows + hot_row_limit=1 + max_rows_per_file=1000 => three cold
+    // segments with disjoint PK ranges (same shape as flush_scheduler tests).
+    // Point-lookup EXPLAIN must prune non-overlapping segments and report
+    // planned opens == survivors, without opening Parquet (BeginCustomScan
+    // skips under EXEC_FLAG_EXPLAIN_ONLY).
+    let suffix = unique_suffix("explain_prune");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        r#"
+        SELECT koldstore.manage_table(
+          table_name     => '{relation}'::regclass,
+          storage        => '{storage}',
+          hot_row_limit  => 1,
+          min_flush_rows => 1,
+          max_rows_per_file => 1000,
+          auto_flush => false,
+          migration_order_by => 'id'
+        )
+        "#
+    ))
+    .expect("manage_table");
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, 'row-' || gs::text FROM generate_series(1, 2501) AS gs"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(
+        flushed >= 2500,
+        "expected multi-segment flush, rows_flushed={flushed}"
+    );
+
+    let planned = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) SELECT body FROM {relation} WHERE id = 1"
+    ));
+    assert!(
+        planned.contains("Status: planned"),
+        "plain EXPLAIN must stay planned: {planned}"
+    );
+    assert!(
+        planned.contains("Candidate Segments: 3"),
+        "expected three candidate segments after 2501-row flush: {planned}"
+    );
+    let pruned = scan_explain_counter(&planned, "Segments Pruned by Min/Max");
+    let planned_opens = scan_explain_counter(&planned, "Parquet Segments Planned");
+    assert!(
+        pruned >= 1,
+        "PK point EXPLAIN must prune at least one disjoint segment: pruned={pruned} planned={planned_opens}\n{planned}"
+    );
+    assert_eq!(
+        planned_opens, 1,
+        "planned opens must equal prune survivors for a single PK: {planned}"
+    );
+    assert!(
+        !planned.contains("Parquet Segments Opened")
+            && !planned.contains("Footer First")
+            && !planned.contains("Status: executed"),
+        "plain EXPLAIN must not open Parquet or report execution: {planned}"
+    );
+}
+
+#[pg_test]
+fn full_cold_count_streams_one_disjoint_segment_payload_at_a_time() {
+    let suffix = unique_suffix("streaming_count");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, repeat('payload-', 8) || gs::text
+         FROM generate_series(1, 2501) AS gs"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(
+        flushed >= 2500,
+        "expected three cold segments, rows_flushed={flushed}"
+    );
+
+    let analyzed = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) SELECT count(*) FROM {relation}"
+    ));
+    assert!(
+        analyzed.contains("Emit Path: merge_stream"),
+        "full cold count must use streaming merge emission: {analyzed}"
+    );
+    assert_eq!(
+        scan_explain_counter(&analyzed, "Parquet Segments Opened"),
+        3,
+        "count must consume all three segments: {analyzed}"
+    );
+    assert!(
+        scan_explain_counter(&analyzed, "Peak Cold Batch Rows") <= 1000,
+        "stream must retain at most one disjoint segment payload: {analyzed}"
+    );
+
+    let limited = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) SELECT id FROM {relation} LIMIT 1"
+    ));
+    assert_eq!(
+        scan_explain_counter(&limited, "Parquet Segments Opened"),
+        1,
+        "parent LIMIT must stop the stream before older segments open: {limited}"
+    );
+}
+
+#[pg_test]
+fn mixed_scan_pages_hot_json_one_batch_at_a_time() {
+    let suffix = unique_suffix("hot_batch");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        r#"
+        SELECT koldstore.manage_table(
+          table_name     => '{relation}'::regclass,
+          storage        => '{storage}',
+          hot_row_limit  => 5000,
+          min_flush_rows => 1,
+          max_rows_per_file => 1000,
+          migration_order_by => 'id'
+        )
+        "#
+    ))
+    .expect("manage_table");
+    // Force-flush seeds cold segments, then leave a large hot heap so MergeStream
+    // must page hot JSON instead of loading it all at BeginCustomScan.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, repeat('payload-', 8) || gs::text
+         FROM generate_series(1, 2500) AS gs"
+    ))
+    .expect("insert cold seed");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(
+        flushed >= 2500,
+        "expected cold segments for mixed scan, rows_flushed={flushed}"
+    );
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, repeat('hot-', 8) || gs::text
+         FROM generate_series(2501, 5000) AS gs"
+    ))
+    .expect("insert hot pages");
+
+    let total = Spi::get_one::<i64>(&format!("SELECT count(*)::bigint FROM {relation}"))
+        .expect("count")
+        .expect("count value");
+    assert_eq!(total, 5000, "mixed scan must return every hot and cold row");
+
+    let analyzed = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) SELECT count(*) FROM {relation}"
+    ));
+    assert!(
+        analyzed.contains("Emit Path: merge_stream"),
+        "mixed count must use streaming merge emission: {analyzed}"
+    );
+    let peak_hot = scan_explain_counter(&analyzed, "Peak Hot Batch Rows");
+    assert!(
+        peak_hot > 0 && peak_hot <= 1024,
+        "hot JSON must page at most HOT_MERGE_BATCH_ROWS: peak={peak_hot}, plan={analyzed}"
+    );
+    assert!(
+        scan_explain_counter(&analyzed, "Peak Cold Batch Rows") <= 1000,
+        "cold payload must stay segment-bounded: {analyzed}"
+    );
+    assert!(
+        scan_explain_counter(&analyzed, "Hot Rows") >= 2500,
+        "hot pages must cover the retained hot heap: {analyzed}"
+    );
+    assert!(
+        scan_explain_counter(&analyzed, "Seen Keys") >= 5000,
+        "exact winner identities must cover every distinct PK: {analyzed}"
+    );
+}
+
+#[pg_test]
+fn merge_scan_fails_closed_when_seen_key_limit_is_exceeded() {
+    let suffix = unique_suffix("seen_limit");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, 'body-' || gs::text
+         FROM generate_series(1, 250) AS gs"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 200, "expected cold rows, rows_flushed={flushed}");
+
+    Spi::run("SET koldstore.max_merge_seen_keys = 100").expect("set seen-key limit");
+    // Catch the PostgreSQL ERROR in a subtransaction so the pg_test txn stays usable.
+    Spi::run(&format!(
+        r#"
+        DO $do$
+        BEGIN
+          PERFORM count(*) FROM {relation};
+          RAISE EXCEPTION 'expected KoldMergeScan seen-key limit to fail the scan';
+        EXCEPTION
+          WHEN OTHERS THEN
+            IF position('max_merge_seen_keys' in SQLERRM) = 0
+               AND position('exact primary-key identities' in SQLERRM) = 0 THEN
+              RAISE;
+            END IF;
+        END
+        $do$;
+        "#
+    ))
+    .expect("seen-key limit must fail closed with a clear error");
+    Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
+}
+
+fn scan_explain_counter(plan: &str, label: &str) -> usize {
+    let prefix = format!("{label}:");
+    plan.lines()
+        .find_map(|line| {
+            let trimmed = line.trim_start();
+            trimmed
+                .strip_prefix(&prefix)
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .unwrap_or_else(|| panic!("missing EXPLAIN counter `{label}` in:\n{plan}"))
 }
 
 #[pg_test]
@@ -331,8 +571,8 @@ fn explain_analyze_counts_mirror_overlay_rows() {
 #[pg_test]
 fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
     // Untyped `2` is an int4 Const against bigint `id`. Hot pushdown must accept
-    // that promotion (same as `2::bigint`) so cold PK lookups do not fall through
-    // to merge_buffer and materialize the entire hot heap.
+    // that promotion (same as `2::bigint`) so cold PK lookups stay on the direct
+    // cold path instead of loading the hot heap for winner resolution.
     let suffix = unique_suffix("int4_pk");
     let schema = format!("pgtest_{suffix}");
     let table = "messages";
@@ -361,8 +601,8 @@ fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
         "expected hot PK miss (0 rows), got: {plan}"
     );
     assert!(
-        !plan.contains("Emit Path: merge_buffer"),
-        "untyped bigint PK lookup must not merge-buffer the hot heap: {plan}"
+        !plan.contains("Emit Path: merge_stream"),
+        "untyped bigint PK lookup must not load the hot heap for merging: {plan}"
     );
     assert_eq!(
         spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 2")),
@@ -436,7 +676,10 @@ fn hot_only_and_mixed_hot_cold_results_match_expected_values() {
     assert_eq!(hot_only, "hot-a,hot-b");
 
     let flushed = flush_table_rows(&relation, true);
-    assert!(flushed >= 2, "expected at least two rows flushed, got {flushed}");
+    assert!(
+        flushed >= 2,
+        "expected at least two rows flushed, got {flushed}"
+    );
 
     // After flush with hot_row_limit high, rows may remain hot or move cold depending
     // on policy; either way the logical result must stay identical.

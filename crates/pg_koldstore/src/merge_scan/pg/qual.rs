@@ -9,23 +9,23 @@ use pgrx::pg_sys;
 use super::literals::{list_node_pointers, literal_json_value, typed_literal_sql, unwrap_relabel};
 
 /// One base-relation attribute required by output projection or executor quals.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ScanProjectionColumn<'a> {
-    pub(super) catalog: &'a koldstore_migrate::order::CatalogColumn,
+#[derive(Debug, Clone)]
+pub(super) struct ScanProjectionColumn {
+    pub(super) catalog: koldstore_migrate::order::CatalogColumn,
     /// Zero-based position in the base relation's scan tuple.
     pub(super) slot_index: usize,
 }
 
 /// Minimal base-relation projection used to build tuples for PostgreSQL `ExecScan`.
-#[derive(Debug)]
-pub(super) struct ScanProjection<'a> {
-    pub(super) columns: Vec<ScanProjectionColumn<'a>>,
+#[derive(Debug, Clone)]
+pub(super) struct ScanProjection {
+    pub(super) columns: Vec<ScanProjectionColumn>,
     pub(super) tuple_width: usize,
 }
 
-impl<'a> ScanProjection<'a> {
-    pub(super) fn catalog_columns(&self) -> Vec<&'a koldstore_migrate::order::CatalogColumn> {
-        self.columns.iter().map(|column| column.catalog).collect()
+impl ScanProjection {
+    pub(super) fn catalog_columns(&self) -> Vec<&koldstore_migrate::order::CatalogColumn> {
+        self.columns.iter().map(|column| &column.catalog).collect()
     }
 }
 
@@ -54,7 +54,7 @@ pub(super) unsafe fn required_scan_projection(
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
     tuple_width: usize,
-) -> Result<ScanProjection<'_>, String> {
+) -> Result<ScanProjection, String> {
     let mut attrs: *mut pg_sys::Bitmapset = std::ptr::null_mut();
     unsafe {
         pg_sys::pull_varattnos(targetlist.cast::<pg_sys::Node>(), scanrelid, &mut attrs);
@@ -110,13 +110,12 @@ pub(super) unsafe fn required_scan_projection(
                 slot_index + 1
             ));
         }
-        let name_text = unsafe { CStr::from_ptr(name) }
-            .to_str()
-            .map_err(|error| error.to_string())?
-            .to_string();
-        unsafe {
-            pg_sys::pfree(name.cast());
-        }
+        let Some(name_text) = (unsafe { super::literals::cstr_owned_pfree(name) }) else {
+            return Err(format!(
+                "required base-relation attribute {} has a non-UTF-8 name",
+                slot_index + 1
+            ));
+        };
         let Some(catalog) = columns.iter().find(|column| column.name == name_text) else {
             if whole_row {
                 // PostgreSQL represents a dropped attribute in a whole-row
@@ -129,7 +128,7 @@ pub(super) unsafe fn required_scan_projection(
             ));
         };
         projection.push(ScanProjectionColumn {
-            catalog,
+            catalog: catalog.clone(),
             slot_index,
         });
     }

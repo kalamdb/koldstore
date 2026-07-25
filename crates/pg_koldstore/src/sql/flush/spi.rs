@@ -1,13 +1,15 @@
 //! PostgreSQL SPI adapters for flush: stats, catalog writes, and cleanup.
 
+use koldstore_catalog::CatalogManifestSegmentRow;
 use koldstore_catalog::{decode::RelationContext, ManagedTableSnapshot};
 use koldstore_common::QualifiedTableName;
 use koldstore_flush::policy::FlushPolicy;
 use koldstore_flush::{
-    cleanup::plan_seq_range_cleanup, manifest_from_catalog_rows, plan_activate_flush_segments,
-    plan_flush_segments_batch_insert, policy_flush_row_count, CatalogManifestSegmentRow,
-    FlushStats, ResolvedFlushSelection, WrittenFlushSegment,
+    cleanup::plan_seq_range_cleanup, plan_activate_flush_segments,
+    plan_flush_segments_batch_insert, policy_flush_row_count, FlushStats, ResolvedFlushSelection,
+    WrittenFlushSegment,
 };
+use koldstore_manifest::manifest_from_catalog_rows;
 use koldstore_mirror::{
     mirror_to_sql, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats, plan_mirror_stats,
     MirrorRelation, MirrorSeqStats,
@@ -126,11 +128,12 @@ fn older_than_cutoff(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let mirror = MirrorRelation::new(snapshot.mirror_relation.clone()).quoted();
-    let sql = format!("SELECT count(*)::bigint, max(seq)::bigint FROM (SELECT seq FROM {mirror} WHERE seq < $1 ORDER BY seq LIMIT $2) eligible");
+    let statement = koldstore_flush::plan_older_than_eligible_mirror_rows(&mirror)
+        .map_err(|error| error.to_string())?;
     let (count, max_seq) = pgrx::Spi::connect(|client| {
         let row = client
             .select(
-                &sql,
+                &statement.sql,
                 None,
                 &[
                     DatumWithOid::from(cutoff_seq),
@@ -320,7 +323,7 @@ pub(super) fn persist_flush_segments_batch(
         let row = &segment.catalog_row;
         let segment_id = crate::spi::uuid_to_pgrx(segment.segment_id);
         segment_ids.push(segment_id);
-        object_paths.push(row.object_path.clone());
+        object_paths.push(row.path.clone());
         batch_numbers.push(row.batch_number);
         min_seqs.push(row.min_seq);
         max_seqs.push(row.max_seq);
@@ -378,7 +381,6 @@ pub(super) fn persist_flush_segment(
 pub(super) fn activate_flush_segments(
     table_oid: pgrx::pg_sys::Oid,
     expected_generation: i64,
-    manifest_path: &str,
     segment_count: i32,
     max_seq: i64,
     max_commit_seq: i64,
@@ -401,7 +403,6 @@ pub(super) fn activate_flush_segments(
             DatumWithOid::from(table_oid),
             DatumWithOid::from(expected_generation),
             DatumWithOid::from(new_generation),
-            DatumWithOid::from(manifest_path),
             DatumWithOid::from(segment_count),
             DatumWithOid::from(max_seq),
             DatumWithOid::from(max_commit_seq),

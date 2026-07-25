@@ -2,8 +2,6 @@ use koldstore_common::ManageTableOptions;
 use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_migrate::MigrateTableRequest;
 use koldstore_migrate::{plan_empty_table_migration, MigrationError, MigrationTableContext};
-use uuid::Uuid;
-
 fn shared_request() -> MigrateTableRequest {
     MigrateTableRequest {
         table_name: "app.items".to_string(),
@@ -17,7 +15,7 @@ fn shared_request() -> MigrateTableRequest {
 fn context() -> MigrationTableContext {
     MigrationTableContext {
         table_oid: 42,
-        storage_id: Uuid::from_u128(7),
+        storage_id: "00000007".to_string(),
     }
 }
 
@@ -26,7 +24,7 @@ fn shared_migrate_table_plan_validates_and_probes_empty_table() {
     let plan = plan_empty_table_migration(&shared_request(), context()).unwrap();
 
     assert_eq!(plan.table_oid, 42);
-    assert_eq!(plan.storage_id, Uuid::from_u128(7));
+    assert_eq!(plan.storage_id, "00000007");
     assert_eq!(plan.table.schema.as_deref(), Some("app"));
     assert_eq!(plan.table.name, "items");
     assert_eq!(plan.effective_scope_column, None);

@@ -75,6 +75,10 @@ pub enum KoldstoreError {
     #[error("catalog validation failed")]
     CatalogValidation { diagnostic: Diagnostic },
 
+    /// Cold segment metadata cannot support a correct read.
+    #[error("invalid cold segment metadata: {0}")]
+    InvalidColdSegmentMetadata(String),
+
     /// JSON serialization or parsing failed.
     #[error("json error: {0}")]
     Json(String),

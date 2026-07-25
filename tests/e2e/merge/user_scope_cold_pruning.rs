@@ -240,7 +240,7 @@ async fn user_scope_cold_segment_lookup_is_index_backed_on_pgrx() -> Result<()> 
             &db.client,
             &format!(
                 r#"
-                SELECT object_path
+                SELECT path
                 FROM koldstore.cold_segments
                 WHERE table_oid = '{}'::regclass::oid
                   AND scope_key = 'user-a'
@@ -268,7 +268,7 @@ async fn user_scope_cold_segment_lookup_is_index_backed_on_pgrx() -> Result<()> 
             .client
             .query(
                 r#"
-                SELECT object_path
+                SELECT path
                 FROM koldstore.cold_segments
                 WHERE table_oid = $1::text::regclass::oid
                   AND scope_key = 'user-a'

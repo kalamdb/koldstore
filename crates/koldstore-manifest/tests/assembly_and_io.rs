@@ -8,7 +8,7 @@ use serde_json::json;
 #[test]
 fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
     let rows = vec![CatalogManifestSegmentRow {
-        object_path: "app/items/001/segment-0001-aaaaaaaa.parquet".to_string(),
+        path: "001/segment-0001-aaaaaaaa.parquet".to_string(),
         batch_number: 1,
         min_seq: 1,
         max_seq: 10,
@@ -64,7 +64,7 @@ fn manifest_paths_and_round_trip_io() {
         "notes",
         &["id".to_string()],
         CatalogManifestSegmentRow {
-            object_path: "app/notes/001/segment-0001-aaaaaaaa.parquet".to_string(),
+            path: "001/segment-0001-aaaaaaaa.parquet".to_string(),
             batch_number: 1,
             min_seq: 5,
             max_seq: 5,
@@ -101,7 +101,7 @@ fn pending_write_sync_state_matches_hot_dml_constant() {
 fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
     let rows = vec![
         CatalogManifestSegmentRow {
-            object_path: "app/items/001/segment-0001-aaaaaaaa.parquet".to_string(),
+            path: "001/segment-0001-aaaaaaaa.parquet".to_string(),
             batch_number: 1,
             min_seq: 1,
             max_seq: 10,
@@ -113,7 +113,7 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
             column_stats: json!({}),
         },
         CatalogManifestSegmentRow {
-            object_path: "app/items/001/segment-0002-bbbbbbbb.parquet".to_string(),
+            path: "001/segment-0002-bbbbbbbb.parquet".to_string(),
             batch_number: 2,
             min_seq: 11,
             max_seq: 20,

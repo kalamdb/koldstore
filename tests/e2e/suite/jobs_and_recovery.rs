@@ -84,6 +84,7 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
                 r#"
                 SET koldstore.cold_reads = 'auto';
                 SET koldstore.max_open_parquet_readers = 32;
+                SET koldstore.max_merge_seen_keys = 1000000;
                 SET koldstore.log_level = 'info';
                 "#,
             )
@@ -99,6 +100,11 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
             .query_one("SHOW koldstore.max_open_parquet_readers", &[])
             .await?
             .get::<_, String>(0);
+        let max_seen_keys = db
+            .client
+            .query_one("SHOW koldstore.max_merge_seen_keys", &[])
+            .await?
+            .get::<_, String>(0);
         let log_level = db
             .client
             .query_one("SHOW koldstore.log_level", &[])
@@ -107,6 +113,7 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
 
         assert_eq!(cold_reads, "auto");
         assert_eq!(max_readers, "32");
+        assert_eq!(max_seen_keys, "1000000");
         assert_eq!(log_level, "info");
     }
 

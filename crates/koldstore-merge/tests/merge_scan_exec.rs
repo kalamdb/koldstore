@@ -4,9 +4,9 @@ use koldstore_merge::scan::exec::{
     ColdAvailability, FilterPlan, ScanResourceCounters,
 };
 use koldstore_merge::scan::plan::{
-    prune_segment_stats, retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
-    ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
-    SegmentStatsHint,
+    group_segments_newest_first, prune_segment_stats, retain_pre_merge_cold_prune_predicates,
+    validate_prune_predicates_indexed, ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan,
+    SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -239,18 +239,21 @@ fn scope_equality_is_retained_for_pre_merge_cold_prune() {
         "id" => Some(ColdPruneColumnPolicy {
             is_primary_key: true,
             is_scope: false,
+            is_version_cursor: false,
             ordered_stats_safe: true,
             equality_stats_safe: true,
         }),
         "tenant_id" => Some(ColdPruneColumnPolicy {
             is_primary_key: false,
             is_scope: true,
+            is_version_cursor: false,
             ordered_stats_safe: false,
             equality_stats_safe: true,
         }),
         "conversation_id" => Some(ColdPruneColumnPolicy {
             is_primary_key: false,
             is_scope: false,
+            is_version_cursor: false,
             ordered_stats_safe: false,
             equality_stats_safe: true,
         }),
@@ -277,6 +280,7 @@ fn text_scope_range_predicates_are_not_pre_merge_safe() {
             Some(ColdPruneColumnPolicy {
                 is_primary_key: false,
                 is_scope: true,
+                is_version_cursor: false,
                 ordered_stats_safe: false,
                 equality_stats_safe: true,
             })
@@ -313,4 +317,80 @@ fn indexed_prune_predicates_keep_segments_without_manifest_stats() {
     );
 
     assert_eq!(selected, vec!["app/items/batch-1.parquet".to_string()]);
+}
+
+fn versioned_segment(path: &str, min_seq: i64, max_seq: i64) -> SegmentStatsHint {
+    SegmentStatsHint {
+        object_path: path.to_string(),
+        column_stats: BTreeMap::from([(
+            "seq".to_string(),
+            koldstore_parquet::ColumnStats {
+                min: json!(min_seq),
+                max: json!(max_seq),
+            },
+        )]),
+        byte_size: None,
+    }
+}
+
+#[test]
+fn newest_first_segment_groups_keep_disjoint_payloads_separate() {
+    let groups = group_segments_newest_first(vec![
+        versioned_segment("old.parquet", 1, 10),
+        versioned_segment("new.parquet", 21, 30),
+        versioned_segment("middle.parquet", 11, 20),
+    ])
+    .unwrap();
+
+    let paths = groups
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|segment| segment.object_path.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        vec![
+            vec!["new.parquet"],
+            vec!["middle.parquet"],
+            vec!["old.parquet"]
+        ]
+    );
+}
+
+#[test]
+fn newest_first_segment_groups_combine_transitive_overlaps() {
+    let groups = group_segments_newest_first(vec![
+        versioned_segment("old.parquet", 1, 9),
+        versioned_segment("bridge.parquet", 18, 25),
+        versioned_segment("new.parquet", 20, 30),
+        versioned_segment("middle.parquet", 10, 20),
+    ])
+    .unwrap();
+
+    assert_eq!(groups.len(), 2);
+    assert_eq!(
+        groups[0]
+            .iter()
+            .map(|segment| segment.object_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["new.parquet", "bridge.parquet", "middle.parquet"]
+    );
+    assert_eq!(groups[1][0].object_path, "old.parquet");
+}
+
+#[test]
+fn newest_first_segment_groups_reject_missing_sequence_metadata() {
+    let error = group_segments_newest_first(vec![SegmentStatsHint {
+        object_path: "missing.parquet".to_string(),
+        column_stats: BTreeMap::new(),
+        byte_size: None,
+    }])
+    .unwrap_err();
+
+    assert!(error.to_string().contains("missing.parquet"));
+    assert!(error.to_string().contains("seq"));
 }

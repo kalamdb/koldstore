@@ -1,19 +1,19 @@
 //! Tuple slot and scan-owned Datum helpers for KoldMergeScan.
 //!
 //! Materialized rows live in a dedicated AllocSet created at BeginCustomScan.
-//! EndCustomScan drops that context, releasing all pass-by-ref Datums at once.
+//! Streaming scans reset it between rows; EndCustomScan drops the context.
 
 use pgrx::memcxt::PgMemoryContexts;
 use pgrx::pg_sys;
 
-/// One projected result row owned by the scan memory context.
+/// One projected result row whose pass-by-ref Datums belong to scan memory.
 #[derive(Debug)]
 pub(super) struct MaterializedRow {
     pub(super) values: Vec<pg_sys::Datum>,
     pub(super) is_null: Vec<bool>,
 }
 
-/// Scan-local AllocSet that owns all materialized Datums for one CustomScan node.
+/// Scan-local AllocSet for buffered or current-row Datums.
 #[derive(Debug)]
 pub(super) struct ScanMemory {
     context: PgMemoryContexts,
@@ -30,6 +30,16 @@ impl ScanMemory {
     /// Runs `f` with allocations going into this scan context.
     pub(super) unsafe fn switch<T>(&mut self, f: impl FnOnce() -> T) -> T {
         self.context.switch_to(|_| f())
+    }
+
+    /// Releases Datums from the previously emitted streamed row.
+    ///
+    /// # Safety
+    ///
+    /// The caller must wait until PostgreSQL has finished consuming every slot
+    /// that references this context.
+    pub(super) unsafe fn reset(&mut self) {
+        self.context.reset();
     }
 }
 

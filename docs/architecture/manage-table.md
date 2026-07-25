@@ -262,7 +262,7 @@ This creates or updates `koldstore.manifest` for `scope_key = ''`:
 
 | Field | Value at manage time |
 |-------|----------------------|
-| `manifest_path` | `'pending'` |
+| `generation` | `0` (unpublished until first flush) |
 | `sync_state` | `'pending_write'` |
 | `hot_row_count` | live heap count |
 | `mirror_row_count` | live mirror count |

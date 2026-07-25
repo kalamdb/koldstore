@@ -54,16 +54,15 @@ pub fn manifest_from_catalog_rows(
 ///
 /// Returns an error when segment metadata cannot be converted into manifest form.
 pub fn build_manifest_segment_from_catalog_row(
-    namespace: &str,
-    table_name: &str,
+    _namespace: &str,
+    _table_name: &str,
     primary_key_columns: &[String],
     row: CatalogManifestSegmentRow,
 ) -> Result<ManifestSegment, ManifestAssemblyError> {
-    let manifest_path = manifest_relative_segment_path(namespace, table_name, &row.object_path);
     let mut segment = ManifestSegment::committed(
         u32::try_from(row.batch_number)
             .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?,
-        manifest_path,
+        row.path,
         row.min_seq..=row.max_seq,
         row.min_commit_seq..=row.max_commit_seq,
         u64::try_from(row.row_count)

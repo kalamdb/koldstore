@@ -1,4 +1,10 @@
-//! Flush job state transitions.
+//! Flush job state transitions and legacy batch-planning helpers.
+//!
+//! **Not on the live `flush_table` path.** Production encode uses
+//! [`crate::encode::stream_flush_chunks`] plus
+//! [`crate::segment_catalog::plan_flush_segments_batch_insert`]. Types here
+//! (`FlushBatchBuilder`, `HotRowCandidate`, `plan_cold_segment_insert`, …)
+//! remain for unit tests and benches that exercise bounded-batch semantics.
 
 use std::{
     cmp::Ordering,

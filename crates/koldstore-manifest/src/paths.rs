@@ -2,7 +2,8 @@
 //!
 //! Cold segments use one table-wide layout (no per-scope object prefixes):
 //! `{namespace}/{table}/{folder:03}/segment-{NNNN}-{token}.parquet`.
-//! Manifest segment paths store the table-relative form
+//! Catalog segment paths are stored relative to the configured table prefix;
+//! manifests use the same table-relative form
 //! `{folder:03}/segment-{NNNN}-{token}.parquet`.
 //!
 //! `token` is a short hex derived from the catalog segment UUID — enough to

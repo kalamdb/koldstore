@@ -20,6 +20,42 @@ pub struct TableRowCounters {
     pub cold_segment_count: i64,
 }
 
+impl TableRowCounters {
+    /// Decodes the JSON object returned by [`plan_read_table_row_counters`].
+    #[must_use]
+    pub fn from_json_value(value: &serde_json::Value) -> Self {
+        Self {
+            hot_row_count: value
+                .get("hot_row_count")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            mirror_row_count: value
+                .get("mirror_row_count")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            cold_row_count: value
+                .get("cold_row_count")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            cold_segment_count: value
+                .get("cold_segment_count")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+        }
+    }
+
+    /// Decodes a JSON text payload from [`plan_read_table_row_counters`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the payload is not valid JSON.
+    pub fn from_json_str(json: &str) -> Result<Self, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|error| error.to_string())?;
+        Ok(Self::from_json_value(&value))
+    }
+}
+
 /// Table counter planning error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TableCounterError {

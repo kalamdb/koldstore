@@ -66,8 +66,9 @@ See [dml-table](architecture/dml-table.md) and
 
 ### Custom scan instead of an external query engine
 
-KoldMergeScan materializes a hot+cold winner set via SQL at scan start, then
-serves rows from a buffer. See [scanning-table](architecture/scanning-table.md).
+KoldMergeScan streams hot pages and cold segment groups through an exact
+winner resolver, retaining PK identities (not full row images) for the scan.
+See [scanning-table](architecture/scanning-table.md).
 
 ### Manifest and catalog
 

@@ -4,69 +4,18 @@ use anyhow::Result;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 
 #[test]
-fn flush_to_cold_plan_writes_parquet_manifest_and_segments() {
+fn flush_to_cold_plan_writes_pending_segment_batch_sql() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    use koldstore_common::{CommitSeq, ScopeKey, SeqId, StablePkHash};
-    use koldstore_flush::job::{plan_cold_segment_insert, FlushBatchInput, HotRowCandidate};
-    use koldstore_parquet::{ColumnStats, SegmentFooterMetadata};
-    use serde_json::json;
-
-    let batch = FlushBatchInput {
-        batch_size: 100,
-        rows: vec![
-            HotRowCandidate::live(
-                StablePkHash::from_hex("01").unwrap(),
-                SeqId::new(1).unwrap(),
-                CommitSeq::new(11).unwrap(),
-            ),
-            HotRowCandidate::live(
-                StablePkHash::from_hex("02").unwrap(),
-                SeqId::new(2).unwrap(),
-                CommitSeq::new(12).unwrap(),
-            ),
-            HotRowCandidate::tombstone(
-                StablePkHash::from_hex("03").unwrap(),
-                SeqId::new(3).unwrap(),
-                CommitSeq::new(13).unwrap(),
-            ),
-        ],
-    }
-    .plan();
-    let footer = SegmentFooterMetadata::from_footer(
-        &batch.footer_summary(),
-        batch.live_rows as u64,
-        4096,
-        1,
-        vec![(
-            "_seq".to_string(),
-            ColumnStats {
-                min: json!(1),
-                max: json!(2),
-            },
-        )],
-    )
-    .unwrap();
-    let segment = plan_cold_segment_insert(
-        42,
-        Some(ScopeKey::new("tenant-a").unwrap()),
-        "app/items/001/segment-0001.parquet",
-        footer,
-        "abc123checksum",
-        "object-etag-1",
-    )
-    .unwrap();
-
-    assert_eq!(batch.live_rows, 2);
-    assert_eq!(batch.tombstones_retained, 1);
-    assert_eq!(segment.object_path, "app/items/001/segment-0001.parquet");
-    assert_eq!(segment.status, "pending");
-    assert_eq!(segment.checksum, "abc123checksum");
-    assert_eq!(segment.object_etag, "object-etag-1");
-    assert_eq!(segment.scope_key.as_ref().unwrap().as_str(), "tenant-a");
-    assert_eq!(segment.min_seq.get(), 1);
-    assert_eq!(segment.max_commit_seq.get(), 12);
+    let statement = koldstore_flush::plan_flush_segments_batch_insert().unwrap();
+    let sql = statement.sql.to_ascii_lowercase();
+    assert!(sql.contains("unnest("));
+    assert!(sql.contains("koldstore.cold_segments"));
+    assert!(
+        sql.contains("pending"),
+        "production insert must stage segments as pending before activate CAS"
+    );
 }
 
 #[tokio::test]
@@ -116,12 +65,20 @@ async fn flush_to_cold_writes_catalog_manifest_and_parquet_on_pgrx() -> Result<(
             .client
             .query_one(
                 r#"
-                SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size
+                SELECT
+                  format('%s/%s/manifest.json', n.nspname, c.relname),
+                  format('%s/%s/%s', n.nspname, c.relname, cs.path),
+                  cs.row_count,
+                  cs.byte_size,
+                  cs.path
                 FROM koldstore.manifest m
+                JOIN pg_class c ON c.oid = m.table_oid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
                 JOIN koldstore.cold_segments cs
                   ON cs.table_oid = m.table_oid
                  AND cs.scope_key = m.scope_key
                 WHERE m.table_oid = $1::text::regclass::oid
+                  AND m.generation > 0
                   AND m.sync_state = 'in_sync'
                   AND cs.status = 'active'
                 ORDER BY cs.batch_number
@@ -140,6 +97,11 @@ async fn flush_to_cold_writes_catalog_manifest_and_parquet_on_pgrx() -> Result<(
         assert!(parquet_path.exists(), "missing {}", parquet_path.display());
         assert_eq!(artifact.get::<_, i64>(2), 64);
         assert!(artifact.get::<_, i64>(3) > 0);
+        let relative_path = artifact.get::<_, String>(4);
+        assert!(
+            relative_path.starts_with("001/") && relative_path.ends_with(".parquet"),
+            "cold_segments.path must be table-relative, got {relative_path}"
+        );
 
         let file = std::fs::File::open(&parquet_path)?;
         let reader = SerializedFileReader::new(file)?;

@@ -240,7 +240,7 @@ pub struct RegistrationMetadata {
     /// Table type.
     pub table_type: String,
     /// Storage id.
-    pub storage_id: uuid::Uuid,
+    pub storage_id: String,
     /// Scope column.
     pub scope_column: Option<String>,
     /// Table-specific change-log mirror relation.
@@ -293,7 +293,7 @@ pub struct PreparedRegistrationMetadata {
     /// Options JSON including flush policy.
     pub options: Value,
     /// Storage registration id.
-    pub storage_id: Uuid,
+    pub storage_id: String,
 }
 
 /// Planned `koldstore.schemas` catalog insertion.
@@ -313,7 +313,7 @@ impl RegistrationMetadata {
     pub fn is_complete(&self) -> bool {
         self.table_oid != 0
             && matches!(self.table_type.as_str(), "shared" | "user")
-            && self.storage_id != Uuid::nil()
+            && !self.storage_id.trim().is_empty()
             && !self.primary_key.is_empty()
             && self
                 .primary_key
@@ -347,7 +347,7 @@ impl RegistrationMetadata {
         if !matches!(self.table_type.as_str(), "shared" | "user") {
             return Err(RegistryError::UnsupportedTableType(self.table_type.clone()));
         }
-        if self.storage_id == Uuid::nil() {
+        if self.storage_id.trim().is_empty() {
             return Err(RegistryError::MissingStorageId);
         }
         if self.primary_key.is_empty()
@@ -436,7 +436,7 @@ impl RegistrationMetadata {
             indexed_columns: serde_json::json!(self.indexed_columns),
             type_matrix,
             options,
-            storage_id: self.storage_id,
+            storage_id: self.storage_id.clone(),
         })
     }
 }

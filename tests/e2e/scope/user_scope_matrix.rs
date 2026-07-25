@@ -395,16 +395,27 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
     common::require_pgrx_server().await?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "user_scope_text_collation").await?;
-        let has_icu = db
+        // Probe CREATE COLLATION: catalog ICU rows can remain after a non-ICU rebuild.
+        let probe = format!("{}.koldstore_icu_probe", db.schema);
+        match db
             .client
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_collation WHERE collprovider = 'i')",
+            .execute(
+                &format!(
+                    "CREATE COLLATION {probe} ( \
+                       provider = icu, locale = 'und-u-ks-level2', deterministic = false \
+                     )"
+                ),
                 &[],
             )
-            .await?
-            .get::<_, bool>(0);
-        if !has_icu {
-            continue;
+            .await
+        {
+            Ok(_) => {
+                db.client
+                    .execute(&format!("DROP COLLATION {probe}"), &[])
+                    .await?;
+            }
+            Err(error) if common::error_chain_contains(&error, "ICU is not supported") => continue,
+            Err(error) => return Err(error.into()),
         }
 
         let relation = db.relation("rls_collated_text_keys");

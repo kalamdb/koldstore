@@ -11,5 +11,6 @@ pub mod row;
 pub mod scope;
 pub mod seq;
 pub mod snowflake;
+pub mod storage_id;
 pub mod table_kind;
 pub mod table_name;

@@ -347,7 +347,7 @@ reads.
 `hooks/executor.rs::enforce_dml_scope` is a pure helper used by unit/shell
 tests and planning code. It is **not** registered as a live executor hook;
 runtime row filtering for scoped tables is RLS. Native hot scans apply it in
-PostgreSQL's child plan; buffered cold and hot+cold scans apply the compiled
+PostgreSQL's child plan; streaming cold and hot+cold scans apply the compiled
 security quals through PostgreSQL `ExecScan` after winner resolution.
 
 ---

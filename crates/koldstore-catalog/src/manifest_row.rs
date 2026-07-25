@@ -10,7 +10,7 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CatalogManifestSegmentRow {
     /// Final object-store path.
-    pub object_path: String,
+    pub path: String,
     /// Segment batch number.
     pub batch_number: i32,
     /// Minimum `_seq`.

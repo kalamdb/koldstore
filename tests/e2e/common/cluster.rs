@@ -419,7 +419,7 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
     Ok(())
 }
 
-fn error_chain_contains(error: &dyn std::error::Error, needle: &str) -> bool {
+pub fn error_chain_contains(error: &dyn std::error::Error, needle: &str) -> bool {
     let mut current: Option<&dyn std::error::Error> = Some(error);
     while let Some(err) = current {
         if err.to_string().contains(needle) {

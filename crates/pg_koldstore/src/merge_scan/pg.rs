@@ -25,7 +25,7 @@ mod qual;
 mod spi_query;
 mod tuple;
 
-use cold::planned_cold_read_profile;
+use cold::planned_cold_read_profile_for_node;
 use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
 use qual::{required_scan_projection, residual_filters};
 use tuple::{slot_attribute_count, store_materialized_row, MaterializedRow, ScanMemory};
@@ -47,17 +47,24 @@ thread_local! {
 enum ScanEmitMode {
     /// Hot-only: pull tuples from the native child plan one at a time.
     HotChild,
-    /// Merged/materialized buffer (mirror-filtered). Parent LIMIT stops pulling.
+    /// Hot-only native Datum buffer. Parent LIMIT stops pulling.
     Buffer {
         rows: Vec<MaterializedRow>,
         next: usize,
         slot_indexes: Vec<usize>,
         tuple_width: usize,
     },
+    /// Hot winners plus newest-first cold segment groups emitted lazily.
+    Stream {
+        stream: Box<execute::MergeRowStream>,
+        projection: qual::ScanProjection,
+        slot_indexes: Vec<usize>,
+        tuple_width: usize,
+    },
 }
 
 impl ScanEmitMode {
-    fn buffer(rows: Vec<MaterializedRow>, projection: &qual::ScanProjection<'_>) -> Self {
+    fn buffer(rows: Vec<MaterializedRow>, projection: &qual::ScanProjection) -> Self {
         Self::Buffer {
             rows,
             next: 0,
@@ -67,6 +74,21 @@ impl ScanEmitMode {
                 .map(|column| column.slot_index)
                 .collect(),
             tuple_width: projection.tuple_width,
+        }
+    }
+
+    fn stream(stream: execute::MergeRowStream, projection: qual::ScanProjection) -> Self {
+        let slot_indexes = projection
+            .columns
+            .iter()
+            .map(|column| column.slot_index)
+            .collect();
+        let tuple_width = projection.tuple_width;
+        Self::Stream {
+            stream: Box::new(stream),
+            projection,
+            slot_indexes,
+            tuple_width,
         }
     }
 }
@@ -79,27 +101,54 @@ struct ScanExecutionState {
     emit_path: EmitPath,
     /// Allocated only when PostgreSQL instruments this node for EXPLAIN.
     execution: Option<Box<ScanExecutionProfile>>,
-    /// Owns all Datums in buffered rows; deleted on EndCustomScan.
+    /// Owns buffered Datums or the current streamed row's pass-by-ref Datums.
     _memory: ScanMemory,
 }
 
 impl ScanExecutionState {
-    unsafe fn store_next_buffered_row(&mut self, slot: *mut pg_sys::TupleTableSlot) -> bool {
-        let ScanEmitMode::Buffer {
-            rows,
-            next,
-            slot_indexes,
-            tuple_width,
-        } = &mut self.mode
-        else {
-            return false;
-        };
-        let Some(row) = rows.get(*next) else {
-            return false;
-        };
-        *next += 1;
-        store_materialized_row(slot, row, slot_indexes, *tuple_width);
-        true
+    unsafe fn store_next_row(&mut self, slot: *mut pg_sys::TupleTableSlot) -> Result<bool, String> {
+        let Self {
+            mode,
+            cold_profile,
+            execution,
+            _memory,
+            ..
+        } = self;
+        match mode {
+            ScanEmitMode::HotChild => Ok(false),
+            ScanEmitMode::Buffer {
+                rows,
+                next,
+                slot_indexes,
+                tuple_width,
+            } => {
+                let Some(row) = rows.get(*next) else {
+                    return Ok(false);
+                };
+                *next += 1;
+                store_materialized_row(slot, row, slot_indexes, *tuple_width);
+                Ok(true)
+            }
+            ScanEmitMode::Stream {
+                stream,
+                projection,
+                slot_indexes,
+                tuple_width,
+            } => {
+                _memory.reset();
+                let Some(row) = stream.next_materialized(
+                    projection,
+                    _memory,
+                    cold_profile,
+                    execution.as_deref_mut(),
+                )?
+                else {
+                    return Ok(false);
+                };
+                store_materialized_row(slot, &row, slot_indexes, *tuple_width);
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -216,7 +265,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     };
 
     let segment_count = with_hook_disabled(|| {
-        crate::catalog::cache::cached_manifest_segment_stats(table_oid, &[])
+        crate::catalog::cache::cached_manifest_segment_stats(table_oid)
             .ok()
             .flatten()
             .map(|stats| stats.segments.len())
@@ -343,6 +392,13 @@ unsafe extern "C-unwind" fn begin_custom_scan(
             "{CUSTOM_PATH_NAME} is required for managed-table SELECT; \
              koldstore.enable_merge_scan is off"
         );
+    }
+
+    // Plain EXPLAIN still calls BeginCustomScan with EXEC_FLAG_EXPLAIN_ONLY.
+    // Skip Parquet opens, hot SPI, and merge materialization — ExplainCustomScan
+    // rebuilds a catalog-pruned planned profile without claiming execution.
+    if (eflags as u32) & pg_sys::EXEC_FLAG_EXPLAIN_ONLY != 0 {
+        return;
     }
 
     let table_oid = (*(*node).ss.ss_currentRelation).rd_id;
@@ -498,18 +554,18 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         return exec_hot_child_slot(node, slot);
     }
 
-    // Buffered merge rows are base-relation scan tuples. ExecScan applies the
+    // Emitted rows are base-relation scan tuples. ExecScan applies the
     // ExprState compiled from plan.qual (including RLS/security quals), counts
     // rejected rows, and projects into ps_ResultTupleSlot.
     pg_sys::ExecScan(
         &raw mut (*node).ss,
-        Some(next_buffered_scan_tuple),
-        Some(recheck_buffered_scan_tuple),
+        Some(next_scan_tuple),
+        Some(recheck_scan_tuple),
     )
 }
 
 #[pgrx::pg_guard]
-unsafe extern "C-unwind" fn next_buffered_scan_tuple(
+unsafe extern "C-unwind" fn next_scan_tuple(
     scan_state: *mut pg_sys::ScanState,
 ) -> *mut pg_sys::TupleTableSlot {
     if scan_state.is_null() {
@@ -524,7 +580,10 @@ unsafe extern "C-unwind" fn next_buffered_scan_tuple(
     let stored = SCAN_STATES.with(|states| {
         let mut states = states.borrow_mut();
         let scan = states.get_mut(&(node as usize))?;
-        Some(scan.store_next_buffered_row(slot))
+        Some(
+            scan.store_next_row(slot)
+                .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} stream failed: {error}")),
+        )
     });
 
     if stored == Some(true) {
@@ -535,7 +594,7 @@ unsafe extern "C-unwind" fn next_buffered_scan_tuple(
 }
 
 #[pgrx::pg_guard]
-unsafe extern "C-unwind" fn recheck_buffered_scan_tuple(
+unsafe extern "C-unwind" fn recheck_scan_tuple(
     _scan_state: *mut pg_sys::ScanState,
     _slot: *mut pg_sys::TupleTableSlot,
 ) -> bool {
@@ -565,7 +624,7 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                         },
                     );
                 }
-                // `scan` drops here, releasing ScanMemory and buffered Datums.
+                // `scan` drops here, releasing stream state and ScanMemory.
             }
         });
         end_custom_plan_children(node);
@@ -633,8 +692,15 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
     }
     SCAN_STATES.with(|states| {
         if let Some(scan) = states.borrow_mut().get_mut(&(node as usize)) {
-            if let ScanEmitMode::Buffer { next, .. } = &mut scan.mode {
-                *next = 0;
+            match &mut scan.mode {
+                ScanEmitMode::Buffer { next, .. } => *next = 0,
+                ScanEmitMode::Stream { stream, .. } => {
+                    stream.reset();
+                    scan.cold_profile.segments.clear();
+                    scan.cold_profile.segments_opened = 0;
+                    scan._memory.reset();
+                }
+                ScanEmitMode::HotChild => {}
             }
         }
     });
@@ -681,7 +747,7 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         None => {
             // EXPLAIN without ANALYZE: inspect catalog metadata, but do not claim
             // that any source, overlay, or merge phase executed.
-            let cold_profile = match resolve_table_oid(node).and_then(planned_cold_read_profile) {
+            let cold_profile = match planned_cold_read_profile_for_node(node) {
                 Ok(profile) => profile,
                 Err(error) => {
                     profile::explain_property(es, "Cold Storage", &format!("unavailable: {error}"));
@@ -898,30 +964,4 @@ unsafe fn resolve_rte_oid(
     } else {
         Some((*rte).relid)
     }
-}
-
-unsafe fn resolve_table_oid(node: *mut pg_sys::CustomScanState) -> Result<pg_sys::Oid, String> {
-    if !(*node).ss.ss_currentRelation.is_null() {
-        return Ok((*(*node).ss.ss_currentRelation).rd_id);
-    }
-
-    let plan = (*node).ss.ps.plan;
-    if plan.is_null() {
-        return Err("custom scan plan is missing".to_string());
-    }
-    let custom_scan = plan.cast::<pg_sys::CustomScan>();
-    let scanrelid = (*custom_scan).scan.scanrelid;
-    if scanrelid == 0 {
-        return Err("custom scan relid is missing".to_string());
-    }
-
-    let estate = (*node).ss.ps.state;
-    if estate.is_null() {
-        return Err("executor state is missing".to_string());
-    }
-    let rte = pg_sys::rt_fetch(scanrelid, (*estate).es_range_table);
-    if rte.is_null() {
-        return Err("range table entry is missing".to_string());
-    }
-    Ok((*rte).relid)
 }

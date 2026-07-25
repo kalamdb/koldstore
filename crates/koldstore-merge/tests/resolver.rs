@@ -3,7 +3,8 @@ use koldstore_common::{
     ScopeKey, SeqId,
 };
 use koldstore_merge::{
-    changes_since, resolve_rows, tombstone_required, ChangeCursor, TombstoneDecision,
+    changes_since, resolve_rows, tombstone_required, ChangeCursor, NewestFirstWinnerResolver,
+    TombstoneDecision,
 };
 use serde_json::json;
 
@@ -95,6 +96,94 @@ fn resolver_masks_deleted_winners() {
     );
 
     assert!(rows.is_empty());
+}
+
+#[test]
+fn streaming_resolver_keeps_newest_winner_across_payload_batches() {
+    let mut resolver = NewestFirstWinnerResolver::new([pk(4)]);
+
+    let hot_rows = resolver
+        .resolve_hot_batch(vec![hot(1, 30, 30, false, "hot")])
+        .unwrap();
+    assert_eq!(hot_rows.len(), 1);
+    assert_eq!(hot_rows[0].row_image["body"], "hot");
+
+    let newer_cold = resolver
+        .resolve_cold_batch(vec![
+            cold(1, 20, 20, false, "shadowed-by-hot"),
+            cold(2, 20, 20, false, "newer-cold"),
+            cold(3, 19, 19, true, "deleted"),
+            cold(4, 18, 18, false, "masked-by-mirror"),
+        ])
+        .unwrap();
+    assert_eq!(newer_cold.len(), 1);
+    assert_eq!(newer_cold[0].row_image["body"], "newer-cold");
+
+    let older_cold = resolver
+        .resolve_cold_batch(vec![
+            cold(2, 10, 10, false, "older-duplicate"),
+            cold(3, 9, 9, false, "older-before-delete"),
+            cold(5, 8, 8, false, "old-only"),
+        ])
+        .unwrap();
+    assert_eq!(older_cold.len(), 1);
+    assert_eq!(older_cold[0].row_image["body"], "old-only");
+    assert_eq!(resolver.seen_key_count(), 5);
+}
+
+#[test]
+fn streaming_resolver_resolves_duplicates_inside_one_overlapping_batch() {
+    let mut resolver = NewestFirstWinnerResolver::default();
+
+    let rows = resolver
+        .resolve_cold_batch(vec![
+            cold(1, 10, 10, false, "old"),
+            cold(1, 20, 20, false, "new"),
+            cold(2, 30, 30, false, "live"),
+            cold(2, 31, 31, true, "deleted"),
+        ])
+        .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_image["body"], "new");
+    assert_eq!(resolver.seen_key_count(), 2);
+}
+
+#[test]
+fn streaming_resolver_mirror_mask_applies_after_live_hot_winners() {
+    let mut resolver = NewestFirstWinnerResolver::default();
+
+    let hot_rows = resolver
+        .resolve_hot_batch(vec![hot(4, 30, 30, false, "live-hot")])
+        .unwrap();
+    resolver.mask_older_pks([pk(4)]).unwrap();
+    let cold_rows = resolver
+        .resolve_cold_batch(vec![cold(4, 20, 20, false, "stale-cold")])
+        .unwrap();
+
+    assert_eq!(hot_rows.len(), 1);
+    assert_eq!(hot_rows[0].row_image["body"], "live-hot");
+    assert!(cold_rows.is_empty());
+}
+
+#[test]
+fn streaming_resolver_fails_closed_when_seen_key_limit_is_exceeded() {
+    let mut resolver = NewestFirstWinnerResolver::default().with_max_seen_keys(Some(2));
+
+    let first = resolver
+        .resolve_cold_batch(vec![
+            cold(1, 10, 10, false, "one"),
+            cold(2, 10, 10, false, "two"),
+        ])
+        .unwrap();
+    assert_eq!(first.len(), 2);
+
+    let exceeded = resolver
+        .resolve_cold_batch(vec![cold(3, 9, 9, false, "three")])
+        .expect_err("third distinct key must fail closed");
+    assert_eq!(exceeded.limit, 2);
+    assert_eq!(exceeded.seen, 2);
+    assert_eq!(resolver.seen_key_count(), 2);
 }
 
 #[test]

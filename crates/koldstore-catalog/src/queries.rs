@@ -116,6 +116,7 @@ SELECT jsonb_build_object(
     'storage_type', st.storage_type,
     'credentials', COALESCE(st.credentials, '{}'::jsonb),
     'config', COALESCE(st.config, '{}'::jsonb),
+    'regular_path_tmpl', st.regular_path_tmpl,
     'schema_version', s.version,
     'compression', COALESCE(s.options->>'compression', 'zstd')
 )::text
@@ -183,22 +184,33 @@ LIMIT 1
 
 /// Builds the latest published manifest scan context for merge-scan planning.
 ///
-/// Returns one JSON text row with manifest path, generation, storage base path,
+/// Returns one JSON text row with table prefix, generation, storage base path,
 /// and active shared-scope cold-segment stats when a published manifest exists.
 ///
 /// `sync_state = 'pending_write'` after hot DML still exposes the last published
-/// cold segments; only the placeholder pre-flush row (`manifest_path = 'pending'`)
-/// is treated as hot-only.
+/// cold segments; only rows with a published generation are returned.
 ///
 /// # Errors
 ///
 /// Returns an error when statement metadata is invalid.
 pub fn plan_in_sync_manifest_scan_context() -> SqlResult<SqlStatement> {
+    // One SPI shape for planner + execution: load every cold_segment_stats row
+    // plus typed seq/commit_seq bounds. Merge-scan caches by table_oid only, so
+    // EXPLAIN and ExecShare one catalog load without a second predicate-keyed
+    // round trip.
     SqlStatement::read_with_params(
         "resolve published manifest scan context",
         r#"
 SELECT jsonb_build_object(
-  'manifest_path', m.manifest_path,
+  'table_prefix', CASE
+      WHEN replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname) = ''
+      THEN ''
+      ELSE regexp_replace(
+          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
+          '/+$', ''
+      ) || '/'
+  END,
+  'regular_path_tmpl', st.regular_path_tmpl,
   'generation', m.generation,
   'base_path', st.base_path,
   'storage_type', st.storage_type,
@@ -207,7 +219,7 @@ SELECT jsonb_build_object(
   'segments', COALESCE((
       SELECT jsonb_agg(
           jsonb_build_object(
-              'object_path', cs.object_path,
+              'path', cs.path,
               'column_stats', COALESCE((
                   SELECT jsonb_object_agg(
                       css.column_name,
@@ -226,10 +238,15 @@ SELECT jsonb_build_object(
                   WHERE css.segment_id = cs.segment_id
                     AND css.table_oid = cs.table_oid
                     AND css.scope_key = cs.scope_key
-                    AND css.column_name::text IN (
-                        SELECT pg_catalog.jsonb_array_elements_text($2::jsonb)
+                    AND css.column_name::text NOT IN ('seq', 'commit_seq')
+              ), '{}'::jsonb)
+              || jsonb_build_object(
+                    'seq', jsonb_build_object('min', cs.min_seq, 'max', cs.max_seq),
+                    'commit_seq', jsonb_build_object(
+                        'min', cs.min_commit_seq,
+                        'max', cs.max_commit_seq
                     )
-              ), '{}'::jsonb),
+                 ),
               'byte_size', cs.byte_size
           )
           ORDER BY cs.batch_number
@@ -242,14 +259,15 @@ SELECT jsonb_build_object(
 )::text
 FROM koldstore.manifest m
 JOIN koldstore.schemas s ON s.table_oid = m.table_oid AND s.active AND s.initialization_state = 'complete'
+JOIN pg_catalog.pg_class c ON c.oid = s.table_oid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN koldstore.storage st ON st.id = s.storage_id
 WHERE m.table_oid = $1::oid
-  AND m.manifest_path IS DISTINCT FROM 'pending'
   AND m.generation > 0
 ORDER BY m.generation DESC
 LIMIT 1
 "#,
-        [SqlParamType::Oid, SqlParamType::Jsonb],
+        [SqlParamType::Oid],
     )
 }
 
@@ -298,7 +316,7 @@ fn plan_cold_segments_for_manifest_json_with_statuses(
             r#"
 SELECT COALESCE(jsonb_agg(
     jsonb_build_object(
-        'object_path', object_path,
+        'path', path,
         'batch_number', batch_number,
         'min_seq', min_seq,
         'max_seq', max_seq,
@@ -345,7 +363,7 @@ pub fn plan_expired_pending_segment_paths() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "resolve expired pending segment paths",
         r#"
-SELECT COALESCE(jsonb_agg(object_path ORDER BY created_at, segment_id)::text, '[]')
+SELECT COALESCE(jsonb_agg(path ORDER BY created_at, segment_id)::text, '[]')
 FROM koldstore.cold_segments
 WHERE table_oid = $1::oid
   AND scope_key = ''
@@ -380,14 +398,16 @@ mod tests {
     use super::plan_in_sync_manifest_scan_context;
 
     #[test]
-    fn merge_scan_context_reads_only_requested_normalized_stats() {
+    fn merge_scan_context_loads_all_normalized_stats_plus_typed_seq_bounds() {
         let statement = plan_in_sync_manifest_scan_context().unwrap();
 
         assert!(statement.sql.contains("koldstore.cold_segment_stats"));
-        assert!(statement
+        assert!(statement.sql.contains("'seq', jsonb_build_object"));
+        assert!(statement.sql.contains("'commit_seq', jsonb_build_object"));
+        assert!(!statement
             .sql
             .contains("jsonb_array_elements_text($2::jsonb)"));
         assert!(!statement.sql.contains("'column_stats', cs.column_stats"));
-        assert_eq!(statement.param_types.len(), 2);
+        assert_eq!(statement.param_types.len(), 1);
     }
 }

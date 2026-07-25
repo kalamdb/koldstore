@@ -1,12 +1,6 @@
 //! Flush policy and mirror-backed selection helpers.
 
-pub use koldstore_common::{flush_enabled_from_options, hot_row_limit_from_options, FlushPolicy};
-
-/// Loads a flush policy from `koldstore.schemas.options`.
-#[must_use]
-pub fn flush_policy_from_options(options: &serde_json::Value) -> Option<FlushPolicy> {
-    FlushPolicy::from_value(options)
-}
+pub use koldstore_common::FlushPolicy;
 
 /// Computes how many excess mirror rows should move to cold storage.
 ///

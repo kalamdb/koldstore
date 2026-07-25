@@ -746,9 +746,11 @@ async fn load_manifest(client: &Client, pg_version: u16, storage_root: &Path) ->
     let manifest_path = client
         .query_one(
             r#"
-            SELECT manifest_path
-            FROM koldstore.manifest
-            WHERE table_oid = $1::text::regclass::oid
+            SELECT format('%s/%s/manifest.json', n.nspname, c.relname)
+            FROM koldstore.manifest m
+            JOIN pg_class c ON c.oid = m.table_oid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE m.table_oid = $1::text::regclass::oid
               AND sync_state = 'in_sync'
             ORDER BY generation DESC
             LIMIT 1
@@ -794,9 +796,11 @@ async fn assert_cold_parquet_sample_readable(
     let manifest_path = client
         .query_one(
             r#"
-            SELECT manifest_path
-            FROM koldstore.manifest
-            WHERE table_oid = $1::text::regclass::oid
+            SELECT format('%s/%s/manifest.json', n.nspname, c.relname)
+            FROM koldstore.manifest m
+            JOIN pg_class c ON c.oid = m.table_oid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE m.table_oid = $1::text::regclass::oid
               AND sync_state = 'in_sync'
             ORDER BY generation DESC
             LIMIT 1

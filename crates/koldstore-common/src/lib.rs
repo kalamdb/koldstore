@@ -17,7 +17,9 @@ pub mod sql;
 
 // Stable top-level paths used across the workspace.
 pub use config::privileges;
-pub use domain::{commit_sequence, filter, pk, row, scope, seq, snowflake, table_kind, table_name};
+pub use domain::{
+    commit_sequence, filter, pk, row, scope, seq, snowflake, storage_id, table_kind, table_name,
+};
 pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 
 pub use commit_sequence::{CommitSequenceDomain, COMMIT_SEQUENCE_LOCK_NAMESPACE};
@@ -29,12 +31,12 @@ pub use config::{
 pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};
 pub use ident::{escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident};
-pub use json::compare_json_values;
+pub use json::{column_stats_range_may_overlap, compare_json_values};
 pub use lsn::{format_pg_lsn, parse_pg_lsn, AppliedWalBoundary, WalFenceLsn};
 pub use pg_type_name::canonical_postgres_type_name;
 pub use pk::{
-    LogicalPk, PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue,
-    PrimaryKeyColumnShape, PrimaryKeyShape, StablePkHash,
+    LogicalPk, LogicalPkValues, PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    PkValue, PrimaryKeyColumnShape, PrimaryKeyShape, StablePkHash,
 };
 pub use privileges::{can_set_guc, RoleClass, INTERNAL_GUCS};
 pub use row::{
@@ -54,6 +56,7 @@ pub use snowflake::{
     KOLDSTORE_EPOCH_MILLIS,
 };
 pub use sql::{map_sql_error, SqlAccess, SqlError, SqlParamType, SqlResult, SqlStatement};
+pub use storage_id::StorageId;
 pub use strings::dedupe_nonblank;
 pub use table_kind::TableKind;
 pub use table_name::{QualifiedTableName, TableName};

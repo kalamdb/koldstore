@@ -204,8 +204,8 @@ pub async fn manifest_count(client: &Client, relation: &str) -> Result<i64> {
 /// Counts published cold manifests (`sync_state = 'in_sync'`) for a relation.
 ///
 /// Row-counter maintenance may create a placeholder manifest row with
-/// `manifest_path = 'pending'` before any flush succeeds; this helper ignores
-/// those rows and only counts object-store-visible manifests.
+/// `generation = 0` before any flush succeeds; this helper ignores those rows
+/// and only counts object-store-visible manifests.
 ///
 /// # Errors
 ///

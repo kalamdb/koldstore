@@ -1,4 +1,4 @@
-use koldstore_flush::{cleanup, job, worker};
+use koldstore_flush::{cleanup, job};
 
 #[test]
 fn hot_cleanup_waits_for_manifest_commit_and_retains_needed_tombstones() {
@@ -14,11 +14,6 @@ fn hot_cleanup_waits_for_manifest_commit_and_retains_needed_tombstones() {
 
     assert!(after_commit_without_cold_pk.remove_live_hot_rows);
     assert!(!after_commit_without_cold_pk.retain_tombstone);
-}
-
-#[test]
-fn flush_worker_registration_requires_shared_preload_for_launcher() {
-    assert!(worker::requires_shared_preload());
 }
 
 #[test]

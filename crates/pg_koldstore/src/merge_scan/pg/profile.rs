@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::time::Instant;
 
-use koldstore_merge::scan::MergeScanResult;
 use koldstore_parquet::{BloomPruneMode, ParquetReadProfile};
 use pgrx::pg_sys;
 
@@ -59,11 +58,7 @@ pub(super) trait ScanProfileSink {
     fn start_timer(&self) -> Option<Instant>;
     fn record_hot_scan(&mut self, started: Option<Instant>);
     fn record_hot_buffer(&mut self, row_count: usize);
-    fn record_cold_rows(&mut self, row_count: usize);
     fn record_mirror_scan(&mut self, row_count: usize, started: Option<Instant>);
-    fn record_overlay(&mut self, input_rows: usize, output_rows: usize, started: Option<Instant>);
-    fn record_merge(&mut self, merged: &MergeScanResult, started: Option<Instant>);
-    fn record_materialization(&mut self, started: Option<Instant>);
 }
 
 /// Zero-cost profiling sink used outside `EXPLAIN ANALYZE`.
@@ -82,25 +77,7 @@ impl ScanProfileSink for DisabledScanProfiler {
     fn record_hot_buffer(&mut self, _row_count: usize) {}
 
     #[inline(always)]
-    fn record_cold_rows(&mut self, _row_count: usize) {}
-
-    #[inline(always)]
     fn record_mirror_scan(&mut self, _row_count: usize, _started: Option<Instant>) {}
-
-    #[inline(always)]
-    fn record_overlay(
-        &mut self,
-        _input_rows: usize,
-        _output_rows: usize,
-        _started: Option<Instant>,
-    ) {
-    }
-
-    #[inline(always)]
-    fn record_merge(&mut self, _merged: &MergeScanResult, _started: Option<Instant>) {}
-
-    #[inline(always)]
-    fn record_materialization(&mut self, _started: Option<Instant>) {}
 }
 
 impl ScanProfiler {
@@ -138,7 +115,11 @@ impl ScanProfiler {
         initialization_started: Option<Instant>,
     ) -> Option<Box<ScanExecutionProfile>> {
         if let Some(execution) = self.execution.as_mut() {
-            execution.hot_rows = hot_rows;
+            // MergeStream accumulates hot pages during ExecCustomScan; only the
+            // eager hot-native / probe paths know the count at BeginCustomScan.
+            if hot_rows > 0 {
+                execution.hot_rows = hot_rows;
+            }
             execution.initialization_ms = initialization_started.map(elapsed_ms);
         }
         self.execution
@@ -164,41 +145,10 @@ impl ScanProfileSink for ScanProfiler {
         }
     }
 
-    fn record_cold_rows(&mut self, row_count: usize) {
-        if let Some(execution) = self.execution.as_mut() {
-            execution.cold_rows = row_count;
-        }
-    }
-
     fn record_mirror_scan(&mut self, row_count: usize, started: Option<Instant>) {
         if let Some(execution) = self.execution.as_mut() {
             execution.mirror_rows = row_count;
             execution.mirror_scan_ms = started.map(elapsed_ms);
-        }
-    }
-
-    fn record_overlay(&mut self, input_rows: usize, output_rows: usize, started: Option<Instant>) {
-        if let Some(execution) = self.execution.as_mut() {
-            execution.overlay_rows_removed = input_rows.saturating_sub(output_rows);
-            execution.overlay_ms = started.map(elapsed_ms);
-        }
-    }
-
-    fn record_merge(&mut self, merged: &MergeScanResult, started: Option<Instant>) {
-        if let Some(execution) = self.execution.as_mut() {
-            execution.merge_ms = started.map(elapsed_ms);
-            execution.merge_executed = true;
-            execution.merge_input_rows = merged.hot_rows_seen + merged.cold_rows_seen;
-            execution.merge_output_rows = merged.rows.len();
-            execution.merge_rows_removed = execution
-                .merge_input_rows
-                .saturating_sub(execution.merge_output_rows);
-        }
-    }
-
-    fn record_materialization(&mut self, started: Option<Instant>) {
-        if let Some(execution) = self.execution.as_mut() {
-            execution.materialization_ms = started.map(elapsed_ms);
         }
     }
 }
@@ -211,10 +161,10 @@ pub(super) enum EmitPath {
     HotChild,
     /// Hot-only SPI native Datums (no JSON), buffered.
     HotNative,
-    /// Cold-only after PK probe: no hot JSON merge.
+    /// Cold-only PK point winner emitted from a lazy segment stream.
     ColdNative,
-    /// Hot+cold overlap via JSON merge buffer.
-    MergeBuffer,
+    /// Hot+cold winners emitted from newest-first cold segment groups.
+    MergeStream,
 }
 
 impl EmitPath {
@@ -223,7 +173,7 @@ impl EmitPath {
             Self::HotChild => "hot_child",
             Self::HotNative => "hot_native",
             Self::ColdNative => "cold_native",
-            Self::MergeBuffer => "merge_buffer",
+            Self::MergeStream => "merge_stream",
         }
     }
 }
@@ -233,8 +183,14 @@ impl EmitPath {
 pub(super) struct ScanExecutionProfile {
     /// Rows read from the hot heap, including a zero-row point probe.
     pub(super) hot_rows: usize,
+    /// Maximum hot JSON rows retained in one MergeStream SPI page.
+    pub(super) peak_hot_batch_rows: usize,
+    /// Exact PK identities retained by newest-first resolution.
+    pub(super) seen_key_count: usize,
     /// Rows decoded from selected Parquet row groups.
     pub(super) cold_rows: usize,
+    /// Maximum decoded cold rows retained in one streaming merge batch.
+    pub(super) peak_cold_batch_rows: usize,
     /// Mirror tombstones inspected for the immediate delete overlay.
     pub(super) mirror_rows: usize,
     /// Cold rows masked by matching mirror tombstones.
@@ -316,8 +272,6 @@ pub(super) struct ColdReadProfile {
     pub(super) manifest_read_ms: Option<f64>,
     /// Segments considered before any prune (catalog candidates).
     pub(super) segments_considered: usize,
-    /// Segments rejected because they do not match the scan scope.
-    pub(super) segments_pruned_scope: usize,
     /// Segments rejected by normalized catalog min/max statistics.
     pub(super) segments_pruned_min_max: usize,
     /// Segments opened after catalog prune.
@@ -336,7 +290,6 @@ impl ColdReadProfile {
             base_path: String::new(),
             manifest_read_ms: None,
             segments_considered: 0,
-            segments_pruned_scope: 0,
             segments_pruned_min_max: 0,
             segments_opened: 0,
             pk_probe: None,
@@ -424,6 +377,14 @@ fn explain_hot_scan(
         Some(execution) => {
             explain_text(es, "Access Method", hot_access_method(emit_path));
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
+            if matches!(emit_path, EmitPath::MergeStream) {
+                explain_integer(
+                    es,
+                    "Peak Hot Batch Rows",
+                    None,
+                    execution.peak_hot_batch_rows as i64,
+                );
+            }
         }
         None => explain_text(es, "Status", "planned"),
     }
@@ -435,7 +396,7 @@ fn hot_access_method(emit_path: EmitPath) -> &'static str {
         EmitPath::HotChild => "PostgreSQL child plan",
         EmitPath::HotNative => "SPI native tuples",
         EmitPath::ColdNative => "SPI native point probe",
-        EmitPath::MergeBuffer => "SPI JSON projection",
+        EmitPath::MergeStream => "SPI JSON projection + segment stream",
     }
 }
 
@@ -462,18 +423,18 @@ fn explain_cold_scan(
     explain_text(es, "Status", status);
     if let Some(execution) = execution {
         explain_integer(es, "Rows Scanned", None, execution.cold_rows as i64);
+        explain_integer(
+            es,
+            "Peak Cold Batch Rows",
+            None,
+            execution.peak_cold_batch_rows as i64,
+        );
     }
     explain_integer(
         es,
         "Candidate Segments",
         None,
         profile.segments_considered as i64,
-    );
-    explain_integer(
-        es,
-        "Segments Pruned by Scope",
-        None,
-        profile.segments_pruned_scope as i64,
     );
     explain_integer(
         es,
@@ -498,9 +459,9 @@ fn explain_cold_scan(
     }
     explain_integer(
         es,
-        "Segments Pruned by Bloom",
+        "Segments Empty After Bloom",
         None,
-        profile.segments_pruned_by_bloom() as i64,
+        profile.segments_empty_after_bloom() as i64,
     );
 
     let (row_groups_total, row_groups_selected, row_groups_skipped, bloom_filters_fetched) =
@@ -624,6 +585,9 @@ fn explain_merge(
                 None,
                 execution.overlay_rows_removed as i64,
             );
+            if matches!(emit_path, EmitPath::MergeStream | EmitPath::ColdNative) {
+                explain_integer(es, "Seen Keys", None, execution.seen_key_count as i64);
+            }
             explain_text(es, "Tuple Path", emit_path.as_str());
             explain_text(es, "Post-Merge Filter", "PostgreSQL ExecScan");
         }
@@ -749,7 +713,11 @@ fn explain_segment(
 }
 
 impl ColdReadProfile {
-    fn segments_pruned_by_bloom(&self) -> usize {
+    /// Counts opened segments where bloom ran and left zero selected row groups.
+    ///
+    /// This is not "segments skipped before open"; bloom runs after a segment is
+    /// opened and its footer is read.
+    fn segments_empty_after_bloom(&self) -> usize {
         self.segments
             .iter()
             .filter_map(|segment| segment.parquet.as_ref())

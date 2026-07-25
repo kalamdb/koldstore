@@ -1,4 +1,9 @@
 //! Qual classification helpers.
+//!
+//! [`build_pruning_plan`] is a PG-free abstract planner used by unit tests and
+//! library callers. The live CustomScan cold path builds
+//! [`crate::scan::SegmentPrunePredicate`]s in `pg_koldstore` and applies
+//! [`crate::scan::prune_segment_stats_hints`] at execution time.
 
 use koldstore_common::{ColumnClass, Predicate, PredicateClass, PredicateValue, Result};
 

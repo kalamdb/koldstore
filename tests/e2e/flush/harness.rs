@@ -63,7 +63,10 @@ pub async fn barrier_unlock(client: &Client) -> Result<()> {
     Ok(())
 }
 
-/// Polls until a backend is waiting on the failpoint barrier lock.
+/// Polls until a live backend (not `coordinator`) waits on the failpoint barrier.
+///
+/// Filters to the current database and joins `pg_stat_activity` so a dying peer
+/// from a prior pooled-DB test cannot look like the current flush has parked.
 ///
 /// # Errors
 ///
@@ -72,18 +75,26 @@ pub async fn wait_until_barrier_waiter(
     coordinator: &Client,
     flush_finished: impl Fn() -> bool,
 ) -> Result<()> {
+    let coordinator_pid: i32 = coordinator
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await?
+        .get(0);
     for _ in 0..200 {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         let waiting = coordinator
             .query_one(
                 "SELECT EXISTS (\
-                   SELECT 1 FROM pg_catalog.pg_locks \
-                   WHERE locktype = 'advisory' \
-                     AND classid = 0 \
-                     AND objid = $1::bigint \
-                     AND granted = false\
+                   SELECT 1 \
+                   FROM pg_catalog.pg_locks l \
+                   JOIN pg_catalog.pg_stat_activity a ON a.pid = l.pid \
+                   WHERE l.locktype = 'advisory' \
+                     AND l.classid = 0 \
+                     AND l.objid = $1::bigint \
+                     AND l.granted = false \
+                     AND l.pid IS DISTINCT FROM $2::int \
+                     AND a.datname = current_database()\
                  )",
-                &[&BARRIER_LOCK_KEY],
+                &[&BARRIER_LOCK_KEY, &coordinator_pid],
             )
             .await?
             .get::<_, bool>(0);

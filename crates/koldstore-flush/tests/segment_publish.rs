@@ -59,8 +59,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
 
     let written = write_flush_segment_with_client(
         &client,
-        "app",
-        "items",
+        "app/items",
         "zstd",
         &["id".to_string()],
         &["id".to_string()],
@@ -72,14 +71,14 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     .unwrap();
 
     assert!(
-        written.object_path.starts_with(&format!(
-            "app/items/001/segment-0000-{}.",
+        written.path.starts_with(&format!(
+            "001/segment-0000-{}.",
             koldstore_manifest::segment_path_token(written.segment_id)
         )),
         "object path should use padded folder/segment + short token, got {}",
-        written.object_path
+        written.path
     );
-    assert!(written.object_path.ends_with(".parquet"));
+    assert!(written.path.ends_with(".parquet"));
     assert!(written.byte_size > 0);
     assert_eq!(written.checksum.len(), 64);
     let bytes = client.get(&written.object_path).unwrap();
@@ -121,8 +120,7 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
     let orphan_stats = FlushStats::from_write_chunk(&orphan).unwrap();
     let first = write_flush_segment_with_client(
         &client,
-        "app",
-        "items",
+        "app/items",
         "zstd",
         &["id".to_string()],
         &["id".to_string()],
@@ -137,8 +135,7 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
     let retry_stats = FlushStats::from_write_chunk(&retry_chunk).unwrap();
     let second = write_flush_segment_with_client(
         &client,
-        "app",
-        "items",
+        "app/items",
         "zstd",
         &["id".to_string()],
         &["id".to_string()],
@@ -150,15 +147,14 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
     .unwrap();
 
     assert_ne!(
-        first.object_path, second.object_path,
+        first.path, second.path,
         "retry must not collide with orphaned final object"
     );
     assert!(
-        first.object_path.contains("/001/segment-0001-")
-            && second.object_path.contains("/001/segment-0001-"),
+        first.path.contains("001/segment-0001-") && second.path.contains("001/segment-0001-"),
         "retries keep the same padded folder/segment number, got {} vs {}",
-        first.object_path,
-        second.object_path
+        first.path,
+        second.path
     );
     assert_ne!(first.segment_id, second.segment_id);
     assert_ne!(first.byte_size, second.byte_size);

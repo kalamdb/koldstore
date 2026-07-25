@@ -212,8 +212,20 @@ async fn drop_table_during_flush_after_manifest_publish() -> Result<()> {
 
         let oid = table_oid(&db.client, &table.relation).await?;
         let lock_key = table_job_lock_key(oid);
+        let mut held = false;
+        for _ in 0..80 {
+            if count_advisory_holders(&db.client, lock_key).await? >= 1 {
+                held = true;
+                break;
+            }
+            anyhow::ensure!(
+                !flush_handle.is_finished(),
+                "flush exited before holding table-job lock at after_manifest_publish"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
         assert!(
-            count_advisory_holders(&db.client, lock_key).await? >= 1,
+            held,
             "flush must hold the table-job advisory lock at after_manifest_publish"
         );
 
@@ -439,10 +451,22 @@ async fn dual_flush_same_table_waits_on_job_lock_then_serializes() -> Result<()>
         });
 
         wait_until_barrier_waiter(&coordinator, || first_handle.is_finished()).await?;
-        assert!(
-            count_advisory_holders(&db.client, lock_key).await? >= 1,
-            "first flush must hold table-job lock after claim"
-        );
+        // `after_claim` runs only after `lock_table_job`. Async phase-0 apply can
+        // leave a long gap before park; also reject a stale barrier waiter from a
+        // prior pooled-DB peer by requiring the table-job lock itself.
+        let mut held = false;
+        for _ in 0..80 {
+            if count_advisory_holders(&db.client, lock_key).await? >= 1 {
+                held = true;
+                break;
+            }
+            anyhow::ensure!(
+                !first_handle.is_finished(),
+                "first flush exited before holding table-job lock after claim"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(held, "first flush must hold table-job lock after claim");
 
         let second = connect_peer(&db).await?;
         let second_relation = table.relation.clone();

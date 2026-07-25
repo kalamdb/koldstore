@@ -95,7 +95,7 @@ pub fn registration_metadata_for_refresh(
     RegistrationMetadata {
         table_oid,
         table_type: active.table_type.clone(),
-        storage_id: Uuid::parse_str(&active.storage_id).unwrap_or(Uuid::nil()),
+        storage_id: active.storage_id.clone(),
         scope_column: active.scope_column.clone(),
         mirror_relation: Some(active.mirror_relation.clone()),
         primary_key_shape: Some(primary_key_shape.clone()),

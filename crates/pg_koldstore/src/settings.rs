@@ -7,6 +7,11 @@
 pub const DEFAULT_COLD_READS: &str = "auto";
 /// Default maximum globally open Parquet readers.
 pub const DEFAULT_MAX_OPEN_PARQUET_READERS: i32 = 32;
+/// Default per-scan exact PK seen-set cap for merge scans.
+///
+/// Protects backends from accidental full-table scans that retain millions of
+/// compact PK identities. `0` disables the cap.
+pub const DEFAULT_MAX_MERGE_SEEN_KEYS: i32 = 1_000_000;
 /// Default extension log level.
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
@@ -14,10 +19,15 @@ pub const DEFAULT_LOG_LEVEL: &str = "info";
 pub const MIN_CONCURRENCY_LIMIT: i32 = 1;
 /// Conservative hard cap to avoid unbounded backend memory or object-store pressure.
 pub const MAX_CONCURRENCY_LIMIT: i32 = 1024;
+/// Minimum merge seen-key cap (`0` = unlimited).
+pub const MIN_MAX_MERGE_SEEN_KEYS: i32 = 0;
+/// Hard cap for `koldstore.max_merge_seen_keys`.
+pub const MAX_MAX_MERGE_SEEN_KEYS: i32 = 100_000_000;
 
 /// Names of public GUCs owned by pg-koldstore.
 pub const COLD_READS_GUC: &str = "koldstore.cold_reads";
 pub const MAX_OPEN_PARQUET_READERS_GUC: &str = "koldstore.max_open_parquet_readers";
+pub const MAX_MERGE_SEEN_KEYS_GUC: &str = "koldstore.max_merge_seen_keys";
 pub const LOG_LEVEL_GUC: &str = "koldstore.log_level";
 /// GUC that sets the minimum allowed `max_rows_per_file` for managed tables.
 pub const MIN_MAX_ROWS_PER_FILE_GUC: &str = "koldstore.min_max_rows_per_file";
@@ -148,6 +158,18 @@ pub const fn bounded_concurrency_limit(value: i32) -> i32 {
         MIN_CONCURRENCY_LIMIT
     } else if value > MAX_CONCURRENCY_LIMIT {
         MAX_CONCURRENCY_LIMIT
+    } else {
+        value
+    }
+}
+
+/// Validates and clamps the per-scan merge seen-key cap (`0` stays unlimited).
+#[must_use]
+pub const fn bounded_max_merge_seen_keys(value: i32) -> i32 {
+    if value < MIN_MAX_MERGE_SEEN_KEYS {
+        MIN_MAX_MERGE_SEEN_KEYS
+    } else if value > MAX_MAX_MERGE_SEEN_KEYS {
+        MAX_MAX_MERGE_SEEN_KEYS
     } else {
         value
     }

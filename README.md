@@ -1,8 +1,8 @@
 # KoldStore
 
-> **Keep hot data in PostgreSQL. Move historical rows to Parquet. Query one table.**
+> **Keep hot data in PostgreSQL. Move historical rows to Parquet. Shrink the PostgreSQL heap and indexes. Query one table.**
 
-KoldStore is an open-source PostgreSQL tiered-storage extension for application tables that grow forever: messages, audit logs, AI history, notifications, events, and IoT data.
+KoldStore is an open-source PostgreSQL tiered-storage extension for application tables that grow forever: messages, audit logs, AI history, notifications, events, and IoT data. By moving historical rows out of PostgreSQL, it reduces the primary heap and index size. In the published benchmark, the smaller hot table also made `VACUUM (FULL, ANALYZE)`—a whole-table rewrite—substantially faster.
 
 Your table remains a normal PostgreSQL heap table. KoldStore keeps the active working set in PostgreSQL, flushes older rows into compressed Parquet on storage you control, and transparently reads hot and cold rows through the original table.
 
@@ -36,16 +36,20 @@ Old rows  → Parquet / object storage
 Queries   → same PostgreSQL table
 ```
 
+
+
 ## What is tiered storage?
 
 **Tiered storage is a data management strategy that assigns data to different
 storage media based on performance, frequency of access, and cost.** KoldStore
 applies that strategy to rows in one PostgreSQL table:
 
-| Tier | Where rows live | Optimized for |
-| --- | --- | --- |
-| **Hot** | PostgreSQL heap and native indexes | Active data, low-latency reads, and normal transactional writes |
-| **Cold** | Compressed Parquet on filesystem or object storage | Historical data, lower storage cost, and longer retention |
+
+| Tier     | Where rows live                                    | Optimized for                                                   |
+| -------- | -------------------------------------------------- | --------------------------------------------------------------- |
+| **Hot**  | PostgreSQL heap and native indexes                 | Active data, low-latency reads, and normal transactional writes |
+| **Cold** | Compressed Parquet on filesystem or object storage | Historical data, lower storage cost, and longer retention       |
+
 
 Applications continue to query the original PostgreSQL table; `KoldMergeScan`
 combines visible rows from both tiers. Placement is controlled by the table's
@@ -56,10 +60,12 @@ than by automatically measuring how often each row is accessed.
 
 KoldStore extends PostgreSQL instead of replacing it. Applications keep using the same SQL, drivers, ORMs, transactions, replication, and operational tooling while PostgreSQL gains a transparent cold-storage layer for historical rows.
 
-- Keeps the hot working set small so indexes, VACUUM, and backups stay manageable
+- Keeps the hot working set small so the PostgreSQL heap, indexes, and backup set stay manageable
 - Stores history as open Apache Parquet on filesystem, S3/MinIO, GCS, or Azure Blob
 - Avoids partition explosion and proprietary archive lock-in
 - Adopts incrementally on existing tables — no schema redesign required
+
+
 
 ### Good fit today
 
@@ -69,6 +75,8 @@ KoldStore extends PostgreSQL instead of replacing it. Applications keep using th
 - Notifications
 - User activity and IoT telemetry
 
+
+
 ### Not a good fit yet
 
 - Payment ledgers and account balances
@@ -76,31 +84,37 @@ KoldStore extends PostgreSQL instead of replacing it. Applications keep using th
 - FK-heavy relational models that need global uniqueness across hot + cold
 - Workloads that need cold rows to stay as fast as B-tree point lookups
 
+
+
 ## Compared with other approaches
 
-| Approach | What you keep | Tradeoff |
-| --- | --- | --- |
-| **KoldStore** | Same PostgreSQL table, SQL, drivers, and ORMs | Older rows move to open Parquet; hot heap stays small |
-| Bigger disk / partitions | Familiar ops | History still inflates heap, indexes, VACUUM, and backups |
-| Time-series or analytics DB | Columnar scan performance | New system, new query model, app migration |
-| Custom table AM / fork | Deeper engine control | Leaves stock PostgreSQL storage and tooling |
-| Proprietary archive tier | Managed cold storage | Vendor format lock-in |
 
-## Storage wins at a glance
+| Approach                    | What you keep                                 | Tradeoff                                                  |
+| --------------------------- | --------------------------------------------- | --------------------------------------------------------- |
+| **KoldStore**               | Same PostgreSQL table, SQL, drivers, and ORMs | Older rows move to open Parquet; hot heap stays small     |
+| Bigger disk / partitions    | Familiar ops                                  | History still inflates heap, indexes, and backups         |
+| Time-series or analytics DB | Columnar scan performance                     | New system, new query model, app migration                |
+| Custom table AM / fork      | Deeper engine control                         | Leaves stock PostgreSQL storage and tooling               |
+| Proprietary archive tier    | Managed cold storage                          | Vendor format lock-in                                     |
 
-KoldStore is a **storage lifecycle tool**, not a universal query accelerator. After older rows are flushed, PostgreSQL keeps a smaller hot working set; cold data lives in zstd Parquet outside the primary heap.
 
-<p align="center">
-  <img src="docs/assets/benchmark-storage-wins.svg" alt="After flush: 72 MiB hot in PostgreSQL plus 599 MiB cold Parquet (671 MiB total) versus 5.85 GiB all-in-PostgreSQL; indexes 97% smaller; VACUUM FULL 43× faster" width="900" />
-</p>
 
-| Result | Before → after flush | Tradeoff |
-| --- | --- | --- |
-| Total footprint (hot + cold) | 5.85 GiB → 671 MiB | **89% smaller** |
-| └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB | **99% smaller** |
-| └ cold Parquet | — → 599 MiB | outside the database |
-| Indexes (hot + `__cl`) | 415 MiB → 11.5 MiB | **97% smaller** |
-| `VACUUM (FULL, ANALYZE)` | 149.29 s → 3.44 s | **43× faster** |
+
+## Storage and whole-table maintenance wins at a glance
+
+KoldStore is a **storage lifecycle tool**, not a universal query accelerator. After older rows are flushed, PostgreSQL keeps a smaller hot working set and smaller indexes; cold data lives in zstd Parquet outside the primary heap. The maintenance figure below is specifically `VACUUM (FULL, ANALYZE)`, which rewrites the whole table. It does not measure routine autovacuum, which was disabled for the benchmark.
+
+
+
+
+| Result                              | Before → after flush | Tradeoff             |
+| ----------------------------------- | -------------------- | -------------------- |
+| Total footprint (hot + cold)        | 5.85 GiB → 671 MiB   | **89% smaller**      |
+| └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB    | **99% smaller**      |
+| └ cold Parquet                      | — → 599 MiB          | outside the database |
+| Indexes (hot + `__cl`)              | 415 MiB → 11.5 MiB   | **97% smaller**      |
+| `VACUUM (FULL, ANALYZE)`            | 149.29 s → 3.44 s    | **43× faster**       |
+
 
 Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000`,
 `--warmup-rows 1000000` (local PG16.13 `release-pg`, 2026-07-20). Each side
@@ -113,12 +127,14 @@ indexes. Full tables: [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
 Post-optimization PostgreSQL 16 smoke measurements put async foreground UPDATE
 at heap parity on both tested statement shapes:
 
-| UPDATE workload | PostgreSQL only | KoldStore async | Difference |
-| --- | ---: | ---: | ---: |
-| Single-row pgbench throughput | 26,482 ops/s | 26,152 ops/s | **1.25% lower** |
-| Single-row pgbench p95 | 0.211 ms | 0.213 ms | **0.95% higher** |
-| 1k-row batch foreground throughput | 77,166 ops/s | 76,030 ops/s | **1.47% lower** |
-| Async mirror catch-up | — | 49,358 ops/s | deferred work |
+
+| UPDATE workload                    | PostgreSQL only | KoldStore async | Difference       |
+| ---------------------------------- | --------------- | --------------- | ---------------- |
+| Single-row pgbench throughput      | 26,482 ops/s    | 26,152 ops/s    | **1.25% lower**  |
+| Single-row pgbench p95             | 0.211 ms        | 0.213 ms        | **0.95% higher** |
+| 1k-row batch foreground throughput | 77,166 ops/s    | 76,030 ops/s    | **1.47% lower**  |
+| Async mirror catch-up              | —               | 49,358 ops/s    | deferred work    |
+
 
 The single-row run used 10k seeded rows, four clients, and five seconds with the
 background worker enabled. The batch run used 100k rows and a 50k-row UPDATE
@@ -139,14 +155,16 @@ storage context until the guarded repeated publication run replaces it. Async
 commits the source heap first; strict mode includes mirror maintenance in the
 application transaction.
 
-| Operation | PostgreSQL only | KoldStore async | Trade-off |
-| --- | ---: | ---: | ---: |
-| INSERT | 94,302 ops/s | 107,030 ops/s | ≈ within noise (not a product win) |
-| UPDATE | 69,239 ops/s | 52,446 ops/s | historical pre-optimization single sample; **24% lower** |
-| DELETE | 119,350 ops/s | 179,882 ops/s | single-sample — do not claim faster |
-| Hot-only PK lookup | 1,800 ops/s | 1,825 ops/s | ≈ same |
-| Hot+cold PK lookup | 1,793 ops/s | 1,529 ops/s | **15% slower** |
-| Cold-only PK lookup | 1,762 ops/s | 1,242 ops/s | **30% slower** |
+
+| Operation           | PostgreSQL only | KoldStore async | Trade-off                                                |
+| ------------------- | --------------- | --------------- | -------------------------------------------------------- |
+| INSERT              | 94,302 ops/s    | 107,030 ops/s   | ≈ within noise (not a product win)                       |
+| UPDATE              | 69,239 ops/s    | 52,446 ops/s    | historical pre-optimization single sample; **24% lower** |
+| DELETE              | 119,350 ops/s   | 179,882 ops/s   | single-sample — do not claim faster                      |
+| Hot-only PK lookup  | 1,800 ops/s     | 1,825 ops/s     | ≈ same                                                   |
+| Hot+cold PK lookup  | 1,793 ops/s     | 1,529 ops/s     | **15% slower**                                           |
+| Cold-only PK lookup | 1,762 ops/s     | 1,242 ops/s     | **30% slower**                                           |
+
 
 Async mirror catch-up measured 30,173 INSERT, 914 UPDATE, 28,417 DELETE, and
 24,906 restore operations per second in that historical run. The current
@@ -183,6 +201,8 @@ flowchart TD
   Scan --> Cold[Manifest → Parquet / S3]
 ```
 
+
+
 For example, assume messages `1` and `2` have been flushed to Parquet while
 the newer message `3` remains in PostgreSQL. The application still issues one
 normal query against `messages`:
@@ -204,11 +224,11 @@ Custom Scan (KoldMergeScan) on messages (actual rows=2 loops=1)
   Hot Plan: Bitmap Heap Scan
   Mirror Tombstones: 0
   Mirror Overrides: 0
-  Emit path: merge_buffer
-  Hot rows: 1
+  Emit path: merge_stream
+  Peak Hot Batch Rows: 1
+  Seen Keys: 1
   Result rows: 3
   Candidate segments: 1
-  Segments pruned by scope: 0
   Segments pruned by min/max: 0
   Parquet segments opened: 1
   Row groups read: 1
@@ -216,7 +236,7 @@ Custom Scan (KoldMergeScan) on messages (actual rows=2 loops=1)
   Bytes fetched: 1.5 kB
   Manifest: readme_capture/messages/manifest.json, source=catalog, 0.002 ms
   Cold storage: type=filesystem, base=/tmp/koldstore-readme-explain-storage
-  Cold segments: considered=1, pruned_scope=0, pruned_min_max=0, pruned_bloom=0, opened=1
+  Cold segments: considered=1, pruned_min_max=0, opened=1
   Cold row groups: total=1, selected=1, skipped=0, bloom_filters_fetched=0
   Cold projection: id, body
   Parquet segment: readme_capture/messages/001/segment-0001-6afccda7.parquet, 1672 bytes, 2 rows, 2.897 ms
@@ -320,6 +340,8 @@ To build from this repo instead, use `docker/run.sh` (compiles the extension).
 - Supported column types today: `boolean`, integer types, `real`, `double precision`, `text`, `varchar`, `uuid`, `jsonb`, `timestamptz`
 - Local development uses `pgrx`; Docker is for packaging and smoke checks
 
+
+
 ## Limitations
 
 - Not production-ready
@@ -333,12 +355,14 @@ Full list: [docs/limitations.md](docs/limitations.md).
 
 ## Roadmap
 
-Grouped after the 0.1 hot/cold baseline:
+Priority after the 0.1 hot/cold baseline:
 
-- **Operations** — time-based / predicate flush policies, coordinated backup/restore, import/export
-- **Query path** — faster cold PK lookups, streaming `KoldMergeScan`, broader planner pushdown
-- **Change APIs** — public `changes_since` / change-cursor SQL on the existing `__cl` mirror
-- **Storage** — compaction, deleted-index in manifest, storage file datatype
+1. **Scoped storage** — store each `scope_column` value under its own cold folder (`{namespace}/{table}/{scopeId}/…`), so tenant/user data stays physically separated and easier to prune, backup, or delete independently
+2. **Change API** — public `changes_since` / change-cursor SQL for a table (and scope) since a last-seen seq, built for real-time sync and catch-up consumers
+3. **Compaction** — combine small cold segments into larger files to cut object-store chatter and improve scan efficiency
+4. **Backup / export** — first-class dump and restore that understands KoldStore: coordinated PostgreSQL + cold-object backups, and table/scope archive export/import of managed hot+cold data
+
+Also planned: faster cold PK lookups, time-based / predicate flush policies, and a storage file datatype.
 
 Tracked in [docs/roadmap.md](docs/roadmap.md).
 
@@ -368,6 +392,8 @@ scripts/run-pg-e2e.sh 16 --mode async
 - [Crate architecture](docs/architecture/crate-architecture.md)
 - [SQL API](docs/sql-api.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
+
+
 
 ## License
 

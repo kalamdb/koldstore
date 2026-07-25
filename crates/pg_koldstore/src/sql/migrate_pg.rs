@@ -108,7 +108,8 @@ fn manage_table_pg_impl(
     let options = validation.options;
     let capture_mode = options.mirror_capture_mode();
     let storage_id = storage_id
-        .unwrap_or_else(|| unreachable!("validated storage registration must have an id"));
+        .unwrap_or_else(|| unreachable!("validated storage registration must have an id"))
+        .to_string();
     let primary_key_shape = primary_key_shape(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let job_id = Uuid::new_v4();
@@ -123,7 +124,7 @@ fn manage_table_pg_impl(
         &request,
         koldstore_migrate::MigrationTableContext {
             table_oid: table_oid_u32,
-            storage_id,
+            storage_id: storage_id.clone(),
         },
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
@@ -141,7 +142,7 @@ fn manage_table_pg_impl(
         register_schema_version(SchemaRegistrationInput {
             table_oid: table_oid_u32,
             table_type,
-            storage_id,
+            storage_id: storage_id.clone(),
             scope_column: empty_plan.effective_scope_column.as_deref(),
             mirror_relation: &mirror_plan.mirror_table,
             primary_key_shape: &primary_key_shape,
@@ -163,7 +164,7 @@ fn manage_table_pg_impl(
             job_id,
             table_oid_u32,
             table_type,
-            storage_id,
+            storage_id.clone(),
             empty_plan.effective_scope_column.as_deref(),
             &empty_plan.table,
         )
@@ -189,7 +190,7 @@ fn manage_table_pg_impl(
         &request,
         koldstore_migrate::MigrationTableContext {
             table_oid: table_oid_u32,
-            storage_id,
+            storage_id: storage_id.clone(),
         },
         catalog,
         job_id,
@@ -456,7 +457,7 @@ fn primary_key_shape(table_oid: u32) -> Result<koldstore_common::PrimaryKeyShape
 struct SchemaRegistrationInput<'a> {
     table_oid: u32,
     table_type: &'a str,
-    storage_id: Uuid,
+    storage_id: String,
     scope_column: Option<&'a str>,
     mirror_relation: &'a koldstore_migrate::QualifiedTableName,
     primary_key_shape: &'a koldstore_common::PrimaryKeyShape,
@@ -493,7 +494,7 @@ fn execute_schema_registry_insert(
             DatumWithOid::from(pgrx::JsonB(prepared.indexed_columns.clone())),
             DatumWithOid::from(pgrx::JsonB(prepared.type_matrix.clone())),
             DatumWithOid::from(pgrx::JsonB(prepared.options.clone())),
-            DatumWithOid::from(crate::spi::uuid_to_pgrx(prepared.storage_id)),
+            DatumWithOid::from(prepared.storage_id.as_str()),
         ],
     )
     .map_err(|error| error.to_string())
@@ -619,7 +620,7 @@ fn insert_completed_empty_migration_job(
     job_id: Uuid,
     table_oid: u32,
     table_type: &str,
-    storage_id: Uuid,
+    storage_id: String,
     scope_column: Option<&str>,
     table: &koldstore_migrate::QualifiedTableName,
 ) -> Result<(), String> {
@@ -635,7 +636,7 @@ fn insert_completed_empty_migration_job(
             DatumWithOid::from(pgrx::pg_sys::Oid::from(table_oid)),
             DatumWithOid::from(table_name.as_str()),
             DatumWithOid::from(table_type),
-            DatumWithOid::from(crate::spi::uuid_to_pgrx(storage_id)),
+            DatumWithOid::from(storage_id.as_str()),
             DatumWithOid::from(scope_column),
         ],
     )

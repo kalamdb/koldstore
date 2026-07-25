@@ -75,7 +75,7 @@ fn existing_table_mirror_initialization_batches_without_rewriting_base_schema() 
 #[test]
 fn migration_backfill_job_payload_is_type_safe_and_operator_visible() {
     let job_id = Uuid::from_u128(11);
-    let storage_id = Uuid::from_u128(22);
+    let storage_id = "00000016".to_string();
     let request = MigrationBackfillJobRequest::new(
         job_id,
         42,

@@ -150,7 +150,7 @@ fn mirror_initialization_job_starts_in_capturing_phase_not_system_column_phase()
         42,
         &table(),
         koldstore_migrate::jobs::ManagedTableType::Shared,
-        Uuid::from_u128(2),
+        "00000002".to_string(),
         None,
         &ordering(),
         MigrationBatchSize::new(10_000).unwrap(),

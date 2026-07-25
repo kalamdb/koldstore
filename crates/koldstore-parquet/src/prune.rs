@@ -1,16 +1,17 @@
 //! Row-group pruning helpers.
 //!
-//! Segment-level pruning lives in `koldstore-merge`. This module prunes
-//! **row groups inside one Parquet file** using footer column stats and
-//! native Parquet bloom filters (written on flush for PK columns).
+//! Segment-level pruning lives in `koldstore-merge`. This module owns:
+//! - **Live ObjectStore path helpers** used by `reader.rs`
+//!   (`select_row_groups_from_metadata` and related).
+//! - **[`RowGroupPruner`]** — FooterSummary-oriented API kept for benches and
+//!   unit tests; production merge scan does not call it.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
 
 use bytes::Bytes;
-use koldstore_common::{compare_json_values, CommitSeq, SeqId};
+use koldstore_common::{column_stats_range_may_overlap, CommitSeq, SeqId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Type as ParquetPhysicalType;
 use parquet::bloom_filter::Sbbf;
@@ -28,7 +29,9 @@ pub struct PruneDecision {
     pub skipped_row_groups: usize,
 }
 
-/// Row-group pruner placeholder.
+/// Row-group pruner over [`crate::FooterSummary`] (benches / unit tests).
+///
+/// Production ObjectStore reads use `select_row_groups_from_metadata` instead.
 #[derive(Debug, Default, Clone)]
 pub struct RowGroupPruner;
 
@@ -148,17 +151,7 @@ impl RowGroupPruner {
         let Some(stats) = column_stats.get(column) else {
             return true;
         };
-        if min.is_null() || max.is_null() || stats.min.is_null() || stats.max.is_null() {
-            return true;
-        }
-        let Some(max_vs_min) = compare_json_values(&stats.max, min) else {
-            return true;
-        };
-        let Some(min_vs_max) = compare_json_values(&stats.min, max) else {
-            return true;
-        };
-
-        max_vs_min != Ordering::Less && min_vs_max != Ordering::Greater
+        column_stats_range_may_overlap(&stats.min, &stats.max, Some(min), Some(max))
     }
 }
 

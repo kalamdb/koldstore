@@ -167,7 +167,7 @@ flowchart TD
   Merge[Mask cold by mirror PKs]
   HotOnly{Cold empty?}
   Stream["ExecCustomScan: ExecProcNode child"]
-  Buf["Merge + emit buffer / stream"]
+  StreamEmit["Merge stream: hot pages then cold groups"]
 
   Begin --> Guc
   Guc -->|off| Err
@@ -178,24 +178,27 @@ flowchart TD
   Cold --> Merge
   Merge --> HotOnly
   HotOnly -->|yes + child| Stream
-  HotOnly -->|merge| Buf
+  HotOnly -->|merge| StreamEmit
 ```
 
 ### BeginCustomScan
 
 1. Error if `enable_merge_scan` is off.
 2. Deserialize `MergeScanPlan` when present.
-3. Load catalog snapshot + mirror overlay (all unflushed mirror PKs).
-4. Prune cold segments from local catalog stats; open ObjectStore readers only
-   for remaining candidates.
-5. Filter cold rows whose PK appears in the mirror overlay.
-6. Hot-only + native child → stream mode; otherwise merge and materialize.
+3. Load catalog snapshot + mirror tombstone overlay.
+4. Prune cold segments from local catalog stats; prepare a lazy newest-first
+   cold stream (no Parquet open yet).
+5. Hot-only + native child → stream mode; otherwise open a paged hot JSON
+   reader and a merge stream (pages load during `ExecCustomScan`).
 
 ### ExecCustomScan / End / Rescan
 
 - Hot-child mode: `ExecProcNode` on the child.
-- Buffer mode: emit the next materialized row.
-- Drop scan state on end; `ExecReScan` the hot child when present.
+- Hot-native buffer mode: emit the next materialized hot-only row (cold pruned).
+- Merge stream: emit hot SPI pages first (drop each row image after Datum
+  materialization), then decode one cold segment group at a time against the
+  compact PK seen-set; parent `LIMIT` can stop before older groups open.
+- Drop scan state on end; rewind hot paging + cold groups on rescan.
 
 ---
 
@@ -230,19 +233,20 @@ flowchart TD
 | `koldstore.cold_reads=on` | Cold eligible; does not force unnecessary object reads. |
 | `koldstore.cold_reads=off` | Hot-only; ERROR when correctness would require opening cold. |
 | `koldstore.max_open_parquet_readers` | Per-backend open Parquet reader cap. |
+| `koldstore.max_merge_seen_keys` | Per-scan exact PK seen-set cap (fail-closed; `0` disables). |
 
 ---
 
 ## Row-level security
 
 Native hot-child scans remain PostgreSQL-owned and apply permissions and RLS
-normally. Buffered cold and hot+cold winners are materialized in the base
-relation's scan-slot layout, then returned through PostgreSQL `ExecScan`.
+normally. Cold and hot+cold winners are materialized one tuple at a time in the
+base relation's scan-slot layout, then returned through PostgreSQL `ExecScan`.
 
 Fixed reads of extension-owned catalogs and mirror tombstones run under the
-extension owner. Buffered merge scans read the complete hot source under a
-tightly scoped relation-owner context so RLS cannot hide a newer winner;
-PostgreSQL then evaluates the invoking role's compiled quals on resolved tuples.
+extension owner. Merge streams page the hot source under a tightly scoped
+relation-owner context so RLS cannot hide a newer winner; PostgreSQL then
+evaluates the invoking role's compiled quals on resolved tuples.
 
 ---
 
@@ -261,7 +265,7 @@ Plain `EXPLAIN` reports planned source state and never claims that a segment
 was opened or a row was scanned. `EXPLAIN ANALYZE` adds:
 
 - the selected emit path (`hot_child`, `hot_native`, `cold_native`, or
-  `merge_buffer`);
+  `merge_stream`);
 - a nested `Scan Sources` flow with hot, cold Parquet, and mirror-overlay
   access methods and rows scanned;
 - segment, row-group, bloom, range-request, byte, projection, and cache
@@ -289,15 +293,17 @@ Example shape (ANALYZE, TEXT):
 
 ```text
 Custom Scan (KoldMergeScan)
-  Emit Path: merge_buffer
+  Emit Path: merge_stream
   Scan Sources:
     Hot Scan:
       Planned Access: Bitmap Heap Scan
-      Access Method: SPI JSON projection
+      Access Method: SPI JSON projection + segment stream
       Rows Scanned: 1
+      Peak Hot Batch Rows: 1
     Cold Scan:
       Status: executed
       Rows Scanned: 3
+      Peak Cold Batch Rows: 3
       Candidate Segments: 12
       Segments Pruned by Min/Max: 10
       Parquet Segments Opened: 2
@@ -311,6 +317,7 @@ Custom Scan (KoldMergeScan)
     Input Rows: 3
     Output Rows: 2
     Rows Removed by Merge: 1
+    Seen Keys: 4
   Timing:
     Initialization Time: 4.812 ms
     Hot Scan Time: 0.142 ms
@@ -322,9 +329,10 @@ Custom Scan (KoldMergeScan)
 
 ## Implementation notes / remaining polish
 
-1. Overlap merge path still uses SPI JSON hot load for winner resolution when a
-   full PK equality probe is not available; PK point lookups use hot-native /
-   cold-native emit.
+1. Overlap merge path still uses paged SPI JSON hot load for winner resolution
+   when a full PK equality probe is not available; PK point lookups use
+   hot-native / cold-native emit. Peak retained hot JSON is one SPI page
+   (`HOT_MERGE_BATCH_ROWS`); the exact PK seen-set stays in RAM until spill.
 2. User-scoped cold segment loading beyond `scope_key = ''` continues to land
    with catalog scope work.
 3. No DSM / parallel CustomScan workers yet.

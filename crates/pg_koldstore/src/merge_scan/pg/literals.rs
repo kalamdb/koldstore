@@ -106,11 +106,7 @@ unsafe fn datum_typed_sql(
             let oid = column_type_oid(pg_type);
             pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
             let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
-            if out.is_null() {
-                return None;
-            }
-            let text = CStr::from_ptr(out).to_str().ok()?.to_string();
-            pg_sys::pfree(out.cast());
+            let text = cstr_owned_pfree(out)?;
             quote_sql_literal(&text)
         }
     }
@@ -140,11 +136,7 @@ unsafe fn datum_json_value(
                 return None;
             }
             let cstr = pg_sys::text_to_cstring(text);
-            if cstr.is_null() {
-                return None;
-            }
-            let value = CStr::from_ptr(cstr).to_str().ok()?.to_string();
-            pg_sys::pfree(cstr.cast());
+            let value = cstr_owned_pfree(cstr)?;
             Some(serde_json::Value::String(value))
         }
         PgType::Uuid => {
@@ -153,17 +145,23 @@ unsafe fn datum_json_value(
             let oid = column_type_oid(PgType::Uuid);
             pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
             let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
-            if out.is_null() {
-                return None;
-            }
-            let value = CStr::from_ptr(out).to_str().ok()?.to_string();
-            pg_sys::pfree(out.cast());
+            let value = cstr_owned_pfree(out)?;
             Some(serde_json::Value::String(value))
         }
         PgType::Bool => Some(serde_json::Value::Bool(datum.value() != 0)),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => Some(serde_json::json!(datum.value() as i64)),
         _ => None,
     }
+}
+
+/// Copies a PostgreSQL C string into a Rust `String`, then always `pfree`s it.
+pub(super) unsafe fn cstr_owned_pfree(ptr: *mut std::os::raw::c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let owned = CStr::from_ptr(ptr).to_str().ok().map(str::to_string);
+    pg_sys::pfree(ptr.cast());
+    owned
 }
 
 fn column_type_oid(pg_type: PgType) -> pg_sys::Oid {

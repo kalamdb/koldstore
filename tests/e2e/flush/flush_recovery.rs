@@ -51,22 +51,24 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
             .client
             .query_one(
                 r#"
-                SELECT m.manifest_path, cs.object_path
+                SELECT
+                  format('%s/%s', n.nspname, c.relname),
+                  format('%s/%s/%s', n.nspname, c.relname, cs.path)
                 FROM koldstore.manifest m
+                JOIN pg_class c ON c.oid = m.table_oid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
                 JOIN koldstore.cold_segments cs
                   ON cs.table_oid = m.table_oid
                  AND cs.scope_key = m.scope_key
                 WHERE m.table_oid = $1::text::regclass::oid
+                  AND m.generation > 0
+                  AND m.sync_state = 'in_sync'
                 LIMIT 1
                 "#,
                 &[&table.relation],
             )
             .await?;
-        let manifest_path = manifest_row.get::<_, String>(0);
-        let table_prefix = std::path::Path::new(&manifest_path)
-            .parent()
-            .expect("manifest path has table prefix")
-            .to_string_lossy();
+        let table_prefix = manifest_row.get::<_, String>(0);
         let orphan_temp = format!("{table_prefix}/.tmp/writer/orphan.parquet.tmp");
         let orphan_final = format!("{table_prefix}/orphan-final.parquet");
         if let Some(parent) = db.storage_root.join(&orphan_temp).parent() {
@@ -99,14 +101,12 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
         assert!(!db.storage_root.join(&orphan_temp).exists());
         assert!(!db.storage_root.join(&orphan_final).exists());
         let quarantine_prefix = "orphan-final.parquet.quarantine.";
-        assert!(
-            std::fs::read_dir(db.storage_root.join(table_prefix.as_ref()))?
-                .filter_map(Result::ok)
-                .any(|entry| entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(quarantine_prefix))
-        );
+        assert!(std::fs::read_dir(db.storage_root.join(&table_prefix))?
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(quarantine_prefix)));
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
     }
 
@@ -122,19 +122,20 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
         db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
 
-        let manifest_path: String = db
+        let table_prefix: String = db
             .client
             .query_one(
                 r#"
-                SELECT manifest_path
-                FROM koldstore.manifest
-                WHERE table_oid = $1::text::regclass::oid
+                SELECT format('%s/%s', n.nspname, c.relname)
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.oid = $1::text::regclass::oid
                 "#,
                 &[&table.relation],
             )
             .await?
             .get(0);
-        let absolute_manifest_path = db.storage_root.join(&manifest_path);
+        let absolute_manifest_path = db.storage_root.join(&table_prefix).join("manifest.json");
         let mut manifest: Value =
             serde_json::from_str(&std::fs::read_to_string(&absolute_manifest_path)?)?;
         let first_segment = manifest["segments"][0].clone();

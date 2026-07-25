@@ -16,12 +16,12 @@ use crate::request::{MigrateTableRequest, MigrationError, MigrationResult};
 use crate::QualifiedTableName;
 
 /// Catalog context resolved before migration planning.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationTableContext {
     /// OID of the target table.
     pub table_oid: u32,
     /// Registered storage id.
-    pub storage_id: Uuid,
+    pub storage_id: String,
 }
 
 /// Planned work for the empty-table migration entrypoint.
@@ -32,7 +32,7 @@ pub struct EmptyTableMigrationPlan {
     /// OID of the target table.
     pub table_oid: u32,
     /// Registered storage id.
-    pub storage_id: Uuid,
+    pub storage_id: String,
     /// Effective user scope column, if user-scoped.
     pub effective_scope_column: Option<String>,
     /// Read-only probe; any returned row means the greenfield-only path must stop.
@@ -58,7 +58,7 @@ pub struct ExistingTableMigrationPlan {
     /// OID of the target table.
     pub table_oid: u32,
     /// Registered storage id.
-    pub storage_id: Uuid,
+    pub storage_id: String,
     /// Effective user scope column, if user-scoped.
     pub effective_scope_column: Option<String>,
     /// Oldest-to-newest ordering selected for backfill.
@@ -157,7 +157,7 @@ pub fn plan_existing_table_migration(
         base.table_oid,
         &base.table,
         table_type,
-        base.storage_id,
+        base.storage_id.clone(),
         base.effective_scope_column.clone(),
         &ordering,
         backfill_batch_size,

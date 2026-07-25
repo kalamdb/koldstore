@@ -8,9 +8,10 @@
 //! 5. Drop the change-log mirror after the heap is gone
 
 use koldstore_common::QualifiedTableName;
-use koldstore_manifest::table_object_prefix;
 use koldstore_migrate::drop_table::{plan_drop_table_cleanup, DropTableCleanupPolicy};
-use koldstore_storage::{open_client_from_catalog_fields, StorageClient};
+use koldstore_storage::{
+    open_client_from_catalog_fields, render_regular_table_prefix, PathTemplate, StorageClient,
+};
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys;
 
@@ -65,7 +66,11 @@ fn cleanup_one_managed_table_before_drop(
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
     let mirror = crate::catalog::resolve::mirror_relation_by_table_oid(table_oid)?;
-    let prefix = table_object_prefix(&relation.namespace, &relation.name);
+    let prefix = render_regular_table_prefix(
+        &PathTemplate::new(&storage.regular_path_tmpl),
+        &relation.namespace,
+        &relation.name,
+    )?;
     let table = QualifiedTableName::parse(&format!("{}.{}", relation.namespace, relation.name))
         .map_err(|error| error.to_string())?;
 
