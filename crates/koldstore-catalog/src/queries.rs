@@ -203,11 +203,18 @@ pub fn plan_in_sync_manifest_scan_context() -> SqlResult<SqlStatement> {
         r#"
 SELECT jsonb_build_object(
   'table_prefix', CASE
-      WHEN replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname) = ''
+      WHEN regexp_replace(
+          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
+          '(^/+)|(/+$)',
+          '',
+          'g'
+      ) = ''
       THEN ''
       ELSE regexp_replace(
           replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
-          '/+$', ''
+          '(^/+)|(/+$)',
+          '',
+          'g'
       ) || '/'
   END,
   'regular_path_tmpl', st.regular_path_tmpl,
