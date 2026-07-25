@@ -1,4 +1,4 @@
--- Upgrade koldstore from 0.1.0 to 0.1.6-beta.0.
+-- Upgrade koldstore from 0.1.0 to 0.1.7-beta.0.
 --
 -- Catalog DDL is unchanged from the current 0.1.0 bootstrap (greenfield /
 -- reinstall). SQL-callable entry points are LANGUAGE c / pgrx wrappers
