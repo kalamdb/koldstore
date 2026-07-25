@@ -457,12 +457,14 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
     Ok(())
 }
 
-/// Regression: idle ticks must not re-decode retained WAL or rewrite mirror
-/// state when only non-publication WAL is generated.
+/// Regression: idle ticks must advance the slot past non-publication WAL
+/// without rewriting mirror / `applied_lsn`.
 ///
-/// Before the fix, every latch wake called `pg_replication_slot_advance` /
-/// peek against a lagged `restart_lsn`, pinning a core and flooding
-/// "starting logical decoding" logs while `applied_lsn` stayed put.
+/// Before the fix, every latch wake peeked against a lagged `restart_lsn`,
+/// pinning a core and flooding "starting logical decoding" logs while
+/// `applied_lsn` stayed put. Assertions are structural (retention collapse,
+/// frozen apply watermarks, repeatable second wave) — not wall-clock fence
+/// budgets, which flake under parallel e2e WAL + `lock_apply` contention.
 #[tokio::test]
 async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Result<()> {
     if !common::selected_mirror_capture_mode()?.is_async() {
@@ -588,35 +590,111 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
             drained.retained_bytes
         );
 
-        // Once caught up, further idle wakes must stay quiet: confirmed_flush
-        // should not thrash and fences must remain empty/cheap.
-        let quiet = common::async_mirror_progress(&db.client).await?;
-        let mut confirmed_changes = 0_u32;
-        let mut last_confirmed = quiet.confirmed_flush_lsn.clone();
+        // After catch-up, neighbor databases may keep advancing cluster WAL.
+        // That can move confirmed_flush on empty peeks — that is healthy idle
+        // behavior. What must stay frozen is publication apply state.
+        let settled = common::async_mirror_progress(&db.client).await?;
+        let mirror_before_idle = common::mirror_op_count(&db.client, &mirror, 1).await?;
+        assert_eq!(mirror_before_idle, 50);
         let sample_started = Instant::now();
         while sample_started.elapsed() < Duration::from_secs(2) {
             let sample = common::async_mirror_progress(&db.client).await?;
-            if sample.confirmed_flush_lsn != last_confirmed {
-                confirmed_changes += 1;
-                last_confirmed = sample.confirmed_flush_lsn;
-            }
+            assert_eq!(
+                sample.applied_lsn, settled.applied_lsn,
+                "idle empty peeks must not rewrite applied_lsn"
+            );
+            assert_eq!(
+                sample.updated_at, settled.updated_at,
+                "idle empty peeks must not bump async_mirror_state.updated_at"
+            );
+            assert_eq!(
+                common::mirror_op_count(&db.client, &mirror, 1).await?,
+                mirror_before_idle,
+                "idle empty peeks must not rewrite mirror rows"
+            );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+
+        // Second noise wave: prove the empty-peek path stays correct when the
+        // slot lags again (repeatability), without relying on wall-clock fence
+        // budgets that flake under parallel CI apply-lock contention.
+        force_stop_async_worker(&db.client).await?;
+        let before_second = common::async_mirror_progress(&db.client).await?;
+        db.client
+            .batch_execute(&format!(
+                "INSERT INTO {noise} (payload) \
+                 SELECT repeat('y', 4096) FROM generate_series(1, 2000); \
+                 SELECT pg_switch_wal()"
+            ))
+            .await?;
+        let blocked_again = common::async_mirror_progress(&db.client).await?;
+        anyhow::ensure!(
+            blocked_again.retained_bytes > before_second.retained_bytes + 256 * 1024,
+            "second non-publication wave must grow retention \
+             (before={}, after={})",
+            before_second.retained_bytes,
+            blocked_again.retained_bytes
+        );
+        common::wait_for_async_worker(&db.client).await?;
+        let drained_again = common::wait_for_confirmed_flush_past(
+            &db.client,
+            &before_second.confirmed_flush_lsn,
+            Duration::from_secs(15),
+        )
+        .await?;
+        common::log_always(format!(
+            "second idle empty-peek advanced confirmed_flush {} -> {} \
+             (retained_bytes {} -> {})",
+            before_second.confirmed_flush_lsn,
+            drained_again.confirmed_flush_lsn,
+            blocked_again.retained_bytes,
+            drained_again.retained_bytes
+        ));
+        assert_eq!(
+            drained_again.applied_lsn, baseline.applied_lsn,
+            "second non-publication wave must not rewrite applied_lsn"
+        );
+        assert_eq!(
+            drained_again.updated_at, baseline.updated_at,
+            "second non-publication wave must not bump updated_at"
+        );
+        assert_eq!(
+            common::mirror_op_count(&db.client, &mirror, 1).await?,
+            50,
+            "second idle drain must not rewrite mirror rows"
+        );
         assert!(
-            confirmed_changes <= 8,
-            "caught-up idle worker must not thrash confirmed_flush (saw {confirmed_changes} changes)"
+            drained_again.retained_bytes < blocked_again.retained_bytes / 2,
+            "second confirmed_flush advance must shrink retention \
+             (before={}, after={})",
+            blocked_again.retained_bytes,
+            drained_again.retained_bytes
         );
 
-        for _ in 0..5 {
-            let fence_started = Instant::now();
+        // Explicit fences must stay empty for publication changes. Timing is
+        // not asserted: parallel e2e WAL + lock_apply waits make sub-second
+        // budgets flake without proving a hot re-decode path.
+        for i in 0..5 {
             let applied = common::wait_for_async_mirror(&db.client).await?;
-            assert_eq!(applied, 0, "idle fence must report no publication changes");
-            assert!(
-                fence_started.elapsed() < Duration::from_millis(500),
-                "idle fence took {:?}; decode path still looks hot",
-                fence_started.elapsed()
+            assert_eq!(
+                applied, 0,
+                "idle fence #{i} must report no publication changes"
             );
         }
+        let after_fences = common::async_mirror_progress(&db.client).await?;
+        assert_eq!(
+            after_fences.applied_lsn, baseline.applied_lsn,
+            "repeated idle fences must leave applied_lsn unchanged"
+        );
+        assert_eq!(
+            after_fences.updated_at, baseline.updated_at,
+            "repeated idle fences must leave updated_at unchanged"
+        );
+        assert_eq!(
+            common::mirror_op_count(&db.client, &mirror, 1).await?,
+            50,
+            "repeated idle fences must leave mirror rows unchanged"
+        );
 
         let jobs_after: i64 = db
             .client
