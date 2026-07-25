@@ -145,7 +145,6 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
     // Expired pending paths are removed from the referenced set so LIST recovery
     // can quarantine them; catalog rows are deleted after object actions.
     for path in &expired_paths {
-        referenced.remove(path);
         referenced.remove(&join_object_key(&prefix, path));
     }
 
