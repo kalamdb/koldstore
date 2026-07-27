@@ -318,14 +318,18 @@ pub(super) struct ColdReadProfile {
     pub(super) segments_considered: usize,
     /// Segments rejected because they do not match the scan scope.
     pub(super) segments_pruned_scope: usize,
-    /// Segments rejected by normalized catalog min/max statistics.
-    pub(super) segments_pruned_min_max: usize,
+    /// Segments rejected by `cold_segment_index` candidate lookup.
+    pub(super) segments_pruned_catalog_index: usize,
     /// Segments opened after catalog prune.
     pub(super) segments_opened: usize,
-    /// Stable order-column attnum when the managed table configures one.
+    /// Stable column ID used for cold_segment_index lookup, when any.
     pub(super) segment_index_order_column_id: Option<i16>,
     /// Bound shape used for cold_segment_index candidate SQL, when planned.
     pub(super) segment_index_lookup_shape: Option<super::cold::SegmentIndexLookupShape>,
+    /// Wall time spent on the segment-index SPI lookup, when executed.
+    pub(super) segment_index_lookup_ms: Option<f64>,
+    /// Candidate segments returned by cold_segment_index before Parquet open.
+    pub(super) segment_index_candidate_segments: Option<usize>,
     /// PK equality probe pushed into Parquet row-group prune, when present.
     pub(super) pk_probe: Option<(String, Vec<String>)>,
     pub(super) projected_columns: Vec<String>,
@@ -341,10 +345,12 @@ impl ColdReadProfile {
             manifest_read_ms: None,
             segments_considered: 0,
             segments_pruned_scope: 0,
-            segments_pruned_min_max: 0,
+            segments_pruned_catalog_index: 0,
             segments_opened: 0,
             segment_index_order_column_id: None,
             segment_index_lookup_shape: None,
+            segment_index_lookup_ms: None,
+            segment_index_candidate_segments: None,
             pk_probe: None,
             projected_columns: Vec::new(),
             segments: vec![],
@@ -485,6 +491,19 @@ fn explain_cold_scan(
         if let Some(shape) = profile.segment_index_lookup_shape {
             explain_text(es, "Segment Index Lookup Shape", shape.as_str());
         }
+        if analyze {
+            if let Some(ms) = profile.segment_index_lookup_ms {
+                explain_float(es, "Segment Index Lookup Time", "ms", ms, 3);
+            }
+            if let Some(candidates) = profile.segment_index_candidate_segments {
+                explain_integer(
+                    es,
+                    "Segment Index Candidates",
+                    None,
+                    candidates as i64,
+                );
+            }
+        }
     }
     explain_integer(
         es,
@@ -496,7 +515,7 @@ fn explain_cold_scan(
         es,
         "Segments Pruned by Catalog Index",
         None,
-        profile.segments_pruned_min_max as i64,
+        profile.segments_pruned_catalog_index as i64,
     );
     if analyze {
         explain_integer(

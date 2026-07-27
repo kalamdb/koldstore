@@ -21,7 +21,6 @@ fn explain_shows_kold_merge_scan_for_managed_table() {
     assert!(
         plan.contains("Candidate Segments")
             || plan.contains("Segments Pruned by Catalog Index")
-            || plan.contains("Segments Pruned by Min/Max")
             || plan.contains("Parquet Segments Opened")
             || plan.contains("Parquet Segments Planned"),
         "expected Timescale-style prune properties in EXPLAIN: {plan}"

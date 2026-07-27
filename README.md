@@ -209,14 +209,14 @@ Custom Scan (KoldMergeScan) on messages (actual rows=2 loops=1)
   Result rows: 3
   Candidate segments: 1
   Segments pruned by scope: 0
-  Segments pruned by min/max: 0
+  Segments pruned by catalog index: 0
   Parquet segments opened: 1
   Row groups read: 1
   Row groups skipped: 0 of 1
   Bytes fetched: 1.5 kB
   Manifest: readme_capture/messages/manifest.json, source=catalog, 0.002 ms
   Cold storage: type=filesystem, base=/tmp/koldstore-readme-explain-storage
-  Cold segments: considered=1, pruned_scope=0, pruned_min_max=0, pruned_bloom=0, opened=1
+  Cold segments: considered=1, pruned_scope=0, pruned_catalog_index=0, pruned_bloom=0, opened=1
   Cold row groups: total=1, selected=1, skipped=0, bloom_filters_fetched=0
   Cold projection: id, body
   Parquet segment: readme_capture/messages/001/segment-0001-6afccda7.parquet, 1672 bytes, 2 rows, 2.897 ms

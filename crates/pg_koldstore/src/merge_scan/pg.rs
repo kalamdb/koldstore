@@ -407,7 +407,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     // Hot heap is current-state only, so PK + scope equality can be pushed into
     // the SPI load. Mutable columns stay residual for cold (pre-merge), but may
     // still appear in hot_equality for post-merge ExecScan. Scope pushdown
-    // matches catalog min/max prune on the shared manifest until per-scope
+    // matches catalog segment-index prune on the shared manifest until per-scope
     // manifests land.
     let mut source_equality_columns = snapshot
         .primary_key_columns

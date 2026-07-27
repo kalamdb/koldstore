@@ -32,9 +32,9 @@ pub(super) fn load_cold_rows_for_merge(
     with_hook_disabled(|| {
         // Pre-merge prune is limited to PK + scope. Mutable columns stay residual
         // so an older cold version cannot resurrect after its newer segment is
-        // pruned away. Scope uses catalog min/max on the shared manifest today
-        // (`scope_key = ''`); later each scope_id gets its own manifest/folder
-        // and listing filters by scope_key first.
+        // pruned away. Scope uses catalog segment-index bounds on the shared
+        // manifest today (`scope_key = ''`); later each scope_id gets its own
+        // manifest/folder and listing filters by scope_key first.
         let scope_column = snapshot.scope_column.as_deref();
         let segment_order_column_id = snapshot.segment_order_column_id;
         let prune_predicates = retain_pre_merge_cold_prune_predicates(
@@ -98,6 +98,7 @@ pub(super) fn load_cold_rows_for_merge(
         validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_column_ids)
             .map_err(|error| error.to_string())?;
         let segments_considered = manifest_stats.segments.len();
+        let index_started = Instant::now();
         let (indexed_candidates, segment_index_lookup_shape, index_column_id) =
             resolve_segment_index_candidates(
                 table_oid,
@@ -105,9 +106,14 @@ pub(super) fn load_cold_rows_for_merge(
                 segment_order_column_id,
                 &prune_predicates,
             )?;
+        let segment_index_lookup_ms = indexed_candidates
+            .as_ref()
+            .map(|_| elapsed_ms(index_started));
+        let segment_index_candidate_segments =
+            indexed_candidates.as_ref().map(|candidates| candidates.len());
         let segments = indexed_candidates
             .unwrap_or_else(|| manifest_stats.segments.clone());
-        let segments_pruned_min_max = segments_considered.saturating_sub(segments.len());
+        let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
         // Shared-scope catalog SQL still filters `scope_key = ''`. When per-scope
         // manifests land, listing will drop other scopes here and this counter
         // will reflect that primary prune.
@@ -126,10 +132,12 @@ pub(super) fn load_cold_rows_for_merge(
             manifest_read_ms: Some(manifest_read_ms),
             segments_considered,
             segments_pruned_scope,
-            segments_pruned_min_max,
+            segments_pruned_catalog_index,
             segments_opened: segments.len(),
             segment_index_order_column_id: index_column_id,
             segment_index_lookup_shape: Some(segment_index_lookup_shape),
+            segment_index_lookup_ms,
+            segment_index_candidate_segments,
             pk_probe: pk_probe
                 .as_ref()
                 .map(|(column, values)| (column.name.clone(), values.clone())),
@@ -379,11 +387,13 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             manifest_read_ms: None,
             segments_considered: manifest_stats.segments.len(),
             segments_pruned_scope: 0,
-            segments_pruned_min_max: 0,
+            segments_pruned_catalog_index: 0,
             segments_opened: manifest_stats.segments.len(),
             segment_index_order_column_id,
             segment_index_lookup_shape: segment_index_order_column_id
                 .map(|_| SegmentIndexLookupShape::AllActive),
+            segment_index_lookup_ms: None,
+            segment_index_candidate_segments: None,
             pk_probe: None,
             projected_columns: Vec::new(),
             segments: manifest_stats

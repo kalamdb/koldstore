@@ -122,7 +122,7 @@ impl SegmentPrunePredicate {
     }
 }
 
-/// Per-column policy for pre-merge cold segment prune via catalog min/max.
+/// Per-column policy for pre-merge cold segment prune via `cold_segment_index`.
 ///
 /// Mutable application columns stay residual: pruning their newer cold version
 /// can resurrect an older row. Scope is safe because the scope key does not
@@ -131,8 +131,8 @@ impl SegmentPrunePredicate {
 /// Today all active segments live under the shared catalog manifest
 /// (`scope_key = ''`); scope is treated like an indexed stats column. Later
 /// each `scope_id` will own its own `manifest.json` + folder, and listing will
-/// filter by `scope_key` first — min/max remains a secondary prune inside that
-/// scope's segment set.
+/// filter by `scope_key` first — catalog index prune remains secondary inside
+/// that scope's segment set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColdPruneColumnPolicy {
     /// Column is part of the logical primary key.
