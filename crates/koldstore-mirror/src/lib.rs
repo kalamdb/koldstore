@@ -21,11 +21,11 @@ pub use r#async::{
 };
 pub use shared::{
     mirror_delete_using_selected_sql, mirror_relation_for_source, mirror_selected_join_predicate,
-    mirror_to_sql, plan_async_mirror_batch_insert, plan_async_mirror_batch_update,
-    plan_async_mirror_batch_upsert, plan_delete_selected_mirror_rows, plan_drop_mirror_table,
-    plan_mirror_oldest_rows_max_seq, plan_mirror_oldest_rows_stats, plan_mirror_op_stats,
-    plan_mirror_schema, plan_mirror_schema_with_order_key, plan_mirror_stats,
-    plan_select_mirror_rows_after_seq,
+    mirror_to_sql, plan_async_mirror_batch_delete_existing, plan_async_mirror_batch_insert,
+    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert,
+    plan_delete_selected_mirror_rows, plan_drop_mirror_table, plan_mirror_oldest_rows_max_seq,
+    plan_mirror_oldest_rows_stats, plan_mirror_op_stats, plan_mirror_schema,
+    plan_mirror_schema_with_order_key, plan_mirror_stats, plan_select_mirror_rows_after_seq,
     plan_select_mirror_rows_after_seq_with_params, plan_upsert_mirror_row, quoted_pk_columns,
     selected_record_columns, MirrorAccess, MirrorColumn, MirrorError, MirrorRelation, MirrorResult,
     MirrorSchemaPlan, MirrorSelectionRow, MirrorSeqStats, MirrorStatement, SqlParamType,

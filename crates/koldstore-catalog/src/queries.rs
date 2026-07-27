@@ -57,7 +57,20 @@ pub fn plan_async_managed_relation_by_oid() -> SqlResult<SqlStatement> {
 SELECT (SELECT jsonb_build_object(
     'table_oid', s.table_oid::text,
     'mirror', s.mirror_relation::text,
-    'primary_key', s.primary_key
+    'primary_key', s.primary_key,
+    'segment_order_column_id', (s.options->>'segment_order_column_id')::int,
+    'segment_order_column', (
+      SELECT c->>'name'
+      FROM jsonb_array_elements(s.columns) AS c
+      WHERE (c->>'column_id')::int = (s.options->>'segment_order_column_id')::int
+      LIMIT 1
+    ),
+    'segment_order_type_oid', (
+      SELECT (c->>'type_oid')::bigint
+      FROM jsonb_array_elements(s.columns) AS c
+      WHERE (c->>'column_id')::int = (s.options->>'segment_order_column_id')::int
+      LIMIT 1
+    )
 )::text
 FROM koldstore.schemas s
 WHERE s.active AND s.table_oid = $1::oid

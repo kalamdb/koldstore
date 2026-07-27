@@ -10,7 +10,7 @@ mod encode;
 mod error;
 mod types;
 
-pub use encode::{decode_sort_key, encode_sort_key, encode_sort_key_json};
+pub use encode::{decode_sort_key, encode_sort_key, encode_sort_key_json, encode_sort_key_pg_text};
 pub use error::SortKeyError;
 pub use types::{
     SortKeyType, SortKeyValue, CODEC_VERSION, PG_EPOCH_DAYS_FROM_UNIX, PG_EPOCH_MICROS_FROM_UNIX,

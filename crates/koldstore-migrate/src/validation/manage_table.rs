@@ -113,9 +113,6 @@ pub fn validate_manage_table(
     }
 
     if let Some(column) = context.segment_order_column {
-        if mirror_capture_mode.is_async() {
-            return Err(MigrationConstraintError::SegmentOrderRequiresStrictCapture);
-        }
         if column.nullable {
             return Err(MigrationConstraintError::NullableSegmentOrderColumn(
                 column.name.to_string(),

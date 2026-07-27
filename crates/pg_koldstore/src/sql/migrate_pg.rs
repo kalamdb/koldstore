@@ -194,6 +194,7 @@ fn manage_table_pg_impl(
             &empty_plan.table,
             &mirror_plan.mirror_table,
             &primary_key_shape,
+            order_column_name,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         ensure_database_worker_for_managed_options(&request.options);
@@ -253,6 +254,7 @@ fn manage_table_pg_impl(
         &plan.table,
         &mirror_plan.mirror_table,
         &primary_key_shape,
+        order_column_name,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     ensure_database_worker_for_managed_options(&request.options);

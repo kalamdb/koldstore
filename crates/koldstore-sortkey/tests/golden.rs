@@ -4,8 +4,8 @@
 //! Updating the `storekey` dependency must not silently change them.
 
 use koldstore_sortkey::{
-    decode_sort_key, encode_sort_key, encode_sort_key_json, SortKeyType, SortKeyValue,
-    CODEC_VERSION,
+    decode_sort_key, encode_sort_key, encode_sort_key_json, encode_sort_key_pg_text, SortKeyType,
+    SortKeyValue, CODEC_VERSION,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -101,6 +101,26 @@ fn json_helpers_match_typed_encoding() {
     assert_eq!(
         encode_sort_key_json(SortKeyType::Timestamptz, &json!(pg_micros)).unwrap(),
         encoded
+    );
+}
+
+#[test]
+fn pg_text_helpers_match_typed_encoding() {
+    assert_eq!(
+        encode_sort_key_pg_text(SortKeyType::Bool, "t").unwrap(),
+        encode_sort_key(&SortKeyValue::Bool(true)).unwrap()
+    );
+    assert_eq!(
+        encode_sort_key_pg_text(SortKeyType::Int8, "42").unwrap(),
+        encode_sort_key(&SortKeyValue::Int8(42)).unwrap()
+    );
+    assert_eq!(
+        encode_sort_key_pg_text(SortKeyType::Uuid, "550e8400-e29b-41d4-a716-446655440000")
+            .unwrap(),
+        encode_sort_key(&SortKeyValue::Uuid(
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()
+        ))
+        .unwrap()
     );
 }
 

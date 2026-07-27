@@ -62,6 +62,51 @@ pub fn encode_sort_key_json(ty: SortKeyType, value: &Value) -> Result<Vec<u8>, S
     encode_sort_key(&parse_json_value(ty, value)?)
 }
 
+/// Encodes a PostgreSQL text-output scalar (as emitted by `pgoutput`) as Sort Key V1.
+///
+/// # Errors
+///
+/// Returns [`SortKeyError`] when `text` is not a valid literal for `ty`.
+pub fn encode_sort_key_pg_text(ty: SortKeyType, text: &str) -> Result<Vec<u8>, SortKeyError> {
+    let value = match ty {
+        SortKeyType::Bool => Value::Bool(parse_pg_bool(text)?),
+        SortKeyType::Int2 | SortKeyType::Int4 | SortKeyType::Int8 => {
+            let n = text
+                .parse::<i64>()
+                .map_err(|error| invalid_json(ty_name(ty), error.to_string()))?;
+            Value::Number(n.into())
+        }
+        SortKeyType::Date | SortKeyType::Timestamp | SortKeyType::Timestamptz | SortKeyType::Uuid => {
+            Value::String(text.to_string())
+        }
+    };
+    encode_sort_key_json(ty, &value)
+}
+
+fn parse_pg_bool(text: &str) -> Result<bool, SortKeyError> {
+    match text {
+        "t" | "true" | "TRUE" | "yes" | "on" | "1" => Ok(true),
+        "f" | "false" | "FALSE" | "no" | "off" | "0" => Ok(false),
+        other => Err(invalid_json(
+            "bool",
+            format!("expected boolean text, got `{other}`"),
+        )),
+    }
+}
+
+fn ty_name(ty: SortKeyType) -> &'static str {
+    match ty {
+        SortKeyType::Bool => "bool",
+        SortKeyType::Int2 => "int2",
+        SortKeyType::Int4 => "int4",
+        SortKeyType::Int8 => "int8",
+        SortKeyType::Date => "date",
+        SortKeyType::Timestamp => "timestamp",
+        SortKeyType::Timestamptz => "timestamptz",
+        SortKeyType::Uuid => "uuid",
+    }
+}
+
 fn parse_json_value(ty: SortKeyType, value: &Value) -> Result<SortKeyValue, SortKeyError> {
     match ty {
         SortKeyType::Bool => Ok(SortKeyValue::Bool(value.as_bool().ok_or_else(|| {

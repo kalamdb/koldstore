@@ -41,6 +41,25 @@ fn segment_order_column_is_validated_and_persisted_by_attnum() {
 }
 
 #[test]
+fn segment_order_column_allowed_with_async_mirror_capture() {
+    let mut context = valid_context();
+    context.mirror_capture_mode = Some("async");
+    context.segment_order_column = Some(SegmentOrderColumnInput {
+        column_id: 4,
+        name: "created_at",
+        type_oid: 1184,
+        nullable: false,
+    });
+
+    let validated = validate_manage_table(context).unwrap();
+    assert_eq!(validated.options.segment_order_column_id, Some(4));
+    assert_eq!(
+        validated.options.mirror_capture_mode(),
+        koldstore_common::MirrorCaptureMode::Async
+    );
+}
+
+#[test]
 fn segment_order_column_rejects_nullable_or_unsupported_types() {
     let mut nullable = valid_context();
     nullable.segment_order_column = Some(SegmentOrderColumnInput {

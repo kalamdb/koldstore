@@ -43,9 +43,6 @@ pub enum MigrationConstraintError {
     /// The requested mirror capture consistency mode is unsupported.
     #[error("unsupported mirror capture mode `{0}`; expected `strict` or `async`")]
     UnsupportedMirrorCaptureMode(String),
-    /// Async WAL capture does not yet carry encoded segment order keys.
-    #[error("segment_order_column requires mirror_capture_mode = 'strict'")]
-    SegmentOrderRequiresStrictCapture,
     /// The requested table ownership model is unsupported.
     #[error("unsupported table type `{0}`")]
     UnsupportedTableType(String),

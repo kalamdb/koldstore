@@ -206,6 +206,7 @@ pub(crate) fn activate_table(
     source: &QualifiedTableName,
     mirror: &QualifiedTableName,
     primary_key: &koldstore_common::PrimaryKeyShape,
+    order_column: Option<&str>,
 ) -> Result<(), String> {
     if mode != MirrorCaptureMode::Async {
         return Ok(());
@@ -233,12 +234,18 @@ pub(crate) fn activate_table(
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     if !is_member {
-        let published_columns = primary_key
+        let mut published = primary_key
             .columns()
             .iter()
             .map(|column| quote_ident(column.column().as_str()))
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect::<Vec<_>>();
+        if let Some(order_column) = order_column {
+            let quoted = quote_ident(order_column);
+            if !published.iter().any(|column| column == &quoted) {
+                published.push(quoted);
+            }
+        }
+        let published_columns = published.join(", ");
         pgrx::Spi::run(&format!(
             "ALTER PUBLICATION {publication} ADD TABLE {} ({published_columns})",
             source.quoted(),
