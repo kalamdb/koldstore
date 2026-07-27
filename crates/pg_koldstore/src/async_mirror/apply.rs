@@ -797,10 +797,12 @@ fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
         .ok_or_else(|| "async schema metadata has no primary key".to_string())?
         .iter()
         .map(|column| {
+            // Accept legacy string names or ColumnRef objects from #66.
             column
                 .as_str()
+                .or_else(|| column.get("name").and_then(Value::as_str))
                 .map(str::to_string)
-                .ok_or_else(|| "async primary key contains a non-string".to_string())
+                .ok_or_else(|| "async primary key entry missing name".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
     let order_column = match (

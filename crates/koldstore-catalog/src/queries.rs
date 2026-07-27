@@ -57,7 +57,10 @@ pub fn plan_async_managed_relation_by_oid() -> SqlResult<SqlStatement> {
 SELECT (SELECT jsonb_build_object(
     'table_oid', s.table_oid::text,
     'mirror', s.mirror_relation::text,
-    'primary_key', s.primary_key,
+    'primary_key', (
+      SELECT COALESCE(jsonb_agg(elem->>'name' ORDER BY ord), '[]'::jsonb)
+      FROM jsonb_array_elements(s.primary_key) WITH ORDINALITY AS t(elem, ord)
+    ),
     'segment_order_column_id', (s.options->>'segment_order_column_id')::int,
     'segment_order_column', (
       SELECT c->>'name'
@@ -66,8 +69,12 @@ SELECT (SELECT jsonb_build_object(
       LIMIT 1
     ),
     'segment_order_type_oid', (
-      SELECT (c->>'type_oid')::bigint
+      SELECT a.atttypid::bigint
       FROM jsonb_array_elements(s.columns) AS c
+      JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = s.table_oid
+       AND a.attnum = (c->>'column_id')::smallint
+       AND NOT a.attisdropped
       WHERE (c->>'column_id')::int = (s.options->>'segment_order_column_id')::int
       LIMIT 1
     )
@@ -501,8 +508,9 @@ WHERE table_oid = $1::oid
 #[cfg(test)]
 mod tests {
     use super::{
-        plan_cold_segment_candidates_closed_range, plan_cold_segment_candidates_lower_bound,
-        plan_cold_segment_candidates_upper_bound, plan_in_sync_manifest_scan_context,
+        plan_async_managed_relation_by_oid, plan_cold_segment_candidates_closed_range,
+        plan_cold_segment_candidates_lower_bound, plan_cold_segment_candidates_upper_bound,
+        plan_in_sync_manifest_scan_context,
     };
     use koldstore_common::SqlParamType;
 
@@ -557,11 +565,15 @@ mod tests {
         assert!(lower.sql.contains("csi.max_value >= $6::bytea"));
         assert!(!lower.sql.contains("csi.min_value <="));
         assert!(!lower.sql.contains("IS NULL OR"));
+        assert!(!lower.sql.contains("INDEX"));
+        assert!(!lower.sql.contains("column_name"));
 
         let upper = plan_cold_segment_candidates_upper_bound().unwrap();
         assert!(upper.sql.contains("csi.min_value <= $6::bytea"));
         assert!(!upper.sql.contains("csi.max_value >="));
         assert!(!upper.sql.contains("IS NULL OR"));
+        assert!(!upper.sql.contains("INDEX"));
+        assert!(!upper.sql.contains("column_name"));
 
         let expected = vec![
             SqlParamType::Oid,
@@ -573,5 +585,33 @@ mod tests {
         ];
         assert_eq!(lower.param_types, expected);
         assert_eq!(upper.param_types, expected);
+    }
+
+    #[test]
+    fn candidate_sql_never_forces_both_indexes() {
+        for statement in [
+            plan_cold_segment_candidates_closed_range().unwrap(),
+            plan_cold_segment_candidates_lower_bound().unwrap(),
+            plan_cold_segment_candidates_upper_bound().unwrap(),
+        ] {
+            assert!(!statement.sql.contains("BitmapAnd"));
+            assert!(!statement.sql.contains("IndexScan"));
+            assert!(!statement.sql.contains("FORCE"));
+            assert!(!statement.sql.contains("IS NULL OR"));
+            assert!(!statement.sql.contains("column_name"));
+        }
+    }
+
+    #[test]
+    fn async_managed_relation_projects_primary_key_names() {
+        let statement = plan_async_managed_relation_by_oid().unwrap();
+        assert!(statement.sql.contains("jsonb_agg(elem->>'name'"));
+        assert!(statement.sql.contains("jsonb_array_elements(s.primary_key)"));
+        assert!(!statement.sql.contains("'primary_key', s.primary_key"));
+        assert!(
+            statement.sql.contains("a.atttypid"),
+            "order-column type must come from pg_attribute, not missing columns.type_oid"
+        );
+        assert!(!statement.sql.contains("c->>'type_oid'"));
     }
 }

@@ -99,13 +99,18 @@ pub(super) fn load_cold_rows_for_merge(
             .map_err(|error| error.to_string())?;
         let segments_considered = manifest_stats.segments.len();
         let index_started = Instant::now();
-        let (indexed_candidates, segment_index_lookup_shape, index_column_id) =
-            resolve_segment_index_candidates(
-                table_oid,
-                catalog,
-                segment_order_column_id,
-                &prune_predicates,
-            )?;
+        let (
+            indexed_candidates,
+            segment_index_lookup_shape,
+            index_column_id,
+            index_column_name,
+            segment_index_plan,
+        ) = resolve_segment_index_candidates(
+            table_oid,
+            catalog,
+            segment_order_column_id,
+            &prune_predicates,
+        )?;
         let segment_index_lookup_ms = indexed_candidates
             .as_ref()
             .map(|_| elapsed_ms(index_started));
@@ -135,7 +140,9 @@ pub(super) fn load_cold_rows_for_merge(
             segments_pruned_catalog_index,
             segments_opened: segments.len(),
             segment_index_order_column_id: index_column_id,
+            segment_index_order_column: index_column_name,
             segment_index_lookup_shape: Some(segment_index_lookup_shape),
+            segment_index_plan,
             segment_index_lookup_ms,
             segment_index_candidate_segments,
             pk_probe: pk_probe
@@ -236,7 +243,16 @@ fn resolve_segment_index_candidates(
     catalog: &koldstore_migrate::ExistingTableCatalog,
     segment_order_column_id: Option<ColumnId>,
     predicates: &[SegmentPrunePredicate],
-) -> Result<(Option<Vec<SegmentStatsHint>>, SegmentIndexLookupShape, Option<i16>), String> {
+) -> Result<
+    (
+        Option<Vec<SegmentStatsHint>>,
+        SegmentIndexLookupShape,
+        Option<i16>,
+        Option<String>,
+        Option<String>,
+    ),
+    String,
+> {
     let preferred = segment_order_column_id.and_then(|column_id| {
         catalog
             .columns
@@ -259,23 +275,42 @@ fn resolve_segment_index_candidates(
         })
     });
     let Some(column) = column else {
-        return Ok((None, SegmentIndexLookupShape::AllActive, None));
+        let order_name = segment_order_column_id.and_then(|column_id| {
+            catalog
+                .columns
+                .iter()
+                .find(|column| column.column_id == column_id)
+                .map(|column| column.name.clone())
+        });
+        return Ok((
+            None,
+            SegmentIndexLookupShape::AllActive,
+            segment_order_column_id.map(ColumnId::get),
+            order_name,
+            None,
+        ));
     };
-    let (candidates, shape) = load_segment_index_candidates(table_oid, column, predicates)?;
-    Ok((candidates, shape, Some(column.column_id.get())))
+    let (candidates, shape, plan) = load_segment_index_candidates(table_oid, column, predicates)?;
+    Ok((
+        candidates,
+        shape,
+        Some(column.column_id.get()),
+        Some(column.name.clone()),
+        plan,
+    ))
 }
 
 fn load_segment_index_candidates(
     table_oid: pg_sys::Oid,
     column: &koldstore_migrate::order::CatalogColumn,
     predicates: &[SegmentPrunePredicate],
-) -> Result<(Option<Vec<SegmentStatsHint>>, SegmentIndexLookupShape), String> {
+) -> Result<(Option<Vec<SegmentStatsHint>>, SegmentIndexLookupShape, Option<String>), String> {
     use pgrx::datum::DatumWithOid;
 
     let Some(sort_type) =
         koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
     else {
-        return Ok((None, SegmentIndexLookupShape::AllActive));
+        return Ok((None, SegmentIndexLookupShape::AllActive, None));
     };
     let mut lower = None::<Vec<u8>>;
     let mut upper = None::<Vec<u8>>;
@@ -311,7 +346,7 @@ fn load_segment_index_candidates(
             koldstore_catalog::queries::plan_cold_segment_candidates_upper_bound(),
             SegmentIndexLookupShape::UpperBound,
         ),
-        (None, None) => return Ok((None, SegmentIndexLookupShape::AllActive)),
+        (None, None) => return Ok((None, SegmentIndexLookupShape::AllActive, None)),
     };
     let statement = statement.map_err(|error| error.to_string())?;
     let mut args = vec![
@@ -327,6 +362,13 @@ fn load_segment_index_candidates(
     if let Some(value) = upper {
         args.push(DatumWithOid::from(value));
     }
+
+    // Report the index PostgreSQL is expected to prefer for this bound shape.
+    // The SQL never forces an index (no HINT / BitmapAnd); the planner may still
+    // choose seq_scan or BitmapAnd when cheaper. SPI EXPLAIN is intentionally
+    // avoided here — nested EXPLAIN is rejected inside non-volatile function
+    // contexts during ordinary SELECTs.
+    let plan = Some(preferred_segment_index_plan(shape).to_string());
 
     let candidates = crate::catalog::owner::with_extension_owner(|| {
         crate::spi::execute_prepared(&statement, &args, |tuples| {
@@ -357,7 +399,17 @@ fn load_segment_index_candidates(
         })
         .map_err(|error| error.to_string())
     })??;
-    Ok((Some(candidates), shape))
+    Ok((Some(candidates), shape, plan))
+}
+
+/// Preferred cold_segment_index access path for a bound shape (not forced).
+const fn preferred_segment_index_plan(shape: SegmentIndexLookupShape) -> &'static str {
+    match shape {
+        SegmentIndexLookupShape::BoundedRange => "bitmap_and_or_single",
+        SegmentIndexLookupShape::LowerBound => "max_idx",
+        SegmentIndexLookupShape::UpperBound => "min_idx",
+        SegmentIndexLookupShape::AllActive => "seq_scan",
+    }
 }
 
 fn missing_candidate_field(name: &str) -> pgrx::spi::SpiError {
@@ -390,8 +442,10 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             segments_pruned_catalog_index: 0,
             segments_opened: manifest_stats.segments.len(),
             segment_index_order_column_id,
+            segment_index_order_column: None,
             segment_index_lookup_shape: segment_index_order_column_id
                 .map(|_| SegmentIndexLookupShape::AllActive),
+            segment_index_plan: None,
             segment_index_lookup_ms: None,
             segment_index_candidate_segments: None,
             pk_probe: None,
@@ -635,7 +689,10 @@ mod tests {
     use koldstore_merge::scan::plan::SegmentStatsHint;
     use koldstore_schema::PgType;
 
-    use super::{cold_pruning_type_is_collation_independent, physical_name_for_segment};
+    use super::{
+        cold_pruning_type_is_collation_independent, physical_name_for_segment,
+        preferred_segment_index_plan,
+    };
 
     #[test]
     fn text_like_types_are_not_safe_for_byte_ordered_cold_pruning() {
@@ -645,6 +702,22 @@ mod tests {
         ));
         assert!(cold_pruning_type_is_collation_independent(PgType::Int8));
         assert!(cold_pruning_type_is_collation_independent(PgType::Uuid));
+    }
+
+    #[test]
+    fn segment_index_plan_preference_matches_bound_shape() {
+        assert_eq!(
+            preferred_segment_index_plan(super::SegmentIndexLookupShape::LowerBound),
+            "max_idx"
+        );
+        assert_eq!(
+            preferred_segment_index_plan(super::SegmentIndexLookupShape::UpperBound),
+            "min_idx"
+        );
+        assert_eq!(
+            preferred_segment_index_plan(super::SegmentIndexLookupShape::BoundedRange),
+            "bitmap_and_or_single"
+        );
     }
 
     #[test]

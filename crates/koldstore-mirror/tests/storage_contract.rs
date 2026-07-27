@@ -121,7 +121,7 @@ fn async_mirror_batch_upsert_includes_order_key_bind() {
     assert!(sql.contains("unnest($2::text[], $3::bigint[], $4::bytea[])"));
     assert!(sql.contains("incoming.order_key AS \"order_key\""));
     assert!(sql.contains("\"order_key\", \"seq\", \"op\""));
-    assert!(sql.contains("\"order_key\" = EXCLUDED.\"order_key\""));
+    assert!(!sql.contains("\"order_key\" = EXCLUDED.\"order_key\""));
 }
 
 #[test]

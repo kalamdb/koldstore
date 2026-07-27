@@ -324,8 +324,12 @@ pub(super) struct ColdReadProfile {
     pub(super) segments_opened: usize,
     /// Stable column ID used for cold_segment_index lookup, when any.
     pub(super) segment_index_order_column_id: Option<i16>,
+    /// Current name of the order column (diagnostic only).
+    pub(super) segment_index_order_column: Option<String>,
     /// Bound shape used for cold_segment_index candidate SQL, when planned.
     pub(super) segment_index_lookup_shape: Option<super::cold::SegmentIndexLookupShape>,
+    /// PostgreSQL access method chosen for the candidate lookup, when known.
+    pub(super) segment_index_plan: Option<String>,
     /// Wall time spent on the segment-index SPI lookup, when executed.
     pub(super) segment_index_lookup_ms: Option<f64>,
     /// Candidate segments returned by cold_segment_index before Parquet open.
@@ -348,7 +352,9 @@ impl ColdReadProfile {
             segments_pruned_catalog_index: 0,
             segments_opened: 0,
             segment_index_order_column_id: None,
+            segment_index_order_column: None,
             segment_index_lookup_shape: None,
+            segment_index_plan: None,
             segment_index_lookup_ms: None,
             segment_index_candidate_segments: None,
             pk_probe: None,
@@ -488,20 +494,32 @@ fn explain_cold_scan(
             "postgres (koldstore.cold_segment_index)",
         );
         explain_integer(es, "Order Column ID", None, i64::from(column_id));
+        if let Some(name) = profile.segment_index_order_column.as_deref() {
+            explain_text(es, "Order Column", name);
+        }
         if let Some(shape) = profile.segment_index_lookup_shape {
             explain_text(es, "Segment Index Lookup Shape", shape.as_str());
+        }
+        if let Some(plan) = profile.segment_index_plan.as_deref() {
+            explain_text(es, "Segment Index Plan", plan);
+        }
+        explain_integer(
+            es,
+            "Candidate Segments Before Range",
+            None,
+            profile.segments_considered as i64,
+        );
+        if let Some(candidates) = profile.segment_index_candidate_segments {
+            explain_integer(
+                es,
+                "Segments Returned by Segment Index",
+                None,
+                candidates as i64,
+            );
         }
         if analyze {
             if let Some(ms) = profile.segment_index_lookup_ms {
                 explain_float(es, "Segment Index Lookup Time", "ms", ms, 3);
-            }
-            if let Some(candidates) = profile.segment_index_candidate_segments {
-                explain_integer(
-                    es,
-                    "Segment Index Candidates",
-                    None,
-                    candidates as i64,
-                );
             }
         }
     }
@@ -549,6 +567,18 @@ fn explain_cold_scan(
         if row_groups_total > 0 {
             explain_integer(es, "Row Groups Total", None, row_groups_total as i64);
             explain_integer(es, "Row Groups Skipped", None, row_groups_skipped as i64);
+            explain_integer(
+                es,
+                "Row Groups Pruned by Min/Max",
+                None,
+                profile.row_groups_pruned_by_stats() as i64,
+            );
+            explain_integer(
+                es,
+                "Row Groups Pruned by Bloom",
+                None,
+                profile.row_groups_pruned_by_bloom_filters() as i64,
+            );
         }
         // Unit on ExplainPropertyUInteger renders as "N bytes" — same as native PG.
         explain_uinteger(es, "Bytes Fetched", Some("bytes"), bytes_fetched);
@@ -793,6 +823,24 @@ impl ColdReadProfile {
                 parquet.bloom == BloomPruneMode::Applied && parquet.row_groups_selected.is_empty()
             })
             .count()
+    }
+
+    fn row_groups_pruned_by_stats(&self) -> usize {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .filter(|parquet| parquet.stats_pruned)
+            .map(|parquet| parquet.row_groups_skipped)
+            .sum()
+    }
+
+    fn row_groups_pruned_by_bloom_filters(&self) -> usize {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .filter(|parquet| parquet.bloom == BloomPruneMode::Applied && !parquet.stats_pruned)
+            .map(|parquet| parquet.row_groups_skipped)
+            .sum()
     }
 
     fn row_group_totals(&self) -> (usize, usize, usize, usize) {

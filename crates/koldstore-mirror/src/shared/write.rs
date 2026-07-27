@@ -220,14 +220,9 @@ pub fn plan_async_mirror_batch_upsert(
         ])
         .collect::<Vec<_>>()
         .join(", ");
-    let conflict_set = if include_order_key {
-        "\"seq\" = EXCLUDED.\"seq\", \
-               \"op\" = EXCLUDED.\"op\", \
-               \"order_key\" = EXCLUDED.\"order_key\""
-    } else {
-        "\"seq\" = EXCLUDED.\"seq\", \
-               \"op\" = EXCLUDED.\"op\""
-    };
+    // Order keys are immutable per PK; keep the first encoded value on conflict.
+    let conflict_set = "\"seq\" = EXCLUDED.\"seq\", \
+               \"op\" = EXCLUDED.\"op\"";
     Ok(format!(
         "WITH incoming AS (\
            SELECT {projected} FROM unnest({unnest}) AS incoming({aliases})\
@@ -329,14 +324,8 @@ pub fn plan_async_mirror_batch_update(
         .map(|key| format!("mirror.{key}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let update_set = if include_order_key {
-        "\"seq\" = incoming.\"seq\", \
-               \"op\" = $1::smallint, \
-               \"order_key\" = incoming.\"order_key\""
-    } else {
-        "\"seq\" = incoming.\"seq\", \
-               \"op\" = $1::smallint"
-    };
+    let update_set = "\"seq\" = incoming.\"seq\", \
+               \"op\" = $1::smallint";
     let incoming_values = quoted_keys
         .iter()
         .map(|key| format!("incoming.{key}"))
@@ -349,14 +338,9 @@ pub fn plan_async_mirror_batch_update(
     } else {
         format!("{conflict_keys}, \"seq\", \"op\"")
     };
-    let conflict_set = if include_order_key {
-        "\"seq\" = EXCLUDED.\"seq\", \
-               \"op\" = EXCLUDED.\"op\", \
-               \"order_key\" = EXCLUDED.\"order_key\""
-    } else {
-        "\"seq\" = EXCLUDED.\"seq\", \
-               \"op\" = EXCLUDED.\"op\""
-    };
+    // Order keys are immutable per PK; keep the first encoded value on conflict.
+    let conflict_set = "\"seq\" = EXCLUDED.\"seq\", \
+               \"op\" = EXCLUDED.\"op\"";
     let missing_key = quoted_keys
         .first()
         .expect("primary-key planner rejects an empty key");

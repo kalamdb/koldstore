@@ -614,7 +614,7 @@ AS $$
 BEGIN
     IF {distinct} THEN
         RAISE EXCEPTION
-            'pg-koldstore does not support primary-key updates on managed table %',
+            'pg-koldstore does not support primary-key or segment-order-column updates on managed table %',
             TG_TABLE_NAME;
     END IF;
     RETURN NEW;
