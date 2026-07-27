@@ -230,17 +230,17 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segment_stats (
   segment_id uuid NOT NULL REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,
   table_oid oid NOT NULL,
   scope_key text NOT NULL DEFAULT '',
-  column_name name NOT NULL,
+  column_id smallint NOT NULL,
   type_oid oid NOT NULL,
   min_value bytea,
   max_value bytea,
   null_count bigint,
   distinct_count bigint,
-  PRIMARY KEY (segment_id, column_name)
+  PRIMARY KEY (segment_id, column_id)
 );
 
 CREATE INDEX IF NOT EXISTS cold_segment_stats_lookup_idx
-  ON koldstore.cold_segment_stats (table_oid, scope_key, column_name, segment_id);
+  ON koldstore.cold_segment_stats (table_oid, scope_key, column_id, segment_id);
 
 -- NOTE: Do not add per-PK catalog tables (e.g. exact cold_pk_hints). Cold
 -- presence is discovered via cold_segment_stats / Parquet stats+bloom so catalog

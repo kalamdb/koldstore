@@ -3,7 +3,7 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use koldstore::spi::prepared_plan_key;
-use koldstore_common::{CommitSeq, SeqId, StablePkHash, TableName};
+use koldstore_common::{ColumnId, ColumnRef, CommitSeq, SeqId, StablePkHash, TableName};
 use koldstore_flush::job::{
     conditional_cleanup_allowed, FlushBatchBuilder, FlushBatchInput, FlushExecutionConfig,
     FlushWatermark, HotRowCandidate,
@@ -42,11 +42,15 @@ fn bench_flush_batch_builder(c: &mut Criterion) {
 
 fn bench_flush_metadata(c: &mut Criterion) {
     let plan = flush_input(10_000).plan();
+    let columns = [
+        ColumnRef::new(ColumnId::from_attnum(2), "created_day"),
+        ColumnRef::new(ColumnId::from_attnum(3), "priority"),
+    ];
     c.bench_function("flush_footer_summary", |b| {
         b.iter(|| black_box(&plan).footer_summary())
     });
     c.bench_function("flush_column_stats", |b| {
-        b.iter(|| black_box(&plan).column_stats(["created_day", "priority"]))
+        b.iter(|| black_box(&plan).column_stats(&columns))
     });
 }
 

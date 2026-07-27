@@ -1,5 +1,6 @@
 use koldstore_common::{
-    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape, PrimaryKeyShape,
+    ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    PrimaryKeyShape,
 };
 use koldstore_migrate::{
     capture::{plan_drop_mirror_dml_triggers, plan_mirror_capture, MirrorCapturePlan},
@@ -8,6 +9,7 @@ use koldstore_migrate::{
 
 fn pk_column(name: &str, ordinal: u16) -> PrimaryKeyColumnShape {
     PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(ordinal as i16),
         PkColumn::new(name).unwrap(),
         PkOrdinal::new(ordinal).unwrap(),
         PgTypeOid::new(20).unwrap(),

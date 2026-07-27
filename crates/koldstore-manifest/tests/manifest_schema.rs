@@ -39,7 +39,7 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
     };
     let mut segment =
         ManifestSegment::committed(1, "batch-1.parquet", 20..=30, 120..=130, 11, 8192, 1);
-    segment.pk_filter = Some(PkFilter::exact(vec![0, 1]));
+    segment.pk_filter = Some(PkFilter::exact(vec![1, 2]));
     manifest.append_segment(segment);
 
     let encoded = serde_json::to_string(&manifest).unwrap();
@@ -62,10 +62,9 @@ fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
         "created_at".to_string(),
         ManifestColumnStats::new(json!("2026-01-01T00:00:00Z"), json!("2026-01-31T00:00:00Z")),
     );
-    segment.bloom_filters.push(ManifestBloomFilter::bloom(
-        vec!["id".to_string()],
-        Some(0.01),
-    ));
+    segment
+        .bloom_filters
+        .push(ManifestBloomFilter::bloom(vec![1], Some(0.01)));
     manifest.append_segment(segment);
 
     let encoded = serde_json::to_string(&manifest).unwrap();
@@ -76,7 +75,7 @@ fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
         json!("2026-01-01T00:00:00Z")
     );
     assert_eq!(decoded.segments[0].bloom_filters[0].kind, "bloom");
-    assert_eq!(decoded.segments[0].bloom_filters[0].columns, vec!["id"]);
+    assert_eq!(decoded.segments[0].bloom_filters[0].column_ids, vec![1]);
 }
 
 #[test]
@@ -162,7 +161,7 @@ fn golden_manifest_fixture_remains_compatible() {
         value["segments"][0]["pk_filter"],
         json!({
             "kind": "exact",
-            "column_ids": [0],
+            "column_ids": [1],
         })
     );
 }

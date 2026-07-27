@@ -1,6 +1,6 @@
 //! Migration entrypoint planning.
 
-use koldstore_common::{is_safe_identifier, SqlStatement, TableKind};
+use koldstore_common::{is_safe_identifier, ColumnRef, SqlStatement, TableKind};
 use uuid::Uuid;
 
 use crate::backfill::DEFAULT_BACKFILL_BATCH_ROWS;
@@ -47,7 +47,7 @@ pub struct ExistingTableCatalog {
     /// Column metadata.
     pub columns: Vec<CatalogColumn>,
     /// Simple indexed or constrained columns eligible for cold metadata.
-    pub indexed_columns: Vec<String>,
+    pub indexed_columns: Vec<ColumnRef>,
 }
 
 /// Planned work for an async existing-table migration.

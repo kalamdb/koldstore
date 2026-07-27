@@ -1,3 +1,4 @@
+use koldstore_common::{ColumnId, ColumnRef};
 use koldstore_manifest::{
     build_manifest_segment_from_catalog_row, load_manifest_from_path, manifest_from_catalog_rows,
     manifest_paths, manifest_relative_segment_path, manifest_to_json_bytes, write_manifest_to_path,
@@ -17,14 +18,17 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
         row_count: 10,
         byte_size: 128,
         schema_version: 2,
-        column_stats: json!({"id": {"min": 1, "max": 10}}),
+        column_stats: json!({"1": {"min": 1, "max": 10}}),
     }];
 
     let manifest = manifest_from_catalog_rows(
         "app",
         "items",
         2,
-        &["id".to_string(), "tenant".to_string()],
+        &[
+            ColumnRef::new(ColumnId::from_attnum(7), "id"),
+            ColumnRef::new(ColumnId::from_attnum(11), "tenant"),
+        ],
         rows,
     )
     .unwrap();
@@ -40,7 +44,11 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
             .pk_filter
             .as_ref()
             .map(|filter| filter.column_ids.clone()),
-        Some(vec![1, 2])
+        Some(vec![7, 11])
+    );
+    assert_eq!(
+        manifest.segments[0].bloom_filters[0].column_ids,
+        vec![7, 11]
     );
     assert_eq!(
         manifest_relative_segment_path(
@@ -62,7 +70,7 @@ fn manifest_paths_and_round_trip_io() {
     let segment = build_manifest_segment_from_catalog_row(
         "app",
         "notes",
-        &["id".to_string()],
+        &[ColumnRef::new(ColumnId::from_attnum(7), "id")],
         CatalogManifestSegmentRow {
             object_path: "app/notes/001/segment-0001-aaaaaaaa.parquet".to_string(),
             batch_number: 1,
@@ -125,8 +133,14 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
             column_stats: json!({}),
         },
     ];
-    let manifest =
-        manifest_from_catalog_rows("app", "items", 1, &["id".to_string()], rows).unwrap();
+    let manifest = manifest_from_catalog_rows(
+        "app",
+        "items",
+        1,
+        &[ColumnRef::new(ColumnId::from_attnum(7), "id")],
+        rows,
+    )
+    .unwrap();
     assert_eq!(manifest.segments.len(), 2);
     assert_eq!(
         manifest.segments[0].path,

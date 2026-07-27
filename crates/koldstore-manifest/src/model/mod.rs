@@ -135,7 +135,7 @@ pub enum SegmentStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PkFilter {
     pub kind: String,
-    pub column_ids: Vec<u32>,
+    pub column_ids: Vec<i16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub false_positive_rate: Option<f64>,
 }
@@ -144,17 +144,17 @@ pub struct PkFilter {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestBloomFilter {
     pub kind: String,
-    pub columns: Vec<String>,
+    pub column_ids: Vec<i16>,
     pub false_positive_rate: Option<f64>,
 }
 
 impl ManifestBloomFilter {
-    /// Creates bloom filter metadata for the given columns.
+    /// Creates bloom filter metadata for the given stable column IDs.
     #[must_use]
-    pub fn bloom(columns: Vec<String>, false_positive_rate: Option<f64>) -> Self {
+    pub fn bloom(column_ids: Vec<i16>, false_positive_rate: Option<f64>) -> Self {
         Self {
             kind: "bloom".to_string(),
-            columns,
+            column_ids,
             false_positive_rate,
         }
     }
@@ -163,7 +163,7 @@ impl ManifestBloomFilter {
 impl PkFilter {
     /// Creates exact PK metadata.
     #[must_use]
-    pub fn exact(column_ids: Vec<u32>) -> Self {
+    pub fn exact(column_ids: Vec<i16>) -> Self {
         Self {
             kind: "exact".to_string(),
             column_ids,

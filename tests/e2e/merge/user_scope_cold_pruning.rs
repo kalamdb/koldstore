@@ -135,7 +135,13 @@ async fn scope_column_equality_prunes_cold_segments_via_catalog_stats() -> Resul
                 SELECT count(*)::bigint
                 FROM koldstore.cold_segment_stats
                 WHERE table_oid = $1::text::regclass::oid
-                  AND column_name = 'user_id'
+                  AND column_id = (
+                      SELECT attnum
+                      FROM pg_catalog.pg_attribute
+                      WHERE attrelid = $1::text::regclass
+                        AND attname = 'user_id'
+                        AND NOT attisdropped
+                  )
                 "#,
                 &[&relation],
             )

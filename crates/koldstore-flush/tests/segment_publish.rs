@@ -1,11 +1,16 @@
 //! Flush segment publish durability: encode → Create publish → readable final.
 
+use koldstore_common::{ColumnId, ColumnRef};
 use koldstore_flush::{write_flush_segment_with_client, FlushStats, FlushWriteChunk};
 use koldstore_parquet::{
     plan_clean_cold_record, record_batch_from_clean_cold_records, ColdRecordBatch, PgColumn, PgType,
 };
 use koldstore_storage::{open_filesystem_client, StorageClient, StorageClientError};
 use serde_json::json;
+
+fn indexed_columns() -> Vec<ColumnRef> {
+    vec![ColumnRef::new(ColumnId::from_attnum(1), "id")]
+}
 
 fn cold_chunk(rows: usize) -> FlushWriteChunk {
     let plans: Vec<_> = (1..=rows as i64)
@@ -56,6 +61,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     let client = open_filesystem_client(root.path().to_str().unwrap()).unwrap();
     let chunk = cold_chunk(5);
     let stats = FlushStats::from_write_chunk(&chunk).unwrap();
+    let indexed_columns = indexed_columns();
 
     let written = write_flush_segment_with_client(
         &client,
@@ -63,7 +69,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
         "items",
         "zstd",
         &["id".to_string()],
-        &["id".to_string()],
+        &indexed_columns,
         1,
         0,
         &chunk,
@@ -82,6 +88,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     assert!(written.object_path.ends_with(".parquet"));
     assert!(written.byte_size > 0);
     assert_eq!(written.checksum.len(), 64);
+    assert_eq!(written.column_stats, json!({"1": {"min": 1, "max": 5}}));
     let bytes = client.get(&written.object_path).unwrap();
     assert_eq!(bytes.len() as i64, written.byte_size);
     assert_eq!(
@@ -119,13 +126,14 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
     // batch_number=1 while concurrent DML changed the next encode payload.
     let orphan = cold_chunk(3);
     let orphan_stats = FlushStats::from_write_chunk(&orphan).unwrap();
+    let indexed_columns = indexed_columns();
     let first = write_flush_segment_with_client(
         &client,
         "app",
         "items",
         "zstd",
         &["id".to_string()],
-        &["id".to_string()],
+        &indexed_columns,
         1,
         1,
         &orphan,
@@ -141,7 +149,7 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
         "items",
         "zstd",
         &["id".to_string()],
-        &["id".to_string()],
+        &indexed_columns,
         1,
         1, // same batch_number as the orphaned attempt
         &retry_chunk,

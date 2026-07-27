@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use koldstore_catalog::{column_stats_min_max_map_into, CatalogManifestSegmentRow};
+use koldstore_common::ColumnRef;
 use thiserror::Error;
 
 use crate::model::{Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment, PkFilter};
@@ -30,7 +31,7 @@ pub fn manifest_from_catalog_rows(
     namespace: &str,
     table_name: &str,
     schema_version: u32,
-    primary_key_columns: &[String],
+    primary_key_columns: &[ColumnRef],
     rows: Vec<CatalogManifestSegmentRow>,
 ) -> Result<Manifest, ManifestAssemblyError> {
     let mut manifest = Manifest::new_shared(
@@ -56,7 +57,7 @@ pub fn manifest_from_catalog_rows(
 pub fn build_manifest_segment_from_catalog_row(
     namespace: &str,
     table_name: &str,
-    primary_key_columns: &[String],
+    primary_key_columns: &[ColumnRef],
     row: CatalogManifestSegmentRow,
 ) -> Result<ManifestSegment, ManifestAssemblyError> {
     let manifest_path = manifest_relative_segment_path(namespace, table_name, &row.object_path);
@@ -75,11 +76,13 @@ pub fn build_manifest_segment_from_catalog_row(
     );
     segment.column_stats = manifest_column_stats(row.column_stats);
     if !primary_key_columns.is_empty() {
-        segment.bloom_filters.push(ManifestBloomFilter::bloom(
-            primary_key_columns.to_vec(),
-            Some(0.01),
-        ));
-        let column_ids = (1..=primary_key_columns.len() as u32).collect::<Vec<_>>();
+        let column_ids = primary_key_columns
+            .iter()
+            .map(|column| column.column_id.get())
+            .collect::<Vec<_>>();
+        segment
+            .bloom_filters
+            .push(ManifestBloomFilter::bloom(column_ids.clone(), Some(0.01)));
         segment.pk_filter.replace(PkFilter::exact(column_ids));
     }
     Ok(segment)

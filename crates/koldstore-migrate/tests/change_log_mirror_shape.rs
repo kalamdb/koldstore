@@ -1,6 +1,6 @@
 use koldstore_common::{
-    PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
-    PrimaryKeyShape,
+    ColumnId, PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    PrimaryKeyColumnShape, PrimaryKeyShape,
 };
 use koldstore_migrate::{mirror, register, QualifiedTableName};
 
@@ -12,6 +12,7 @@ fn pk_column(
     typmod: i32,
 ) -> PrimaryKeyColumnShape {
     PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(ordinal as i16),
         PkColumn::new(name).unwrap(),
         PkOrdinal::new(ordinal).unwrap(),
         PgTypeOid::new(type_oid).unwrap(),
@@ -59,6 +60,7 @@ fn mirror_preserves_typmod_collation_and_domain_identity() {
     let code = pk_column("code", 1, 1043, "character varying", 36);
     let mut locale = pk_column("locale", 2, 25, "text", -1);
     locale = PrimaryKeyColumnShape::new(
+        locale.column_id(),
         locale.column().clone(),
         locale.ordinal(),
         locale.type_oid(),
@@ -69,6 +71,7 @@ fn mirror_preserves_typmod_collation_and_domain_identity() {
         true,
     );
     let domain = PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(3),
         PkColumn::new("message_id").unwrap(),
         PkOrdinal::new(3).unwrap(),
         PgTypeOid::new(80001).unwrap(),
@@ -97,6 +100,7 @@ fn primary_key_shape_probe_reads_exact_catalog_metadata() {
     assert!(probe.sql.contains("pg_type"));
     assert!(probe.sql.contains("pg_collation"));
     assert!(probe.sql.contains("collisdeterministic"));
+    assert!(probe.sql.contains("'column_id', a.attnum"));
     assert!(probe.sql.contains("domain_identity"));
     assert!(probe.sql.contains("$1::oid"));
 }
@@ -105,6 +109,7 @@ fn primary_key_shape_probe_reads_exact_catalog_metadata() {
 fn nondeterministic_primary_key_collation_is_rejected() {
     let error =
         register::primary_key_shape_from_catalog_rows(vec![register::PrimaryKeyShapeCatalogRow {
+            column_id: ColumnId::from_attnum(1),
             column: "id".to_string(),
             ordinal: 1,
             type_oid: 25,

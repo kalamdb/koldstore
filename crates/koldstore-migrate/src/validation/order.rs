@@ -1,6 +1,6 @@
 //! Existing-table migration ordering decisions.
 
-use koldstore_common::is_safe_identifier;
+use koldstore_common::{is_safe_identifier, ColumnId, ColumnRef};
 use koldstore_schema::{PgType, SchemaError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -8,6 +8,8 @@ use thiserror::Error;
 /// Catalog column metadata needed to choose a safe backfill order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogColumn {
+    /// Stable column ID from `pg_attribute.attnum`.
+    pub column_id: ColumnId,
     /// Column name.
     pub name: String,
     /// Supported PostgreSQL type parsed from catalog metadata.
@@ -26,6 +28,7 @@ pub struct CatalogColumn {
 
 #[derive(Debug, Deserialize, Serialize)]
 struct CatalogColumnWire {
+    column_id: ColumnId,
     name: String,
     type_name: String,
     is_primary_key: bool,
@@ -41,6 +44,7 @@ impl TryFrom<CatalogColumnWire> for CatalogColumn {
 
     fn try_from(wire: CatalogColumnWire) -> Result<Self, Self::Error> {
         Ok(Self {
+            column_id: wire.column_id,
             name: wire.name,
             pg_type: PgType::from_postgres_name(&wire.type_name)?,
             catalog_type_name: wire.type_name,
@@ -58,6 +62,7 @@ impl Serialize for CatalogColumn {
         S: serde::Serializer,
     {
         CatalogColumnWire {
+            column_id: self.column_id,
             name: self.name.clone(),
             type_name: self.catalog_type_name.clone(),
             is_primary_key: self.is_primary_key,
@@ -83,42 +88,49 @@ impl<'de> Deserialize<'de> for CatalogColumn {
 impl CatalogColumn {
     /// Creates bigint column metadata.
     #[must_use]
-    pub fn bigint(name: impl Into<String>) -> Self {
-        Self::typed(name, PgType::Int8, "bigint")
+    pub fn bigint(column_id: i16, name: impl Into<String>) -> Self {
+        Self::typed(column_id, name, PgType::Int8, "bigint")
     }
 
     /// Creates text column metadata.
     #[must_use]
-    pub fn text(name: impl Into<String>) -> Self {
-        Self::typed(name, PgType::Text, "text")
+    pub fn text(column_id: i16, name: impl Into<String>) -> Self {
+        Self::typed(column_id, name, PgType::Text, "text")
     }
 
     /// Creates uuid column metadata.
     #[must_use]
-    pub fn uuid(name: impl Into<String>) -> Self {
-        Self::typed(name, PgType::Uuid, "uuid")
+    pub fn uuid(column_id: i16, name: impl Into<String>) -> Self {
+        Self::typed(column_id, name, PgType::Uuid, "uuid")
     }
 
     /// Creates timestamp column metadata.
     #[must_use]
-    pub fn timestamp(name: impl Into<String>) -> Self {
-        Self::typed(name, PgType::Timestamptz, "timestamp without time zone")
+    pub fn timestamp(column_id: i16, name: impl Into<String>) -> Self {
+        Self::typed(
+            column_id,
+            name,
+            PgType::Timestamptz,
+            "timestamp without time zone",
+        )
     }
 
     /// Creates jsonb column metadata.
     #[must_use]
-    pub fn jsonb(name: impl Into<String>) -> Self {
-        Self::typed(name, PgType::Jsonb, "jsonb")
+    pub fn jsonb(column_id: i16, name: impl Into<String>) -> Self {
+        Self::typed(column_id, name, PgType::Jsonb, "jsonb")
     }
 
     /// Creates column metadata from a supported PostgreSQL type.
     #[must_use]
     pub fn typed(
+        column_id: i16,
         name: impl Into<String>,
         pg_type: PgType,
         catalog_type_name: impl Into<String>,
     ) -> Self {
         Self {
+            column_id: ColumnId::from_attnum(column_id),
             name: name.into(),
             pg_type,
             catalog_type_name: catalog_type_name.into(),
@@ -136,11 +148,11 @@ impl CatalogColumn {
     /// Panics when `type_name` is outside the MVP support matrix. Tests and
     /// builders should prefer [`Self::typed`] or the typed constructors.
     #[must_use]
-    pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
+    pub fn new(column_id: i16, name: impl Into<String>, type_name: impl Into<String>) -> Self {
         let catalog_type_name = type_name.into();
         let pg_type = PgType::from_postgres_name(&catalog_type_name)
             .expect("catalog column builders must use supported PostgreSQL types");
-        Self::typed(name, pg_type, catalog_type_name)
+        Self::typed(column_id, name, pg_type, catalog_type_name)
     }
 
     /// Returns the original catalog type spelling for SQL casts.
@@ -175,15 +187,15 @@ impl CatalogColumn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogPrimaryKey {
     /// Primary-key columns in index order.
-    pub columns: Vec<String>,
+    pub columns: Vec<ColumnRef>,
 }
 
 impl CatalogPrimaryKey {
     /// Builds a single-column primary key.
     #[must_use]
-    pub fn single(column: impl Into<String>) -> Self {
+    pub fn single(column_id: i16, column: impl Into<String>) -> Self {
         Self {
-            columns: vec![column.into()],
+            columns: vec![ColumnRef::new(ColumnId::from_attnum(column_id), column)],
         }
     }
 }
@@ -274,7 +286,7 @@ pub fn choose_migration_ordering(
     let Some(column) = request
         .columns
         .iter()
-        .find(|column| &column.name == pk_column)
+        .find(|column| column.column_id == pk_column.column_id)
     else {
         return Err(MigrationOrderingError::MissingOrderingIndicator);
     };

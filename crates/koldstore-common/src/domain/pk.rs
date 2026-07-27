@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{KoldstoreError, Result};
+use crate::{ColumnId, KoldstoreError, Result};
 
 /// A primary-key column name in logical order.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -168,6 +168,7 @@ impl PgCollation {
 /// Exact source-table primary-key column shape preserved by clean-schema mirrors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrimaryKeyColumnShape {
+    column_id: ColumnId,
     column: PkColumn,
     ordinal: PkOrdinal,
     type_oid: PgTypeOid,
@@ -183,6 +184,7 @@ impl PrimaryKeyColumnShape {
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub const fn new(
+        column_id: ColumnId,
         column: PkColumn,
         ordinal: PkOrdinal,
         type_oid: PgTypeOid,
@@ -193,6 +195,7 @@ impl PrimaryKeyColumnShape {
         not_null: bool,
     ) -> Self {
         Self {
+            column_id,
             column,
             ordinal,
             type_oid,
@@ -202,6 +205,12 @@ impl PrimaryKeyColumnShape {
             domain_identity,
             not_null,
         }
+    }
+
+    /// Returns the stable primary-key column ID.
+    #[must_use]
+    pub const fn column_id(&self) -> ColumnId {
+        self.column_id
     }
 
     /// Returns the primary-key column name.
@@ -274,6 +283,7 @@ impl PrimaryKeyShape {
         }
 
         let mut seen_columns = BTreeMap::new();
+        let mut seen_column_ids = BTreeMap::new();
         let mut seen_ordinals = BTreeMap::new();
         for (idx, column) in columns.iter().enumerate() {
             let expected = u16::try_from(idx + 1).map_err(|_| {
@@ -295,6 +305,15 @@ impl PrimaryKeyShape {
                 return Err(KoldstoreError::InvalidPrimaryKey(format!(
                     "duplicate primary-key column: {}",
                     column.column()
+                )));
+            }
+            if seen_column_ids
+                .insert(column.column_id(), column.ordinal().get())
+                .is_some()
+            {
+                return Err(KoldstoreError::InvalidPrimaryKey(format!(
+                    "duplicate primary-key column ID: {}",
+                    column.column_id()
                 )));
             }
             if seen_ordinals

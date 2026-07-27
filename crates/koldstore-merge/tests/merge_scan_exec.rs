@@ -182,8 +182,10 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
     let segments = vec![
         SegmentStatsHint {
             object_path: "app/items/batch-1.parquet".to_string(),
+            schema_version: 1,
+            physical_names: BTreeMap::new(),
             column_stats: BTreeMap::from([(
-                "qty".to_string(),
+                5,
                 koldstore_parquet::ColumnStats {
                     min: json!(1),
                     max: json!(10),
@@ -193,8 +195,10 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
         },
         SegmentStatsHint {
             object_path: "app/items/batch-2.parquet".to_string(),
+            schema_version: 1,
+            physical_names: BTreeMap::new(),
             column_stats: BTreeMap::from([(
-                "qty".to_string(),
+                5,
                 koldstore_parquet::ColumnStats {
                     min: json!(50),
                     max: json!(99),
@@ -204,6 +208,8 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
         },
         SegmentStatsHint {
             object_path: "app/items/batch-missing-stats.parquet".to_string(),
+            schema_version: 1,
+            physical_names: BTreeMap::new(),
             column_stats: BTreeMap::new(),
             byte_size: None,
         },
@@ -212,6 +218,7 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
     let selected = prune_segment_stats(
         &segments,
         &[SegmentPrunePredicate::closed_range(
+            5,
             "qty",
             json!(20),
             json!(60),
@@ -228,27 +235,51 @@ fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
 }
 
 #[test]
+fn manifest_stats_pruning_matches_stable_id_across_column_rename() {
+    let segments = vec![SegmentStatsHint {
+        object_path: "app/items/batch-1.parquet".to_string(),
+        schema_version: 1,
+        physical_names: BTreeMap::new(),
+        column_stats: BTreeMap::from([(
+            7,
+            koldstore_parquet::ColumnStats {
+                min: json!(1),
+                max: json!(10),
+            },
+        )]),
+        byte_size: None,
+    }];
+
+    let selected = prune_segment_stats(
+        &segments,
+        &[SegmentPrunePredicate::equality(7, "renamed_qty", json!(50))],
+    );
+
+    assert!(selected.is_empty());
+}
+
+#[test]
 fn scope_equality_is_retained_for_pre_merge_cold_prune() {
     let predicates = vec![
-        SegmentPrunePredicate::equality("id", json!(1)),
-        SegmentPrunePredicate::equality("tenant_id", json!("tenant-a")),
-        SegmentPrunePredicate::equality("conversation_id", json!("conv-1")),
-        SegmentPrunePredicate::lower_bound("tenant_id", json!("tenant-m")),
+        SegmentPrunePredicate::equality(1, "id", json!(1)),
+        SegmentPrunePredicate::equality(2, "tenant_id", json!("tenant-a")),
+        SegmentPrunePredicate::equality(3, "conversation_id", json!("conv-1")),
+        SegmentPrunePredicate::lower_bound(2, "tenant_id", json!("tenant-m")),
     ];
     let retained = retain_pre_merge_cold_prune_predicates(predicates, |column| match column {
-        "id" => Some(ColdPruneColumnPolicy {
+        1 => Some(ColdPruneColumnPolicy {
             is_primary_key: true,
             is_scope: false,
             ordered_stats_safe: true,
             equality_stats_safe: true,
         }),
-        "tenant_id" => Some(ColdPruneColumnPolicy {
+        2 => Some(ColdPruneColumnPolicy {
             is_primary_key: false,
             is_scope: true,
             ordered_stats_safe: false,
             equality_stats_safe: true,
         }),
-        "conversation_id" => Some(ColdPruneColumnPolicy {
+        3 => Some(ColdPruneColumnPolicy {
             is_primary_key: false,
             is_scope: false,
             ordered_stats_safe: false,
@@ -260,8 +291,8 @@ fn scope_equality_is_retained_for_pre_merge_cold_prune() {
     assert_eq!(
         retained,
         vec![
-            SegmentPrunePredicate::equality("id", json!(1)),
-            SegmentPrunePredicate::equality("tenant_id", json!("tenant-a")),
+            SegmentPrunePredicate::equality(1, "id", json!(1)),
+            SegmentPrunePredicate::equality(2, "tenant_id", json!("tenant-a")),
         ]
     );
 }
@@ -270,6 +301,7 @@ fn scope_equality_is_retained_for_pre_merge_cold_prune() {
 fn text_scope_range_predicates_are_not_pre_merge_safe() {
     let retained = retain_pre_merge_cold_prune_predicates(
         vec![SegmentPrunePredicate::lower_bound(
+            2,
             "tenant_id",
             json!("tenant-m"),
         )],
@@ -288,8 +320,8 @@ fn text_scope_range_predicates_are_not_pre_merge_safe() {
 #[test]
 fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
     let err = validate_prune_predicates_indexed(
-        &[SegmentPrunePredicate::equality("status", json!("open"))],
-        &["created_at".to_string()],
+        &[SegmentPrunePredicate::equality(2, "status", json!("open"))],
+        &[3],
     )
     .unwrap_err();
 
@@ -301,12 +333,15 @@ fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
 fn indexed_prune_predicates_keep_segments_without_manifest_stats() {
     let segments = vec![SegmentStatsHint {
         object_path: "app/items/batch-1.parquet".to_string(),
+        schema_version: 1,
+        physical_names: BTreeMap::new(),
         column_stats: BTreeMap::new(),
         byte_size: None,
     }];
     let selected = prune_segment_stats(
         &segments,
         &[SegmentPrunePredicate::equality(
+            3,
             "created_at",
             json!("2026-01-01"),
         )],

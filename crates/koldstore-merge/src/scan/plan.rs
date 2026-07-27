@@ -41,8 +41,12 @@ pub struct SegmentHint {
 pub struct SegmentStatsHint {
     /// Final object-store path.
     pub object_path: String,
+    /// Schema version used to write this segment.
+    pub schema_version: i32,
+    /// Physical Parquet names for requested columns, keyed by stable ID.
+    pub physical_names: BTreeMap<i16, String>,
     /// Segment-level min/max stats by column.
-    pub column_stats: BTreeMap<String, koldstore_parquet::ColumnStats>,
+    pub column_stats: BTreeMap<i16, koldstore_parquet::ColumnStats>,
     /// Object byte size when known (enables bounded footer range GETs on S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_size: Option<u64>,
@@ -51,7 +55,9 @@ pub struct SegmentStatsHint {
 /// Min/max predicate proven safe for segment-level candidate pruning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SegmentPrunePredicate {
-    /// Column whose segment stats should be checked.
+    /// Stable column ID whose segment stats should be checked.
+    pub column_id: i16,
+    /// Current column name for diagnostics and physical-name resolution.
     pub column: String,
     /// Inclusive lower bound, when present.
     pub min: Option<serde_json::Value>,
@@ -71,8 +77,9 @@ impl SegmentPrunePredicate {
 
     /// Builds an equality pruning predicate.
     #[must_use]
-    pub fn equality(column: impl Into<String>, value: serde_json::Value) -> Self {
+    pub fn equality(column_id: i16, column: impl Into<String>, value: serde_json::Value) -> Self {
         Self {
+            column_id,
             column: column.into(),
             min: Some(value.clone()),
             max: Some(value),
@@ -82,11 +89,13 @@ impl SegmentPrunePredicate {
     /// Builds an inclusive range pruning predicate.
     #[must_use]
     pub fn closed_range(
+        column_id: i16,
         column: impl Into<String>,
         min: serde_json::Value,
         max: serde_json::Value,
     ) -> Self {
         Self {
+            column_id,
             column: column.into(),
             min: Some(min),
             max: Some(max),
@@ -95,8 +104,9 @@ impl SegmentPrunePredicate {
 
     /// Builds a lower-bound pruning predicate.
     #[must_use]
-    pub fn lower_bound(column: impl Into<String>, min: serde_json::Value) -> Self {
+    pub fn lower_bound(column_id: i16, column: impl Into<String>, min: serde_json::Value) -> Self {
         Self {
+            column_id,
             column: column.into(),
             min: Some(min),
             max: None,
@@ -105,8 +115,9 @@ impl SegmentPrunePredicate {
 
     /// Builds an upper-bound pruning predicate.
     #[must_use]
-    pub fn upper_bound(column: impl Into<String>, max: serde_json::Value) -> Self {
+    pub fn upper_bound(column_id: i16, column: impl Into<String>, max: serde_json::Value) -> Self {
         Self {
+            column_id,
             column: column.into(),
             min: None,
             max: Some(max),
@@ -161,13 +172,12 @@ impl ColdPruneColumnPolicy {
 #[must_use]
 pub fn retain_pre_merge_cold_prune_predicates(
     predicates: Vec<SegmentPrunePredicate>,
-    mut policy_for: impl FnMut(&str) -> Option<ColdPruneColumnPolicy>,
+    mut policy_for: impl FnMut(i16) -> Option<ColdPruneColumnPolicy>,
 ) -> Vec<SegmentPrunePredicate> {
     predicates
         .into_iter()
         .filter(|predicate| {
-            policy_for(predicate.column.as_str())
-                .is_some_and(|policy| policy.allows_predicate(predicate))
+            policy_for(predicate.column_id).is_some_and(|policy| policy.allows_predicate(predicate))
         })
         .collect()
 }
@@ -214,14 +224,11 @@ pub fn prune_segment_stats_hints(
 /// not captured as an indexed cold-stat column.
 pub fn validate_prune_predicates_indexed(
     predicates: &[SegmentPrunePredicate],
-    indexed_columns: &[String],
+    indexed_column_ids: &[i16],
 ) -> Result<()> {
-    let indexed_columns = indexed_columns
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
+    let indexed_column_ids = indexed_column_ids.iter().copied().collect::<BTreeSet<_>>();
     for predicate in predicates {
-        if !indexed_columns.contains(predicate.column.as_str()) {
+        if !indexed_column_ids.contains(&predicate.column_id) {
             return Err(KoldstoreError::UnsafePredicate(format!(
                 "cold filter column `{}` is not indexed; koldstore cold reads require WHERE filters on indexed columns",
                 predicate.column
@@ -243,7 +250,7 @@ pub fn validate_prune_predicate_stats(
 ) -> Result<()> {
     for predicate in predicates {
         for segment in segments {
-            if !segment.column_stats.contains_key(&predicate.column) {
+            if !segment.column_stats.contains_key(&predicate.column_id) {
                 return Err(KoldstoreError::UnsafePredicate(format!(
                     "cold filter column `{}` is indexed but segment `{}` has no min/max stats",
                     predicate.column, segment.object_path
@@ -258,7 +265,7 @@ fn segment_may_match_predicate(
     segment: &SegmentStatsHint,
     predicate: &SegmentPrunePredicate,
 ) -> bool {
-    let Some(stats) = segment.column_stats.get(&predicate.column) else {
+    let Some(stats) = segment.column_stats.get(&predicate.column_id) else {
         return true;
     };
     if stats.min.is_null() || stats.max.is_null() {

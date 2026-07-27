@@ -275,7 +275,12 @@ unsafe extern "C-unwind" fn plan_custom_path(
         crate::catalog::cache::managed_table_snapshot(table_oid)
             .ok()
             .flatten()
-            .map(|snapshot| snapshot.primary_key_columns.clone())
+            .map(|snapshot| {
+                snapshot
+                    .primary_key_names()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     });
     let mut merge_plan = MergeScanPlan::new(table_oid.to_u32(), primary_key);
@@ -407,7 +412,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     let mut source_equality_columns = snapshot
         .primary_key_columns
         .iter()
-        .map(String::as_str)
+        .map(|column| column.name.as_str())
         .collect::<std::collections::HashSet<_>>();
     if let Some(scope) = snapshot.scope_column.as_deref() {
         source_equality_columns.insert(scope);

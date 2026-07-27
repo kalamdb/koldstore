@@ -1,4 +1,4 @@
-use koldstore_common::{ColumnClass, Predicate, PredicateValue};
+use koldstore_common::{ColumnClass, ColumnId, Predicate, PredicateValue};
 use koldstore_merge::rls;
 use serde_json::json;
 
@@ -11,6 +11,7 @@ fn unsupported_cold_rls_fails_closed() {
 #[test]
 fn security_quals_add_required_columns_or_fail_closed() {
     let qual = Predicate {
+        column_id: ColumnId::from_attnum(2),
         column: "tenant_id".to_string(),
         class: ColumnClass::Security,
         value: PredicateValue::Eq(json!("user-a")),
@@ -24,6 +25,7 @@ fn security_quals_add_required_columns_or_fail_closed() {
     );
 
     let unsupported = Predicate {
+        column_id: ColumnId::from_attnum(2),
         column: "tenant_id".to_string(),
         class: ColumnClass::Security,
         value: PredicateValue::Expression("current_user = owner".to_string()),

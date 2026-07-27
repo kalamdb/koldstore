@@ -404,6 +404,12 @@ fn manage_table_validation_context<'a>(
         .collect();
     let min_max_rows_per_file = u64::try_from(crate::guc::min_max_rows_per_file())
         .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
+    let primary_key_names = catalog
+        .primary_key
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
 
     koldstore_migrate::manage_table::ManageTableValidationContext {
         migration: MigrationValidationInput {
@@ -413,11 +419,11 @@ fn manage_table_validation_context<'a>(
             flush_enabled: hot_row_limit.is_some(),
             allow_fk_hot_only: false,
             columns,
-            primary_key: catalog.primary_key.columns.clone(),
+            primary_key: primary_key_names.clone(),
             expression_primary_key: false,
             indexes: Vec::new(),
             check_constraints: Vec::new(),
-            not_null_columns: catalog.primary_key.columns.clone(),
+            not_null_columns: primary_key_names,
             unique_constraints: constraints.unique_constraints,
             foreign_keys: constraints.foreign_keys,
         },
@@ -461,9 +467,9 @@ struct SchemaRegistrationInput<'a> {
     mirror_relation: &'a koldstore_migrate::QualifiedTableName,
     primary_key_shape: &'a koldstore_common::PrimaryKeyShape,
     initialization_state: koldstore_schema::MirrorInitializationState,
-    primary_key: &'a [String],
+    primary_key: &'a [koldstore_common::ColumnRef],
     columns: &'a [koldstore_migrate::order::CatalogColumn],
-    indexed_columns: &'a [String],
+    indexed_columns: &'a [koldstore_common::ColumnRef],
     options: &'a ManageTableOptions,
     active: bool,
     migration_status: MigrationStatus,
@@ -548,18 +554,40 @@ pub(crate) fn refresh_active_schema_if_changed(
         .columns
         .iter()
         .map(|column| koldstore_schema::CatalogColumnShape {
+            column_id: column.column_id,
             name: column.name.as_str(),
             pg_type: column.pg_type,
             catalog_type_name: column.catalog_type_name(),
         })
         .collect::<Vec<_>>();
+    let active_primary_key = active
+        .primary_key
+        .iter()
+        .map(|column| column.column_id)
+        .collect::<Vec<_>>();
+    let active_indexed_columns = active
+        .indexed_columns
+        .iter()
+        .map(|column| column.column_id)
+        .collect::<Vec<_>>();
+    let current_primary_key = catalog
+        .primary_key
+        .columns
+        .iter()
+        .map(|column| column.column_id)
+        .collect::<Vec<_>>();
+    let current_indexed_columns = catalog
+        .indexed_columns
+        .iter()
+        .map(|column| column.column_id)
+        .collect::<Vec<_>>();
     let action = koldstore_schema::plan_schema_evolution(&koldstore_schema::SchemaEvolutionInput {
-        active_primary_key: &active.primary_key,
+        active_primary_key: &active_primary_key,
         active_columns: &active.columns,
-        active_indexed_columns: &active.indexed_columns,
-        current_primary_key: &catalog.primary_key.columns,
+        active_indexed_columns: &active_indexed_columns,
+        current_primary_key: &current_primary_key,
         current_columns: &current_columns,
-        current_indexed_columns: &catalog.indexed_columns,
+        current_indexed_columns: &current_indexed_columns,
     })
     .map_err(|error| error.to_string())?;
     if action == koldstore_schema::SchemaEvolutionAction::Unchanged {

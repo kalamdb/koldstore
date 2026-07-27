@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{KoldstoreError, Result};
+use crate::{ColumnId, KoldstoreError, Result};
 
 /// Column category used to decide predicate pushdown safety.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,9 @@ pub enum PredicateValue {
 /// A simplified predicate description from PostgreSQL quals.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Predicate {
-    /// Column name.
+    /// Stable logical column identity.
+    pub column_id: ColumnId,
+    /// Column name for diagnostics.
     pub column: String,
     /// Column class.
     pub class: ColumnClass,

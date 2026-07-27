@@ -43,7 +43,7 @@ pub const REQUIRED_CATALOG_TABLES: &[CatalogTableSpec] = &[
     },
     CatalogTableSpec {
         name: "koldstore.cold_segment_stats",
-        purpose: "normalized per-column segment statistics for predicate pruning",
+        purpose: "normalized segment statistics keyed by stable column ID",
     },
 ];
 

@@ -50,21 +50,24 @@ fn format_bytes_human_matches_timescale_style_units() {
 
 #[test]
 fn merge_scan_plan_serializes_complete_custom_private_payload() {
-    use koldstore_common::{ColumnClass, Predicate, PredicateValue, ScopeKey, SeqId};
+    use koldstore_common::{ColumnClass, ColumnId, Predicate, PredicateValue, ScopeKey, SeqId};
     use merge_scan::plan::{MergeMetadataAttnums, MergeScanPlan, SegmentHint};
     use serde_json::json;
 
     let safe_pk = Predicate {
+        column_id: ColumnId::from_attnum(1),
         column: "id".to_string(),
         class: ColumnClass::PrimaryKey,
         value: PredicateValue::Eq(json!(42)),
     };
     let residual_status = Predicate {
+        column_id: ColumnId::from_attnum(2),
         column: "status".to_string(),
         class: ColumnClass::Mutable,
         value: PredicateValue::Eq(json!("open")),
     };
     let security_scope = Predicate {
+        column_id: ColumnId::from_attnum(3),
         column: "tenant_id".to_string(),
         class: ColumnClass::Security,
         value: PredicateValue::Eq(json!("tenant-a")),

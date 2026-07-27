@@ -208,9 +208,24 @@ SELECT jsonb_build_object(
       SELECT jsonb_agg(
           jsonb_build_object(
               'object_path', cs.object_path,
+              'schema_version', cs.schema_version,
+              'physical_names', COALESCE((
+                  SELECT jsonb_object_agg(
+                      (column_value->>'column_id'),
+                      (column_value->>'name')
+                  )
+                  FROM koldstore.schemas historical_schema
+                  CROSS JOIN LATERAL jsonb_array_elements(historical_schema.columns) column_value
+                  WHERE historical_schema.table_oid = cs.table_oid
+                    AND historical_schema.version = cs.schema_version
+                    AND (column_value->>'column_id')::smallint IN (
+                        SELECT value::smallint
+                        FROM pg_catalog.jsonb_array_elements_text($2::jsonb) AS requested(value)
+                    )
+              ), '{}'::jsonb),
               'column_stats', COALESCE((
                   SELECT jsonb_object_agg(
-                      css.column_name,
+                      css.column_id::text,
                       jsonb_strip_nulls(jsonb_build_object(
                           'min', CASE
                               WHEN css.min_value IS NULL THEN NULL
@@ -226,8 +241,9 @@ SELECT jsonb_build_object(
                   WHERE css.segment_id = cs.segment_id
                     AND css.table_oid = cs.table_oid
                     AND css.scope_key = cs.scope_key
-                    AND css.column_name::text IN (
-                        SELECT pg_catalog.jsonb_array_elements_text($2::jsonb)
+                    AND css.column_id IN (
+                        SELECT value::smallint
+                        FROM pg_catalog.jsonb_array_elements_text($2::jsonb) AS requested(value)
                     )
               ), '{}'::jsonb),
               'byte_size', cs.byte_size
@@ -384,9 +400,19 @@ mod tests {
         let statement = plan_in_sync_manifest_scan_context().unwrap();
 
         assert!(statement.sql.contains("koldstore.cold_segment_stats"));
+        assert!(statement.sql.contains("css.column_id"));
+        assert!(statement.sql.contains("css.column_id::text"));
+        assert!(statement
+            .sql
+            .contains("'schema_version', cs.schema_version"));
+        assert!(statement.sql.contains("'physical_names'"));
+        assert!(statement
+            .sql
+            .contains("historical_schema.version = cs.schema_version"));
         assert!(statement
             .sql
             .contains("jsonb_array_elements_text($2::jsonb)"));
+        assert!(!statement.sql.contains("css.column_name"));
         assert!(!statement.sql.contains("'column_stats', cs.column_stats"));
         assert_eq!(statement.param_types.len(), 2);
     }

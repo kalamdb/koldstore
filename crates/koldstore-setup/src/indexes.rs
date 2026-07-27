@@ -79,7 +79,7 @@ pub const REQUIRED_CATALOG_INDEXES: &[CatalogIndexSpec] = &[
         name: "cold_segment_stats_lookup_idx",
         table: "koldstore.cold_segment_stats",
         unique: false,
-        purpose: "predicate-column stats lookup for active segments",
+        purpose: "stable column-ID stats lookup for active segments",
     },
 ];
 

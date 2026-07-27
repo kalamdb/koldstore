@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
 use koldstore_catalog::ManagedTableSnapshot;
-use koldstore_common::{dedupe_nonblank, FlushPolicy, QualifiedTableName};
+use koldstore_common::{ColumnRef, FlushPolicy, QualifiedTableName};
 use koldstore_flush::{
     flush_mirror_fetch_limit, flush_phase, max_rows_per_file_from_policy,
     plan_apply_flush_row_count_deltas, relative_manifest_path, should_continue_flush_catchup,
@@ -37,7 +37,7 @@ pub(super) struct FlushPreparedContext {
     storage: FlushStorageContext,
     snapshot: Arc<ManagedTableSnapshot>,
     catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
-    indexed_columns: Vec<String>,
+    indexed_columns: Vec<ColumnRef>,
     max_rows_per_file: usize,
     target_file_size_bytes: Option<u64>,
 }
@@ -66,13 +66,15 @@ fn load_flush_prepared_context(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let catalog = crate::sql::migrate_pg::migration_catalog(table_oid.to_u32())?;
-    let indexed_columns = dedupe_nonblank(
-        snapshot
-            .primary_key_columns
-            .iter()
-            .map(String::as_str)
-            .chain(catalog.indexed_columns.iter().map(String::as_str)),
-    );
+    let mut seen_column_ids = std::collections::BTreeSet::new();
+    let indexed_columns = catalog
+        .columns
+        .iter()
+        .filter(|column| column.is_primary_key)
+        .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
+        .chain(catalog.indexed_columns.iter().cloned())
+        .filter(|column| seen_column_ids.insert(column.column_id))
+        .collect();
     let min_floor = u64::try_from(crate::guc::min_max_rows_per_file())
         .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
     let options = super::spi::active_manage_options(table_oid)?.unwrap_or_default();
@@ -129,7 +131,11 @@ pub(super) fn stream_write_flush_batches(
     let encode_input = StreamEncodeInput {
         table,
         mirror,
-        primary_key_columns: ctx.snapshot.primary_key_columns.clone(),
+        primary_key_columns: ctx
+            .snapshot
+            .primary_key_names()
+            .map(str::to_string)
+            .collect(),
         base_column_names: ctx
             .catalog_columns
             .iter()
@@ -142,7 +148,11 @@ pub(super) fn stream_write_flush_batches(
                 koldstore_parquet::PgColumn::new(column.name.clone(), column.pg_type, true)
             })
             .collect(),
-        indexed_columns: ctx.indexed_columns.clone(),
+        indexed_columns: ctx
+            .indexed_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect(),
         schema_version,
         max_seq: stats.max_seq,
         max_rows_per_file: ctx.max_rows_per_file,
@@ -225,12 +235,17 @@ fn write_streamed_chunk(
 ) -> Result<(), String> {
     crate::failpoints::hit("during_parquet_write")?;
     let chunk_stats = FlushStats::from_write_chunk(&chunk)?;
+    let primary_key_names = ctx
+        .snapshot
+        .primary_key_names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let written = write_flush_segment_with_client(
         client,
         &ctx.relation.namespace,
         &ctx.relation.name,
         &ctx.storage.compression,
-        &ctx.snapshot.primary_key_columns,
+        &primary_key_names,
         &ctx.indexed_columns,
         ctx.storage.schema_version,
         *batch_number,
@@ -320,9 +335,14 @@ pub(super) fn finalize_flush(
         outcome.prune_max_seq
     );
     crate::failpoints::hit("during_hot_cleanup")?;
+    let primary_key_names = ctx
+        .snapshot
+        .primary_key_names()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     let (mirror_pruned, hot_pruned) = prune_flushed_hot_rows(
         table_oid,
-        &ctx.snapshot.primary_key_columns,
+        &primary_key_names,
         outcome.prune_max_seq,
         outcome.mirror_ops.as_deref(),
     )?;

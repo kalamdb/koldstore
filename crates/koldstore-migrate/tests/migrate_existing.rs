@@ -1,5 +1,5 @@
 use koldstore_common::{
-    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
 };
 use koldstore_common::{SqlAccess as SpiAccess, SqlParamType};
 use koldstore_migrate::{
@@ -12,6 +12,7 @@ use koldstore_migrate::{
 
 fn pk() -> Vec<PrimaryKeyColumnShape> {
     vec![PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(1),
         PkColumn::new("id").unwrap(),
         PkOrdinal::new(1).unwrap(),
         PgTypeOid::new(20).unwrap(),

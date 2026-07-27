@@ -1,4 +1,4 @@
-use koldstore_common::ManageTableOptions;
+use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions};
 use koldstore_migrate::{
     jobs::MigrationJobPhase,
     order::{CatalogColumn, CatalogPrimaryKey, OrderingSource},
@@ -27,13 +27,13 @@ fn context() -> MigrationTableContext {
 #[test]
 fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
     let catalog = ExistingTableCatalog {
-        primary_key: CatalogPrimaryKey::single("id"),
-        indexed_columns: vec!["body".to_string()],
+        primary_key: CatalogPrimaryKey::single(1, "id"),
+        indexed_columns: vec![ColumnRef::new(ColumnId::from_attnum(2), "body")],
         columns: vec![
-            CatalogColumn::bigint("id")
+            CatalogColumn::bigint(1, "id")
                 .primary_key()
                 .default_expr("nextval('items_id_seq'::regclass)"),
-            CatalogColumn::text("body"),
+            CatalogColumn::text(2, "body"),
         ],
     };
 
@@ -79,11 +79,11 @@ fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
 #[test]
 fn existing_table_migration_plan_accepts_explicit_migration_order_by_from_options() {
     let catalog = ExistingTableCatalog {
-        primary_key: CatalogPrimaryKey::single("id"),
-        indexed_columns: vec!["created_at".to_string()],
+        primary_key: CatalogPrimaryKey::single(1, "id"),
+        indexed_columns: vec![ColumnRef::new(ColumnId::from_attnum(2), "created_at")],
         columns: vec![
-            CatalogColumn::uuid("id").primary_key(),
-            CatalogColumn::timestamp("created_at"),
+            CatalogColumn::uuid(1, "id").primary_key(),
+            CatalogColumn::timestamp(2, "created_at"),
         ],
     };
 
@@ -104,9 +104,9 @@ fn existing_table_migration_plan_accepts_explicit_migration_order_by_from_option
 #[test]
 fn existing_table_migration_plan_rejects_existing_rows_without_stable_ordering() {
     let catalog = ExistingTableCatalog {
-        primary_key: CatalogPrimaryKey::single("id"),
+        primary_key: CatalogPrimaryKey::single(1, "id"),
         indexed_columns: Vec::new(),
-        columns: vec![CatalogColumn::uuid("id").primary_key()],
+        columns: vec![CatalogColumn::uuid(1, "id").primary_key()],
     };
 
     let error = plan_existing_table_migration(

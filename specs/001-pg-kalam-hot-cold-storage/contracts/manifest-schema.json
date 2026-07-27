@@ -123,7 +123,7 @@
         },
         "column_stats": {
           "type": "object",
-          "description": "Per-column min/max keyed by column id or stable column name. Must include PK, _seq, _commit_seq, and configured indexed/immutable columns when supported.",
+          "description": "Per-column min/max keyed by stringified stable column_id. Must include PK, _seq, _commit_seq, and configured indexed/immutable columns when supported.",
           "additionalProperties": {
             "type": "object",
             "properties": {

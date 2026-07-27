@@ -1464,6 +1464,7 @@ version = "0.1.6-beta.0"
 dependencies = [
  "chrono",
  "koldstore-catalog",
+ "koldstore-common",
  "koldstore-storage",
  "serde",
  "serde_json",

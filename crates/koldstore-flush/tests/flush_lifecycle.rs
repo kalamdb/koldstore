@@ -102,7 +102,7 @@ fn bounded_flush_batch_builder_stops_before_row_or_memory_limits() {
 
 #[test]
 fn flush_stats_use_latest_live_values_and_ignore_tombstones() {
-    use koldstore_common::{CommitSeq, SeqId, StablePkHash};
+    use koldstore_common::{ColumnId, ColumnRef, CommitSeq, SeqId, StablePkHash};
     use koldstore_flush::job::{FlushBatchInput, HotRowCandidate};
     use serde_json::json;
 
@@ -128,19 +128,21 @@ fn flush_stats_use_latest_live_values_and_ignore_tombstones() {
     }
     .plan();
 
-    let stats = batch.segment_column_stats(["score", "status"]);
+    let columns = [
+        ColumnRef::new(ColumnId::from_attnum(3), "score"),
+        ColumnRef::new(ColumnId::from_attnum(4), "status"),
+    ];
+    let stats = batch.segment_column_stats(&columns);
 
-    assert_eq!(stats["score"].min, json!(30));
-    assert_eq!(stats["score"].max, json!(30));
-    assert_eq!(stats["status"].min, json!("new"));
-    assert_eq!(stats["status"].max, json!("new"));
-    assert_eq!(stats["seq"].min, json!(3));
-    assert_eq!(stats["seq"].max, json!(3));
+    assert_eq!(stats["3"].min, json!(30));
+    assert_eq!(stats["3"].max, json!(30));
+    assert_eq!(stats["4"].min, json!("new"));
+    assert_eq!(stats["4"].max, json!("new"));
 }
 
 #[test]
 fn flush_stats_omit_incomparable_columns_to_keep_pruning_conservative() {
-    use koldstore_common::{CommitSeq, SeqId, StablePkHash};
+    use koldstore_common::{ColumnId, ColumnRef, CommitSeq, SeqId, StablePkHash};
     use koldstore_flush::job::{FlushBatchInput, HotRowCandidate};
     use serde_json::json;
 
@@ -163,9 +165,9 @@ fn flush_stats_omit_incomparable_columns_to_keep_pruning_conservative() {
     }
     .plan();
 
-    let stats = batch.column_stats(["mixed"]);
+    let stats = batch.column_stats(&[ColumnRef::new(ColumnId::from_attnum(2), "mixed")]);
 
-    assert!(!stats.contains_key("mixed"));
+    assert!(!stats.contains_key("2"));
 }
 
 #[test]

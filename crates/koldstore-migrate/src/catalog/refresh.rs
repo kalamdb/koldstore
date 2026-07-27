@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use uuid::Uuid;
 
-use koldstore_common::{PrimaryKeyShape, SqlParamType, SqlResult, SqlStatement};
+use koldstore_common::{ColumnRef, PrimaryKeyShape, SqlParamType, SqlResult, SqlStatement};
 use koldstore_schema::{MirrorInitializationState, SchemaColumn};
 
 use crate::plan::ExistingTableCatalog;
@@ -61,11 +61,11 @@ pub struct ActiveSchemaRefreshContext {
     /// Mirror relation oid as text.
     pub mirror_relation: String,
     /// Active primary-key columns.
-    pub primary_key: Vec<String>,
+    pub primary_key: Vec<ColumnRef>,
     /// Active schema columns.
     pub columns: Vec<SchemaColumn>,
     /// Active indexed columns.
-    pub indexed_columns: Vec<String>,
+    pub indexed_columns: Vec<ColumnRef>,
     /// Active schema options.
     pub options: serde_json::Value,
 }

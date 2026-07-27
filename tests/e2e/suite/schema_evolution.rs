@@ -103,6 +103,249 @@ async fn alter_table_add_nullable_column_refreshes_schema_and_reads_old_cold_row
 }
 
 #[tokio::test]
+async fn rename_column_preserves_column_id_and_reads_across_schema_versions() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "schema_evolution_rename").await?;
+        let table = db.create_indexed_items_table("rename_items", 10).await?;
+        db.manage_shared(&table.relation, "id").await?;
+        assert_eq!(db.flush_table(&table.relation).await?, 10);
+
+        let before = db
+            .client
+            .query_one(
+                r#"
+                SELECT version,
+                       (
+                         SELECT c->>'column_id'
+                         FROM jsonb_array_elements(columns) AS c
+                         WHERE c->>'name' = 'title'
+                       ) AS title_column_id,
+                       (
+                         SELECT count(*)
+                         FROM koldstore.cold_segment_stats st
+                         JOIN koldstore.cold_segments cs
+                           ON cs.segment_id = st.segment_id
+                         WHERE cs.table_oid = s.table_oid
+                           AND cs.status = 'active'
+                           AND st.column_id = (
+                             SELECT (c->>'column_id')::smallint
+                             FROM jsonb_array_elements(s.columns) AS c
+                             WHERE c->>'name' = 'title'
+                           )
+                       ) AS title_stats_rows
+                FROM koldstore.schemas s
+                WHERE table_oid = $1::text::regclass::oid
+                  AND active
+                "#,
+                &[&table.relation],
+            )
+            .await?;
+        let version_before: i32 = before.get(0);
+        let title_column_id: String = before.get(1);
+        let title_stats_before: i64 = before.get(2);
+        assert_eq!(version_before, 1);
+        assert!(
+            title_stats_before > 0,
+            "expected cold stats for title before rename"
+        );
+
+        db.client
+            .batch_execute(&format!(
+                r#"
+                ALTER TABLE {} RENAME COLUMN title TO headline;
+                INSERT INTO {} (id, account_id, headline, qty, category)
+                VALUES (100, 1, 'after-rename', 10, 'new');
+                "#,
+                table.relation, table.relation
+            ))
+            .await?;
+        assert_eq!(db.flush_table(&table.relation).await?, 1);
+
+        let after = db
+            .client
+            .query_one(
+                r#"
+                SELECT version,
+                       (
+                         SELECT c->>'column_id'
+                         FROM jsonb_array_elements(columns) AS c
+                         WHERE c->>'name' = 'headline'
+                       ) AS headline_column_id,
+                       (
+                         SELECT count(*)
+                         FROM jsonb_array_elements(columns) AS c
+                         WHERE c->>'name' = 'title'
+                       ) AS old_name_rows,
+                       (
+                         SELECT count(*)
+                         FROM koldstore.cold_segment_stats st
+                         JOIN koldstore.cold_segments cs
+                           ON cs.segment_id = st.segment_id
+                         WHERE cs.table_oid = s.table_oid
+                           AND cs.status = 'active'
+                           AND st.column_id = $2::smallint
+                       ) AS stats_rows_for_id
+                FROM koldstore.schemas s
+                WHERE table_oid = $1::text::regclass::oid
+                  AND active
+                "#,
+                &[&table.relation, &title_column_id.parse::<i16>()?],
+            )
+            .await?;
+        let version_after: i32 = after.get(0);
+        let headline_column_id: String = after.get(1);
+        let old_name_rows: i64 = after.get(2);
+        let stats_rows_for_id: i64 = after.get(3);
+        assert!(
+            version_after > version_before,
+            "rename should refresh schema version"
+        );
+        assert_eq!(headline_column_id, title_column_id);
+        assert_eq!(old_name_rows, 0);
+        assert!(
+            stats_rows_for_id >= title_stats_before,
+            "rename must keep cold stats attached to the same column_id"
+        );
+
+        let rows = db
+            .client
+            .query(
+                &format!(
+                    "SELECT id, headline FROM {} WHERE id IN (1, 100) ORDER BY id",
+                    table.relation
+                ),
+                &[],
+            )
+            .await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get::<_, i64>(0), 1);
+        assert_eq!(
+            rows[0].get::<_, String>(1),
+            "item-000001",
+            "old cold rows must remain readable under the renamed column"
+        );
+        assert_eq!(rows[1].get::<_, i64>(0), 100);
+        assert_eq!(rows[1].get::<_, String>(1), "after-rename");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn drop_and_add_same_column_name_uses_new_column_id() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "schema_evolution_drop_add").await?;
+        let table = db.create_indexed_items_table("drop_add_items", 6).await?;
+        db.manage_shared(&table.relation, "id").await?;
+        assert_eq!(db.flush_table(&table.relation).await?, 6);
+
+        let before = db
+            .client
+            .query_one(
+                r#"
+                SELECT
+                  (SELECT c->>'column_id'
+                   FROM jsonb_array_elements(columns) AS c
+                   WHERE c->>'name' = 'qty') AS qty_column_id,
+                  (
+                    SELECT count(*)
+                    FROM koldstore.cold_segment_stats st
+                    JOIN koldstore.cold_segments cs
+                      ON cs.segment_id = st.segment_id
+                    WHERE cs.table_oid = s.table_oid
+                      AND cs.status = 'active'
+                      AND st.column_id = (
+                        SELECT (c->>'column_id')::smallint
+                        FROM jsonb_array_elements(s.columns) AS c
+                        WHERE c->>'name' = 'qty'
+                      )
+                  ) AS qty_stats_rows
+                FROM koldstore.schemas s
+                WHERE table_oid = $1::text::regclass::oid
+                  AND active
+                "#,
+                &[&table.relation],
+            )
+            .await?;
+        let old_column_id: String = before.get(0);
+        let old_stats_rows: i64 = before.get(1);
+        assert!(
+            old_stats_rows > 0,
+            "qty is indexed so flush should write cold_segment_stats for it"
+        );
+
+        db.client
+            .batch_execute(&format!(
+                r#"
+                DROP INDEX IF EXISTS {schema}.{table_name}_qty_idx;
+                ALTER TABLE {relation} DROP COLUMN qty;
+                ALTER TABLE {relation} ADD COLUMN qty integer NOT NULL DEFAULT 42;
+                INSERT INTO {relation} (id, account_id, title, qty, category)
+                VALUES (200, 1, 'post-drop-add', 42, 'new');
+                "#,
+                schema = db.schema,
+                table_name = table.table_name,
+                relation = table.relation
+            ))
+            .await?;
+        assert_eq!(db.flush_table(&table.relation).await?, 1);
+
+        let after = db
+            .client
+            .query_one(
+                r#"
+                SELECT
+                  (SELECT c->>'column_id'
+                   FROM jsonb_array_elements(columns) AS c
+                   WHERE c->>'name' = 'qty') AS qty_column_id,
+                  (
+                    SELECT count(*)
+                    FROM koldstore.cold_segment_stats st
+                    JOIN koldstore.cold_segments cs
+                      ON cs.segment_id = st.segment_id
+                    WHERE cs.table_oid = s.table_oid
+                      AND cs.status = 'active'
+                      AND st.column_id = $2::smallint
+                  ) AS old_id_stats_rows
+                FROM koldstore.schemas s
+                WHERE table_oid = $1::text::regclass::oid
+                  AND active
+                "#,
+                &[&table.relation, &old_column_id.parse::<i16>()?],
+            )
+            .await?;
+        let new_column_id: String = after.get(0);
+        let old_id_stats_rows: i64 = after.get(1);
+        assert_ne!(
+            new_column_id, old_column_id,
+            "drop+add must allocate a new column_id even when the name is reused"
+        );
+        assert!(
+            old_id_stats_rows > 0,
+            "old cold stats remain under the retired column_id and must not be reused as the new identity"
+        );
+
+        let rows = db
+            .client
+            .query(
+                &format!(
+                    "SELECT id, qty FROM {} WHERE id IN (1, 200) ORDER BY id",
+                    table.relation
+                ),
+                &[],
+            )
+            .await?;
+        assert_eq!(rows.len(), 2);
+        // Pre-drop cold rows lack the new attnum; they materialize NULL rather than
+        // reusing retired-column stats/identity.
+        assert_eq!(rows[0].get::<_, Option<i32>>(1), None);
+        assert_eq!(rows[1].get::<_, Option<i32>>(1), Some(42));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn unsupported_alter_table_type_records_error_job_without_pruning_hot_rows() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "schema_evolution_reject").await?;

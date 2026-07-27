@@ -4,6 +4,7 @@
 //! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
 
 use koldstore_catalog::CatalogManifestSegmentRow;
+use koldstore_common::ColumnRef;
 use koldstore_manifest::{segment_object_path, segment_path_token, table_object_prefix};
 use koldstore_parquet::validate_parquet_bytes;
 use koldstore_storage::{
@@ -64,7 +65,7 @@ pub fn write_flush_segment_file(
     base_path: &str,
     compression: &str,
     primary_key_columns: &[String],
-    indexed_columns: &[String],
+    indexed_columns: &[ColumnRef],
     schema_version: i32,
     batch_number: i32,
     chunk: &FlushWriteChunk,
@@ -97,7 +98,7 @@ pub fn write_flush_segment_with_client(
     table_name: &str,
     _compression: &str,
     _primary_key_columns: &[String],
-    _indexed_columns: &[String],
+    indexed_columns: &[ColumnRef],
     schema_version: i32,
     batch_number: i32,
     chunk: &FlushWriteChunk,
@@ -133,7 +134,7 @@ pub fn write_flush_segment_with_client(
     let published = publish_immutable_object(client, &temp_key, &object_path, bytes)
         .map_err(|error| error.to_string())?;
 
-    let column_stats = indexed_column_stats_json(&chunk.indexed_bounds, chunk_stats);
+    let column_stats = indexed_column_stats_json(&chunk.indexed_bounds, indexed_columns);
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
     let catalog_row = CatalogManifestSegmentRow {
         object_path: object_path.clone(),

@@ -26,7 +26,7 @@
       "schema_version": 1,
       "pk_filter": {
         "kind": "exact",
-        "column_ids": [0]
+        "column_ids": [1]
       },
       "status": "committed",
       "checksum": "sha256:golden",

@@ -1,11 +1,13 @@
 //! Qual classification helpers.
 
-use koldstore_common::{ColumnClass, Predicate, PredicateClass, PredicateValue, Result};
+use koldstore_common::{ColumnClass, ColumnId, Predicate, PredicateClass, PredicateValue, Result};
 
 /// Inclusive integer range extracted for safe row-group pruning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PruningRange {
-    /// Column name.
+    /// Stable logical column identity.
+    pub column_id: ColumnId,
+    /// Column name for diagnostics.
     pub column: String,
     /// Inclusive minimum.
     pub min: i64,
@@ -17,17 +19,17 @@ pub struct PruningRange {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PruningPlan {
     /// PK columns with equality or IN filters.
-    pub pk_columns: Vec<String>,
+    pub pk_columns: Vec<ColumnId>,
     /// Scope columns with equality filters.
-    pub scope_columns: Vec<String>,
+    pub scope_columns: Vec<ColumnId>,
     /// Optional `seq` range.
     pub seq_range: Option<PruningRange>,
     /// Optional commit-sequence range.
     pub commit_seq_range: Option<PruningRange>,
     /// Immutable/stat-only columns safe for pre-merge pruning.
-    pub immutable_stat_columns: Vec<String>,
+    pub immutable_stat_columns: Vec<ColumnId>,
     /// Columns that must remain post-merge residual filters.
-    pub residual_columns: Vec<String>,
+    pub residual_columns: Vec<ColumnId>,
 }
 
 /// Classified predicates.
@@ -45,12 +47,12 @@ impl ClassifiedPredicates {
         !self.residual.is_empty() || !self.security.is_empty()
     }
 
-    /// Returns safe-pruning column names in classification order.
+    /// Returns safe-pruning column IDs in classification order.
     #[must_use]
-    pub fn safe_pruning_columns(&self) -> Vec<String> {
+    pub fn safe_pruning_column_ids(&self) -> Vec<ColumnId> {
         self.safe
             .iter()
-            .map(|predicate| predicate.column.clone())
+            .map(|predicate| predicate.column_id)
             .collect()
     }
 }
@@ -80,22 +82,22 @@ pub fn build_pruning_plan(predicates: &[Predicate]) -> Result<PruningPlan> {
             .residual
             .iter()
             .chain(classified.security.iter())
-            .map(|predicate| predicate.column.clone())
+            .map(|predicate| predicate.column_id)
             .collect(),
         ..PruningPlan::default()
     };
 
     for predicate in classified.safe {
         match predicate.class {
-            ColumnClass::PrimaryKey => plan.pk_columns.push(predicate.column),
-            ColumnClass::Scope => plan.scope_columns.push(predicate.column),
+            ColumnClass::PrimaryKey => plan.pk_columns.push(predicate.column_id),
+            ColumnClass::Scope => plan.scope_columns.push(predicate.column_id),
             ColumnClass::Seq => {
                 plan.seq_range = range_from_predicate(&predicate);
             }
             ColumnClass::CommitSeq => {
                 plan.commit_seq_range = range_from_predicate(&predicate);
             }
-            ColumnClass::Immutable => plan.immutable_stat_columns.push(predicate.column),
+            ColumnClass::Immutable => plan.immutable_stat_columns.push(predicate.column_id),
             ColumnClass::Mutable | ColumnClass::Security => {}
         }
     }
@@ -106,6 +108,7 @@ pub fn build_pruning_plan(predicates: &[Predicate]) -> Result<PruningPlan> {
 fn range_from_predicate(predicate: &Predicate) -> Option<PruningRange> {
     match predicate.value {
         PredicateValue::Range { min, max } => Some(PruningRange {
+            column_id: predicate.column_id,
             column: predicate.column.clone(),
             min,
             max,

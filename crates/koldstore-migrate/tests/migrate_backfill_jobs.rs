@@ -1,6 +1,6 @@
 use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_common::{
-    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
 };
 use koldstore_migrate::{
     backfill::plan_mirror_initialization_batch,
@@ -27,6 +27,7 @@ fn ordering() -> MigrationOrdering {
 #[test]
 fn existing_table_mirror_initialization_batches_without_rewriting_base_schema() {
     let pk = vec![PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(1),
         PkColumn::new("id").unwrap(),
         PkOrdinal::new(1).unwrap(),
         PgTypeOid::new(20).unwrap(),

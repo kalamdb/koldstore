@@ -70,10 +70,9 @@ fn build_segments(count: usize) -> Vec<ManifestSegment> {
                 1,
             );
             segment.column_stats = column_stats(idx);
-            segment.bloom_filters.push(ManifestBloomFilter::bloom(
-                vec!["user_id".to_string()],
-                Some(0.01),
-            ));
+            segment
+                .bloom_filters
+                .push(ManifestBloomFilter::bloom(vec![2], Some(0.01)));
             segment
         })
         .collect()
@@ -150,7 +149,7 @@ fn count_segments_with_user_bloom(segments: &[ManifestSegment]) -> usize {
             segment
                 .bloom_filters
                 .iter()
-                .any(|filter| filter.columns.iter().any(|column| column == "user_id"))
+                .any(|filter| filter.column_ids.contains(&2))
         })
         .count()
 }

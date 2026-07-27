@@ -1,6 +1,6 @@
 use koldstore_common::{
-    MirrorOperation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
-    TableName,
+    ColumnId, MirrorOperation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    PrimaryKeyColumnShape, TableName,
 };
 use koldstore_mirror::{
     mirror_relation_for_source, plan_async_mirror_batch_update, plan_async_mirror_batch_upsert,
@@ -11,6 +11,7 @@ use koldstore_mirror::{
 
 fn pk_shape(name: &str, type_name: &str) -> PrimaryKeyColumnShape {
     PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(1),
         PkColumn::new(name).unwrap(),
         PkOrdinal::new(1).unwrap(),
         PgTypeOid::new(20).unwrap(),

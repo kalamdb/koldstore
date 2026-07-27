@@ -27,6 +27,22 @@ fn canonical_install_sql_has_required_setup_objects() {
 }
 
 #[test]
+fn cold_segment_stats_uses_stable_column_id_identity() {
+    let table_start = INSTALL_SQL
+        .find("CREATE TABLE IF NOT EXISTS koldstore.cold_segment_stats")
+        .unwrap();
+    let table_sql = &INSTALL_SQL[table_start..];
+    let table_end = table_sql.find(");").unwrap();
+    let table_sql = &table_sql[..table_end];
+
+    assert!(table_sql.contains("column_id smallint NOT NULL"));
+    assert!(table_sql.contains("PRIMARY KEY (segment_id, column_id)"));
+    assert!(!table_sql.contains("column_name"));
+    assert!(INSTALL_SQL
+        .contains("ON koldstore.cold_segment_stats (table_oid, scope_key, column_id, segment_id)"));
+}
+
+#[test]
 fn canonical_install_sql_has_no_duplicate_named_objects() {
     let plan = BootstrapPlan::from_sql(INSTALL_SQL);
 

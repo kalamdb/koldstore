@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use koldstore_common::TableName;
+use koldstore_common::{ColumnRef, TableName};
 use koldstore_schema::MirrorInitializationState;
 use serde::Deserialize;
 
@@ -176,12 +176,21 @@ pub struct ManagedTableSnapshot {
     pub initialization_state: MirrorInitializationState,
     /// Active change-log mirror relation.
     pub mirror_relation: TableName,
-    /// Preserved primary-key columns.
-    pub primary_key_columns: Vec<String>,
+    /// Preserved primary-key columns with stable identity.
+    pub primary_key_columns: Vec<ColumnRef>,
     /// Hash of the exact primary-key shape JSON.
     pub primary_key_shape_hash: u64,
     /// Optional user-scope column.
     pub scope_column: Option<String>,
+}
+
+impl ManagedTableSnapshot {
+    /// Returns current-schema primary-key names for SQL and Parquet boundaries.
+    pub fn primary_key_names(&self) -> impl Iterator<Item = &str> {
+        self.primary_key_columns
+            .iter()
+            .map(|column| column.name.as_str())
+    }
 }
 
 /// In-process cache keyed by table OID.
@@ -291,7 +300,7 @@ struct ManagedTableSnapshotWire {
     active: bool,
     initialization_state: MirrorInitializationState,
     mirror_relation: String,
-    primary_key: Vec<String>,
+    primary_key: Vec<ColumnRef>,
     primary_key_shape: serde_json::Value,
     #[serde(default)]
     scope_column: Option<serde_json::Value>,
@@ -320,9 +329,9 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
         };
         let mut hasher = DefaultHasher::new();
         for column in &wire.primary_key {
-            column.hash(&mut hasher);
+            column.column_id.hash(&mut hasher);
         }
-        hash_json_value(&wire.primary_key_shape, &mut hasher);
+        hash_primary_key_shape(&wire.primary_key_shape, &mut hasher);
 
         Ok(Self {
             table_oid,
@@ -337,7 +346,7 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
     }
 }
 
-fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
+fn hash_primary_key_shape(value: &serde_json::Value, hasher: &mut impl Hasher) {
     match value {
         serde_json::Value::Null => 0u8.hash(hasher),
         serde_json::Value::Bool(flag) => {
@@ -358,15 +367,19 @@ fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
             4u8.hash(hasher);
             items.len().hash(hasher);
             for item in items {
-                hash_json_value(item, hasher);
+                hash_primary_key_shape(item, hasher);
             }
         }
         serde_json::Value::Object(map) => {
             5u8.hash(hasher);
-            map.len().hash(hasher);
-            for (key, item) in map {
+            let stable_fields = map
+                .iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "name" | "column"))
+                .collect::<Vec<_>>();
+            stable_fields.len().hash(hasher);
+            for (key, item) in stable_fields {
                 key.hash(hasher);
-                hash_json_value(item, hasher);
+                hash_primary_key_shape(item, hasher);
             }
         }
     }
@@ -374,7 +387,57 @@ fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoundedOidCache, ManagedTableSnapshotCache, OptionalLookupCache};
+    use koldstore_common::ColumnId;
+
+    use super::{
+        decode_managed_table_snapshot, BoundedOidCache, ManagedTableSnapshotCache,
+        OptionalLookupCache,
+    };
+
+    #[test]
+    fn managed_table_snapshot_decodes_stable_primary_key_refs() {
+        let snapshot = decode_managed_table_snapshot(&serde_json::json!({
+            "table_oid": 42,
+            "schema_version": 3,
+            "active": true,
+            "initialization_state": "complete",
+            "mirror_relation": "koldstore_mirror.items",
+            "primary_key": [{"column_id": 7, "name": "renamed_id"}],
+            "primary_key_shape": {"columns": [{"column_id": 7, "name": "renamed_id"}]},
+            "scope_column": null
+        }))
+        .unwrap();
+
+        assert_eq!(
+            snapshot.primary_key_columns[0].column_id,
+            ColumnId::from_attnum(7)
+        );
+        assert_eq!(snapshot.primary_key_columns[0].name, "renamed_id");
+    }
+
+    #[test]
+    fn primary_key_shape_hash_is_stable_across_rename() {
+        let snapshot = |name: &str| {
+            decode_managed_table_snapshot(&serde_json::json!({
+                "table_oid": 42,
+                "schema_version": 3,
+                "active": true,
+                "initialization_state": "complete",
+                "mirror_relation": "koldstore_mirror.items",
+                "primary_key": [{"column_id": 7, "name": name}],
+                "primary_key_shape": {
+                    "columns": [{"column_id": 7, "name": name, "type_oid": 20}]
+                },
+                "scope_column": null
+            }))
+            .unwrap()
+        };
+
+        assert_eq!(
+            snapshot("id").primary_key_shape_hash,
+            snapshot("renamed_id").primary_key_shape_hash
+        );
+    }
 
     #[test]
     fn optional_lookup_cache_distinguishes_miss_from_cached_absence() {

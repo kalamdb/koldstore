@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use koldstore_common::{dedupe_nonblank, ColdRow};
+use koldstore_common::{ColdRow, ColumnRef};
 use koldstore_merge::scan::plan::{
     prune_segment_stats_hints, retain_pre_merge_cold_prune_predicates,
     validate_prune_predicates_indexed, ColdPruneColumnPolicy, SegmentPrunePredicate,
@@ -41,38 +41,54 @@ pub(super) fn load_cold_rows_for_merge(
             unsafe {
                 segment_prune_predicates(table_oid, scanrelid, qual, &catalog.columns, params)
             },
-            |column_name| {
+            |column_id| {
                 let column = catalog
                     .columns
                     .iter()
-                    .find(|column| column.name == column_name)?;
+                    .find(|column| column.column_id.get() == column_id)?;
                 Some(cold_prune_column_policy(column, scope_column))
             },
         );
-        let predicate_columns = dedupe_nonblank(
-            prune_predicates
+        let projection_columns =
+            projection_columns(projected_columns, &snapshot.primary_key_columns);
+        let mut requested_columns = projection_columns.clone();
+        requested_columns.extend(prune_predicates.iter().filter_map(|predicate| {
+            catalog
+                .columns
                 .iter()
-                .map(|predicate| predicate.column.as_str()),
-        );
+                .find(|column| column.column_id.get() == predicate.column_id)
+                .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
+        }));
+        requested_columns.sort_by_key(|column| column.column_id);
+        requested_columns.dedup_by_key(|column| column.column_id);
         let manifest_started = Instant::now();
         let Some(manifest_stats) =
-            crate::catalog::cache::cached_manifest_segment_stats(table_oid, &predicate_columns)?
+            crate::catalog::cache::cached_manifest_segment_stats(table_oid, &requested_columns)?
         else {
             return Ok((ColdReadProfile::empty("(none)"), Vec::new()));
         };
         let manifest_read_ms = elapsed_ms(manifest_started);
         // Scope is always eligible for catalog stats prune even when it is not
         // separately listed in indexed_columns (it usually is via secondary indexes).
-        let indexed_filter_columns = dedupe_nonblank(
-            catalog
-                .primary_key
-                .columns
-                .iter()
-                .map(String::as_str)
-                .chain(catalog.indexed_columns.iter().map(String::as_str))
-                .chain(scope_column),
-        );
-        validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_columns)
+        let mut indexed_filter_column_ids = catalog
+            .primary_key
+            .columns
+            .iter()
+            .chain(catalog.indexed_columns.iter())
+            .map(|column| column.column_id.get())
+            .collect::<Vec<_>>();
+        if let Some(scope) = scope_column {
+            indexed_filter_column_ids.extend(
+                catalog
+                    .columns
+                    .iter()
+                    .filter(|column| column.name == scope)
+                    .map(|column| column.column_id.get()),
+            );
+        }
+        indexed_filter_column_ids.sort_unstable();
+        indexed_filter_column_ids.dedup();
+        validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_column_ids)
             .map_err(|error| error.to_string())?;
         let segments_considered = manifest_stats.segments.len();
         let segments = prune_segment_stats_hints(&manifest_stats.segments, &prune_predicates);
@@ -82,7 +98,10 @@ pub(super) fn load_cold_rows_for_merge(
         // will reflect that primary prune; min/max remains secondary.
         let segments_pruned_scope = 0usize;
 
-        let projection = projection_column_names(projected_columns, &snapshot.primary_key_columns);
+        let projection = projection_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
         let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
 
         let mut profile = ColdReadProfile {
@@ -94,7 +113,9 @@ pub(super) fn load_cold_rows_for_merge(
             segments_pruned_scope,
             segments_pruned_min_max,
             segments_opened: segments.len(),
-            pk_probe: pk_probe.clone(),
+            pk_probe: pk_probe
+                .as_ref()
+                .map(|(column, values)| (column.name.clone(), values.clone())),
             projected_columns: projection.clone(),
             segments: vec![],
         };
@@ -107,19 +128,6 @@ pub(super) fn load_cold_rows_for_merge(
             return Err("cold reads are disabled by koldstore.cold_reads".to_string());
         }
 
-        let parquet_columns = catalog
-            .columns
-            .iter()
-            .filter(|column| projection.iter().any(|name| name == &column.name))
-            .map(|column| PgColumn::new(column.name.clone(), column.pg_type, true))
-            .collect::<Vec<_>>();
-        let mut options = ParquetReadOptions::new().with_columns(projection);
-        // Point-lookup path: push PK equality into Parquet row-group prune
-        // (column-chunk min/max + native bloom filters written on flush).
-        if let Some((column, values)) = pk_probe {
-            options = options.with_pk_values(column, values);
-        }
-
         let client = open_client_from_catalog_fields(
             &manifest_stats.storage_type,
             &manifest_stats.base_path,
@@ -130,9 +138,11 @@ pub(super) fn load_cold_rows_for_merge(
         let (cold_rows, segment_profiles) = cold_rows_from_segments(
             &client,
             &segments,
-            &parquet_columns,
+            &projection_columns,
+            &catalog.columns,
             &snapshot.primary_key_columns,
-            &options,
+            snapshot.schema_version,
+            pk_probe,
         )?;
         profile.segments = segment_profiles;
 
@@ -203,20 +213,23 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
     })
 }
 
-fn projection_column_names(
+fn projection_columns(
     projected: &[&koldstore_migrate::order::CatalogColumn],
-    primary_key_columns: &[String],
-) -> Vec<String> {
-    let mut names = projected
+    primary_key_columns: &[ColumnRef],
+) -> Vec<ColumnRef> {
+    let mut columns = projected
         .iter()
-        .map(|column| column.name.clone())
+        .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
         .collect::<Vec<_>>();
     for pk in primary_key_columns {
-        if !names.iter().any(|name| name == pk) {
-            names.push(pk.clone());
+        if !columns
+            .iter()
+            .any(|column| column.column_id == pk.column_id)
+        {
+            columns.push(pk.clone());
         }
     }
-    names
+    columns
 }
 
 /// Extracts a single-column PK equality probe for Parquet bloom/min-max pruning.
@@ -226,14 +239,14 @@ fn projection_column_names(
 /// bloom probing is wired.
 fn pk_equality_values(
     predicates: &[SegmentPrunePredicate],
-    primary_key_columns: &[String],
-) -> Option<(String, Vec<String>)> {
+    primary_key_columns: &[ColumnRef],
+) -> Option<(ColumnRef, Vec<String>)> {
     if primary_key_columns.len() != 1 {
         return None;
     }
     let pk = &primary_key_columns[0];
     let predicate = predicates.iter().find(|predicate| {
-        predicate.column == *pk
+        predicate.column_id == pk.column_id.get()
             && predicate.min.is_some()
             && predicate.max.is_some()
             && predicate.min == predicate.max
@@ -251,9 +264,11 @@ fn pk_equality_values(
 fn cold_rows_from_segments(
     client: &koldstore_storage::ObjectStoreClient,
     segment_hints: &[SegmentStatsHint],
-    columns: &[PgColumn],
-    primary_key_columns: &[String],
-    options: &ParquetReadOptions,
+    projected_columns: &[ColumnRef],
+    catalog_columns: &[koldstore_migrate::order::CatalogColumn],
+    primary_key_columns: &[ColumnRef],
+    current_schema_version: i32,
+    pk_probe: Option<(ColumnRef, Vec<String>)>,
 ) -> Result<(Vec<ColdRow>, Vec<SegmentReadProfile>), String> {
     // One ObjectStore client for all segments (filesystem or S3). Parquet reads
     // are footer-first with range GETs — no full-object download. Known
@@ -262,6 +277,73 @@ fn cold_rows_from_segments(
     let mut rows = Vec::new();
     let mut segments = Vec::with_capacity(segment_hints.len());
     for hint in segment_hints {
+        // Columns added after a segment was written have no physical field in
+        // that schema version; omit them from the Parquet projection and fill
+        // NULL after remap. Renames keep the same column_id with a different
+        // physical name in historical_schema.
+        let physical_names = projected_columns
+            .iter()
+            .filter_map(|column| {
+                physical_name_for_segment(column, hint, current_schema_version)
+                    .transpose()
+                    .map(|result| result.map(|physical_name| (column.clone(), physical_name)))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let missing_logical_names = projected_columns
+            .iter()
+            .filter(|column| {
+                !physical_names
+                    .iter()
+                    .any(|(present, _)| present.column_id == column.column_id)
+            })
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let columns = physical_names
+            .iter()
+            .map(|(column, physical_name)| {
+                let catalog_column = catalog_columns
+                    .iter()
+                    .find(|candidate| candidate.column_id == column.column_id)
+                    .ok_or_else(|| {
+                        format!(
+                            "catalog is missing projected column_id {}",
+                            column.column_id
+                        )
+                    })?;
+                Ok(PgColumn::new(
+                    physical_name.clone(),
+                    catalog_column.pg_type,
+                    true,
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let physical_pk_names = primary_key_columns
+            .iter()
+            .map(|column| {
+                physical_name_for_segment(column, hint, current_schema_version)?.ok_or_else(|| {
+                    format!(
+                        "schema version {} is missing primary-key column_id {}",
+                        hint.schema_version, column.column_id
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut options = ParquetReadOptions::new().with_columns(
+            physical_names
+                .iter()
+                .map(|(_, name)| name.clone())
+                .collect::<Vec<_>>(),
+        );
+        if let Some((pk_column, values)) = &pk_probe {
+            let physical_pk = physical_name_for_segment(pk_column, hint, current_schema_version)?
+                .ok_or_else(|| {
+                    format!(
+                        "schema version {} is missing primary-key column_id {}",
+                        hint.schema_version, pk_column.column_id
+                    )
+                })?;
+            options = options.with_pk_values(physical_pk, values.clone());
+        }
         let started = Instant::now();
         let _permit = crate::merge_scan::reader_pool::try_acquire_parquet_reader_permit(
             crate::guc::max_open_parquet_readers(),
@@ -270,9 +352,9 @@ fn cold_rows_from_segments(
             std::sync::Arc::clone(&store),
             &hint.object_path,
             hint.byte_size,
-            columns,
-            primary_key_columns,
-            options,
+            &columns,
+            &physical_pk_names,
+            &options,
         )?;
         segments.push(SegmentReadProfile {
             object_path: hint.object_path.clone(),
@@ -281,18 +363,81 @@ fn cold_rows_from_segments(
             byte_size: hint.byte_size.or(parquet_profile.file_size),
             parquet: Some(parquet_profile),
         });
-        for row in segment_rows {
-            rows.push(clean_cold_row_to_common(row, primary_key_columns)?);
+        let logical_pk_names = primary_key_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        for mut row in segment_rows {
+            remap_row_to_logical_names(&mut row.pk_json, &physical_names);
+            remap_row_to_logical_names(&mut row.row_image, &physical_names);
+            fill_missing_logical_nulls(&mut row.row_image, &missing_logical_names);
+            rows.push(clean_cold_row_to_common(row, &logical_pk_names)?);
         }
     }
     Ok((rows, segments))
 }
 
+/// Resolves the Parquet field name for a logical column in one segment schema.
+///
+/// Returns `Ok(None)` when the column was added after the segment was written.
+///
+/// # Errors
+///
+/// Returns an error when a renamed/historical column ID is expected but the
+/// segment schema map is incomplete for a non-current schema version.
+fn physical_name_for_segment(
+    column: &ColumnRef,
+    hint: &SegmentStatsHint,
+    current_schema_version: i32,
+) -> Result<Option<String>, String> {
+    if let Some(name) = hint.physical_names.get(&column.column_id.get()) {
+        return Ok(Some(name.clone()));
+    }
+    if hint.schema_version == current_schema_version {
+        return Ok(Some(column.name.clone()));
+    }
+    // Additive columns (and drop+add with a new attnum) are absent from older
+    // segment schemas; callers materialize NULL for the current logical name.
+    Ok(None)
+}
+
+fn remap_row_to_logical_names(
+    value: &mut serde_json::Value,
+    physical_names: &[(ColumnRef, String)],
+) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    for (column, physical_name) in physical_names {
+        if physical_name == &column.name {
+            continue;
+        }
+        if let Some(value) = object.remove(physical_name) {
+            object.insert(column.name.clone(), value);
+        }
+    }
+}
+
+fn fill_missing_logical_nulls(value: &mut serde_json::Value, missing_names: &[String]) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    for name in missing_names {
+        object
+            .entry(name.clone())
+            .or_insert(serde_json::Value::Null);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use koldstore_common::{ColumnId, ColumnRef};
+    use koldstore_merge::scan::plan::SegmentStatsHint;
     use koldstore_schema::PgType;
 
-    use super::cold_pruning_type_is_collation_independent;
+    use super::{cold_pruning_type_is_collation_independent, physical_name_for_segment};
 
     #[test]
     fn text_like_types_are_not_safe_for_byte_ordered_cold_pruning() {
@@ -302,5 +447,24 @@ mod tests {
         ));
         assert!(cold_pruning_type_is_collation_independent(PgType::Int8));
         assert!(cold_pruning_type_is_collation_independent(PgType::Uuid));
+    }
+
+    #[test]
+    fn historical_segment_resolves_physical_name_by_stable_column_id() {
+        let column = ColumnRef::new(ColumnId::from_attnum(7), "renamed_body");
+        let hint = SegmentStatsHint {
+            object_path: "app/items/old.parquet".to_string(),
+            schema_version: 1,
+            physical_names: BTreeMap::from([(7, "body".to_string())]),
+            column_stats: BTreeMap::new(),
+            byte_size: None,
+        };
+
+        assert_eq!(
+            physical_name_for_segment(&column, &hint, 2).unwrap(),
+            Some("body".to_string())
+        );
+        let added = ColumnRef::new(ColumnId::from_attnum(9), "note");
+        assert_eq!(physical_name_for_segment(&added, &hint, 2).unwrap(), None);
     }
 }

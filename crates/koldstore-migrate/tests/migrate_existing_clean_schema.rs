@@ -1,6 +1,6 @@
 use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_common::{
-    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
 };
 use koldstore_migrate::{
     backfill::plan_mirror_initialization_batch,
@@ -20,6 +20,7 @@ fn mirror() -> QualifiedTableName {
 
 fn pk_column(name: &str, ordinal: u16) -> PrimaryKeyColumnShape {
     PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(ordinal as i16),
         PkColumn::new(name).unwrap(),
         PkOrdinal::new(ordinal).unwrap(),
         PgTypeOid::new(20).unwrap(),

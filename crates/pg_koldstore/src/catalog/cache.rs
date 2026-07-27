@@ -11,6 +11,8 @@ use koldstore_catalog::{
     ManagedTableSnapshot, ManagedTableSnapshotCache, OptionalLookupCache,
 };
 #[cfg(feature = "pg")]
+use koldstore_common::ColumnRef;
+#[cfg(feature = "pg")]
 use koldstore_merge::scan::plan::SegmentStatsHint;
 
 #[cfg(feature = "pg")]
@@ -19,7 +21,7 @@ use crate::spi::{
 };
 
 #[cfg(feature = "pg")]
-type SegmentStatsCacheKey = (u32, Vec<String>);
+type SegmentStatsCacheKey = (u32, Vec<i16>);
 #[cfg(feature = "pg")]
 type SegmentStatsCache = OptionalLookupCache<SegmentStatsCacheKey, Arc<CachedSegmentStats>>;
 
@@ -211,18 +213,21 @@ pub fn is_managed_relation(table_oid: pgrx::pg_sys::Oid) -> bool {
 #[cfg(feature = "pg")]
 pub fn cached_manifest_segment_stats(
     table_oid: pgrx::pg_sys::Oid,
-    predicate_columns: &[String],
+    predicate_columns: &[ColumnRef],
 ) -> Result<Option<Arc<CachedSegmentStats>>, String> {
     let key = table_oid.to_u32();
-    let mut columns = predicate_columns.to_vec();
-    columns.sort();
-    columns.dedup();
-    let cache_key = (key, columns);
+    let columns = predicate_columns
+        .iter()
+        .cloned()
+        .map(|column| (column.column_id.get(), column))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let cache_key = (key, columns.keys().copied().collect());
     if let Some(cached) = SEGMENT_STATS_CACHE.with(|cache| cache.borrow().get(&cache_key)) {
         return Ok(cached);
     }
 
-    let shared = load_manifest_segment_stats(table_oid, &cache_key.1)?.map(Arc::new);
+    let columns = columns.into_values().collect::<Vec<_>>();
+    let shared = load_manifest_segment_stats(table_oid, &columns)?.map(Arc::new);
     SEGMENT_STATS_CACHE.with(|cache| {
         cache.borrow_mut().insert(cache_key, shared.clone());
     });
@@ -268,7 +273,7 @@ pub fn reset_managed_table_spi_load_count() {
 #[cfg(feature = "pg")]
 fn load_manifest_segment_stats(
     table_oid: pgrx::pg_sys::Oid,
-    predicate_columns: &[String],
+    predicate_columns: &[ColumnRef],
 ) -> Result<Option<CachedSegmentStats>, String> {
     super::owner::with_extension_owner(|| {
         load_manifest_segment_stats_as_owner(table_oid, predicate_columns)
@@ -278,7 +283,7 @@ fn load_manifest_segment_stats(
 #[cfg(feature = "pg")]
 fn load_manifest_segment_stats_as_owner(
     table_oid: pgrx::pg_sys::Oid,
-    predicate_columns: &[String],
+    predicate_columns: &[ColumnRef],
 ) -> Result<Option<CachedSegmentStats>, String> {
     let statement = koldstore_catalog::queries::plan_in_sync_manifest_scan_context()
         .map_err(|error| error.to_string())?;
@@ -287,7 +292,10 @@ fn load_manifest_segment_stats_as_owner(
         &statement,
         &[
             pgrx::datum::DatumWithOid::from(table_oid),
-            pgrx::datum::DatumWithOid::from(pgrx::JsonB(serde_json::json!(predicate_columns))),
+            pgrx::datum::DatumWithOid::from(pgrx::JsonB(serde_json::json!(predicate_columns
+                .iter()
+                .map(|column| column.column_id.get())
+                .collect::<Vec<_>>()))),
         ],
         first_row::<String>,
     )
@@ -315,6 +323,8 @@ fn cached_from_context(context: InSyncManifestScanContext) -> CachedSegmentStats
             .into_iter()
             .map(|segment| SegmentStatsHint {
                 object_path: segment.object_path,
+                schema_version: segment.schema_version,
+                physical_names: segment.physical_names,
                 column_stats: catalog_column_stats_map(segment.column_stats),
                 byte_size: segment.byte_size,
             })
@@ -325,9 +335,12 @@ fn cached_from_context(context: InSyncManifestScanContext) -> CachedSegmentStats
 #[cfg(feature = "pg")]
 fn catalog_column_stats_map(
     column_stats: serde_json::Value,
-) -> std::collections::BTreeMap<String, koldstore_parquet::ColumnStats> {
+) -> std::collections::BTreeMap<i16, koldstore_parquet::ColumnStats> {
     koldstore_catalog::column_stats_min_max_map(&column_stats)
         .into_iter()
-        .map(|(column, (min, max))| (column, koldstore_parquet::ColumnStats { min, max }))
+        .filter_map(|(column_id, (min, max))| {
+            let column_id = column_id.parse::<i16>().ok()?;
+            Some((column_id, koldstore_parquet::ColumnStats { min, max }))
+        })
         .collect()
 }
