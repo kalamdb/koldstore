@@ -2,11 +2,10 @@
 
 use std::time::Instant;
 
-use koldstore_common::{ColdRow, ColumnRef};
+use koldstore_common::{ColdRow, ColumnId, ColumnRef};
 use koldstore_merge::scan::plan::{
-    prune_segment_stats_hints, retain_pre_merge_cold_prune_predicates,
-    validate_prune_predicates_indexed, ColdPruneColumnPolicy, SegmentPrunePredicate,
-    SegmentStatsHint,
+    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
+    ColdPruneColumnPolicy, SegmentPrunePredicate, SegmentStatsHint,
 };
 use koldstore_parquet::{
     clean_cold_row_to_common, read_clean_cold_rows_from_object_store_with_size, ParquetReadOptions,
@@ -37,6 +36,7 @@ pub(super) fn load_cold_rows_for_merge(
         // (`scope_key = ''`); later each scope_id gets its own manifest/folder
         // and listing filters by scope_key first.
         let scope_column = snapshot.scope_column.as_deref();
+        let segment_order_column_id = snapshot.segment_order_column_id;
         let prune_predicates = retain_pre_merge_cold_prune_predicates(
             unsafe {
                 segment_prune_predicates(table_oid, scanrelid, qual, &catalog.columns, params)
@@ -46,7 +46,11 @@ pub(super) fn load_cold_rows_for_merge(
                     .columns
                     .iter()
                     .find(|column| column.column_id.get() == column_id)?;
-                Some(cold_prune_column_policy(column, scope_column))
+                Some(cold_prune_column_policy(
+                    column,
+                    scope_column,
+                    segment_order_column_id,
+                ))
             },
         );
         let projection_columns =
@@ -86,16 +90,27 @@ pub(super) fn load_cold_rows_for_merge(
                     .map(|column| column.column_id.get()),
             );
         }
+        if let Some(column_id) = segment_order_column_id {
+            indexed_filter_column_ids.push(column_id.get());
+        }
         indexed_filter_column_ids.sort_unstable();
         indexed_filter_column_ids.dedup();
         validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_column_ids)
             .map_err(|error| error.to_string())?;
         let segments_considered = manifest_stats.segments.len();
-        let segments = prune_segment_stats_hints(&manifest_stats.segments, &prune_predicates);
+        let (indexed_candidates, segment_index_lookup_shape, index_column_id) =
+            resolve_segment_index_candidates(
+                table_oid,
+                catalog,
+                segment_order_column_id,
+                &prune_predicates,
+            )?;
+        let segments = indexed_candidates
+            .unwrap_or_else(|| manifest_stats.segments.clone());
         let segments_pruned_min_max = segments_considered.saturating_sub(segments.len());
         // Shared-scope catalog SQL still filters `scope_key = ''`. When per-scope
         // manifests land, listing will drop other scopes here and this counter
-        // will reflect that primary prune; min/max remains secondary.
+        // will reflect that primary prune.
         let segments_pruned_scope = 0usize;
 
         let projection = projection_columns
@@ -113,6 +128,8 @@ pub(super) fn load_cold_rows_for_merge(
             segments_pruned_scope,
             segments_pruned_min_max,
             segments_opened: segments.len(),
+            segment_index_order_column_id: index_column_id,
+            segment_index_lookup_shape: Some(segment_index_lookup_shape),
             pk_probe: pk_probe
                 .as_ref()
                 .map(|(column, values)| (column.name.clone(), values.clone())),
@@ -154,10 +171,12 @@ pub(super) fn load_cold_rows_for_merge(
 fn cold_prune_column_policy(
     column: &koldstore_migrate::order::CatalogColumn,
     scope_column: Option<&str>,
+    segment_order_column_id: Option<ColumnId>,
 ) -> ColdPruneColumnPolicy {
     let ordered_stats_safe = cold_pruning_type_is_collation_independent(column.pg_type);
     ColdPruneColumnPolicy {
-        is_primary_key: column.is_primary_key,
+        is_primary_key: column.is_primary_key
+            || segment_order_column_id.is_some_and(|id| id == column.column_id),
         is_scope: scope_column.is_some_and(|scope| scope == column.name),
         ordered_stats_safe,
         // Text scope ids compare as exact flush-encoded JSON strings.
@@ -165,18 +184,178 @@ fn cold_prune_column_policy(
     }
 }
 
-/// Whether JSON/Parquet scalar comparison has the same semantics as the
-/// PostgreSQL type for conservative cold pruning.
-///
-/// Text and text arrays are deliberately excluded from *ordered* prune:
-/// PostgreSQL collation can make range semantics differ from byte-ordered
-/// segment stats. Scope text equality is allowed separately via
-/// [`ColdPruneColumnPolicy::equality_stats_safe`].
+/// Whether Sort Key V1 / catalog index pruning has the same order semantics as
+/// PostgreSQL for this type (collation-independent scalars only).
 const fn cold_pruning_type_is_collation_independent(pg_type: PgType) -> bool {
     matches!(
         pg_type,
-        PgType::Bool | PgType::Int2 | PgType::Int4 | PgType::Int8 | PgType::Uuid
+        PgType::Bool
+            | PgType::Int2
+            | PgType::Int4
+            | PgType::Int8
+            | PgType::Uuid
+            | PgType::Timestamptz
     )
+}
+
+/// Bound shape used for `koldstore.cold_segment_index` candidate SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SegmentIndexLookupShape {
+    BoundedRange,
+    LowerBound,
+    UpperBound,
+    AllActive,
+}
+
+impl SegmentIndexLookupShape {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::BoundedRange => "bounded_range",
+            Self::LowerBound => "lower_bound",
+            Self::UpperBound => "upper_bound",
+            Self::AllActive => "all_active",
+        }
+    }
+}
+
+/// Picks a Sort Key–allowlisted prune column and asks Postgres for candidates.
+///
+/// Prefers the configured `segment_order_column_id` when it has a range/equality
+/// predicate; otherwise uses the first allowlisted prune predicate. Falls back
+/// to the full active segment list when no indexable predicate exists.
+fn resolve_segment_index_candidates(
+    table_oid: pg_sys::Oid,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    segment_order_column_id: Option<ColumnId>,
+    predicates: &[SegmentPrunePredicate],
+) -> Result<(Option<Vec<SegmentStatsHint>>, SegmentIndexLookupShape, Option<i16>), String> {
+    let preferred = segment_order_column_id.and_then(|column_id| {
+        catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id == column_id)
+            .filter(|column| {
+                koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
+                    && predicates
+                        .iter()
+                        .any(|predicate| predicate.column_id == column.column_id.get())
+            })
+    });
+    let column = preferred.or_else(|| {
+        predicates.iter().find_map(|predicate| {
+            catalog.columns.iter().find(|column| {
+                column.column_id.get() == predicate.column_id
+                    && koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+                        .is_some()
+            })
+        })
+    });
+    let Some(column) = column else {
+        return Ok((None, SegmentIndexLookupShape::AllActive, None));
+    };
+    let (candidates, shape) = load_segment_index_candidates(table_oid, column, predicates)?;
+    Ok((candidates, shape, Some(column.column_id.get())))
+}
+
+fn load_segment_index_candidates(
+    table_oid: pg_sys::Oid,
+    column: &koldstore_migrate::order::CatalogColumn,
+    predicates: &[SegmentPrunePredicate],
+) -> Result<(Option<Vec<SegmentStatsHint>>, SegmentIndexLookupShape), String> {
+    use pgrx::datum::DatumWithOid;
+
+    let Some(sort_type) =
+        koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+    else {
+        return Ok((None, SegmentIndexLookupShape::AllActive));
+    };
+    let mut lower = None::<Vec<u8>>;
+    let mut upper = None::<Vec<u8>>;
+    for predicate in predicates
+        .iter()
+        .filter(|predicate| predicate.column_id == column.column_id.get())
+    {
+        if let Some(value) = predicate.min.as_ref() {
+            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
+                .map_err(|error| error.to_string())?;
+            if lower.as_ref().is_none_or(|current| encoded > *current) {
+                lower = Some(encoded);
+            }
+        }
+        if let Some(value) = predicate.max.as_ref() {
+            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
+                .map_err(|error| error.to_string())?;
+            if upper.as_ref().is_none_or(|current| encoded < *current) {
+                upper = Some(encoded);
+            }
+        }
+    }
+    let (statement, shape) = match (&lower, &upper) {
+        (Some(_), Some(_)) => (
+            koldstore_catalog::queries::plan_cold_segment_candidates_closed_range(),
+            SegmentIndexLookupShape::BoundedRange,
+        ),
+        (Some(_), None) => (
+            koldstore_catalog::queries::plan_cold_segment_candidates_lower_bound(),
+            SegmentIndexLookupShape::LowerBound,
+        ),
+        (None, Some(_)) => (
+            koldstore_catalog::queries::plan_cold_segment_candidates_upper_bound(),
+            SegmentIndexLookupShape::UpperBound,
+        ),
+        (None, None) => return Ok((None, SegmentIndexLookupShape::AllActive)),
+    };
+    let statement = statement.map_err(|error| error.to_string())?;
+    let mut args = vec![
+        DatumWithOid::from(table_oid),
+        DatumWithOid::from(""),
+        DatumWithOid::from(i32::from(column.column_id.get())),
+        DatumWithOid::from(pg_sys::Oid::from(column.pg_type.type_oid())),
+        DatumWithOid::from(i32::from(koldstore_sortkey::CODEC_VERSION)),
+    ];
+    if let Some(value) = lower {
+        args.push(DatumWithOid::from(value));
+    }
+    if let Some(value) = upper {
+        args.push(DatumWithOid::from(value));
+    }
+
+    let candidates = crate::catalog::owner::with_extension_owner(|| {
+        crate::spi::execute_prepared(&statement, &args, |tuples| {
+            tuples
+                .into_iter()
+                .map(|tuple| {
+                    let object_path = tuple
+                        .get::<String>(1)?
+                        .ok_or_else(|| missing_candidate_field("object_path"))?;
+                    let byte_size = tuple
+                        .get::<i64>(2)?
+                        .and_then(|value| u64::try_from(value).ok());
+                    let schema_version = tuple
+                        .get::<i32>(3)?
+                        .ok_or_else(|| missing_candidate_field("schema_version"))?;
+                    let physical_names = tuple
+                        .get::<String>(8)?
+                        .map(|json| serde_json::from_str(&json).unwrap_or_default())
+                        .unwrap_or_default();
+                    Ok(SegmentStatsHint {
+                        object_path,
+                        schema_version,
+                        physical_names,
+                        byte_size,
+                    })
+                })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+    })??;
+    Ok((Some(candidates), shape))
+}
+
+fn missing_candidate_field(name: &str) -> pgrx::spi::SpiError {
+    pgrx::spi::SpiError::DatumError(pgrx::datum::TryFromDatumError::NoSuchAttributeName(
+        name.to_string(),
+    ))
 }
 
 /// Planned cold profile for EXPLAIN without opening Parquet files.
@@ -187,6 +366,12 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
         else {
             return Ok(ColdReadProfile::empty("(none)"));
         };
+        let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
+            .map_err(|error| error.to_string())?;
+        let segment_index_order_column_id = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.segment_order_column_id)
+            .map(ColumnId::get);
         Ok(ColdReadProfile {
             manifest_path: manifest_stats.manifest_path.clone(),
             storage_type: manifest_stats.storage_type.clone(),
@@ -196,6 +381,9 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             segments_pruned_scope: 0,
             segments_pruned_min_max: 0,
             segments_opened: manifest_stats.segments.len(),
+            segment_index_order_column_id,
+            segment_index_lookup_shape: segment_index_order_column_id
+                .map(|_| SegmentIndexLookupShape::AllActive),
             pk_probe: None,
             projected_columns: Vec::new(),
             segments: manifest_stats
@@ -456,7 +644,6 @@ mod tests {
             object_path: "app/items/old.parquet".to_string(),
             schema_version: 1,
             physical_names: BTreeMap::from([(7, "body".to_string())]),
-            column_stats: BTreeMap::new(),
             byte_size: None,
         };
 

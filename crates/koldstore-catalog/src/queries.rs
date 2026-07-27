@@ -148,7 +148,8 @@ SELECT jsonb_build_object(
     'mirror_relation', format('%I.%I', n.nspname, c.relname),
     'primary_key', s.primary_key,
     'primary_key_shape', s.primary_key_shape,
-    'scope_column', s.scope_column
+    'scope_column', s.scope_column,
+    'options', s.options
 )::text
 FROM koldstore.schemas s
 JOIN pg_class c ON c.oid = s.mirror_relation
@@ -223,29 +224,6 @@ SELECT jsonb_build_object(
                         FROM pg_catalog.jsonb_array_elements_text($2::jsonb) AS requested(value)
                     )
               ), '{}'::jsonb),
-              'column_stats', COALESCE((
-                  SELECT jsonb_object_agg(
-                      css.column_id::text,
-                      jsonb_strip_nulls(jsonb_build_object(
-                          'min', CASE
-                              WHEN css.min_value IS NULL THEN NULL
-                              ELSE pg_catalog.convert_from(css.min_value, 'UTF8')::jsonb
-                          END,
-                          'max', CASE
-                              WHEN css.max_value IS NULL THEN NULL
-                              ELSE pg_catalog.convert_from(css.max_value, 'UTF8')::jsonb
-                          END
-                      ))
-                  )
-                  FROM koldstore.cold_segment_stats css
-                  WHERE css.segment_id = cs.segment_id
-                    AND css.table_oid = cs.table_oid
-                    AND css.scope_key = cs.scope_key
-                    AND css.column_id IN (
-                        SELECT value::smallint
-                        FROM pg_catalog.jsonb_array_elements_text($2::jsonb) AS requested(value)
-                    )
-              ), '{}'::jsonb),
               'byte_size', cs.byte_size
           )
           ORDER BY cs.batch_number
@@ -266,6 +244,122 @@ ORDER BY m.generation DESC
 LIMIT 1
 "#,
         [SqlParamType::Oid, SqlParamType::Jsonb],
+    )
+}
+
+/// Builds active cold-segment candidates for an inclusive closed range.
+///
+/// Parameters are table OID, scope key, stable column ID, type OID, codec
+/// version, encoded lower bound, and encoded upper bound.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_segment_candidates_closed_range() -> SqlResult<SqlStatement> {
+    plan_cold_segment_candidates(
+        "resolve active cold segment candidates for closed range",
+        "AND csi.min_value <= $7::bytea\n  AND csi.max_value >= $6::bytea",
+        vec![
+            SqlParamType::Oid,
+            SqlParamType::Text,
+            SqlParamType::Integer,
+            SqlParamType::Oid,
+            SqlParamType::Integer,
+            SqlParamType::Bytea,
+            SqlParamType::Bytea,
+        ],
+    )
+}
+
+/// Builds active cold-segment candidates for an inclusive lower bound.
+///
+/// Parameters are table OID, scope key, stable column ID, type OID, codec
+/// version, and encoded lower bound.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_segment_candidates_lower_bound() -> SqlResult<SqlStatement> {
+    plan_cold_segment_candidates(
+        "resolve active cold segment candidates for lower bound",
+        "AND csi.max_value >= $6::bytea",
+        vec![
+            SqlParamType::Oid,
+            SqlParamType::Text,
+            SqlParamType::Integer,
+            SqlParamType::Oid,
+            SqlParamType::Integer,
+            SqlParamType::Bytea,
+        ],
+    )
+}
+
+/// Builds active cold-segment candidates for an inclusive upper bound.
+///
+/// Parameters are table OID, scope key, stable column ID, type OID, codec
+/// version, and encoded upper bound.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_segment_candidates_upper_bound() -> SqlResult<SqlStatement> {
+    plan_cold_segment_candidates(
+        "resolve active cold segment candidates for upper bound",
+        "AND csi.min_value <= $6::bytea",
+        vec![
+            SqlParamType::Oid,
+            SqlParamType::Text,
+            SqlParamType::Integer,
+            SqlParamType::Oid,
+            SqlParamType::Integer,
+            SqlParamType::Bytea,
+        ],
+    )
+}
+
+fn plan_cold_segment_candidates(
+    operation: &str,
+    bound_predicate: &str,
+    param_types: Vec<SqlParamType>,
+) -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        operation,
+        &format!(
+            r#"
+SELECT
+    cs.object_path,
+    cs.byte_size,
+    cs.schema_version,
+    cs.min_seq,
+    cs.max_seq,
+    cs.min_commit_seq,
+    cs.max_commit_seq,
+    COALESCE((
+        SELECT jsonb_object_agg(
+            (column_value->>'column_id'),
+            (column_value->>'name')
+        )
+        FROM koldstore.schemas historical_schema
+        CROSS JOIN LATERAL jsonb_array_elements(historical_schema.columns) column_value
+        WHERE historical_schema.table_oid = cs.table_oid
+          AND historical_schema.version = cs.schema_version
+    ), '{{}}'::jsonb)::text AS physical_names
+FROM koldstore.cold_segment_index csi
+JOIN koldstore.cold_segments cs
+  ON cs.segment_id = csi.segment_id
+ AND cs.table_oid = csi.table_oid
+ AND cs.scope_key = csi.scope_key
+WHERE csi.table_oid = $1::oid
+  AND csi.scope_key = $2::text
+  AND csi.column_id = $3::smallint
+  AND csi.type_oid = $4::oid
+  AND csi.codec_version = $5::smallint
+  AND cs.status = 'active'
+  {bound_predicate}
+ORDER BY cs.batch_number, cs.segment_id
+"#
+        ),
+        param_types,
     )
 }
 
@@ -393,15 +487,16 @@ WHERE table_oid = $1::oid
 
 #[cfg(test)]
 mod tests {
-    use super::plan_in_sync_manifest_scan_context;
+    use super::{
+        plan_cold_segment_candidates_closed_range, plan_cold_segment_candidates_lower_bound,
+        plan_cold_segment_candidates_upper_bound, plan_in_sync_manifest_scan_context,
+    };
+    use koldstore_common::SqlParamType;
 
     #[test]
-    fn merge_scan_context_reads_only_requested_normalized_stats() {
+    fn merge_scan_context_omits_binary_index_bounds() {
         let statement = plan_in_sync_manifest_scan_context().unwrap();
 
-        assert!(statement.sql.contains("koldstore.cold_segment_stats"));
-        assert!(statement.sql.contains("css.column_id"));
-        assert!(statement.sql.contains("css.column_id::text"));
         assert!(statement
             .sql
             .contains("'schema_version', cs.schema_version"));
@@ -412,8 +507,58 @@ mod tests {
         assert!(statement
             .sql
             .contains("jsonb_array_elements_text($2::jsonb)"));
-        assert!(!statement.sql.contains("css.column_name"));
-        assert!(!statement.sql.contains("'column_stats', cs.column_stats"));
+        assert!(!statement.sql.contains("'column_stats'"));
+        assert!(!statement.sql.contains("cold_segment_stats"));
+        assert!(!statement.sql.contains("cold_segment_index"));
+        assert!(!statement.sql.contains("convert_from"));
         assert_eq!(statement.param_types.len(), 2);
+    }
+
+    #[test]
+    fn closed_range_candidates_use_both_non_nullable_bounds() {
+        let statement = plan_cold_segment_candidates_closed_range().unwrap();
+
+        assert!(statement.sql.contains("koldstore.cold_segment_index"));
+        assert!(statement.sql.contains("csi.min_value <= $7::bytea"));
+        assert!(statement.sql.contains("csi.max_value >= $6::bytea"));
+        assert!(statement.sql.contains("cs.status = 'active'"));
+        assert!(statement.sql.contains("AS physical_names"));
+        assert!(!statement.sql.contains("IS NULL OR"));
+        assert_eq!(
+            statement.param_types,
+            vec![
+                SqlParamType::Oid,
+                SqlParamType::Text,
+                SqlParamType::Integer,
+                SqlParamType::Oid,
+                SqlParamType::Integer,
+                SqlParamType::Bytea,
+                SqlParamType::Bytea,
+            ]
+        );
+    }
+
+    #[test]
+    fn one_sided_candidate_plans_use_only_the_relevant_index_bound() {
+        let lower = plan_cold_segment_candidates_lower_bound().unwrap();
+        assert!(lower.sql.contains("csi.max_value >= $6::bytea"));
+        assert!(!lower.sql.contains("csi.min_value <="));
+        assert!(!lower.sql.contains("IS NULL OR"));
+
+        let upper = plan_cold_segment_candidates_upper_bound().unwrap();
+        assert!(upper.sql.contains("csi.min_value <= $6::bytea"));
+        assert!(!upper.sql.contains("csi.max_value >="));
+        assert!(!upper.sql.contains("IS NULL OR"));
+
+        let expected = vec![
+            SqlParamType::Oid,
+            SqlParamType::Text,
+            SqlParamType::Integer,
+            SqlParamType::Oid,
+            SqlParamType::Integer,
+            SqlParamType::Bytea,
+        ];
+        assert_eq!(lower.param_types, expected);
+        assert_eq!(upper.param_types, expected);
     }
 }

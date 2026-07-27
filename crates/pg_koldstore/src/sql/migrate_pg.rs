@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, mirror_capture_mode default 'strict', auto_flush default true)`.
+/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, mirror_capture_mode default 'strict', auto_flush default true, segment_order_column default null)`.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
@@ -29,6 +29,7 @@ pub fn manage_table_pg(
     target_file_size_mb: pgrx::default!(Option<i64>, "NULL"),
     mirror_capture_mode: pgrx::default!(&str, "'strict'"),
     auto_flush: pgrx::default!(bool, true),
+    segment_order_column: pgrx::default!(Option<&str>, "NULL"),
 ) -> pgrx::Uuid {
     manage_table_pg_impl(
         table_name,
@@ -43,6 +44,7 @@ pub fn manage_table_pg(
         max_rows_per_file,
         mirror_capture_mode,
         auto_flush,
+        segment_order_column,
     )
 }
 
@@ -61,6 +63,7 @@ fn manage_table_pg_impl(
     max_rows_per_file: i64,
     mirror_capture_mode: &str,
     auto_flush: bool,
+    segment_order_column: Option<&str>,
 ) -> pgrx::Uuid {
     crate::preload::require_shared_preload();
     // Validate logical decoding before taking the transaction-scoped job lock.
@@ -94,6 +97,7 @@ fn manage_table_pg_impl(
             storage_id.is_some(),
             already_managed,
             migration_order_by,
+            segment_order_column,
             compression,
             target_file_size_mb,
             hot_row_limit,
@@ -130,8 +134,19 @@ fn manage_table_pg_impl(
 
     let has_existing_rows = table_has_rows(&empty_plan.table)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let order_column_name = request.options.segment_order_column_id.and_then(|column_id| {
+        registry_catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id.get() == column_id)
+            .map(|column| column.name.as_str())
+    });
     let mirror_plan =
-        koldstore_migrate::plan_change_log_mirror(&empty_plan.table, &primary_key_shape)
+        koldstore_migrate::plan_change_log_mirror_with_order_column(
+            &empty_plan.table,
+            &primary_key_shape,
+            order_column_name,
+        )
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     if !has_existing_rows {
         for statement in mirror_plan.create_statements() {
@@ -377,6 +392,7 @@ fn manage_table_validation_context<'a>(
     storage_exists: bool,
     already_managed: bool,
     migration_order_by: Option<&'a str>,
+    segment_order_column: Option<&'a str>,
     compression: Option<&'a str>,
     target_file_size_mb: Option<i64>,
     hot_row_limit: Option<i64>,
@@ -384,7 +400,7 @@ fn manage_table_validation_context<'a>(
     max_rows_per_file: i64,
     mirror_capture_mode: Option<&'a str>,
     auto_flush: bool,
-    catalog: &koldstore_migrate::ExistingTableCatalog,
+    catalog: &'a koldstore_migrate::ExistingTableCatalog,
     constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
 ) -> koldstore_migrate::manage_table::ManageTableValidationContext<'a> {
     use koldstore_migrate::constraints::{ColumnDefinition, MigrationValidationInput};
@@ -397,7 +413,7 @@ fn manage_table_validation_context<'a>(
                 column.name.clone(),
                 column.pg_type,
                 column.catalog_type_name().to_string(),
-                true,
+                column.nullable,
                 column.generated,
             )
         })
@@ -410,6 +426,24 @@ fn manage_table_validation_context<'a>(
         .iter()
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
+    let segment_order_column = segment_order_column
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(|name| {
+            let column = catalog
+                .columns
+                .iter()
+                .find(|column| column.name == name)
+                .unwrap_or_else(|| {
+                    pgrx::error!("migrate table failed: segment order column `{name}` does not exist")
+                });
+            koldstore_migrate::manage_table::SegmentOrderColumnInput {
+                column_id: column.column_id.get(),
+                name: &column.name,
+                type_oid: column.pg_type.type_oid(),
+                nullable: column.nullable,
+            }
+        });
 
     koldstore_migrate::manage_table::ManageTableValidationContext {
         migration: MigrationValidationInput {
@@ -429,6 +463,7 @@ fn manage_table_validation_context<'a>(
         },
         already_managed,
         migration_order_by,
+        segment_order_column,
         compression,
         mirror_capture_mode,
         policy: koldstore_migrate::manage_table::ManageTablePolicyInput {

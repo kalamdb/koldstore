@@ -322,6 +322,10 @@ pub(super) struct ColdReadProfile {
     pub(super) segments_pruned_min_max: usize,
     /// Segments opened after catalog prune.
     pub(super) segments_opened: usize,
+    /// Stable order-column attnum when the managed table configures one.
+    pub(super) segment_index_order_column_id: Option<i16>,
+    /// Bound shape used for cold_segment_index candidate SQL, when planned.
+    pub(super) segment_index_lookup_shape: Option<super::cold::SegmentIndexLookupShape>,
     /// PK equality probe pushed into Parquet row-group prune, when present.
     pub(super) pk_probe: Option<(String, Vec<String>)>,
     pub(super) projected_columns: Vec<String>,
@@ -339,6 +343,8 @@ impl ColdReadProfile {
             segments_pruned_scope: 0,
             segments_pruned_min_max: 0,
             segments_opened: 0,
+            segment_index_order_column_id: None,
+            segment_index_lookup_shape: None,
             pk_probe: None,
             projected_columns: Vec::new(),
             segments: vec![],
@@ -469,6 +475,17 @@ fn explain_cold_scan(
         None,
         profile.segments_considered as i64,
     );
+    if let Some(column_id) = profile.segment_index_order_column_id {
+        explain_text(
+            es,
+            "Segment Index Source",
+            "postgres (koldstore.cold_segment_index)",
+        );
+        explain_integer(es, "Order Column ID", None, i64::from(column_id));
+        if let Some(shape) = profile.segment_index_lookup_shape {
+            explain_text(es, "Segment Index Lookup Shape", shape.as_str());
+        }
+    }
     explain_integer(
         es,
         "Segments Pruned by Scope",
@@ -477,7 +494,7 @@ fn explain_cold_scan(
     );
     explain_integer(
         es,
-        "Segments Pruned by Min/Max",
+        "Segments Pruned by Catalog Index",
         None,
         profile.segments_pruned_min_max as i64,
     );

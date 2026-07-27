@@ -29,6 +29,8 @@ pub struct FlushMirrorRow {
     pub op: i16,
     /// Application column values in catalog order.
     pub values: Vec<FlushColumnValue>,
+    /// Encoded immutable segment-order key retained by the mirror.
+    pub order_key: Option<Vec<u8>>,
 }
 
 /// Resolves catalog positions for primary-key columns.

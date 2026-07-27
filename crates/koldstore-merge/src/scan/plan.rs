@@ -1,9 +1,8 @@
 //! CustomScan plan serialization and PG-free pruning helpers.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use koldstore_common::{compare_json_values, KoldstoreError, Predicate, Result, ScopeKey, SeqId};
+use koldstore_common::{KoldstoreError, Predicate, Result, ScopeKey, SeqId};
 use serde::{Deserialize, Serialize};
 
 /// Attribute numbers for merge metadata projected during hot/cold reads.
@@ -36,7 +35,7 @@ pub struct SegmentHint {
     pub max_seq: SeqId,
 }
 
-/// Segment stats loaded from the manifest-backed cold segment catalog.
+/// Segment stats loaded from the cold segment catalog for merge reads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SegmentStatsHint {
     /// Final object-store path.
@@ -45,8 +44,6 @@ pub struct SegmentStatsHint {
     pub schema_version: i32,
     /// Physical Parquet names for requested columns, keyed by stable ID.
     pub physical_names: BTreeMap<i16, String>,
-    /// Segment-level min/max stats by column.
-    pub column_stats: BTreeMap<i16, koldstore_parquet::ColumnStats>,
     /// Object byte size when known (enables bounded footer range GETs on S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_size: Option<u64>,
@@ -182,40 +179,6 @@ pub fn retain_pre_merge_cold_prune_predicates(
         .collect()
 }
 
-/// Returns segment paths whose manifest min/max stats cannot prove non-overlap.
-///
-/// Missing or incomparable stats keep the segment selected. The SQL executor
-/// still applies residual quals after winner resolution; this only avoids
-/// opening Parquet files that cannot contain a candidate row.
-#[must_use]
-pub fn prune_segment_stats(
-    segments: &[SegmentStatsHint],
-    predicates: &[SegmentPrunePredicate],
-) -> Vec<String> {
-    prune_segment_stats_hints(segments, predicates)
-        .into_iter()
-        .map(|segment| segment.object_path)
-        .collect()
-}
-
-/// Like [`prune_segment_stats`], but keeps full segment hints (including
-/// `byte_size` for footer-bounded ObjectStore reads).
-#[must_use]
-pub fn prune_segment_stats_hints(
-    segments: &[SegmentStatsHint],
-    predicates: &[SegmentPrunePredicate],
-) -> Vec<SegmentStatsHint> {
-    segments
-        .iter()
-        .filter(|segment| {
-            predicates
-                .iter()
-                .all(|predicate| segment_may_match_predicate(segment, predicate))
-        })
-        .cloned()
-        .collect()
-}
-
 /// Validates that all cold pruning predicates target indexed/stat columns.
 ///
 /// # Errors
@@ -236,65 +199,6 @@ pub fn validate_prune_predicates_indexed(
         }
     }
     Ok(())
-}
-
-/// Validates that selected indexed predicates have segment min/max metadata.
-///
-/// # Errors
-///
-/// Returns an unsafe predicate error when any active segment lacks min/max stats
-/// for a requested pruning column.
-pub fn validate_prune_predicate_stats(
-    segments: &[SegmentStatsHint],
-    predicates: &[SegmentPrunePredicate],
-) -> Result<()> {
-    for predicate in predicates {
-        for segment in segments {
-            if !segment.column_stats.contains_key(&predicate.column_id) {
-                return Err(KoldstoreError::UnsafePredicate(format!(
-                    "cold filter column `{}` is indexed but segment `{}` has no min/max stats",
-                    predicate.column, segment.object_path
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn segment_may_match_predicate(
-    segment: &SegmentStatsHint,
-    predicate: &SegmentPrunePredicate,
-) -> bool {
-    let Some(stats) = segment.column_stats.get(&predicate.column_id) else {
-        return true;
-    };
-    if stats.min.is_null() || stats.max.is_null() {
-        return true;
-    }
-
-    if let Some(min) = &predicate.min {
-        if min.is_null() {
-            return true;
-        }
-        match compare_json_values(&stats.max, min) {
-            Some(Ordering::Less) => return false,
-            Some(_) => {}
-            None => return true,
-        }
-    }
-
-    if let Some(max) = &predicate.max {
-        if max.is_null() {
-            return true;
-        }
-        match compare_json_values(&stats.min, max) {
-            Some(Ordering::Greater) => return false,
-            Some(_) => {}
-            None => return true,
-        }
-    }
-
-    true
 }
 
 /// How unflushed mirror rows participate in merge reads.

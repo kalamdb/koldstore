@@ -4,6 +4,7 @@ use koldstore_migrate::constraints::{
 };
 use koldstore_migrate::manage_table::{
     validate_manage_table, ManageTablePolicyInput, ManageTableValidationContext,
+    SegmentOrderColumnInput,
 };
 
 fn valid_context() -> ManageTableValidationContext<'static> {
@@ -11,6 +12,7 @@ fn valid_context() -> ManageTableValidationContext<'static> {
         migration: MigrationValidationInput::minimal_shared(),
         already_managed: false,
         migration_order_by: None,
+        segment_order_column: None,
         compression: None,
         mirror_capture_mode: None,
         policy: ManageTablePolicyInput {
@@ -22,6 +24,41 @@ fn valid_context() -> ManageTableValidationContext<'static> {
             auto_flush: true,
         },
     }
+}
+
+#[test]
+fn segment_order_column_is_validated_and_persisted_by_attnum() {
+    let mut context = valid_context();
+    context.segment_order_column = Some(SegmentOrderColumnInput {
+        column_id: 4,
+        name: "created_at",
+        type_oid: 1184,
+        nullable: false,
+    });
+
+    let validated = validate_manage_table(context).unwrap();
+    assert_eq!(validated.options.segment_order_column_id, Some(4));
+}
+
+#[test]
+fn segment_order_column_rejects_nullable_or_unsupported_types() {
+    let mut nullable = valid_context();
+    nullable.segment_order_column = Some(SegmentOrderColumnInput {
+        column_id: 4,
+        name: "created_at",
+        type_oid: 1184,
+        nullable: true,
+    });
+    assert!(validate_manage_table(nullable).is_err());
+
+    let mut unsupported = valid_context();
+    unsupported.segment_order_column = Some(SegmentOrderColumnInput {
+        column_id: 5,
+        name: "title",
+        type_oid: 25,
+        nullable: false,
+    });
+    assert!(validate_manage_table(unsupported).is_err());
 }
 
 #[test]

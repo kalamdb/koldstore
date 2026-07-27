@@ -53,6 +53,19 @@ pub fn plan_mirror_schema(
     mirror_table: &MirrorRelation,
     primary_key: &[PrimaryKeyColumnShape],
 ) -> MirrorResult<MirrorSchemaPlan> {
+    plan_mirror_schema_with_order_key(mirror_table, primary_key, false)
+}
+
+/// Plans primitive mirror storage with an optional encoded segment-order key.
+///
+/// # Errors
+///
+/// Returns an error when the key shape is empty or contains nullable columns.
+pub fn plan_mirror_schema_with_order_key(
+    mirror_table: &MirrorRelation,
+    primary_key: &[PrimaryKeyColumnShape],
+    include_order_key: bool,
+) -> MirrorResult<MirrorSchemaPlan> {
     if primary_key.is_empty() {
         return Err(MirrorError::MissingPrimaryKey);
     }
@@ -73,6 +86,9 @@ pub fn plan_mirror_schema(
         .iter()
         .map(render_pk_column)
         .collect::<MirrorResult<Vec<_>>>()?;
+    if include_order_key {
+        ddl_columns.push("\"order_key\" bytea NOT NULL".to_string());
+    }
     ddl_columns.extend([
         MirrorColumn::Seq.definition().to_string(),
         MirrorColumn::Op.definition().to_string(),

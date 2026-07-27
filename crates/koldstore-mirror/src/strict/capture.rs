@@ -97,6 +97,21 @@ pub fn plan_mirror_capture(
     mirror_table: &QualifiedTableName,
     primary_key: &[PrimaryKeyColumnShape],
 ) -> MirrorCaptureResult<MirrorCapturePlan> {
+    plan_mirror_capture_with_order_column(source_table, mirror_table, primary_key, None)
+}
+
+/// Plans strict capture with an optional immutable encoded segment-order key.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied or statement
+/// metadata cannot be represented by the SQL helper.
+pub fn plan_mirror_capture_with_order_column(
+    source_table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key: &[PrimaryKeyColumnShape],
+    order_column: Option<&str>,
+) -> MirrorCaptureResult<MirrorCapturePlan> {
     if primary_key.is_empty() {
         return Err(MirrorCaptureError::MissingPrimaryKey);
     }
@@ -110,12 +125,13 @@ pub fn plan_mirror_capture(
         name: format!("{}_pk_guard", mirror_table.name),
     };
     let source = source_table.quoted();
-    let function_sql = capture_function_sql(&function_name, mirror_table, primary_key)?;
+    let function_sql =
+        capture_function_sql(&function_name, mirror_table, primary_key, order_column)?;
     let function = SqlStatement::write("create change-log mirror capture function", &function_sql)
         .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
     let pk_guard_function = SqlStatement::write(
         "create change-log mirror primary-key guard function",
-        &pk_guard_function_sql(&guard_function_name, primary_key),
+        &pk_guard_function_sql(&guard_function_name, primary_key, order_column),
     )
     .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
 
@@ -126,8 +142,13 @@ pub fn plan_mirror_capture(
         .try_into()
         .expect("mirror capture has exactly three trigger operations");
     let [insert_trigger, update_trigger, delete_trigger] = triggers;
-    let pk_guard_trigger =
-        plan_pk_guard_trigger(mirror_table, &source, &guard_function_name, primary_key)?;
+    let pk_guard_trigger = plan_pk_guard_trigger(
+        mirror_table,
+        &source,
+        &guard_function_name,
+        primary_key,
+        order_column,
+    )?;
 
     let drop_triggers = SqlStatement::write("drop change-log mirror capture triggers", &{
         let mut drops = MirrorOperation::ALL
@@ -369,6 +390,7 @@ fn capture_function_sql(
     function_name: &QualifiedTableName,
     mirror_table: &QualifiedTableName,
     primary_key: &[PrimaryKeyColumnShape],
+    order_column: Option<&str>,
 ) -> MirrorCaptureResult<String> {
     let mirror = mirror_table
         .as_table_name()
@@ -382,6 +404,9 @@ fn capture_function_sql(
         quoted_pk_columns(&pk_names).map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
     let insert_columns = {
         let mut columns = pk_columns.clone();
+        if order_column.is_some() {
+            columns.push("\"order_key\"".to_string());
+        }
         columns.extend(["\"seq\"".to_string(), "\"op\"".to_string()]);
         columns.join(", ")
     };
@@ -395,6 +420,26 @@ fn capture_function_sql(
         .map(|column| format!("incoming.{column}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let order_key_src = order_column
+        .map(|column| {
+            format!(
+                "koldstore.internal_encode_sort_key(src.{})",
+                quote_ident(column)
+            )
+        })
+        .map(|expression| format!("{expression}, "))
+        .unwrap_or_default();
+    let order_key_src_aliased = order_column
+        .map(|column| {
+            format!(
+                "koldstore.internal_encode_sort_key(src.{}) AS order_key,\n                   ",
+                quote_ident(column)
+            )
+        })
+        .unwrap_or_default();
+    let order_key_incoming = order_column
+        .map(|_| "incoming.order_key, ")
+        .unwrap_or_default();
     let seq_expr = snowflake_id_call_expression();
     let conflict_columns = pk_columns.join(", ");
     let pk_join = pk_equality_predicate(primary_key, "mirror", "src");
@@ -409,12 +454,17 @@ fn capture_function_sql(
     let small_insert = format!(
         r#"
         INSERT INTO {mirror} ({insert_columns})
-        SELECT {pk_select_src}, {seq_expr}, {insert_op}
+        SELECT {pk_select_src}, {order_key_src}{seq_expr}, {insert_op}
         FROM new_rows AS src
         ON CONFLICT ({conflict_columns}) DO UPDATE
         SET "seq" = EXCLUDED."seq",
-            "op" = EXCLUDED."op""#,
+            "op" = EXCLUDED."op"{order_key_conflict}"#,
         mirror = mirror.quoted(),
+        order_key_conflict = if order_column.is_some() {
+            ",\n            \"order_key\" = EXCLUDED.\"order_key\""
+        } else {
+            ""
+        },
     );
 
     let bulk_insert = format!(
@@ -422,17 +472,22 @@ fn capture_function_sql(
         MERGE INTO {mirror} AS mirror
         USING (
             SELECT {pk_select_src},
-                   {seq_expr} AS next_seq
+                   {order_key_src_aliased}{seq_expr} AS next_seq
             FROM new_rows AS src
         ) AS incoming
         ON {merge_on}
         WHEN MATCHED THEN
             UPDATE SET "seq" = incoming.next_seq,
-                       "op" = {insert_op}
+                       "op" = {insert_op}{order_key_merge_update}
         WHEN NOT MATCHED THEN
             INSERT ({insert_columns})
-            VALUES ({pk_select_incoming}, incoming.next_seq, {insert_op})"#,
+            VALUES ({pk_select_incoming}, {order_key_incoming}incoming.next_seq, {insert_op})"#,
         mirror = mirror.quoted(),
+        order_key_merge_update = if order_column.is_some() {
+            ",\n                       \"order_key\" = incoming.order_key"
+        } else {
+            ""
+        },
     );
 
     // Every mutable hot row has a mirror row: empty-table INSERT capture and
@@ -533,15 +588,20 @@ $$
 fn pk_guard_function_sql(
     function_name: &QualifiedTableName,
     primary_key: &[PrimaryKeyColumnShape],
+    order_column: Option<&str>,
 ) -> String {
-    let distinct = primary_key
+    let mut distinct = primary_key
         .iter()
         .map(|column| {
             let name = quote_ident(column.column().as_str());
             format!("OLD.{name} IS DISTINCT FROM NEW.{name}")
         })
-        .collect::<Vec<_>>()
-        .join("\n       OR ");
+        .collect::<Vec<_>>();
+    if let Some(order_column) = order_column {
+        let name = quote_ident(order_column);
+        distinct.push(format!("OLD.{name} IS DISTINCT FROM NEW.{name}"));
+    }
+    let distinct = distinct.join("\n       OR ");
 
     format!(
         r#"
@@ -570,13 +630,17 @@ fn plan_pk_guard_trigger(
     source_table: &str,
     function_name: &QualifiedTableName,
     primary_key: &[PrimaryKeyColumnShape],
+    order_column: Option<&str>,
 ) -> MirrorCaptureResult<SqlStatement> {
     let trigger_name = pk_guard_trigger_name(&mirror_table.name);
-    let of_columns = primary_key
+    let mut of_columns = primary_key
         .iter()
         .map(|column| quote_ident(column.column().as_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    if let Some(order_column) = order_column {
+        of_columns.push(quote_ident(order_column));
+    }
+    let of_columns = of_columns.join(", ");
     SqlStatement::write(
         "create change-log mirror primary-key guard trigger",
         &format!(

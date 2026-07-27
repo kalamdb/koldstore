@@ -47,6 +47,7 @@ koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-migrate.workspace = true
 koldstore-schema.workspace = true
+koldstore-sortkey.workspace = true
 koldstore-storage.workspace = true
 koldstore-worker.workspace = true
 pgrx = { workspace = true, optional = true }

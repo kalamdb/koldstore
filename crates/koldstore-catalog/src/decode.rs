@@ -11,7 +11,7 @@ pub struct RelationContext {
     pub name: String,
 }
 
-/// Active cold-segment stats row returned by merge-scan catalog lookups.
+/// Active cold-segment row returned by merge-scan catalog lookups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestScanSegmentStats {
     /// Final object-store path.
@@ -20,8 +20,6 @@ pub struct ManifestScanSegmentStats {
     pub schema_version: i32,
     /// Physical Parquet field names keyed by stable column ID.
     pub physical_names: BTreeMap<i16, String>,
-    /// Segment-level min/max stats by column.
-    pub column_stats: serde_json::Value,
     /// Object byte size when known (enables bounded footer range GETs).
     pub byte_size: Option<u64>,
 }
@@ -121,11 +119,6 @@ pub fn in_sync_manifest_scan_context(
 pub fn manifest_scan_segment_stats(
     value: &serde_json::Value,
 ) -> Result<ManifestScanSegmentStats, String> {
-    let column_stats = value
-        .get("column_stats")
-        .cloned()
-        .ok_or_else(|| "missing field `column_stats`".to_string())?;
-
     Ok(ManifestScanSegmentStats {
         object_path: required_string(value, "object_path")?.to_string(),
         schema_version: required_i32(value, "schema_version")?,
@@ -141,7 +134,6 @@ pub fn manifest_scan_segment_stats(
                     .collect()
             })
             .unwrap_or_default(),
-        column_stats,
         byte_size: optional_u64(value, "byte_size"),
     })
 }
@@ -307,10 +299,6 @@ mod tests {
         assert_eq!(context.segments.len(), 1);
         assert_eq!(context.segments[0].object_path, "ns/table/batch-1.parquet");
         assert_eq!(context.segments[0].byte_size, None);
-        assert_eq!(
-            context.segments[0].column_stats,
-            serde_json::json!({"1": {"min": 1, "max": 100}})
-        );
     }
 
     #[test]

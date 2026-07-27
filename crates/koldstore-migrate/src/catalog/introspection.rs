@@ -94,6 +94,7 @@ SELECT COALESCE(
             'name', a.attname,
             'type_name', format_type(a.atttypid, a.atttypmod),
             'is_primary_key', pk.attnum IS NOT NULL,
+            'nullable', NOT a.attnotnull,
             'identity', a.attidentity <> '',
             'generated', a.attgenerated <> '',
             'default_expr', pg_get_expr(d.adbin, d.adrelid)

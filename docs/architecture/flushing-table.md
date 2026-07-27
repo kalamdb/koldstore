@@ -290,15 +290,16 @@ Manifest finalize uses `write_manifest_with_client` and the same atomic put path
 During streaming, each Parquet file is cataloged immediately via
 `persist_flush_segment` with **`status = 'pending'`** (not query-visible):
 
-1. One SPI insert for `koldstore.cold_segments` + `cold_segment_stats`
+1. One SPI insert for `koldstore.cold_segments` + `cold_segment_index`
    (native arrays / `unnest`), including `checksum` (sha256 hex) and
    `object_etag` from the single publish pass
-2. No per-PK catalog rows — prune with `cold_segment_stats` / Parquet
-   row-group stats and bloom filters so catalog size stays O(segments ×
+2. No per-PK catalog rows — prune with Sort Key V1 `cold_segment_index` /
+   Parquet row-group stats and bloom filters so catalog size stays O(segments ×
    indexed columns)
 
-`column_stats` crosses SPI as `pgrx::JsonB` per segment (already
-`serde_json::Value` in Rust). Failpoints: `after_checksum_metadata` then
+`column_stats` on `cold_segments` is for object-store `manifest.json` export
+only (SPI as `pgrx::JsonB`). Query-path prune uses `cold_segment_index`.
+Failpoints: `after_checksum_metadata` then
 `after_pending_segment` after the pending insert.
 
 ---

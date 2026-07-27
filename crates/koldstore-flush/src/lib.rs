@@ -29,8 +29,8 @@ pub use ops::*;
 pub use policy::policy_flush_row_count;
 pub use scheduler::{scheduler_should_flush, scheduler_should_flush_parsed};
 pub use segment_catalog::{
-    indexed_column_stats_json, plan_activate_flush_segments, plan_flush_segments_batch_insert,
-    SegmentCatalogError,
+    encode_indexed_column_bounds, indexed_column_stats_json, plan_activate_flush_segments,
+    plan_flush_segments_batch_insert, EncodedColumnBound, SegmentCatalogError,
 };
 pub use segment_write::{
     flush_segment_object_path, write_flush_segment_file, write_flush_segment_with_client,

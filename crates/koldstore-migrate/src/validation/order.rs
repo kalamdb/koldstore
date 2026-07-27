@@ -18,6 +18,8 @@ pub struct CatalogColumn {
     pub catalog_type_name: String,
     /// Whether the column participates in the primary key.
     pub is_primary_key: bool,
+    /// Whether PostgreSQL permits NULL values.
+    pub nullable: bool,
     /// Whether PostgreSQL marks the column as an identity column.
     pub identity: bool,
     /// Whether PostgreSQL computes the column from a generation expression.
@@ -32,6 +34,8 @@ struct CatalogColumnWire {
     name: String,
     type_name: String,
     is_primary_key: bool,
+    #[serde(default = "default_nullable")]
+    nullable: bool,
     identity: bool,
     #[serde(default)]
     generated: bool,
@@ -49,6 +53,7 @@ impl TryFrom<CatalogColumnWire> for CatalogColumn {
             pg_type: PgType::from_postgres_name(&wire.type_name)?,
             catalog_type_name: wire.type_name,
             is_primary_key: wire.is_primary_key,
+            nullable: wire.nullable,
             identity: wire.identity,
             generated: wire.generated,
             default_expr: wire.default_expr,
@@ -66,6 +71,7 @@ impl Serialize for CatalogColumn {
             name: self.name.clone(),
             type_name: self.catalog_type_name.clone(),
             is_primary_key: self.is_primary_key,
+            nullable: self.nullable,
             identity: self.identity,
             generated: self.generated,
             default_expr: self.default_expr.clone(),
@@ -135,6 +141,7 @@ impl CatalogColumn {
             pg_type,
             catalog_type_name: catalog_type_name.into(),
             is_primary_key: false,
+            nullable: false,
             identity: false,
             generated: false,
             default_expr: None,
@@ -181,6 +188,10 @@ impl CatalogColumn {
         self.default_expr = Some(default_expr.into());
         self
     }
+}
+
+const fn default_nullable() -> bool {
+    true
 }
 
 /// Primary-key metadata for a table being migrated.

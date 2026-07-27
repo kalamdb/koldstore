@@ -304,8 +304,11 @@ pub struct ManageTableOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_file_size_mb: Option<u64>,
     /// Explicit oldest-to-newest ordering column for populated-table backfill.
-    #[serde(alias = "order_column", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_order_by: Option<String>,
+    /// Stable source attnum used to order cold segments and prune range scans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_order_column_id: Option<i16>,
     /// Parquet compression codec.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<ParquetCompression>,
@@ -474,6 +477,13 @@ impl ManageTableOptions {
     #[must_use]
     pub fn with_migration_order_by(mut self, column: impl Into<String>) -> Self {
         self.migration_order_by = Some(column.into());
+        self
+    }
+
+    /// Sets the stable source attnum used for cold-segment ordering.
+    #[must_use]
+    pub const fn with_segment_order_column_id(mut self, column_id: i16) -> Self {
+        self.segment_order_column_id = Some(column_id);
         self
     }
 
@@ -707,18 +717,14 @@ mod tests {
     }
 
     #[test]
-    fn manage_table_options_decode_legacy_order_column() {
-        let options = ManageTableOptions::from_value(&serde_json::json!({
-            "order_column": "created_at"
-        }));
+    fn manage_table_options_persist_segment_order_column_id_without_name() {
+        let options = ManageTableOptions::default().with_segment_order_column_id(7);
 
-        assert_eq!(options.explicit_migration_order_by(), Some("created_at"));
         assert_eq!(
             options.to_value(),
-            serde_json::json!({
-                "migration_order_by": "created_at",
-            })
+            serde_json::json!({ "segment_order_column_id": 7 })
         );
+        assert_eq!(options.segment_order_column_id, Some(7));
     }
 
     #[test]

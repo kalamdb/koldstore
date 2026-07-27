@@ -4,12 +4,10 @@ use koldstore_merge::scan::exec::{
     ColdAvailability, FilterPlan, ScanResourceCounters,
 };
 use koldstore_merge::scan::plan::{
-    prune_segment_stats, retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
-    ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
-    SegmentStatsHint,
+    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed, ColdPruneColumnPolicy,
+    MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
 };
 use serde_json::json;
-use std::collections::BTreeMap;
 
 fn pk(id: i64) -> LogicalPk {
     LogicalPk::from_json_object(&json!({"id": id}), &[PkColumn::new("id").unwrap()]).unwrap()
@@ -178,87 +176,6 @@ fn scan_state_cleanup_releases_resources_and_rescan_resets_merge_state() {
 }
 
 #[test]
-fn manifest_stats_pruning_skips_only_proven_non_overlapping_segments() {
-    let segments = vec![
-        SegmentStatsHint {
-            object_path: "app/items/batch-1.parquet".to_string(),
-            schema_version: 1,
-            physical_names: BTreeMap::new(),
-            column_stats: BTreeMap::from([(
-                5,
-                koldstore_parquet::ColumnStats {
-                    min: json!(1),
-                    max: json!(10),
-                },
-            )]),
-            byte_size: None,
-        },
-        SegmentStatsHint {
-            object_path: "app/items/batch-2.parquet".to_string(),
-            schema_version: 1,
-            physical_names: BTreeMap::new(),
-            column_stats: BTreeMap::from([(
-                5,
-                koldstore_parquet::ColumnStats {
-                    min: json!(50),
-                    max: json!(99),
-                },
-            )]),
-            byte_size: None,
-        },
-        SegmentStatsHint {
-            object_path: "app/items/batch-missing-stats.parquet".to_string(),
-            schema_version: 1,
-            physical_names: BTreeMap::new(),
-            column_stats: BTreeMap::new(),
-            byte_size: None,
-        },
-    ];
-
-    let selected = prune_segment_stats(
-        &segments,
-        &[SegmentPrunePredicate::closed_range(
-            5,
-            "qty",
-            json!(20),
-            json!(60),
-        )],
-    );
-
-    assert_eq!(
-        selected,
-        vec![
-            "app/items/batch-2.parquet".to_string(),
-            "app/items/batch-missing-stats.parquet".to_string(),
-        ]
-    );
-}
-
-#[test]
-fn manifest_stats_pruning_matches_stable_id_across_column_rename() {
-    let segments = vec![SegmentStatsHint {
-        object_path: "app/items/batch-1.parquet".to_string(),
-        schema_version: 1,
-        physical_names: BTreeMap::new(),
-        column_stats: BTreeMap::from([(
-            7,
-            koldstore_parquet::ColumnStats {
-                min: json!(1),
-                max: json!(10),
-            },
-        )]),
-        byte_size: None,
-    }];
-
-    let selected = prune_segment_stats(
-        &segments,
-        &[SegmentPrunePredicate::equality(7, "renamed_qty", json!(50))],
-    );
-
-    assert!(selected.is_empty());
-}
-
-#[test]
 fn scope_equality_is_retained_for_pre_merge_cold_prune() {
     let predicates = vec![
         SegmentPrunePredicate::equality(1, "id", json!(1)),
@@ -327,25 +244,4 @@ fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
 
     assert!(err.to_string().contains("status"));
     assert!(err.to_string().contains("indexed"));
-}
-
-#[test]
-fn indexed_prune_predicates_keep_segments_without_manifest_stats() {
-    let segments = vec![SegmentStatsHint {
-        object_path: "app/items/batch-1.parquet".to_string(),
-        schema_version: 1,
-        physical_names: BTreeMap::new(),
-        column_stats: BTreeMap::new(),
-        byte_size: None,
-    }];
-    let selected = prune_segment_stats(
-        &segments,
-        &[SegmentPrunePredicate::equality(
-            3,
-            "created_at",
-            json!("2026-01-01"),
-        )],
-    );
-
-    assert_eq!(selected, vec!["app/items/batch-1.parquet".to_string()]);
 }

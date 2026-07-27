@@ -239,7 +239,7 @@ pub async fn assert_cold_metadata_present(client: &Client, relation: &str) -> Re
               count(DISTINCT st.column_id),
               COALESCE(sum(cs.byte_size), 0)::bigint
             FROM koldstore.cold_segments cs
-            LEFT JOIN koldstore.cold_segment_stats st
+            LEFT JOIN koldstore.cold_segment_index st
               ON st.segment_id = cs.segment_id
              AND st.table_oid = cs.table_oid
              AND st.scope_key = cs.scope_key
@@ -255,7 +255,7 @@ pub async fn assert_cold_metadata_present(client: &Client, relation: &str) -> Re
     );
     anyhow::ensure!(
         row.get::<_, i64>(1) > 0,
-        "expected cold_segment_stats prune metadata for {relation}"
+        "expected cold_segment_index prune metadata for {relation}"
     );
     anyhow::ensure!(
         row.get::<_, i64>(2) > 0,

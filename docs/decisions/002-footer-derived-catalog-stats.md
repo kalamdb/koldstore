@@ -10,10 +10,10 @@ Accepted (deferred implementation)
 
 ## Context
 
-On flush, KoldStore publishes per-segment `column_stats` (min/max for `seq`,
-primary-key, and indexed columns) into `koldstore.cold_segments` /
-`cold_segment_stats` so `KoldMergeScan` can prune whole Parquet files **before**
-opening them.
+On flush, KoldStore publishes Sort Key V1 bounds into
+`koldstore.cold_segment_index` (and optional `column_stats` JSON on
+`cold_segments` for object-store `manifest.json`) so `KoldMergeScan` can prune
+whole Parquet files **before** opening them.
 
 Today those bounds are computed twice on the write path:
 

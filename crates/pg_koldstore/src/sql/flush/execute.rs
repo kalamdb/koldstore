@@ -67,14 +67,25 @@ fn load_flush_prepared_context(
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let catalog = crate::sql::migrate_pg::migration_catalog(table_oid.to_u32())?;
     let mut seen_column_ids = std::collections::BTreeSet::new();
-    let indexed_columns = catalog
+    let mut indexed_columns = catalog
         .columns
         .iter()
         .filter(|column| column.is_primary_key)
         .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
         .chain(catalog.indexed_columns.iter().cloned())
         .filter(|column| seen_column_ids.insert(column.column_id))
-        .collect();
+        .collect::<Vec<_>>();
+    if let Some(order_column_id) = snapshot.segment_order_column_id {
+        if let Some(column) = catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id == order_column_id)
+        {
+            if seen_column_ids.insert(column.column_id) {
+                indexed_columns.push(ColumnRef::new(column.column_id, column.name.clone()));
+            }
+        }
+    }
     let min_floor = u64::try_from(crate::guc::min_max_rows_per_file())
         .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
     let options = super::spi::active_manage_options(table_oid)?.unwrap_or_default();
@@ -161,6 +172,7 @@ pub(super) fn stream_write_flush_batches(
         compression: ctx.storage.compression.clone(),
         row_group_size: koldstore_parquet::WriterOptions::default().row_group_size,
         mirror_ops: selection.mirror_ops.clone(),
+        sort_by_order_key: ctx.snapshot.segment_order_column_id.is_some(),
     };
     let catalog_columns = ctx.catalog_columns.clone();
     let fetch_batch_size = encode_input.fetch_batch_size;
@@ -176,6 +188,7 @@ pub(super) fn stream_write_flush_batches(
                     max_seq,
                     after_seq,
                     fetch_batch_size,
+                    ctx.snapshot.segment_order_column_id.is_some(),
                 )
             },
             |chunk| {

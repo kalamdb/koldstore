@@ -47,6 +47,7 @@ pub use drop_table::{
 pub use koldstore_common::{FlushPolicy, ManageTableOptions, QualifiedTableName};
 pub use mirror::{
     mirror_relation_for_source, plan_change_log_mirror, plan_change_log_mirror_from_columns,
+    plan_change_log_mirror_with_order_column,
     ChangeLogMirrorPlan, MirrorError, MirrorResult,
 };
 pub use plan::{

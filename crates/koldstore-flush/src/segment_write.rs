@@ -35,6 +35,10 @@ pub struct WrittenFlushSegment {
     pub object_etag: Option<String>,
     /// Column stats JSON stored in `koldstore.cold_segments`.
     pub column_stats: serde_json::Value,
+    /// Original JSON bounds awaiting catalog type resolution and Sort Key encoding.
+    pub indexed_bounds: std::collections::BTreeMap<String, (serde_json::Value, serde_json::Value)>,
+    /// Stable indexed-column identities corresponding to [`Self::indexed_bounds`].
+    pub indexed_columns: Vec<ColumnRef>,
     /// Catalog row shape for manifest assembly (single source of truth).
     pub catalog_row: CatalogManifestSegmentRow,
 }
@@ -156,6 +160,8 @@ pub fn write_flush_segment_with_client(
         checksum: published.checksum,
         object_etag: published.etag,
         column_stats,
+        indexed_bounds: chunk.indexed_bounds.clone(),
+        indexed_columns: indexed_columns.to_vec(),
         catalog_row,
     })
 }

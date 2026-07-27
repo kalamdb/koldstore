@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use koldstore_common::{ColumnRef, TableName};
+use koldstore_common::{ColumnId, ColumnRef, TableName};
 use koldstore_schema::MirrorInitializationState;
 use serde::Deserialize;
 
@@ -182,6 +182,8 @@ pub struct ManagedTableSnapshot {
     pub primary_key_shape_hash: u64,
     /// Optional user-scope column.
     pub scope_column: Option<String>,
+    /// Stable source attnum used for cold-segment ordering and range pruning.
+    pub segment_order_column_id: Option<ColumnId>,
 }
 
 impl ManagedTableSnapshot {
@@ -304,6 +306,8 @@ struct ManagedTableSnapshotWire {
     primary_key_shape: serde_json::Value,
     #[serde(default)]
     scope_column: Option<serde_json::Value>,
+    #[serde(default)]
+    options: serde_json::Value,
 }
 
 impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
@@ -332,6 +336,14 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
             column.column_id.hash(&mut hasher);
         }
         hash_primary_key_shape(&wire.primary_key_shape, &mut hasher);
+        let segment_order_column_id = wire
+            .options
+            .get("segment_order_column_id")
+            .and_then(serde_json::Value::as_i64)
+            .map(i16::try_from)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .map(ColumnId::from_attnum);
 
         Ok(Self {
             table_oid,
@@ -342,6 +354,7 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
             primary_key_columns: wire.primary_key,
             primary_key_shape_hash: hasher.finish(),
             scope_column,
+            segment_order_column_id,
         })
     }
 }
@@ -404,7 +417,8 @@ mod tests {
             "mirror_relation": "koldstore_mirror.items",
             "primary_key": [{"column_id": 7, "name": "renamed_id"}],
             "primary_key_shape": {"columns": [{"column_id": 7, "name": "renamed_id"}]},
-            "scope_column": null
+            "scope_column": null,
+            "options": {"segment_order_column_id": 9}
         }))
         .unwrap();
 
@@ -413,6 +427,7 @@ mod tests {
             ColumnId::from_attnum(7)
         );
         assert_eq!(snapshot.primary_key_columns[0].name, "renamed_id");
+        assert_eq!(snapshot.segment_order_column_id, Some(ColumnId::from_attnum(9)));
     }
 
     #[test]

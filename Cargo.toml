@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/koldstore-common",
+    "crates/koldstore-sortkey",
     "crates/koldstore-catalog",
     "crates/koldstore-schema",
     "crates/koldstore-setup",
@@ -23,6 +24,7 @@ members = [
 ]
 default-members = [
     "crates/koldstore-common",
+    "crates/koldstore-sortkey",
     "crates/koldstore-catalog",
     "crates/koldstore-schema",
     "crates/koldstore-setup",
@@ -50,6 +52,7 @@ rust-version = "1.96"
 
 [workspace.dependencies]
 koldstore-common = { path = "crates/koldstore-common" }
+koldstore-sortkey = { path = "crates/koldstore-sortkey" }
 koldstore-catalog = { path = "crates/koldstore-catalog" }
 koldstore-schema = { path = "crates/koldstore-schema" }
 koldstore-setup = { path = "crates/koldstore-setup" }
@@ -85,6 +88,7 @@ rustls = { version = "0.23.42", default-features = false, features = ["ring", "s
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+storekey = { version = "=0.11.0", default-features = false, features = ["uuid"] }
 tempfile = "3.27.0"
 thiserror = "2.0.19"
 # Shared runtime features for library crates. Test binaries add `macros`;

@@ -7,11 +7,11 @@
 
 use koldstore_common::{PrimaryKeyColumnShape, PrimaryKeyShape, SqlStatement};
 use koldstore_mirror::{
-    mirror_relation_for_source as storage_mirror_relation_for_source, plan_mirror_schema,
-    statement::mirror_to_sql, MirrorStatement,
+    mirror_relation_for_source as storage_mirror_relation_for_source,
+    plan_mirror_schema_with_order_key, statement::mirror_to_sql, MirrorStatement,
 };
 
-use crate::capture::{plan_mirror_capture, MirrorCapturePlan};
+use crate::capture::MirrorCapturePlan;
 use crate::QualifiedTableName;
 
 pub type MirrorResult<T> = Result<T, MirrorError>;
@@ -97,7 +97,24 @@ pub fn plan_change_log_mirror(
     source_table: &QualifiedTableName,
     primary_key: &PrimaryKeyShape,
 ) -> MirrorResult<ChangeLogMirrorPlan> {
-    plan_change_log_mirror_from_columns(source_table, primary_key.columns())
+    plan_change_log_mirror_with_order_column(source_table, primary_key, None)
+}
+
+/// Plans a change-log mirror with an optional immutable segment-order column.
+///
+/// # Errors
+///
+/// Returns an error when key metadata or generated SQL is invalid.
+pub fn plan_change_log_mirror_with_order_column(
+    source_table: &QualifiedTableName,
+    primary_key: &PrimaryKeyShape,
+    order_column: Option<&str>,
+) -> MirrorResult<ChangeLogMirrorPlan> {
+    plan_change_log_mirror_from_columns_with_order_column(
+        source_table,
+        primary_key.columns(),
+        order_column,
+    )
 }
 
 /// Plans a per-table change-log mirror from ordered primary-key columns.
@@ -110,13 +127,27 @@ pub fn plan_change_log_mirror_from_columns(
     source_table: &QualifiedTableName,
     columns: &[PrimaryKeyColumnShape],
 ) -> MirrorResult<ChangeLogMirrorPlan> {
+    plan_change_log_mirror_from_columns_with_order_column(source_table, columns, None)
+}
+
+fn plan_change_log_mirror_from_columns_with_order_column(
+    source_table: &QualifiedTableName,
+    columns: &[PrimaryKeyColumnShape],
+    order_column: Option<&str>,
+) -> MirrorResult<ChangeLogMirrorPlan> {
     let source_name = source_table
         .as_table_name()
         .map_err(|error| MirrorError::InvalidMirrorName(error.to_string()))?;
     let mirror_storage = storage_mirror_relation_for_source(&source_name)?;
     let mirror_table = QualifiedTableName::from_table_name(mirror_storage.table_name());
-    let schema_plan = plan_mirror_schema(&mirror_storage, columns)?;
-    let capture = plan_mirror_capture(source_table, &mirror_table, columns)
+    let schema_plan =
+        plan_mirror_schema_with_order_key(&mirror_storage, columns, order_column.is_some())?;
+    let capture = koldstore_mirror::strict::plan_mirror_capture_with_order_column(
+        source_table,
+        &mirror_table,
+        columns,
+        order_column,
+    )
         .map_err(|error| MirrorError::Capture(error.to_string()))?;
 
     Ok(ChangeLogMirrorPlan {

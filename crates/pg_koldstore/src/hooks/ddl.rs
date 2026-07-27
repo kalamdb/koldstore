@@ -275,6 +275,7 @@ fn ensure_initial_management(
         None,
         "strict",
         true,
+        None,
     );
     Ok(())
 }

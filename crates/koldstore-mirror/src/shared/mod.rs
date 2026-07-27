@@ -23,7 +23,10 @@ pub use relation::{
     mirror_relation_for_source, MirrorRelation, CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,
 };
 pub use row_json::{MirrorSelectionRow, MirrorSeqStats};
-pub use schema::{plan_drop_mirror_table, plan_mirror_schema, MirrorSchemaPlan};
+pub use schema::{
+    plan_drop_mirror_table, plan_mirror_schema, plan_mirror_schema_with_order_key,
+    MirrorSchemaPlan,
+};
 pub use statement::{mirror_to_sql, MirrorAccess, MirrorStatement, SqlParamType};
 pub use write::{
     mirror_delete_using_selected_sql, mirror_selected_join_predicate,

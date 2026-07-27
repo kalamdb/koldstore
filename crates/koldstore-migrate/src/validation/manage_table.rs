@@ -27,6 +27,19 @@ pub struct ManageTablePolicyInput {
     pub auto_flush: bool,
 }
 
+/// Catalog-resolved segment ordering column accepted at the manage boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SegmentOrderColumnInput<'a> {
+    /// Stable PostgreSQL `attnum`.
+    pub column_id: i16,
+    /// Current physical column name, used only for diagnostics.
+    pub name: &'a str,
+    /// PostgreSQL type OID.
+    pub type_oid: u32,
+    /// Whether PostgreSQL permits NULL values.
+    pub nullable: bool,
+}
+
 /// PostgreSQL-free context required to validate one `manage_table` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManageTableValidationContext<'a> {
@@ -36,6 +49,8 @@ pub struct ManageTableValidationContext<'a> {
     pub already_managed: bool,
     /// Optional explicit backfill ordering column.
     pub migration_order_by: Option<&'a str>,
+    /// Optional catalog-resolved cold-segment ordering column.
+    pub segment_order_column: Option<SegmentOrderColumnInput<'a>>,
     /// Optional operator-provided compression spelling.
     pub compression: Option<&'a str>,
     /// Optional mirror consistency/write-throughput mode.
@@ -95,6 +110,26 @@ pub fn validate_manage_table(
             ));
         }
         options = options.with_migration_order_by(migration_order_by);
+    }
+
+    if let Some(column) = context.segment_order_column {
+        if mirror_capture_mode.is_async() {
+            return Err(MigrationConstraintError::SegmentOrderRequiresStrictCapture);
+        }
+        if column.nullable {
+            return Err(MigrationConstraintError::NullableSegmentOrderColumn(
+                column.name.to_string(),
+            ));
+        }
+        if koldstore_sortkey::SortKeyType::from_type_oid(column.type_oid).is_none() {
+            return Err(
+                MigrationConstraintError::UnsupportedSegmentOrderColumnType {
+                    column: column.name.to_string(),
+                    type_oid: column.type_oid,
+                },
+            );
+        }
+        options = options.with_segment_order_column_id(column.column_id);
     }
 
     if let Some(hot_row_limit) = context.policy.hot_row_limit {

@@ -41,13 +41,13 @@ fn user_scope_cold_pruning_filters_segments_before_stream_open() {
     assert_eq!(state.resources.object_store_handles, 1);
 }
 
-/// Scope equality uses `koldstore.cold_segment_stats` min/max on the shared
-/// manifest (`scope_key = ''`) to skip other tenants' Parquet files.
+/// Text scope equality remains correct when Sort Key V1 cannot index the scope
+/// column and the scan conservatively opens all candidate segments.
 ///
 /// Later each scope_id will own its own manifest.json + folder; listing will
 /// filter by `scope_key` first and min/max remains a secondary prune.
 #[tokio::test]
-async fn scope_column_equality_prunes_cold_segments_via_catalog_stats() -> Result<()> {
+async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<()> {
     common::require_pgrx_server().await?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "scope_stats_prune").await?;
@@ -127,13 +127,13 @@ async fn scope_column_equality_prunes_cold_segments_via_catalog_stats() -> Resul
             "expected >=2 cold segments after segregated flushes, got {segments}"
         );
 
-        // Catalog must have scope-column stats (indexed path, not manifest.json).
+        // Sort Key V1 deliberately does not support text, so no index rows are expected.
         let stats_rows: i64 = db
             .client
             .query_one(
                 r#"
                 SELECT count(*)::bigint
-                FROM koldstore.cold_segment_stats
+                FROM koldstore.cold_segment_index
                 WHERE table_oid = $1::text::regclass::oid
                   AND column_id = (
                       SELECT attnum
@@ -147,10 +147,7 @@ async fn scope_column_equality_prunes_cold_segments_via_catalog_stats() -> Resul
             )
             .await?
             .get(0);
-        anyhow::ensure!(
-            stats_rows >= 2,
-            "expected user_id cold_segment_stats rows, got {stats_rows}"
-        );
+        anyhow::ensure!(stats_rows == 0, "text user_id should not have index rows");
 
         db.client
             .batch_execute("SET koldstore.user_id = 'user-a'")
@@ -168,19 +165,14 @@ async fn scope_column_equality_prunes_cold_segments_via_catalog_stats() -> Resul
             "expected DB segment catalog source, got:\n{plan}"
         );
         anyhow::ensure!(
-            plan.contains("Segments Pruned by Min/Max:"),
-            "expected min/max prune counter, got:\n{plan}"
+            plan.contains("Segments Pruned by Catalog Index:"),
+            "expected catalog-index prune counter, got:\n{plan}"
         );
-        let pruned = explain_counter(&plan, "Segments Pruned by Min/Max")?;
         let opened = explain_counter(&plan, "Parquet Segments Opened")?;
         let considered = explain_counter(&plan, "Candidate Segments")?;
         anyhow::ensure!(
-            pruned >= 1,
-            "scope equality should prune at least one foreign-tenant segment; pruned={pruned} opened={opened} considered={considered}\n{plan}"
-        );
-        anyhow::ensure!(
-            opened < considered,
-            "opened ({opened}) should be < candidates ({considered}) after scope prune\n{plan}"
+            opened == considered,
+            "unsupported text pruning should conservatively open all candidates; opened={opened} considered={considered}\n{plan}"
         );
 
         let visible: i64 = db

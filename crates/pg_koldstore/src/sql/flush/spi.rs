@@ -4,9 +4,9 @@ use koldstore_catalog::{decode::RelationContext, ManagedTableSnapshot};
 use koldstore_common::QualifiedTableName;
 use koldstore_flush::policy::FlushPolicy;
 use koldstore_flush::{
-    cleanup::plan_seq_range_cleanup, manifest_from_catalog_rows, plan_activate_flush_segments,
-    plan_flush_segments_batch_insert, policy_flush_row_count, CatalogManifestSegmentRow,
-    FlushStats, ResolvedFlushSelection, WrittenFlushSegment,
+    cleanup::plan_seq_range_cleanup, encode_indexed_column_bounds, manifest_from_catalog_rows,
+    plan_activate_flush_segments, plan_flush_segments_batch_insert, policy_flush_row_count,
+    CatalogManifestSegmentRow, FlushStats, ResolvedFlushSelection, WrittenFlushSegment,
 };
 use koldstore_mirror::{
     mirror_to_sql, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats, plan_mirror_stats,
@@ -285,9 +285,9 @@ pub(super) fn manifest_generation(table_oid: pgrx::pg_sys::Oid) -> Result<i64, S
 
 /// Catalogs every segment written by one `flush_table` call.
 ///
-/// Segment rows + normalized `cold_segment_stats` go in one SPI round trip.
+/// Segment rows + normalized `cold_segment_index` bounds go in one SPI insert.
 /// Exact per-PK catalog hints are intentionally not written: prune with
-/// `cold_segment_stats` / Parquet stats so catalog size stays O(segments).
+/// `cold_segment_index` / Parquet stats so catalog size stays O(segments).
 ///
 /// # Errors
 ///
@@ -303,6 +303,7 @@ pub(super) fn persist_flush_segments_batch(
         return Ok(());
     }
 
+    let column_type_oids = resolve_indexed_column_type_oids(table_oid, segments)?;
     let mut segment_ids = Vec::with_capacity(segments.len());
     let mut object_paths = Vec::with_capacity(segments.len());
     let mut batch_numbers = Vec::with_capacity(segments.len());
@@ -316,6 +317,12 @@ pub(super) fn persist_flush_segments_batch(
     let mut column_stats = Vec::with_capacity(segments.len());
     let mut checksums = Vec::with_capacity(segments.len());
     let mut object_etags = Vec::with_capacity(segments.len());
+    let mut index_segment_ids = Vec::new();
+    let mut index_column_ids = Vec::new();
+    let mut index_type_oids = Vec::new();
+    let mut index_codec_versions = Vec::new();
+    let mut index_min_values = Vec::new();
+    let mut index_max_values = Vec::new();
     for segment in segments {
         let row = &segment.catalog_row;
         let segment_id = crate::spi::uuid_to_pgrx(segment.segment_id);
@@ -332,6 +339,20 @@ pub(super) fn persist_flush_segments_batch(
         column_stats.push(pgrx::JsonB(row.column_stats.clone()));
         checksums.push(segment.checksum.clone());
         object_etags.push(segment.object_etag.clone().unwrap_or_default());
+        for bound in encode_indexed_column_bounds(
+            &segment.indexed_bounds,
+            &segment.indexed_columns,
+            &column_type_oids,
+        )
+        .map_err(|error| error.to_string())?
+        {
+            index_segment_ids.push(segment_id);
+            index_column_ids.push(bound.column_id.get());
+            index_type_oids.push(pgrx::pg_sys::Oid::from(bound.type_oid));
+            index_codec_versions.push(bound.codec_version);
+            index_min_values.push(bound.min_value);
+            index_max_values.push(bound.max_value);
+        }
     }
 
     let statement = plan_flush_segments_batch_insert().map_err(|error| error.to_string())?;
@@ -352,10 +373,61 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(column_stats),
             DatumWithOid::from(checksums),
             DatumWithOid::from(object_etags),
+            DatumWithOid::from(index_segment_ids),
+            DatumWithOid::from(index_column_ids),
+            DatumWithOid::from(index_type_oids),
+            DatumWithOid::from(index_codec_versions),
+            DatumWithOid::from(index_min_values),
+            DatumWithOid::from(index_max_values),
         ],
     )
     .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn resolve_indexed_column_type_oids(
+    table_oid: pgrx::pg_sys::Oid,
+    segments: &[WrittenFlushSegment],
+) -> Result<std::collections::BTreeMap<koldstore_common::ColumnId, u32>, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let column_ids = segments
+        .iter()
+        .flat_map(|segment| segment.indexed_columns.iter())
+        .map(|column| column.column_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if column_ids.is_empty() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    let attnums = column_ids
+        .iter()
+        .map(|column_id| column_id.get())
+        .collect::<Vec<_>>();
+    let json = pgrx::Spi::get_one_with_args::<String>(
+        r#"
+SELECT COALESCE(
+    jsonb_object_agg(attribute.attnum::text, attribute.atttypid::bigint)::text,
+    '{}'
+)
+FROM pg_catalog.pg_attribute attribute
+WHERE attribute.attrelid = $1::oid
+  AND attribute.attnum = ANY($2::smallint[])
+  AND attribute.attnum > 0
+  AND NOT attribute.attisdropped
+"#,
+        &[DatumWithOid::from(table_oid), DatumWithOid::from(attnums)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or_else(|| "{}".to_string());
+    let raw = serde_json::from_str::<std::collections::BTreeMap<String, u32>>(&json)
+        .map_err(|error| error.to_string())?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|(attnum, type_oid)| {
+            let attnum = attnum.parse::<i16>().ok()?;
+            Some((koldstore_common::ColumnId::from_attnum(attnum), type_oid))
+        })
+        .collect())
 }
 
 /// Catalogs one written segment immediately (segment row + column stats).

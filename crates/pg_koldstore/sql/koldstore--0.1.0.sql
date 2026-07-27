@@ -201,8 +201,7 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   byte_size bigint NOT NULL,
   schema_version integer NOT NULL,
   column_stats jsonb NOT NULL DEFAULT '{}'::jsonb,
-  -- column_stats mirrors cold_segment_stats for cache-friendly segment loads.
-  -- Keep both in sync on flush; do not grow this with per-row payloads.
+  -- Object-store manifest export only. Query-path prune uses cold_segment_index.
   status text NOT NULL CHECK (status IN ('pending', 'active', 'compacted', 'deleted')),
   -- Object identity from publish (sha256 hex + backend etag). Set at pending insert.
   checksum text,
@@ -226,25 +225,34 @@ CREATE INDEX IF NOT EXISTS cold_segments_pending_created_idx
   ON koldstore.cold_segments (table_oid, created_at)
   WHERE status = 'pending';
 
-CREATE TABLE IF NOT EXISTS koldstore.cold_segment_stats (
-  segment_id uuid NOT NULL REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,
-  table_oid oid NOT NULL,
-  scope_key text NOT NULL DEFAULT '',
-  column_id smallint NOT NULL,
-  type_oid oid NOT NULL,
-  min_value bytea,
-  max_value bytea,
-  null_count bigint,
-  distinct_count bigint,
-  PRIMARY KEY (segment_id, column_id)
+-- Query-path bounds use the persisted KoldStore Sort Key V1 bytea codec.
+CREATE TABLE IF NOT EXISTS koldstore.cold_segment_index (
+    segment_id uuid NOT NULL
+        REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,
+    table_oid oid NOT NULL,
+    scope_key text NOT NULL DEFAULT '',
+    column_id smallint NOT NULL,
+    type_oid oid NOT NULL,
+    codec_version smallint NOT NULL,
+    min_value bytea NOT NULL,
+    max_value bytea NOT NULL,
+    PRIMARY KEY (segment_id, column_id),
+    CHECK (min_value <= max_value)
 );
 
-CREATE INDEX IF NOT EXISTS cold_segment_stats_lookup_idx
-  ON koldstore.cold_segment_stats (table_oid, scope_key, column_id, segment_id);
+CREATE INDEX IF NOT EXISTS cold_segment_index_min_idx
+ON koldstore.cold_segment_index (
+    table_oid, scope_key, column_id, type_oid, codec_version, min_value
+) INCLUDE (max_value, segment_id);
+
+CREATE INDEX IF NOT EXISTS cold_segment_index_max_idx
+ON koldstore.cold_segment_index (
+    table_oid, scope_key, column_id, type_oid, codec_version, max_value
+) INCLUDE (min_value, segment_id);
 
 -- NOTE: Do not add per-PK catalog tables (e.g. exact cold_pk_hints). Cold
--- presence is discovered via cold_segment_stats / Parquet stats+bloom so catalog
--- size stays O(segments × indexed columns), not O(flushed rows).
+-- presence is discovered via Sort Key V1 bounds in cold_segment_index and
+-- Parquet stats/bloom, so catalog size stays O(segments × indexed columns).
 
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_seq AS bigint;
 CREATE SEQUENCE IF NOT EXISTS koldstore.global_commit_seq AS bigint;
@@ -349,5 +357,5 @@ REVOKE ALL ON
   koldstore.jobs,
   koldstore.table_cancel_requests,
   koldstore.cold_segments,
-  koldstore.cold_segment_stats
+  koldstore.cold_segment_index
 FROM PUBLIC;

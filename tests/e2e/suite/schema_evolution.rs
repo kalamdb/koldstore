@@ -118,11 +118,24 @@ async fn rename_column_preserves_column_id_and_reads_across_schema_versions() ->
                        (
                          SELECT c->>'column_id'
                          FROM jsonb_array_elements(columns) AS c
-                         WHERE c->>'name' = 'title'
-                       ) AS title_column_id,
+                         WHERE c->>'name' = 'qty'
+                       ) AS qty_column_id,
                        (
                          SELECT count(*)
-                         FROM koldstore.cold_segment_stats st
+                         FROM koldstore.cold_segment_index st
+                         JOIN koldstore.cold_segments cs
+                           ON cs.segment_id = st.segment_id
+                         WHERE cs.table_oid = s.table_oid
+                           AND cs.status = 'active'
+                           AND st.column_id = (
+                             SELECT (c->>'column_id')::smallint
+                             FROM jsonb_array_elements(s.columns) AS c
+                             WHERE c->>'name' = 'qty'
+                           )
+                       ) AS qty_stats_rows,
+                       (
+                         SELECT count(*)
+                         FROM koldstore.cold_segment_index st
                          JOIN koldstore.cold_segments cs
                            ON cs.segment_id = st.segment_id
                          WHERE cs.table_oid = s.table_oid
@@ -141,22 +154,28 @@ async fn rename_column_preserves_column_id_and_reads_across_schema_versions() ->
             )
             .await?;
         let version_before: i32 = before.get(0);
-        let title_column_id: String = before.get(1);
-        let title_stats_before: i64 = before.get(2);
+        let qty_column_id: String = before.get(1);
+        let qty_stats_before: i64 = before.get(2);
+        let title_stats_before: i64 = before.get(3);
         assert_eq!(version_before, 1);
         assert!(
-            title_stats_before > 0,
-            "expected cold stats for title before rename"
+            qty_stats_before > 0,
+            "expected Sort Key index rows for integer qty before rename"
+        );
+        assert_eq!(
+            title_stats_before, 0,
+            "text title must not produce Sort Key V1 index rows"
         );
 
         db.client
             .batch_execute(&format!(
                 r#"
                 ALTER TABLE {} RENAME COLUMN title TO headline;
-                INSERT INTO {} (id, account_id, headline, qty, category)
+                ALTER TABLE {} RENAME COLUMN qty TO amount;
+                INSERT INTO {} (id, account_id, headline, amount, category)
                 VALUES (100, 1, 'after-rename', 10, 'new');
                 "#,
-                table.relation, table.relation
+                table.relation, table.relation, table.relation
             ))
             .await?;
         assert_eq!(db.flush_table(&table.relation).await?, 1);
@@ -169,16 +188,16 @@ async fn rename_column_preserves_column_id_and_reads_across_schema_versions() ->
                        (
                          SELECT c->>'column_id'
                          FROM jsonb_array_elements(columns) AS c
-                         WHERE c->>'name' = 'headline'
-                       ) AS headline_column_id,
+                         WHERE c->>'name' = 'amount'
+                       ) AS amount_column_id,
                        (
                          SELECT count(*)
                          FROM jsonb_array_elements(columns) AS c
-                         WHERE c->>'name' = 'title'
+                         WHERE c->>'name' IN ('title', 'qty')
                        ) AS old_name_rows,
                        (
                          SELECT count(*)
-                         FROM koldstore.cold_segment_stats st
+                         FROM koldstore.cold_segment_index st
                          JOIN koldstore.cold_segments cs
                            ON cs.segment_id = st.segment_id
                          WHERE cs.table_oid = s.table_oid
@@ -189,22 +208,22 @@ async fn rename_column_preserves_column_id_and_reads_across_schema_versions() ->
                 WHERE table_oid = $1::text::regclass::oid
                   AND active
                 "#,
-                &[&table.relation, &title_column_id.parse::<i16>()?],
+                &[&table.relation, &qty_column_id.parse::<i16>()?],
             )
             .await?;
         let version_after: i32 = after.get(0);
-        let headline_column_id: String = after.get(1);
+        let amount_column_id: String = after.get(1);
         let old_name_rows: i64 = after.get(2);
         let stats_rows_for_id: i64 = after.get(3);
         assert!(
             version_after > version_before,
             "rename should refresh schema version"
         );
-        assert_eq!(headline_column_id, title_column_id);
+        assert_eq!(amount_column_id, qty_column_id);
         assert_eq!(old_name_rows, 0);
         assert!(
-            stats_rows_for_id >= title_stats_before,
-            "rename must keep cold stats attached to the same column_id"
+            stats_rows_for_id >= qty_stats_before,
+            "rename must keep cold index rows attached to the same column_id"
         );
 
         let rows = db
@@ -249,7 +268,7 @@ async fn drop_and_add_same_column_name_uses_new_column_id() -> Result<()> {
                    WHERE c->>'name' = 'qty') AS qty_column_id,
                   (
                     SELECT count(*)
-                    FROM koldstore.cold_segment_stats st
+                    FROM koldstore.cold_segment_index st
                     JOIN koldstore.cold_segments cs
                       ON cs.segment_id = st.segment_id
                     WHERE cs.table_oid = s.table_oid
@@ -271,7 +290,7 @@ async fn drop_and_add_same_column_name_uses_new_column_id() -> Result<()> {
         let old_stats_rows: i64 = before.get(1);
         assert!(
             old_stats_rows > 0,
-            "qty is indexed so flush should write cold_segment_stats for it"
+            "qty is indexed so flush should write cold_segment_index for it"
         );
 
         db.client
@@ -300,7 +319,7 @@ async fn drop_and_add_same_column_name_uses_new_column_id() -> Result<()> {
                    WHERE c->>'name' = 'qty') AS qty_column_id,
                   (
                     SELECT count(*)
-                    FROM koldstore.cold_segment_stats st
+                    FROM koldstore.cold_segment_index st
                     JOIN koldstore.cold_segments cs
                       ON cs.segment_id = st.segment_id
                     WHERE cs.table_oid = s.table_oid

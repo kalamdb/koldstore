@@ -1451,6 +1451,7 @@ dependencies = [
  "koldstore-migrate",
  "koldstore-mirror",
  "koldstore-parquet",
+ "koldstore-sortkey",
  "koldstore-storage",
  "serde_json",
  "tempfile",
@@ -1496,6 +1497,7 @@ dependencies = [
  "koldstore-common",
  "koldstore-mirror",
  "koldstore-schema",
+ "koldstore-sortkey",
  "serde",
  "serde_json",
  "thiserror",
@@ -1546,6 +1548,17 @@ dependencies = [
 [[package]]
 name = "koldstore-setup"
 version = "0.1.6-beta.0"
+
+[[package]]
+name = "koldstore-sortkey"
+version = "0.1.6-beta.0"
+dependencies = [
+ "chrono",
+ "serde_json",
+ "storekey",
+ "thiserror",
+ "uuid",
+]
 
 [[package]]
 name = "koldstore-storage"
@@ -2000,6 +2013,7 @@ dependencies = [
  "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-schema",
+ "koldstore-sortkey",
  "koldstore-storage",
  "koldstore-worker",
  "pgrx",
@@ -2813,6 +2827,15 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-postgres",
+]
+
+[[package]]
+name = "storekey"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd9a94571bde7369ecaac47cec2e6844642d99166bd452fbd8def74b5b917b2f"
+dependencies = [
+ "uuid",
 ]
 
 [[package]]

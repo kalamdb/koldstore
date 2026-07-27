@@ -12,7 +12,6 @@ use koldstore_parquet::{
     SegmentSplitPolicy, StreamingParquetSegmentWriter, WriterOptions,
 };
 
-use crate::ops::plan_mirror_flush_selection_batch;
 use crate::write::{merge_indexed_bounds, FlushWriteChunk};
 
 /// Input for one streaming flush encode pass.
@@ -46,6 +45,8 @@ pub struct StreamEncodeInput {
     pub row_group_size: usize,
     /// When set, mirror fetch is restricted to these operation codes.
     pub mirror_ops: Option<Vec<i16>>,
+    /// Collects the bounded flush selection and sorts by mirror `order_key`, then PK.
+    pub sort_by_order_key: bool,
 }
 
 struct SegmentBuilder {
@@ -206,13 +207,14 @@ where
     F: FnMut(&SqlStatement, i64, i64) -> Result<Vec<FlushMirrorRow>, String>,
     W: FnMut(FlushWriteChunk) -> Result<(), String>,
 {
-    let selection = plan_mirror_flush_selection_batch(
+    let selection = crate::ops::plan_mirror_flush_selection_batch_with_order_key(
         &input.table,
         &input.mirror,
         &input.primary_key_columns,
         &input.base_column_names,
         None,
         input.mirror_ops.as_deref(),
+        input.sort_by_order_key,
     )
     .map_err(|error| error.to_string())?;
 
@@ -221,6 +223,11 @@ where
     let mut max_seq = 0_i64;
     let mut chunk_builder = ChunkBuilder::new(&input.parquet_columns, &input.indexed_columns)?;
     let mut segment_builder = SegmentBuilder::new(input);
+    let pk_indices = koldstore_parquet::pk_column_indices(
+        &input.base_column_names,
+        &input.primary_key_columns,
+    )?;
+    let mut ordered_rows = Vec::new();
 
     loop {
         let batch = fetch_batch(&selection.statement, input.max_seq, after_seq)?;
@@ -230,7 +237,38 @@ where
         after_seq = batch.last().map(|row| row.seq).unwrap_or(after_seq);
         max_seq = after_seq;
         let batch_len = batch.len();
-        for row in batch {
+        if input.sort_by_order_key {
+            ordered_rows.extend(batch);
+        } else {
+            for row in batch {
+                chunk_builder.push_row(&row, &input.primary_key_columns, input.schema_version)?;
+                rows_written += 1;
+                let row_group_limit = input.row_group_size.max(1).min(
+                    segment_builder
+                        .remaining_rows(input.max_rows_per_file)
+                        .max(1),
+                );
+                if chunk_builder.len() >= row_group_limit {
+                    let cold_batch = chunk_builder.take_batch()?;
+                    if segment_builder.push_batch(cold_batch)? {
+                        if let Some(chunk) = segment_builder.finish_segment()? {
+                            write_chunk(chunk)?;
+                        }
+                    }
+                }
+            }
+        }
+        if (batch_len as i64) < input.fetch_batch_size {
+            break;
+        }
+    }
+
+    if input.sort_by_order_key {
+        if ordered_rows.iter().any(|row| row.order_key.is_none()) {
+            return Err("configured segment order key is missing from a mirror row".to_string());
+        }
+        sort_flush_rows(&mut ordered_rows, &pk_indices);
+        for row in ordered_rows {
             chunk_builder.push_row(&row, &input.primary_key_columns, input.schema_version)?;
             rows_written += 1;
             let row_group_limit = input.row_group_size.max(1).min(
@@ -247,9 +285,6 @@ where
                 }
             }
         }
-        if (batch_len as i64) < input.fetch_batch_size {
-            break;
-        }
     }
 
     if chunk_builder.len() > 0 {
@@ -264,6 +299,56 @@ where
         max_seq,
         rows_written,
     })
+}
+
+fn sort_flush_rows(rows: &mut [FlushMirrorRow], primary_key_indices: &[usize]) {
+    rows.sort_by(|left, right| {
+        left.order_key
+            .as_deref()
+            .cmp(&right.order_key.as_deref())
+            .then_with(|| {
+                for index in primary_key_indices {
+                    let ordering = compare_flush_values(
+                        left.values.get(*index),
+                        right.values.get(*index),
+                    );
+                    if !ordering.is_eq() {
+                        return ordering;
+                    }
+                }
+                left.seq.cmp(&right.seq)
+            })
+    });
+}
+
+fn compare_flush_values(
+    left: Option<&koldstore_parquet::FlushColumnValue>,
+    right: Option<&koldstore_parquet::FlushColumnValue>,
+) -> std::cmp::Ordering {
+    use koldstore_parquet::FlushColumnValue;
+    match (left, right) {
+        (Some(FlushColumnValue::Bool(left)), Some(FlushColumnValue::Bool(right))) => left.cmp(right),
+        (Some(FlushColumnValue::Int16(left)), Some(FlushColumnValue::Int16(right))) => left.cmp(right),
+        (Some(FlushColumnValue::Int32(left)), Some(FlushColumnValue::Int32(right))) => left.cmp(right),
+        (Some(FlushColumnValue::Int64(left)), Some(FlushColumnValue::Int64(right))) => left.cmp(right),
+        (Some(FlushColumnValue::Float32(left)), Some(FlushColumnValue::Float32(right))) => {
+            left.total_cmp(right)
+        }
+        (Some(FlushColumnValue::Float64(left)), Some(FlushColumnValue::Float64(right))) => {
+            left.total_cmp(right)
+        }
+        (Some(FlushColumnValue::Utf8(left)), Some(FlushColumnValue::Utf8(right))) => left.cmp(right),
+        (
+            Some(FlushColumnValue::TimestamptzMicros(left)),
+            Some(FlushColumnValue::TimestamptzMicros(right)),
+        ) => left.cmp(right),
+        (Some(FlushColumnValue::Null), Some(FlushColumnValue::Null)) | (None, None) => {
+            std::cmp::Ordering::Equal
+        }
+        (Some(FlushColumnValue::Null) | None, _) => std::cmp::Ordering::Less,
+        (_, Some(FlushColumnValue::Null) | None) => std::cmp::Ordering::Greater,
+        (Some(left), Some(right)) => format!("{left:?}").cmp(&format!("{right:?}")),
+    }
 }
 
 #[cfg(test)]
@@ -290,6 +375,7 @@ mod tests {
             compression: "zstd".to_string(),
             row_group_size: 1,
             mirror_ops: None,
+            sort_by_order_key: false,
         }
     }
 
@@ -302,6 +388,7 @@ mod tests {
                     FlushColumnValue::Int64(seq),
                     FlushColumnValue::Utf8("payload".repeat(20)),
                 ],
+                order_key: None,
             })
             .collect()
     }
@@ -342,5 +429,35 @@ mod tests {
 
         assert_eq!(outcome.rows_written, 5);
         assert_eq!(segment_rows, vec![1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn segment_order_sort_uses_primary_key_as_tie_breaker() {
+        let mut rows = vec![
+            FlushMirrorRow {
+                seq: 1,
+                op: 1,
+                values: vec![FlushColumnValue::Int64(3), FlushColumnValue::Int64(10)],
+                order_key: Some(vec![10]),
+            },
+            FlushMirrorRow {
+                seq: 2,
+                op: 1,
+                values: vec![FlushColumnValue::Int64(2), FlushColumnValue::Int64(10)],
+                order_key: Some(vec![10]),
+            },
+            FlushMirrorRow {
+                seq: 3,
+                op: 1,
+                values: vec![FlushColumnValue::Int64(1), FlushColumnValue::Int64(5)],
+                order_key: Some(vec![5]),
+            },
+        ];
+
+        sort_flush_rows(&mut rows, &[0]);
+        assert_eq!(
+            rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
+            vec![3, 2, 1]
+        );
     }
 }

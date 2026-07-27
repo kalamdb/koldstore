@@ -43,6 +43,9 @@ pub enum MigrationConstraintError {
     /// The requested mirror capture consistency mode is unsupported.
     #[error("unsupported mirror capture mode `{0}`; expected `strict` or `async`")]
     UnsupportedMirrorCaptureMode(String),
+    /// Async WAL capture does not yet carry encoded segment order keys.
+    #[error("segment_order_column requires mirror_capture_mode = 'strict'")]
+    SegmentOrderRequiresStrictCapture,
     /// The requested table ownership model is unsupported.
     #[error("unsupported table type `{0}`")]
     UnsupportedTableType(String),
@@ -86,6 +89,17 @@ pub enum MigrationConstraintError {
     /// Explicit migration ordering names a column absent from the table.
     #[error("migration order column `{0}` does not exist")]
     MissingOrderColumn(String),
+    /// Segment order column must be physically present and non-null.
+    #[error("segment order column `{0}` must be NOT NULL")]
+    NullableSegmentOrderColumn(String),
+    /// Segment order column type must be supported by Sort Key V1.
+    #[error("segment order column `{column}` has unsupported type OID {type_oid}")]
+    UnsupportedSegmentOrderColumnType {
+        /// Operator-facing column name.
+        column: String,
+        /// PostgreSQL type OID.
+        type_oid: u32,
+    },
     /// Storage registration lookup failed.
     #[error("storage registration must exist before migration")]
     MissingStorage,

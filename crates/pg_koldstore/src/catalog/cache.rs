@@ -325,22 +325,8 @@ fn cached_from_context(context: InSyncManifestScanContext) -> CachedSegmentStats
                 object_path: segment.object_path,
                 schema_version: segment.schema_version,
                 physical_names: segment.physical_names,
-                column_stats: catalog_column_stats_map(segment.column_stats),
                 byte_size: segment.byte_size,
             })
             .collect(),
     }
-}
-
-#[cfg(feature = "pg")]
-fn catalog_column_stats_map(
-    column_stats: serde_json::Value,
-) -> std::collections::BTreeMap<i16, koldstore_parquet::ColumnStats> {
-    koldstore_catalog::column_stats_min_max_map(&column_stats)
-        .into_iter()
-        .filter_map(|(column_id, (min, max))| {
-            let column_id = column_id.parse::<i16>().ok()?;
-            Some((column_id, koldstore_parquet::ColumnStats { min, max }))
-        })
-        .collect()
 }
