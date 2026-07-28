@@ -1,4 +1,4 @@
-//! Catalog→manifest assembly and local path I/O coverage.
+//! Catalog-to-manifest assembly and local path I/O coverage.
 //!
 //! Folder-shard export rejection/round-trip edge cases live in `sharded_export.rs`.
 
