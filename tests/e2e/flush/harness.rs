@@ -282,7 +282,9 @@ pub async fn run_mixed_worker(
     Ok(())
 }
 
-fn is_retryable_concurrency_error(error: &tokio_postgres::Error) -> bool {
+/// True when Postgres reports deadlock / serialization / lock-not-available.
+#[must_use]
+pub fn is_retryable_concurrency_error(error: &tokio_postgres::Error) -> bool {
     error
         .as_db_error()
         .map(|db| {

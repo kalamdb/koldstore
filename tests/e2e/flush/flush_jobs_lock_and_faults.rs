@@ -16,7 +16,7 @@ use tokio_postgres::Client;
 use crate::common;
 use crate::flush::harness::{
     assert_flush_load_invariants, barrier_lock, barrier_unlock, connect_peer, flush_table_on,
-    wait_until_barrier_waiter,
+    is_retryable_concurrency_error, wait_until_barrier_waiter,
 };
 
 /// Matches `TABLE_JOB_LOCK_NAMESPACE` in `job_lock_pg.rs` (single-bigint advisory key).
@@ -296,10 +296,10 @@ async fn drop_table_while_mirror_capture_is_active() -> Result<()> {
                     )
                     .await
                 {
-                    let text = error.to_string();
+                    let text = format!("{error:#}");
                     if text.contains("does not exist")
                         || text.contains("managed")
-                        || text.contains("deadlock")
+                        || is_retryable_concurrency_error(&error)
                     {
                         return Ok(());
                     }
@@ -309,17 +309,17 @@ async fn drop_table_while_mirror_capture_is_active() -> Result<()> {
             Ok(())
         });
 
-        // Let mirroring absorb commits, then stop writers before DROP to avoid
-        // AccessExclusive vs row-lock deadlocks.
+        // Stop writers first, then fence apply, so DROP does not race an
+        // in-flight async apply that still holds AccessShare on the heap.
         tokio::time::sleep(Duration::from_millis(80)).await;
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = tokio::time::timeout(Duration::from_secs(5), dml_handle).await;
         if common::selected_mirror_capture_mode()?.is_async() {
             let _ = common::fence_async_mirror_if_needed(&db.client).await;
         }
-        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = tokio::time::timeout(Duration::from_secs(5), dml_handle).await;
 
         let mut dropped = false;
-        for _ in 0..5 {
+        for _ in 0..8 {
             match db
                 .client
                 .batch_execute(&format!("DROP TABLE IF EXISTS {}", table.relation))
@@ -329,8 +329,8 @@ async fn drop_table_while_mirror_capture_is_active() -> Result<()> {
                     dropped = true;
                     break;
                 }
-                Err(error) if error.to_string().contains("deadlock") => {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
+                Err(error) if is_retryable_concurrency_error(&error) => {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 Err(error) => return Err(error).context("DROP TABLE while mirror capture active"),
             }
