@@ -767,7 +767,9 @@ pub async fn assert_parquet_and_manifest(
         let contents =
             std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         anyhow::ensure!(
-            contents.contains("segments") || contents.contains("schema_version"),
+            contents.contains("shards")
+                || contents.contains("segments")
+                || contents.contains("schema_version"),
             "manifest {} does not look like a koldstore manifest",
             path.display()
         );

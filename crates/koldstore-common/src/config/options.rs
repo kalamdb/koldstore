@@ -285,27 +285,21 @@ impl FlushPolicy {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ManageTableOptions {
-    /// Canonical tagged policy. New writes use this field.
+    /// Canonical tagged flush policy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flush_policy: Option<FlushPolicy>,
-    /// Maximum pending hot mirror rows to keep before flushing oldest rows.
-    #[serde(skip_serializing)]
-    pub hot_row_limit: Option<u64>,
-    /// Minimum excess rows required before a non-forced flush runs.
-    #[serde(skip_serializing)]
-    pub min_flush_rows: Option<u64>,
-    /// Maximum rows written into one cold Parquet segment per flush batch.
-    #[serde(skip_serializing)]
-    pub max_rows_per_file: Option<u64>,
-    /// Legacy transaction bound, accepted during rolling upgrades.
-    #[serde(skip_serializing)]
-    pub max_rows_per_flush: Option<u64>,
     /// Preferred Parquet segment size in megabytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_file_size_mb: Option<u64>,
     /// Explicit oldest-to-newest ordering column for populated-table backfill.
-    #[serde(alias = "order_column", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub migration_order_by: Option<String>,
+    /// Stable source attnum used to order cold segments and prune range scans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_order_column_id: Option<i16>,
+    /// Stable source attnum used to authorize user-scope segment pruning.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_column_id: Option<i16>,
     /// Parquet compression codec.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compression: Option<ParquetCompression>,
@@ -335,9 +329,8 @@ impl ManageTableOptions {
     /// Rejects malformed tagged policies, zero execution bounds, invalid age
     /// components, and the reserved filter policy.
     pub fn try_from_value(value: &Value) -> Result<Self, String> {
-        let mut decoded: Self =
+        let decoded: Self =
             serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
-        decoded.normalize_flush_policy();
         if let Some(policy) = decoded.flush_policy.as_ref() {
             if policy.min_flush_rows() == 0
                 || policy.max_rows_per_file() == 0
@@ -367,43 +360,15 @@ impl ManageTableOptions {
         if value.is_null() {
             return Self::default();
         }
-        let mut decoded: Self = serde_json::from_value(value.clone()).unwrap_or_default();
-        decoded.normalize_flush_policy();
-        decoded
+        serde_json::from_value(value.clone()).unwrap_or_default()
     }
 
     /// Encodes schema options to JSON for catalog persistence.
     ///
     /// Derived fields such as `cold_metadata` are merged separately at registration time.
-    /// Legacy flat `hot_row_limit` inputs are promoted to tagged `flush_policy` on write so
-    /// catalog JSON never drops an effective policy.
     #[must_use]
     pub fn to_value(&self) -> Value {
-        let mut normalized = self.clone();
-        normalized.normalize_flush_policy();
-        serde_json::to_value(&normalized).unwrap_or_else(|_| Value::Object(Default::default()))
-    }
-
-    /// Promotes legacy flat flush fields into tagged `flush_policy` when needed.
-    fn normalize_flush_policy(&mut self) {
-        if self.flush_policy.is_some() {
-            return;
-        }
-        let Some(hot_row_limit) = self.hot_row_limit.filter(|value| *value > 0) else {
-            return;
-        };
-        self.flush_policy = Some(FlushPolicy::RowLimit {
-            hot_row_limit,
-            min_flush_rows: self.min_flush_rows.filter(|value| *value > 0).unwrap_or(1),
-            max_rows_per_file: self
-                .max_rows_per_file
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_MIN_MAX_ROWS_PER_FILE),
-            max_rows_per_flush: self
-                .max_rows_per_flush
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_MAX_ROWS_PER_FLUSH),
-        });
+        serde_json::to_value(self).unwrap_or_else(|_| Value::Object(Default::default()))
     }
 
     /// Returns true when automatic flush is configured.
@@ -424,22 +389,7 @@ impl ManageTableOptions {
     /// Returns the structured flush policy when flush is enabled.
     #[must_use]
     pub fn flush_policy(&self) -> Option<FlushPolicy> {
-        if let Some(policy) = &self.flush_policy {
-            return Some(policy.clone());
-        }
-        let hot_row_limit = self.hot_row_limit.filter(|value| *value > 0)?;
-        Some(FlushPolicy::RowLimit {
-            hot_row_limit,
-            min_flush_rows: self.min_flush_rows.filter(|value| *value > 0).unwrap_or(1),
-            max_rows_per_file: self
-                .max_rows_per_file
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_MIN_MAX_ROWS_PER_FILE),
-            max_rows_per_flush: self
-                .max_rows_per_flush
-                .filter(|value| *value > 0)
-                .unwrap_or(DEFAULT_MAX_ROWS_PER_FLUSH),
-        })
+        self.flush_policy.clone()
     }
 
     /// Sets structured flush settings.
@@ -455,11 +405,6 @@ impl ManageTableOptions {
             min_flush_rows,
             max_rows_per_file,
         ));
-        // Keep the in-memory compatibility view for callers compiled against
-        // the original model; serde skips these fields on new writes.
-        self.hot_row_limit = Some(hot_row_limit);
-        self.min_flush_rows = Some(min_flush_rows);
-        self.max_rows_per_file = Some(max_rows_per_file);
         self
     }
 
@@ -474,6 +419,20 @@ impl ManageTableOptions {
     #[must_use]
     pub fn with_migration_order_by(mut self, column: impl Into<String>) -> Self {
         self.migration_order_by = Some(column.into());
+        self
+    }
+
+    /// Sets the stable source attnum used for cold-segment ordering.
+    #[must_use]
+    pub const fn with_segment_order_column_id(mut self, column_id: i16) -> Self {
+        self.segment_order_column_id = Some(column_id);
+        self
+    }
+
+    /// Sets the stable source attnum used for user-scope segment pruning.
+    #[must_use]
+    pub const fn with_scope_column_id(mut self, column_id: i16) -> Self {
+        self.scope_column_id = Some(column_id);
         self
     }
 
@@ -669,23 +628,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_flat_hot_row_limit_persists_as_tagged_flush_policy() {
+    fn flat_hot_row_limit_json_is_ignored_without_tagged_flush_policy() {
         let options = ManageTableOptions::from_value(&serde_json::json!({
             "compression": "zstd",
             "hot_row_limit": 1000,
         }));
-        assert_eq!(options.hot_row_limit(), Some(1000));
+        assert_eq!(options.hot_row_limit(), None);
+        assert_eq!(options.flush_policy(), None);
         assert_eq!(
             options.to_value(),
             serde_json::json!({
-                "compression": "zstd",
-                "flush_policy": {
-                    "type": "row_limit",
-                    "hot_row_limit": 1000,
-                    "min_flush_rows": 1,
-                    "max_rows_per_file": 1000,
-                    "max_rows_per_flush": 10_000
-                }
+                "compression": "zstd"
             })
         );
     }
@@ -707,25 +660,38 @@ mod tests {
     }
 
     #[test]
-    fn manage_table_options_decode_legacy_order_column() {
-        let options = ManageTableOptions::from_value(&serde_json::json!({
-            "order_column": "created_at"
-        }));
+    fn manage_table_options_persist_segment_order_column_id_without_name() {
+        let options = ManageTableOptions::default().with_segment_order_column_id(7);
 
-        assert_eq!(options.explicit_migration_order_by(), Some("created_at"));
         assert_eq!(
             options.to_value(),
-            serde_json::json!({
-                "migration_order_by": "created_at",
-            })
+            serde_json::json!({ "segment_order_column_id": 7 })
         );
+        assert_eq!(options.segment_order_column_id, Some(7));
     }
 
     #[test]
-    fn flush_policy_from_value_ignores_unrelated_fields() {
+    fn manage_table_options_persist_scope_column_id_without_name() {
+        let options = ManageTableOptions::default().with_scope_column_id(4);
+
+        assert_eq!(
+            options.to_value(),
+            serde_json::json!({ "scope_column_id": 4 })
+        );
+        assert_eq!(options.scope_column_id, Some(4));
+    }
+
+    #[test]
+    fn flush_policy_from_value_reads_tagged_policy_and_ignores_unrelated_fields() {
         let policy = FlushPolicy::from_value(&serde_json::json!({
             "migration_order_by": "created_at",
-            "hot_row_limit": 500,
+            "flush_policy": {
+                "type": "row_limit",
+                "hot_row_limit": 500,
+                "min_flush_rows": 1,
+                "max_rows_per_file": 1000,
+                "max_rows_per_flush": 10_000
+            }
         }))
         .unwrap();
 
@@ -741,11 +707,18 @@ mod tests {
     #[test]
     fn flush_policy_preserves_optional_file_size_target() {
         let options = ManageTableOptions::from_value(&serde_json::json!({
-            "hot_row_limit": 500,
+            "flush_policy": {
+                "type": "row_limit",
+                "hot_row_limit": 500,
+                "min_flush_rows": 1,
+                "max_rows_per_file": 1000,
+                "max_rows_per_flush": 10_000
+            },
             "target_file_size_mb": 64,
         }));
 
         assert_eq!(options.target_file_size_mb, Some(64));
+        assert_eq!(options.hot_row_limit(), Some(500));
     }
 
     #[test]

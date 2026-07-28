@@ -183,7 +183,8 @@ If `selection.stats.row_count == 0`:
 
 ### 4.1 Setup
 
-- Manifest paths: `{base_path}/{namespace}/{table}/manifest.json`
+- Manifest paths: thin root `{base_path}/{namespace}/{table}/manifest.json` plus
+  per-folder `{folder:03}/manifest-shard.json` (see export shape below)
 - Open the configured filesystem/S3 client and load the existing manifest object, or create a new shared manifest
 - `next_flush_batch_number` from `koldstore.cold_segments`
 - Build `StreamEncodeInput` (columns, Parquet schema, `max_seq`, optional `mirror_ops`)
@@ -230,9 +231,9 @@ rows (`op = 3`) carry PK values from mirror only.
 1. Fetch page of up to 8192 rows (`FLUSH_MIRROR_FETCH_BATCH_SIZE`)
 2. `CleanColdRecordBatchBuilder::push_typed_row` per row
    - App columns + metadata: `seq`, `op`, `deleted`, `schema_version`
-   - Tracks `indexed_bounds` as `serde_json::Value` min/max per indexed column
-     (manual pass; Parquet writer also records chunk stats on the same
-     columns — see planned change below)
+   - Tracks `indexed_bounds` as `serde_json::Value` min/max keyed by stable
+     `ColumnId` (manual pass; Parquet writer also records chunk stats on the
+     same columns — see planned change below)
 3. When chunk reaches `max_rows_per_file` → `FlushWriteChunk`
 4. Callback writes Parquet segment
 
@@ -267,17 +268,21 @@ in-file row-group prune already uses the footer. Details:
    - Column statistics on `seq` + PK + indexed columns
    - Bloom filters on PK columns (`max_ndv` = row-group size)
    - Compression from storage context (default `zstd`)
-5. `column_stats` JSON for catalog (today from merged `indexed_bounds` +
-   `FlushStats.seq`; later from footer extraction per ADR-002):
+5. Sort Key V1 rows for `cold_segment_index` (from merged `indexed_bounds` +
+   type OIDs). Manifest export reconstructs on-disk `column_stats` from those
+   rows (no duplicated JSON on `cold_segments`):
    ```json
-   { "seq": {"min": N, "max": M}, "created_at": {"min": "...", "max": "..."} }
+   { "1": {"min": N, "max": M}, "4": {"min": "...", "max": "..."} }
    ```
 6. `byte_size` from published object metadata (not recomputed by scanning rows)
-7. Assemble `ManifestSegment`s from `catalog_row`s once, then `manifest.append_segment_batch(...)`
+7. Assemble `ManifestSegment`s from catalog rows (+ index bounds) once, then `manifest.append_segment_batch(...)`
 8. Collect `WrittenFlushSegment` (new `segment_id = Uuid::new_v4()`)
 
 Manifest finalize uses `write_manifest_with_client` and the same atomic put path
-(`publish_mutable_object`) so `manifest.json` is never truncate-written in place.
+(`publish_mutable_object`) so root and shard JSON are never truncate-written in place.
+Changed shards are published before the root; completed folders whose content hash
+is unchanged are not rewritten. Each root reference carries the shard SHA-256 so a
+crash or external mutation is detected instead of silently merging inconsistent JSON.
 
 ### 4.5 Validation
 
@@ -290,15 +295,18 @@ Manifest finalize uses `write_manifest_with_client` and the same atomic put path
 During streaming, each Parquet file is cataloged immediately via
 `persist_flush_segment` with **`status = 'pending'`** (not query-visible):
 
-1. One SPI insert for `koldstore.cold_segments` + `cold_segment_stats`
+1. One SPI insert for `koldstore.cold_segments` + `cold_segment_index`
    (native arrays / `unnest`), including `checksum` (sha256 hex) and
    `object_etag` from the single publish pass
-2. No per-PK catalog rows — prune with `cold_segment_stats` / Parquet
-   row-group stats and bloom filters so catalog size stays O(segments ×
+2. No per-PK catalog rows — prune with Sort Key V1 `cold_segment_index` /
+   Parquet row-group stats and bloom filters so catalog size stays O(segments ×
    indexed columns)
 
-`column_stats` crosses SPI as `pgrx::JsonB` per segment (already
-`serde_json::Value` in Rust). Failpoints: `after_checksum_metadata` then
+`column_stats` in object-store `manifest.json` is derived at export time from
+`koldstore.cold_segment_index` (Sort Key V1 bounds). Query-path prune uses the
+same index table directly; `cold_segments` no longer stores a duplicated JSON
+copy.
+Failpoints: `after_checksum_metadata` then
 `after_pending_segment` after the pending insert.
 
 ---
@@ -383,7 +391,7 @@ Guards against drift between streamed manifest and catalog truth before activate
 
 | Step | Serde |
 |------|-------|
-| Write `manifest.json` | `serde_json::to_vec(&Manifest)` to object-store path (derived export) |
+| Write object manifest | sharded root + folder shards via `serde_json` |
 | CAS activate | `plan_activate_flush_segments`: bump `manifest.generation` bigint where expected matches; set pending → `active` for this flush’s segment ids |
 | Complete job | native SPI bigints |
 | Invalidate cache | `catalog::cache::invalidate_table` |
@@ -397,13 +405,20 @@ authoritative and retryable. Pending segments are invisible to merge scan
 
 See [ADR-004](../decisions/004-segment-publication-protocol.md).
 
-### `manifest.json` shape (`koldstore-manifest`)
+### Object-store manifest export shape (`koldstore-manifest`)
 
-`Manifest` and `ManifestSegment` are `Serialize`/`Deserialize`:
+Folder-sharded layout only (manifest version `1`):
 
-- `segments[]`: `path`, seq/commit ranges, `row_count`, `byte_size`, `schema_version`
-- `column_stats`: `BTreeMap<String, {min, max: serde_json::Value}>`
-- Watermarks: `max_seq`, `max_commit_seq`
+- Root `{namespace}/{table}/manifest.json`: watermarks (`max_seq`,
+  `max_commit_seq`), schema/publish metadata, `files` folder counters, and
+  `shards[]` (`folder`, `path`, `content_sha256`, segment/seq ranges). No
+  embedded segment bodies.
+- Shard `{folder:03}/manifest-shard.json`: that folder’s `segments[]` with
+  `path`, seq/commit ranges, `row_count`, `byte_size`, `schema_version`, and
+  `column_stats` (decoded from `cold_segment_index` at export time).
+
+PostgreSQL catalog remains query authority; object manifests are derived export
+only.
 
 After finalize, `sync_state` becomes `in_sync` and `generation` is monotonic.
 

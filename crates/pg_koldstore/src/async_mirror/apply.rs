@@ -21,9 +21,9 @@ use std::collections::{HashMap, HashSet};
 use koldstore_catalog::queries::plan_async_managed_relation_by_oid;
 use koldstore_common::{format_pg_lsn, next_id_after, MirrorOperation};
 use koldstore_mirror::{
-    decode_message, must_flush_before_push, pk_identity, plan_async_mirror_batch_update,
-    plan_async_mirror_batch_upsert, primary_key_json, PgOutputMessage, PgOutputRelation,
-    PgOutputTuple, APPLY_BATCH_ROWS,
+    decode_message, must_flush_before_push, pk_identity, plan_async_mirror_batch_delete_existing,
+    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, primary_key_json,
+    PgOutputMessage, PgOutputRelation, PgOutputTuple, PgOutputValue, APPLY_BATCH_ROWS,
 };
 use pgrx::datum::DatumWithOid;
 use serde_json::Value;
@@ -119,16 +119,26 @@ pub struct BoundedApplyOutcome {
 }
 
 #[derive(Debug, Clone)]
+struct OrderColumnConfig {
+    name: String,
+    type_oid: u32,
+}
+
+#[derive(Debug, Clone)]
 struct ManagedRelation {
     table_oid: pgrx::pg_sys::Oid,
     mirror: String,
     primary_key: Vec<String>,
+    order_column: Option<OrderColumnConfig>,
     /// Cached `format_type` spellings for each primary-key column.
     pk_type_names: Option<Vec<String>>,
-    /// Cached upsert SQL for typed `unnest` binds (Insert/Update/Delete).
+    /// Cached upsert SQL for typed `unnest` binds (Insert when no order key,
+    /// or Insert/Update with order key).
     upsert_sql: Option<String>,
     /// Cached direct-update plus insert-missing SQL for UPDATE batches.
     update_sql: Option<String>,
+    /// Cached delete-existing SQL when order_key forbids inventing tombstones.
+    delete_sql: Option<String>,
 }
 
 impl ManagedRelation {
@@ -136,6 +146,11 @@ impl ManagedRelation {
         self.pk_type_names = None;
         self.upsert_sql = None;
         self.update_sql = None;
+        self.delete_sql = None;
+    }
+
+    fn include_order_key(&self) -> bool {
+        self.order_column.is_some()
     }
 }
 
@@ -654,6 +669,24 @@ fn push_change(
         return Ok(());
     };
     let mut row = primary_key_json(relation, &config.primary_key, tuple)?;
+    if operation != MirrorOperation::Delete {
+        if let Some(order) = config.order_column.as_ref() {
+            let text = order_column_text(relation, order, tuple)?;
+            let ty =
+                koldstore_sortkey::SortKeyType::from_type_oid(order.type_oid).ok_or_else(|| {
+                    format!(
+                        "segment order column {} has unsupported type OID {}",
+                        order.name, order.type_oid
+                    )
+                })?;
+            let encoded = koldstore_sortkey::encode_sort_key_pg_text(ty, &text)
+                .map_err(|error| error.to_string())?;
+            row.insert(
+                "order_key".to_string(),
+                Value::Array(encoded.into_iter().map(Value::from).collect()),
+            );
+        }
+    }
     // Always allocate seq in Rust (floor path stays strictly above prune watermark).
     let seq = if let Some((target_oid, floor)) = request.target_prune_floor {
         if config.table_oid == target_oid {
@@ -766,17 +799,77 @@ fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
             column
                 .as_str()
                 .map(str::to_string)
-                .ok_or_else(|| "async primary key contains a non-string".to_string())
+                .ok_or_else(|| "async primary key entry missing name".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let order_column = match (
+        value.get("segment_order_column").and_then(Value::as_str),
+        value
+            .get("segment_order_type_oid")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                value
+                    .get("segment_order_type_oid")
+                    .and_then(Value::as_i64)
+                    .and_then(|n| u64::try_from(n).ok())
+            }),
+    ) {
+        (Some(name), Some(type_oid)) => Some(OrderColumnConfig {
+            name: name.to_string(),
+            type_oid: type_oid as u32,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "async schema metadata has incomplete segment_order_column fields".to_string(),
+            )
+        }
+    };
     Ok(ManagedRelation {
         table_oid,
         mirror,
         primary_key,
+        order_column,
         pk_type_names: None,
         upsert_sql: None,
         update_sql: None,
+        delete_sql: None,
     })
+}
+
+fn order_column_text(
+    relation: &PgOutputRelation,
+    order: &OrderColumnConfig,
+    tuple: &PgOutputTuple,
+) -> Result<String, String> {
+    let relation_index = relation
+        .columns
+        .iter()
+        .position(|column| column.name == order.name)
+        .ok_or_else(|| {
+            format!(
+                "pgoutput relation {}.{} does not publish segment order column {}",
+                relation.namespace, relation.name, order.name
+            )
+        })?;
+    let value = tuple
+        .values
+        .get(relation_index)
+        .ok_or_else(|| format!("tuple omits segment order column {}", order.name))?;
+    match value {
+        PgOutputValue::Null => Err(format!("segment order column {} is NULL", order.name)),
+        PgOutputValue::UnchangedToast => Err(format!(
+            "segment order column {} was emitted as unchanged TOAST",
+            order.name
+        )),
+        PgOutputValue::Text(bytes) => std::str::from_utf8(bytes)
+            .map(str::to_string)
+            .map_err(|error| error.to_string()),
+        PgOutputValue::Binary(_) => Err(format!(
+            "segment order column {} arrived as binary pgoutput",
+            order.name
+        )),
+    }
 }
 
 fn ensure_pk_type_names(
@@ -829,28 +922,54 @@ fn apply_batch(
         .map(String::as_str)
         .collect::<Vec<_>>();
     let pk_types = config.pk_type_names.as_ref().expect("pk types populated");
-    let sql = if operation == MirrorOperation::Update {
-        if config.update_sql.is_none() {
-            config.update_sql = Some(
-                plan_async_mirror_batch_update(&config.mirror, &pk_refs, pk_types, "unused")
+    let include_order_key = config.include_order_key();
+    let sql = match operation {
+        MirrorOperation::Update => {
+            if config.update_sql.is_none() {
+                config.update_sql = Some(
+                    plan_async_mirror_batch_update(
+                        &config.mirror,
+                        &pk_refs,
+                        pk_types,
+                        "unused",
+                        include_order_key,
+                    )
                     .map_err(|error| error.to_string())?,
-            );
+                );
+            }
+            config.update_sql.as_ref().expect("update SQL cached")
         }
-        config.update_sql.as_ref().expect("update SQL cached")
-    } else {
-        if config.upsert_sql.is_none() {
-            config.upsert_sql = Some(
-                plan_async_mirror_batch_upsert(&config.mirror, &pk_refs, pk_types)
+        MirrorOperation::Delete if include_order_key => {
+            if config.delete_sql.is_none() {
+                config.delete_sql = Some(
+                    plan_async_mirror_batch_delete_existing(&config.mirror, &pk_refs, pk_types)
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            config.delete_sql.as_ref().expect("delete SQL cached")
+        }
+        MirrorOperation::Insert | MirrorOperation::Delete => {
+            if config.upsert_sql.is_none() {
+                config.upsert_sql = Some(
+                    plan_async_mirror_batch_upsert(
+                        &config.mirror,
+                        &pk_refs,
+                        pk_types,
+                        include_order_key,
+                    )
                     .map_err(|error| error.to_string())?,
-            );
+                );
+            }
+            config.upsert_sql.as_ref().expect("upsert SQL cached")
         }
-        config.upsert_sql.as_ref().expect("upsert SQL cached")
     };
 
     let mut pk_columns: Vec<Vec<String>> = (0..config.primary_key.len())
         .map(|_| Vec::with_capacity(rows.len()))
         .collect();
     let mut seqs = Vec::with_capacity(rows.len());
+    let need_order_keys = include_order_key && operation != MirrorOperation::Delete;
+    let mut order_keys = need_order_keys.then(|| Vec::<Vec<u8>>::with_capacity(rows.len()));
     for row in rows {
         let object = row
             .as_object()
@@ -870,15 +989,32 @@ fn apply_batch(
             .and_then(Value::as_i64)
             .ok_or_else(|| "async mirror batch row missing seq".to_string())?;
         seqs.push(seq);
+        if let Some(order_keys) = order_keys.as_mut() {
+            let encoded = object
+                .get("order_key")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "async mirror batch row missing order_key".to_string())?
+                .iter()
+                .map(|cell| {
+                    cell.as_u64()
+                        .and_then(|n| u8::try_from(n).ok())
+                        .ok_or_else(|| "order_key byte is not u8".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            order_keys.push(encoded);
+        }
     }
 
     let result = pgrx::Spi::connect(|client| -> Result<(i64, i64), String> {
-        let mut args: Vec<DatumWithOid<'_>> = Vec::with_capacity(pk_columns.len() + 2);
+        let mut args: Vec<DatumWithOid<'_>> = Vec::with_capacity(pk_columns.len() + 3);
         args.push(DatumWithOid::from(operation.code()));
         for column in &pk_columns {
             args.push(DatumWithOid::from(column.clone()));
         }
         args.push(DatumWithOid::from(seqs.clone()));
+        if let Some(order_keys) = order_keys.as_ref() {
+            args.push(DatumWithOid::from(order_keys.clone()));
+        }
         let table = client
             .select(sql, None, &args)
             .map_err(|error| format!("execute async mirror batch: {error}"))?;

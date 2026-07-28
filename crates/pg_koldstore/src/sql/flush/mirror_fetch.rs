@@ -24,6 +24,7 @@ pub(super) fn fetch_mirror_batch(
     max_seq: i64,
     after_seq: i64,
     fetch_limit: i64,
+    include_order_key: bool,
 ) -> Result<Vec<FlushMirrorRow>, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -41,7 +42,7 @@ pub(super) fn fetch_mirror_batch(
             DatumWithOid::from(after_seq),
             DatumWithOid::from(limit),
         ],
-        |tuples| decode_mirror_batch(tuples, columns),
+        |tuples| decode_mirror_batch(tuples, columns, include_order_key),
     )
     .map_err(|error| error.to_string())
 }
@@ -49,6 +50,7 @@ pub(super) fn fetch_mirror_batch(
 fn decode_mirror_batch(
     tuples: pgrx::spi::SpiTupleTable<'_>,
     columns: &[CatalogColumn],
+    include_order_key: bool,
 ) -> pgrx::spi::Result<Vec<FlushMirrorRow>> {
     // Column layout from plan_mirror_flush_selection_batch:
     //   1..=N  application columns (catalog order)
@@ -59,7 +61,13 @@ fn decode_mirror_batch(
     let op_ordinal = columns.len() + 2;
     let mut rows = Vec::with_capacity(tuples.len());
     for tuple in tuples {
-        rows.push(decode_mirror_row(&tuple, columns, seq_ordinal, op_ordinal)?);
+        rows.push(decode_mirror_row(
+            &tuple,
+            columns,
+            seq_ordinal,
+            op_ordinal,
+            include_order_key,
+        )?);
     }
     Ok(rows)
 }
@@ -69,6 +77,7 @@ fn decode_mirror_row(
     columns: &[CatalogColumn],
     seq_ordinal: usize,
     op_ordinal: usize,
+    include_order_key: bool,
 ) -> pgrx::spi::Result<FlushMirrorRow> {
     // PERFORMANCE: Ordinal access avoids per-column name lookups (SPI_fnumber).
     let seq = tuple
@@ -81,7 +90,16 @@ fn decode_mirror_row(
     for (index, column) in columns.iter().enumerate() {
         values.push(read_column(tuple, column, index + 1)?);
     }
-    Ok(FlushMirrorRow { seq, op, values })
+    let order_key = include_order_key
+        .then(|| tuple.get::<Vec<u8>>(columns.len() + 4))
+        .transpose()?
+        .flatten();
+    Ok(FlushMirrorRow {
+        seq,
+        op,
+        values,
+        order_key,
+    })
 }
 
 fn missing_attribute(name: &str) -> pgrx::spi::SpiError {

@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use koldstore_common::{quote_ident, ColdRow, LogicalPk, PkColumn, TableName};
+use koldstore_common::{quote_ident, ColdRow, ColumnRef, LogicalPk, PkColumn, TableName};
 use pgrx::pg_sys;
 
 use super::hot::HotEqualityFilter;
@@ -57,7 +57,7 @@ pub(super) fn filter_cold_rows_with_overlay(
 /// Live `op` 1/2 rows are intentionally omitted: hot heap state already wins.
 pub(super) fn load_mirror_tombstone_overlay(
     mirror_relation: &TableName,
-    primary_key_columns: &[String],
+    primary_key_columns: &[ColumnRef],
     pk_filters: &[HotEqualityFilter],
 ) -> Result<MirrorOverlay, String> {
     if primary_key_columns.is_empty() {
@@ -65,22 +65,25 @@ pub(super) fn load_mirror_tombstone_overlay(
     }
     let pk_columns = primary_key_columns
         .iter()
-        .map(|column| PkColumn::new(column.as_str()).map_err(|error| error.to_string()))
+        .map(|column| PkColumn::new(&column.name).map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
     let pk_json = primary_key_columns
         .iter()
         .map(|column| {
             format!(
                 "'{escaped}', mirror.{quoted}",
-                escaped = column.replace('\'', "''"),
-                quoted = quote_ident(column),
+                escaped = column.name.replace('\'', "''"),
+                quoted = quote_ident(&column.name),
             )
         })
         .collect::<Vec<_>>()
         .join(", ");
 
     let mut where_clauses = vec!["mirror.\"op\" = 3".to_string()];
-    let pk_filter_names: HashSet<&str> = primary_key_columns.iter().map(String::as_str).collect();
+    let pk_filter_names: HashSet<&str> = primary_key_columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
     let applicable: Vec<&HotEqualityFilter> = pk_filters
         .iter()
         .filter(|filter| pk_filter_names.contains(filter.column.as_str()))

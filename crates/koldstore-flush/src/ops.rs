@@ -243,6 +243,7 @@ pub fn plan_mirror_flush_selection(
         scope_column,
         None,
         MirrorFlushPaging::Unbounded,
+        false,
     )
 }
 
@@ -267,6 +268,31 @@ pub fn plan_mirror_flush_selection_batch(
     scope_column: Option<&str>,
     mirror_ops: Option<&[i16]>,
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
+    plan_mirror_flush_selection_batch_with_order_key(
+        table,
+        mirror_table,
+        primary_key_columns,
+        base_columns,
+        scope_column,
+        mirror_ops,
+        false,
+    )
+}
+
+/// Plans one keyset page and optionally returns the mirror's encoded order key.
+///
+/// # Errors
+///
+/// Returns an error when identifiers are unsafe or statement metadata cannot be prepared.
+pub fn plan_mirror_flush_selection_batch_with_order_key(
+    table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key_columns: &[String],
+    base_columns: &[String],
+    scope_column: Option<&str>,
+    mirror_ops: Option<&[i16]>,
+    include_order_key: bool,
+) -> Result<MirrorFlushSelectionPlan, OpsError> {
     plan_mirror_flush_selection_inner(
         table,
         mirror_table,
@@ -275,6 +301,7 @@ pub fn plan_mirror_flush_selection_batch(
         scope_column,
         mirror_ops,
         MirrorFlushPaging::KeysetLimit,
+        include_order_key,
     )
 }
 
@@ -286,6 +313,7 @@ enum MirrorFlushPaging {
     KeysetLimit,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_mirror_flush_selection_inner(
     table: &QualifiedTableName,
     mirror_table: &QualifiedTableName,
@@ -294,6 +322,7 @@ fn plan_mirror_flush_selection_inner(
     scope_column: Option<&str>,
     mirror_ops: Option<&[i16]>,
     paging: MirrorFlushPaging,
+    include_order_key: bool,
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     if primary_key_columns.is_empty() {
         return Err(OpsError::Sql(
@@ -333,6 +362,9 @@ fn plan_mirror_flush_selection_inner(
         ),
         "(mirror.\"op\" = 3) AS deleted".to_string(),
     ]);
+    if include_order_key {
+        select_columns.push("mirror.\"order_key\" AS order_key".to_string());
+    }
 
     let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];
     let (mut param_types, operation, limit_sql, scope_param) = match paging {
@@ -591,7 +623,7 @@ pub fn validate_cold_storage_plan(
 ) -> Result<ValidateColdStoragePlan, OpsError> {
     let statement = SqlStatement::read(
         "validate cold storage",
-        "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.column_stats FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
+        "SELECT m.manifest_path, cs.object_path, cs.row_count FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 

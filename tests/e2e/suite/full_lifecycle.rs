@@ -765,8 +765,10 @@ async fn load_manifest(client: &Client, pg_version: u16, storage_root: &Path) ->
         manifest_file.display()
     );
 
-    let manifest: Manifest = serde_json::from_str(&std::fs::read_to_string(&manifest_file)?)
-        .with_context(|| format!("parse manifest.json at {}", manifest_file.display()))?;
+    let manifest = koldstore_manifest::try_load_manifest_from_path(&manifest_file)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("parse manifest export at {}", manifest_file.display()))?
+        .with_context(|| format!("missing manifest export at {}", manifest_file.display()))?;
 
     for segment in &manifest.segments {
         let parquet_path = manifest_file

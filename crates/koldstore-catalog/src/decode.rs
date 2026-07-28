@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::manifest_row::CatalogSegmentIndexBound;
+
 /// PostgreSQL relation identity resolved from `pg_class`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationContext {
@@ -11,13 +13,15 @@ pub struct RelationContext {
     pub name: String,
 }
 
-/// Active cold-segment stats row returned by merge-scan catalog lookups.
+/// Active cold-segment row returned by merge-scan catalog lookups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestScanSegmentStats {
     /// Final object-store path.
     pub object_path: String,
-    /// Segment-level min/max stats by column.
-    pub column_stats: serde_json::Value,
+    /// Schema version used to write the segment.
+    pub schema_version: i32,
+    /// Physical Parquet field names keyed by stable column ID.
+    pub physical_names: BTreeMap<i16, String>,
     /// Object byte size when known (enables bounded footer range GETs).
     pub byte_size: Option<u64>,
 }
@@ -117,22 +121,31 @@ pub fn in_sync_manifest_scan_context(
 pub fn manifest_scan_segment_stats(
     value: &serde_json::Value,
 ) -> Result<ManifestScanSegmentStats, String> {
-    let column_stats = value
-        .get("column_stats")
-        .cloned()
-        .ok_or_else(|| "missing field `column_stats`".to_string())?;
-
     Ok(ManifestScanSegmentStats {
         object_path: required_string(value, "object_path")?.to_string(),
-        column_stats,
+        schema_version: required_i32(value, "schema_version")?,
+        physical_names: value
+            .get("physical_names")
+            .and_then(serde_json::Value::as_object)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(|(column_id, name)| {
+                        Some((column_id.parse::<i16>().ok()?, name.as_str()?.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         byte_size: optional_u64(value, "byte_size"),
     })
 }
 
-/// Extracts `{column: (min, max)}` pairs from catalog column-stats JSON.
+/// Extracts `{column_id: (min, max)}` pairs from catalog column-stats JSON.
 ///
-/// Columns missing either `min` or `max` are skipped. Used by manifest assembly
-/// and merge-scan segment pruning so both paths share one walk.
+/// Keys are canonical stringified PostgreSQL attribute numbers. Entries with a
+/// non-numeric/zero key or missing either bound are skipped. Prefer
+/// [`column_stats_from_index_bounds`] for live export — this helper remains for
+/// parsing already-decoded JSON maps in tests and legacy fixtures.
 #[must_use]
 pub fn column_stats_min_max_map(
     column_stats: &serde_json::Value,
@@ -142,13 +155,16 @@ pub fn column_stats_min_max_map(
         return stats;
     };
     for (column, value) in columns {
+        let Some(column_id) = canonical_column_id_key(column) else {
+            continue;
+        };
         let Some(min) = value.get("min") else {
             continue;
         };
         let Some(max) = value.get("max") else {
             continue;
         };
-        stats.insert(column.clone(), (min.clone(), max.clone()));
+        stats.insert(column_id, (min.clone(), max.clone()));
     }
     stats
 }
@@ -163,6 +179,9 @@ pub fn column_stats_min_max_map_into(
         return stats;
     };
     for (column, value) in columns {
+        let Some(column_id) = canonical_column_id_key(&column) else {
+            continue;
+        };
         let serde_json::Value::Object(mut bounds) = value else {
             continue;
         };
@@ -172,9 +191,77 @@ pub fn column_stats_min_max_map_into(
         let Some(max) = bounds.remove("max") else {
             continue;
         };
-        stats.insert(column, (min, max));
+        stats.insert(column_id, (min, max));
     }
     stats
+}
+
+/// Decodes Sort Key V1 index rows into the manifest export `{column_id: {min,max}}` map.
+///
+/// Unsupported type OIDs and codec mismatches are skipped. Corrupt hex or Storekey
+/// payloads return an error so export does not silently publish wrong bounds.
+///
+/// # Errors
+///
+/// Returns an error when a bound cannot be hex-decoded or Sort Key-decoded.
+pub fn column_stats_from_index_bounds(
+    bounds: &[CatalogSegmentIndexBound],
+) -> Result<BTreeMap<String, (serde_json::Value, serde_json::Value)>, String> {
+    use koldstore_sortkey::{decode_sort_key, SortKeyType, CODEC_VERSION};
+
+    let mut stats = BTreeMap::new();
+    for bound in bounds {
+        if bound.codec_version != CODEC_VERSION {
+            continue;
+        }
+        let Some(sort_key_type) = SortKeyType::from_type_oid(bound.type_oid) else {
+            continue;
+        };
+        if bound.column_id == 0 {
+            continue;
+        }
+        let min_bytes = decode_hex(&bound.min_value)
+            .map_err(|error| format!("index min_value for column {}: {error}", bound.column_id))?;
+        let max_bytes = decode_hex(&bound.max_value)
+            .map_err(|error| format!("index max_value for column {}: {error}", bound.column_id))?;
+        let min = decode_sort_key(sort_key_type, &min_bytes)
+            .map_err(|error| format!("decode min for column {}: {error}", bound.column_id))?
+            .to_json();
+        let max = decode_sort_key(sort_key_type, &max_bytes)
+            .map_err(|error| format!("decode max for column {}: {error}", bound.column_id))?
+            .to_json();
+        stats.insert(bound.column_id.to_string(), (min, max));
+    }
+    Ok(stats)
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+    let trimmed = value.trim();
+    if !trimmed.len().is_multiple_of(2) {
+        return Err(format!("odd-length hex string `{trimmed}`"));
+    }
+    let mut bytes = Vec::with_capacity(trimmed.len() / 2);
+    let chars = trimmed.as_bytes();
+    for chunk in chars.chunks(2) {
+        let hi = hex_nibble(chunk[0])?;
+        let lo = hex_nibble(chunk[1])?;
+        bytes.push((hi << 4) | lo);
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("invalid hex digit `{}`", byte as char)),
+    }
+}
+
+fn canonical_column_id_key(value: &str) -> Option<String> {
+    let column_id = value.parse::<i16>().ok()?;
+    (column_id != 0).then(|| column_id.to_string())
 }
 
 /// Decodes a flush storage context JSON payload.
@@ -263,7 +350,9 @@ mod tests {
             "segments": [
                 {
                     "object_path": "ns/table/batch-1.parquet",
-                    "column_stats": {"seq": {"min": 1, "max": 100}}
+                    "schema_version": 1,
+                    "physical_names": {"1": "id"},
+                    "column_stats": {"1": {"min": 1, "max": 100}}
                 }
             ]
         });
@@ -276,10 +365,6 @@ mod tests {
         assert_eq!(context.segments.len(), 1);
         assert_eq!(context.segments[0].object_path, "ns/table/batch-1.parquet");
         assert_eq!(context.segments[0].byte_size, None);
-        assert_eq!(
-            context.segments[0].column_stats,
-            serde_json::json!({"seq": {"min": 1, "max": 100}})
-        );
     }
 
     #[test]
@@ -292,26 +377,57 @@ mod tests {
             "segments": [
                 {
                     "object_path": "ns/table/batch-1.parquet",
-                    "column_stats": {"id": {"min": 1, "max": 10}},
+                    "schema_version": 2,
+                    "physical_names": {"1": "old_id"},
+                    "column_stats": {"1": {"min": 1, "max": 10}},
                     "byte_size": 4096
                 }
             ]
         });
         let context = in_sync_manifest_scan_context(&value).unwrap();
         assert_eq!(context.segments[0].byte_size, Some(4096));
+        assert_eq!(context.segments[0].schema_version, 2);
+        assert_eq!(
+            context.segments[0]
+                .physical_names
+                .get(&1)
+                .map(String::as_str),
+            Some("old_id")
+        );
+    }
+
+    #[test]
+    fn column_stats_from_index_bounds_decodes_sort_key_json() {
+        use super::column_stats_from_index_bounds;
+        use crate::manifest_row::CatalogSegmentIndexBound;
+        use koldstore_sortkey::{encode_sort_key_json, SortKeyType, CODEC_VERSION};
+
+        let min = encode_sort_key_json(SortKeyType::Int8, &serde_json::json!(1)).unwrap();
+        let max = encode_sort_key_json(SortKeyType::Int8, &serde_json::json!(10)).unwrap();
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let stats = column_stats_from_index_bounds(&[CatalogSegmentIndexBound {
+            column_id: 1,
+            type_oid: 20,
+            codec_version: CODEC_VERSION,
+            min_value: hex(&min),
+            max_value: hex(&max),
+        }])
+        .unwrap();
+        assert_eq!(stats["1"], (serde_json::json!(1), serde_json::json!(10)));
     }
 
     #[test]
     fn column_stats_min_max_map_skips_incomplete_bounds() {
         let value = serde_json::json!({
-            "seq": {"min": 1, "max": 100},
-            "partial": {"min": 1},
-            "other": {"max": 9}
+            "1": {"min": 1, "max": 100},
+            "2": {"min": 1},
+            "3": {"max": 9},
+            "not-a-column-id": {"min": 0, "max": 0}
         });
         let stats = column_stats_min_max_map(&value);
         assert_eq!(stats.len(), 1);
         assert_eq!(
-            stats.get("seq"),
+            stats.get("1"),
             Some(&(serde_json::json!(1), serde_json::json!(100)))
         );
     }

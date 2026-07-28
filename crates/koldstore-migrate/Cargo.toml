@@ -10,6 +10,7 @@ description = "Table migration and demigration planning for pg-koldstore"
 koldstore-common.workspace = true
 koldstore-mirror.workspace = true
 koldstore-schema.workspace = true
+koldstore-sortkey.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

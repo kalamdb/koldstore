@@ -294,8 +294,8 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
         "active": true,
         "initialization_state": "complete",
         "mirror_relation": "koldstore.items__cl",
-        "primary_key": ["id"],
-        "primary_key_shape": [{"column": "id", "type_oid": 20}],
+        "primary_key": [{"column_id": 1, "name": "id"}],
+        "primary_key_shape": [{"column_id": 1, "name": "id", "type_oid": 20}],
         "scope_column": null
     }))
     .unwrap();
@@ -307,7 +307,8 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
         koldstore_schema::MirrorInitializationState::Complete
     );
     assert_eq!(snapshot.mirror_relation.relation(), "items__cl");
-    assert_eq!(snapshot.primary_key_columns, vec!["id".to_string()]);
+    assert_eq!(snapshot.primary_key_columns[0].column_id.get(), 1);
+    assert_eq!(snapshot.primary_key_columns[0].name, "id");
     assert!(snapshot.scope_column.is_none());
 }
 

@@ -47,14 +47,15 @@ pub use drop_table::{
 pub use koldstore_common::{FlushPolicy, ManageTableOptions, QualifiedTableName};
 pub use mirror::{
     mirror_relation_for_source, plan_change_log_mirror, plan_change_log_mirror_from_columns,
-    ChangeLogMirrorPlan, MirrorError, MirrorResult,
+    plan_change_log_mirror_with_order_column, ChangeLogMirrorPlan, MirrorError, MirrorResult,
 };
 pub use plan::{
     plan_empty_table_migration, plan_existing_table_migration, EmptyTableMigrationPlan,
     ExistingTableCatalog, ExistingTableMigrationPlan, MigrationTableContext,
 };
 pub use refresh::{
-    plan_active_schema_refresh_context_json, plan_schema_refresh,
-    registration_metadata_for_refresh, ActiveSchemaRefreshContext, SchemaRefreshPlan,
+    plan_active_schema_refresh_context_json, plan_schema_refresh, primary_key_renames,
+    registration_metadata_for_refresh, resolve_scope_column_name, runtime_artifacts_need_sync,
+    ActiveSchemaRefreshContext, SchemaRefreshPlan,
 };
 pub use request::{DemigrateTableRequest, MigrateTableRequest, MigrationError, MigrationResult};

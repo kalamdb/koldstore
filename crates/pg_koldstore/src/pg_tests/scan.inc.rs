@@ -20,7 +20,7 @@ fn explain_shows_kold_merge_scan_for_managed_table() {
     );
     assert!(
         plan.contains("Candidate Segments")
-            || plan.contains("Segments Pruned by Min/Max")
+            || plan.contains("Segments Pruned by Catalog Index")
             || plan.contains("Parquet Segments Opened")
             || plan.contains("Parquet Segments Planned"),
         "expected Timescale-style prune properties in EXPLAIN: {plan}"
@@ -143,8 +143,7 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         "Emit Path",
         "Hot Rows",
         "Candidate Segments",
-        "Segments Pruned by Scope",
-        "Segments Pruned by Min/Max",
+        "Segments Pruned by Catalog Index",
         "Parquet Segments Opened",
         "Bytes Fetched",
         "Segment Catalog Source",
@@ -371,9 +370,9 @@ fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
 }
 
 #[pg_test]
-fn hot_pk_hit_skips_parquet_open_when_cold_segment_stats_overlap() {
+fn hot_pk_hit_skips_parquet_open_when_cold_segment_index_overlaps() {
     // After flush, hot rows are pruned. Re-inserting the same PK leaves the old
-    // version in cold while the live row is hot. Catalog min/max still keeps the
+    // version in cold while the live row is hot. Catalog index still keeps the
     // segment (PK is in range). Hot-first must return the hot row without opening
     // Parquet.
     let suffix = unique_suffix("hot_first");

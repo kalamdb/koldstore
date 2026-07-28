@@ -102,6 +102,12 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
     if let Some(manifest) = try_load_manifest_with_client(&client, &manifest_path)? {
         referenced.extend(
             manifest
+                .shards
+                .iter()
+                .map(|shard| format!("{prefix}/{}", shard.path.trim_start_matches('/'))),
+        );
+        referenced.extend(
+            manifest
                 .segments
                 .into_iter()
                 .map(|segment| format!("{prefix}/{}", segment.path.trim_start_matches('/'))),

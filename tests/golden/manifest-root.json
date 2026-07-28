@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "table": "items",
+  "namespace": "app",
+  "scope_id": null,
+  "schema_version": 1,
+  "max_seq": 10,
+  "max_commit_seq": 20,
+  "updated_at": "2026-07-03T00:00:00Z",
+  "publish": {
+    "generation": "1",
+    "etag": "golden-etag",
+    "backend": "filesystem",
+    "writer_id": "golden"
+  },
+  "shards": [
+    {
+      "folder": "001",
+      "path": "001/manifest-shard.json",
+      "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "segment_count": 1,
+      "min_seq": 1,
+      "max_seq": 10,
+      "min_commit_seq": 11,
+      "max_commit_seq": 20
+    }
+  ],
+  "files": {
+    "current_subfolder": "001",
+    "subfolder_count": 1,
+    "max_files_per_subfolder": 100,
+    "total_files": 1
+  }
+}

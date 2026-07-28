@@ -76,10 +76,16 @@ pub const REQUIRED_CATALOG_INDEXES: &[CatalogIndexSpec] = &[
         purpose: "commit-sequence pruning for active cold data",
     },
     CatalogIndexSpec {
-        name: "cold_segment_stats_lookup_idx",
-        table: "koldstore.cold_segment_stats",
+        name: "cold_segment_index_min_idx",
+        table: "koldstore.cold_segment_index",
         unique: false,
-        purpose: "predicate-column stats lookup for active segments",
+        purpose: "upper-bound candidate lookup over Sort Key V1 minima",
+    },
+    CatalogIndexSpec {
+        name: "cold_segment_index_max_idx",
+        table: "koldstore.cold_segment_index",
+        unique: false,
+        purpose: "lower-bound candidate lookup over Sort Key V1 maxima",
     },
 ];
 

@@ -94,7 +94,7 @@ Custom Scan (KoldMergeScan) on history
 ```text
 Custom Scan (KoldMergeScan) on history
   Hot Plan: Index Scan
-  Cold segments: considered=12, pruned_min_max=11, opened=1
+  Cold segments: considered=12, pruned_catalog_index=11, opened=1
   Parquet segment: public/history/batch-1.parquet, ... 1 rows
 ```
 

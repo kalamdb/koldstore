@@ -42,8 +42,8 @@ pub use rls::{
 pub use scan::{
     begin_merge_scan, begin_merge_scan_with_plan, build_path_replacement, clear_partial_heap_paths,
     custom_scan_explain_label, evaluate_after_winner_resolution, execute_merge_scan,
-    execute_merge_scan_with_filters, prune_segment_stats, prune_segment_stats_hints,
-    replace_heap_final_path, retain_pre_merge_cold_prune_predicates, ColdAvailability,
+    execute_merge_scan_with_filters, replace_heap_final_path,
+    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed, ColdAvailability,
     ColdPruneColumnPolicy, FilterPlan, MergeMetadataAttnums, MergeScanError, MergeScanPlan,
     MergeScanResult, PathReplacementDecision, PlannerPath, PlannerPathKind, ScanResourceCounters,
     ScanState, SegmentHint, SegmentPrunePredicate, SegmentStatsHint, CUSTOM_PATH_NAME,

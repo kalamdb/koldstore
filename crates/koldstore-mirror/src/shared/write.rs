@@ -160,6 +160,7 @@ fn pk_selected_join_predicates(primary_key: &[&str]) -> MirrorResult<Vec<String>
 /// - `$1` — operation code (`smallint`)
 /// - `$2..$N+1` — one `text[]` per primary-key column (cast to `pk_type_names`)
 /// - `$N+2` — `bigint[]` of preallocated `seq` values
+/// - `$N+3` — `bytea[]` of Sort Key V1 `order_key` values when `include_order_key`
 ///
 /// Counter result: `(affected_rows, existing_rows)` using `xmax = 0` to detect
 /// inserts without an extra PK join.
@@ -171,6 +172,7 @@ pub fn plan_async_mirror_batch_upsert(
     mirror_quoted: &str,
     primary_key: &[&str],
     pk_type_names: &[String],
+    include_order_key: bool,
 ) -> MirrorResult<String> {
     if primary_key.len() != pk_type_names.len() {
         return Err(MirrorError::InvalidColumn(
@@ -181,9 +183,10 @@ pub fn plan_async_mirror_batch_upsert(
     let conflict_keys = quoted_keys.join(", ");
     let pk_count = quoted_keys.len();
     // $1 = op; $2..$(pk_count+1) = pk text arrays; $(pk_count+2) = seq bigint[]
-    let mut unnest_args = Vec::with_capacity(pk_count + 1);
-    let mut unnest_aliases = Vec::with_capacity(pk_count + 1);
-    let mut select_keys = Vec::with_capacity(pk_count);
+    // optional $(pk_count+3) = order_key bytea[]
+    let mut unnest_args = Vec::with_capacity(pk_count + 2);
+    let mut unnest_aliases = Vec::with_capacity(pk_count + 2);
+    let mut select_keys = Vec::with_capacity(pk_count + 2);
     for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
         let param = index + 2;
         let alias = format!("pk_{index}");
@@ -195,28 +198,37 @@ pub fn plan_async_mirror_batch_upsert(
     unnest_args.push(format!("${seq_param}::bigint[]"));
     unnest_aliases.push("seq".to_string());
     select_keys.push("incoming.seq AS \"seq\"".to_string());
+    if include_order_key {
+        let order_param = pk_count + 3;
+        unnest_args.push(format!("${order_param}::bytea[]"));
+        unnest_aliases.push("order_key".to_string());
+        select_keys.push("incoming.order_key AS \"order_key\"".to_string());
+    }
 
-    let insert_columns = format!("{conflict_keys}, \"seq\", \"op\"");
-    let insert_select = format!(
-        "{select_list}, $1::smallint",
-        select_list = quoted_keys
-            .iter()
-            .map(|key| format!("incoming.{key}"))
-            .chain(["incoming.\"seq\"".to_string()])
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    // Rebuild select list with casts into a subquery so INSERT sees typed cols.
+    let insert_columns = if include_order_key {
+        format!("{conflict_keys}, \"order_key\", \"seq\", \"op\"")
+    } else {
+        format!("{conflict_keys}, \"seq\", \"op\"")
+    };
+    let insert_select_cols = quoted_keys
+        .iter()
+        .map(|key| format!("incoming.{key}"))
+        .chain(include_order_key.then(|| "incoming.\"order_key\"".to_string()))
+        .chain(["incoming.\"seq\"".to_string(), "$1::smallint".to_string()])
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Order keys are immutable per PK; keep the first encoded value on conflict.
+    let conflict_set = "\"seq\" = EXCLUDED.\"seq\", \
+               \"op\" = EXCLUDED.\"op\"";
     Ok(format!(
         "WITH incoming AS (\
            SELECT {projected} FROM unnest({unnest}) AS incoming({aliases})\
          ), applied AS (\
            INSERT INTO {mirror_quoted} ({insert_columns}) \
-           SELECT {insert_select} \
+           SELECT {insert_select_cols} \
            FROM incoming \
            ON CONFLICT ({conflict_keys}) DO UPDATE \
-           SET \"seq\" = EXCLUDED.\"seq\", \
-               \"op\" = EXCLUDED.\"op\" \
+           SET {conflict_set} \
            RETURNING (xmax = 0) AS inserted\
          ) \
          SELECT count(*)::bigint, \
@@ -242,7 +254,7 @@ pub fn plan_async_mirror_batch_insert(
     pk_type_names: &[String],
     _seq_expression: &str,
 ) -> MirrorResult<String> {
-    plan_async_mirror_batch_upsert(mirror_quoted, primary_key, pk_type_names)
+    plan_async_mirror_batch_upsert(mirror_quoted, primary_key, pk_type_names, false)
 }
 
 /// Plans a set-based async-mirror update with an insert-missing fallback.
@@ -252,6 +264,9 @@ pub fn plan_async_mirror_batch_insert(
 /// latest-state replay semantics without paying conflict resolution for the
 /// common hot-row case.
 ///
+/// When `include_order_key` is true, bind `$N+3` as `bytea[]` and persist
+/// `order_key` on both the update and insert-missing paths.
+///
 /// # Errors
 ///
 /// Returns an error when the primary key is empty or unsafe.
@@ -260,6 +275,7 @@ pub fn plan_async_mirror_batch_update(
     primary_key: &[&str],
     pk_type_names: &[String],
     _seq_expression: &str,
+    include_order_key: bool,
 ) -> MirrorResult<String> {
     if primary_key.len() != pk_type_names.len() {
         return Err(MirrorError::InvalidColumn(
@@ -269,9 +285,9 @@ pub fn plan_async_mirror_batch_update(
     let quoted_keys = quoted_pk_columns(primary_key)?;
     let conflict_keys = quoted_keys.join(", ");
     let pk_count = quoted_keys.len();
-    let mut unnest_args = Vec::with_capacity(pk_count + 1);
-    let mut unnest_aliases = Vec::with_capacity(pk_count + 1);
-    let mut projected = Vec::with_capacity(pk_count + 1);
+    let mut unnest_args = Vec::with_capacity(pk_count + 2);
+    let mut unnest_aliases = Vec::with_capacity(pk_count + 2);
+    let mut projected = Vec::with_capacity(pk_count + 2);
     for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
         let param = index + 2;
         let alias = format!("pk_{index}");
@@ -283,6 +299,12 @@ pub fn plan_async_mirror_batch_update(
     unnest_args.push(format!("${seq_param}::bigint[]"));
     unnest_aliases.push("seq".to_string());
     projected.push("incoming.seq AS \"seq\"".to_string());
+    if include_order_key {
+        let order_param = pk_count + 3;
+        unnest_args.push(format!("${order_param}::bytea[]"));
+        unnest_aliases.push("order_key".to_string());
+        projected.push("incoming.order_key AS \"order_key\"".to_string());
+    }
 
     let update_join = quoted_keys
         .iter()
@@ -299,13 +321,23 @@ pub fn plan_async_mirror_batch_update(
         .map(|key| format!("mirror.{key}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let update_set = "\"seq\" = incoming.\"seq\", \
+               \"op\" = $1::smallint";
     let incoming_values = quoted_keys
         .iter()
         .map(|key| format!("incoming.{key}"))
+        .chain(include_order_key.then(|| "incoming.\"order_key\"".to_string()))
         .chain(["incoming.\"seq\"".to_string(), "$1::smallint".to_string()])
         .collect::<Vec<_>>()
         .join(", ");
-    let insert_columns = format!("{conflict_keys}, \"seq\", \"op\"");
+    let insert_columns = if include_order_key {
+        format!("{conflict_keys}, \"order_key\", \"seq\", \"op\"")
+    } else {
+        format!("{conflict_keys}, \"seq\", \"op\"")
+    };
+    // Order keys are immutable per PK; keep the first encoded value on conflict.
+    let conflict_set = "\"seq\" = EXCLUDED.\"seq\", \
+               \"op\" = EXCLUDED.\"op\"";
     let missing_key = quoted_keys
         .first()
         .expect("primary-key planner rejects an empty key");
@@ -315,8 +347,7 @@ pub fn plan_async_mirror_batch_update(
            SELECT {projected} FROM unnest({unnest}) AS incoming({aliases})\
          ), updated AS (\
            UPDATE {mirror_quoted} AS mirror \
-           SET \"seq\" = incoming.\"seq\", \
-               \"op\" = $1::smallint \
+           SET {update_set} \
            FROM incoming \
            WHERE {update_join} \
            RETURNING {returning_keys}\
@@ -327,14 +358,74 @@ pub fn plan_async_mirror_batch_update(
            LEFT JOIN updated ON {missing_join} \
            WHERE updated.{missing_key} IS NULL \
            ON CONFLICT ({conflict_keys}) DO UPDATE \
-           SET \"seq\" = EXCLUDED.\"seq\", \
-               \"op\" = EXCLUDED.\"op\" \
+           SET {conflict_set} \
            RETURNING (xmax = 0) AS inserted\
          ) \
          SELECT ((SELECT count(*) FROM updated) + count(*))::bigint, \
                 ((SELECT count(*) FROM updated) + \
                  count(*) FILTER (WHERE NOT inserted))::bigint \
          FROM inserted",
+        projected = projected.join(", "),
+        unnest = unnest_args.join(", "),
+        aliases = unnest_aliases.join(", "),
+    ))
+}
+
+/// Plans a delete-op update that only touches existing mirror rows.
+///
+/// Used when `order_key` is required: DELETE WAL often lacks the order column
+/// under default replica identity, so inventing a tombstone insert is unsafe.
+///
+/// Bind contract matches upsert without `order_key`: `$1` op, `$2..$N+1` PK
+/// arrays, `$N+2` seq array.
+///
+/// # Errors
+///
+/// Returns an error when the primary key is empty/unsafe or type lists mismatch.
+pub fn plan_async_mirror_batch_delete_existing(
+    mirror_quoted: &str,
+    primary_key: &[&str],
+    pk_type_names: &[String],
+) -> MirrorResult<String> {
+    if primary_key.len() != pk_type_names.len() {
+        return Err(MirrorError::InvalidColumn(
+            "primary-key type count mismatch".to_string(),
+        ));
+    }
+    let quoted_keys = quoted_pk_columns(primary_key)?;
+    let pk_count = quoted_keys.len();
+    let mut unnest_args = Vec::with_capacity(pk_count + 1);
+    let mut unnest_aliases = Vec::with_capacity(pk_count + 1);
+    let mut projected = Vec::with_capacity(pk_count + 1);
+    for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
+        let param = index + 2;
+        let alias = format!("pk_{index}");
+        unnest_args.push(format!("${param}::text[]"));
+        unnest_aliases.push(alias.clone());
+        projected.push(format!("incoming.{alias}::{type_name} AS {quoted}"));
+    }
+    let seq_param = pk_count + 2;
+    unnest_args.push(format!("${seq_param}::bigint[]"));
+    unnest_aliases.push("seq".to_string());
+    projected.push("incoming.seq AS \"seq\"".to_string());
+    let update_join = quoted_keys
+        .iter()
+        .map(|key| format!("mirror.{key} = incoming.{key}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+
+    Ok(format!(
+        "WITH incoming AS (\
+           SELECT {projected} FROM unnest({unnest}) AS incoming({aliases})\
+         ), updated AS (\
+           UPDATE {mirror_quoted} AS mirror \
+           SET \"seq\" = incoming.\"seq\", \
+               \"op\" = $1::smallint \
+           FROM incoming \
+           WHERE {update_join} \
+           RETURNING 1\
+         ) \
+         SELECT count(*)::bigint, count(*)::bigint FROM updated",
         projected = projected.join(", "),
         unnest = unnest_args.join(", "),
         aliases = unnest_aliases.join(", "),

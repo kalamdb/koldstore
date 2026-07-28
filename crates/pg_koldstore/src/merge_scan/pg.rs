@@ -216,7 +216,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     };
 
     let segment_count = with_hook_disabled(|| {
-        crate::catalog::cache::cached_manifest_segment_stats(table_oid, &[])
+        crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])
             .ok()
             .flatten()
             .map(|stats| stats.segments.len())
@@ -275,7 +275,12 @@ unsafe extern "C-unwind" fn plan_custom_path(
         crate::catalog::cache::managed_table_snapshot(table_oid)
             .ok()
             .flatten()
-            .map(|snapshot| snapshot.primary_key_columns.clone())
+            .map(|snapshot| {
+                snapshot
+                    .primary_key_names()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     });
     let mut merge_plan = MergeScanPlan::new(table_oid.to_u32(), primary_key);
@@ -402,15 +407,21 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     // Hot heap is current-state only, so PK + scope equality can be pushed into
     // the SPI load. Mutable columns stay residual for cold (pre-merge), but may
     // still appear in hot_equality for post-merge ExecScan. Scope pushdown
-    // matches catalog min/max prune on the shared manifest until per-scope
+    // matches catalog segment-index prune on the shared manifest until per-scope
     // manifests land.
     let mut source_equality_columns = snapshot
         .primary_key_columns
         .iter()
-        .map(String::as_str)
+        .map(|column| column.name.as_str())
         .collect::<std::collections::HashSet<_>>();
-    if let Some(scope) = snapshot.scope_column.as_deref() {
-        source_equality_columns.insert(scope);
+    if let Some(scope_id) = snapshot.scope_column_id {
+        if let Some(scope) = catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id == scope_id)
+        {
+            source_equality_columns.insert(scope.name.as_str());
+        }
     }
     let pk_equality = residual
         .hot_equality
@@ -684,7 +695,7 @@ unsafe extern "C-unwind" fn explain_custom_scan(
             let cold_profile = match resolve_table_oid(node).and_then(planned_cold_read_profile) {
                 Ok(profile) => profile,
                 Err(error) => {
-                    profile::explain_property(es, "Cold Storage", &format!("unavailable: {error}"));
+                    profile::explain_text(es, "Cold Storage", &format!("unavailable: {error}"));
                     return;
                 }
             };
@@ -711,7 +722,7 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         // Fallback when the hot child was not initialized into custom_ps (cold
         // emit paths). Graph clients that walk custom_ps still see nested Plans
         // when the child was initialized for hot-only streaming.
-        profile::explain_property(es, "Hot Plan", &hot_label);
+        profile::explain_text(es, "Hot Plan", &hot_label);
     }
     if let Some(execution) = execution.as_ref() {
         profile::explain_integer(es, "Mirror Tombstones", None, execution.mirror_rows as i64);

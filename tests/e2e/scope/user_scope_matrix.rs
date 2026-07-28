@@ -409,12 +409,28 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
 
         let relation = db.relation("rls_collated_text_keys");
         let collation = format!("{}.koldstore_case_insensitive", db.schema);
-        db.client
+        if let Err(error) = db
+            .client
             .batch_execute(&format!(
                 "CREATE COLLATION {collation} ( \
                    provider = icu, locale = 'und-u-ks-level2', deterministic = false \
-                 ); \
-                 CREATE TABLE {relation} ( \
+                 );"
+            ))
+            .await
+        {
+            // tokio_postgres Display is often just "db error"; read the SQLSTATE message.
+            let message = error
+                .as_db_error()
+                .map(|err| err.message().to_string())
+                .unwrap_or_else(|| error.to_string());
+            if message.contains("ICU is not supported") {
+                continue;
+            }
+            return Err(error.into());
+        }
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} ( \
                    id text COLLATE {collation} PRIMARY KEY, \
                    user_id text NOT NULL, payload text NOT NULL, \
                    migration_seq bigint NOT NULL \

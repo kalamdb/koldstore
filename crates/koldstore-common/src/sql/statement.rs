@@ -42,6 +42,7 @@ pub enum SqlParamType {
     Integer,
     Text,
     Jsonb,
+    Bytea,
     Oid,
     Uuid,
     Boolean,

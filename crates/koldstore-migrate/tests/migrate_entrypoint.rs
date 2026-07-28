@@ -10,7 +10,7 @@ fn shared_request() -> MigrateTableRequest {
         table_type: "shared".to_string(),
         storage_name: "local-minio".to_string(),
         scope_column: None,
-        options: ManageTableOptions::from_value(&serde_json::json!({ "hot_row_limit": 1000 })),
+        options: ManageTableOptions::default().with_flush(1000, 1, 1000),
     }
 }
 

@@ -21,7 +21,7 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 
 - **setup** (`koldstore-setup`): DDL plans for internal objects in
   `koldstore--0.1.0.sql` — `storage`, `schemas`, `manifest`, `jobs`,
-  `cold_segments`, `cold_segment_stats`, sequences, types, indexes, grants.
+  `cold_segments`, `cold_segment_index`, sequences, types, indexes, grants.
   Dependency-free leaf (parses/classifies SQL only).
 - **schema** (`koldstore-schema`): `koldstore.schemas` registry — column sets,
   versions, type matrix, initialization state for migrated tables.
@@ -38,8 +38,9 @@ leaf for migrate/merge). Catalog owns cold bookkeeping and may *look up*
 `mirror_relation` from `koldstore.schemas`, but does not build mirror upserts.
 
 **Do not merge manifest and catalog.** Catalog is PostgreSQL cold-metadata
-authority; `koldstore-manifest` owns the derived object-store `manifest.json`
-(model, assembly, paths, I/O) and depends on catalog + storage.
+authority; `koldstore-manifest` owns the derived object-store export
+(`manifest.json` root + folder `manifest-shard.json` files: model, assembly,
+paths, I/O) and depends on catalog + storage.
 
 ## Dependency Graph
 

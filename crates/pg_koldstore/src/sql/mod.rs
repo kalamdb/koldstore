@@ -8,4 +8,5 @@ pub mod job_lock_pg;
 pub mod migrate_pg;
 pub mod ops_pg;
 pub mod session;
+pub mod sort_key_pg;
 pub mod storage_pg;

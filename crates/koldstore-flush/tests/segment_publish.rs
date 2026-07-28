@@ -1,5 +1,6 @@
 //! Flush segment publish durability: encode → Create publish → readable final.
 
+use koldstore_common::ColumnId;
 use koldstore_flush::{write_flush_segment_with_client, FlushStats, FlushWriteChunk};
 use koldstore_parquet::{
     plan_clean_cold_record, record_batch_from_clean_cold_records, ColdRecordBatch, PgColumn, PgType,
@@ -32,7 +33,7 @@ fn cold_chunk(rows: usize) -> FlushWriteChunk {
     )
     .unwrap();
     let mut indexed_bounds = std::collections::BTreeMap::new();
-    indexed_bounds.insert("id".to_string(), (json!(1), json!(rows)));
+    indexed_bounds.insert(ColumnId::from_attnum(1), (json!(1), json!(rows)));
     let cold_batch = ColdRecordBatch {
         batch,
         row_count: rows,
@@ -56,13 +57,11 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     let client = open_filesystem_client(root.path().to_str().unwrap()).unwrap();
     let chunk = cold_chunk(5);
     let stats = FlushStats::from_write_chunk(&chunk).unwrap();
-
     let written = write_flush_segment_with_client(
         &client,
         "app",
         "items",
         "zstd",
-        &["id".to_string()],
         &["id".to_string()],
         1,
         0,
@@ -82,6 +81,10 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     assert!(written.object_path.ends_with(".parquet"));
     assert!(written.byte_size > 0);
     assert_eq!(written.checksum.len(), 64);
+    assert_eq!(
+        written.indexed_bounds.get(&ColumnId::from_attnum(1)),
+        Some(&(json!(1), json!(5)))
+    );
     let bytes = client.get(&written.object_path).unwrap();
     assert_eq!(bytes.len() as i64, written.byte_size);
     assert_eq!(
@@ -125,7 +128,6 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
         "items",
         "zstd",
         &["id".to_string()],
-        &["id".to_string()],
         1,
         1,
         &orphan,
@@ -140,7 +142,6 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
         "app",
         "items",
         "zstd",
-        &["id".to_string()],
         &["id".to_string()],
         1,
         1, // same batch_number as the orphaned attempt

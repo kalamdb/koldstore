@@ -68,7 +68,7 @@ fn mirror_tracks_insert_update_delete_reinsert_and_rollback() {
 }
 
 #[pg_test]
-#[should_panic(expected = "does not support primary-key updates")]
+#[should_panic(expected = "does not support primary-key or segment-order-column updates")]
 fn managed_primary_key_mutation_is_rejected() {
     let suffix = unique_suffix("pkmut");
     let schema = format!("pgtest_{suffix}");

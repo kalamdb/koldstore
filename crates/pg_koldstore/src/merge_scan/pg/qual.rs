@@ -37,7 +37,6 @@ pub(super) struct ResidualFilters {
 
 #[derive(Debug, Clone, Copy)]
 struct QualCatalog<'a> {
-    table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
     columns: &'a [koldstore_migrate::order::CatalogColumn],
 }
@@ -48,7 +47,7 @@ struct QualCatalog<'a> {
 /// subqueries, so cold enforcement does not depend on KoldStore understanding a
 /// policy's expression shape.
 pub(super) unsafe fn required_scan_projection(
-    table_oid: pg_sys::Oid,
+    _table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
     targetlist: *mut pg_sys::List,
     qual: *mut pg_sys::List,
@@ -103,28 +102,17 @@ pub(super) unsafe fn required_scan_projection(
         }
         let attnum =
             pg_sys::AttrNumber::try_from(slot_index + 1).map_err(|error| error.to_string())?;
-        let name = unsafe { pg_sys::get_attname(table_oid, attnum, true) };
-        if name.is_null() {
-            return Err(format!(
-                "required base-relation attribute {} does not exist",
-                slot_index + 1
-            ));
-        }
-        let name_text = unsafe { CStr::from_ptr(name) }
-            .to_str()
-            .map_err(|error| error.to_string())?
-            .to_string();
-        unsafe {
-            pg_sys::pfree(name.cast());
-        }
-        let Some(catalog) = columns.iter().find(|column| column.name == name_text) else {
+        let Some(catalog) = columns
+            .iter()
+            .find(|column| column.column_id.get() == attnum)
+        else {
             if whole_row {
                 // PostgreSQL represents a dropped attribute in a whole-row
                 // value as NULL; it is intentionally absent from our catalog.
                 continue;
             }
             return Err(format!(
-                "required base-relation attribute {} (`{name_text}`) is not present in the managed schema",
+                "required base-relation attribute {} is not present in the managed schema",
                 slot_index + 1,
             ));
         };
@@ -141,17 +129,13 @@ pub(super) unsafe fn required_scan_projection(
 }
 
 pub(super) unsafe fn residual_filters(
-    table_oid: pg_sys::Oid,
+    _table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
     params: pg_sys::ParamListInfo,
 ) -> ResidualFilters {
-    let catalog = QualCatalog {
-        table_oid,
-        scanrelid,
-        columns,
-    };
+    let catalog = QualCatalog { scanrelid, columns };
     let mut filters = ResidualFilters::default();
     for node in list_node_pointers(qual) {
         collect_residual_filters(node.cast::<pg_sys::Expr>(), catalog, params, &mut filters);
@@ -160,17 +144,13 @@ pub(super) unsafe fn residual_filters(
 }
 
 pub(super) unsafe fn segment_prune_predicates(
-    table_oid: pg_sys::Oid,
+    _table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
     params: pg_sys::ParamListInfo,
 ) -> Vec<SegmentPrunePredicate> {
-    let catalog = QualCatalog {
-        table_oid,
-        scanrelid,
-        columns,
-    };
+    let catalog = QualCatalog { scanrelid, columns };
     list_node_pointers(qual)
         .into_iter()
         .flat_map(|node| {
@@ -238,14 +218,23 @@ fn prune_predicate_from_op(
     opname: &str,
     reversed: bool,
 ) -> Option<SegmentPrunePredicate> {
+    let column_id = column.column_id.get();
     match (opname, reversed) {
-        ("=", _) => Some(SegmentPrunePredicate::equality(&column.name, literal)),
-        (">" | ">=", false) | ("<" | "<=", true) => {
-            Some(SegmentPrunePredicate::lower_bound(&column.name, literal))
-        }
-        ("<" | "<=", false) | (">" | ">=", true) => {
-            Some(SegmentPrunePredicate::upper_bound(&column.name, literal))
-        }
+        ("=", _) => Some(SegmentPrunePredicate::equality(
+            column_id,
+            &column.name,
+            literal,
+        )),
+        (">" | ">=", false) | ("<" | "<=", true) => Some(SegmentPrunePredicate::lower_bound(
+            column_id,
+            &column.name,
+            literal,
+        )),
+        ("<" | "<=", false) | (">" | ">=", true) => Some(SegmentPrunePredicate::upper_bound(
+            column_id,
+            &column.name,
+            literal,
+        )),
         _ => None,
     }
 }
@@ -374,16 +363,10 @@ unsafe fn var_column(
     if attno <= 0 || (*var).varlevelsup != 0 || (*var).varno != scanrelid {
         return None;
     }
-    let name = pg_sys::get_attname(catalog.table_oid, attno, true);
-    if name.is_null() {
-        return None;
-    }
-    let name_text = CStr::from_ptr(name).to_string_lossy().into_owned();
-    pg_sys::pfree(name.cast());
     catalog
         .columns
         .iter()
-        .find(|column| column.name == name_text)
+        .find(|column| column.column_id.get() == attno)
 }
 
 unsafe fn operator_is_pg_catalog(operator: pg_sys::Oid) -> bool {

@@ -1,8 +1,8 @@
 use koldstore_common::{
-    ColdRow, ColumnClass, CommitSeq, HotRow, LogicalPk, MirrorOperation, MirrorState, PgCollation,
-    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue, Predicate, PredicateClass,
-    PredicateValue, PrimaryKeyColumnShape, PrimaryKeyShape, QualifiedTableName, SeqId,
-    StablePkHash, TableKind, TableName,
+    ColdRow, ColumnClass, ColumnId, CommitSeq, HotRow, LogicalPk, MirrorOperation, MirrorState,
+    PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue, Predicate,
+    PredicateClass, PredicateValue, PrimaryKeyColumnShape, PrimaryKeyShape, QualifiedTableName,
+    SeqId, StablePkHash, TableKind, TableName,
 };
 use serde_json::json;
 
@@ -110,16 +110,19 @@ fn logical_pk_rejects_missing_null_and_duplicate_columns() {
 #[test]
 fn predicate_classification_keeps_mutable_columns_residual() {
     let pk_predicate = Predicate {
+        column_id: ColumnId::from_attnum(1),
         column: "id".to_string(),
         class: ColumnClass::PrimaryKey,
         value: PredicateValue::Eq(json!(1)),
     };
     let mutable_predicate = Predicate {
+        column_id: ColumnId::from_attnum(2),
         column: "status".to_string(),
         class: ColumnClass::Mutable,
         value: PredicateValue::Eq(json!("open")),
     };
     let security_predicate = Predicate {
+        column_id: ColumnId::from_attnum(3),
         column: "tenant_id".to_string(),
         class: ColumnClass::Security,
         value: PredicateValue::Eq(json!("tenant-a")),
@@ -238,6 +241,7 @@ fn mirror_state_transitions_cover_insert_update_delete_and_reinsert() {
 fn primary_key_shape_preserves_exact_column_metadata() {
     let shape = PrimaryKeyShape::new(vec![
         PrimaryKeyColumnShape::new(
+            ColumnId::from_attnum(1),
             PkColumn::new("tenant_id").unwrap(),
             PkOrdinal::new(1).unwrap(),
             PgTypeOid::new(2950).unwrap(),
@@ -248,6 +252,7 @@ fn primary_key_shape_preserves_exact_column_metadata() {
             true,
         ),
         PrimaryKeyColumnShape::new(
+            ColumnId::from_attnum(2),
             PkColumn::new("slug").unwrap(),
             PkOrdinal::new(2).unwrap(),
             PgTypeOid::new(1043).unwrap(),
@@ -279,6 +284,7 @@ fn primary_key_shape_rejects_empty_duplicate_or_unordered_ordinals() {
     assert!(PrimaryKeyShape::new(vec![]).is_err());
 
     let id = PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(1),
         PkColumn::new("id").unwrap(),
         PkOrdinal::new(1).unwrap(),
         PgTypeOid::new(20).unwrap(),
@@ -291,6 +297,7 @@ fn primary_key_shape_rejects_empty_duplicate_or_unordered_ordinals() {
     assert!(PrimaryKeyShape::new(vec![id.clone(), id]).is_err());
 
     let first = PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(1),
         PkColumn::new("tenant_id").unwrap(),
         PkOrdinal::new(2).unwrap(),
         PgTypeOid::new(2950).unwrap(),
@@ -301,6 +308,7 @@ fn primary_key_shape_rejects_empty_duplicate_or_unordered_ordinals() {
         true,
     );
     let second = PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(2),
         PkColumn::new("id").unwrap(),
         PkOrdinal::new(1).unwrap(),
         PgTypeOid::new(20).unwrap(),

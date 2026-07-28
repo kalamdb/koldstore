@@ -1,9 +1,10 @@
 use koldstore_common::{
-    MirrorOperation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
-    TableName,
+    ColumnId, MirrorOperation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    PrimaryKeyColumnShape, TableName,
 };
 use koldstore_mirror::{
-    mirror_relation_for_source, plan_async_mirror_batch_update, plan_async_mirror_batch_upsert,
+    mirror_relation_for_source, plan_async_mirror_batch_delete_existing,
+    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert,
     plan_delete_selected_mirror_rows, plan_mirror_schema, plan_mirror_stats,
     plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorAccess, MirrorColumn,
     SqlParamType,
@@ -11,6 +12,7 @@ use koldstore_mirror::{
 
 fn pk_shape(name: &str, type_name: &str) -> PrimaryKeyColumnShape {
     PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(1),
         PkColumn::new(name).unwrap(),
         PkOrdinal::new(1).unwrap(),
         PgTypeOid::new(20).unwrap(),
@@ -92,6 +94,7 @@ fn async_mirror_batch_upsert_uses_typed_unnest_and_xmax_counters() {
         "\"koldstore\".\"items__cl\"",
         &["id"],
         &["bigint".to_string()],
+        false,
     )
     .unwrap();
 
@@ -102,6 +105,23 @@ fn async_mirror_batch_upsert_uses_typed_unnest_and_xmax_counters() {
     assert!(!sql.contains("jsonb_to_recordset"));
     assert!(!sql.contains("commit_lsn"));
     assert!(!sql.contains("existing AS"));
+    assert!(!sql.contains("order_key"));
+}
+
+#[test]
+fn async_mirror_batch_upsert_includes_order_key_bind() {
+    let sql = plan_async_mirror_batch_upsert(
+        "\"koldstore\".\"items__cl\"",
+        &["id"],
+        &["bigint".to_string()],
+        true,
+    )
+    .unwrap();
+
+    assert!(sql.contains("unnest($2::text[], $3::bigint[], $4::bytea[])"));
+    assert!(sql.contains("incoming.order_key AS \"order_key\""));
+    assert!(sql.contains("\"order_key\", \"seq\", \"op\""));
+    assert!(!sql.contains("\"order_key\" = EXCLUDED.\"order_key\""));
 }
 
 #[test]
@@ -111,6 +131,7 @@ fn async_mirror_batch_update_updates_existing_rows_then_upserts_missing_rows() {
         &["tenant_id", "id"],
         &["uuid".to_string(), "bigint".to_string()],
         "unused",
+        false,
     )
     .unwrap();
 
@@ -121,6 +142,19 @@ fn async_mirror_batch_update_updates_existing_rows_then_upserts_missing_rows() {
     assert!(sql.contains("WHERE updated.\"tenant_id\" IS NULL"));
     assert!(sql.contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE"));
     assert!(sql.contains("count(*) FILTER (WHERE NOT inserted)"));
+}
+
+#[test]
+fn async_mirror_batch_delete_existing_updates_only() {
+    let sql = plan_async_mirror_batch_delete_existing(
+        "\"koldstore\".\"items__cl\"",
+        &["id"],
+        &["bigint".to_string()],
+    )
+    .unwrap();
+    assert!(sql.contains("UPDATE \"koldstore\".\"items__cl\" AS mirror"));
+    assert!(!sql.contains("INSERT INTO"));
+    assert!(!sql.contains("order_key"));
 }
 
 #[test]

@@ -299,7 +299,7 @@ Custom Scan (KoldMergeScan)
       Status: executed
       Rows Scanned: 3
       Candidate Segments: 12
-      Segments Pruned by Min/Max: 10
+      Segments Pruned by Catalog Index: 10
       Parquet Segments Opened: 2
       Bytes Fetched: 16384 bytes
     Mirror Scan:

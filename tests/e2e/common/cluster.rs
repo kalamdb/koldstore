@@ -374,6 +374,7 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
                 AND migrate_proc.prorettype = 'uuid'::regtype
                 AND 'migration_order_by' = ANY (migrate_proc.proargnames)
                 AND 'target_file_size_mb' = ANY (migrate_proc.proargnames)
+                AND 'segment_order_column' = ANY (migrate_proc.proargnames)
             )
             AND EXISTS (
               SELECT 1
@@ -384,6 +385,14 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
                 AND flush_proc.prorettype = 'uuid'::regtype
                 AND 'force' = ANY (flush_proc.proargnames)
             )
+            AND EXISTS (
+              SELECT 1
+              FROM pg_proc encode_proc
+              JOIN pg_namespace encode_ns ON encode_ns.oid = encode_proc.pronamespace
+              WHERE encode_ns.nspname = 'koldstore'
+                AND encode_proc.proname = 'internal_encode_sort_key'
+            )
+            AND to_regclass('koldstore.cold_segment_index') IS NOT NULL
             "#,
             &[],
         )
@@ -407,7 +416,18 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
         }
     }
 
-    client
+    // Dropping the extension while leftover managed-table triggers/workers exist
+    // can crash the backend (shared_preload). Quiesce them first.
+    let _ = client
+        .batch_execute(
+            r#"
+            UPDATE koldstore.schemas SET active = false WHERE active;
+            "#,
+        )
+        .await;
+    let _ = super::async_mirror::terminate_async_worker(client).await;
+
+    match client
         .batch_execute(
             r#"
             DROP EXTENSION IF EXISTS koldstore CASCADE;
@@ -415,8 +435,21 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
             "#,
         )
         .await
-        .context("reinstall koldstore extension to pick up new SQL entities")?;
-    Ok(())
+    {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if error_chain_contains(&error, "connection closed")
+                || error_chain_contains(&error, "terminating connection")
+                || error_chain_contains(&error, "server closed the connection")
+            {
+                Err(error).context(
+                    "reinstall koldstore extension closed the backend; recreate E2E worker DBs with scripts/run-pg-e2e.sh",
+                )
+            } else {
+                Err(error).context("reinstall koldstore extension to pick up new SQL entities")
+            }
+        }
+    }
 }
 
 fn error_chain_contains(error: &dyn std::error::Error, needle: &str) -> bool {

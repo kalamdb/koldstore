@@ -1,4 +1,9 @@
 //! Manifest serialized model types.
+//!
+//! Object-store layout is folder-sharded only: a thin root `manifest.json`
+//! lists [`ManifestShardRef`] entries; segment bodies live in
+//! `{folder}/manifest-shard.json`. The in-memory [`Manifest`] may hold a full
+//! `segments` list while assembling from catalog or after a merged load.
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -6,7 +11,16 @@ use std::ops::RangeInclusive;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Object-store manifest.
+/// Root `manifest.json` document version (folder-sharded layout).
+pub const MANIFEST_VERSION: u32 = 1;
+/// Shard document format version under `{folder}/manifest-shard.json`.
+pub const MANIFEST_SHARD_VERSION: u32 = 1;
+
+/// Object-store / in-memory manifest.
+///
+/// On disk, roots are version [`MANIFEST_VERSION`] with `shards` and no segment
+/// bodies. In memory, `segments` holds the working list during assembly and
+/// after [`crate::io::try_load_manifest_with_client`] merges shards.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u32,
@@ -19,8 +33,40 @@ pub struct Manifest {
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish: Option<PublishState>,
+    /// Folder shard index written on every root export.
+    pub shards: Vec<ManifestShardRef>,
+    /// Working / merged segment list. Omitted from root object-store JSON.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub segments: Vec<ManifestSegment>,
     pub files: FilesState,
+}
+
+/// Pointer from a root manifest to one folder shard file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestShardRef {
+    /// Zero-padded folder name (`001`).
+    pub folder: String,
+    /// Table-relative shard path (`001/manifest-shard.json`).
+    pub path: String,
+    /// SHA-256 of the exact shard JSON bytes written before this root.
+    pub content_sha256: String,
+    pub segment_count: u32,
+    pub min_seq: i64,
+    pub max_seq: i64,
+    pub min_commit_seq: i64,
+    pub max_commit_seq: i64,
+}
+
+/// Per-folder shard document written beside cold segment objects.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManifestShard {
+    pub version: u32,
+    pub folder: String,
+    pub table: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+    pub schema_version: u32,
+    pub segments: Vec<ManifestSegment>,
 }
 
 /// Result of applying a batch of manifest segment appends.
@@ -28,7 +74,7 @@ pub struct Manifest {
 pub struct ManifestBatchAppend {
     /// Number of segment entries appended.
     pub appended_segments: usize,
-    /// Number of object-store `manifest.json` writes needed for the batch.
+    /// Number of object-store root+shard publish cycles needed for the batch.
     pub manifest_writes_required: usize,
 }
 
@@ -41,7 +87,7 @@ pub struct PublishState {
     pub writer_id: Option<String>,
 }
 
-/// Manifest segment entry.
+/// Manifest segment entry (shard document / in-memory).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestSegment {
     pub batch: u32,
@@ -135,7 +181,7 @@ pub enum SegmentStatus {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PkFilter {
     pub kind: String,
-    pub column_ids: Vec<u32>,
+    pub column_ids: Vec<i16>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub false_positive_rate: Option<f64>,
 }
@@ -144,17 +190,17 @@ pub struct PkFilter {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestBloomFilter {
     pub kind: String,
-    pub columns: Vec<String>,
+    pub column_ids: Vec<i16>,
     pub false_positive_rate: Option<f64>,
 }
 
 impl ManifestBloomFilter {
-    /// Creates bloom filter metadata for the given columns.
+    /// Creates bloom filter metadata for the given stable column IDs.
     #[must_use]
-    pub fn bloom(columns: Vec<String>, false_positive_rate: Option<f64>) -> Self {
+    pub fn bloom(column_ids: Vec<i16>, false_positive_rate: Option<f64>) -> Self {
         Self {
             kind: "bloom".to_string(),
-            columns,
+            column_ids,
             false_positive_rate,
         }
     }
@@ -163,7 +209,7 @@ impl ManifestBloomFilter {
 impl PkFilter {
     /// Creates exact PK metadata.
     #[must_use]
-    pub fn exact(column_ids: Vec<u32>) -> Self {
+    pub fn exact(column_ids: Vec<i16>) -> Self {
         Self {
             kind: "exact".to_string(),
             column_ids,
@@ -184,9 +230,9 @@ pub struct FilesState {
 impl Default for FilesState {
     fn default() -> Self {
         Self {
-            current_subfolder: "files-0".to_string(),
+            current_subfolder: "001".to_string(),
             subfolder_count: 0,
-            max_files_per_subfolder: 10_000,
+            max_files_per_subfolder: crate::paths::SEGMENTS_PER_FOLDER,
             total_files: Some(0),
         }
     }

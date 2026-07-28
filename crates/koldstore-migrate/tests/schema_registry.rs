@@ -1,6 +1,6 @@
 use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_common::{
-    ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    ColumnId, ColumnRef, ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
     PrimaryKeyColumnShape, PrimaryKeyShape,
 };
 use koldstore_migrate::register::{
@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 fn pk_shape() -> PrimaryKeyShape {
     PrimaryKeyShape::new(vec![PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(1),
         PkColumn::new("id").unwrap(),
         PkOrdinal::new(1).unwrap(),
         PgTypeOid::new(20).unwrap(),
@@ -35,18 +36,20 @@ fn metadata() -> RegistrationMetadata {
         primary_key_shape: Some(pk_shape()),
         initialization_state: MirrorInitializationState::Complete,
         active: true,
-        primary_key: vec!["id".to_string()],
+        primary_key: vec![ColumnRef::new(ColumnId::from_attnum(1), "id")],
         columns: vec![
-            SchemaColumn::app("id", "bigint", false),
-            SchemaColumn::app("title", "text", false),
-            SchemaColumn::app("user_id", "text", false),
+            SchemaColumn::app(1, "id", "bigint", false),
+            SchemaColumn::app(2, "title", "text", false),
+            SchemaColumn::app(3, "user_id", "text", false),
         ],
-        indexed_columns: vec!["id".to_string(), "created_at".to_string()],
+        indexed_columns: vec![
+            ColumnRef::new(ColumnId::from_attnum(1), "id"),
+            ColumnRef::new(ColumnId::from_attnum(4), "created_at"),
+        ],
         type_matrix: serde_json::json!({"postgres": 16}),
-        options: ManageTableOptions::from_value(&serde_json::json!({
-            "compression": "zstd",
-            "hot_row_limit": 1000
-        })),
+        options: ManageTableOptions::default()
+            .with_compression(koldstore_common::ParquetCompression::Zstd)
+            .with_flush(1000, 1, 1000),
     }
 }
 
@@ -67,10 +70,16 @@ fn schema_registry_plan_captures_greenfield_metadata() {
         serde_json::to_value(pk_shape()).unwrap()
     );
     assert_eq!(plan.metadata.initialization_state, "complete");
-    assert_eq!(plan.metadata.primary_key, serde_json::json!(["id"]));
+    assert_eq!(
+        plan.metadata.primary_key,
+        serde_json::json!([{"column_id": 1, "name": "id"}])
+    );
     assert_eq!(
         plan.metadata.indexed_columns,
-        serde_json::json!(["id", "created_at"])
+        serde_json::json!([
+            {"column_id": 1, "name": "id"},
+            {"column_id": 4, "name": "created_at"}
+        ])
     );
     assert_eq!(
         plan.metadata.type_matrix,
@@ -88,11 +97,17 @@ fn schema_registry_plan_captures_greenfield_metadata() {
                 "max_rows_per_flush": 10000
             },
             "cold_metadata": {
-                "stats_columns": ["id", "created_at"],
-                "bloom_filter_columns": ["id", "created_at"],
-                "bloom_candidate_columns": ["id", "created_at"],
+                "stats_columns": [
+                    {"column_id": 1, "name": "id"},
+                    {"column_id": 4, "name": "created_at"}
+                ],
+                "bloom_filter_columns": [
+                    {"column_id": 1, "name": "id"},
+                    {"column_id": 4, "name": "created_at"}
+                ],
                 "indexed_columns": [
                     {
+                        "column_id": 1,
                         "column": "id",
                         "source": "primary_key",
                         "source_name": "primary_key",
@@ -104,6 +119,7 @@ fn schema_registry_plan_captures_greenfield_metadata() {
                         "supports_bloom": true
                     },
                     {
+                        "column_id": 4,
                         "column": "created_at",
                         "source": "secondary_index",
                         "source_name": null,
@@ -125,11 +141,11 @@ fn schema_registry_plan_captures_greenfield_metadata() {
 fn schema_registry_plan_derives_type_matrix_and_cold_metadata_candidates() {
     let mut metadata = metadata();
     metadata.type_matrix = serde_json::Value::Null;
-    metadata.primary_key = vec!["id".to_string()];
+    metadata.primary_key = vec![ColumnRef::new(ColumnId::from_attnum(1), "id")];
     metadata.indexed_columns = vec![
-        "created_at".to_string(),
-        "title".to_string(),
-        "created_at".to_string(),
+        ColumnRef::new(ColumnId::from_attnum(4), "created_at"),
+        ColumnRef::new(ColumnId::from_attnum(2), "title"),
+        ColumnRef::new(ColumnId::from_attnum(4), "created_at"),
     ];
 
     let plan = plan_schema_registry_insert_with_id(&metadata, Uuid::from_u128(99)).unwrap();
@@ -148,11 +164,18 @@ fn schema_registry_plan_derives_type_matrix_and_cold_metadata_candidates() {
     assert_eq!(
         plan.metadata.options["cold_metadata"],
         serde_json::json!({
-            "stats_columns": ["created_at", "title"],
-            "bloom_filter_columns": ["id", "created_at", "title"],
-            "bloom_candidate_columns": ["id", "created_at", "title"],
+            "stats_columns": [
+                {"column_id": 4, "name": "created_at"},
+                {"column_id": 2, "name": "title"}
+            ],
+            "bloom_filter_columns": [
+                {"column_id": 1, "name": "id"},
+                {"column_id": 4, "name": "created_at"},
+                {"column_id": 2, "name": "title"}
+            ],
             "indexed_columns": [
                 {
+                    "column_id": 1,
                     "column": "id",
                     "source": "primary_key",
                     "source_name": "primary_key",
@@ -164,6 +187,7 @@ fn schema_registry_plan_derives_type_matrix_and_cold_metadata_candidates() {
                     "supports_bloom": true
                 },
                 {
+                    "column_id": 4,
                     "column": "created_at",
                     "source": "secondary_index",
                     "source_name": null,
@@ -175,6 +199,7 @@ fn schema_registry_plan_derives_type_matrix_and_cold_metadata_candidates() {
                     "supports_bloom": true
                 },
                 {
+                    "column_id": 2,
                     "column": "title",
                     "source": "secondary_index",
                     "source_name": null,
@@ -194,16 +219,29 @@ fn schema_registry_plan_derives_type_matrix_and_cold_metadata_candidates() {
 #[test]
 fn cold_metadata_config_records_typed_sources_and_bloom_columns() {
     let config = cold_metadata_config(
-        &["id".to_string()],
-        &["created_at".to_string(), "tenant_id".to_string()],
+        &[ColumnRef::new(ColumnId::from_attnum(1), "id")],
+        &[
+            ColumnRef::new(ColumnId::from_attnum(2), "created_at"),
+            ColumnRef::new(ColumnId::from_attnum(3), "tenant_id"),
+        ],
     );
 
-    assert_eq!(config.stats_columns, vec!["created_at", "tenant_id"]);
+    assert_eq!(
+        config.stats_columns,
+        vec![
+            ColumnRef::new(ColumnId::from_attnum(2), "created_at"),
+            ColumnRef::new(ColumnId::from_attnum(3), "tenant_id"),
+        ]
+    );
     assert_eq!(
         config.bloom_filter_columns,
-        vec!["id", "created_at", "tenant_id"]
+        vec![
+            ColumnRef::new(ColumnId::from_attnum(1), "id"),
+            ColumnRef::new(ColumnId::from_attnum(2), "created_at"),
+            ColumnRef::new(ColumnId::from_attnum(3), "tenant_id"),
+        ]
     );
-    assert_eq!(config.bloom_candidate_columns, config.bloom_filter_columns);
+    assert!(!config.bloom_filter_columns.is_empty());
     assert_eq!(
         config.indexed_columns[0].source,
         IndexedColumnSource::PrimaryKey

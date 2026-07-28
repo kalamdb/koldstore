@@ -17,9 +17,12 @@ pub mod sql;
 
 // Stable top-level paths used across the workspace.
 pub use config::privileges;
-pub use domain::{commit_sequence, filter, pk, row, scope, seq, snowflake, table_kind, table_name};
+pub use domain::{
+    column, commit_sequence, filter, pk, row, scope, seq, snowflake, table_kind, table_name,
+};
 pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 
+pub use column::{ColumnId, ColumnRef};
 pub use commit_sequence::{CommitSequenceDomain, COMMIT_SEQUENCE_LOCK_NAMESPACE};
 pub use config::{
     flush_enabled_from_options, hot_row_limit_from_options, validate_max_rows_per_file,

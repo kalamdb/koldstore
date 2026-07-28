@@ -3,7 +3,9 @@
 //! DROP TABLE cleanup planning lives in `koldstore-migrate`; this module
 //! re-exports those plans for the extension shell and installs the live
 //! ProcessUtility hook used for `ALTER TABLE … SET/RESET` KoldStore options
-//! and managed `DROP TABLE` teardown.
+//! and managed `DROP TABLE` teardown. Managed-table schema changes (including
+//! `RENAME COLUMN`) also refresh catalog metadata and rename-sensitive runtime
+//! artifacts so DML keeps working without waiting for the next flush.
 
 pub use koldstore_migrate::drop_table::{
     plan_drop_table_cleanup, DropTableCleanupError, DropTableCleanupOutcome, DropTableCleanupPlan,
@@ -53,12 +55,19 @@ mod process_utility {
             let mut captured = None;
             let mut has_standard_actions = true;
             let mut drop_oids = Vec::new();
+            let mut refresh_oid = None;
             if !copied.is_null() && !(*copied).utilityStmt.is_null() {
                 match (*(*copied).utilityStmt).type_ {
                     pg_sys::NodeTag::T_AlterTableStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::AlterTableStmt>();
                         captured = strip_options(stmt);
                         has_standard_actions = !(*stmt).cmds.is_null();
+                        refresh_oid = relation_oid_from_range_var((*stmt).relation);
+                    }
+                    pg_sys::NodeTag::T_RenameStmt => {
+                        // `ALTER TABLE … RENAME COLUMN` is RenameStmt, not AlterTableStmt.
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::RenameStmt>();
+                        refresh_oid = rename_stmt_relation_oid(stmt);
                     }
                     pg_sys::NodeTag::T_DropStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::DropStmt>();
@@ -84,6 +93,20 @@ mod process_utility {
             }
             if let Some((relation, options)) = captured {
                 apply_options(relation, options);
+            }
+            if let Some(table_oid) = refresh_oid {
+                // PortalRunUtility increments the command counter only after
+                // ProcessUtility returns. Refresh/SPI must see the just-applied
+                // ALTER (e.g. RENAME COLUMN) in this same transaction.
+                pg_sys::CommandCounterIncrement();
+                // Do not abort the user ALTER on refresh failure. Unsupported
+                // type additions must remain allowed at DDL time; flush refreshes
+                // again and records an error job without pruning hot rows.
+                if let Err(error) =
+                    crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid)
+                {
+                    pgrx::warning!("KoldStore schema refresh after ALTER TABLE deferred: {error}");
+                }
             }
         }
     }
@@ -188,6 +211,40 @@ mod process_utility {
             .unwrap_or_else(|error| pgrx::error!("KoldStore ALTER TABLE failed: {error}"));
     }
 
+    /// Resolves a relation OID from a `RangeVar`, tolerating missing relations.
+    unsafe fn relation_oid_from_range_var(relation: *mut pg_sys::RangeVar) -> Option<pg_sys::Oid> {
+        unsafe {
+            if relation.is_null() {
+                return None;
+            }
+            #[allow(clippy::unnecessary_cast)]
+            let flags: u32 = pg_sys::RVROption::RVR_MISSING_OK as u32;
+            let oid = pg_sys::RangeVarGetRelidExtended(
+                relation,
+                pg_sys::NoLock as pg_sys::LOCKMODE,
+                flags,
+                None,
+                std::ptr::null_mut(),
+            );
+            (oid != pg_sys::InvalidOid).then_some(oid)
+        }
+    }
+
+    /// Resolves the table OID for column/table renames that need schema sync.
+    unsafe fn rename_stmt_relation_oid(stmt: *mut pg_sys::RenameStmt) -> Option<pg_sys::Oid> {
+        unsafe {
+            if stmt.is_null() {
+                return None;
+            }
+            match (*stmt).renameType {
+                pg_sys::ObjectType::OBJECT_COLUMN | pg_sys::ObjectType::OBJECT_TABLE => {
+                    relation_oid_from_range_var((*stmt).relation)
+                }
+                _ => None,
+            }
+        }
+    }
+
     /// True when `role` owns relation `oid` (PG15 vs PG16+ ACL helper names differ).
     unsafe fn relation_ownercheck(oid: pg_sys::Oid, role: pg_sys::Oid) -> bool {
         #[cfg(feature = "pg15")]
@@ -275,6 +332,7 @@ fn ensure_initial_management(
         None,
         "strict",
         true,
+        None,
     );
     Ok(())
 }

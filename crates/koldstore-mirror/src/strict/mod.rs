@@ -8,6 +8,6 @@ pub mod capture;
 
 pub use capture::{
     async_worker_kick_trigger_name, async_worker_kick_trigger_names, plan_drop_mirror_dml_triggers,
-    plan_mirror_capture, plan_mirror_capture_teardown, MirrorCaptureError, MirrorCapturePlan,
-    MirrorCaptureResult,
+    plan_mirror_capture, plan_mirror_capture_teardown, plan_mirror_capture_with_order_column,
+    MirrorCaptureError, MirrorCapturePlan, MirrorCaptureResult,
 };

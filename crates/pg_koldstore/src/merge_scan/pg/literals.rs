@@ -162,6 +162,9 @@ unsafe fn datum_json_value(
         }
         PgType::Bool => Some(serde_json::Value::Bool(datum.value() != 0)),
         PgType::Int2 | PgType::Int4 | PgType::Int8 => Some(serde_json::json!(datum.value() as i64)),
+        // TimestampTzADT is microseconds since the PostgreSQL epoch — the same
+        // unit Sort Key V1 persists for timestamptz bounds.
+        PgType::Timestamptz => Some(serde_json::json!(datum.value() as i64)),
         _ => None,
     }
 }

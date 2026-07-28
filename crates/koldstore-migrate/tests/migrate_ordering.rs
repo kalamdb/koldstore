@@ -6,10 +6,10 @@ use koldstore_migrate::order::{
 #[test]
 fn migration_uses_auto_increment_single_primary_key_as_oldest_first_order() {
     let request = MigrationOrderingRequest {
-        primary_key: CatalogPrimaryKey::single("id"),
+        primary_key: CatalogPrimaryKey::single(1, "id"),
         columns: vec![
-            CatalogColumn::bigint("id").primary_key().identity(),
-            CatalogColumn::text("body"),
+            CatalogColumn::bigint(1, "id").primary_key().identity(),
+            CatalogColumn::text(2, "body"),
         ],
         explicit_order_column: None,
     };
@@ -29,10 +29,10 @@ fn migration_uses_auto_increment_single_primary_key_as_oldest_first_order() {
 #[test]
 fn migration_accepts_explicit_timestamp_order_column_when_primary_key_is_not_incremental() {
     let request = MigrationOrderingRequest {
-        primary_key: CatalogPrimaryKey::single("uuid"),
+        primary_key: CatalogPrimaryKey::single(1, "uuid"),
         columns: vec![
-            CatalogColumn::uuid("uuid").primary_key(),
-            CatalogColumn::timestamp("created_at"),
+            CatalogColumn::uuid(1, "uuid").primary_key(),
+            CatalogColumn::timestamp(2, "created_at"),
         ],
         explicit_order_column: Some("created_at".to_string()),
     };
@@ -47,10 +47,10 @@ fn migration_accepts_explicit_timestamp_order_column_when_primary_key_is_not_inc
 #[test]
 fn migration_rejects_existing_rows_without_stable_ordering_indicator() {
     let request = MigrationOrderingRequest {
-        primary_key: CatalogPrimaryKey::single("uuid"),
+        primary_key: CatalogPrimaryKey::single(1, "uuid"),
         columns: vec![
-            CatalogColumn::uuid("uuid").primary_key(),
-            CatalogColumn::text("body"),
+            CatalogColumn::uuid(1, "uuid").primary_key(),
+            CatalogColumn::text(2, "body"),
         ],
         explicit_order_column: None,
     };
@@ -66,10 +66,10 @@ fn migration_rejects_existing_rows_without_stable_ordering_indicator() {
 #[test]
 fn migration_rejects_explicit_order_column_that_is_not_orderable() {
     let request = MigrationOrderingRequest {
-        primary_key: CatalogPrimaryKey::single("id"),
+        primary_key: CatalogPrimaryKey::single(1, "id"),
         columns: vec![
-            CatalogColumn::bigint("id").primary_key(),
-            CatalogColumn::jsonb("payload"),
+            CatalogColumn::bigint(1, "id").primary_key(),
+            CatalogColumn::jsonb(2, "payload"),
         ],
         explicit_order_column: Some("payload".to_string()),
     };

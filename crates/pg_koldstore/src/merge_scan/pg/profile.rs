@@ -316,12 +316,22 @@ pub(super) struct ColdReadProfile {
     pub(super) manifest_read_ms: Option<f64>,
     /// Segments considered before any prune (catalog candidates).
     pub(super) segments_considered: usize,
-    /// Segments rejected because they do not match the scan scope.
-    pub(super) segments_pruned_scope: usize,
-    /// Segments rejected by normalized catalog min/max statistics.
-    pub(super) segments_pruned_min_max: usize,
+    /// Segments rejected by `cold_segment_index` candidate lookup.
+    pub(super) segments_pruned_catalog_index: usize,
     /// Segments opened after catalog prune.
     pub(super) segments_opened: usize,
+    /// Stable column ID used for cold_segment_index lookup, when any.
+    pub(super) segment_index_order_column_id: Option<i16>,
+    /// Current name of the order column (diagnostic only).
+    pub(super) segment_index_order_column: Option<String>,
+    /// Bound shape used for cold_segment_index candidate SQL, when planned.
+    pub(super) segment_index_lookup_shape: Option<koldstore_catalog::SegmentIndexLookupShape>,
+    /// Preferred index access for the bound shape (not forced by SQL).
+    pub(super) segment_index_plan: Option<String>,
+    /// Wall time spent on the segment-index SPI lookup, when executed.
+    pub(super) segment_index_lookup_ms: Option<f64>,
+    /// Candidate segments returned by cold_segment_index before Parquet open.
+    pub(super) segment_index_candidate_segments: Option<usize>,
     /// PK equality probe pushed into Parquet row-group prune, when present.
     pub(super) pk_probe: Option<(String, Vec<String>)>,
     pub(super) projected_columns: Vec<String>,
@@ -336,9 +346,14 @@ impl ColdReadProfile {
             base_path: String::new(),
             manifest_read_ms: None,
             segments_considered: 0,
-            segments_pruned_scope: 0,
-            segments_pruned_min_max: 0,
+            segments_pruned_catalog_index: 0,
             segments_opened: 0,
+            segment_index_order_column_id: None,
+            segment_index_order_column: None,
+            segment_index_lookup_shape: None,
+            segment_index_plan: None,
+            segment_index_lookup_ms: None,
+            segment_index_candidate_segments: None,
             pk_probe: None,
             projected_columns: Vec::new(),
             segments: vec![],
@@ -469,17 +484,41 @@ fn explain_cold_scan(
         None,
         profile.segments_considered as i64,
     );
+    if let Some(column_id) = profile.segment_index_order_column_id {
+        explain_text(
+            es,
+            "Segment Index Source",
+            "postgres (koldstore.cold_segment_index)",
+        );
+        explain_integer(es, "Order Column ID", None, i64::from(column_id));
+        if let Some(name) = profile.segment_index_order_column.as_deref() {
+            explain_text(es, "Order Column", name);
+        }
+        if let Some(shape) = profile.segment_index_lookup_shape {
+            explain_text(es, "Segment Index Lookup Shape", shape.as_str());
+        }
+        if let Some(plan) = profile.segment_index_plan.as_deref() {
+            explain_text(es, "Segment Index Preferred Access", plan);
+        }
+        if let Some(candidates) = profile.segment_index_candidate_segments {
+            explain_integer(
+                es,
+                "Segments Returned by Segment Index",
+                None,
+                candidates as i64,
+            );
+        }
+        if analyze {
+            if let Some(ms) = profile.segment_index_lookup_ms {
+                explain_float(es, "Segment Index Lookup Time", "ms", ms, 3);
+            }
+        }
+    }
     explain_integer(
         es,
-        "Segments Pruned by Scope",
+        "Segments Pruned by Catalog Index",
         None,
-        profile.segments_pruned_scope as i64,
-    );
-    explain_integer(
-        es,
-        "Segments Pruned by Min/Max",
-        None,
-        profile.segments_pruned_min_max as i64,
+        profile.segments_pruned_catalog_index as i64,
     );
     if analyze {
         explain_integer(
@@ -513,6 +552,18 @@ fn explain_cold_scan(
         if row_groups_total > 0 {
             explain_integer(es, "Row Groups Total", None, row_groups_total as i64);
             explain_integer(es, "Row Groups Skipped", None, row_groups_skipped as i64);
+            explain_integer(
+                es,
+                "Row Groups Pruned by Column Stats",
+                None,
+                profile.row_groups_pruned_by_stats() as i64,
+            );
+            explain_integer(
+                es,
+                "Row Groups Pruned by Bloom",
+                None,
+                profile.row_groups_pruned_by_bloom_filters() as i64,
+            );
         }
         // Unit on ExplainPropertyUInteger renders as "N bytes" — same as native PG.
         explain_uinteger(es, "Bytes Fetched", Some("bytes"), bytes_fetched);
@@ -759,6 +810,24 @@ impl ColdReadProfile {
             .count()
     }
 
+    fn row_groups_pruned_by_stats(&self) -> usize {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .filter(|parquet| parquet.stats_pruned)
+            .map(|parquet| parquet.row_groups_skipped)
+            .sum()
+    }
+
+    fn row_groups_pruned_by_bloom_filters(&self) -> usize {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .filter(|parquet| parquet.bloom == BloomPruneMode::Applied && !parquet.stats_pruned)
+            .map(|parquet| parquet.row_groups_skipped)
+            .sum()
+    }
+
     fn row_group_totals(&self) -> (usize, usize, usize, usize) {
         self.segments
             .iter()
@@ -804,10 +873,6 @@ fn explain_wants_timing(es: *mut pg_sys::ExplainState) -> bool {
     unsafe { (*es).timing }
 }
 
-pub(super) fn explain_property(es: *mut pg_sys::ExplainState, label: &str, value: &str) {
-    explain_text(es, label, value);
-}
-
 pub(super) fn explain_integer(
     es: *mut pg_sys::ExplainState,
     label: &str,
@@ -826,7 +891,7 @@ pub(super) fn explain_integer(
     }
 }
 
-fn explain_text(es: *mut pg_sys::ExplainState, label: &str, value: &str) {
+pub(super) fn explain_text(es: *mut pg_sys::ExplainState, label: &str, value: &str) {
     let label = CString::new(label).unwrap_or_default();
     let value = CString::new(value).unwrap_or_default();
     unsafe {

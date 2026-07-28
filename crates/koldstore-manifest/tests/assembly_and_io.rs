@@ -1,9 +1,30 @@
+//! Catalog-to-manifest assembly and local path I/O coverage.
+//!
+//! Folder-shard export rejection/round-trip edge cases live in `sharded_export.rs`.
+
+use koldstore_catalog::CatalogSegmentIndexBound;
+use koldstore_common::{ColumnId, ColumnRef};
 use koldstore_manifest::{
-    build_manifest_segment_from_catalog_row, load_manifest_from_path, manifest_from_catalog_rows,
-    manifest_paths, manifest_relative_segment_path, manifest_to_json_bytes, write_manifest_to_path,
-    CatalogManifestSegmentRow, Manifest, SyncState,
+    build_manifest_segment_from_catalog_row, manifest_from_catalog_rows, manifest_paths,
+    manifest_relative_segment_path, manifest_to_json_bytes, try_load_manifest_from_path,
+    write_manifest_to_path, CatalogManifestSegmentRow, Manifest, SyncState,
 };
-use serde_json::json;
+use koldstore_sortkey::{encode_sort_key_json, SortKeyType, CODEC_VERSION};
+
+fn hex_sort_key(value: i64) -> String {
+    let bytes = encode_sort_key_json(SortKeyType::Int8, &serde_json::json!(value)).unwrap();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn index_bound(column_id: i16, min: i64, max: i64) -> CatalogSegmentIndexBound {
+    CatalogSegmentIndexBound {
+        column_id,
+        type_oid: 20,
+        codec_version: CODEC_VERSION,
+        min_value: hex_sort_key(min),
+        max_value: hex_sort_key(max),
+    }
+}
 
 #[test]
 fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
@@ -17,14 +38,17 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
         row_count: 10,
         byte_size: 128,
         schema_version: 2,
-        column_stats: json!({"id": {"min": 1, "max": 10}}),
+        index_bounds: vec![index_bound(1, 1, 10)],
     }];
 
     let manifest = manifest_from_catalog_rows(
         "app",
         "items",
         2,
-        &["id".to_string(), "tenant".to_string()],
+        &[
+            ColumnRef::new(ColumnId::from_attnum(7), "id"),
+            ColumnRef::new(ColumnId::from_attnum(11), "tenant"),
+        ],
         rows,
     )
     .unwrap();
@@ -36,11 +60,23 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
     );
     assert_eq!(manifest.max_seq, 10);
     assert_eq!(
+        manifest.segments[0].column_stats["1"].min,
+        serde_json::json!(1)
+    );
+    assert_eq!(
+        manifest.segments[0].column_stats["1"].max,
+        serde_json::json!(10)
+    );
+    assert_eq!(
         manifest.segments[0]
             .pk_filter
             .as_ref()
             .map(|filter| filter.column_ids.clone()),
-        Some(vec![1, 2])
+        Some(vec![7, 11])
+    );
+    assert_eq!(
+        manifest.segments[0].bloom_filters[0].column_ids,
+        vec![7, 11]
     );
     assert_eq!(
         manifest_relative_segment_path(
@@ -53,16 +89,16 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
 }
 
 #[test]
-fn manifest_paths_and_round_trip_io() {
-    let dir = tempfile_dir();
-    let (relative, absolute) = manifest_paths("app", "notes", dir.to_str().unwrap());
+fn manifest_paths_and_sharded_round_trip_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let (relative, absolute) = manifest_paths("app", "notes", dir.path().to_str().unwrap());
     assert_eq!(relative, "app/notes/manifest.json");
 
     let mut manifest = Manifest::new_shared("app", "notes", 1);
     let segment = build_manifest_segment_from_catalog_row(
         "app",
         "notes",
-        &["id".to_string()],
+        &[ColumnRef::new(ColumnId::from_attnum(7), "id")],
         CatalogManifestSegmentRow {
             object_path: "app/notes/001/segment-0001-aaaaaaaa.parquet".to_string(),
             batch_number: 1,
@@ -73,14 +109,16 @@ fn manifest_paths_and_round_trip_io() {
             row_count: 1,
             byte_size: 32,
             schema_version: 1,
-            column_stats: json!({}),
+            index_bounds: vec![],
         },
     )
     .unwrap();
     manifest.append_segment(segment);
 
     write_manifest_to_path(&absolute, &manifest).unwrap();
-    let loaded = load_manifest_from_path(&absolute).expect("manifest should load");
+    let loaded = try_load_manifest_from_path(&absolute)
+        .expect("manifest load should succeed")
+        .expect("manifest should exist");
     assert_eq!(loaded.segments.len(), 1);
     assert_eq!(loaded.max_seq, 5);
     assert!(!manifest_to_json_bytes(&loaded).unwrap().is_empty());
@@ -110,7 +148,7 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
             row_count: 10,
             byte_size: 128,
             schema_version: 1,
-            column_stats: json!({}),
+            index_bounds: vec![],
         },
         CatalogManifestSegmentRow {
             object_path: "app/items/001/segment-0002-bbbbbbbb.parquet".to_string(),
@@ -122,11 +160,17 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
             row_count: 10,
             byte_size: 256,
             schema_version: 1,
-            column_stats: json!({}),
+            index_bounds: vec![],
         },
     ];
-    let manifest =
-        manifest_from_catalog_rows("app", "items", 1, &["id".to_string()], rows).unwrap();
+    let manifest = manifest_from_catalog_rows(
+        "app",
+        "items",
+        1,
+        &[ColumnRef::new(ColumnId::from_attnum(7), "id")],
+        rows,
+    )
+    .unwrap();
     assert_eq!(manifest.segments.len(), 2);
     assert_eq!(
         manifest.segments[0].path,
@@ -138,16 +182,4 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
     );
     assert_eq!(manifest.max_seq, 20);
     assert_eq!(manifest.max_commit_seq, 20);
-}
-
-fn tempfile_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "koldstore-manifest-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }

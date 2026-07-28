@@ -1,9 +1,8 @@
 //! CustomScan plan serialization and PG-free pruning helpers.
 
-use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use koldstore_common::{compare_json_values, KoldstoreError, Predicate, Result, ScopeKey, SeqId};
+use koldstore_common::{KoldstoreError, Predicate, Result, ScopeKey, SeqId};
 use serde::{Deserialize, Serialize};
 
 /// Attribute numbers for merge metadata projected during hot/cold reads.
@@ -36,13 +35,15 @@ pub struct SegmentHint {
     pub max_seq: SeqId,
 }
 
-/// Segment stats loaded from the manifest-backed cold segment catalog.
+/// Active cold segment metadata for merge reads (from catalog listing or index).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SegmentStatsHint {
     /// Final object-store path.
     pub object_path: String,
-    /// Segment-level min/max stats by column.
-    pub column_stats: BTreeMap<String, koldstore_parquet::ColumnStats>,
+    /// Schema version used to write this segment.
+    pub schema_version: i32,
+    /// Physical Parquet names for requested columns, keyed by stable ID.
+    pub physical_names: BTreeMap<i16, String>,
     /// Object byte size when known (enables bounded footer range GETs on S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_size: Option<u64>,
@@ -51,7 +52,9 @@ pub struct SegmentStatsHint {
 /// Min/max predicate proven safe for segment-level candidate pruning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SegmentPrunePredicate {
-    /// Column whose segment stats should be checked.
+    /// Stable column ID whose segment stats should be checked.
+    pub column_id: i16,
+    /// Current column name for diagnostics and physical-name resolution.
     pub column: String,
     /// Inclusive lower bound, when present.
     pub min: Option<serde_json::Value>,
@@ -71,8 +74,9 @@ impl SegmentPrunePredicate {
 
     /// Builds an equality pruning predicate.
     #[must_use]
-    pub fn equality(column: impl Into<String>, value: serde_json::Value) -> Self {
+    pub fn equality(column_id: i16, column: impl Into<String>, value: serde_json::Value) -> Self {
         Self {
+            column_id,
             column: column.into(),
             min: Some(value.clone()),
             max: Some(value),
@@ -82,11 +86,13 @@ impl SegmentPrunePredicate {
     /// Builds an inclusive range pruning predicate.
     #[must_use]
     pub fn closed_range(
+        column_id: i16,
         column: impl Into<String>,
         min: serde_json::Value,
         max: serde_json::Value,
     ) -> Self {
         Self {
+            column_id,
             column: column.into(),
             min: Some(min),
             max: Some(max),
@@ -95,8 +101,9 @@ impl SegmentPrunePredicate {
 
     /// Builds a lower-bound pruning predicate.
     #[must_use]
-    pub fn lower_bound(column: impl Into<String>, min: serde_json::Value) -> Self {
+    pub fn lower_bound(column_id: i16, column: impl Into<String>, min: serde_json::Value) -> Self {
         Self {
+            column_id,
             column: column.into(),
             min: Some(min),
             max: None,
@@ -105,8 +112,9 @@ impl SegmentPrunePredicate {
 
     /// Builds an upper-bound pruning predicate.
     #[must_use]
-    pub fn upper_bound(column: impl Into<String>, max: serde_json::Value) -> Self {
+    pub fn upper_bound(column_id: i16, column: impl Into<String>, max: serde_json::Value) -> Self {
         Self {
+            column_id,
             column: column.into(),
             min: None,
             max: Some(max),
@@ -114,44 +122,34 @@ impl SegmentPrunePredicate {
     }
 }
 
-/// Per-column policy for pre-merge cold segment prune via catalog min/max.
+/// Per-column policy for pre-merge cold segment prune via `cold_segment_index`.
 ///
 /// Mutable application columns stay residual: pruning their newer cold version
-/// can resurrect an older row. Scope is safe because the scope key does not
-/// change across versions of a row (RLS/user identity).
+/// can resurrect an older row. Scope and the configured segment order column are
+/// safe because their values do not change across versions of a row.
 ///
-/// Today all active segments live under the shared catalog manifest
-/// (`scope_key = ''`); scope is treated like an indexed stats column. Later
-/// each `scope_id` will own its own `manifest.json` + folder, and listing will
-/// filter by `scope_key` first — min/max remains a secondary prune inside that
-/// scope's segment set.
+/// Only Sort Key V1–allowlisted types participate in catalog index prune. Text
+/// scope keys are residual and fall back to scanning all active segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColdPruneColumnPolicy {
     /// Column is part of the logical primary key.
     pub is_primary_key: bool,
     /// Column is the managed table `scope_column` (for example `tenant_id`).
     pub is_scope: bool,
-    /// Min/max ordering matches PostgreSQL (int, bool, uuid, …).
-    pub ordered_stats_safe: bool,
-    /// Exact equality against catalog JSON encoding is safe (text scope ids).
-    pub equality_stats_safe: bool,
+    /// Column is the configured `segment_order_column_id`.
+    pub is_order_column: bool,
+    /// Column type is in the Sort Key V1 allowlist (`cold_segment_index`).
+    pub sort_key_indexable: bool,
 }
 
 impl ColdPruneColumnPolicy {
     /// Whether `predicate` may prune segments before winner resolution.
     #[must_use]
-    pub fn allows_predicate(self, predicate: &SegmentPrunePredicate) -> bool {
-        if self.is_primary_key {
-            return self.ordered_stats_safe;
+    pub fn allows_predicate(self, _predicate: &SegmentPrunePredicate) -> bool {
+        if !(self.is_primary_key || self.is_scope || self.is_order_column) {
+            return false;
         }
-        if self.is_scope {
-            if self.ordered_stats_safe {
-                return true;
-            }
-            // Text scope keys: equality-only against flush-encoded JSON stats.
-            return self.equality_stats_safe && predicate.is_equality();
-        }
-        false
+        self.sort_key_indexable
     }
 }
 
@@ -161,48 +159,13 @@ impl ColdPruneColumnPolicy {
 #[must_use]
 pub fn retain_pre_merge_cold_prune_predicates(
     predicates: Vec<SegmentPrunePredicate>,
-    mut policy_for: impl FnMut(&str) -> Option<ColdPruneColumnPolicy>,
+    mut policy_for: impl FnMut(i16) -> Option<ColdPruneColumnPolicy>,
 ) -> Vec<SegmentPrunePredicate> {
     predicates
         .into_iter()
         .filter(|predicate| {
-            policy_for(predicate.column.as_str())
-                .is_some_and(|policy| policy.allows_predicate(predicate))
+            policy_for(predicate.column_id).is_some_and(|policy| policy.allows_predicate(predicate))
         })
-        .collect()
-}
-
-/// Returns segment paths whose manifest min/max stats cannot prove non-overlap.
-///
-/// Missing or incomparable stats keep the segment selected. The SQL executor
-/// still applies residual quals after winner resolution; this only avoids
-/// opening Parquet files that cannot contain a candidate row.
-#[must_use]
-pub fn prune_segment_stats(
-    segments: &[SegmentStatsHint],
-    predicates: &[SegmentPrunePredicate],
-) -> Vec<String> {
-    prune_segment_stats_hints(segments, predicates)
-        .into_iter()
-        .map(|segment| segment.object_path)
-        .collect()
-}
-
-/// Like [`prune_segment_stats`], but keeps full segment hints (including
-/// `byte_size` for footer-bounded ObjectStore reads).
-#[must_use]
-pub fn prune_segment_stats_hints(
-    segments: &[SegmentStatsHint],
-    predicates: &[SegmentPrunePredicate],
-) -> Vec<SegmentStatsHint> {
-    segments
-        .iter()
-        .filter(|segment| {
-            predicates
-                .iter()
-                .all(|predicate| segment_may_match_predicate(segment, predicate))
-        })
-        .cloned()
         .collect()
 }
 
@@ -214,14 +177,11 @@ pub fn prune_segment_stats_hints(
 /// not captured as an indexed cold-stat column.
 pub fn validate_prune_predicates_indexed(
     predicates: &[SegmentPrunePredicate],
-    indexed_columns: &[String],
+    indexed_column_ids: &[i16],
 ) -> Result<()> {
-    let indexed_columns = indexed_columns
-        .iter()
-        .map(String::as_str)
-        .collect::<BTreeSet<_>>();
+    let indexed_column_ids = indexed_column_ids.iter().copied().collect::<BTreeSet<_>>();
     for predicate in predicates {
-        if !indexed_columns.contains(predicate.column.as_str()) {
+        if !indexed_column_ids.contains(&predicate.column_id) {
             return Err(KoldstoreError::UnsafePredicate(format!(
                 "cold filter column `{}` is not indexed; koldstore cold reads require WHERE filters on indexed columns",
                 predicate.column
@@ -229,65 +189,6 @@ pub fn validate_prune_predicates_indexed(
         }
     }
     Ok(())
-}
-
-/// Validates that selected indexed predicates have segment min/max metadata.
-///
-/// # Errors
-///
-/// Returns an unsafe predicate error when any active segment lacks min/max stats
-/// for a requested pruning column.
-pub fn validate_prune_predicate_stats(
-    segments: &[SegmentStatsHint],
-    predicates: &[SegmentPrunePredicate],
-) -> Result<()> {
-    for predicate in predicates {
-        for segment in segments {
-            if !segment.column_stats.contains_key(&predicate.column) {
-                return Err(KoldstoreError::UnsafePredicate(format!(
-                    "cold filter column `{}` is indexed but segment `{}` has no min/max stats",
-                    predicate.column, segment.object_path
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn segment_may_match_predicate(
-    segment: &SegmentStatsHint,
-    predicate: &SegmentPrunePredicate,
-) -> bool {
-    let Some(stats) = segment.column_stats.get(&predicate.column) else {
-        return true;
-    };
-    if stats.min.is_null() || stats.max.is_null() {
-        return true;
-    }
-
-    if let Some(min) = &predicate.min {
-        if min.is_null() {
-            return true;
-        }
-        match compare_json_values(&stats.max, min) {
-            Some(Ordering::Less) => return false,
-            Some(_) => {}
-            None => return true,
-        }
-    }
-
-    if let Some(max) = &predicate.max {
-        if max.is_null() {
-            return true;
-        }
-        match compare_json_values(&stats.min, max) {
-            Some(Ordering::Greater) => return false,
-            Some(_) => {}
-            None => return true,
-        }
-    }
-
-    true
 }
 
 /// How unflushed mirror rows participate in merge reads.

@@ -8,7 +8,7 @@
 use std::ffi::CStr;
 
 use koldstore_common::{
-    quote_ident, CommitSeq, HotRow, LogicalPk, PkColumn, QualifiedTableName, SeqId,
+    quote_ident, ColumnRef, CommitSeq, HotRow, LogicalPk, PkColumn, QualifiedTableName, SeqId,
 };
 use koldstore_merge::scan::HOT_SEQ_SENTINEL;
 use pgrx::pg_sys;
@@ -30,13 +30,13 @@ pub(super) struct HotEqualityFilter {
 /// Returns true when equality filters cover every primary-key column.
 pub(super) fn equality_covers_primary_key(
     filters: &[HotEqualityFilter],
-    primary_key_columns: &[String],
+    primary_key_columns: &[ColumnRef],
 ) -> bool {
     !primary_key_columns.is_empty()
         && primary_key_columns.iter().all(|primary_key| {
             filters
                 .iter()
-                .any(|filter| filter.column.eq_ignore_ascii_case(primary_key))
+                .any(|filter| filter.column.eq_ignore_ascii_case(&primary_key.name))
         })
 }
 
@@ -58,7 +58,7 @@ pub(super) fn load_hot_rows_for_merge(
     let pk_columns = snapshot
         .primary_key_columns
         .iter()
-        .map(|column| PkColumn::new(column.as_str()).map_err(|error| error.to_string()))
+        .map(|column| PkColumn::new(&column.name).map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Subquery select list: projected image columns plus any PK columns missing
@@ -68,8 +68,8 @@ pub(super) fn load_hot_rows_for_merge(
         .map(|column| column.name.clone())
         .collect();
     for pk in &snapshot.primary_key_columns {
-        if !select_names.iter().any(|name| name == pk) {
-            select_names.push(pk.clone());
+        if !select_names.iter().any(|name| name == &pk.name) {
+            select_names.push(pk.name.clone());
         }
     }
     let select_list = select_names
@@ -83,8 +83,8 @@ pub(super) fn load_hot_rows_for_merge(
         .map(|column| {
             format!(
                 "'{column}', proj.{quoted}",
-                column = column.replace('\'', "''"),
-                quoted = quote_ident(column),
+                column = column.name.replace('\'', "''"),
+                quoted = quote_ident(&column.name),
             )
         })
         .collect::<Vec<_>>()

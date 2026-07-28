@@ -1,5 +1,6 @@
 //! Tests for migrated-table schema registry models.
 
+use koldstore_common::ColumnId;
 use koldstore_schema::{MirrorInitializationState, SchemaColumn, SchemaRegistryEntry, TypeMatrix};
 use uuid::Uuid;
 
@@ -18,19 +19,48 @@ fn type_matrix_reports_supported_and_unsupported_types() {
 }
 
 #[test]
-fn schema_registry_validation_requires_pk_but_not_system_columns() {
+fn schema_column_serialization_includes_column_id() {
+    let column = SchemaColumn::app(3, "created_at", "timestamptz", false);
+    let value = serde_json::to_value(&column).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "column_id": 3,
+            "name": "created_at",
+            "type_name": "timestamptz",
+            "nullable": false,
+            "system": false
+        })
+    );
+
+    let decoded: SchemaColumn = serde_json::from_value(value).unwrap();
+    assert_eq!(decoded.column_id, ColumnId::from_attnum(3));
+    assert_eq!(decoded.name, "created_at");
+}
+
+#[test]
+fn schema_registry_validation_requires_pk_ids() {
     let entry = SchemaRegistryEntry {
         id: Uuid::new_v4(),
         table_oid: 42,
         version: 1,
-        columns: vec![SchemaColumn::app("id", "int8", false)],
+        columns: vec![SchemaColumn::app(1, "id", "int8", false)],
     };
 
-    entry.validate(&["id"]).unwrap();
+    entry.validate(&[ColumnId::from_attnum(1)]).unwrap();
     assert!(entry.validate(&[]).is_err());
-    assert!(entry.validate(&["missing"]).is_err());
+    assert!(entry.validate(&[ColumnId::from_attnum(99)]).is_err());
     assert_eq!(entry.application_columns().len(), 1);
     assert!(entry.system_columns().is_empty());
+    assert_eq!(entry.physical_name(ColumnId::from_attnum(1)), Some("id"));
+}
+
+#[test]
+fn rename_preserves_column_id_in_new_version() {
+    let v1 = SchemaColumn::app(3, "created_at", "timestamptz", false);
+    let v2 = SchemaColumn::app(3, "event_time", "timestamptz", false);
+    assert_eq!(v1.column_id, v2.column_id);
+    assert_ne!(v1.name, v2.name);
 }
 
 #[test]

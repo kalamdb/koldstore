@@ -3,9 +3,13 @@ use koldstore_flush::policy::{flush_rows_for_excess, policy_flush_row_count, Flu
 #[test]
 fn structured_schema_options_load_hot_row_limit_policy() {
     let policy = FlushPolicy::from_value(&serde_json::json!({
-        "hot_row_limit": 10_000,
-        "min_flush_rows": 1_000,
-        "max_rows_per_file": 500,
+        "flush_policy": {
+            "type": "row_limit",
+            "hot_row_limit": 10_000,
+            "min_flush_rows": 1_000,
+            "max_rows_per_file": 500,
+            "max_rows_per_flush": 10_000
+        }
     }))
     .unwrap();
 

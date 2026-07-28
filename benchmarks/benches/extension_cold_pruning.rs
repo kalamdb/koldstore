@@ -33,7 +33,7 @@ fn bench_row_group_pruning(c: &mut Criterion) {
     });
 }
 
-fn bench_pk_and_minmax_pruning(c: &mut Criterion) {
+fn bench_pk_bloom_pruning(c: &mut Criterion) {
     let footer = footer_with_row_groups(100_000);
     let bloom_values = bloom_values_for_groups(100_000);
     let pruner = RowGroupPruner;
@@ -48,24 +48,6 @@ fn bench_pk_and_minmax_pruning(c: &mut Criterion) {
                 black_box(&footer),
                 black_box(&bloom_values),
                 ["missing-user"],
-            )
-        })
-    });
-
-    let column_stats = BTreeMap::from([(
-        "created_day".to_string(),
-        ColumnStats {
-            min: json!(90),
-            max: json!(180),
-        },
-    )]);
-    c.bench_function("segment_minmax_overlap_check", |b| {
-        b.iter(|| {
-            pruner.segment_column_may_overlap(
-                black_box(&column_stats),
-                "created_day",
-                &json!(120),
-                &json!(121),
             )
         })
     });
@@ -120,7 +102,7 @@ fn bloom_values_for_groups(count: usize) -> BTreeMap<usize, Vec<String>> {
 criterion_group!(
     benches,
     bench_row_group_pruning,
-    bench_pk_and_minmax_pruning,
+    bench_pk_bloom_pruning,
     bench_footer_metadata_parsing
 );
 criterion_main!(benches);

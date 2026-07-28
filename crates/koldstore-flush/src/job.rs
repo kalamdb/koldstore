@@ -8,12 +8,10 @@ use std::{
 
 use koldstore_catalog::SyncState;
 use koldstore_common::{
-    compare_json_values, CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey, SeqId,
-    StablePkHash,
+    compare_json_values, ColumnRef, CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey,
+    SeqId, StablePkHash,
 };
-use koldstore_parquet::{
-    ColdMetadataColumn, ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata,
-};
+use koldstore_parquet::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
 
 /// Manifest sync state alias used by flush orchestration.
 pub use koldstore_catalog::SyncState as ManifestSyncState;
@@ -353,22 +351,19 @@ impl FlushBatchPlan {
 
     /// Computes min/max stats for configured columns from live flushed rows.
     #[must_use]
-    pub fn column_stats<I, S>(&self, columns: I) -> BTreeMap<String, ColumnStats>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let mut accumulators = BTreeMap::<String, ColumnStatsAccumulator>::new();
+    pub fn column_stats(&self, columns: &[ColumnRef]) -> BTreeMap<String, ColumnStats> {
+        let mut accumulators = BTreeMap::<String, (&str, ColumnStatsAccumulator)>::new();
         for column in columns {
-            let column = column.as_ref().trim();
-            if !column.is_empty() {
-                accumulators.entry(column.to_string()).or_default();
+            if !column.name.trim().is_empty() {
+                accumulators
+                    .entry(column.column_id.to_string())
+                    .or_insert_with(|| (&column.name, ColumnStatsAccumulator::default()));
             }
         }
 
         for row in self.rows.iter().filter(|row| !row.deleted) {
-            for (column, accumulator) in &mut accumulators {
-                if let Some(value) = row.column_values.get(column) {
+            for (column_name, accumulator) in accumulators.values_mut() {
+                if let Some(value) = row.column_values.get(*column_name) {
                     accumulator.push(value);
                 }
             }
@@ -376,37 +371,16 @@ impl FlushBatchPlan {
 
         accumulators
             .into_iter()
-            .filter_map(|(column, accumulator)| accumulator.finish().map(|stats| (column, stats)))
+            .filter_map(|(column_id, (_, accumulator))| {
+                accumulator.finish().map(|stats| (column_id, stats))
+            })
             .collect()
     }
 
-    /// Computes segment stats for clean-schema metadata and configured app columns.
+    /// Computes ID-keyed segment stats for configured application columns.
     #[must_use]
-    pub fn segment_column_stats<I, S>(&self, columns: I) -> BTreeMap<String, ColumnStats>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let mut stats = self.column_stats(columns);
-        if let Some((min_seq, max_seq, min_commit_seq, max_commit_seq)) =
-            self.footer_summary().segment_bounds()
-        {
-            stats.insert(
-                ColdMetadataColumn::Seq.name().to_string(),
-                ColumnStats {
-                    min: serde_json::json!(min_seq),
-                    max: serde_json::json!(max_seq),
-                },
-            );
-            stats.insert(
-                "commit_seq".to_string(),
-                ColumnStats {
-                    min: serde_json::json!(min_commit_seq),
-                    max: serde_json::json!(max_commit_seq),
-                },
-            );
-        }
-        stats
+    pub fn segment_column_stats(&self, columns: &[ColumnRef]) -> BTreeMap<String, ColumnStats> {
+        self.column_stats(columns)
     }
 }
 

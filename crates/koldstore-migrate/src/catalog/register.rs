@@ -1,11 +1,13 @@
 //! Schema registry insertion helpers.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
-use koldstore_common::{dedupe_nonblank, ManageTableOptions};
+use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions};
 
 use koldstore_common::SqlStatement;
 use koldstore_common::{
@@ -117,11 +119,9 @@ pub enum RegistryError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColdMetadataCandidates {
     /// Columns worth recording min/max/null-count style statistics for.
-    pub stats_columns: Vec<String>,
+    pub stats_columns: Vec<ColumnRef>,
     /// Columns configured for Parquet bloom filters.
-    pub bloom_filter_columns: Vec<String>,
-    /// Columns worth considering for bloom filters.
-    pub bloom_candidate_columns: Vec<String>,
+    pub bloom_filter_columns: Vec<ColumnRef>,
 }
 
 /// Source of a column's cold metadata eligibility.
@@ -141,6 +141,8 @@ pub enum IndexedColumnSource {
 /// Structured metadata for one indexed/constraint-derived column.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexedColumnMetadata {
+    /// Stable column ID.
+    pub column_id: ColumnId,
     /// Column name.
     pub column: String,
     /// Metadata source.
@@ -164,9 +166,10 @@ pub struct IndexedColumnMetadata {
 impl IndexedColumnMetadata {
     /// Creates primary-key column metadata.
     #[must_use]
-    pub fn primary_key(column: impl Into<String>, ordinal: u32) -> Self {
+    pub fn primary_key(column: &ColumnRef, ordinal: u32) -> Self {
         Self {
-            column: column.into(),
+            column_id: column.column_id,
+            column: column.name.clone(),
             source: IndexedColumnSource::PrimaryKey,
             source_name: Some("primary_key".to_string()),
             ordinal,
@@ -180,9 +183,10 @@ impl IndexedColumnMetadata {
 
     /// Creates secondary-index column metadata.
     #[must_use]
-    pub fn secondary_index(column: impl Into<String>, ordinal: u32) -> Self {
+    pub fn secondary_index(column: &ColumnRef, ordinal: u32) -> Self {
         Self {
-            column: column.into(),
+            column_id: column.column_id,
+            column: column.name.clone(),
             source: IndexedColumnSource::SecondaryIndex,
             source_name: None,
             ordinal,
@@ -201,7 +205,7 @@ pub struct OrderedIndexMetadata {
     /// Index or constraint name.
     pub name: String,
     /// Columns in index key order.
-    pub columns: Vec<String>,
+    pub columns: Vec<ColumnRef>,
     /// Whether the ordered key is unique.
     pub unique: bool,
 }
@@ -210,11 +214,9 @@ pub struct OrderedIndexMetadata {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColdMetadataConfig {
     /// Columns worth recording min/max/null-count style statistics for.
-    pub stats_columns: Vec<String>,
+    pub stats_columns: Vec<ColumnRef>,
     /// Columns configured for Parquet bloom filters.
-    pub bloom_filter_columns: Vec<String>,
-    /// Backward-compatible alias for readers still looking for candidate columns.
-    pub bloom_candidate_columns: Vec<String>,
+    pub bloom_filter_columns: Vec<ColumnRef>,
     /// Structured metadata for columns selected from indexes/constraints.
     pub indexed_columns: Vec<IndexedColumnMetadata>,
     /// Composite index shapes retained for future ordered pruning.
@@ -252,11 +254,11 @@ pub struct RegistrationMetadata {
     /// Whether the schema row is active.
     pub active: bool,
     /// Primary key columns.
-    pub primary_key: Vec<String>,
+    pub primary_key: Vec<ColumnRef>,
     /// Application column metadata.
     pub columns: Vec<SchemaColumn>,
     /// Indexed columns used as cold stats/bloom candidates.
-    pub indexed_columns: Vec<String>,
+    pub indexed_columns: Vec<ColumnRef>,
     /// Captured type support/coercion metadata.
     pub type_matrix: Value,
     /// Additional manage-table options.
@@ -318,7 +320,7 @@ impl RegistrationMetadata {
             && self
                 .primary_key
                 .iter()
-                .all(|column| !column.trim().is_empty())
+                .all(|column| !column.name.trim().is_empty())
             && self
                 .mirror_relation
                 .as_deref()
@@ -354,7 +356,7 @@ impl RegistrationMetadata {
             || self
                 .primary_key
                 .iter()
-                .any(|column| column.trim().is_empty())
+                .any(|column| column.name.trim().is_empty())
         {
             return Err(RegistryError::MissingPrimaryKey);
         }
@@ -448,6 +450,7 @@ pub fn schema_columns_from_catalog(columns: &[crate::order::CatalogColumn]) -> V
         .iter()
         .map(|column| {
             SchemaColumn::typed(
+                column.column_id.get(),
                 column.name.clone(),
                 column.pg_type,
                 column.catalog_type_name(),
@@ -538,6 +541,8 @@ pub fn plan_schema_registry_insert_prepared(
 /// Primary-key column shape as decoded from PostgreSQL catalog JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct PrimaryKeyShapeCatalogRow {
+    /// Stable column ID from `pg_attribute.attnum`.
+    pub column_id: ColumnId,
     /// Column name.
     pub column: String,
     /// One-based primary-key ordinal.
@@ -576,6 +581,7 @@ pub fn primary_key_shape_probe_plan(table_oid: u32) -> RegistryResult<SqlStateme
 SELECT COALESCE(
     jsonb_agg(
         jsonb_build_object(
+            'column_id', a.attnum,
             'column', a.attname,
             'ordinal', key_position.ordinality,
             'type_oid', a.atttypid::bigint,
@@ -643,6 +649,7 @@ pub fn primary_key_shape_from_catalog_rows(
         .into_iter()
         .map(|row| {
             Ok(PrimaryKeyColumnShape::new(
+                row.column_id,
                 PkColumn::new(row.column).map_err(|error| RegistryError::Spi(error.to_string()))?,
                 PkOrdinal::new(row.ordinal)
                     .map_err(|error| RegistryError::Spi(error.to_string()))?,
@@ -701,45 +708,41 @@ pub fn capture_type_matrix(columns: &[SchemaColumn]) -> Value {
 /// Builds cold stats and bloom candidate metadata from PK and indexed columns.
 #[must_use]
 pub fn cold_metadata_candidates(
-    primary_key: &[String],
-    indexed_columns: &[String],
+    primary_key: &[ColumnRef],
+    indexed_columns: &[ColumnRef],
 ) -> ColdMetadataCandidates {
     let config = cold_metadata_config(primary_key, indexed_columns);
 
     ColdMetadataCandidates {
         stats_columns: config.stats_columns,
         bloom_filter_columns: config.bloom_filter_columns,
-        bloom_candidate_columns: config.bloom_candidate_columns,
     }
 }
 
 /// Builds typed cold metadata configuration from PK and indexed columns.
 #[must_use]
 pub fn cold_metadata_config(
-    primary_key: &[String],
-    indexed_columns: &[String],
+    primary_key: &[ColumnRef],
+    indexed_columns: &[ColumnRef],
 ) -> ColdMetadataConfig {
-    let stats_columns = dedupe_nonblank(indexed_columns.iter().map(String::as_str));
-    let bloom_filter_columns = dedupe_nonblank(
-        primary_key
-            .iter()
-            .chain(indexed_columns)
-            .map(String::as_str),
-    );
+    let stats_columns = dedupe_column_refs(indexed_columns.iter());
+    let bloom_filter_columns = dedupe_column_refs(primary_key.iter().chain(indexed_columns));
     let mut indexed_metadata = Vec::new();
     for (index, column) in primary_key
         .iter()
-        .map(String::as_str)
-        .filter(|column| !column.trim().is_empty())
+        .filter(|column| !column.name.trim().is_empty())
         .enumerate()
     {
         indexed_metadata.push(IndexedColumnMetadata::primary_key(
-            column.trim(),
+            column,
             (index + 1) as u32,
         ));
     }
-    for (index, column) in stats_columns.iter().map(String::as_str).enumerate() {
-        if !primary_key.iter().any(|pk| pk == column) {
+    for (index, column) in stats_columns.iter().enumerate() {
+        if !primary_key
+            .iter()
+            .any(|pk| pk.column_id == column.column_id)
+        {
             indexed_metadata.push(IndexedColumnMetadata::secondary_index(
                 column,
                 (index + 1) as u32,
@@ -749,11 +752,20 @@ pub fn cold_metadata_config(
 
     ColdMetadataConfig {
         stats_columns,
-        bloom_candidate_columns: bloom_filter_columns.clone(),
         bloom_filter_columns,
         indexed_columns: indexed_metadata,
         ordered_indexes: Vec::new(),
     }
+}
+
+fn dedupe_column_refs<'a>(columns: impl IntoIterator<Item = &'a ColumnRef>) -> Vec<ColumnRef> {
+    let mut seen = BTreeSet::new();
+    columns
+        .into_iter()
+        .filter(|column| !column.name.trim().is_empty())
+        .filter(|column| seen.insert(column.column_id))
+        .cloned()
+        .collect()
 }
 
 fn options_object_mut(options: &mut Value) -> RegistryResult<&mut Map<String, Value>> {

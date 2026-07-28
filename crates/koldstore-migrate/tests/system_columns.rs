@@ -1,5 +1,5 @@
 use koldstore_common::{
-    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
 };
 use koldstore_migrate::{mirror::plan_change_log_mirror_from_columns, QualifiedTableName};
 
@@ -7,6 +7,7 @@ use koldstore_migrate::{mirror::plan_change_log_mirror_from_columns, QualifiedTa
 fn clean_schema_migration_uses_mirror_table_instead_of_system_columns() {
     let source = QualifiedTableName::parse("app.items").unwrap();
     let pk = PrimaryKeyColumnShape::new(
+        ColumnId::from_attnum(1),
         PkColumn::new("id").unwrap(),
         PkOrdinal::new(1).unwrap(),
         PgTypeOid::new(20).unwrap(),

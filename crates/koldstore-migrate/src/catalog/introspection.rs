@@ -6,7 +6,7 @@
 use serde::Deserialize;
 use thiserror::Error;
 
-use koldstore_common::SqlStatement;
+use koldstore_common::{ColumnRef, SqlStatement};
 
 use crate::constraints::{
     FkDirection, ForeignKeyShape, ManageTableConstraintsCatalog, UniqueConstraintShape,
@@ -36,7 +36,7 @@ pub enum IntrospectionError {
     Sql(String),
 }
 
-/// Plans the primary-key column name probe for one table OID.
+/// Plans the ordered primary-key column reference probe for one table OID.
 ///
 /// # Errors
 ///
@@ -45,7 +45,16 @@ pub fn plan_primary_key_columns_probe() -> MigrationResult<SqlStatement> {
     SqlStatement::read(
         "migration primary key columns",
         r#"
-SELECT COALESCE(jsonb_agg(a.attname ORDER BY key_position.ordinality)::text, '[]')
+SELECT COALESCE(
+    jsonb_agg(
+        jsonb_build_object(
+            'column_id', a.attnum,
+            'name', a.attname
+        )
+        ORDER BY key_position.ordinality
+    )::text,
+    '[]'
+)
 FROM pg_index i
 JOIN unnest(i.indkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
 JOIN pg_attribute a
@@ -69,7 +78,7 @@ pub fn plan_table_columns_probe() -> MigrationResult<SqlStatement> {
         "migration table columns",
         r#"
 WITH pk AS (
-    SELECT a.attname
+    SELECT a.attnum
     FROM pg_index i
     JOIN unnest(i.indkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
     JOIN pg_attribute a
@@ -81,9 +90,11 @@ WITH pk AS (
 SELECT COALESCE(
     jsonb_agg(
         jsonb_build_object(
+            'column_id', a.attnum,
             'name', a.attname,
             'type_name', format_type(a.atttypid, a.atttypmod),
-            'is_primary_key', pk.attname IS NOT NULL,
+            'is_primary_key', pk.attnum IS NOT NULL,
+            'nullable', NOT a.attnotnull,
             'identity', a.attidentity <> '',
             'generated', a.attgenerated <> '',
             'default_expr', pg_get_expr(d.adbin, d.adrelid)
@@ -97,7 +108,7 @@ LEFT JOIN pg_attrdef d
   ON d.adrelid = a.attrelid
  AND d.adnum = a.attnum
 LEFT JOIN pk
-  ON pk.attname = a.attname
+  ON pk.attnum = a.attnum
 WHERE a.attrelid = $1::oid
   AND a.attnum > 0
   AND NOT a.attisdropped
@@ -117,7 +128,7 @@ pub fn plan_indexed_columns_probe() -> MigrationResult<SqlStatement> {
         "migration indexed columns",
         r#"
 WITH pk AS (
-    SELECT a.attname
+    SELECT a.attnum
     FROM pg_index i
     JOIN unnest(i.indkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
     JOIN pg_attribute a
@@ -127,7 +138,7 @@ WITH pk AS (
       AND i.indisprimary
 ),
 candidate AS (
-    SELECT a.attname, i.indexrelid::bigint AS source_oid, key_position.ordinality
+    SELECT a.attnum, a.attname, i.indexrelid::bigint AS source_oid, key_position.ordinality
     FROM pg_index i
     JOIN unnest(i.indkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
     JOIN pg_attribute a
@@ -137,7 +148,7 @@ candidate AS (
       AND NOT i.indisprimary
       AND i.indexprs IS NULL
     UNION ALL
-    SELECT a.attname, c.oid::bigint AS source_oid, key_position.ordinality
+    SELECT a.attnum, a.attname, c.oid::bigint AS source_oid, key_position.ordinality
     FROM pg_constraint c
     JOIN unnest(c.conkey) WITH ORDINALITY AS key_position(attnum, ordinality) ON true
     JOIN pg_attribute a
@@ -147,16 +158,26 @@ candidate AS (
       AND c.contype = 'f'
 ),
 ranked AS (
-    SELECT DISTINCT ON (candidate.attname)
+    SELECT DISTINCT ON (candidate.attnum)
+        candidate.attnum,
         candidate.attname,
         candidate.source_oid,
         candidate.ordinality
     FROM candidate
-    LEFT JOIN pk ON pk.attname = candidate.attname
-    WHERE pk.attname IS NULL
-    ORDER BY candidate.attname, candidate.source_oid, candidate.ordinality
+    LEFT JOIN pk ON pk.attnum = candidate.attnum
+    WHERE pk.attnum IS NULL
+    ORDER BY candidate.attnum, candidate.source_oid, candidate.ordinality
 )
-SELECT COALESCE(jsonb_agg(attname ORDER BY source_oid, ordinality, attname)::text, '[]')
+SELECT COALESCE(
+    jsonb_agg(
+        jsonb_build_object(
+            'column_id', attnum,
+            'name', attname
+        )
+        ORDER BY source_oid, ordinality, attnum
+    )::text,
+    '[]'
+)
 FROM ranked
 "#,
     )
@@ -333,11 +354,11 @@ pub fn decode_existing_table_catalog(
     columns_json: &str,
     indexed_columns_json: &str,
 ) -> Result<ExistingTableCatalog, IntrospectionError> {
-    let primary_key = serde_json::from_str::<Vec<String>>(primary_key_json)
+    let primary_key = serde_json::from_str::<Vec<ColumnRef>>(primary_key_json)
         .map_err(|error| IntrospectionError::PrimaryKeyDecode(error.to_string()))?;
     let columns = serde_json::from_str::<Vec<CatalogColumn>>(columns_json)
         .map_err(|error| IntrospectionError::ColumnDecode(error.to_string()))?;
-    let indexed_columns = serde_json::from_str::<Vec<String>>(indexed_columns_json)
+    let indexed_columns = serde_json::from_str::<Vec<ColumnRef>>(indexed_columns_json)
         .map_err(|error| IntrospectionError::IndexedColumnDecode(error.to_string()))?;
 
     Ok(ExistingTableCatalog {
@@ -413,5 +434,37 @@ mod tests {
         assert!(catalog.primary_key.columns.is_empty());
         assert!(catalog.columns.is_empty());
         assert!(catalog.indexed_columns.is_empty());
+    }
+
+    #[test]
+    fn decodes_stable_column_references() {
+        let catalog = decode_existing_table_catalog(
+            r#"[{"column_id":1,"name":"id"}]"#,
+            r#"[{
+                "column_id":1,
+                "name":"id",
+                "type_name":"bigint",
+                "is_primary_key":true,
+                "identity":true
+            }]"#,
+            r#"[{"column_id":2,"name":"created_at"}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(catalog.primary_key.columns[0].column_id.get(), 1);
+        assert_eq!(catalog.columns[0].column_id.get(), 1);
+        assert_eq!(catalog.columns[0].catalog_type_name(), "bigint");
+        assert_eq!(catalog.indexed_columns[0].column_id.get(), 2);
+    }
+
+    #[test]
+    fn catalog_probes_emit_column_ids() {
+        let primary_key = plan_primary_key_columns_probe().unwrap();
+        let columns = plan_table_columns_probe().unwrap();
+        let indexed = plan_indexed_columns_probe().unwrap();
+
+        assert!(primary_key.sql.contains("'column_id', a.attnum"));
+        assert!(columns.sql.contains("'column_id', a.attnum"));
+        assert!(indexed.sql.contains("'column_id', attnum"));
     }
 }

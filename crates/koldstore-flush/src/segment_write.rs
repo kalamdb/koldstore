@@ -4,6 +4,7 @@
 //! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
 
 use koldstore_catalog::CatalogManifestSegmentRow;
+use koldstore_common::ColumnId;
 use koldstore_manifest::{segment_object_path, segment_path_token, table_object_prefix};
 use koldstore_parquet::validate_parquet_bytes;
 use koldstore_storage::{
@@ -12,7 +13,6 @@ use koldstore_storage::{
 };
 use uuid::Uuid;
 
-use crate::segment_catalog::indexed_column_stats_json;
 use crate::stats::FlushStats;
 use crate::write::FlushWriteChunk;
 
@@ -32,8 +32,9 @@ pub struct WrittenFlushSegment {
     pub checksum: String,
     /// Optional object-store etag from publish.
     pub object_etag: Option<String>,
-    /// Column stats JSON stored in `koldstore.cold_segments`.
-    pub column_stats: serde_json::Value,
+    /// Original JSON bounds awaiting catalog type resolution and Sort Key encoding.
+    pub indexed_bounds:
+        std::collections::BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
     /// Catalog row shape for manifest assembly (single source of truth).
     pub catalog_row: CatalogManifestSegmentRow,
 }
@@ -64,7 +65,6 @@ pub fn write_flush_segment_file(
     base_path: &str,
     compression: &str,
     primary_key_columns: &[String],
-    indexed_columns: &[String],
     schema_version: i32,
     batch_number: i32,
     chunk: &FlushWriteChunk,
@@ -77,7 +77,6 @@ pub fn write_flush_segment_file(
         table_name,
         compression,
         primary_key_columns,
-        indexed_columns,
         schema_version,
         batch_number,
         chunk,
@@ -97,7 +96,6 @@ pub fn write_flush_segment_with_client(
     table_name: &str,
     _compression: &str,
     _primary_key_columns: &[String],
-    _indexed_columns: &[String],
     schema_version: i32,
     batch_number: i32,
     chunk: &FlushWriteChunk,
@@ -133,7 +131,6 @@ pub fn write_flush_segment_with_client(
     let published = publish_immutable_object(client, &temp_key, &object_path, bytes)
         .map_err(|error| error.to_string())?;
 
-    let column_stats = indexed_column_stats_json(&chunk.indexed_bounds, chunk_stats);
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
     let catalog_row = CatalogManifestSegmentRow {
         object_path: object_path.clone(),
@@ -145,7 +142,7 @@ pub fn write_flush_segment_with_client(
         row_count: chunk_stats.row_count,
         byte_size,
         schema_version,
-        column_stats: column_stats.clone(),
+        index_bounds: Vec::new(),
     };
 
     Ok(WrittenFlushSegment {
@@ -154,7 +151,7 @@ pub fn write_flush_segment_with_client(
         byte_size,
         checksum: published.checksum,
         object_etag: published.etag,
-        column_stats,
+        indexed_bounds: chunk.indexed_bounds.clone(),
         catalog_row,
     })
 }

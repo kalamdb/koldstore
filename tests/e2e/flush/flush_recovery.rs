@@ -135,17 +135,22 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
             .await?
             .get(0);
         let absolute_manifest_path = db.storage_root.join(&manifest_path);
-        let mut manifest: Value =
-            serde_json::from_str(&std::fs::read_to_string(&absolute_manifest_path)?)?;
-        let first_segment = manifest["segments"][0].clone();
-        manifest["segments"]
+        let root: Value = serde_json::from_str(&std::fs::read_to_string(&absolute_manifest_path)?)?;
+        let shard_rel = root["shards"][0]["path"]
+            .as_str()
+            .expect("sharded root should list a shard path");
+        let absolute_shard_path = absolute_manifest_path
+            .parent()
+            .expect("manifest parent")
+            .join(shard_rel);
+        let mut shard: Value =
+            serde_json::from_str(&std::fs::read_to_string(&absolute_shard_path)?)?;
+        let first_segment = shard["segments"][0].clone();
+        shard["segments"]
             .as_array_mut()
-            .expect("manifest segments should be an array")
+            .expect("shard segments should be an array")
             .push(first_segment);
-        std::fs::write(
-            &absolute_manifest_path,
-            serde_json::to_vec_pretty(&manifest)?,
-        )?;
+        std::fs::write(&absolute_shard_path, serde_json::to_vec_pretty(&shard)?)?;
 
         // In async mode, stop the background applier so the next INSERT stays in
         // WAL until flush's own fence applies it in the same transaction. That is
@@ -192,23 +197,19 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
         }
         flush_result?;
 
-        let rebuilt: Value =
-            serde_json::from_str(&std::fs::read_to_string(&absolute_manifest_path)?)?;
-        let segments = rebuilt["segments"]
-            .as_array()
-            .expect("manifest segments should be an array");
-        let unique_batches = segments
+        let rebuilt = koldstore_manifest::try_load_manifest_from_path(&absolute_manifest_path)
+            .map_err(anyhow::Error::msg)?
+            .expect("rebuilt sharded manifest should load");
+        let unique_batches = rebuilt
+            .segments
             .iter()
-            .map(|segment| {
-                segment["batch"]
-                    .as_i64()
-                    .expect("batch should be an integer")
-            })
+            .map(|segment| i64::from(segment.batch))
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            segments.len(),
+            rebuilt.segments.len(),
             unique_batches.len(),
-            "manifest should not retain duplicate stale segment entries: {rebuilt}"
+            "manifest should not retain duplicate stale segment entries: {:?}",
+            rebuilt.segments
         );
     }
 
