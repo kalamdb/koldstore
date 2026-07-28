@@ -35,7 +35,7 @@ pub struct SegmentHint {
     pub max_seq: SeqId,
 }
 
-/// Segment stats loaded from the cold segment catalog for merge reads.
+/// Active cold segment metadata for merge reads (from catalog listing or index).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SegmentStatsHint {
     /// Final object-store path.
@@ -125,41 +125,31 @@ impl SegmentPrunePredicate {
 /// Per-column policy for pre-merge cold segment prune via `cold_segment_index`.
 ///
 /// Mutable application columns stay residual: pruning their newer cold version
-/// can resurrect an older row. Scope is safe because the scope key does not
-/// change across versions of a row (RLS/user identity).
+/// can resurrect an older row. Scope and the configured segment order column are
+/// safe because their values do not change across versions of a row.
 ///
-/// Today all active segments live under the shared catalog manifest
-/// (`scope_key = ''`); scope is treated like an indexed stats column. Later
-/// each `scope_id` will own its own `manifest.json` + folder, and listing will
-/// filter by `scope_key` first — catalog index prune remains secondary inside
-/// that scope's segment set.
+/// Only Sort Key V1–allowlisted types participate in catalog index prune. Text
+/// scope keys are residual and fall back to scanning all active segments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColdPruneColumnPolicy {
     /// Column is part of the logical primary key.
     pub is_primary_key: bool,
     /// Column is the managed table `scope_column` (for example `tenant_id`).
     pub is_scope: bool,
-    /// Min/max ordering matches PostgreSQL (int, bool, uuid, …).
-    pub ordered_stats_safe: bool,
-    /// Exact equality against catalog JSON encoding is safe (text scope ids).
-    pub equality_stats_safe: bool,
+    /// Column is the configured `segment_order_column_id`.
+    pub is_order_column: bool,
+    /// Column type is in the Sort Key V1 allowlist (`cold_segment_index`).
+    pub sort_key_indexable: bool,
 }
 
 impl ColdPruneColumnPolicy {
     /// Whether `predicate` may prune segments before winner resolution.
     #[must_use]
-    pub fn allows_predicate(self, predicate: &SegmentPrunePredicate) -> bool {
-        if self.is_primary_key {
-            return self.ordered_stats_safe;
+    pub fn allows_predicate(self, _predicate: &SegmentPrunePredicate) -> bool {
+        if !(self.is_primary_key || self.is_scope || self.is_order_column) {
+            return false;
         }
-        if self.is_scope {
-            if self.ordered_stats_safe {
-                return true;
-            }
-            // Text scope keys: equality-only against flush-encoded JSON stats.
-            return self.equality_stats_safe && predicate.is_equality();
-        }
-        false
+        self.sort_key_indexable
     }
 }
 

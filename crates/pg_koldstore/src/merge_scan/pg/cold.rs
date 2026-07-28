@@ -3,6 +3,7 @@
 use std::time::Instant;
 
 use koldstore_common::{ColdRow, ColumnId, ColumnRef};
+use koldstore_catalog::{preferred_segment_index_access, SegmentIndexLookupShape};
 use koldstore_merge::scan::plan::{
     retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
     ColdPruneColumnPolicy, SegmentPrunePredicate, SegmentStatsHint,
@@ -11,7 +12,6 @@ use koldstore_parquet::{
     clean_cold_row_to_common, read_clean_cold_rows_from_object_store_with_size, ParquetReadOptions,
     PgColumn,
 };
-use koldstore_schema::PgType;
 use koldstore_storage::open_client_from_catalog_fields;
 use pgrx::pg_sys;
 
@@ -67,7 +67,7 @@ pub(super) fn load_cold_rows_for_merge(
         requested_columns.dedup_by_key(|column| column.column_id);
         let manifest_started = Instant::now();
         let Some(manifest_stats) =
-            crate::catalog::cache::cached_manifest_segment_stats(table_oid, &requested_columns)?
+            crate::catalog::cache::cached_manifest_scan_context(table_oid, &requested_columns)?
         else {
             return Ok((ColdReadProfile::empty("(none)"), Vec::new()));
         };
@@ -119,10 +119,6 @@ pub(super) fn load_cold_rows_for_merge(
         let segments = indexed_candidates
             .unwrap_or_else(|| manifest_stats.segments.clone());
         let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
-        // Shared-scope catalog SQL still filters `scope_key = ''`. When per-scope
-        // manifests land, listing will drop other scopes here and this counter
-        // will reflect that primary prune.
-        let segments_pruned_scope = 0usize;
 
         let projection = projection_columns
             .iter()
@@ -136,7 +132,6 @@ pub(super) fn load_cold_rows_for_merge(
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: Some(manifest_read_ms),
             segments_considered,
-            segments_pruned_scope,
             segments_pruned_catalog_index,
             segments_opened: segments.len(),
             segment_index_order_column_id: index_column_id,
@@ -188,48 +183,14 @@ fn cold_prune_column_policy(
     scope_column: Option<&str>,
     segment_order_column_id: Option<ColumnId>,
 ) -> ColdPruneColumnPolicy {
-    let ordered_stats_safe = cold_pruning_type_is_collation_independent(column.pg_type);
     ColdPruneColumnPolicy {
-        is_primary_key: column.is_primary_key
-            || segment_order_column_id.is_some_and(|id| id == column.column_id),
+        is_primary_key: column.is_primary_key,
         is_scope: scope_column.is_some_and(|scope| scope == column.name),
-        ordered_stats_safe,
-        // Text scope ids compare as exact flush-encoded JSON strings.
-        equality_stats_safe: ordered_stats_safe || column.pg_type == PgType::Text,
-    }
-}
-
-/// Whether Sort Key V1 / catalog index pruning has the same order semantics as
-/// PostgreSQL for this type (collation-independent scalars only).
-const fn cold_pruning_type_is_collation_independent(pg_type: PgType) -> bool {
-    matches!(
-        pg_type,
-        PgType::Bool
-            | PgType::Int2
-            | PgType::Int4
-            | PgType::Int8
-            | PgType::Uuid
-            | PgType::Timestamptz
-    )
-}
-
-/// Bound shape used for `koldstore.cold_segment_index` candidate SQL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum SegmentIndexLookupShape {
-    BoundedRange,
-    LowerBound,
-    UpperBound,
-    AllActive,
-}
-
-impl SegmentIndexLookupShape {
-    pub(super) const fn as_str(self) -> &'static str {
-        match self {
-            Self::BoundedRange => "bounded_range",
-            Self::LowerBound => "lower_bound",
-            Self::UpperBound => "upper_bound",
-            Self::AllActive => "all_active",
-        }
+        is_order_column: segment_order_column_id.is_some_and(|id| id == column.column_id),
+        sort_key_indexable: koldstore_sortkey::SortKeyType::from_type_oid(
+            column.pg_type.type_oid(),
+        )
+        .is_some(),
     }
 }
 
@@ -368,7 +329,7 @@ fn load_segment_index_candidates(
     // choose seq_scan or BitmapAnd when cheaper. SPI EXPLAIN is intentionally
     // avoided here — nested EXPLAIN is rejected inside non-volatile function
     // contexts during ordinary SELECTs.
-    let plan = Some(preferred_segment_index_plan(shape).to_string());
+    let plan = Some(preferred_segment_index_access(shape).to_string());
 
     let candidates = crate::catalog::owner::with_extension_owner(|| {
         crate::spi::execute_prepared(&statement, &args, |tuples| {
@@ -402,16 +363,6 @@ fn load_segment_index_candidates(
     Ok((Some(candidates), shape, plan))
 }
 
-/// Preferred cold_segment_index access path for a bound shape (not forced).
-const fn preferred_segment_index_plan(shape: SegmentIndexLookupShape) -> &'static str {
-    match shape {
-        SegmentIndexLookupShape::BoundedRange => "bitmap_and_or_single",
-        SegmentIndexLookupShape::LowerBound => "max_idx",
-        SegmentIndexLookupShape::UpperBound => "min_idx",
-        SegmentIndexLookupShape::AllActive => "seq_scan",
-    }
-}
-
 fn missing_candidate_field(name: &str) -> pgrx::spi::SpiError {
     pgrx::spi::SpiError::DatumError(pgrx::datum::TryFromDatumError::NoSuchAttributeName(
         name.to_string(),
@@ -422,7 +373,7 @@ fn missing_candidate_field(name: &str) -> pgrx::spi::SpiError {
 pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdReadProfile, String> {
     with_hook_disabled(|| {
         let Some(manifest_stats) =
-            crate::catalog::cache::cached_manifest_segment_stats(table_oid, &[])?
+            crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?
         else {
             return Ok(ColdReadProfile::empty("(none)"));
         };
@@ -438,7 +389,6 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: None,
             segments_considered: manifest_stats.segments.len(),
-            segments_pruned_scope: 0,
             segments_pruned_catalog_index: 0,
             segments_opened: manifest_stats.segments.len(),
             segment_index_order_column_id,
@@ -685,37 +635,35 @@ fn fill_missing_logical_nulls(value: &mut serde_json::Value, missing_names: &[St
 mod tests {
     use std::collections::BTreeMap;
 
+    use koldstore_catalog::{preferred_segment_index_access, SegmentIndexLookupShape};
     use koldstore_common::{ColumnId, ColumnRef};
     use koldstore_merge::scan::plan::SegmentStatsHint;
     use koldstore_schema::PgType;
+    use koldstore_sortkey::SortKeyType;
 
-    use super::{
-        cold_pruning_type_is_collation_independent, physical_name_for_segment,
-        preferred_segment_index_plan,
-    };
+    use super::physical_name_for_segment;
 
     #[test]
-    fn text_like_types_are_not_safe_for_byte_ordered_cold_pruning() {
-        assert!(!cold_pruning_type_is_collation_independent(PgType::Text));
-        assert!(!cold_pruning_type_is_collation_independent(
-            PgType::TextArray
-        ));
-        assert!(cold_pruning_type_is_collation_independent(PgType::Int8));
-        assert!(cold_pruning_type_is_collation_independent(PgType::Uuid));
+    fn text_like_types_are_not_sort_key_indexable() {
+        assert!(SortKeyType::from_type_oid(PgType::Text.type_oid()).is_none());
+        assert!(SortKeyType::from_type_oid(PgType::TextArray.type_oid()).is_none());
+        assert!(SortKeyType::from_type_oid(PgType::Int8.type_oid()).is_some());
+        assert!(SortKeyType::from_type_oid(PgType::Uuid.type_oid()).is_some());
+        assert!(SortKeyType::from_type_oid(PgType::Timestamptz.type_oid()).is_some());
     }
 
     #[test]
-    fn segment_index_plan_preference_matches_bound_shape() {
+    fn segment_index_preferred_access_matches_bound_shape() {
         assert_eq!(
-            preferred_segment_index_plan(super::SegmentIndexLookupShape::LowerBound),
+            preferred_segment_index_access(SegmentIndexLookupShape::LowerBound),
             "max_idx"
         );
         assert_eq!(
-            preferred_segment_index_plan(super::SegmentIndexLookupShape::UpperBound),
+            preferred_segment_index_access(SegmentIndexLookupShape::UpperBound),
             "min_idx"
         );
         assert_eq!(
-            preferred_segment_index_plan(super::SegmentIndexLookupShape::BoundedRange),
+            preferred_segment_index_access(SegmentIndexLookupShape::BoundedRange),
             "bitmap_and_or_single"
         );
     }

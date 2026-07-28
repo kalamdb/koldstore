@@ -316,8 +316,6 @@ pub(super) struct ColdReadProfile {
     pub(super) manifest_read_ms: Option<f64>,
     /// Segments considered before any prune (catalog candidates).
     pub(super) segments_considered: usize,
-    /// Segments rejected because they do not match the scan scope.
-    pub(super) segments_pruned_scope: usize,
     /// Segments rejected by `cold_segment_index` candidate lookup.
     pub(super) segments_pruned_catalog_index: usize,
     /// Segments opened after catalog prune.
@@ -327,8 +325,8 @@ pub(super) struct ColdReadProfile {
     /// Current name of the order column (diagnostic only).
     pub(super) segment_index_order_column: Option<String>,
     /// Bound shape used for cold_segment_index candidate SQL, when planned.
-    pub(super) segment_index_lookup_shape: Option<super::cold::SegmentIndexLookupShape>,
-    /// PostgreSQL access method chosen for the candidate lookup, when known.
+    pub(super) segment_index_lookup_shape: Option<koldstore_catalog::SegmentIndexLookupShape>,
+    /// Preferred index access for the bound shape (not forced by SQL).
     pub(super) segment_index_plan: Option<String>,
     /// Wall time spent on the segment-index SPI lookup, when executed.
     pub(super) segment_index_lookup_ms: Option<f64>,
@@ -348,7 +346,6 @@ impl ColdReadProfile {
             base_path: String::new(),
             manifest_read_ms: None,
             segments_considered: 0,
-            segments_pruned_scope: 0,
             segments_pruned_catalog_index: 0,
             segments_opened: 0,
             segment_index_order_column_id: None,
@@ -501,14 +498,8 @@ fn explain_cold_scan(
             explain_text(es, "Segment Index Lookup Shape", shape.as_str());
         }
         if let Some(plan) = profile.segment_index_plan.as_deref() {
-            explain_text(es, "Segment Index Plan", plan);
+            explain_text(es, "Segment Index Preferred Access", plan);
         }
-        explain_integer(
-            es,
-            "Candidate Segments Before Range",
-            None,
-            profile.segments_considered as i64,
-        );
         if let Some(candidates) = profile.segment_index_candidate_segments {
             explain_integer(
                 es,
@@ -523,12 +514,6 @@ fn explain_cold_scan(
             }
         }
     }
-    explain_integer(
-        es,
-        "Segments Pruned by Scope",
-        None,
-        profile.segments_pruned_scope as i64,
-    );
     explain_integer(
         es,
         "Segments Pruned by Catalog Index",
@@ -569,7 +554,7 @@ fn explain_cold_scan(
             explain_integer(es, "Row Groups Skipped", None, row_groups_skipped as i64);
             explain_integer(
                 es,
-                "Row Groups Pruned by Min/Max",
+                "Row Groups Pruned by Column Stats",
                 None,
                 profile.row_groups_pruned_by_stats() as i64,
             );
@@ -888,10 +873,6 @@ fn explain_wants_timing(es: *mut pg_sys::ExplainState) -> bool {
     unsafe { (*es).timing }
 }
 
-pub(super) fn explain_property(es: *mut pg_sys::ExplainState, label: &str, value: &str) {
-    explain_text(es, label, value);
-}
-
 pub(super) fn explain_integer(
     es: *mut pg_sys::ExplainState,
     label: &str,
@@ -910,7 +891,7 @@ pub(super) fn explain_integer(
     }
 }
 
-fn explain_text(es: *mut pg_sys::ExplainState, label: &str, value: &str) {
+pub(super) fn explain_text(es: *mut pg_sys::ExplainState, label: &str, value: &str) {
     let label = CString::new(label).unwrap_or_default();
     let value = CString::new(value).unwrap_or_default();
     unsafe {

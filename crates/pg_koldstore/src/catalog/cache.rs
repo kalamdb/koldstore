@@ -21,9 +21,9 @@ use crate::spi::{
 };
 
 #[cfg(feature = "pg")]
-type SegmentStatsCacheKey = (u32, Vec<i16>);
+type ManifestScanCacheKey = (u32, Vec<i16>);
 #[cfg(feature = "pg")]
-type SegmentStatsCache = OptionalLookupCache<SegmentStatsCacheKey, Arc<CachedSegmentStats>>;
+type ManifestScanCache = OptionalLookupCache<ManifestScanCacheKey, Arc<CachedManifestScanContext>>;
 
 /// Counts SPI loads of managed-table snapshots (test / diagnostics).
 #[cfg(feature = "pg")]
@@ -33,17 +33,17 @@ static MANAGED_TABLE_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     static MANAGED_TABLE_CACHE: std::cell::RefCell<ManagedTableSnapshotCache> =
         std::cell::RefCell::new(ManagedTableSnapshotCache::default());
-    static SEGMENT_STATS_CACHE: std::cell::RefCell<SegmentStatsCache> =
+    static MANIFEST_SCAN_CACHE: std::cell::RefCell<ManifestScanCache> =
         std::cell::RefCell::new(OptionalLookupCache::default());
     static MIGRATION_CATALOG_CACHE: std::cell::RefCell<
         BoundedOidCache<Arc<koldstore_migrate::ExistingTableCatalog>>,
     > = std::cell::RefCell::new(BoundedOidCache::default());
 }
 
-/// Cached cold-segment metadata for one managed table.
+/// Cached cold-segment listing + storage context for one managed table.
 #[cfg(feature = "pg")]
 #[derive(Debug, Clone)]
-pub struct CachedSegmentStats {
+pub struct CachedManifestScanContext {
     /// Published manifest object path.
     pub manifest_path: String,
     /// Manifest generation used as the cache identity.
@@ -56,7 +56,7 @@ pub struct CachedSegmentStats {
     pub credentials: serde_json::Value,
     /// Storage backend config JSON.
     pub config: serde_json::Value,
-    /// Active shared-scope segment stats.
+    /// Active shared-scope cold segments for merge/index fallback.
     pub segments: Vec<SegmentStatsHint>,
 }
 
@@ -104,7 +104,7 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
     MANAGED_TABLE_CACHE.with(|cache| {
         cache.borrow_mut().invalidate(key);
     });
-    SEGMENT_STATS_CACHE.with(|cache| {
+    MANIFEST_SCAN_CACHE.with(|cache| {
         cache
             .borrow_mut()
             .retain(|(table_oid, _)| *table_oid != key);
@@ -122,7 +122,7 @@ pub fn invalidate_all() {
     MANAGED_TABLE_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
-    SEGMENT_STATS_CACHE.with(|cache| {
+    MANIFEST_SCAN_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
     MIGRATION_CATALOG_CACHE.with(|cache| {
@@ -211,10 +211,10 @@ pub fn is_managed_relation(table_oid: pgrx::pg_sys::Oid) -> bool {
 ///
 /// Returns an error when SPI execution or JSON decoding fails.
 #[cfg(feature = "pg")]
-pub fn cached_manifest_segment_stats(
+pub fn cached_manifest_scan_context(
     table_oid: pgrx::pg_sys::Oid,
     predicate_columns: &[ColumnRef],
-) -> Result<Option<Arc<CachedSegmentStats>>, String> {
+) -> Result<Option<Arc<CachedManifestScanContext>>, String> {
     let key = table_oid.to_u32();
     let columns = predicate_columns
         .iter()
@@ -222,13 +222,13 @@ pub fn cached_manifest_segment_stats(
         .map(|column| (column.column_id.get(), column))
         .collect::<std::collections::BTreeMap<_, _>>();
     let cache_key = (key, columns.keys().copied().collect());
-    if let Some(cached) = SEGMENT_STATS_CACHE.with(|cache| cache.borrow().get(&cache_key)) {
+    if let Some(cached) = MANIFEST_SCAN_CACHE.with(|cache| cache.borrow().get(&cache_key)) {
         return Ok(cached);
     }
 
     let columns = columns.into_values().collect::<Vec<_>>();
-    let shared = load_manifest_segment_stats(table_oid, &columns)?.map(Arc::new);
-    SEGMENT_STATS_CACHE.with(|cache| {
+    let shared = load_manifest_scan_context(table_oid, &columns)?.map(Arc::new);
+    MANIFEST_SCAN_CACHE.with(|cache| {
         cache.borrow_mut().insert(cache_key, shared.clone());
     });
     Ok(shared)
@@ -271,20 +271,20 @@ pub fn reset_managed_table_spi_load_count() {
 }
 
 #[cfg(feature = "pg")]
-fn load_manifest_segment_stats(
+fn load_manifest_scan_context(
     table_oid: pgrx::pg_sys::Oid,
     predicate_columns: &[ColumnRef],
-) -> Result<Option<CachedSegmentStats>, String> {
+) -> Result<Option<CachedManifestScanContext>, String> {
     super::owner::with_extension_owner(|| {
-        load_manifest_segment_stats_as_owner(table_oid, predicate_columns)
+        load_manifest_scan_context_as_owner(table_oid, predicate_columns)
     })?
 }
 
 #[cfg(feature = "pg")]
-fn load_manifest_segment_stats_as_owner(
+fn load_manifest_scan_context_as_owner(
     table_oid: pgrx::pg_sys::Oid,
     predicate_columns: &[ColumnRef],
-) -> Result<Option<CachedSegmentStats>, String> {
+) -> Result<Option<CachedManifestScanContext>, String> {
     let statement = koldstore_catalog::queries::plan_in_sync_manifest_scan_context()
         .map_err(|error| error.to_string())?;
     require_read_only(&statement).map_err(|error| error.to_string())?;
@@ -310,8 +310,8 @@ fn load_manifest_segment_stats_as_owner(
 }
 
 #[cfg(feature = "pg")]
-fn cached_from_context(context: InSyncManifestScanContext) -> CachedSegmentStats {
-    CachedSegmentStats {
+fn cached_from_context(context: InSyncManifestScanContext) -> CachedManifestScanContext {
+    CachedManifestScanContext {
         manifest_path: context.manifest_path,
         generation: context.generation,
         base_path: context.base_path,

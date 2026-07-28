@@ -21,9 +21,3 @@ pub mod status;
 pub(crate) mod task;
 #[cfg(feature = "pg")]
 pub mod worker;
-
-/// Re-export the library decoder for callers that historically imported
-/// `koldstore::async_mirror::protocol`.
-pub mod protocol {
-    pub use koldstore_mirror::pgoutput::*;
-}

@@ -143,7 +143,6 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         "Emit Path",
         "Hot Rows",
         "Candidate Segments",
-        "Segments Pruned by Scope",
         "Segments Pruned by Catalog Index",
         "Parquet Segments Opened",
         "Bytes Fetched",

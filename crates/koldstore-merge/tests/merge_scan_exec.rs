@@ -176,7 +176,7 @@ fn scan_state_cleanup_releases_resources_and_rescan_resets_merge_state() {
 }
 
 #[test]
-fn scope_equality_is_retained_for_pre_merge_cold_prune() {
+fn primary_key_predicates_are_retained_for_pre_merge_cold_prune() {
     let predicates = vec![
         SegmentPrunePredicate::equality(1, "id", json!(1)),
         SegmentPrunePredicate::equality(2, "tenant_id", json!("tenant-a")),
@@ -187,51 +187,86 @@ fn scope_equality_is_retained_for_pre_merge_cold_prune() {
         1 => Some(ColdPruneColumnPolicy {
             is_primary_key: true,
             is_scope: false,
-            ordered_stats_safe: true,
-            equality_stats_safe: true,
+            is_order_column: false,
+            sort_key_indexable: true,
         }),
         2 => Some(ColdPruneColumnPolicy {
             is_primary_key: false,
             is_scope: true,
-            ordered_stats_safe: false,
-            equality_stats_safe: true,
+            is_order_column: false,
+            // Text scope is not Sort Key V1–indexable; residual only.
+            sort_key_indexable: false,
         }),
         3 => Some(ColdPruneColumnPolicy {
             is_primary_key: false,
             is_scope: false,
-            ordered_stats_safe: false,
-            equality_stats_safe: true,
+            is_order_column: false,
+            sort_key_indexable: false,
         }),
         _ => None,
     });
 
     assert_eq!(
         retained,
-        vec![
-            SegmentPrunePredicate::equality(1, "id", json!(1)),
-            SegmentPrunePredicate::equality(2, "tenant_id", json!("tenant-a")),
-        ]
+        vec![SegmentPrunePredicate::equality(1, "id", json!(1))]
     );
 }
 
 #[test]
-fn text_scope_range_predicates_are_not_pre_merge_safe() {
+fn text_scope_predicates_are_not_pre_merge_safe_without_sort_key() {
     let retained = retain_pre_merge_cold_prune_predicates(
-        vec![SegmentPrunePredicate::lower_bound(
-            2,
-            "tenant_id",
-            json!("tenant-m"),
-        )],
+        vec![
+            SegmentPrunePredicate::equality(2, "tenant_id", json!("tenant-a")),
+            SegmentPrunePredicate::lower_bound(2, "tenant_id", json!("tenant-m")),
+        ],
         |_| {
             Some(ColdPruneColumnPolicy {
                 is_primary_key: false,
                 is_scope: true,
-                ordered_stats_safe: false,
-                equality_stats_safe: true,
+                is_order_column: false,
+                sort_key_indexable: false,
             })
         },
     );
     assert!(retained.is_empty());
+}
+
+#[test]
+fn sort_key_scope_and_order_column_predicates_are_pre_merge_safe() {
+    let retained = retain_pre_merge_cold_prune_predicates(
+        vec![
+            SegmentPrunePredicate::equality(2, "tenant_id", json!(7)),
+            SegmentPrunePredicate::lower_bound(4, "event_time", json!(100)),
+            SegmentPrunePredicate::equality(3, "payload", json!("x")),
+        ],
+        |column| match column {
+            2 => Some(ColdPruneColumnPolicy {
+                is_primary_key: false,
+                is_scope: true,
+                is_order_column: false,
+                sort_key_indexable: true,
+            }),
+            4 => Some(ColdPruneColumnPolicy {
+                is_primary_key: false,
+                is_scope: false,
+                is_order_column: true,
+                sort_key_indexable: true,
+            }),
+            _ => Some(ColdPruneColumnPolicy {
+                is_primary_key: false,
+                is_scope: false,
+                is_order_column: false,
+                sort_key_indexable: true,
+            }),
+        },
+    );
+    assert_eq!(
+        retained,
+        vec![
+            SegmentPrunePredicate::equality(2, "tenant_id", json!(7)),
+            SegmentPrunePredicate::lower_bound(4, "event_time", json!(100)),
+        ]
+    );
 }
 
 #[test]

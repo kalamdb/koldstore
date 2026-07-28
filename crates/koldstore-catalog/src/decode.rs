@@ -141,8 +141,9 @@ pub fn manifest_scan_segment_stats(
 /// Extracts `{column_id: (min, max)}` pairs from catalog column-stats JSON.
 ///
 /// Keys are canonical stringified PostgreSQL attribute numbers. Entries with a
-/// non-numeric/zero key or missing either bound are skipped. Used by manifest
-/// assembly and merge-scan segment pruning so both paths share one walk.
+/// non-numeric/zero key or missing either bound are skipped. Used by object-store
+/// `manifest.json` assembly / export only — query-time segment prune uses
+/// `koldstore.cold_segment_index`, not this JSON.
 #[must_use]
 pub fn column_stats_min_max_map(
     column_stats: &serde_json::Value,

@@ -216,7 +216,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     };
 
     let segment_count = with_hook_disabled(|| {
-        crate::catalog::cache::cached_manifest_segment_stats(table_oid, &[])
+        crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])
             .ok()
             .flatten()
             .map(|stats| stats.segments.len())
@@ -689,7 +689,7 @@ unsafe extern "C-unwind" fn explain_custom_scan(
             let cold_profile = match resolve_table_oid(node).and_then(planned_cold_read_profile) {
                 Ok(profile) => profile,
                 Err(error) => {
-                    profile::explain_property(es, "Cold Storage", &format!("unavailable: {error}"));
+                    profile::explain_text(es, "Cold Storage", &format!("unavailable: {error}"));
                     return;
                 }
             };
@@ -716,7 +716,7 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         // Fallback when the hot child was not initialized into custom_ps (cold
         // emit paths). Graph clients that walk custom_ps still see nested Plans
         // when the child was initialized for hot-only streaming.
-        profile::explain_property(es, "Hot Plan", &hot_label);
+        profile::explain_text(es, "Hot Plan", &hot_label);
     }
     if let Some(execution) = execution.as_ref() {
         profile::explain_integer(es, "Mirror Tombstones", None, execution.mirror_rows as i64);

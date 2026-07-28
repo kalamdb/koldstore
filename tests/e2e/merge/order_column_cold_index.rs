@@ -229,20 +229,20 @@ async fn assert_shape_plan(
         "expected order column name in EXPLAIN, got:\n{plan}"
     );
     anyhow::ensure!(
-        plan.contains("Segment Index Plan:"),
-        "expected Segment Index Plan in EXPLAIN, got:\n{plan}"
+        plan.contains("Segment Index Preferred Access:"),
+        "expected Segment Index Preferred Access in EXPLAIN, got:\n{plan}"
     );
     match expected_shape {
         "lower_bound" => anyhow::ensure!(
-            plan.contains("Segment Index Plan: max_idx"),
+            plan.contains("Segment Index Preferred Access: max_idx"),
             "lower-bound should prefer max_idx:\n{plan}"
         ),
         "upper_bound" => anyhow::ensure!(
-            plan.contains("Segment Index Plan: min_idx"),
+            plan.contains("Segment Index Preferred Access: min_idx"),
             "upper-bound should prefer min_idx:\n{plan}"
         ),
         "bounded_range" => anyhow::ensure!(
-            plan.contains("Segment Index Plan: bitmap_and_or_single"),
+            plan.contains("Segment Index Preferred Access: bitmap_and_or_single"),
             "bounded range should allow planner choice:\n{plan}"
         ),
         _ => {}
@@ -253,13 +253,12 @@ async fn assert_shape_plan(
         "expected segments-returned counter, got:\n{plan}"
     );
     anyhow::ensure!(
-        plan.contains("Candidate Segments Before Range:") || plan.contains("Candidate Segments:"),
-        "expected candidate-before-range counter, got:\n{plan}"
+        plan.contains("Candidate Segments:"),
+        "expected candidate segments counter, got:\n{plan}"
     );
 
     let opened = explain_counter(&plan, "Parquet Segments Opened")?;
-    let considered = explain_counter(&plan, "Candidate Segments Before Range")
-        .or_else(|_| explain_counter(&plan, "Candidate Segments"))?;
+    let considered = explain_counter(&plan, "Candidate Segments")?;
     anyhow::ensure!(
         opened < considered,
         "order-column range should prune at least one cold segment; opened={opened} considered={considered}\n{plan}"

@@ -4,13 +4,12 @@
 //! **row groups inside one Parquet file** using footer column stats and
 //! native Parquet bloom filters (written on flush for PK columns).
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
 
 use bytes::Bytes;
-use koldstore_common::{compare_json_values, CommitSeq, SeqId};
+use koldstore_common::{CommitSeq, SeqId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Type as ParquetPhysicalType;
 use parquet::bloom_filter::Sbbf;
@@ -18,8 +17,6 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::reader::ChunkReader;
 use parquet::file::statistics::Statistics;
 use parquet::schema::types::SchemaDescriptor;
-
-use crate::ColumnStats;
 
 /// Pruning result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,34 +128,6 @@ impl RowGroupPruner {
                 .saturating_sub(selected_row_groups.len()),
             selected_row_groups,
         }
-    }
-
-    /// Returns true when segment min/max stats may overlap the requested range.
-    ///
-    /// Missing, null, or incomparable stats return true so callers scan
-    /// conservatively instead of risking false negatives.
-    #[must_use]
-    pub fn segment_column_may_overlap(
-        &self,
-        column_stats: &BTreeMap<String, ColumnStats>,
-        column: &str,
-        min: &serde_json::Value,
-        max: &serde_json::Value,
-    ) -> bool {
-        let Some(stats) = column_stats.get(column) else {
-            return true;
-        };
-        if min.is_null() || max.is_null() || stats.min.is_null() || stats.max.is_null() {
-            return true;
-        }
-        let Some(max_vs_min) = compare_json_values(&stats.max, min) else {
-            return true;
-        };
-        let Some(min_vs_max) = compare_json_values(&stats.min, max) else {
-            return true;
-        };
-
-        max_vs_min != Ordering::Less && min_vs_max != Ordering::Greater
     }
 }
 
