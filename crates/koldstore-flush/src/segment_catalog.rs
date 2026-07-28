@@ -15,8 +15,8 @@ use thiserror::Error;
 
 pub use koldstore_catalog::CatalogManifestSegmentRow;
 pub use koldstore_manifest::{
-    build_manifest_segment_from_catalog_row, load_manifest_from_path, manifest_from_catalog_rows,
-    write_manifest_to_path, ManifestAssemblyError,
+    build_manifest_segment_from_catalog_row, manifest_from_catalog_rows, write_manifest_to_path,
+    ManifestAssemblyError,
 };
 
 /// Flush catalog planning error.
@@ -90,28 +90,11 @@ pub fn encode_indexed_column_bounds(
     Ok(encoded)
 }
 
-/// Builds indexed column stats JSON for one flushed segment chunk.
-#[must_use]
-pub fn indexed_column_stats_json(
-    indexed_bounds: &std::collections::BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
-) -> serde_json::Value {
-    let mut values = serde_json::Map::new();
-    for (column_id, bounds) in indexed_bounds {
-        values.insert(
-            column_id.to_string(),
-            serde_json::json!({
-                "min": bounds.0,
-                "max": bounds.1,
-            }),
-        );
-    }
-    serde_json::Value::Object(values)
-}
-
 /// Plans combined multi-row segment and normalized-stat inserts as `pending`.
 ///
 /// Segment prune metadata lives in `koldstore.cold_segment_index`. Exact per-PK
-/// catalog rows are not written.
+/// catalog rows are not written. Manifest export reads the same index table —
+/// there is no duplicated `column_stats` JSON on `cold_segments`.
 /// Readers ignore `pending` until [`plan_activate_flush_segments`].
 ///
 /// # Errors
@@ -134,9 +117,8 @@ WITH segment_input AS (
         $9::bigint[],
         $10::bigint[],
         $11::integer[],
-        $12::jsonb[],
-        $13::text[],
-        $14::text[]
+        $12::text[],
+        $13::text[]
     ) AS u(
         segment_id,
         object_path,
@@ -148,7 +130,6 @@ WITH segment_input AS (
         row_count,
         byte_size,
         schema_version,
-        column_stats,
         checksum,
         object_etag
     )
@@ -167,7 +148,6 @@ inserted_segments AS (
         row_count,
         byte_size,
         schema_version,
-        column_stats,
         status,
         checksum,
         object_etag
@@ -185,22 +165,21 @@ inserted_segments AS (
         u.row_count,
         u.byte_size,
         u.schema_version,
-        u.column_stats,
         'pending',
         u.checksum,
         NULLIF(u.object_etag, '')
     FROM segment_input u
-    RETURNING segment_id, table_oid, scope_key, column_stats
+    RETURNING segment_id, table_oid, scope_key
 ),
 index_input AS (
     SELECT *
     FROM unnest(
-        $15::uuid[],
-        $16::smallint[],
-        $17::oid[],
-        $18::smallint[],
-        $19::bytea[],
-        $20::bytea[]
+        $14::uuid[],
+        $15::smallint[],
+        $16::oid[],
+        $17::smallint[],
+        $18::bytea[],
+        $19::bytea[]
     ) AS i(
         segment_id,
         column_id,
@@ -328,28 +307,13 @@ SELECT generation FROM cas
 #[cfg(test)]
 mod tests {
     use super::{
-        encode_indexed_column_bounds, indexed_column_stats_json, plan_activate_flush_segments,
+        encode_indexed_column_bounds, plan_activate_flush_segments,
         plan_flush_segments_batch_insert,
     };
     use koldstore_common::ColumnId;
     use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue, CODEC_VERSION};
     use serde_json::json;
     use std::collections::BTreeMap;
-
-    #[test]
-    fn indexed_stats_json_remains_stable_when_column_name_changes() {
-        let bounds = BTreeMap::from([
-            (ColumnId::from_attnum(1), (json!(1), json!(10))),
-            (ColumnId::from_attnum(3), (json!("a"), json!("z"))),
-        ]);
-        assert_eq!(
-            indexed_column_stats_json(&bounds),
-            json!({
-                "1": {"min": 1, "max": 10},
-                "3": {"min": "a", "max": "z"}
-            })
-        );
-    }
 
     #[test]
     fn indexed_bounds_encode_supported_types_and_skip_unsupported_types() {
@@ -387,11 +351,12 @@ mod tests {
         assert!(statement.sql.contains("column_id"));
         assert!(statement.sql.contains("koldstore.cold_segment_index"));
         assert!(statement.sql.contains("codec_version"));
+        assert!(statement.sql.contains("$18::bytea[]"));
         assert!(statement.sql.contains("$19::bytea[]"));
-        assert!(statement.sql.contains("$20::bytea[]"));
         assert!(statement
             .sql
             .contains("ON CONFLICT (segment_id, column_id)"));
+        assert!(!statement.sql.contains("column_stats"));
         assert!(!statement.sql.contains("jsonb_each"));
         assert!(!statement.sql.contains("convert_to"));
         assert!(!statement.sql.contains("cold_segment_stats"));

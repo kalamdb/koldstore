@@ -111,4 +111,22 @@ impl SortKeyValue {
             Self::Uuid(_) => SortKeyType::Uuid,
         }
     }
+
+    /// Converts this value into the JSON shape accepted by [`crate::encode_sort_key_json`].
+    ///
+    /// Temporal values use PostgreSQL-epoch integer units (days / microseconds).
+    /// UUIDs use hyphenated lowercase strings.
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Bool(value) => serde_json::Value::Bool(*value),
+            Self::Int2(value) => serde_json::Value::Number((*value).into()),
+            Self::Int4(value) => serde_json::Value::Number((*value).into()),
+            Self::Int8(value) => serde_json::Value::Number((*value).into()),
+            Self::Date(value) => serde_json::Value::Number((*value).into()),
+            Self::Timestamp(value) => serde_json::Value::Number((*value).into()),
+            Self::Timestamptz(value) => serde_json::Value::Number((*value).into()),
+            Self::Uuid(value) => serde_json::Value::String(value.to_string()),
+        }
+    }
 }

@@ -4,8 +4,8 @@ use koldstore_merge::scan::exec::{
     ColdAvailability, FilterPlan, ScanResourceCounters,
 };
 use koldstore_merge::scan::plan::{
-    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed, ColdPruneColumnPolicy,
-    MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
+    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
+    ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
 };
 use serde_json::json;
 

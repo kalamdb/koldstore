@@ -148,7 +148,7 @@ fn plan_change_log_mirror_from_columns_with_order_column(
         columns,
         order_column,
     )
-        .map_err(|error| MirrorError::Capture(error.to_string()))?;
+    .map_err(|error| MirrorError::Capture(error.to_string()))?;
 
     Ok(ChangeLogMirrorPlan {
         source_table: source_table.clone(),

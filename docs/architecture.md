@@ -72,7 +72,8 @@ serves rows from a buffer. See [scanning-table](architecture/scanning-table.md).
 ### Manifest and catalog
 
 `koldstore.manifest` tracks sync state and O(1) row counters. Object-store
-`manifest.json` is written on flush finalize. Cold segment metadata lives in
+export is folder-sharded (`manifest.json` root + `{folder}/manifest-shard.json`)
+and is written on flush finalize. Cold segment metadata lives in
 `koldstore.cold_segments`. See [flushing-table](architecture/flushing-table.md).
 
 ### Operational boundaries

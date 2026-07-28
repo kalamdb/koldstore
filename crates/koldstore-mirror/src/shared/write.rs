@@ -214,10 +214,7 @@ pub fn plan_async_mirror_batch_upsert(
         .iter()
         .map(|key| format!("incoming.{key}"))
         .chain(include_order_key.then(|| "incoming.\"order_key\"".to_string()))
-        .chain([
-            "incoming.\"seq\"".to_string(),
-            "$1::smallint".to_string(),
-        ])
+        .chain(["incoming.\"seq\"".to_string(), "$1::smallint".to_string()])
         .collect::<Vec<_>>()
         .join(", ");
     // Order keys are immutable per PK; keep the first encoded value on conflict.

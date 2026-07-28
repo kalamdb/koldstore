@@ -70,7 +70,12 @@ impl SegmentBuilder {
             [ColdMetadataColumn::Seq.name()]
                 .into_iter()
                 .chain(input.primary_key_columns.iter().map(String::as_str))
-                .chain(input.indexed_columns.iter().map(|column| column.name.as_str())),
+                .chain(
+                    input
+                        .indexed_columns
+                        .iter()
+                        .map(|column| column.name.as_str()),
+                ),
         )
         .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str));
         Self {
@@ -223,10 +228,8 @@ where
     let mut max_seq = 0_i64;
     let mut chunk_builder = ChunkBuilder::new(&input.parquet_columns, &input.indexed_columns)?;
     let mut segment_builder = SegmentBuilder::new(input);
-    let pk_indices = koldstore_parquet::pk_column_indices(
-        &input.base_column_names,
-        &input.primary_key_columns,
-    )?;
+    let pk_indices =
+        koldstore_parquet::pk_column_indices(&input.base_column_names, &input.primary_key_columns)?;
     let mut ordered_rows = Vec::new();
 
     loop {
@@ -308,10 +311,8 @@ fn sort_flush_rows(rows: &mut [FlushMirrorRow], primary_key_indices: &[usize]) {
             .cmp(&right.order_key.as_deref())
             .then_with(|| {
                 for index in primary_key_indices {
-                    let ordering = compare_flush_values(
-                        left.values.get(*index),
-                        right.values.get(*index),
-                    );
+                    let ordering =
+                        compare_flush_values(left.values.get(*index), right.values.get(*index));
                     if !ordering.is_eq() {
                         return ordering;
                     }
@@ -327,17 +328,27 @@ fn compare_flush_values(
 ) -> std::cmp::Ordering {
     use koldstore_parquet::FlushColumnValue;
     match (left, right) {
-        (Some(FlushColumnValue::Bool(left)), Some(FlushColumnValue::Bool(right))) => left.cmp(right),
-        (Some(FlushColumnValue::Int16(left)), Some(FlushColumnValue::Int16(right))) => left.cmp(right),
-        (Some(FlushColumnValue::Int32(left)), Some(FlushColumnValue::Int32(right))) => left.cmp(right),
-        (Some(FlushColumnValue::Int64(left)), Some(FlushColumnValue::Int64(right))) => left.cmp(right),
+        (Some(FlushColumnValue::Bool(left)), Some(FlushColumnValue::Bool(right))) => {
+            left.cmp(right)
+        }
+        (Some(FlushColumnValue::Int16(left)), Some(FlushColumnValue::Int16(right))) => {
+            left.cmp(right)
+        }
+        (Some(FlushColumnValue::Int32(left)), Some(FlushColumnValue::Int32(right))) => {
+            left.cmp(right)
+        }
+        (Some(FlushColumnValue::Int64(left)), Some(FlushColumnValue::Int64(right))) => {
+            left.cmp(right)
+        }
         (Some(FlushColumnValue::Float32(left)), Some(FlushColumnValue::Float32(right))) => {
             left.total_cmp(right)
         }
         (Some(FlushColumnValue::Float64(left)), Some(FlushColumnValue::Float64(right))) => {
             left.total_cmp(right)
         }
-        (Some(FlushColumnValue::Utf8(left)), Some(FlushColumnValue::Utf8(right))) => left.cmp(right),
+        (Some(FlushColumnValue::Utf8(left)), Some(FlushColumnValue::Utf8(right))) => {
+            left.cmp(right)
+        }
         (
             Some(FlushColumnValue::TimestamptzMicros(left)),
             Some(FlushColumnValue::TimestamptzMicros(right)),

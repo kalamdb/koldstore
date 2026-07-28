@@ -7,9 +7,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::error::SortKeyError;
-use crate::types::{
-    SortKeyType, SortKeyValue, PG_EPOCH_DAYS_FROM_UNIX, PG_EPOCH_MICROS_FROM_UNIX,
-};
+use crate::types::{SortKeyType, SortKeyValue, PG_EPOCH_DAYS_FROM_UNIX, PG_EPOCH_MICROS_FROM_UNIX};
 
 /// Encodes a Sort Key V1 value into order-preserving bytes.
 ///
@@ -76,9 +74,10 @@ pub fn encode_sort_key_pg_text(ty: SortKeyType, text: &str) -> Result<Vec<u8>, S
                 .map_err(|error| invalid_json(ty_name(ty), error.to_string()))?;
             Value::Number(n.into())
         }
-        SortKeyType::Date | SortKeyType::Timestamp | SortKeyType::Timestamptz | SortKeyType::Uuid => {
-            Value::String(text.to_string())
-        }
+        SortKeyType::Date
+        | SortKeyType::Timestamp
+        | SortKeyType::Timestamptz
+        | SortKeyType::Uuid => Value::String(text.to_string()),
     };
     encode_sort_key_json(ty, &value)
 }
@@ -126,8 +125,8 @@ fn parse_json_value(ty: SortKeyType, value: &Value) -> Result<SortKeyValue, Sort
             let text = value
                 .as_str()
                 .ok_or_else(|| invalid_json("uuid", format!("expected string, got {value}")))?;
-            let uuid = Uuid::parse_str(text)
-                .map_err(|error| invalid_json("uuid", error.to_string()))?;
+            let uuid =
+                Uuid::parse_str(text).map_err(|error| invalid_json("uuid", error.to_string()))?;
             Ok(SortKeyValue::Uuid(uuid))
         }
     }
@@ -138,7 +137,10 @@ fn parse_date_days(value: &Value) -> Result<i32, SortKeyError> {
         return i32::try_from(n).map_err(|error| invalid_json("date", error.to_string()));
     }
     let text = value.as_str().ok_or_else(|| {
-        invalid_json("date", format!("expected integer or date string, got {value}"))
+        invalid_json(
+            "date",
+            format!("expected integer or date string, got {value}"),
+        )
     })?;
     let date = NaiveDate::parse_from_str(text, "%Y-%m-%d")
         .map_err(|error| invalid_json("date", format!("invalid date `{text}`: {error}")))?;

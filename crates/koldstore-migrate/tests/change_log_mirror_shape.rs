@@ -44,14 +44,10 @@ fn mirror_preserves_single_column_primary_key_shape() {
 fn configured_segment_order_adds_non_null_order_key() {
     let source = QualifiedTableName::parse("public.messages").unwrap();
     let shape = PrimaryKeyShape::new(vec![pk_column("id", 1, 20, "bigint", -1)]).unwrap();
-    let sql = mirror::plan_change_log_mirror_with_order_column(
-        &source,
-        &shape,
-        Some("created_at"),
-    )
-    .unwrap()
-    .create_table
-    .sql;
+    let sql = mirror::plan_change_log_mirror_with_order_column(&source, &shape, Some("created_at"))
+        .unwrap()
+        .create_table
+        .sql;
 
     assert!(sql.contains("\"order_key\" bytea NOT NULL"));
 }

@@ -13,7 +13,6 @@ use koldstore_storage::{
 };
 use uuid::Uuid;
 
-use crate::segment_catalog::indexed_column_stats_json;
 use crate::stats::FlushStats;
 use crate::write::FlushWriteChunk;
 
@@ -33,8 +32,6 @@ pub struct WrittenFlushSegment {
     pub checksum: String,
     /// Optional object-store etag from publish.
     pub object_etag: Option<String>,
-    /// Column stats JSON stored in `koldstore.cold_segments`.
-    pub column_stats: serde_json::Value,
     /// Original JSON bounds awaiting catalog type resolution and Sort Key encoding.
     pub indexed_bounds:
         std::collections::BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
@@ -134,7 +131,6 @@ pub fn write_flush_segment_with_client(
     let published = publish_immutable_object(client, &temp_key, &object_path, bytes)
         .map_err(|error| error.to_string())?;
 
-    let column_stats = indexed_column_stats_json(&chunk.indexed_bounds);
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
     let catalog_row = CatalogManifestSegmentRow {
         object_path: object_path.clone(),
@@ -146,7 +142,7 @@ pub fn write_flush_segment_with_client(
         row_count: chunk_stats.row_count,
         byte_size,
         schema_version,
-        column_stats: column_stats.clone(),
+        index_bounds: Vec::new(),
     };
 
     Ok(WrittenFlushSegment {
@@ -155,7 +151,6 @@ pub fn write_flush_segment_with_client(
         byte_size,
         checksum: published.checksum,
         object_etag: published.etag,
-        column_stats,
         indexed_bounds: chunk.indexed_bounds.clone(),
         catalog_row,
     })

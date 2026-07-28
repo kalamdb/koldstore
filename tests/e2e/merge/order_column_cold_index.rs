@@ -62,7 +62,10 @@ async fn order_column_range_shapes_use_cold_segment_index() -> Result<()> {
                 OR payload = 'never'"
         );
         let or_count: i64 = db.client.query_one(&unsupported_or, &[]).await?.get(0);
-        anyhow::ensure!(or_count == 1200, "OR fallback must stay correct, got {or_count}");
+        anyhow::ensure!(
+            or_count == 1200,
+            "OR fallback must stay correct, got {or_count}"
+        );
         let or_plan = common::explain_analyze(&db.client, &unsupported_or).await?;
         anyhow::ensure!(
             or_plan.contains("Segment Index Lookup Shape: all_active")
@@ -75,6 +78,27 @@ async fn order_column_range_shapes_use_cold_segment_index() -> Result<()> {
                 "ALTER TABLE {relation} RENAME COLUMN event_time TO occurred_at;"
             ))
             .await?;
+        db.client
+            .batch_execute(&format!(
+                r#"
+                INSERT INTO {relation} (id, occurred_at, payload)
+                VALUES (99999, timestamptz '2025-06-01 00:00:00+00', 'after-rename');
+                "#
+            ))
+            .await?;
+        common::fence_selected_mirror(&db.client).await?;
+        let renamed_row: i64 = db
+            .client
+            .query_one(
+                &format!("SELECT count(*) FROM {relation} WHERE id = 99999"),
+                &[],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(
+            renamed_row == 1,
+            "DML after order-column rename must be visible, got {renamed_row}"
+        );
         let after_rename: i64 = db
             .client
             .query_one(
@@ -87,8 +111,8 @@ async fn order_column_range_shapes_use_cold_segment_index() -> Result<()> {
             .await?
             .get(0);
         anyhow::ensure!(
-            after_rename == 1200,
-            "rename must keep order-column identity, got {after_rename}"
+            after_rename == 1201,
+            "rename must keep order-column identity and accept new DML, got {after_rename}"
         );
     }
     Ok(())
@@ -155,10 +179,7 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
         );
         let before: Vec<u8> = db
             .client
-            .query_one(
-                &format!("SELECT order_key FROM {mirror} WHERE id = 1"),
-                &[],
-            )
+            .query_one(&format!("SELECT order_key FROM {mirror} WHERE id = 1"), &[])
             .await?
             .get(0);
         anyhow::ensure!(!before.is_empty(), "async insert must encode order_key");
@@ -170,10 +191,7 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
 
         let after: Vec<u8> = db
             .client
-            .query_one(
-                &format!("SELECT order_key FROM {mirror} WHERE id = 1"),
-                &[],
-            )
+            .query_one(&format!("SELECT order_key FROM {mirror} WHERE id = 1"), &[])
             .await?
             .get(0);
         anyhow::ensure!(

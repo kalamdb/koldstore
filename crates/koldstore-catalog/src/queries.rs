@@ -422,29 +422,44 @@ fn plan_cold_segments_for_manifest_json_with_statuses(
     status_in_list: &str,
 ) -> SqlResult<SqlStatement> {
     // status_in_list is a trusted internal fragment ('active' or "pending', 'active").
+    // column_stats for export are derived from cold_segment_index — not stored on
+    // cold_segments — so object-store manifests stay aligned with query prune.
     SqlStatement::read_with_params(
         "resolve cold segments for manifest",
         &format!(
             r#"
 SELECT COALESCE(jsonb_agg(
     jsonb_build_object(
-        'object_path', object_path,
-        'batch_number', batch_number,
-        'min_seq', min_seq,
-        'max_seq', max_seq,
-        'min_commit_seq', min_commit_seq,
-        'max_commit_seq', max_commit_seq,
-        'row_count', row_count,
-        'byte_size', byte_size,
-        'schema_version', schema_version,
-        'column_stats', column_stats
+        'object_path', cs.object_path,
+        'batch_number', cs.batch_number,
+        'min_seq', cs.min_seq,
+        'max_seq', cs.max_seq,
+        'min_commit_seq', cs.min_commit_seq,
+        'max_commit_seq', cs.max_commit_seq,
+        'row_count', cs.row_count,
+        'byte_size', cs.byte_size,
+        'schema_version', cs.schema_version,
+        'index_bounds', (
+            SELECT COALESCE(jsonb_agg(
+                jsonb_build_object(
+                    'column_id', i.column_id,
+                    'type_oid', i.type_oid::bigint,
+                    'codec_version', i.codec_version,
+                    'min_value', encode(i.min_value, 'hex'),
+                    'max_value', encode(i.max_value, 'hex')
+                )
+                ORDER BY i.column_id
+            ), '[]'::jsonb)
+            FROM koldstore.cold_segment_index i
+            WHERE i.segment_id = cs.segment_id
+        )
     )
-    ORDER BY batch_number, segment_id
+    ORDER BY cs.batch_number, cs.segment_id
 )::text, '[]')
-FROM koldstore.cold_segments
-WHERE table_oid = $1::oid
-  AND scope_key = ''
-  AND status IN ('{status_in_list}')
+FROM koldstore.cold_segments cs
+WHERE cs.table_oid = $1::oid
+  AND cs.scope_key = ''
+  AND cs.status IN ('{status_in_list}')
 "#
         ),
         [SqlParamType::Oid],
@@ -510,7 +525,7 @@ mod tests {
     use super::{
         plan_async_managed_relation_by_oid, plan_cold_segment_candidates_closed_range,
         plan_cold_segment_candidates_lower_bound, plan_cold_segment_candidates_upper_bound,
-        plan_in_sync_manifest_scan_context,
+        plan_in_sync_manifest_scan_context, plan_publishable_cold_segments_for_manifest_json,
     };
     use koldstore_common::SqlParamType;
 
@@ -606,12 +621,24 @@ mod tests {
     fn async_managed_relation_projects_primary_key_names() {
         let statement = plan_async_managed_relation_by_oid().unwrap();
         assert!(statement.sql.contains("jsonb_agg(elem->>'name'"));
-        assert!(statement.sql.contains("jsonb_array_elements(s.primary_key)"));
+        assert!(statement
+            .sql
+            .contains("jsonb_array_elements(s.primary_key)"));
         assert!(!statement.sql.contains("'primary_key', s.primary_key"));
         assert!(
             statement.sql.contains("a.atttypid"),
             "order-column type must come from pg_attribute, not missing columns.type_oid"
         );
         assert!(!statement.sql.contains("c->>'type_oid'"));
+    }
+
+    #[test]
+    fn publishable_manifest_rows_join_cold_segment_index() {
+        let statement = plan_publishable_cold_segments_for_manifest_json().unwrap();
+        assert!(statement.sql.contains("koldstore.cold_segment_index"));
+        assert!(statement.sql.contains("'index_bounds'"));
+        assert!(statement.sql.contains("encode(i.min_value, 'hex')"));
+        assert!(!statement.sql.contains("'column_stats'"));
+        assert!(!statement.sql.contains("cs.column_stats"));
     }
 }

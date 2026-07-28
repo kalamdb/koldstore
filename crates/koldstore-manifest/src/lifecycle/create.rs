@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 
-use crate::model::{FilesState, Manifest};
+use crate::model::{FilesState, Manifest, MANIFEST_VERSION};
 
 impl Manifest {
     /// Creates a shared-table manifest.
@@ -33,7 +33,7 @@ impl Manifest {
         schema_version: u32,
     ) -> Self {
         Self {
-            version: 1,
+            version: MANIFEST_VERSION,
             table: table.into(),
             namespace: Some(namespace.into()),
             scope_id,
@@ -42,6 +42,7 @@ impl Manifest {
             max_commit_seq: 0,
             updated_at: Utc::now(),
             publish: None,
+            shards: Vec::new(),
             segments: Vec::new(),
             files: FilesState::default(),
         }

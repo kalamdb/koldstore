@@ -38,8 +38,9 @@ leaf for migrate/merge). Catalog owns cold bookkeeping and may *look up*
 `mirror_relation` from `koldstore.schemas`, but does not build mirror upserts.
 
 **Do not merge manifest and catalog.** Catalog is PostgreSQL cold-metadata
-authority; `koldstore-manifest` owns the derived object-store `manifest.json`
-(model, assembly, paths, I/O) and depends on catalog + storage.
+authority; `koldstore-manifest` owns the derived object-store export
+(`manifest.json` root + folder `manifest-shard.json` files: model, assembly,
+paths, I/O) and depends on catalog + storage.
 
 ## Dependency Graph
 

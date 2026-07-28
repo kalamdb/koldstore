@@ -414,3 +414,161 @@ async fn unsupported_alter_table_type_records_error_job_without_pruning_hot_rows
 
     Ok(())
 }
+
+#[tokio::test]
+async fn rename_primary_key_keeps_dml_and_cold_reads_working() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "schema_evolution_pk_rename").await?;
+        let table = db.create_indexed_items_table("pk_rename_items", 8).await?;
+        db.manage_shared(&table.relation, "id").await?;
+        assert_eq!(db.flush_table(&table.relation).await?, 8);
+
+        db.client
+            .batch_execute(&format!(
+                r#"
+                ALTER TABLE {} RENAME COLUMN id TO item_id;
+                INSERT INTO {} (item_id, account_id, title, qty, category)
+                VALUES (100, 1, 'after-pk-rename', 10, 'new');
+                "#,
+                table.relation, table.relation
+            ))
+            .await?;
+        common::fence_selected_mirror(&db.client).await?;
+        assert_eq!(db.flush_table(&table.relation).await?, 1);
+
+        let schema = db
+            .client
+            .query_one(
+                r#"
+                SELECT version,
+                       (
+                         SELECT c->>'name'
+                         FROM jsonb_array_elements(primary_key) AS c
+                         LIMIT 1
+                       ) AS pk_name,
+                       (
+                         SELECT c->>'column_id'
+                         FROM jsonb_array_elements(primary_key) AS c
+                         LIMIT 1
+                       ) AS pk_column_id
+                FROM koldstore.schemas
+                WHERE table_oid = $1::text::regclass::oid
+                  AND active
+                "#,
+                &[&table.relation],
+            )
+            .await?;
+        assert!(schema.get::<_, i32>(0) >= 2);
+        assert_eq!(schema.get::<_, String>(1), "item_id");
+        assert_eq!(schema.get::<_, String>(2), "1");
+
+        let mirror = common::change_log_mirror_relation(&table.relation);
+        let mirror_table = mirror.rsplit('.').next().unwrap_or(mirror.as_str());
+        let mirror_has_new_pk: bool = db
+            .client
+            .query_one(
+                "SELECT EXISTS (
+                   SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'koldstore'
+                     AND table_name = $1
+                     AND column_name = 'item_id'
+                 )",
+                &[&mirror_table],
+            )
+            .await?
+            .get(0);
+        assert!(
+            mirror_has_new_pk,
+            "mirror PK column must rename with the source PK"
+        );
+
+        let rows = db
+            .client
+            .query(
+                &format!(
+                    "SELECT item_id, title FROM {} WHERE item_id IN (1, 100) ORDER BY item_id",
+                    table.relation
+                ),
+                &[],
+            )
+            .await?;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get::<_, i64>(0), 1);
+        assert_eq!(rows[1].get::<_, i64>(0), 100);
+        assert_eq!(rows[1].get::<_, String>(1), "after-pk-rename");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rename_scope_column_keeps_rls_and_catalog_name_current() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "schema_evolution_scope_rename").await?;
+        let table = db.create_user_notes_table("scope_rename_notes").await?;
+        db.manage_user_scoped(&table.relation, "user_id").await?;
+
+        db.client
+            .batch_execute(&format!(
+                r#"
+                SET koldstore.user_id = 'user-a';
+                ALTER TABLE {} RENAME COLUMN user_id TO owner_id;
+                INSERT INTO {} (id, owner_id, title, body)
+                VALUES (4, 'user-a', 'gamma', 'after-rename');
+                "#,
+                table.relation, table.relation
+            ))
+            .await?;
+        common::fence_selected_mirror(&db.client).await?;
+
+        let schema = db
+            .client
+            .query_one(
+                r#"
+                SELECT scope_column,
+                       (options->>'scope_column_id')::smallint AS scope_column_id
+                FROM koldstore.schemas
+                WHERE table_oid = $1::text::regclass::oid
+                  AND active
+                "#,
+                &[&table.relation],
+            )
+            .await?;
+        assert_eq!(
+            schema.get::<_, Option<String>>(0).as_deref(),
+            Some("owner_id")
+        );
+        assert_eq!(schema.get::<_, i16>(1), 2);
+
+        let policy = db
+            .client
+            .query_one(
+                r#"
+                SELECT qual
+                FROM pg_policies
+                WHERE schemaname = $1
+                  AND tablename = $2
+                  AND policyname = 'koldstore_user_scope_fail_closed'
+                "#,
+                &[&db.schema, &table.table_name],
+            )
+            .await?;
+        let qual: String = policy.get(0);
+        assert!(
+            qual.contains("owner_id"),
+            "RLS policy must reference renamed scope column, got {qual}"
+        );
+
+        let inserted: i64 = db
+            .client
+            .query_one(
+                &format!("SELECT count(*) FROM {} WHERE id = 4", table.relation),
+                &[],
+            )
+            .await?
+            .get(0);
+        assert_eq!(inserted, 1, "insert after scope rename must succeed");
+    }
+
+    Ok(())
+}

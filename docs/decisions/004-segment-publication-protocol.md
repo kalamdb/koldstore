@@ -34,7 +34,8 @@ belongs in PostgreSQL; object-store `manifest.json` is a derived export.
    1. Encode Parquet; publish immutable object (temp → create → byte verify)
    2. Hash payload once (sha256 over the encode buffer); persist `checksum` +
       `object_etag` with `INSERT … status = 'pending'`
-   3. Write derived `manifest.json`
+   3. Write derived folder-sharded object export (`manifest.json` root +
+      `{folder}/manifest-shard.json`)
    4. CAS `manifest.generation` (`bigint`) and `UPDATE` pending → `active` for
       this flush’s segment ids in one catalog step
    5. Only then prune hot/mirror rows
@@ -57,6 +58,11 @@ belongs in PostgreSQL; object-store `manifest.json` is a derived export.
 - Call sites that assumed UUID text generations must use `u64` / `bigint`.
 - Failpoints `after_pending_segment` / `after_checksum_metadata` /
   `before_activate` align with real protocol phases.
+- Object-store export is folder-sharded only (thin root + per-folder shard
+  files). There is no monolithic root segment list. Query prune continues to use
+  PostgreSQL catalog only.
+- Root shard references include a content SHA-256. Flush rewrites only shards
+  whose derived catalog content changed, then atomically replaces the root last.
 
 ## Alternatives Considered
 

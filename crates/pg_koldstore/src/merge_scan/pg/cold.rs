@@ -2,8 +2,8 @@
 
 use std::time::Instant;
 
-use koldstore_common::{ColdRow, ColumnId, ColumnRef};
 use koldstore_catalog::{preferred_segment_index_access, SegmentIndexLookupShape};
+use koldstore_common::{ColdRow, ColumnId, ColumnRef};
 use koldstore_merge::scan::plan::{
     retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
     ColdPruneColumnPolicy, SegmentPrunePredicate, SegmentStatsHint,
@@ -108,10 +108,10 @@ pub(super) fn load_cold_rows_for_merge(
         let segment_index_lookup_ms = indexed_candidates
             .as_ref()
             .map(|_| elapsed_ms(index_started));
-        let segment_index_candidate_segments =
-            indexed_candidates.as_ref().map(|candidates| candidates.len());
-        let segments = indexed_candidates
-            .unwrap_or_else(|| manifest_stats.segments.clone());
+        let segment_index_candidate_segments = indexed_candidates
+            .as_ref()
+            .map(|candidates| candidates.len());
+        let segments = indexed_candidates.unwrap_or_else(|| manifest_stats.segments.clone());
         let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
 
         let projection = projection_columns
@@ -259,11 +259,17 @@ fn load_segment_index_candidates(
     table_oid: pg_sys::Oid,
     column: &koldstore_migrate::order::CatalogColumn,
     predicates: &[SegmentPrunePredicate],
-) -> Result<(Option<Vec<SegmentStatsHint>>, SegmentIndexLookupShape, Option<String>), String> {
+) -> Result<
+    (
+        Option<Vec<SegmentStatsHint>>,
+        SegmentIndexLookupShape,
+        Option<String>,
+    ),
+    String,
+> {
     use pgrx::datum::DatumWithOid;
 
-    let Some(sort_type) =
-        koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+    let Some(sort_type) = koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
     else {
         return Ok((None, SegmentIndexLookupShape::AllActive, None));
     };
@@ -533,11 +539,11 @@ fn cold_rows_from_segments(
         if let Some((pk_column, values)) = &pk_probe {
             let physical_pk = physical_name_for_segment(pk_column, hint, current_schema_version)?
                 .ok_or_else(|| {
-                    format!(
-                        "schema version {} is missing primary-key column_id {}",
-                        hint.schema_version, pk_column.column_id
-                    )
-                })?;
+                format!(
+                    "schema version {} is missing primary-key column_id {}",
+                    hint.schema_version, pk_column.column_id
+                )
+            })?;
             options = options.with_pk_values(physical_pk, values.clone());
         }
         let started = Instant::now();

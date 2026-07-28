@@ -44,6 +44,41 @@ impl MirrorSchemaPlan {
     }
 }
 
+/// Plans `ALTER TABLE … RENAME COLUMN` statements for mirror primary-key columns.
+///
+/// Used after a managed source table renames PK attributes so the `__cl` mirror
+/// storage column names stay aligned with capture/apply SQL.
+///
+/// # Errors
+///
+/// Returns an error when a rename uses an unsafe identifier.
+pub fn plan_mirror_pk_column_renames(
+    mirror_table: &MirrorRelation,
+    renames: &[(String, String)],
+) -> MirrorResult<Vec<MirrorStatement>> {
+    let quoted_mirror = mirror_table.quoted();
+    let mut statements = Vec::with_capacity(renames.len());
+    for (old_name, new_name) in renames {
+        if old_name == new_name {
+            continue;
+        }
+        if !is_safe_identifier(old_name) || !is_safe_identifier(new_name) {
+            return Err(MirrorError::InvalidColumn(format!(
+                "{old_name} -> {new_name}"
+            )));
+        }
+        statements.push(MirrorStatement::write(
+            "rename change-log mirror primary-key column",
+            format!(
+                "ALTER TABLE {quoted_mirror} RENAME COLUMN {} TO {}",
+                quote_ident(old_name),
+                quote_ident(new_name)
+            ),
+        ));
+    }
+    Ok(statements)
+}
+
 /// Plans primitive mirror table storage statements.
 ///
 /// # Errors

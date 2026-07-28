@@ -672,14 +672,13 @@ fn push_change(
     if operation != MirrorOperation::Delete {
         if let Some(order) = config.order_column.as_ref() {
             let text = order_column_text(relation, order, tuple)?;
-            let ty = koldstore_sortkey::SortKeyType::from_type_oid(order.type_oid).ok_or_else(
-                || {
+            let ty =
+                koldstore_sortkey::SortKeyType::from_type_oid(order.type_oid).ok_or_else(|| {
                     format!(
                         "segment order column {} has unsupported type OID {}",
                         order.name, order.type_oid
                     )
-                },
-            )?;
+                })?;
             let encoded = koldstore_sortkey::encode_sort_key_pg_text(ty, &text)
                 .map_err(|error| error.to_string())?;
             row.insert(
@@ -858,10 +857,7 @@ fn order_column_text(
         .get(relation_index)
         .ok_or_else(|| format!("tuple omits segment order column {}", order.name))?;
     match value {
-        PgOutputValue::Null => Err(format!(
-            "segment order column {} is NULL",
-            order.name
-        )),
+        PgOutputValue::Null => Err(format!("segment order column {} is NULL", order.name)),
         PgOutputValue::UnchangedToast => Err(format!(
             "segment order column {} was emitted as unchanged TOAST",
             order.name
@@ -973,8 +969,7 @@ fn apply_batch(
         .collect();
     let mut seqs = Vec::with_capacity(rows.len());
     let need_order_keys = include_order_key && operation != MirrorOperation::Delete;
-    let mut order_keys =
-        need_order_keys.then(|| Vec::<Vec<u8>>::with_capacity(rows.len()));
+    let mut order_keys = need_order_keys.then(|| Vec::<Vec<u8>>::with_capacity(rows.len()));
     for row in rows {
         let object = row
             .as_object()

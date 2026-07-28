@@ -314,7 +314,6 @@ pub(super) fn persist_flush_segments_batch(
     let mut row_counts = Vec::with_capacity(segments.len());
     let mut byte_sizes = Vec::with_capacity(segments.len());
     let mut schema_versions = Vec::with_capacity(segments.len());
-    let mut column_stats = Vec::with_capacity(segments.len());
     let mut checksums = Vec::with_capacity(segments.len());
     let mut object_etags = Vec::with_capacity(segments.len());
     let mut index_segment_ids = Vec::new();
@@ -336,7 +335,6 @@ pub(super) fn persist_flush_segments_batch(
         row_counts.push(row.row_count);
         byte_sizes.push(row.byte_size);
         schema_versions.push(row.schema_version);
-        column_stats.push(pgrx::JsonB(row.column_stats.clone()));
         checksums.push(segment.checksum.clone());
         object_etags.push(segment.object_etag.clone().unwrap_or_default());
         for bound in encode_indexed_column_bounds(&segment.indexed_bounds, &column_type_oids)
@@ -366,7 +364,6 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(row_counts),
             DatumWithOid::from(byte_sizes),
             DatumWithOid::from(schema_versions),
-            DatumWithOid::from(column_stats),
             DatumWithOid::from(checksums),
             DatumWithOid::from(object_etags),
             DatumWithOid::from(index_segment_ids),

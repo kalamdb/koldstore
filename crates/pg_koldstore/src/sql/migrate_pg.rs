@@ -134,20 +134,22 @@ fn manage_table_pg_impl(
 
     let has_existing_rows = table_has_rows(&empty_plan.table)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let order_column_name = request.options.segment_order_column_id.and_then(|column_id| {
-        registry_catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id.get() == column_id)
-            .map(|column| column.name.as_str())
-    });
-    let mirror_plan =
-        koldstore_migrate::plan_change_log_mirror_with_order_column(
-            &empty_plan.table,
-            &primary_key_shape,
-            order_column_name,
-        )
-            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let order_column_name = request
+        .options
+        .segment_order_column_id
+        .and_then(|column_id| {
+            registry_catalog
+                .columns
+                .iter()
+                .find(|column| column.column_id.get() == column_id)
+                .map(|column| column.name.as_str())
+        });
+    let mirror_plan = koldstore_migrate::plan_change_log_mirror_with_order_column(
+        &empty_plan.table,
+        &primary_key_shape,
+        order_column_name,
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     if !has_existing_rows {
         for statement in mirror_plan.create_statements() {
             pgrx::Spi::run(&statement.sql)
@@ -444,7 +446,9 @@ fn manage_table_validation_context<'a>(
                 .iter()
                 .find(|column| column.name == name)
                 .unwrap_or_else(|| {
-                    pgrx::error!("migrate table failed: segment order column `{name}` does not exist")
+                    pgrx::error!(
+                        "migrate table failed: segment order column `{name}` does not exist"
+                    )
                 });
             koldstore_migrate::manage_table::SegmentOrderColumnInput {
                 column_id: column.column_id.get(),
@@ -647,7 +651,12 @@ pub(crate) fn refresh_active_schema_if_changed(
         &catalog,
         &primary_key_shape,
     )?;
-    crate::catalog::cache::invalidate_table(table_oid);
+    // Make the new schemas row visible to subsequent SPI in this command.
+    unsafe {
+        pgrx::pg_sys::CommandCounterIncrement();
+    }
+    sync_runtime_artifacts_after_schema_refresh(table_oid, &active, &catalog, &primary_key_shape)?;
+    crate::catalog::cache::invalidate_table_globally(table_oid);
     crate::spi::invalidate_all_prepared_plans();
     Ok(true)
 }
@@ -684,6 +693,86 @@ fn insert_refreshed_schema_version(
     crate::spi::update(&refresh.deactivate, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?;
     execute_schema_registry_insert(&refresh.insert)?;
+    Ok(())
+}
+
+/// Rebuilds rename-sensitive runtime artifacts after a schema version bump.
+///
+/// Mirror PK column names, strict capture SQL, user-scope RLS, and async
+/// publication column lists are name-bound at creation time. After a source
+/// rename they must be rewritten from the live catalog so DML and flush keep
+/// working without operator intervention.
+#[cfg(feature = "pg")]
+fn sync_runtime_artifacts_after_schema_refresh(
+    table_oid: pgrx::pg_sys::Oid,
+    active: &koldstore_migrate::ActiveSchemaRefreshContext,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    primary_key_shape: &koldstore_common::PrimaryKeyShape,
+) -> Result<(), String> {
+    use koldstore_common::{ManageTableOptions, MirrorCaptureMode};
+    use koldstore_migrate::{
+        primary_key_renames, resolve_scope_column_name, runtime_artifacts_need_sync,
+        QualifiedTableName,
+    };
+    use koldstore_mirror::MirrorRelation;
+
+    let options: ManageTableOptions =
+        serde_json::from_value(active.options.clone()).unwrap_or_default();
+    if !runtime_artifacts_need_sync(active, catalog, &options) {
+        return Ok(());
+    }
+
+    let source_name = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+    let source = QualifiedTableName::parse(&source_name).map_err(|error| error.to_string())?;
+    let mirror =
+        QualifiedTableName::parse(&active.mirror_relation).map_err(|error| error.to_string())?;
+    let mirror_storage =
+        MirrorRelation::new(mirror.as_table_name().map_err(|error| error.to_string())?);
+
+    let renames = primary_key_renames(active, catalog);
+    if !renames.is_empty() {
+        let statements = koldstore_mirror::plan_mirror_pk_column_renames(&mirror_storage, &renames)
+            .map_err(|error| error.to_string())?;
+        for statement in statements {
+            pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+        }
+        unsafe {
+            pgrx::pg_sys::CommandCounterIncrement();
+        }
+    }
+
+    let order_column_name = options.segment_order_column_id.and_then(|column_id| {
+        catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id.get() == column_id)
+            .map(|column| column.name.as_str())
+    });
+    let capture = koldstore_mirror::plan_mirror_capture_with_order_column(
+        &source,
+        &mirror,
+        primary_key_shape.columns(),
+        order_column_name,
+    )
+    .map_err(|error| error.to_string())?;
+    pgrx::Spi::run(&capture.drop_triggers.sql).map_err(|error| error.to_string())?;
+    for statement in capture.create_statements() {
+        pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+    }
+
+    let scope_column = resolve_scope_column_name(active, catalog, &options);
+    apply_user_scope_policy(&source, scope_column.as_deref())?;
+
+    let capture_mode = options.mirror_capture_mode();
+    if capture_mode == MirrorCaptureMode::Async {
+        crate::async_mirror::lifecycle::activate_table(
+            capture_mode,
+            &source,
+            &mirror,
+            primary_key_shape,
+            order_column_name,
+        )?;
+    }
     Ok(())
 }
 

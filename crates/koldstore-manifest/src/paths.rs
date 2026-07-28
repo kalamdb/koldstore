@@ -67,6 +67,9 @@ pub fn segment_object_path(prefix: &str, batch_number: i32, path_token: impl AsR
     )
 }
 
+/// File name for a folder shard document.
+pub const MANIFEST_SHARD_FILE_NAME: &str = "manifest-shard.json";
+
 /// Relative manifest path under the table prefix (`…/manifest.json`).
 #[must_use]
 pub fn relative_manifest_path(namespace: &str, table_name: &str) -> String {
@@ -74,6 +77,48 @@ pub fn relative_manifest_path(namespace: &str, table_name: &str) -> String {
         "{}/manifest.json",
         table_object_prefix(namespace, table_name)
     )
+}
+
+/// Table-relative shard path for a numeric folder (`001/manifest-shard.json`).
+#[must_use]
+pub fn relative_manifest_shard_path_for_folder(folder: u32) -> String {
+    format!("{folder:03}/{MANIFEST_SHARD_FILE_NAME}")
+}
+
+/// Full object key for a folder shard under the table prefix.
+#[must_use]
+pub fn relative_manifest_shard_object_path(
+    namespace: &str,
+    table_name: &str,
+    folder: u32,
+) -> String {
+    format!(
+        "{}/{}",
+        table_object_prefix(namespace, table_name),
+        relative_manifest_shard_path_for_folder(folder)
+    )
+}
+
+/// First path component of a table-relative segment path (`001/segment-….parquet`).
+#[must_use]
+pub(crate) fn folder_from_segment_relative_path(path: &str) -> Option<&str> {
+    let (folder, file_name) = path.split_once('/')?;
+    if parse_folder_name(folder).is_none()
+        || file_name.is_empty()
+        || file_name.contains('/')
+        || file_name == "."
+        || file_name == ".."
+    {
+        return None;
+    }
+    Some(folder)
+}
+
+/// Parses a zero-padded folder name (`001`) into its numeric folder id.
+#[must_use]
+pub(crate) fn parse_folder_name(folder: &str) -> Option<u32> {
+    let number = folder.parse::<u32>().ok()?;
+    (number > 0 && folder == format!("{number:03}")).then_some(number)
 }
 
 /// Relative and absolute manifest paths for a managed table.
@@ -121,5 +166,23 @@ mod tests {
             segment_object_path("app/items", 101, &token),
             "app/items/002/segment-0101-11111111.parquet"
         );
+    }
+
+    #[test]
+    fn shard_paths_and_folder_parse() {
+        assert_eq!(
+            relative_manifest_shard_path_for_folder(1),
+            "001/manifest-shard.json"
+        );
+        assert_eq!(
+            relative_manifest_shard_object_path("app", "items", 2),
+            "app/items/002/manifest-shard.json"
+        );
+        assert_eq!(
+            folder_from_segment_relative_path("001/segment-0001-aaaaaaaa.parquet"),
+            Some("001")
+        );
+        assert_eq!(parse_folder_name("002"), Some(2));
+        assert_eq!(folder_from_segment_relative_path("segment.parquet"), None);
     }
 }

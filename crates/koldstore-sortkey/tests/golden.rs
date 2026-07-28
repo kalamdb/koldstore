@@ -73,7 +73,10 @@ fn date_and_timestamptz_epoch_boundaries() {
     let ts_before = encode_sort_key(&SortKeyValue::Timestamptz(-1)).unwrap();
     let ts_after = encode_sort_key(&SortKeyValue::Timestamptz(1)).unwrap();
     assert!(ts_before < ts_epoch && ts_epoch < ts_after);
-    assert_eq!(ts_epoch, encode_sort_key(&SortKeyValue::Timestamp(0)).unwrap());
+    assert_eq!(
+        ts_epoch,
+        encode_sort_key(&SortKeyValue::Timestamp(0)).unwrap()
+    );
 }
 
 #[test]
@@ -115,8 +118,7 @@ fn pg_text_helpers_match_typed_encoding() {
         encode_sort_key(&SortKeyValue::Int8(42)).unwrap()
     );
     assert_eq!(
-        encode_sort_key_pg_text(SortKeyType::Uuid, "550e8400-e29b-41d4-a716-446655440000")
-            .unwrap(),
+        encode_sort_key_pg_text(SortKeyType::Uuid, "550e8400-e29b-41d4-a716-446655440000").unwrap(),
         encode_sort_key(&SortKeyValue::Uuid(
             Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()
         ))

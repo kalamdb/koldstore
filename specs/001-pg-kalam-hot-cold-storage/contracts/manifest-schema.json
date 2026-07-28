@@ -1,20 +1,31 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://pg-koldstore.dev/schemas/manifest-v1.json",
-  "title": "kalamdb-compatible manifest.json",
-  "description": "Cold storage manifest on object storage. This is the visibility boundary for committed Parquet segments and FILE state. Temporary or final objects not referenced here are not visible to queries.",
+  "$id": "https://pg-koldstore.dev/schemas/manifest-root.json",
+  "title": "Folder-sharded object-store manifest root",
+  "description": "Thin root manifest.json. Segment bodies live in per-folder manifest-shard.json files listed by shards[]. Temporary or final objects not referenced by an active catalog row are not queryable; this export is derived for recovery/EXPORT tooling.",
   "type": "object",
-  "required": ["version", "table", "segments", "files"],
+  "required": [
+    "version",
+    "table",
+    "namespace",
+    "scope_id",
+    "schema_version",
+    "max_seq",
+    "max_commit_seq",
+    "updated_at",
+    "shards",
+    "files"
+  ],
   "properties": {
     "version": {
       "type": "integer",
-      "minimum": 1
+      "const": 1
     },
     "table": {
       "type": "string"
     },
     "namespace": {
-      "type": "string"
+      "type": ["string", "null"]
     },
     "scope_id": {
       "type": ["string", "null"],
@@ -39,27 +50,30 @@
     "publish": {
       "$ref": "#/$defs/publishState"
     },
-    "segments": {
+    "shards": {
       "type": "array",
       "items": {
-        "$ref": "#/$defs/segment"
+        "$ref": "#/$defs/shardRef"
       }
     },
     "files": {
       "$ref": "#/$defs/filesState"
-    },
-    "vector_indexes": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/vectorIndex"
-      },
-      "description": "Placeholder for kalamdb parity; out of MVP scope for pg-koldstore"
     }
   },
+  "not": {
+    "required": ["segments"],
+    "properties": {
+      "segments": {
+        "type": "array",
+        "minItems": 1
+      }
+    }
+  },
+  "additionalProperties": false,
   "$defs": {
     "publishState": {
       "type": "object",
-      "description": "Backend-specific manifest identity and publish metadata. Do not assume atomic object-store rename.",
+      "description": "Backend-specific manifest identity and publish metadata.",
       "properties": {
         "generation": { "type": "string" },
         "etag": { "type": "string" },
@@ -67,106 +81,40 @@
         "writer_id": { "type": "string" }
       }
     },
-    "segment": {
+    "shardRef": {
       "type": "object",
       "required": [
-        "batch",
+        "folder",
         "path",
+        "content_sha256",
+        "segment_count",
         "min_seq",
         "max_seq",
         "min_commit_seq",
-        "max_commit_seq",
-        "row_count",
-        "schema_version"
+        "max_commit_seq"
       ],
       "properties": {
-        "batch": {
-          "type": "integer",
-          "minimum": 0
+        "folder": {
+          "type": "string",
+          "description": "Zero-padded folder name, for example 001"
         },
         "path": {
           "type": "string",
-          "description": "Relative path, for example batch-0.parquet"
+          "description": "Table-relative shard path, for example 001/manifest-shard.json"
         },
-        "temp_path": {
+        "content_sha256": {
           "type": "string",
-          "description": "Optional temp path retained only for diagnostics/recovery"
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the exact shard JSON bytes"
         },
-        "min_seq": {
-          "type": "integer"
-        },
-        "max_seq": {
-          "type": "integer"
-        },
-        "min_commit_seq": {
-          "type": "integer"
-        },
-        "max_commit_seq": {
-          "type": "integer"
-        },
-        "row_count": {
+        "segment_count": {
           "type": "integer",
           "minimum": 0
         },
-        "byte_size": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "schema_version": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "compression": {
-          "type": "string",
-          "enum": ["none", "snappy", "zstd"],
-          "default": "snappy"
-        },
-        "column_stats": {
-          "type": "object",
-          "description": "Per-column min/max keyed by stringified stable column_id. Must include PK, _seq, _commit_seq, and configured indexed/immutable columns when supported.",
-          "additionalProperties": {
-            "type": "object",
-            "properties": {
-              "min": {},
-              "max": {}
-            }
-          }
-        },
-        "pk_filter": {
-          "$ref": "#/$defs/pkFilter"
-        },
-        "status": {
-          "type": "string",
-          "enum": ["committed", "compacted", "deleted"],
-          "default": "committed"
-        },
-        "checksum": {
-          "type": "string"
-        },
-        "etag": {
-          "type": "string"
-        },
-        "created_at": {
-          "type": "string",
-          "format": "date-time"
-        }
-      }
-    },
-    "pkFilter": {
-      "type": "object",
-      "description": "Optional local or Parquet-backed primary-key may-contain metadata.",
-      "properties": {
-        "kind": {
-          "type": "string",
-          "enum": ["none", "exact", "bloom", "range"]
-        },
-        "column_ids": {
-          "type": "array",
-          "items": { "type": "integer" }
-        },
-        "false_positive_rate": {
-          "type": "number"
-        }
+        "min_seq": { "type": "integer" },
+        "max_seq": { "type": "integer" },
+        "min_commit_seq": { "type": "integer" },
+        "max_commit_seq": { "type": "integer" }
       }
     },
     "filesState": {
@@ -188,15 +136,6 @@
           "type": "integer",
           "minimum": 0
         }
-      }
-    },
-    "vectorIndex": {
-      "type": "object",
-      "description": "kalamdb vector index placeholder",
-      "properties": {
-        "name": { "type": "string" },
-        "path": { "type": "string" },
-        "dimensions": { "type": "integer" }
       }
     }
   }

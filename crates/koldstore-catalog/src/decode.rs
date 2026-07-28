@@ -2,6 +2,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::manifest_row::CatalogSegmentIndexBound;
+
 /// PostgreSQL relation identity resolved from `pg_class`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationContext {
@@ -141,9 +143,9 @@ pub fn manifest_scan_segment_stats(
 /// Extracts `{column_id: (min, max)}` pairs from catalog column-stats JSON.
 ///
 /// Keys are canonical stringified PostgreSQL attribute numbers. Entries with a
-/// non-numeric/zero key or missing either bound are skipped. Used by object-store
-/// `manifest.json` assembly / export only — query-time segment prune uses
-/// `koldstore.cold_segment_index`, not this JSON.
+/// non-numeric/zero key or missing either bound are skipped. Prefer
+/// [`column_stats_from_index_bounds`] for live export — this helper remains for
+/// parsing already-decoded JSON maps in tests and legacy fixtures.
 #[must_use]
 pub fn column_stats_min_max_map(
     column_stats: &serde_json::Value,
@@ -192,6 +194,69 @@ pub fn column_stats_min_max_map_into(
         stats.insert(column_id, (min, max));
     }
     stats
+}
+
+/// Decodes Sort Key V1 index rows into the manifest export `{column_id: {min,max}}` map.
+///
+/// Unsupported type OIDs and codec mismatches are skipped. Corrupt hex or Storekey
+/// payloads return an error so export does not silently publish wrong bounds.
+///
+/// # Errors
+///
+/// Returns an error when a bound cannot be hex-decoded or Sort Key-decoded.
+pub fn column_stats_from_index_bounds(
+    bounds: &[CatalogSegmentIndexBound],
+) -> Result<BTreeMap<String, (serde_json::Value, serde_json::Value)>, String> {
+    use koldstore_sortkey::{decode_sort_key, SortKeyType, CODEC_VERSION};
+
+    let mut stats = BTreeMap::new();
+    for bound in bounds {
+        if bound.codec_version != CODEC_VERSION {
+            continue;
+        }
+        let Some(sort_key_type) = SortKeyType::from_type_oid(bound.type_oid) else {
+            continue;
+        };
+        if bound.column_id == 0 {
+            continue;
+        }
+        let min_bytes = decode_hex(&bound.min_value)
+            .map_err(|error| format!("index min_value for column {}: {error}", bound.column_id))?;
+        let max_bytes = decode_hex(&bound.max_value)
+            .map_err(|error| format!("index max_value for column {}: {error}", bound.column_id))?;
+        let min = decode_sort_key(sort_key_type, &min_bytes)
+            .map_err(|error| format!("decode min for column {}: {error}", bound.column_id))?
+            .to_json();
+        let max = decode_sort_key(sort_key_type, &max_bytes)
+            .map_err(|error| format!("decode max for column {}: {error}", bound.column_id))?
+            .to_json();
+        stats.insert(bound.column_id.to_string(), (min, max));
+    }
+    Ok(stats)
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
+    let trimmed = value.trim();
+    if trimmed.len() % 2 != 0 {
+        return Err(format!("odd-length hex string `{trimmed}`"));
+    }
+    let mut bytes = Vec::with_capacity(trimmed.len() / 2);
+    let chars = trimmed.as_bytes();
+    for chunk in chars.chunks(2) {
+        let hi = hex_nibble(chunk[0])?;
+        let lo = hex_nibble(chunk[1])?;
+        bytes.push((hi << 4) | lo);
+    }
+    Ok(bytes)
+}
+
+fn hex_nibble(byte: u8) -> Result<u8, String> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(format!("invalid hex digit `{}`", byte as char)),
+    }
 }
 
 fn canonical_column_id_key(value: &str) -> Option<String> {
@@ -329,6 +394,26 @@ mod tests {
                 .map(String::as_str),
             Some("old_id")
         );
+    }
+
+    #[test]
+    fn column_stats_from_index_bounds_decodes_sort_key_json() {
+        use super::column_stats_from_index_bounds;
+        use crate::manifest_row::CatalogSegmentIndexBound;
+        use koldstore_sortkey::{encode_sort_key_json, SortKeyType, CODEC_VERSION};
+
+        let min = encode_sort_key_json(SortKeyType::Int8, &serde_json::json!(1)).unwrap();
+        let max = encode_sort_key_json(SortKeyType::Int8, &serde_json::json!(10)).unwrap();
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let stats = column_stats_from_index_bounds(&[CatalogSegmentIndexBound {
+            column_id: 1,
+            type_oid: 20,
+            codec_version: CODEC_VERSION,
+            min_value: hex(&min),
+            max_value: hex(&max),
+        }])
+        .unwrap();
+        assert_eq!(stats["1"], (serde_json::json!(1), serde_json::json!(10)));
     }
 
     #[test]

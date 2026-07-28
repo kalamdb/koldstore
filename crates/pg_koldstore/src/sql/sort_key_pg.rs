@@ -33,9 +33,8 @@ pub fn internal_encode_sort_key(value: AnyElement) -> Vec<u8> {
                 .map(|timestamp| SortKeyValue::Timestamp(timestamp.into_inner())),
             1184 => AnyElement::into::<pgrx::datum::TimestampWithTimeZone>(&value)
                 .map(|timestamp| SortKeyValue::Timestamptz(timestamp.into_inner())),
-            2950 => AnyElement::into::<pgrx::datum::Uuid>(&value).map(|uuid| {
-                SortKeyValue::Uuid(uuid::Uuid::from_bytes(*uuid.as_bytes()))
-            }),
+            2950 => AnyElement::into::<pgrx::datum::Uuid>(&value)
+                .map(|uuid| SortKeyValue::Uuid(uuid::Uuid::from_bytes(*uuid.as_bytes()))),
             _ => pgrx::error!("unsupported Sort Key V1 PostgreSQL type OID {type_oid}"),
         }
     }

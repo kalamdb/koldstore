@@ -81,7 +81,10 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     assert!(written.object_path.ends_with(".parquet"));
     assert!(written.byte_size > 0);
     assert_eq!(written.checksum.len(), 64);
-    assert_eq!(written.column_stats, json!({"1": {"min": 1, "max": 5}}));
+    assert_eq!(
+        written.indexed_bounds.get(&ColumnId::from_attnum(1)),
+        Some(&(json!(1), json!(5)))
+    );
     let bytes = client.get(&written.object_path).unwrap();
     assert_eq!(bytes.len() as i64, written.byte_size);
     assert_eq!(

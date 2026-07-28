@@ -29,8 +29,8 @@ pub use ops::*;
 pub use policy::policy_flush_row_count;
 pub use scheduler::{scheduler_should_flush, scheduler_should_flush_parsed};
 pub use segment_catalog::{
-    encode_indexed_column_bounds, indexed_column_stats_json, plan_activate_flush_segments,
-    plan_flush_segments_batch_insert, EncodedColumnBound, SegmentCatalogError,
+    encode_indexed_column_bounds, plan_activate_flush_segments, plan_flush_segments_batch_insert,
+    EncodedColumnBound, SegmentCatalogError,
 };
 pub use segment_write::{
     flush_segment_object_path, write_flush_segment_file, write_flush_segment_with_client,
@@ -53,8 +53,7 @@ pub use table_flush::{
 // Re-export manifest assembly/I/O so existing flush callers keep a stable path.
 pub use koldstore_catalog::CatalogManifestSegmentRow;
 pub use koldstore_manifest::{
-    build_manifest_segment_from_catalog_row, load_manifest_from_path, manifest_from_catalog_rows,
-    write_manifest_to_path,
+    build_manifest_segment_from_catalog_row, manifest_from_catalog_rows, write_manifest_to_path,
 };
 pub use table_jobs::{
     flush_phase, plan_abandon_running_flush_jobs, plan_cancel_jobs_for_drop,

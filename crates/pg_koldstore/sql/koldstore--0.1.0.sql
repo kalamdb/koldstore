@@ -200,8 +200,6 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   row_count bigint NOT NULL,
   byte_size bigint NOT NULL,
   schema_version integer NOT NULL,
-  column_stats jsonb NOT NULL DEFAULT '{}'::jsonb,
-  -- Object-store manifest export only. Query-path prune uses cold_segment_index.
   status text NOT NULL CHECK (status IN ('pending', 'active', 'compacted', 'deleted')),
   -- Object identity from publish (sha256 hex + backend etag). Set at pending insert.
   checksum text,

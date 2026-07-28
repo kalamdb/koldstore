@@ -4,9 +4,7 @@
 //! `koldstore-catalog`. This module owns the pure conversion into the on-disk
 //! manifest model.
 
-use std::collections::BTreeMap;
-
-use koldstore_catalog::{column_stats_min_max_map_into, CatalogManifestSegmentRow};
+use koldstore_catalog::{column_stats_from_index_bounds, CatalogManifestSegmentRow};
 use koldstore_common::ColumnRef;
 use thiserror::Error;
 
@@ -51,6 +49,9 @@ pub fn manifest_from_catalog_rows(
 
 /// Builds one manifest segment from an active cold-segment catalog row.
 ///
+/// Column stats are decoded from `cold_segment_index` rows carried on
+/// [`CatalogManifestSegmentRow::index_bounds`].
+///
 /// # Errors
 ///
 /// Returns an error when segment metadata cannot be converted into manifest form.
@@ -74,7 +75,11 @@ pub fn build_manifest_segment_from_catalog_row(
         u32::try_from(row.schema_version)
             .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?,
     );
-    segment.column_stats = manifest_column_stats(row.column_stats);
+    segment.column_stats = column_stats_from_index_bounds(&row.index_bounds)
+        .map_err(ManifestAssemblyError::InvalidSegment)?
+        .into_iter()
+        .map(|(column, (min, max))| (column, ManifestColumnStats::new(min, max)))
+        .collect();
     if !primary_key_columns.is_empty() {
         let column_ids = primary_key_columns
             .iter()
@@ -100,11 +105,4 @@ pub fn manifest_relative_segment_path(
         .strip_prefix(&prefix)
         .unwrap_or(object_path)
         .to_string()
-}
-
-fn manifest_column_stats(column_stats: serde_json::Value) -> BTreeMap<String, ManifestColumnStats> {
-    column_stats_min_max_map_into(column_stats)
-        .into_iter()
-        .map(|(column, (min, max))| (column, ManifestColumnStats::new(min, max)))
-        .collect()
 }

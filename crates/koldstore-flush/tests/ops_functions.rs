@@ -78,7 +78,7 @@ fn operational_functions_build_parameterized_catalog_plans() {
         .sql
         .contains("cs.scope_key = m.scope_key"));
     assert!(validation.statement.sql.contains("cs.status = 'active'"));
-    assert!(validation.statement.sql.contains("cs.column_stats"));
+    assert!(!validation.statement.sql.contains("cs.column_stats"));
     assert!(!validation.statement.sql.contains("cold_pk_hints"));
 
     let recovery = koldstore_flush::ops::recover_segments_plan(Some(table), false).unwrap();
