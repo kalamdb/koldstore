@@ -36,20 +36,17 @@ fn int8_ordering_and_golden_bytes() {
 
 #[test]
 fn bool_int_and_uuid_round_trips() {
-    assert_eq!(
+    assert!(
         encode_sort_key(&SortKeyValue::Bool(false)).unwrap()
-            < encode_sort_key(&SortKeyValue::Bool(true)).unwrap(),
-        true
+            < encode_sort_key(&SortKeyValue::Bool(true)).unwrap()
     );
-    assert_eq!(
+    assert!(
         encode_sort_key(&SortKeyValue::Int2(-1)).unwrap()
-            < encode_sort_key(&SortKeyValue::Int2(0)).unwrap(),
-        true
+            < encode_sort_key(&SortKeyValue::Int2(0)).unwrap()
     );
-    assert_eq!(
+    assert!(
         encode_sort_key(&SortKeyValue::Int4(-1)).unwrap()
-            < encode_sort_key(&SortKeyValue::Int4(1)).unwrap(),
-        true
+            < encode_sort_key(&SortKeyValue::Int4(1)).unwrap()
     );
 
     let uuid = Uuid::nil();
