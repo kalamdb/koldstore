@@ -125,8 +125,7 @@ pub fn plan_schema_evolution(
     for active_column in input.active_columns {
         let is_pk = input
             .active_primary_key
-            .iter()
-            .any(|pk| *pk == active_column.column_id);
+            .contains(&active_column.column_id);
         let current = input
             .current_columns
             .iter()
