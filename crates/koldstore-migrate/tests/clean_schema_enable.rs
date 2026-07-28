@@ -71,7 +71,7 @@ fn registry_metadata_records_clean_schema_mirror_without_system_columns() {
         ],
         indexed_columns: Vec::new(),
         type_matrix: serde_json::Value::Null,
-        options: ManageTableOptions::from_value(&serde_json::json!({ "hot_row_limit": 1000 })),
+        options: ManageTableOptions::default().with_flush(1000, 1, 1000),
     };
 
     let plan = register::plan_schema_registry_insert_with_id(&metadata, Uuid::from_u128(99))

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use koldstore_common::compare_json_values;
+use koldstore_common::{compare_json_values, ColumnId};
 use koldstore_parquet::ColdRecordBatch;
 
 /// One bounded, fully encoded Parquet segment produced during flush encoding.
@@ -20,7 +20,7 @@ pub struct FlushWriteChunk {
     /// Maximum selected sequence.
     pub max_seq: i64,
     /// Combined indexed-column bounds.
-    pub indexed_bounds: BTreeMap<String, (serde_json::Value, serde_json::Value)>,
+    pub indexed_bounds: BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
 }
 
 impl FlushWriteChunk {
@@ -33,7 +33,7 @@ impl FlushWriteChunk {
         row_count: usize,
         min_seq: i64,
         max_seq: i64,
-        indexed_bounds: BTreeMap<String, (serde_json::Value, serde_json::Value)>,
+        indexed_bounds: BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
     ) -> Self {
         Self {
             parquet_bytes,
@@ -69,8 +69,8 @@ impl FlushWriteChunk {
 
 /// Merges indexed-column min/max bounds from `incoming` into `target`.
 pub fn merge_indexed_bounds(
-    target: &mut BTreeMap<String, (serde_json::Value, serde_json::Value)>,
-    incoming: &BTreeMap<String, (serde_json::Value, serde_json::Value)>,
+    target: &mut BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
+    incoming: &BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
 ) {
     for (column, (min, max)) in incoming {
         let bounds = target
@@ -88,6 +88,7 @@ pub fn merge_indexed_bounds(
 #[cfg(test)]
 mod tests {
     use super::{merge_indexed_bounds, FlushWriteChunk};
+    use koldstore_common::ColumnId;
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -98,7 +99,7 @@ mod tests {
             10,
             1,
             10,
-            BTreeMap::from([("id".to_string(), (json!(1), json!(10)))]),
+            BTreeMap::from([(ColumnId::from_attnum(1), (json!(1), json!(10)))]),
         );
         assert_eq!(chunk.row_count(), 10);
         assert_eq!(chunk.min_seq, 1);
@@ -108,11 +109,12 @@ mod tests {
 
     #[test]
     fn merge_indexed_bounds_expands_min_max() {
-        let mut bounds = BTreeMap::from([("id".to_string(), (json!(5), json!(10)))]);
+        let column_id = ColumnId::from_attnum(1);
+        let mut bounds = BTreeMap::from([(column_id, (json!(5), json!(10)))]);
         merge_indexed_bounds(
             &mut bounds,
-            &BTreeMap::from([("id".to_string(), (json!(1), json!(20)))]),
+            &BTreeMap::from([(column_id, (json!(1), json!(20)))]),
         );
-        assert_eq!(bounds.get("id"), Some(&(json!(1), json!(20))));
+        assert_eq!(bounds.get(&column_id), Some(&(json!(1), json!(20))));
     }
 }

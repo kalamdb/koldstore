@@ -283,9 +283,13 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
 
 ```json
 {
-  "hot_row_limit": 10000,
-  "min_flush_rows": 1000,
-  "max_rows_per_file": 1000,
+  "flush_policy": {
+    "type": "row_limit",
+    "hot_row_limit": 10000,
+    "min_flush_rows": 1000,
+    "max_rows_per_file": 1000,
+    "max_rows_per_flush": 10000
+  },
   "migration_order_by": "created_at",
   "target_file_size_mb": 256,
   "compression": "zstd",
@@ -293,19 +297,29 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
   "allow_fk_hot_only": true,
   "mirror_capture_mode": "async",
   "migration_status": "active",
+  "scope_column_id": 3,
   "cold_metadata": {
-    "stats_columns": ["seq", "created_at"],
-    "bloom_filter_columns": ["id"],
-    "bloom_candidate_columns": ["id"],
-    "indexed_columns": [{ "column": "created_at", "source": "index", "ordinal": 1 }],
+    "stats_columns": [{"column_id": 4, "name": "created_at"}],
+    "bloom_filter_columns": [{"column_id": 1, "name": "id"}],
+    "indexed_columns": [{
+      "column_id": 4,
+      "column": "created_at",
+      "source": "secondary_index",
+      "ordinal": 1
+    }],
     "ordered_indexes": []
   }
 }
 ```
 
 `FlushPolicy` is read back with `FlushPolicy::from_value(&options)` — not a
-separate column. `mirror_capture_mode` is present only for async mode; a missing
-value means the backward-compatible strict default.
+separate column. Flat `hot_row_limit` keys are not accepted; only tagged
+`flush_policy` is authoritative. `mirror_capture_mode` is present only for async
+mode; a missing value means the strict default.
+
+User-scoped tables also persist `scope_column_id` in `options`. It is the stable
+source attnum used to authorize scope segment pruning; `scope_column` remains
+the SQL-facing name. Development databases without the ID must be re-managed.
 
 ### `koldstore.jobs.payload` (migrate_backfill)
 

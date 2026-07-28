@@ -2,22 +2,22 @@
 
 use std::collections::BTreeMap;
 
-use koldstore_common::{ColumnId, ColumnRef};
+use koldstore_common::ColumnId;
 use koldstore_flush::encode_indexed_column_bounds;
 use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue, CODEC_VERSION};
 use serde_json::json;
 
 #[test]
 fn supported_bounds_encode_by_stable_id_and_unsupported_bounds_are_skipped() {
-    let id = ColumnRef::new(ColumnId::from_attnum(1), "id");
-    let body = ColumnRef::new(ColumnId::from_attnum(2), "body");
+    let id = ColumnId::from_attnum(1);
+    let body = ColumnId::from_attnum(2);
     let bounds = BTreeMap::from([
-        ("id".to_string(), (json!(-10), json!(100))),
-        ("body".to_string(), (json!("a"), json!("z"))),
+        (id, (json!(-10), json!(100))),
+        (body, (json!("a"), json!("z"))),
     ]);
-    let type_oids = BTreeMap::from([(id.column_id, 20), (body.column_id, 25)]);
+    let type_oids = BTreeMap::from([(id, 20), (body, 25)]);
 
-    let encoded = encode_indexed_column_bounds(&bounds, &[id, body], &type_oids).unwrap();
+    let encoded = encode_indexed_column_bounds(&bounds, &type_oids).unwrap();
 
     assert_eq!(encoded.len(), 1);
     assert_eq!(encoded[0].column_id, ColumnId::from_attnum(1));

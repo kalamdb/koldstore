@@ -74,11 +74,15 @@ pub async fn wait_until_barrier_waiter(
 ) -> Result<()> {
     for _ in 0..200 {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        // pg_locks is cluster-wide; filter by this database so parallel worker
+        // DBs cannot see each other's shared failpoint barrier waiters.
         let waiting = coordinator
             .query_one(
                 "SELECT EXISTS (\
                    SELECT 1 FROM pg_catalog.pg_locks \
                    WHERE locktype = 'advisory' \
+                     AND database = (SELECT oid FROM pg_catalog.pg_database \
+                                     WHERE datname = current_database()) \
                      AND classid = 0 \
                      AND objid = $1::bigint \
                      AND granted = false\

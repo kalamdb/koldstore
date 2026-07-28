@@ -182,6 +182,8 @@ pub struct ManagedTableSnapshot {
     pub primary_key_shape_hash: u64,
     /// Optional user-scope column.
     pub scope_column: Option<String>,
+    /// Stable source attnum used to authorize user-scope segment pruning.
+    pub scope_column_id: Option<ColumnId>,
     /// Stable source attnum used for cold-segment ordering and range pruning.
     pub segment_order_column_id: Option<ColumnId>,
 }
@@ -344,6 +346,14 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
             .transpose()
             .map_err(|error| error.to_string())?
             .map(ColumnId::from_attnum);
+        let scope_column_id = wire
+            .options
+            .get("scope_column_id")
+            .and_then(serde_json::Value::as_i64)
+            .map(i16::try_from)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .map(ColumnId::from_attnum);
 
         Ok(Self {
             table_oid,
@@ -354,6 +364,7 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
             primary_key_columns: wire.primary_key,
             primary_key_shape_hash: hasher.finish(),
             scope_column,
+            scope_column_id,
             segment_order_column_id,
         })
     }
@@ -417,8 +428,11 @@ mod tests {
             "mirror_relation": "koldstore_mirror.items",
             "primary_key": [{"column_id": 7, "name": "renamed_id"}],
             "primary_key_shape": {"columns": [{"column_id": 7, "name": "renamed_id"}]},
-            "scope_column": null,
-            "options": {"segment_order_column_id": 9}
+            "scope_column": "old_tenant_name",
+            "options": {
+                "scope_column_id": 4,
+                "segment_order_column_id": 9
+            }
         }))
         .unwrap();
 
@@ -427,7 +441,11 @@ mod tests {
             ColumnId::from_attnum(7)
         );
         assert_eq!(snapshot.primary_key_columns[0].name, "renamed_id");
-        assert_eq!(snapshot.segment_order_column_id, Some(ColumnId::from_attnum(9)));
+        assert_eq!(snapshot.scope_column_id, Some(ColumnId::from_attnum(4)));
+        assert_eq!(
+            snapshot.segment_order_column_id,
+            Some(ColumnId::from_attnum(9))
+        );
     }
 
     #[test]

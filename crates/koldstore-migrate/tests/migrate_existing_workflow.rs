@@ -38,10 +38,11 @@ fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
     };
 
     let plan = plan_existing_table_migration(
-        &request(ManageTableOptions::from_value(&serde_json::json!({
-            "backfill_batch_size": 2_048,
-            "hot_row_limit": 1000
-        }))),
+        &request({
+            let mut options = ManageTableOptions::default().with_flush(1000, 1, 1000);
+            options.backfill_batch_size = Some(2_048);
+            options
+        }),
         context(),
         catalog,
         Uuid::from_u128(99),

@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use koldstore_common::{QualifiedTableName, SqlStatement};
+use koldstore_common::{ColumnId, ColumnRef, QualifiedTableName, SqlStatement};
 use koldstore_parquet::{
     CleanColdRecordBatchBuilder, ColdMetadataColumn, ColdRecordBatch, FlushMirrorRow, PgColumn,
     SegmentSplitPolicy, StreamingParquetSegmentWriter, WriterOptions,
@@ -28,7 +28,7 @@ pub struct StreamEncodeInput {
     /// Parquet schema columns.
     pub parquet_columns: Vec<PgColumn>,
     /// Indexed columns tracked for segment stats.
-    pub indexed_columns: Vec<String>,
+    pub indexed_columns: Vec<ColumnRef>,
     /// Active cold schema version.
     pub schema_version: u32,
     /// Maximum selected mirror `seq`.
@@ -56,7 +56,7 @@ struct SegmentBuilder {
     row_count: usize,
     min_seq: Option<i64>,
     max_seq: Option<i64>,
-    indexed_bounds: BTreeMap<String, (serde_json::Value, serde_json::Value)>,
+    indexed_bounds: BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
 }
 
 impl SegmentBuilder {
@@ -70,7 +70,7 @@ impl SegmentBuilder {
             [ColdMetadataColumn::Seq.name()]
                 .into_iter()
                 .chain(input.primary_key_columns.iter().map(String::as_str))
-                .chain(input.indexed_columns.iter().map(String::as_str)),
+                .chain(input.indexed_columns.iter().map(|column| column.name.as_str())),
         )
         .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str));
         Self {
@@ -151,12 +151,12 @@ pub struct StreamEncodeOutcome {
 
 struct ChunkBuilder {
     parquet_columns: Vec<PgColumn>,
-    indexed_columns: Vec<String>,
+    indexed_columns: Vec<ColumnRef>,
     batch_builder: CleanColdRecordBatchBuilder,
 }
 
 impl ChunkBuilder {
-    fn new(parquet_columns: &[PgColumn], indexed_columns: &[String]) -> Result<Self, String> {
+    fn new(parquet_columns: &[PgColumn], indexed_columns: &[ColumnRef]) -> Result<Self, String> {
         Ok(Self {
             parquet_columns: parquet_columns.to_vec(),
             indexed_columns: indexed_columns.to_vec(),
@@ -354,6 +354,7 @@ fn compare_flush_values(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use koldstore_common::{ColumnId, ColumnRef};
     use koldstore_parquet::{FlushColumnValue, PgType};
 
     fn input(target_file_size_bytes: Option<u64>, max_rows_per_file: usize) -> StreamEncodeInput {
@@ -366,7 +367,7 @@ mod tests {
                 PgColumn::new("id", PgType::Int8, false),
                 PgColumn::new("body", PgType::Text, true),
             ],
-            indexed_columns: vec!["id".to_string()],
+            indexed_columns: vec![ColumnRef::new(ColumnId::from_attnum(1), "id")],
             schema_version: 1,
             max_seq: 5,
             max_rows_per_file,

@@ -428,6 +428,13 @@ fn manage_table_validation_context<'a>(
         .iter()
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
+    let scope_column_input = scope_column
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .and_then(|name| catalog.columns.iter().find(|column| column.name == name))
+        .map(|column| koldstore_migrate::manage_table::ScopeColumnInput {
+            column_id: column.column_id.get(),
+        });
     let segment_order_column = segment_order_column
         .map(str::trim)
         .filter(|name| !name.is_empty())
@@ -465,6 +472,7 @@ fn manage_table_validation_context<'a>(
         },
         already_managed,
         migration_order_by,
+        scope_column: scope_column_input,
         segment_order_column,
         compression,
         mirror_capture_mode,

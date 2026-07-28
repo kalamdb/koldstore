@@ -122,8 +122,6 @@ pub struct ColdMetadataCandidates {
     pub stats_columns: Vec<ColumnRef>,
     /// Columns configured for Parquet bloom filters.
     pub bloom_filter_columns: Vec<ColumnRef>,
-    /// Columns worth considering for bloom filters.
-    pub bloom_candidate_columns: Vec<ColumnRef>,
 }
 
 /// Source of a column's cold metadata eligibility.
@@ -219,8 +217,6 @@ pub struct ColdMetadataConfig {
     pub stats_columns: Vec<ColumnRef>,
     /// Columns configured for Parquet bloom filters.
     pub bloom_filter_columns: Vec<ColumnRef>,
-    /// Backward-compatible alias for readers still looking for candidate columns.
-    pub bloom_candidate_columns: Vec<ColumnRef>,
     /// Structured metadata for columns selected from indexes/constraints.
     pub indexed_columns: Vec<IndexedColumnMetadata>,
     /// Composite index shapes retained for future ordered pruning.
@@ -720,7 +716,6 @@ pub fn cold_metadata_candidates(
     ColdMetadataCandidates {
         stats_columns: config.stats_columns,
         bloom_filter_columns: config.bloom_filter_columns,
-        bloom_candidate_columns: config.bloom_candidate_columns,
     }
 }
 
@@ -757,7 +752,6 @@ pub fn cold_metadata_config(
 
     ColdMetadataConfig {
         stats_columns,
-        bloom_candidate_columns: bloom_filter_columns.clone(),
         bloom_filter_columns,
         indexed_columns: indexed_metadata,
         ordered_indexes: Vec::new(),

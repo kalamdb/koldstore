@@ -9,7 +9,7 @@
 //! those rows to `active` in one statement.
 
 use koldstore_catalog::SyncState;
-use koldstore_common::{ColumnId, ColumnRef, SqlStatement};
+use koldstore_common::{ColumnId, SqlStatement};
 use koldstore_sortkey::{encode_sort_key_json, SortKeyType, CODEC_VERSION};
 use thiserror::Error;
 
@@ -64,16 +64,12 @@ pub struct EncodedColumnBound {
 /// Returns an error when a supported type's JSON bound has an invalid shape or
 /// Storekey cannot encode it.
 pub fn encode_indexed_column_bounds(
-    indexed_bounds: &std::collections::BTreeMap<String, (serde_json::Value, serde_json::Value)>,
-    indexed_columns: &[ColumnRef],
+    indexed_bounds: &std::collections::BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
     type_oids: &std::collections::BTreeMap<ColumnId, u32>,
 ) -> Result<Vec<EncodedColumnBound>, SegmentCatalogError> {
-    let mut encoded = Vec::with_capacity(indexed_columns.len());
-    for column in indexed_columns {
-        let Some(bounds) = indexed_bounds.get(&column.name) else {
-            continue;
-        };
-        let Some(&type_oid) = type_oids.get(&column.column_id) else {
+    let mut encoded = Vec::with_capacity(indexed_bounds.len());
+    for (column_id, bounds) in indexed_bounds {
+        let Some(&type_oid) = type_oids.get(column_id) else {
             continue;
         };
         let Some(sort_key_type) = SortKeyType::from_type_oid(type_oid) else {
@@ -84,7 +80,7 @@ pub fn encode_indexed_column_bounds(
         let max_value = encode_sort_key_json(sort_key_type, &bounds.1)
             .map_err(|error| SegmentCatalogError::SortKey(error.to_string()))?;
         encoded.push(EncodedColumnBound {
-            column_id: column.column_id,
+            column_id: *column_id,
             type_oid,
             codec_version: CODEC_VERSION,
             min_value,
@@ -97,16 +93,12 @@ pub fn encode_indexed_column_bounds(
 /// Builds indexed column stats JSON for one flushed segment chunk.
 #[must_use]
 pub fn indexed_column_stats_json(
-    indexed_bounds: &std::collections::BTreeMap<String, (serde_json::Value, serde_json::Value)>,
-    indexed_columns: &[ColumnRef],
+    indexed_bounds: &std::collections::BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
 ) -> serde_json::Value {
     let mut values = serde_json::Map::new();
-    for column in indexed_columns {
-        let Some(bounds) = indexed_bounds.get(&column.name) else {
-            continue;
-        };
+    for (column_id, bounds) in indexed_bounds {
         values.insert(
-            column.column_id.to_string(),
+            column_id.to_string(),
             serde_json::json!({
                 "min": bounds.0,
                 "max": bounds.1,
@@ -339,23 +331,19 @@ mod tests {
         encode_indexed_column_bounds, indexed_column_stats_json, plan_activate_flush_segments,
         plan_flush_segments_batch_insert,
     };
-    use koldstore_common::{ColumnId, ColumnRef};
+    use koldstore_common::ColumnId;
     use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue, CODEC_VERSION};
     use serde_json::json;
     use std::collections::BTreeMap;
 
     #[test]
-    fn indexed_stats_json_uses_stable_column_ids() {
+    fn indexed_stats_json_remains_stable_when_column_name_changes() {
         let bounds = BTreeMap::from([
-            ("id".to_string(), (json!(1), json!(10))),
-            ("renamed_body".to_string(), (json!("a"), json!("z"))),
+            (ColumnId::from_attnum(1), (json!(1), json!(10))),
+            (ColumnId::from_attnum(3), (json!("a"), json!("z"))),
         ]);
-        let columns = vec![
-            ColumnRef::new(ColumnId::from_attnum(1), "id"),
-            ColumnRef::new(ColumnId::from_attnum(3), "renamed_body"),
-        ];
         assert_eq!(
-            indexed_column_stats_json(&bounds, &columns),
+            indexed_column_stats_json(&bounds),
             json!({
                 "1": {"min": 1, "max": 10},
                 "3": {"min": "a", "max": "z"}
@@ -366,19 +354,15 @@ mod tests {
     #[test]
     fn indexed_bounds_encode_supported_types_and_skip_unsupported_types() {
         let bounds = BTreeMap::from([
-            ("id".to_string(), (json!(-5), json!(42))),
-            ("body".to_string(), (json!("a"), json!("z"))),
+            (ColumnId::from_attnum(1), (json!(-5), json!(42))),
+            (ColumnId::from_attnum(2), (json!("a"), json!("z"))),
         ]);
-        let columns = vec![
-            ColumnRef::new(ColumnId::from_attnum(1), "id"),
-            ColumnRef::new(ColumnId::from_attnum(2), "body"),
-        ];
         let type_oids = BTreeMap::from([
             (ColumnId::from_attnum(1), 20),
             (ColumnId::from_attnum(2), 25),
         ]);
 
-        let encoded = encode_indexed_column_bounds(&bounds, &columns, &type_oids).unwrap();
+        let encoded = encode_indexed_column_bounds(&bounds, &type_oids).unwrap();
 
         assert_eq!(encoded.len(), 1);
         assert_eq!(encoded[0].column_id, ColumnId::from_attnum(1));

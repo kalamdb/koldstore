@@ -3,7 +3,7 @@ use koldstore_migrate::constraints::{
     MigrationValidationInput, UniqueConstraintShape,
 };
 use koldstore_migrate::manage_table::{
-    validate_manage_table, ManageTablePolicyInput, ManageTableValidationContext,
+    validate_manage_table, ManageTablePolicyInput, ManageTableValidationContext, ScopeColumnInput,
     SegmentOrderColumnInput,
 };
 
@@ -12,6 +12,7 @@ fn valid_context() -> ManageTableValidationContext<'static> {
         migration: MigrationValidationInput::minimal_shared(),
         already_managed: false,
         migration_order_by: None,
+        scope_column: None,
         segment_order_column: None,
         compression: None,
         mirror_capture_mode: None,
@@ -38,6 +39,21 @@ fn segment_order_column_is_validated_and_persisted_by_attnum() {
 
     let validated = validate_manage_table(context).unwrap();
     assert_eq!(validated.options.segment_order_column_id, Some(4));
+}
+
+#[test]
+fn scope_column_is_persisted_by_attnum() {
+    let mut context = valid_context();
+    context.migration.table_type = "user".to_string();
+    context.migration.scope_column = Some("tenant_id".to_string());
+    context
+        .migration
+        .columns
+        .push(ColumnDefinition::new("tenant_id", "bigint", false));
+    context.scope_column = Some(ScopeColumnInput { column_id: 3 });
+
+    let validated = validate_manage_table(context).unwrap();
+    assert_eq!(validated.options.scope_column_id, Some(3));
 }
 
 #[test]
@@ -84,9 +100,11 @@ fn segment_order_column_rejects_nullable_or_unsupported_types() {
 fn valid_context_returns_canonical_manage_table_options() {
     let validated = validate_manage_table(valid_context()).unwrap();
 
-    assert_eq!(validated.options.hot_row_limit, Some(10_000));
-    assert_eq!(validated.options.min_flush_rows, Some(1_000));
-    assert_eq!(validated.options.max_rows_per_file, Some(1_000));
+    assert_eq!(validated.options.hot_row_limit(), Some(10_000));
+    assert_eq!(
+        validated.options.flush_policy(),
+        Some(koldstore_common::FlushPolicy::new(10_000, 1_000, 1_000))
+    );
     assert!(validated.options.auto_flush_enabled());
     assert_eq!(
         validated.options.compression,

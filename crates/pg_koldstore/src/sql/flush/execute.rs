@@ -159,11 +159,7 @@ pub(super) fn stream_write_flush_batches(
                 koldstore_parquet::PgColumn::new(column.name.clone(), column.pg_type, true)
             })
             .collect(),
-        indexed_columns: ctx
-            .indexed_columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect(),
+        indexed_columns: ctx.indexed_columns.clone(),
         schema_version,
         max_seq: stats.max_seq,
         max_rows_per_file: ctx.max_rows_per_file,
@@ -259,7 +255,6 @@ fn write_streamed_chunk(
         &ctx.relation.name,
         &ctx.storage.compression,
         &primary_key_names,
-        &ctx.indexed_columns,
         ctx.storage.schema_version,
         *batch_number,
         &chunk,

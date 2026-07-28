@@ -40,6 +40,13 @@ pub struct SegmentOrderColumnInput<'a> {
     pub nullable: bool,
 }
 
+/// Catalog-resolved scope column accepted at the manage boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeColumnInput {
+    /// Stable PostgreSQL `attnum`.
+    pub column_id: i16,
+}
+
 /// PostgreSQL-free context required to validate one `manage_table` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManageTableValidationContext<'a> {
@@ -49,6 +56,8 @@ pub struct ManageTableValidationContext<'a> {
     pub already_managed: bool,
     /// Optional explicit backfill ordering column.
     pub migration_order_by: Option<&'a str>,
+    /// Optional catalog-resolved user-scope column.
+    pub scope_column: Option<ScopeColumnInput>,
     /// Optional catalog-resolved cold-segment ordering column.
     pub segment_order_column: Option<SegmentOrderColumnInput<'a>>,
     /// Optional operator-provided compression spelling.
@@ -127,6 +136,9 @@ pub fn validate_manage_table(
             );
         }
         options = options.with_segment_order_column_id(column.column_id);
+    }
+    if let Some(column) = context.scope_column {
+        options = options.with_scope_column_id(column.column_id);
     }
 
     if let Some(hot_row_limit) = context.policy.hot_row_limit {

@@ -414,8 +414,14 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         .iter()
         .map(|column| column.name.as_str())
         .collect::<std::collections::HashSet<_>>();
-    if let Some(scope) = snapshot.scope_column.as_deref() {
-        source_equality_columns.insert(scope);
+    if let Some(scope_id) = snapshot.scope_column_id {
+        if let Some(scope) = catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id == scope_id)
+        {
+            source_equality_columns.insert(scope.name.as_str());
+        }
     }
     let pk_equality = residual
         .hot_equality

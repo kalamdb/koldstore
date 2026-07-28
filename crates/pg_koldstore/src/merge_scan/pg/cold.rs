@@ -35,7 +35,7 @@ pub(super) fn load_cold_rows_for_merge(
         // pruned away. Scope uses catalog segment-index bounds on the shared
         // manifest today (`scope_key = ''`); later each scope_id gets its own
         // manifest/folder and listing filters by scope_key first.
-        let scope_column = snapshot.scope_column.as_deref();
+        let scope_column_id = snapshot.scope_column_id;
         let segment_order_column_id = snapshot.segment_order_column_id;
         let prune_predicates = retain_pre_merge_cold_prune_predicates(
             unsafe {
@@ -48,7 +48,7 @@ pub(super) fn load_cold_rows_for_merge(
                     .find(|column| column.column_id.get() == column_id)?;
                 Some(cold_prune_column_policy(
                     column,
-                    scope_column,
+                    scope_column_id,
                     segment_order_column_id,
                 ))
             },
@@ -81,14 +81,8 @@ pub(super) fn load_cold_rows_for_merge(
             .chain(catalog.indexed_columns.iter())
             .map(|column| column.column_id.get())
             .collect::<Vec<_>>();
-        if let Some(scope) = scope_column {
-            indexed_filter_column_ids.extend(
-                catalog
-                    .columns
-                    .iter()
-                    .filter(|column| column.name == scope)
-                    .map(|column| column.column_id.get()),
-            );
+        if let Some(column_id) = scope_column_id {
+            indexed_filter_column_ids.push(column_id.get());
         }
         if let Some(column_id) = segment_order_column_id {
             indexed_filter_column_ids.push(column_id.get());
@@ -180,12 +174,12 @@ pub(super) fn load_cold_rows_for_merge(
 /// Builds the pre-merge prune policy for one catalog column.
 fn cold_prune_column_policy(
     column: &koldstore_migrate::order::CatalogColumn,
-    scope_column: Option<&str>,
+    scope_column_id: Option<ColumnId>,
     segment_order_column_id: Option<ColumnId>,
 ) -> ColdPruneColumnPolicy {
     ColdPruneColumnPolicy {
         is_primary_key: column.is_primary_key,
-        is_scope: scope_column.is_some_and(|scope| scope == column.name),
+        is_scope: scope_column_id.is_some_and(|id| id == column.column_id),
         is_order_column: segment_order_column_id.is_some_and(|id| id == column.column_id),
         sort_key_indexable: koldstore_sortkey::SortKeyType::from_type_oid(
             column.pg_type.type_oid(),
@@ -641,7 +635,16 @@ mod tests {
     use koldstore_schema::PgType;
     use koldstore_sortkey::SortKeyType;
 
-    use super::physical_name_for_segment;
+    use super::{cold_prune_column_policy, physical_name_for_segment};
+
+    #[test]
+    fn scope_prune_policy_matches_stable_column_id_after_rename() {
+        let column = koldstore_migrate::order::CatalogColumn::bigint(4, "renamed_tenant");
+
+        let policy = cold_prune_column_policy(&column, Some(ColumnId::from_attnum(4)), None);
+
+        assert!(policy.is_scope);
+    }
 
     #[test]
     fn text_like_types_are_not_sort_key_indexable() {

@@ -47,10 +47,9 @@ fn metadata() -> RegistrationMetadata {
             ColumnRef::new(ColumnId::from_attnum(4), "created_at"),
         ],
         type_matrix: serde_json::json!({"postgres": 16}),
-        options: ManageTableOptions::from_value(&serde_json::json!({
-            "compression": "zstd",
-            "hot_row_limit": 1000
-        })),
+        options: ManageTableOptions::default()
+            .with_compression(koldstore_common::ParquetCompression::Zstd)
+            .with_flush(1000, 1, 1000),
     }
 }
 
@@ -103,10 +102,6 @@ fn schema_registry_plan_captures_greenfield_metadata() {
                     {"column_id": 4, "name": "created_at"}
                 ],
                 "bloom_filter_columns": [
-                    {"column_id": 1, "name": "id"},
-                    {"column_id": 4, "name": "created_at"}
-                ],
-                "bloom_candidate_columns": [
                     {"column_id": 1, "name": "id"},
                     {"column_id": 4, "name": "created_at"}
                 ],
@@ -174,11 +169,6 @@ fn schema_registry_plan_derives_type_matrix_and_cold_metadata_candidates() {
                 {"column_id": 2, "name": "title"}
             ],
             "bloom_filter_columns": [
-                {"column_id": 1, "name": "id"},
-                {"column_id": 4, "name": "created_at"},
-                {"column_id": 2, "name": "title"}
-            ],
-            "bloom_candidate_columns": [
                 {"column_id": 1, "name": "id"},
                 {"column_id": 4, "name": "created_at"},
                 {"column_id": 2, "name": "title"}
@@ -251,7 +241,7 @@ fn cold_metadata_config_records_typed_sources_and_bloom_columns() {
             ColumnRef::new(ColumnId::from_attnum(3), "tenant_id"),
         ]
     );
-    assert_eq!(config.bloom_candidate_columns, config.bloom_filter_columns);
+    assert!(!config.bloom_filter_columns.is_empty());
     assert_eq!(
         config.indexed_columns[0].source,
         IndexedColumnSource::PrimaryKey

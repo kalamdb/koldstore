@@ -339,12 +339,8 @@ pub(super) fn persist_flush_segments_batch(
         column_stats.push(pgrx::JsonB(row.column_stats.clone()));
         checksums.push(segment.checksum.clone());
         object_etags.push(segment.object_etag.clone().unwrap_or_default());
-        for bound in encode_indexed_column_bounds(
-            &segment.indexed_bounds,
-            &segment.indexed_columns,
-            &column_type_oids,
-        )
-        .map_err(|error| error.to_string())?
+        for bound in encode_indexed_column_bounds(&segment.indexed_bounds, &column_type_oids)
+            .map_err(|error| error.to_string())?
         {
             index_segment_ids.push(segment_id);
             index_column_ids.push(bound.column_id.get());
@@ -393,8 +389,7 @@ fn resolve_indexed_column_type_oids(
 
     let column_ids = segments
         .iter()
-        .flat_map(|segment| segment.indexed_columns.iter())
-        .map(|column| column.column_id)
+        .flat_map(|segment| segment.indexed_bounds.keys().copied())
         .collect::<std::collections::BTreeSet<_>>();
     if column_ids.is_empty() {
         return Ok(std::collections::BTreeMap::new());

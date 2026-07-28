@@ -230,9 +230,9 @@ rows (`op = 3`) carry PK values from mirror only.
 1. Fetch page of up to 8192 rows (`FLUSH_MIRROR_FETCH_BATCH_SIZE`)
 2. `CleanColdRecordBatchBuilder::push_typed_row` per row
    - App columns + metadata: `seq`, `op`, `deleted`, `schema_version`
-   - Tracks `indexed_bounds` as `serde_json::Value` min/max per indexed column
-     (manual pass; Parquet writer also records chunk stats on the same
-     columns — see planned change below)
+   - Tracks `indexed_bounds` as `serde_json::Value` min/max keyed by stable
+     `ColumnId` (manual pass; Parquet writer also records chunk stats on the
+     same columns — see planned change below)
 3. When chunk reaches `max_rows_per_file` → `FlushWriteChunk`
 4. Callback writes Parquet segment
 
@@ -270,7 +270,7 @@ in-file row-group prune already uses the footer. Details:
 5. `column_stats` JSON for catalog (today from merged `indexed_bounds` +
    `FlushStats.seq`; later from footer extraction per ADR-002):
    ```json
-   { "seq": {"min": N, "max": M}, "created_at": {"min": "...", "max": "..."} }
+   { "1": {"min": N, "max": M}, "4": {"min": "...", "max": "..."} }
    ```
 6. `byte_size` from published object metadata (not recomputed by scanning rows)
 7. Assemble `ManifestSegment`s from `catalog_row`s once, then `manifest.append_segment_batch(...)`

@@ -74,6 +74,8 @@ async fn manage_with_hot_limit(
 
 async fn count_advisory_waiters(client: &Client, key: i64) -> Result<i64> {
     // Single-bigint advisory keys split into (classid, objid) = (hi32, lo32).
+    // Filter by database: pg_locks is cluster-wide and table OIDs collide across
+    // pooled worker DBs.
     let classid = ((key as u64) >> 32) as i64;
     let objid = (key as u32) as i64;
     Ok(client
@@ -82,6 +84,8 @@ async fn count_advisory_waiters(client: &Client, key: i64) -> Result<i64> {
             SELECT count(*)::bigint
             FROM pg_catalog.pg_locks
             WHERE locktype = 'advisory'
+              AND database = (SELECT oid FROM pg_catalog.pg_database
+                              WHERE datname = current_database())
               AND classid::bigint = $1
               AND objid::bigint = $2
               AND granted = false
@@ -101,6 +105,8 @@ async fn count_advisory_holders(client: &Client, key: i64) -> Result<i64> {
             SELECT count(*)::bigint
             FROM pg_catalog.pg_locks
             WHERE locktype = 'advisory'
+              AND database = (SELECT oid FROM pg_catalog.pg_database
+                              WHERE datname = current_database())
               AND classid::bigint = $1
               AND objid::bigint = $2
               AND granted = true
