@@ -237,7 +237,7 @@ pub fn column_stats_from_index_bounds(
 
 fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
     let trimmed = value.trim();
-    if trimmed.len() % 2 != 0 {
+    if !trimmed.len().is_multiple_of(2) {
         return Err(format!("odd-length hex string `{trimmed}`"));
     }
     let mut bytes = Vec::with_capacity(trimmed.len() / 2);

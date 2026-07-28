@@ -313,6 +313,7 @@ enum MirrorFlushPaging {
     KeysetLimit,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn plan_mirror_flush_selection_inner(
     table: &QualifiedTableName,
     mirror_table: &QualifiedTableName,

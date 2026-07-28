@@ -74,7 +74,7 @@ pub fn merge_indexed_bounds(
 ) {
     for (column, (min, max)) in incoming {
         let bounds = target
-            .entry(column.clone())
+            .entry(*column)
             .or_insert_with(|| (min.clone(), max.clone()));
         if compare_json_values(min, &bounds.0).is_some_and(|order| order.is_lt()) {
             bounds.0 = min.clone();
