@@ -36,8 +36,8 @@ pub use json::compare_json_values;
 pub use lsn::{format_pg_lsn, parse_pg_lsn, AppliedWalBoundary, WalFenceLsn};
 pub use pg_type_name::canonical_postgres_type_name;
 pub use pk::{
-    LogicalPk, PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue,
-    PrimaryKeyColumnShape, PrimaryKeyShape, StablePkHash,
+    LogicalPk, LogicalPkValues, PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
+    PkValue, PrimaryKeyColumnShape, PrimaryKeyShape, StablePkHash,
 };
 pub use privileges::{can_set_guc, RoleClass, INTERNAL_GUCS};
 pub use row::{

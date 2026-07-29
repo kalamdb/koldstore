@@ -47,6 +47,10 @@ pub struct SegmentStatsHint {
     /// Object byte size when known (enables bounded footer range GETs on S3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byte_size: Option<u64>,
+    /// Segment minimum `seq` (inclusive).
+    pub min_seq: SeqId,
+    /// Segment maximum `seq` (inclusive).
+    pub max_seq: SeqId,
 }
 
 /// Min/max predicate proven safe for segment-level candidate pruning.
@@ -189,6 +193,63 @@ pub fn validate_prune_predicates_indexed(
         }
     }
     Ok(())
+}
+
+/// Groups catalog segments into exact newest-first merge batches.
+///
+/// Disjoint sequence ranges remain separate so the executor can drop one
+/// segment payload before opening the next. Transitively overlapping ranges
+/// stay together because winner resolution cannot safely emit either range
+/// until all overlapping candidates have been compared.
+///
+/// # Errors
+///
+/// Returns a catalog validation error when a segment has a reversed `seq` range.
+pub fn group_segments_newest_first(
+    segments: Vec<SegmentStatsHint>,
+) -> Result<Vec<Vec<SegmentStatsHint>>> {
+    let mut ranged = segments
+        .into_iter()
+        .map(|segment| {
+            let (min, max) = segment_seq_range(&segment)?;
+            Ok((segment, min, max))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ranged.sort_by(|left, right| {
+        right
+            .2
+            .cmp(&left.2)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.0.object_path.cmp(&right.0.object_path))
+    });
+
+    let mut groups = Vec::new();
+    let mut current = Vec::new();
+    let mut current_min = None::<SeqId>;
+    for (segment, min, max) in ranged {
+        if current_min.is_some_and(|group_min| max < group_min) {
+            groups.push(std::mem::take(&mut current));
+            current_min = None;
+        }
+        current_min = Some(current_min.map_or(min, |group_min| group_min.min(min)));
+        current.push(segment);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    Ok(groups)
+}
+
+fn segment_seq_range(segment: &SegmentStatsHint) -> Result<(SeqId, SeqId)> {
+    if segment.min_seq > segment.max_seq {
+        return Err(KoldstoreError::InvalidColdSegmentMetadata(format!(
+            "cold segment `{}` has reversed `seq` range {}..={}",
+            segment.object_path,
+            segment.min_seq.get(),
+            segment.max_seq.get()
+        )));
+    }
+    Ok((segment.min_seq, segment.max_seq))
 }
 
 /// How unflushed mirror rows participate in merge reads.

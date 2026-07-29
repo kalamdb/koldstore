@@ -212,7 +212,7 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
         );
     }
     for expected in [
-        "Emit Path: merge_buffer",
+        "Emit Path: merge_stream",
         "Hot Rows: 1",
         "Rows Scanned: 3",
         "Input Rows: 4",
@@ -331,7 +331,7 @@ fn explain_analyze_counts_mirror_overlay_rows() {
 fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
     // Untyped `2` is an int4 Const against bigint `id`. Hot pushdown must accept
     // that promotion (same as `2::bigint`) so cold PK lookups do not fall through
-    // to merge_buffer and materialize the entire hot heap.
+    // to merge_stream and materialize the entire hot heap.
     let suffix = unique_suffix("int4_pk");
     let schema = format!("pgtest_{suffix}");
     let table = "messages";
@@ -360,7 +360,7 @@ fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
         "expected hot PK miss (0 rows), got: {plan}"
     );
     assert!(
-        !plan.contains("Emit Path: merge_buffer"),
+        !plan.contains("Emit Path: merge_stream"),
         "untyped bigint PK lookup must not merge-buffer the hot heap: {plan}"
     );
     assert_eq!(
@@ -520,4 +520,45 @@ fn unmanaged_select_second_plan_does_not_spi_managed_lookup() {
         loads, 0,
         "second unmanaged plan must use cached absence, not SPI"
     );
+}
+
+#[pg_test]
+fn merge_scan_fails_closed_when_seen_key_limit_is_exceeded() {
+    let suffix = unique_suffix("seen_limit");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, 'body-' || gs::text
+         FROM generate_series(1, 250) AS gs"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 200, "expected cold rows, rows_flushed={flushed}");
+
+    Spi::run("SET koldstore.max_merge_seen_keys = 100").expect("set seen-key limit");
+    // Catch the PostgreSQL ERROR in a subtransaction so the pg_test txn stays usable.
+    Spi::run(&format!(
+        r#"
+        DO $do$
+        BEGIN
+          PERFORM count(*) FROM {relation};
+          RAISE EXCEPTION 'expected KoldMergeScan seen-key limit to fail the scan';
+        EXCEPTION
+          WHEN OTHERS THEN
+            IF position('max_merge_seen_keys' in SQLERRM) = 0
+               AND position('exact primary-key identities' in SQLERRM) = 0 THEN
+              RAISE;
+            END IF;
+        END
+        $do$;
+        "#
+    ))
+    .expect("seen-key limit must fail closed with a clear error");
+    Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
 }

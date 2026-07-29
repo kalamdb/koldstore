@@ -4,8 +4,9 @@ use koldstore_merge::scan::exec::{
     ColdAvailability, FilterPlan, ScanResourceCounters,
 };
 use koldstore_merge::scan::plan::{
-    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
-    ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
+    group_segments_newest_first, retain_pre_merge_cold_prune_predicates,
+    validate_prune_predicates_indexed, ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan,
+    SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
 };
 use serde_json::json;
 
@@ -279,4 +280,80 @@ fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
 
     assert!(err.to_string().contains("status"));
     assert!(err.to_string().contains("indexed"));
+}
+
+fn versioned_segment(path: &str, min_seq: i64, max_seq: i64) -> SegmentStatsHint {
+    SegmentStatsHint {
+        object_path: path.to_string(),
+        schema_version: 1,
+        physical_names: Default::default(),
+        byte_size: None,
+        min_seq: SeqId::new(min_seq).unwrap(),
+        max_seq: SeqId::new(max_seq).unwrap(),
+    }
+}
+
+#[test]
+fn newest_first_segment_groups_keep_disjoint_payloads_separate() {
+    let groups = group_segments_newest_first(vec![
+        versioned_segment("old.parquet", 1, 10),
+        versioned_segment("new.parquet", 21, 30),
+        versioned_segment("middle.parquet", 11, 20),
+    ])
+    .unwrap();
+
+    let paths = groups
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|segment| segment.object_path.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        vec![
+            vec!["new.parquet"],
+            vec!["middle.parquet"],
+            vec!["old.parquet"]
+        ]
+    );
+}
+
+#[test]
+fn newest_first_segment_groups_combine_transitive_overlaps() {
+    let groups = group_segments_newest_first(vec![
+        versioned_segment("old.parquet", 1, 9),
+        versioned_segment("bridge.parquet", 18, 25),
+        versioned_segment("new.parquet", 20, 30),
+        versioned_segment("middle.parquet", 10, 20),
+    ])
+    .unwrap();
+
+    assert_eq!(groups.len(), 2);
+    assert_eq!(
+        groups[0]
+            .iter()
+            .map(|segment| segment.object_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["new.parquet", "bridge.parquet", "middle.parquet"]
+    );
+    assert_eq!(groups[1][0].object_path, "old.parquet");
+}
+
+#[test]
+fn newest_first_segment_groups_reject_reversed_sequence_range() {
+    let error = group_segments_newest_first(vec![SegmentStatsHint {
+        object_path: "reversed.parquet".to_string(),
+        schema_version: 1,
+        physical_names: Default::default(),
+        byte_size: None,
+        min_seq: SeqId::new(20).unwrap(),
+        max_seq: SeqId::new(10).unwrap(),
+    }])
+    .unwrap_err();
+
+    assert!(error.to_string().contains("reversed.parquet"));
+    assert!(error.to_string().contains("seq"));
 }

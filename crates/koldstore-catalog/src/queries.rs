@@ -230,6 +230,8 @@ SELECT jsonb_build_object(
           jsonb_build_object(
               'object_path', cs.object_path,
               'schema_version', cs.schema_version,
+              'min_seq', cs.min_seq,
+              'max_seq', cs.max_seq,
               'physical_names', COALESCE((
                   SELECT jsonb_object_agg(
                       (column_value->>'column_id'),
@@ -537,6 +539,7 @@ mod tests {
             .sql
             .contains("'schema_version', cs.schema_version"));
         assert!(statement.sql.contains("'physical_names'"));
+        assert!(statement.sql.contains("'min_seq', cs.min_seq"));
         assert!(statement
             .sql
             .contains("historical_schema.version = cs.schema_version"));

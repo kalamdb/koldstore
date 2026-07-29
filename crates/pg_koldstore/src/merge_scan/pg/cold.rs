@@ -3,10 +3,11 @@
 use std::time::Instant;
 
 use koldstore_catalog::{preferred_segment_index_access, SegmentIndexLookupShape};
-use koldstore_common::{ColdRow, ColumnId, ColumnRef};
+use koldstore_common::{ColdRow, ColumnId, ColumnRef, SeqId};
 use koldstore_merge::scan::plan::{
-    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
-    ColdPruneColumnPolicy, SegmentPrunePredicate, SegmentStatsHint,
+    group_segments_newest_first, retain_pre_merge_cold_prune_predicates,
+    validate_prune_predicates_indexed, ColdPruneColumnPolicy, SegmentPrunePredicate,
+    SegmentStatsHint,
 };
 use koldstore_parquet::{
     clean_cold_row_to_common, read_clean_cold_rows_from_object_store_with_size, ParquetReadOptions,
@@ -19,8 +20,55 @@ use super::profile::{elapsed_ms, ColdReadProfile, SegmentReadProfile};
 use super::qual::segment_prune_predicates;
 use super::with_hook_disabled;
 
-/// Loads cold rows for merge, applying catalog prune and Parquet projection.
-pub(super) fn load_cold_rows_for_merge(
+/// Lazily opens safe newest-first segment groups for one CustomScan.
+#[derive(Debug)]
+pub(super) struct ColdRowStream {
+    client: koldstore_storage::ObjectStoreClient,
+    segment_groups: Vec<Vec<SegmentStatsHint>>,
+    next_group: usize,
+    projection_columns: Vec<ColumnRef>,
+    catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
+    primary_key_columns: Vec<ColumnRef>,
+    schema_version: i32,
+    pk_probe: Option<(ColumnRef, Vec<String>)>,
+}
+
+type ColdBatch = (Vec<ColdRow>, Vec<SegmentReadProfile>);
+
+impl ColdRowStream {
+    /// Reads the next overlapping segment group and closes every reader before
+    /// returning its decoded rows.
+    pub(super) fn next_batch(
+        &mut self,
+        collect_profile: bool,
+    ) -> Result<Option<ColdBatch>, String> {
+        let Some(group) = self.segment_groups.get(self.next_group) else {
+            return Ok(None);
+        };
+        self.next_group += 1;
+        let (rows, profiles) = cold_rows_from_segments(
+            &self.client,
+            group,
+            &self.projection_columns,
+            &self.catalog_columns,
+            &self.primary_key_columns,
+            self.schema_version,
+            self.pk_probe.clone(),
+        )?;
+        if !collect_profile {
+            return Ok(Some((rows, Vec::new())));
+        }
+        Ok(Some((rows, profiles)))
+    }
+
+    /// Rewinds catalog-owned segment descriptors for PostgreSQL rescan.
+    pub(super) fn reset(&mut self) {
+        self.next_group = 0;
+    }
+}
+
+/// Prepares a cold stream without opening or decoding a Parquet file.
+pub(super) fn prepare_cold_row_stream(
     table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
     snapshot: &koldstore_catalog::ManagedTableSnapshot,
@@ -28,148 +76,183 @@ pub(super) fn load_cold_rows_for_merge(
     qual: *mut pg_sys::List,
     projected_columns: &[&koldstore_migrate::order::CatalogColumn],
     params: pg_sys::ParamListInfo,
-) -> Result<(ColdReadProfile, Vec<ColdRow>), String> {
+) -> Result<(ColdReadProfile, Option<ColdRowStream>), String> {
     with_hook_disabled(|| {
-        // Pre-merge prune is limited to PK + scope. Mutable columns stay residual
-        // so an older cold version cannot resurrect after its newer segment is
-        // pruned away. Scope uses catalog segment-index bounds on the shared
-        // manifest today (`scope_key = ''`); later each scope_id gets its own
-        // manifest/folder and listing filters by scope_key first.
-        let scope_column_id = snapshot.scope_column_id;
-        let segment_order_column_id = snapshot.segment_order_column_id;
-        let prune_predicates = retain_pre_merge_cold_prune_predicates(
-            unsafe {
-                segment_prune_predicates(table_oid, scanrelid, qual, &catalog.columns, params)
-            },
-            |column_id| {
-                let column = catalog
-                    .columns
-                    .iter()
-                    .find(|column| column.column_id.get() == column_id)?;
-                Some(cold_prune_column_policy(
-                    column,
-                    scope_column_id,
-                    segment_order_column_id,
-                ))
-            },
-        );
-        let projection_columns =
-            projection_columns(projected_columns, &snapshot.primary_key_columns);
-        let mut requested_columns = projection_columns.clone();
-        requested_columns.extend(prune_predicates.iter().filter_map(|predicate| {
-            catalog
-                .columns
-                .iter()
-                .find(|column| column.column_id.get() == predicate.column_id)
-                .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
-        }));
-        requested_columns.sort_by_key(|column| column.column_id);
-        requested_columns.dedup_by_key(|column| column.column_id);
-        let manifest_started = Instant::now();
-        let Some(manifest_stats) =
-            crate::catalog::cache::cached_manifest_scan_context(table_oid, &requested_columns)?
-        else {
-            return Ok((ColdReadProfile::empty("(none)"), Vec::new()));
-        };
-        let manifest_read_ms = elapsed_ms(manifest_started);
-        // Scope is always eligible for catalog stats prune even when it is not
-        // separately listed in indexed_columns (it usually is via secondary indexes).
-        let mut indexed_filter_column_ids = catalog
-            .primary_key
-            .columns
-            .iter()
-            .chain(catalog.indexed_columns.iter())
-            .map(|column| column.column_id.get())
-            .collect::<Vec<_>>();
-        if let Some(column_id) = scope_column_id {
-            indexed_filter_column_ids.push(column_id.get());
-        }
-        if let Some(column_id) = segment_order_column_id {
-            indexed_filter_column_ids.push(column_id.get());
-        }
-        indexed_filter_column_ids.sort_unstable();
-        indexed_filter_column_ids.dedup();
-        validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_column_ids)
-            .map_err(|error| error.to_string())?;
-        let segments_considered = manifest_stats.segments.len();
-        let index_started = Instant::now();
-        let resolved = resolve_segment_index_candidates(
+        let Some(planned) = plan_cold_segments(
             table_oid,
+            scanrelid,
+            snapshot,
             catalog,
-            segment_order_column_id,
-            &prune_predicates,
-        )?;
-        let SegmentIndexCandidateResolution {
-            candidates: indexed_candidates,
-            shape: segment_index_lookup_shape,
-            column_id: index_column_id,
-            column_name: index_column_name,
-            plan: segment_index_plan,
-        } = resolved;
-        let segment_index_lookup_ms = indexed_candidates
-            .as_ref()
-            .map(|_| elapsed_ms(index_started));
-        let segment_index_candidate_segments = indexed_candidates
-            .as_ref()
-            .map(|candidates| candidates.len());
-        let segments = indexed_candidates.unwrap_or_else(|| manifest_stats.segments.clone());
-        let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
-
-        let projection = projection_columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect::<Vec<_>>();
-        let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
-
-        let mut profile = ColdReadProfile {
-            manifest_path: manifest_stats.manifest_path.clone(),
-            storage_type: manifest_stats.storage_type.clone(),
-            base_path: manifest_stats.base_path.clone(),
-            manifest_read_ms: Some(manifest_read_ms),
-            segments_considered,
-            segments_pruned_catalog_index,
-            segments_opened: segments.len(),
-            segment_index_order_column_id: index_column_id,
-            segment_index_order_column: index_column_name,
-            segment_index_lookup_shape: Some(segment_index_lookup_shape),
-            segment_index_plan,
-            segment_index_lookup_ms,
-            segment_index_candidate_segments,
-            pk_probe: pk_probe
-                .as_ref()
-                .map(|(column, values)| (column.name.clone(), values.clone())),
-            projected_columns: projection.clone(),
-            segments: vec![],
+            qual,
+            projected_columns,
+            params,
+        )?
+        else {
+            return Ok((ColdReadProfile::empty("(none)"), None));
         };
 
-        if segments.is_empty() {
-            return Ok((profile, Vec::new()));
+        let mut profile = planned.profile;
+        profile.segments_opened = 0;
+        if planned.segments.is_empty() {
+            return Ok((profile, None));
         }
-
         if crate::guc::cold_reads_mode() == crate::settings::ColdReadsMode::Off {
             return Err("cold reads are disabled by koldstore.cold_reads".to_string());
         }
 
         let client = open_client_from_catalog_fields(
-            &manifest_stats.storage_type,
-            &manifest_stats.base_path,
-            &manifest_stats.credentials,
-            &manifest_stats.config,
+            &planned.storage_type,
+            &planned.base_path,
+            &planned.credentials,
+            &planned.config,
         )
         .map_err(|error| error.to_string())?;
-        let (cold_rows, segment_profiles) = cold_rows_from_segments(
-            &client,
-            &segments,
-            &projection_columns,
-            &catalog.columns,
-            &snapshot.primary_key_columns,
-            snapshot.schema_version,
-            pk_probe,
-        )?;
-        profile.segments = segment_profiles;
-
-        Ok((profile, cold_rows))
+        let segment_groups =
+            group_segments_newest_first(planned.segments).map_err(|error| error.to_string())?;
+        Ok((
+            profile,
+            Some(ColdRowStream {
+                client,
+                segment_groups,
+                next_group: 0,
+                projection_columns: planned.projection_columns,
+                catalog_columns: catalog.columns.clone(),
+                primary_key_columns: snapshot.primary_key_columns.clone(),
+                schema_version: snapshot.schema_version,
+                pk_probe: planned.pk_probe,
+            }),
+        ))
     })
+}
+
+struct PlannedColdSegments {
+    profile: ColdReadProfile,
+    storage_type: String,
+    base_path: String,
+    credentials: serde_json::Value,
+    config: serde_json::Value,
+    segments: Vec<SegmentStatsHint>,
+    projection_columns: Vec<ColumnRef>,
+    pk_probe: Option<(ColumnRef, Vec<String>)>,
+}
+
+fn plan_cold_segments(
+    table_oid: pg_sys::Oid,
+    scanrelid: pg_sys::Index,
+    snapshot: &koldstore_catalog::ManagedTableSnapshot,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    qual: *mut pg_sys::List,
+    projected_columns: &[&koldstore_migrate::order::CatalogColumn],
+    params: pg_sys::ParamListInfo,
+) -> Result<Option<PlannedColdSegments>, String> {
+    let scope_column_id = snapshot.scope_column_id;
+    let segment_order_column_id = snapshot.segment_order_column_id;
+    let prune_predicates = retain_pre_merge_cold_prune_predicates(
+        unsafe { segment_prune_predicates(table_oid, scanrelid, qual, &catalog.columns, params) },
+        |column_id| {
+            let column = catalog
+                .columns
+                .iter()
+                .find(|column| column.column_id.get() == column_id)?;
+            Some(cold_prune_column_policy(
+                column,
+                scope_column_id,
+                segment_order_column_id,
+            ))
+        },
+    );
+    let projection_columns = projection_columns(projected_columns, &snapshot.primary_key_columns);
+    let mut requested_columns = projection_columns.clone();
+    requested_columns.extend(prune_predicates.iter().filter_map(|predicate| {
+        catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id.get() == predicate.column_id)
+            .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
+    }));
+    requested_columns.sort_by_key(|column| column.column_id);
+    requested_columns.dedup_by_key(|column| column.column_id);
+    let manifest_started = Instant::now();
+    let Some(manifest_stats) =
+        crate::catalog::cache::cached_manifest_scan_context(table_oid, &requested_columns)?
+    else {
+        return Ok(None);
+    };
+    let manifest_read_ms = elapsed_ms(manifest_started);
+    let mut indexed_filter_column_ids = catalog
+        .primary_key
+        .columns
+        .iter()
+        .chain(catalog.indexed_columns.iter())
+        .map(|column| column.column_id.get())
+        .collect::<Vec<_>>();
+    if let Some(column_id) = scope_column_id {
+        indexed_filter_column_ids.push(column_id.get());
+    }
+    if let Some(column_id) = segment_order_column_id {
+        indexed_filter_column_ids.push(column_id.get());
+    }
+    indexed_filter_column_ids.sort_unstable();
+    indexed_filter_column_ids.dedup();
+    validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_column_ids)
+        .map_err(|error| error.to_string())?;
+    let segments_considered = manifest_stats.segments.len();
+    let index_started = Instant::now();
+    let resolved = resolve_segment_index_candidates(
+        table_oid,
+        catalog,
+        segment_order_column_id,
+        &prune_predicates,
+    )?;
+    let SegmentIndexCandidateResolution {
+        candidates: indexed_candidates,
+        shape: segment_index_lookup_shape,
+        column_id: index_column_id,
+        column_name: index_column_name,
+        plan: segment_index_plan,
+    } = resolved;
+    let segment_index_lookup_ms = indexed_candidates
+        .as_ref()
+        .map(|_| elapsed_ms(index_started));
+    let segment_index_candidate_segments =
+        indexed_candidates.as_ref().map(|candidates| candidates.len());
+    let segments = indexed_candidates.unwrap_or_else(|| manifest_stats.segments.clone());
+    let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
+    let projection = projection_columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect::<Vec<_>>();
+    let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
+    let profile = ColdReadProfile {
+        manifest_path: manifest_stats.manifest_path.clone(),
+        storage_type: manifest_stats.storage_type.clone(),
+        base_path: manifest_stats.base_path.clone(),
+        manifest_read_ms: Some(manifest_read_ms),
+        segments_considered,
+        segments_pruned_catalog_index,
+        segments_opened: segments.len(),
+        segment_index_order_column_id: index_column_id,
+        segment_index_order_column: index_column_name,
+        segment_index_lookup_shape: Some(segment_index_lookup_shape),
+        segment_index_plan,
+        segment_index_lookup_ms,
+        segment_index_candidate_segments,
+        pk_probe: pk_probe
+            .as_ref()
+            .map(|(column, values)| (column.name.clone(), values.clone())),
+        projected_columns: projection,
+        segments: vec![],
+    };
+    Ok(Some(PlannedColdSegments {
+        profile,
+        storage_type: manifest_stats.storage_type.clone(),
+        base_path: manifest_stats.base_path.clone(),
+        credentials: manifest_stats.credentials.clone(),
+        config: manifest_stats.config.clone(),
+        segments,
+        projection_columns,
+        pk_probe,
+    }))
 }
 
 /// Result of choosing a prune column and loading catalog index candidates.
@@ -356,15 +439,37 @@ fn load_segment_index_candidates(
                     let schema_version = tuple
                         .get::<i32>(3)?
                         .ok_or_else(|| missing_candidate_field("schema_version"))?;
+                    let min_seq_raw = tuple
+                        .get::<i64>(4)?
+                        .ok_or_else(|| missing_candidate_field("min_seq"))?;
+                    let max_seq_raw = tuple
+                        .get::<i64>(5)?
+                        .ok_or_else(|| missing_candidate_field("max_seq"))?;
                     let physical_names = tuple
                         .get::<String>(8)?
                         .map(|json| serde_json::from_str(&json).unwrap_or_default())
                         .unwrap_or_default();
+                    let min_seq = SeqId::new(min_seq_raw).map_err(|error| {
+                        pgrx::spi::SpiError::DatumError(
+                            pgrx::datum::TryFromDatumError::NoSuchAttributeName(format!(
+                                "invalid min_seq {min_seq_raw}: {error}"
+                            )),
+                        )
+                    })?;
+                    let max_seq = SeqId::new(max_seq_raw).map_err(|error| {
+                        pgrx::spi::SpiError::DatumError(
+                            pgrx::datum::TryFromDatumError::NoSuchAttributeName(format!(
+                                "invalid max_seq {max_seq_raw}: {error}"
+                            )),
+                        )
+                    })?;
                     Ok(SegmentStatsHint {
                         object_path,
                         schema_version,
                         physical_names,
                         byte_size,
+                        min_seq,
+                        max_seq,
                     })
                 })
                 .collect()
@@ -700,6 +805,8 @@ mod tests {
             schema_version: 1,
             physical_names: BTreeMap::from([(7, "body".to_string())]),
             byte_size: None,
+            min_seq: SeqId::new(1).unwrap(),
+            max_seq: SeqId::new(10).unwrap(),
         };
 
         assert_eq!(

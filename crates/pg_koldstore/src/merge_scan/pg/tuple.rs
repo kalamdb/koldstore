@@ -31,6 +31,15 @@ impl ScanMemory {
     pub(super) unsafe fn switch<T>(&mut self, f: impl FnOnce() -> T) -> T {
         self.context.switch_to(|_| f())
     }
+
+    /// Releases Datums from the previously emitted streamed row.
+    ///
+    /// # Safety
+    ///
+    /// Callers must not retain Datums allocated in this context across reset.
+    pub(super) unsafe fn reset(&mut self) {
+        self.context.reset();
+    }
 }
 
 pub(super) unsafe fn store_materialized_row(

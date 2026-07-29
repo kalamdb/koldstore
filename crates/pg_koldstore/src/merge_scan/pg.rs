@@ -54,10 +54,17 @@ enum ScanEmitMode {
         slot_indexes: Vec<usize>,
         tuple_width: usize,
     },
+    /// Hot winners plus newest-first cold segment groups emitted lazily.
+    Stream {
+        stream: Box<execute::MergeRowStream>,
+        projection: qual::ScanProjection,
+        slot_indexes: Vec<usize>,
+        tuple_width: usize,
+    },
 }
 
 impl ScanEmitMode {
-    fn buffer(rows: Vec<MaterializedRow>, projection: &qual::ScanProjection<'_>) -> Self {
+    fn buffer(rows: Vec<MaterializedRow>, projection: &qual::ScanProjection) -> Self {
         Self::Buffer {
             rows,
             next: 0,
@@ -67,6 +74,21 @@ impl ScanEmitMode {
                 .map(|column| column.slot_index)
                 .collect(),
             tuple_width: projection.tuple_width,
+        }
+    }
+
+    fn stream(stream: execute::MergeRowStream, projection: qual::ScanProjection) -> Self {
+        let slot_indexes = projection
+            .columns
+            .iter()
+            .map(|column| column.slot_index)
+            .collect();
+        let tuple_width = projection.tuple_width;
+        Self::Stream {
+            stream: Box::new(stream),
+            projection,
+            slot_indexes,
+            tuple_width,
         }
     }
 }
@@ -79,27 +101,54 @@ struct ScanExecutionState {
     emit_path: EmitPath,
     /// Allocated only when PostgreSQL instruments this node for EXPLAIN.
     execution: Option<Box<ScanExecutionProfile>>,
-    /// Owns all Datums in buffered rows; deleted on EndCustomScan.
+    /// Owns buffered Datums or the current streamed row's pass-by-ref Datums.
     _memory: ScanMemory,
 }
 
 impl ScanExecutionState {
-    unsafe fn store_next_buffered_row(&mut self, slot: *mut pg_sys::TupleTableSlot) -> bool {
-        let ScanEmitMode::Buffer {
-            rows,
-            next,
-            slot_indexes,
-            tuple_width,
-        } = &mut self.mode
-        else {
-            return false;
-        };
-        let Some(row) = rows.get(*next) else {
-            return false;
-        };
-        *next += 1;
-        store_materialized_row(slot, row, slot_indexes, *tuple_width);
-        true
+    unsafe fn store_next_row(&mut self, slot: *mut pg_sys::TupleTableSlot) -> Result<bool, String> {
+        let Self {
+            mode,
+            cold_profile,
+            execution,
+            _memory,
+            ..
+        } = self;
+        match mode {
+            ScanEmitMode::HotChild => Ok(false),
+            ScanEmitMode::Buffer {
+                rows,
+                next,
+                slot_indexes,
+                tuple_width,
+            } => {
+                let Some(row) = rows.get(*next) else {
+                    return Ok(false);
+                };
+                *next += 1;
+                store_materialized_row(slot, row, slot_indexes, *tuple_width);
+                Ok(true)
+            }
+            ScanEmitMode::Stream {
+                stream,
+                projection,
+                slot_indexes,
+                tuple_width,
+            } => {
+                _memory.reset();
+                let Some(row) = stream.next_materialized(
+                    projection,
+                    _memory,
+                    cold_profile,
+                    execution.as_deref_mut(),
+                )?
+                else {
+                    return Ok(false);
+                };
+                store_materialized_row(slot, &row, slot_indexes, *tuple_width);
+                Ok(true)
+            }
+        }
     }
 }
 
@@ -503,18 +552,18 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         return exec_hot_child_slot(node, slot);
     }
 
-    // Buffered merge rows are base-relation scan tuples. ExecScan applies the
+    // Emitted rows are base-relation scan tuples. ExecScan applies the
     // ExprState compiled from plan.qual (including RLS/security quals), counts
     // rejected rows, and projects into ps_ResultTupleSlot.
     pg_sys::ExecScan(
         &raw mut (*node).ss,
-        Some(next_buffered_scan_tuple),
-        Some(recheck_buffered_scan_tuple),
+        Some(next_scan_tuple),
+        Some(recheck_scan_tuple),
     )
 }
 
 #[pgrx::pg_guard]
-unsafe extern "C-unwind" fn next_buffered_scan_tuple(
+unsafe extern "C-unwind" fn next_scan_tuple(
     scan_state: *mut pg_sys::ScanState,
 ) -> *mut pg_sys::TupleTableSlot {
     if scan_state.is_null() {
@@ -529,7 +578,10 @@ unsafe extern "C-unwind" fn next_buffered_scan_tuple(
     let stored = SCAN_STATES.with(|states| {
         let mut states = states.borrow_mut();
         let scan = states.get_mut(&(node as usize))?;
-        Some(scan.store_next_buffered_row(slot))
+        Some(
+            scan.store_next_row(slot)
+                .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} stream failed: {error}")),
+        )
     });
 
     if stored == Some(true) {
@@ -540,7 +592,7 @@ unsafe extern "C-unwind" fn next_buffered_scan_tuple(
 }
 
 #[pgrx::pg_guard]
-unsafe extern "C-unwind" fn recheck_buffered_scan_tuple(
+unsafe extern "C-unwind" fn recheck_scan_tuple(
     _scan_state: *mut pg_sys::ScanState,
     _slot: *mut pg_sys::TupleTableSlot,
 ) -> bool {
@@ -638,8 +690,15 @@ unsafe extern "C-unwind" fn rescan_custom_scan(node: *mut pg_sys::CustomScanStat
     }
     SCAN_STATES.with(|states| {
         if let Some(scan) = states.borrow_mut().get_mut(&(node as usize)) {
-            if let ScanEmitMode::Buffer { next, .. } = &mut scan.mode {
-                *next = 0;
+            match &mut scan.mode {
+                ScanEmitMode::Buffer { next, .. } => *next = 0,
+                ScanEmitMode::Stream { stream, .. } => {
+                    stream.reset();
+                    scan.cold_profile.segments.clear();
+                    scan.cold_profile.segments_opened = 0;
+                    scan._memory.reset();
+                }
+                ScanEmitMode::HotChild => {}
             }
         }
     });

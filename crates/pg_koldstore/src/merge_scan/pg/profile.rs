@@ -59,10 +59,14 @@ pub(super) trait ScanProfileSink {
     fn start_timer(&self) -> Option<Instant>;
     fn record_hot_scan(&mut self, started: Option<Instant>);
     fn record_hot_buffer(&mut self, row_count: usize);
+    #[allow(dead_code)]
     fn record_cold_rows(&mut self, row_count: usize);
     fn record_mirror_scan(&mut self, row_count: usize, started: Option<Instant>);
+    #[allow(dead_code)]
     fn record_overlay(&mut self, input_rows: usize, output_rows: usize, started: Option<Instant>);
+    #[allow(dead_code)]
     fn record_merge(&mut self, merged: &MergeScanResult, started: Option<Instant>);
+    #[allow(dead_code)]
     fn record_materialization(&mut self, started: Option<Instant>);
 }
 
@@ -82,12 +86,14 @@ impl ScanProfileSink for DisabledScanProfiler {
     fn record_hot_buffer(&mut self, _row_count: usize) {}
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn record_cold_rows(&mut self, _row_count: usize) {}
 
     #[inline(always)]
     fn record_mirror_scan(&mut self, _row_count: usize, _started: Option<Instant>) {}
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn record_overlay(
         &mut self,
         _input_rows: usize,
@@ -97,9 +103,11 @@ impl ScanProfileSink for DisabledScanProfiler {
     }
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn record_merge(&mut self, _merged: &MergeScanResult, _started: Option<Instant>) {}
 
     #[inline(always)]
+    #[allow(dead_code)]
     fn record_materialization(&mut self, _started: Option<Instant>) {}
 }
 
@@ -164,6 +172,7 @@ impl ScanProfileSink for ScanProfiler {
         }
     }
 
+    #[allow(dead_code)]
     fn record_cold_rows(&mut self, row_count: usize) {
         if let Some(execution) = self.execution.as_mut() {
             execution.cold_rows = row_count;
@@ -177,6 +186,7 @@ impl ScanProfileSink for ScanProfiler {
         }
     }
 
+    #[allow(dead_code)]
     fn record_overlay(&mut self, input_rows: usize, output_rows: usize, started: Option<Instant>) {
         if let Some(execution) = self.execution.as_mut() {
             execution.overlay_rows_removed = input_rows.saturating_sub(output_rows);
@@ -184,6 +194,7 @@ impl ScanProfileSink for ScanProfiler {
         }
     }
 
+    #[allow(dead_code)]
     fn record_merge(&mut self, merged: &MergeScanResult, started: Option<Instant>) {
         if let Some(execution) = self.execution.as_mut() {
             execution.merge_ms = started.map(elapsed_ms);
@@ -196,6 +207,7 @@ impl ScanProfileSink for ScanProfiler {
         }
     }
 
+    #[allow(dead_code)]
     fn record_materialization(&mut self, started: Option<Instant>) {
         if let Some(execution) = self.execution.as_mut() {
             execution.materialization_ms = started.map(elapsed_ms);
@@ -213,8 +225,8 @@ pub(super) enum EmitPath {
     HotNative,
     /// Cold-only after PK probe: no hot JSON merge.
     ColdNative,
-    /// Hot+cold overlap via JSON merge buffer.
-    MergeBuffer,
+    /// Hot+cold winners emitted from newest-first cold segment groups.
+    MergeStream,
 }
 
 impl EmitPath {
@@ -223,7 +235,7 @@ impl EmitPath {
             Self::HotChild => "hot_child",
             Self::HotNative => "hot_native",
             Self::ColdNative => "cold_native",
-            Self::MergeBuffer => "merge_buffer",
+            Self::MergeStream => "merge_stream",
         }
     }
 }
@@ -233,8 +245,14 @@ impl EmitPath {
 pub(super) struct ScanExecutionProfile {
     /// Rows read from the hot heap, including a zero-row point probe.
     pub(super) hot_rows: usize,
+    /// Maximum hot JSON rows retained in one MergeStream SPI page.
+    pub(super) peak_hot_batch_rows: usize,
+    /// Exact PK identities retained by newest-first resolution.
+    pub(super) seen_key_count: usize,
     /// Rows decoded from selected Parquet row groups.
     pub(super) cold_rows: usize,
+    /// Peak decoded cold rows retained for one newest-first segment group.
+    pub(super) peak_cold_batch_rows: usize,
     /// Mirror tombstones inspected for the immediate delete overlay.
     pub(super) mirror_rows: usize,
     /// Cold rows masked by matching mirror tombstones.
@@ -439,6 +457,14 @@ fn explain_hot_scan(
         Some(execution) => {
             explain_text(es, "Access Method", hot_access_method(emit_path));
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
+            if matches!(emit_path, EmitPath::MergeStream) {
+                explain_integer(
+                    es,
+                    "Peak Hot Batch Rows",
+                    None,
+                    execution.peak_hot_batch_rows as i64,
+                );
+            }
         }
         None => explain_text(es, "Status", "planned"),
     }
@@ -450,7 +476,7 @@ fn hot_access_method(emit_path: EmitPath) -> &'static str {
         EmitPath::HotChild => "PostgreSQL child plan",
         EmitPath::HotNative => "SPI native tuples",
         EmitPath::ColdNative => "SPI native point probe",
-        EmitPath::MergeBuffer => "SPI JSON projection",
+        EmitPath::MergeStream => "SPI JSON projection + segment stream",
     }
 }
 
@@ -675,6 +701,15 @@ fn explain_merge(
                 None,
                 execution.overlay_rows_removed as i64,
             );
+            if matches!(emit_path, EmitPath::MergeStream | EmitPath::ColdNative) {
+                explain_integer(es, "Seen Keys", None, execution.seen_key_count as i64);
+                explain_integer(
+                    es,
+                    "Peak Cold Batch Rows",
+                    None,
+                    execution.peak_cold_batch_rows as i64,
+                );
+            }
             explain_text(es, "Tuple Path", emit_path.as_str());
             explain_text(es, "Post-Merge Filter", "PostgreSQL ExecScan");
         }

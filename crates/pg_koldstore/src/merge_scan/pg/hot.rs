@@ -40,58 +40,91 @@ pub(super) fn equality_covers_primary_key(
         })
 }
 
-/// Loads live hot rows as [`HotRow`] values for Rust merge resolution.
-///
-/// When `equality_filters` is non-empty, they are AND-ed into the SPI query so
-/// point lookups do not materialize the entire hot heap.
-///
-/// `projected_columns` limits the JSON image to columns needed for emit/filters.
-/// Uses `to_jsonb(proj)` on a subquery (not `jsonb_build_object`) so wide tables
-/// stay under PostgreSQL's `FUNC_MAX_ARGS` limit.
-pub(super) fn load_hot_rows_for_merge(
-    relation: &str,
-    snapshot: &koldstore_catalog::ManagedTableSnapshot,
-    equality_filters: &[HotEqualityFilter],
-    projected_columns: &[&koldstore_migrate::order::CatalogColumn],
-) -> Result<Vec<HotRow>, String> {
-    let table = QualifiedTableName::parse(relation).map_err(|error| error.to_string())?;
-    let pk_columns = snapshot
-        .primary_key_columns
-        .iter()
-        .map(|column| PkColumn::new(&column.name).map_err(|error| error.to_string()))
-        .collect::<Result<Vec<_>, _>>()?;
+/// Maximum hot JSON rows retained in one MergeStream SPI page.
+pub(super) const HOT_MERGE_BATCH_ROWS: usize = 1024;
 
-    // Subquery select list: projected image columns plus any PK columns missing
-    // from the projection (needed for pk_json).
-    let mut select_names: Vec<String> = projected_columns
-        .iter()
-        .map(|column| column.name.clone())
-        .collect();
-    for pk in &snapshot.primary_key_columns {
-        if !select_names.iter().any(|name| name == &pk.name) {
-            select_names.push(pk.name.clone());
+/// Paged SPI reader for merge-path hot JSON rows.
+///
+/// Pages are ordered by primary-key columns so `LIMIT`/`OFFSET` is stable for
+/// one scan snapshot. Application-table PK uniqueness makes cross-page hot
+/// duplicates impossible.
+#[derive(Debug)]
+pub(super) struct HotMergeBatchReader {
+    ordered_sql: String,
+    pk_columns: Vec<PkColumn>,
+    batch_size: usize,
+    offset: usize,
+    exhausted: bool,
+    relation_owner: pg_sys::Oid,
+}
+
+impl HotMergeBatchReader {
+    /// Builds a reader that yields empty pages (cold-only merge / point paths).
+    #[must_use]
+    pub(super) fn empty(relation_owner: pg_sys::Oid) -> Self {
+        Self {
+            ordered_sql: String::new(),
+            pk_columns: Vec::new(),
+            batch_size: HOT_MERGE_BATCH_ROWS,
+            offset: 0,
+            exhausted: true,
+            relation_owner,
         }
     }
-    let select_list = select_names
-        .iter()
-        .map(|name| format!("hot.{}", quote_ident(name)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let hot_pk = snapshot
-        .primary_key_columns
-        .iter()
-        .map(|column| {
-            format!(
-                "'{column}', proj.{quoted}",
-                column = column.name.replace('\'', "''"),
-                quoted = quote_ident(&column.name),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let where_clause = where_clause_sql(equality_filters);
-    let sql = format!(
-        r#"
+
+    /// Prepares a paged hot JSON reader without fetching the first page.
+    pub(super) fn open(
+        relation: &str,
+        snapshot: &koldstore_catalog::ManagedTableSnapshot,
+        equality_filters: &[HotEqualityFilter],
+        projected_columns: &[&koldstore_migrate::order::CatalogColumn],
+        relation_owner: pg_sys::Oid,
+    ) -> Result<Self, String> {
+        let table = QualifiedTableName::parse(relation).map_err(|error| error.to_string())?;
+        let pk_columns = snapshot
+            .primary_key_columns
+            .iter()
+            .map(|column| PkColumn::new(&column.name).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        if pk_columns.is_empty() {
+            return Err("managed table primary key is required for hot merge paging".to_string());
+        }
+
+        let mut select_names: Vec<String> = projected_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        for pk in &snapshot.primary_key_columns {
+            if !select_names.iter().any(|name| name == &pk.name) {
+                select_names.push(pk.name.clone());
+            }
+        }
+        let select_list = select_names
+            .iter()
+            .map(|name| format!("hot.{}", quote_ident(name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let hot_pk = snapshot
+            .primary_key_columns
+            .iter()
+            .map(|column| {
+                format!(
+                    "'{column}', proj.{quoted}",
+                    column = column.name.replace('\'', "''"),
+                    quoted = quote_ident(&column.name),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let order_by = snapshot
+            .primary_key_columns
+            .iter()
+            .map(|column| format!("proj.{}", quote_ident(&column.name)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let where_clause = where_clause_sql(equality_filters);
+        let ordered_sql = format!(
+            r#"
 SELECT
     to_jsonb(proj) AS row_image,
     jsonb_build_object({hot_pk}) AS pk_json
@@ -100,14 +133,59 @@ FROM (
     FROM ONLY {table} AS hot
     {where_clause}
 ) AS proj
+ORDER BY {order_by}
 "#,
-        hot_pk = hot_pk,
-        select_list = select_list,
-        table = table.quoted(),
-        where_clause = where_clause,
-    );
+            hot_pk = hot_pk,
+            select_list = select_list,
+            table = table.quoted(),
+            where_clause = where_clause,
+            order_by = order_by,
+        );
 
-    with_hook_disabled(|| unsafe { execute_hot_rows_query(&sql, &pk_columns) })
+        Ok(Self {
+            ordered_sql,
+            pk_columns,
+            batch_size: HOT_MERGE_BATCH_ROWS,
+            offset: 0,
+            exhausted: false,
+            relation_owner,
+        })
+    }
+
+    /// Fetches the next hot page under the relation-owner merge identity.
+    ///
+    /// Returns `Ok(None)` when every visible hot row has already been read.
+    pub(super) fn next_batch(&mut self) -> Result<Option<Vec<HotRow>>, String> {
+        if self.exhausted {
+            return Ok(None);
+        }
+        let sql = format!(
+            "{prefix} LIMIT {limit} OFFSET {offset}",
+            prefix = self.ordered_sql,
+            limit = self.batch_size,
+            offset = self.offset,
+        );
+        let rows =
+            crate::catalog::owner::with_relation_owner_for_merge(self.relation_owner, || {
+                with_hook_disabled(|| unsafe { execute_hot_rows_query(&sql, &self.pk_columns) })
+            })?;
+        let fetched = rows.len();
+        self.offset = self.offset.saturating_add(fetched);
+        if fetched < self.batch_size {
+            self.exhausted = true;
+        }
+        if fetched == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(rows))
+        }
+    }
+
+    /// Rewinds paging for PostgreSQL rescan without dropping prepared SQL.
+    pub(super) fn reset(&mut self) {
+        self.offset = 0;
+        self.exhausted = self.ordered_sql.is_empty();
+    }
 }
 
 /// Loads projected hot columns as native Datums when cold storage is fully pruned.
@@ -121,7 +199,7 @@ pub(super) fn load_hot_rows_native(
     relation: &str,
     equality_filters: &[HotEqualityFilter],
     projected_columns: &[&koldstore_migrate::order::CatalogColumn],
-    scan_projection: &ScanProjection<'_>,
+    scan_projection: &ScanProjection,
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
     let table = QualifiedTableName::parse(relation).map_err(|error| error.to_string())?;
@@ -209,7 +287,7 @@ unsafe fn execute_hot_row_placeholders(query: &str) -> Result<Vec<MaterializedRo
 
 unsafe fn execute_hot_rows_native(
     query: &str,
-    scan_projection: &ScanProjection<'_>,
+    scan_projection: &ScanProjection,
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
     with_read_query(query, |processed, tuptable| {
@@ -283,7 +361,7 @@ unsafe fn materialize_spi_tuple(
     tuple: pg_sys::HeapTuple,
     tupdesc: pg_sys::TupleDesc,
     type_meta: &[ColumnTypeMeta],
-    scan_projection: &ScanProjection<'_>,
+    scan_projection: &ScanProjection,
 ) -> Result<MaterializedRow, String> {
     let mut values = Vec::with_capacity(scan_projection.columns.len());
     let mut is_null = Vec::with_capacity(scan_projection.columns.len());

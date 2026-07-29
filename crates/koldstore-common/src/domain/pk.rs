@@ -385,6 +385,19 @@ pub struct LogicalPk {
     columns: Vec<(PkColumn, PkValue)>,
 }
 
+/// Exact ordered PK values for identity comparisons within one known PK shape.
+///
+/// Column names are intentionally omitted: every key in a managed-table scan
+/// has the same ordered [`PrimaryKeyShape`]. Single-column keys avoid both the
+/// per-key column-name clone and the `Vec` allocation carried by [`LogicalPk`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LogicalPkValues {
+    /// One primary-key value stored inline.
+    Single(PkValue),
+    /// Composite primary-key values in catalog order.
+    Composite(Box<[PkValue]>),
+}
+
 impl LogicalPk {
     /// Creates a logical primary key from ordered pairs.
     ///
@@ -447,6 +460,27 @@ impl LogicalPk {
             map.insert(column.as_str().to_string(), value.as_json().clone());
         }
         Value::Object(map)
+    }
+
+    /// Consumes this key into its compact value-only identity.
+    ///
+    /// The result is exact only within a single known PK shape. Callers must
+    /// not compare identities from tables with different PK column layouts.
+    #[must_use]
+    pub fn into_values(self) -> LogicalPkValues {
+        let mut values = self.columns.into_iter().map(|(_, value)| value);
+        let first = values
+            .next()
+            .expect("LogicalPk construction guarantees at least one column");
+        match values.next() {
+            None => LogicalPkValues::Single(first),
+            Some(second) => LogicalPkValues::Composite(
+                std::iter::once(first)
+                    .chain(std::iter::once(second))
+                    .chain(values)
+                    .collect(),
+            ),
+        }
     }
 }
 

@@ -24,6 +24,10 @@ pub struct ManifestScanSegmentStats {
     pub physical_names: BTreeMap<i16, String>,
     /// Object byte size when known (enables bounded footer range GETs).
     pub byte_size: Option<u64>,
+    /// Segment minimum `seq` (inclusive).
+    pub min_seq: i64,
+    /// Segment maximum `seq` (inclusive).
+    pub max_seq: i64,
 }
 
 /// Manifest-backed merge-scan context loaded from catalog SPI.
@@ -137,6 +141,8 @@ pub fn manifest_scan_segment_stats(
             })
             .unwrap_or_default(),
         byte_size: optional_u64(value, "byte_size"),
+        min_seq: required_i64(value, "min_seq")?,
+        max_seq: required_i64(value, "max_seq")?,
     })
 }
 
@@ -312,6 +318,13 @@ fn required_i32(value: &serde_json::Value, field: &str) -> Result<i32, String> {
     i32::try_from(raw).map_err(|error| error.to_string())
 }
 
+fn required_i64(value: &serde_json::Value, field: &str) -> Result<i64, String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| format!("missing integer field `{field}`"))
+}
+
 fn required_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> {
     let raw = value
         .get(field)
@@ -352,6 +365,8 @@ mod tests {
                     "object_path": "ns/table/batch-1.parquet",
                     "schema_version": 1,
                     "physical_names": {"1": "id"},
+                    "min_seq": 1,
+                    "max_seq": 100,
                     "column_stats": {"1": {"min": 1, "max": 100}}
                 }
             ]
@@ -379,6 +394,8 @@ mod tests {
                     "object_path": "ns/table/batch-1.parquet",
                     "schema_version": 2,
                     "physical_names": {"1": "old_id"},
+                    "min_seq": 1,
+                    "max_seq": 10,
                     "column_stats": {"1": {"min": 1, "max": 10}},
                     "byte_size": 4096
                 }

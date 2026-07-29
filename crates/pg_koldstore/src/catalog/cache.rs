@@ -329,27 +329,46 @@ fn load_manifest_scan_context_as_owner(
     let value: serde_json::Value =
         serde_json::from_str(&json).map_err(|error| error.to_string())?;
     let context = koldstore_catalog::decode::in_sync_manifest_scan_context(&value)?;
-    Ok(Some(cached_from_context(context)))
+    Ok(Some(cached_from_context(context)?))
 }
 
 #[cfg(feature = "pg")]
-fn cached_from_context(context: InSyncManifestScanContext) -> CachedManifestScanContext {
-    CachedManifestScanContext {
+fn cached_from_context(
+    context: InSyncManifestScanContext,
+) -> Result<CachedManifestScanContext, String> {
+    let segments = context
+        .segments
+        .into_iter()
+        .map(|segment| {
+            let min_seq = koldstore_common::SeqId::new(segment.min_seq).map_err(|error| {
+                format!(
+                    "catalog segment `{}` has invalid min_seq {}: {error}",
+                    segment.object_path, segment.min_seq
+                )
+            })?;
+            let max_seq = koldstore_common::SeqId::new(segment.max_seq).map_err(|error| {
+                format!(
+                    "catalog segment `{}` has invalid max_seq {}: {error}",
+                    segment.object_path, segment.max_seq
+                )
+            })?;
+            Ok(SegmentStatsHint {
+                object_path: segment.object_path,
+                schema_version: segment.schema_version,
+                physical_names: segment.physical_names,
+                byte_size: segment.byte_size,
+                min_seq,
+                max_seq,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(CachedManifestScanContext {
         manifest_path: context.manifest_path,
         generation: context.generation,
         base_path: context.base_path,
         storage_type: context.storage_type,
         credentials: context.credentials,
         config: context.config,
-        segments: context
-            .segments
-            .into_iter()
-            .map(|segment| SegmentStatsHint {
-                object_path: segment.object_path,
-                schema_version: segment.schema_version,
-                physical_names: segment.physical_names,
-                byte_size: segment.byte_size,
-            })
-            .collect(),
-    }
+        segments,
+    })
 }

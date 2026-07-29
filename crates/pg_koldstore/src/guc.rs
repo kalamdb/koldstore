@@ -14,6 +14,9 @@ static COLD_READS: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::
 static MAX_OPEN_PARQUET_READERS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_MAX_OPEN_PARQUET_READERS);
 #[cfg(feature = "pg")]
+static MAX_MERGE_SEEN_KEYS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_MAX_MERGE_SEEN_KEYS);
+#[cfg(feature = "pg")]
 static LOG_LEVEL: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c"info"));
 #[cfg(feature = "pg")]
 static ENABLE_MERGE_SCAN: GucSetting<bool> = GucSetting::<bool>::new(true);
@@ -72,6 +75,16 @@ pub fn define_gucs() {
         &MAX_OPEN_PARQUET_READERS,
         settings::MIN_CONCURRENCY_LIMIT,
         settings::MAX_CONCURRENCY_LIMIT,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.max_merge_seen_keys",
+        c"Maximum exact PK identities retained by one KoldMergeScan.",
+        c"Fail-closed per-scan cap on the compact winner seen-set. Protects backends from accidental full-table scans. 0 disables the cap.",
+        &MAX_MERGE_SEEN_KEYS,
+        settings::MIN_MAX_MERGE_SEEN_KEYS,
+        settings::MAX_MAX_MERGE_SEEN_KEYS,
         GucContext::Userset,
         flags,
     );
@@ -256,6 +269,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "32",
         },
         GucDefinition {
+            name: settings::MAX_MERGE_SEEN_KEYS_GUC,
+            internal: false,
+            default_value: "1000000",
+        },
+        GucDefinition {
             name: settings::LOG_LEVEL_GUC,
             internal: false,
             default_value: settings::DEFAULT_LOG_LEVEL,
@@ -395,6 +413,20 @@ pub fn max_open_parquet_readers() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_MAX_OPEN_PARQUET_READERS
+    }
+}
+
+/// Current per-scan merge seen-key cap (`0` = unlimited).
+#[must_use]
+pub fn max_merge_seen_keys() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_max_merge_seen_keys(MAX_MERGE_SEEN_KEYS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_MAX_MERGE_SEEN_KEYS
     }
 }
 
