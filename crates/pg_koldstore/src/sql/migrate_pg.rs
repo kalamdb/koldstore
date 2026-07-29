@@ -592,6 +592,10 @@ fn register_schema_version(input: SchemaRegistrationInput<'_>) -> Result<(), Str
 pub(crate) fn refresh_active_schema_if_changed(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<bool, String> {
+    // shared_preload ProcessUtility can reach here before CREATE EXTENSION.
+    if !crate::catalog::cache::managed_catalog_ready() {
+        return Ok(false);
+    }
     let table_oid_u32 = table_oid.to_u32();
     let Some(active) = active_schema_refresh_context(table_oid)? else {
         return Ok(false);

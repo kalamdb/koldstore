@@ -95,17 +95,24 @@ mod process_utility {
                 apply_options(relation, options);
             }
             if let Some(table_oid) = refresh_oid {
-                // PortalRunUtility increments the command counter only after
-                // ProcessUtility returns. Refresh/SPI must see the just-applied
-                // ALTER (e.g. RENAME COLUMN) in this same transaction.
-                pg_sys::CommandCounterIncrement();
-                // Do not abort the user ALTER on refresh failure. Unsupported
-                // type additions must remain allowed at DDL time; flush refreshes
-                // again and records an error job without pruning hot rows.
-                if let Err(error) =
-                    crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid)
-                {
-                    pgrx::warning!("KoldStore schema refresh after ALTER TABLE deferred: {error}");
+                // shared_preload installs this hook before CREATE EXTENSION, and
+                // initdb runs ALTER TABLE on system catalogs. Skip until
+                // koldstore.schemas exists — SPI would FATAL the bootstrap.
+                if crate::catalog::cache::managed_catalog_ready() {
+                    // PortalRunUtility increments the command counter only after
+                    // ProcessUtility returns. Refresh/SPI must see the just-applied
+                    // ALTER (e.g. RENAME COLUMN) in this same transaction.
+                    pg_sys::CommandCounterIncrement();
+                    // Do not abort the user ALTER on refresh failure. Unsupported
+                    // type additions must remain allowed at DDL time; flush refreshes
+                    // again and records an error job without pruning hot rows.
+                    if let Err(error) =
+                        crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid)
+                    {
+                        pgrx::warning!(
+                            "KoldStore schema refresh after ALTER TABLE deferred: {error}"
+                        );
+                    }
                 }
             }
         }

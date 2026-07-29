@@ -60,6 +60,23 @@ pub struct CachedManifestScanContext {
     pub segments: Vec<SegmentStatsHint>,
 }
 
+/// Returns whether `koldstore.schemas` is present (syscache, no SPI).
+///
+/// ProcessUtility and planner hooks must not SPI-query the managed catalog
+/// during `initdb` / `CREATE EXTENSION` while the relation does not exist yet —
+/// a missing-relation error is FATAL in bootstrap and aborts cluster init.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn managed_catalog_ready() -> bool {
+    unsafe {
+        let namespace = pgrx::pg_sys::get_namespace_oid(c"koldstore".as_ptr(), true);
+        if namespace == pgrx::pg_sys::InvalidOid {
+            return false;
+        }
+        pgrx::pg_sys::get_relname_relid(c"schemas".as_ptr(), namespace) != pgrx::pg_sys::InvalidOid
+    }
+}
+
 /// Registers the relcache callback that keeps backend-local KoldStore caches coherent.
 #[cfg(feature = "pg")]
 pub fn register_invalidation_callback() {
@@ -168,6 +185,9 @@ pub fn cached_migration_catalog(
 pub fn managed_table_snapshot(
     table_oid: pgrx::pg_sys::Oid,
 ) -> SpiResult<Option<Arc<ManagedTableSnapshot>>> {
+    if !managed_catalog_ready() {
+        return Ok(None);
+    }
     let key = table_oid.to_u32();
     if let Some(cached) = MANAGED_TABLE_CACHE.with(|cache| cache.borrow().get(key)) {
         return Ok(cached);
@@ -192,6 +212,9 @@ pub fn managed_table_snapshot(
 #[cfg(feature = "pg")]
 #[must_use]
 pub fn is_managed_relation(table_oid: pgrx::pg_sys::Oid) -> bool {
+    if !managed_catalog_ready() {
+        return false;
+    }
     managed_table_snapshot(table_oid)
         .ok()
         .flatten()
