@@ -164,13 +164,7 @@ pub(crate) fn with_hook_disabled<T>(f: impl FnOnce() -> T) -> T {
 /// Planner hooks must not SPI-query the managed catalog while CREATE EXTENSION
 /// (or DROP) is still building it. Syscache avoids nested planning.
 fn managed_catalog_ready() -> bool {
-    unsafe {
-        let namespace = pgrx::pg_sys::get_namespace_oid(c"koldstore".as_ptr(), true);
-        if namespace == pgrx::pg_sys::InvalidOid {
-            return false;
-        }
-        pgrx::pg_sys::get_relname_relid(c"schemas".as_ptr(), namespace) != pgrx::pg_sys::InvalidOid
-    }
+    crate::catalog::cache::managed_catalog_ready()
 }
 
 #[pgrx::pg_guard]
