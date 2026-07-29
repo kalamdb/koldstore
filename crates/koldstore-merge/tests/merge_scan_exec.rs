@@ -42,7 +42,6 @@ fn plan() -> MergeScanPlan {
         table_oid: 42,
         scanrelid: 1,
         primary_key_columns: vec!["id".to_string()],
-        exact_pk_lookup: false,
         merge_metadata_attnums: MergeMetadataAttnums {
             seq: 3,
             commit_seq: 4,
