@@ -87,7 +87,6 @@ pub fn changes_since(
 /// Returns an error when no primary-key columns are supplied, the scope column
 /// is unsafe, or the SQL statement cannot be represented.
 pub fn plan_mirror_changes_since(
-    _table: &QualifiedTableName,
     mirror_table: &QualifiedTableName,
     primary_key_columns: &[String],
     scope_column: Option<&str>,

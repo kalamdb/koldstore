@@ -200,7 +200,7 @@ FROM koldstore.async_mirror_state;
 If the worker cannot run or repeatedly soft-fails, the slot retains WAL and can
 fill `pg_wal`. Alert on retained bytes, `async_mirror_status()->'healthy'`, and
 the age of `updated_at`. `async_mirror_status()->'retention'` contains the
-threshold, observed bytes, and `ok`; `admission` remains a compatibility alias.
+threshold, observed bytes, and `ok`.
 By default
 `koldstore.async_mirror_max_retained_bytes` is a **1 GiB health threshold**.
 Crossing it marks async mirror status unhealthy and should alert operators, but

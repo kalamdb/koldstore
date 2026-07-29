@@ -197,8 +197,10 @@ the project `README.md`.
 Flush is on-demand unless you schedule it. Operator recipe:
 [operations/scheduling.md](operations/scheduling.md).
 
-Extension install / `ALTER EXTENSION … UPDATE` and the production GUC baseline
-are documented in [operations/upgrade.md](operations/upgrade.md).
+Extension install and the production GUC baseline are documented in
+[operations/upgrade.md](operations/upgrade.md). Catalog DDL changes during
+development go into `crates/pg_koldstore/sql/koldstore--0.1.0.sql` directly
+(no packaged `ALTER EXTENSION … UPDATE` edges in beta).
 
 To verify that recipe against local pgrx PostgreSQL (builds/installs `pg_cron`
 if needed, waits for a one-minute cron tick):

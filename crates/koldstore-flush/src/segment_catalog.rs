@@ -9,15 +9,10 @@
 //! those rows to `active` in one statement.
 
 use koldstore_catalog::SyncState;
-use koldstore_common::{ColumnId, SqlStatement};
-use koldstore_sortkey::{encode_sort_key_json, SortKeyType, CODEC_VERSION};
+use koldstore_common::SqlStatement;
 use thiserror::Error;
 
-pub use koldstore_catalog::CatalogManifestSegmentRow;
-pub use koldstore_manifest::{
-    build_manifest_segment_from_catalog_row, manifest_from_catalog_rows, write_manifest_to_path,
-    ManifestAssemblyError,
-};
+use koldstore_manifest::ManifestAssemblyError;
 
 /// Flush catalog planning error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -28,66 +23,12 @@ pub enum SegmentCatalogError {
     /// Manifest assembly failed.
     #[error("{0}")]
     Manifest(String),
-    /// A supported indexed-column bound could not be encoded.
-    #[error("{0}")]
-    SortKey(String),
 }
 
 impl From<ManifestAssemblyError> for SegmentCatalogError {
     fn from(error: ManifestAssemblyError) -> Self {
         Self::Manifest(error.to_string())
     }
-}
-
-/// One Sort Key V1 index row ready for a typed SPI array insert.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncodedColumnBound {
-    /// Stable PostgreSQL attribute number.
-    pub column_id: ColumnId,
-    /// PostgreSQL type OID used to interpret the encoded bytes.
-    pub type_oid: u32,
-    /// Persisted Sort Key codec version.
-    pub codec_version: i16,
-    /// Encoded inclusive lower segment bound.
-    pub min_value: Vec<u8>,
-    /// Encoded inclusive upper segment bound.
-    pub max_value: Vec<u8>,
-}
-
-/// Encodes supported indexed-column JSON bounds as Sort Key V1 bytes.
-///
-/// Columns missing bounds or catalog type metadata are omitted. Types outside
-/// the Sort Key V1 allowlist are intentionally skipped.
-///
-/// # Errors
-///
-/// Returns an error when a supported type's JSON bound has an invalid shape or
-/// Storekey cannot encode it.
-pub fn encode_indexed_column_bounds(
-    indexed_bounds: &std::collections::BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
-    type_oids: &std::collections::BTreeMap<ColumnId, u32>,
-) -> Result<Vec<EncodedColumnBound>, SegmentCatalogError> {
-    let mut encoded = Vec::with_capacity(indexed_bounds.len());
-    for (column_id, bounds) in indexed_bounds {
-        let Some(&type_oid) = type_oids.get(column_id) else {
-            continue;
-        };
-        let Some(sort_key_type) = SortKeyType::from_type_oid(type_oid) else {
-            continue;
-        };
-        let min_value = encode_sort_key_json(sort_key_type, &bounds.0)
-            .map_err(|error| SegmentCatalogError::SortKey(error.to_string()))?;
-        let max_value = encode_sort_key_json(sort_key_type, &bounds.1)
-            .map_err(|error| SegmentCatalogError::SortKey(error.to_string()))?;
-        encoded.push(EncodedColumnBound {
-            column_id: *column_id,
-            type_oid,
-            codec_version: CODEC_VERSION,
-            min_value,
-            max_value,
-        });
-    }
-    Ok(encoded)
 }
 
 /// Plans combined multi-row segment and normalized-stat inserts as `pending`.
@@ -118,7 +59,9 @@ WITH segment_input AS (
         $10::bigint[],
         $11::integer[],
         $12::text[],
-        $13::text[]
+        $13::text[],
+        $14::integer[],
+        $15::integer[]
     ) AS u(
         segment_id,
         path,
@@ -131,7 +74,9 @@ WITH segment_input AS (
         byte_size,
         schema_version,
         checksum,
-        object_etag
+        object_etag,
+        row_group_count,
+        row_group_offset
     )
 ),
 inserted_segments AS (
@@ -148,6 +93,10 @@ inserted_segments AS (
         row_count,
         byte_size,
         schema_version,
+        row_group_count,
+        row_group_row_counts,
+        row_group_min_seqs,
+        row_group_max_seqs,
         status,
         checksum,
         object_etag
@@ -165,6 +114,19 @@ inserted_segments AS (
         u.row_count,
         u.byte_size,
         u.schema_version,
+        u.row_group_count,
+        ($16::bigint[])[
+            (u.row_group_offset + 1):
+            (u.row_group_offset + u.row_group_count)
+        ],
+        ($17::bigint[])[
+            (u.row_group_offset + 1):
+            (u.row_group_offset + u.row_group_count)
+        ],
+        ($18::bigint[])[
+            (u.row_group_offset + 1):
+            (u.row_group_offset + u.row_group_count)
+        ],
         'pending',
         u.checksum,
         NULLIF(u.object_etag, '')
@@ -174,19 +136,23 @@ inserted_segments AS (
 index_input AS (
     SELECT *
     FROM unnest(
-        $14::uuid[],
-        $15::smallint[],
-        $16::oid[],
-        $17::smallint[],
-        $18::bytea[],
-        $19::bytea[]
+        $19::uuid[],
+        $20::smallint[],
+        $21::oid[],
+        $22::smallint[],
+        $23::bytea[],
+        $24::bytea[],
+        $25::integer[],
+        $26::integer[]
     ) AS i(
         segment_id,
         column_id,
         type_oid,
         codec_version,
         min_value,
-        max_value
+        max_value,
+        row_group_count,
+        row_group_offset
     )
 )
 INSERT INTO koldstore.cold_segment_index (
@@ -197,7 +163,10 @@ INSERT INTO koldstore.cold_segment_index (
     type_oid,
     codec_version,
     min_value,
-    max_value
+    max_value,
+    row_group_min_values,
+    row_group_max_values,
+    row_group_null_counts
 )
 SELECT
     cs.segment_id,
@@ -207,7 +176,19 @@ SELECT
     i.type_oid,
     i.codec_version,
     i.min_value,
-    i.max_value
+    i.max_value,
+    ($27::bytea[])[
+        (i.row_group_offset + 1):
+        (i.row_group_offset + i.row_group_count)
+    ],
+    ($28::bytea[])[
+        (i.row_group_offset + 1):
+        (i.row_group_offset + i.row_group_count)
+    ],
+    ($29::bigint[])[
+        (i.row_group_offset + 1):
+        (i.row_group_offset + i.row_group_count)
+    ]
 FROM inserted_segments cs
 JOIN index_input i ON i.segment_id = cs.segment_id
 ON CONFLICT (segment_id, column_id)
@@ -217,7 +198,10 @@ DO UPDATE SET
     type_oid = EXCLUDED.type_oid,
     codec_version = EXCLUDED.codec_version,
     min_value = EXCLUDED.min_value,
-    max_value = EXCLUDED.max_value
+    max_value = EXCLUDED.max_value,
+    row_group_min_values = EXCLUDED.row_group_min_values,
+    row_group_max_values = EXCLUDED.row_group_max_values,
+    row_group_null_counts = EXCLUDED.row_group_null_counts
 "#,
     )
     .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
@@ -302,44 +286,10 @@ SELECT generation FROM cas
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        encode_indexed_column_bounds, plan_activate_flush_segments,
-        plan_flush_segments_batch_insert,
-    };
-    use koldstore_common::ColumnId;
-    use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue, CODEC_VERSION};
-    use serde_json::json;
-    use std::collections::BTreeMap;
+    use super::{plan_activate_flush_segments, plan_flush_segments_batch_insert};
 
     #[test]
-    fn indexed_bounds_encode_supported_types_and_skip_unsupported_types() {
-        let bounds = BTreeMap::from([
-            (ColumnId::from_attnum(1), (json!(-5), json!(42))),
-            (ColumnId::from_attnum(2), (json!("a"), json!("z"))),
-        ]);
-        let type_oids = BTreeMap::from([
-            (ColumnId::from_attnum(1), 20),
-            (ColumnId::from_attnum(2), 25),
-        ]);
-
-        let encoded = encode_indexed_column_bounds(&bounds, &type_oids).unwrap();
-
-        assert_eq!(encoded.len(), 1);
-        assert_eq!(encoded[0].column_id, ColumnId::from_attnum(1));
-        assert_eq!(encoded[0].type_oid, 20);
-        assert_eq!(encoded[0].codec_version, CODEC_VERSION);
-        assert_eq!(
-            decode_sort_key(SortKeyType::Int8, &encoded[0].min_value).unwrap(),
-            SortKeyValue::Int8(-5)
-        );
-        assert_eq!(
-            decode_sort_key(SortKeyType::Int8, &encoded[0].max_value).unwrap(),
-            SortKeyValue::Int8(42)
-        );
-    }
-
-    #[test]
-    fn flush_segment_insert_plans_pending_with_checksum() {
+    fn flush_segment_insert_persists_packed_row_group_metadata() {
         let statement = plan_flush_segments_batch_insert().unwrap();
         assert!(statement.sql.contains("'pending'"));
         assert!(statement.sql.contains("checksum"));
@@ -347,8 +297,19 @@ mod tests {
         assert!(statement.sql.contains("column_id"));
         assert!(statement.sql.contains("koldstore.cold_segment_index"));
         assert!(statement.sql.contains("codec_version"));
-        assert!(statement.sql.contains("$18::bytea[]"));
-        assert!(statement.sql.contains("$19::bytea[]"));
+        assert!(statement.sql.contains("row_group_count"));
+        assert!(statement.sql.contains("row_group_row_counts"));
+        assert!(statement.sql.contains("row_group_min_seqs"));
+        assert!(statement.sql.contains("row_group_max_seqs"));
+        assert!(statement.sql.contains("row_group_min_values"));
+        assert!(statement.sql.contains("row_group_max_values"));
+        assert!(statement.sql.contains("row_group_null_counts"));
+        assert!(statement.sql.contains("row_group_offset"));
+        assert!(statement.sql.contains("($16::bigint[])"));
+        assert!(statement.sql.contains("($27::bytea[])"));
+        assert!(statement.sql.contains("($29::bigint[])"));
+        assert!(!statement.sql.contains("bytea[][]"));
+        assert!(!statement.sql.contains("bigint[][]"));
         assert!(statement
             .sql
             .contains("ON CONFLICT (segment_id, column_id)"));

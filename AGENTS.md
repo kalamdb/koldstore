@@ -1,5 +1,28 @@
 # Agent Guidance
 
+## Uncommitted Work Follows the Active Branch
+
+- Never leave uncommitted changes parked on a previous branch when starting or
+  switching to other work.
+- If the session moves to a newer/target branch (or the user asks to continue
+  elsewhere) and the working tree still has local edits, **move those changes
+  onto the branch that will continue the work** before doing anything else —
+  typically `git stash push -u`, checkout/switch, then `git stash pop` (or an
+  equivalent carry-over). Resolve conflicts on the destination branch.
+- Do not commit solely to “park” WIP unless the user explicitly asks for a
+  commit. Prefer stash/carry-over so history stays clean.
+- Before ending a turn that switched branches, confirm with `git status` that
+  no WIP remains stranded on the old branch tip.
+
+## Catalog SQL During Development
+
+- Edit `crates/pg_koldstore/sql/koldstore--0.1.0.sql` directly for catalog DDL.
+- Do **not** add `koldstore--<from>--<to>.sql` upgrade edges while the product
+  is still in development/beta. Local installs reinstall or resync when the
+  bootstrap fragment changes.
+- Introduce packaged `ALTER EXTENSION … UPDATE` edges only when intentionally
+  shipping a supported upgrade path.
+
 ## Testing Loop
 
 - Keep the default development and verification loop local and fast with pgrx-managed PostgreSQL.
@@ -14,6 +37,25 @@
 - Workarounds in tests (`ORDER BY` removed, literals instead of parameters, client-side merge) are only allowed as a temporary bisect step and must be reverted once the product fix lands.
 - Prefer adding a focused regression e2e that would have caught the bug (for example ordered `SELECT … LIMIT` after multi-wave flush) before calling the fix done.
 - Managed-table reads must never omit hot or cold rows that should be visible, including under load, during flush, and for `ORDER BY` / `LIMIT` / parameterized plans.
+
+## Hot-Only Merge Scan Path Is Locked
+
+- Treat `crates/pg_koldstore/src/merge_scan/` hot-only emit and plan-time prune
+  paths as performance-critical and locked:
+  - plan-time early return when published cold cannot contribute
+    (`cold_side_proven_empty` / empty manifest → keep native heap paths)
+  - `EmitPath::HotChild` / `ScanEmitMode::HotChild` delegation
+  - hot point-hit probe before Parquet open
+  - catalog/cache short-circuits for absent cold segments
+- Do **not** casually rewrite, “simplify,” or regress that path while fixing
+  tests, EXPLAIN formatting, or unrelated scan features.
+- Prefer updating tests/docs to the current contract:
+  - cold-capable predicates: `KoldMergeScan` with `Hot Scan` + `Planned Access`
+  - cold-proven-empty hot PK lookups: native Index/Seq/Bitmap Scan with **no**
+    `KoldMergeScan` wrapper
+- Any intentional change requires an explicit user request, a clear
+  performance/correctness rationale, and verification that hot-only PK lookups
+  remain fast and that hot+cold merge correctness is unchanged.
 
 ## Rust Design Preferences
 

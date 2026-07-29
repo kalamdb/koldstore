@@ -66,6 +66,45 @@ pub fn assert_kold_merge_scan_explain(plan: &str) -> Result<()> {
     Ok(())
 }
 
+/// Asserts a managed-table read uses either `KoldMergeScan` or a native heap plan.
+///
+/// When published cold cannot contribute (empty manifest / proven-empty bounds),
+/// the locked hot-only path keeps PostgreSQL's native Index/Seq/Bitmap plans.
+/// Callers that require cold participation should use
+/// [`assert_kold_merge_scan_explain`] or [`assert_kold_merge_scan_cold_reads`].
+pub fn assert_managed_read_plan(plan: &str) -> Result<()> {
+    if plan.contains("Custom Scan (KoldMergeScan)") {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        plan.contains("Index Scan")
+            || plan.contains("Seq Scan")
+            || plan.contains("Bitmap Heap Scan")
+            || plan.contains("Bitmap Index Scan"),
+        "expected KoldMergeScan or native heap plan for managed read, got:\n{plan}"
+    );
+    Ok(())
+}
+
+/// Asserts merge-scan EXPLAIN exposes the native hot child under `Hot Scan`.
+///
+/// Locks the hot-path EXPLAIN contract (`Hot Scan` + `Planned Access`) so
+/// regressions cannot silently rename the label without updating callers.
+pub fn assert_kold_merge_scan_hot_planned_access(plan: &str) -> Result<()> {
+    assert_kold_merge_scan_explain(plan)?;
+    anyhow::ensure!(
+        plan.lines()
+            .any(|line| line.trim_start().starts_with("Hot Scan")),
+        "expected Hot Scan section in EXPLAIN, got:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.lines()
+            .any(|line| line.trim_start().starts_with("Planned Access:")),
+        "expected Planned Access under Hot Scan in EXPLAIN, got:\n{plan}"
+    );
+    Ok(())
+}
+
 /// Asserts a merge scan `EXPLAIN` lists manifest and parquet cold sources.
 pub fn assert_kold_merge_scan_cold_reads(
     plan: &str,
@@ -88,15 +127,6 @@ pub fn assert_kold_merge_scan_cold_reads(
         "expected at least {min_parquet_segments} parquet segment(s), got {parquet_segments} in plan:\n{plan}"
     );
     Ok(())
-}
-
-/// Backward-compatible alias for planned cold-read assertions.
-pub fn assert_kold_merge_scan_planned_cold_reads(
-    plan: &str,
-    manifest_path_hint: &str,
-    min_parquet_segments: usize,
-) -> Result<()> {
-    assert_kold_merge_scan_cold_reads(plan, manifest_path_hint, min_parquet_segments)
 }
 
 /// Asserts an analyzed merge scan reports executed cold catalog and parquet reads.
@@ -163,11 +193,6 @@ fn count_parquet_segments(plan: &str) -> usize {
     plan.lines()
         .filter(|line| line.trim_start().starts_with("Object:"))
         .count()
-}
-
-/// Backward-compatible alias for older tests.
-pub fn assert_merge_scan_explain(plan: &str) -> Result<()> {
-    assert_kold_merge_scan_explain(plan)
 }
 
 /// Asserts hot DML instrumentation did not record object-store reads.

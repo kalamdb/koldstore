@@ -53,6 +53,12 @@ Options:
   --prepare-only    Prepare pgrx + extension only, skip the test
   -h, --help        Show this help text
 
+Notes:
+  The storage harness sizes koldstore_max_rows_per_flush to (rows - hot_limit)
+  so one flush_table can drain the policy excess (override with
+  KOLDSTORE_STORAGE_MAX_ROWS_PER_FLUSH). Product default 10k/wave × 64 waves
+  only covers 640k rows per job — too small for published 10M runs.
+
 Examples:
   scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results \
     --rows 10000000 --hot-limit 100000 --dml-sample 50000

@@ -6,12 +6,14 @@
 //! can depend on it without pulling catalog SQL. Must not depend on `pgrx`.
 //! SQL execution stays in `pg_koldstore`.
 
+pub mod catalog_column;
 pub mod evolution;
 pub mod pg_type;
 pub mod schema_registry;
 pub mod state;
 pub mod type_matrix;
 
+pub use catalog_column::CatalogColumn;
 pub use evolution::{
     plan_schema_evolution, CatalogColumnShape, SchemaEvolutionAction, SchemaEvolutionError,
     SchemaEvolutionInput,

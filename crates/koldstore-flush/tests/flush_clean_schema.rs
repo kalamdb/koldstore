@@ -1,5 +1,5 @@
 use koldstore_common::SqlParamType;
-use koldstore_flush::ops::{plan_mirror_flush_selection, plan_mirror_flush_selection_batch};
+use koldstore_flush::ops::plan_mirror_flush_selection_batch;
 use koldstore_flush::plan_seq_range_cleanup;
 use koldstore_migrate::QualifiedTableName;
 
@@ -13,11 +13,12 @@ fn mirror() -> QualifiedTableName {
 
 #[test]
 fn mirror_backed_flush_selection_reads_mirror_and_base_rows_without_system_columns() {
-    let plan = plan_mirror_flush_selection(
+    let plan = plan_mirror_flush_selection_batch(
         &table(),
         &mirror(),
         &["id".to_string()],
         &["id".to_string(), "body".to_string()],
+        None,
         None,
     )
     .unwrap();
@@ -39,7 +40,14 @@ fn mirror_backed_flush_selection_reads_mirror_and_base_rows_without_system_colum
         .sql
         .contains("(mirror.\"op\" = 3) AS deleted"));
     assert!(plan.statement.sql.contains("ORDER BY mirror.\"seq\" ASC"));
-    assert_eq!(plan.statement.param_types, vec![SqlParamType::BigInt]);
+    assert_eq!(
+        plan.statement.param_types,
+        vec![
+            SqlParamType::BigInt,
+            SqlParamType::BigInt,
+            SqlParamType::BigInt
+        ]
+    );
 
     for forbidden in ["\"_seq\"", "\"_commit_seq\"", "\"_deleted\"", "row_events"] {
         assert!(
@@ -51,7 +59,7 @@ fn mirror_backed_flush_selection_reads_mirror_and_base_rows_without_system_colum
 
 #[test]
 fn user_scoped_flush_selection_filters_by_application_scope_column() {
-    let plan = plan_mirror_flush_selection(
+    let plan = plan_mirror_flush_selection_batch(
         &table(),
         &mirror(),
         &["tenant_id".to_string(), "id".to_string()],
@@ -61,16 +69,22 @@ fn user_scoped_flush_selection_filters_by_application_scope_column() {
             "body".to_string(),
         ],
         Some("tenant_id"),
+        None,
     )
     .unwrap();
 
     assert!(plan
         .statement
         .sql
-        .contains("\"mirror\".\"tenant_id\"::text = $2::text"));
+        .contains("\"mirror\".\"tenant_id\"::text = $4::text"));
     assert_eq!(
         plan.statement.param_types,
-        vec![SqlParamType::BigInt, SqlParamType::Text]
+        vec![
+            SqlParamType::BigInt,
+            SqlParamType::BigInt,
+            SqlParamType::BigInt,
+            SqlParamType::Text
+        ]
     );
     assert!(!plan.statement.sql.contains("\"_user_id\""));
 }

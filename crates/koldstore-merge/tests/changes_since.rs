@@ -110,11 +110,9 @@ fn changes_since_validates_limit_and_reports_seq_retention_gap() {
 
 #[test]
 fn mirror_backed_changes_since_plan_reads_mirror_and_not_row_events() {
-    let table = koldstore_migrate::QualifiedTableName::parse("app.items").unwrap();
     let mirror = koldstore_migrate::QualifiedTableName::parse("koldstore.items__cl").unwrap();
     let plan =
-        events::plan_mirror_changes_since(&table, &mirror, &["id".to_string()], Some("tenant_id"))
-            .unwrap();
+        events::plan_mirror_changes_since(&mirror, &["id".to_string()], Some("tenant_id")).unwrap();
 
     assert!(plan
         .statement

@@ -50,10 +50,11 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
         let manifest_row = db
             .client
             .query_one(
-                r#"
+                &format!(
+                    r#"
                 SELECT
                   format('%s/%s', n.nspname, c.relname),
-                  format('%s/%s/%s', n.nspname, c.relname, cs.path)
+                  {object}
                 FROM koldstore.manifest m
                 JOIN pg_class c ON c.oid = m.table_oid
                 JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -65,6 +66,8 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
                   AND m.sync_state = 'in_sync'
                 LIMIT 1
                 "#,
+                    object = common::SQL_DEFAULT_COLD_OBJECT_KEY,
+                ),
                 &[&table.relation],
             )
             .await?;
@@ -135,7 +138,9 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
             )
             .await?
             .get(0);
-        let absolute_manifest_path = db.storage_root.join(&manifest_path);
+        let absolute_manifest_path = db
+            .storage_root
+            .join(format!("{table_prefix}/manifest.json"));
         let root: Value = serde_json::from_str(&std::fs::read_to_string(&absolute_manifest_path)?)?;
         let shard_rel = root["shards"][0]["path"]
             .as_str()

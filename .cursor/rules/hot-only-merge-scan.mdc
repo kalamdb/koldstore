@@ -1,0 +1,40 @@
+---
+description: Lock the hot-only KoldMergeScan performance path; prefer test/doc updates over scan rewrites.
+globs: crates/pg_koldstore/src/merge_scan/**/*,crates/pg_koldstore/src/catalog/cache.rs,tests/e2e/merge/**
+alwaysApply: false
+---
+
+# Hot-Only Merge Scan Lock
+
+The hot-only read path under `KoldMergeScan` is intentionally locked after a measured
+performance win. Treat changes here with extreme caution.
+
+## Do not casually change
+
+- Plan-time early return when published cold cannot contribute
+  (`cold_side_proven_empty`, empty manifest → keep native PostgreSQL paths)
+- `EmitPath::HotChild` / `ScanEmitMode::HotChild` delegation to the native hot child
+- Hot point-hit probe that skips Parquet opens when a hot winner exists
+- Native hot-only load when no cold segments are published
+- Catalog/cache short-circuits that make absent cold manifests cheap on repeat lookups
+
+## Locked contracts
+
+- Cold-capable predicates: `Custom Scan (KoldMergeScan)` with
+  `Hot Scan` / `Planned Access: <native plan>` (not the legacy `Hot Plan:` label).
+- Hot PK lookups with an indexable qual:
+  - Prefer cold-proven-empty native `Index Scan` (no `KoldMergeScan`).
+  - Otherwise `KoldMergeScan` with `Planned Access: Index Scan`.
+  Never accept a hot PK point lookup that loses the index child.
+
+## When tests fail against this path
+
+- Prefer fixing **tests and docs** to match the contracts above.
+- Do **not** rewrite emit/execution or plan-time prune logic just to satisfy an
+  outdated assertion.
+
+## When an intentional change is required
+
+1. Get an explicit user request.
+2. State the performance/correctness rationale.
+3. Re-verify hot-only PK lookup latency and hot+cold merge correctness.

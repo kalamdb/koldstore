@@ -10,8 +10,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
 
-use bytes::Bytes;
-use koldstore_common::{column_stats_range_may_overlap, CommitSeq, SeqId};
+use koldstore_common::{CommitSeq, SeqId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Type as ParquetPhysicalType;
 use parquet::bloom_filter::Sbbf;
@@ -19,8 +18,6 @@ use parquet::file::metadata::ParquetMetaData;
 use parquet::file::reader::ChunkReader;
 use parquet::file::statistics::Statistics;
 use parquet::schema::types::SchemaDescriptor;
-
-use crate::ColumnStats;
 
 /// Pruning result.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,24 +132,6 @@ impl RowGroupPruner {
             selected_row_groups,
         }
     }
-
-    /// Returns true when segment min/max stats may overlap the requested range.
-    ///
-    /// Missing, null, or incomparable stats return true so callers scan
-    /// conservatively instead of risking false negatives.
-    #[must_use]
-    pub fn segment_column_may_overlap(
-        &self,
-        column_stats: &BTreeMap<String, ColumnStats>,
-        column: &str,
-        min: &serde_json::Value,
-        max: &serde_json::Value,
-    ) -> bool {
-        let Some(stats) = column_stats.get(column) else {
-            return true;
-        };
-        column_stats_range_may_overlap(&stats.min, &stats.max, Some(min), Some(max))
-    }
 }
 
 /// Selects row groups that may contain any of the requested PK equality values.
@@ -177,19 +156,6 @@ pub fn select_row_groups_for_pk_values(
     }
     let file = File::open(path.as_ref()).map_err(|error| error.to_string())?;
     select_row_groups_for_pk_values_reader(file, column, values)
-}
-
-/// Selects row groups from an in-memory Parquet object.
-///
-/// # Errors
-///
-/// Returns an error when Parquet metadata or bloom filters are invalid.
-pub fn select_row_groups_for_pk_values_bytes(
-    bytes: Bytes,
-    column: &str,
-    values: &[String],
-) -> Result<PruneDecision, String> {
-    select_row_groups_for_pk_values_reader(bytes, column, values)
 }
 
 fn select_row_groups_for_pk_values_reader<R>(

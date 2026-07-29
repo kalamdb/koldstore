@@ -108,7 +108,7 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
             manifest
                 .shards
                 .iter()
-                .map(|shard| format!("{prefix}/{}", shard.path.trim_start_matches('/'))),
+                .map(|shard| join_object_key(&prefix, &shard.path)),
         );
         referenced.extend(
             manifest

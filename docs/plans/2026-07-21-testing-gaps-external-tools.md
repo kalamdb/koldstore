@@ -12,7 +12,7 @@ vendoring corpora or rewriting PostgreSQL’s own regress/isolation frameworks.
 | Isolation | `tests/e2e/isolation/schedules.rs` | (KS-specific; no `pg_isolation_regress`) |
 | Crash restart | `tests/e2e/crash/postmaster_restart.rs` | PostgreSQL `pg_ctl -m immediate` |
 | Network faults | `tests/e2e/suite/failure_injection.rs` | Toxiproxy Docker (`scripts/ci/start-toxiproxy.sh`) + MinIO |
-| Extension upgrade | `tests/e2e/suite/extension_upgrade.rs` | PostgreSQL `ALTER EXTENSION UPDATE` (`pg_upgrade` deferred) |
+| Extension upgrade | Deferred (edit `koldstore--0.1.0.sql`; reinstall) | Packaged `ALTER EXTENSION UPDATE` edges not used in beta |
 
 ## Skip / pin rules
 

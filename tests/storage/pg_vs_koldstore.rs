@@ -226,6 +226,15 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         "KOLDSTORE_STORAGE_MAX_ROWS_PER_FILE",
         (rows / 10).max(1_000),
     );
+    // One flush_table job is capped at MAX_CATCHUP_WAVES_PER_JOB (64) ×
+    // max_rows_per_flush. Default product max_rows_per_flush is 10k → 640k
+    // rows/call, which cannot drain a 10M RESULTS run. Size the wave for the
+    // expected cold excess so one call finishes the policy drain (fewer waves
+    // also cuts finalize/manifest overhead — the main flush wall-clock cost).
+    let max_rows_per_flush = env_i64(
+        "KOLDSTORE_STORAGE_MAX_ROWS_PER_FLUSH",
+        rows.saturating_sub(hot_limit).max(max_rows_per_file).max(1),
+    );
 
     let target = common::local_pg_matrix()
         .into_iter()
@@ -245,13 +254,14 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         .await?;
 
     common::log_always(format!(
-        "storage_cmp: side={} rows={} hot_limit={} dml_sample={} insert_batch_rows={} warmup_rows={}",
+        "storage_cmp: side={} rows={} hot_limit={} dml_sample={} insert_batch_rows={} warmup_rows={} max_rows_per_flush={}",
         side_mode_label(side, &mirror_capture_mode),
         rows,
         hot_limit,
         dml_sample,
         insert_batch_rows,
-        warmup_rows
+        warmup_rows,
+        max_rows_per_flush
     ));
 
     match side {
@@ -290,6 +300,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                     hot_limit,
                     1,
                     max_rows_per_file,
+                    max_rows_per_flush,
                     mode,
                 )
                 .await?;
@@ -313,6 +324,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                 insert_batch_rows,
                 hot_limit,
                 max_rows_per_file,
+                max_rows_per_flush,
             )
             .await?;
             let worker_guc_pinned =
@@ -355,6 +367,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                     hot_limit,
                     1,
                     max_rows_per_file,
+                    max_rows_per_flush,
                     &mirror_capture_mode,
                 )
                 .await?;
@@ -405,6 +418,7 @@ async fn run_pg_only_body(
         warmup_rows,
         insert_batch_rows,
         hot_limit,
+        max_rows_per_file,
         max_rows_per_file,
     )
     .await?;
@@ -589,10 +603,10 @@ async fn run_managed_only_body(
 
     let flush = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: flush_table (expect ~{} cold rows)",
+            "storage_cmp: flush_table until hot_rows <= {hot_limit} (expect ~{} cold rows)",
             rows.saturating_sub(hot_limit)
         ));
-        flush_table_with_metrics(&db.client, managed, db.target.port).await?
+        flush_until_hot_limit(&db.client, managed, db.target.port, hot_limit).await?
     };
     anyhow::ensure!(
         flush.rows_flushed > 0,
@@ -609,6 +623,12 @@ async fn run_managed_only_body(
     anyhow::ensure!(
         status.hot_rows > 0,
         "expected hot rows to remain after policy flush, got {status:?}"
+    );
+    anyhow::ensure!(
+        status.hot_rows <= hot_limit,
+        "expected hot_rows <= hot_limit after flush (hot_rows={}, hot_limit={hot_limit}, cold={})",
+        status.hot_rows,
+        status.cold_row_count
     );
     anyhow::ensure!(
         status.cold_row_count > 0,
@@ -640,7 +660,7 @@ async fn run_managed_only_body(
         )
         .await?;
         common::assert_kold_merge_scan_explain(&plan_cold)?;
-        common::assert_kold_merge_scan_planned_cold_reads(&plan_cold, "manifest.json", 1)?;
+        common::assert_kold_merge_scan_cold_reads(&plan_cold, "manifest.json", 1)?;
         anyhow::ensure!(
             !plan_cold.contains("Parquet Segments Opened: 0")
                 && !plan_cold.contains("Parquet Segments Planned: 0"),
@@ -837,10 +857,10 @@ async fn run_storage_comparison_body(
 
     let flush = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: flush_table (expect ~{} cold rows)",
+            "storage_cmp: flush_table until hot_rows <= {hot_limit} (expect ~{} cold rows)",
             rows.saturating_sub(hot_limit)
         ));
-        flush_table_with_metrics(&db.client, managed, db.target.port).await?
+        flush_until_hot_limit(&db.client, managed, db.target.port, hot_limit).await?
     };
     anyhow::ensure!(
         flush.rows_flushed > 0,
@@ -857,6 +877,12 @@ async fn run_storage_comparison_body(
     anyhow::ensure!(
         status.hot_rows > 0,
         "expected hot rows to remain after policy flush, got {status:?}"
+    );
+    anyhow::ensure!(
+        status.hot_rows <= hot_limit,
+        "expected hot_rows <= hot_limit after flush (hot_rows={}, hot_limit={hot_limit}, cold={})",
+        status.hot_rows,
+        status.cold_row_count
     );
     anyhow::ensure!(
         status.cold_row_count > 0,
@@ -895,7 +921,7 @@ async fn run_storage_comparison_body(
         )
         .await?;
         common::assert_kold_merge_scan_explain(&plan_cold)?;
-        common::assert_kold_merge_scan_planned_cold_reads(&plan_cold, "manifest.json", 1)?;
+        common::assert_kold_merge_scan_cold_reads(&plan_cold, "manifest.json", 1)?;
         anyhow::ensure!(
             !plan_cold.contains("Parquet Segments Opened: 0")
                 && !plan_cold.contains("Parquet Segments Planned: 0"),
@@ -1060,6 +1086,7 @@ async fn warm_up_before_timed_seed(
     insert_batch_rows: i64,
     hot_limit: i64,
     max_rows_per_file: i64,
+    max_rows_per_flush: i64,
 ) -> Result<()> {
     if warmup_rows <= 0 {
         common::log_always(format!(
@@ -1083,6 +1110,7 @@ async fn warm_up_before_timed_seed(
             hot_limit,
             1,
             max_rows_per_file,
+            max_rows_per_flush,
             mode,
         )
         .await?;
@@ -1151,6 +1179,7 @@ async fn manage_with_hot_limit(
     hot_row_limit: i64,
     min_flush_rows: i64,
     max_rows_per_file: i64,
+    max_rows_per_flush: i64,
     mirror_capture_mode: &str,
 ) -> Result<()> {
     // auto_flush=false so background DB-worker waves don't steal the timed
@@ -1181,6 +1210,20 @@ async fn manage_with_hot_limit(
         )
         .await
         .with_context(|| format!("manage_table {relation}"))?;
+    // manage_table does not expose max_rows_per_flush; set it after manage so a
+    // single flush_table can drain to hot_row_limit (product default is 10k/wave
+    // × 64 waves = 640k max per call).
+    client
+        .execute(
+            &format!(
+                "ALTER TABLE {relation} SET (koldstore_max_rows_per_flush = {max_rows_per_flush})"
+            ),
+            &[],
+        )
+        .await
+        .with_context(|| {
+            format!("set koldstore_max_rows_per_flush={max_rows_per_flush} on {relation}")
+        })?;
     Ok(())
 }
 
@@ -1405,6 +1448,76 @@ async fn flush_table_with_metrics(
         before_rss_bytes: before.rss_bytes,
         peak_rss_bytes,
         after_rss_bytes: after.rss_bytes,
+    })
+}
+
+/// Calls `flush_table` until the hot heap is within `hot_limit` (or a call makes
+/// no progress). Aggregates duration/rows and keeps the peak RSS across calls.
+///
+/// Needed when a single job still hits the product wave cap; with the harness
+/// `max_rows_per_flush` sized to the cold excess, this usually is one call.
+async fn flush_until_hot_limit(
+    client: &Client,
+    relation: &str,
+    pg_port: u16,
+    hot_limit: i64,
+) -> Result<FlushMetrics> {
+    // Bound retries: product jobs also cap at 64 waves; allow a few extra jobs
+    // if a prior call drained only a prefix.
+    const MAX_FLUSH_JOBS: usize = 8;
+
+    let mut total_rows = 0_i64;
+    let mut total_duration = Duration::ZERO;
+    let mut before_rss_bytes = 0_u64;
+    let mut peak_rss_bytes = 0_u64;
+    let mut after_rss_bytes = 0_u64;
+
+    for job in 1..=MAX_FLUSH_JOBS {
+        let status = common::describe_table(client, relation).await?;
+        if status.hot_rows <= hot_limit {
+            if job == 1 {
+                anyhow::bail!(
+                    "flush requested but hot_rows={} already <= hot_limit={hot_limit}",
+                    status.hot_rows
+                );
+            }
+            break;
+        }
+
+        let wave = flush_table_with_metrics(client, relation, pg_port).await?;
+        if job == 1 {
+            before_rss_bytes = wave.before_rss_bytes;
+        }
+        total_rows = total_rows.saturating_add(wave.rows_flushed);
+        total_duration = total_duration.saturating_add(wave.duration);
+        peak_rss_bytes = peak_rss_bytes.max(wave.peak_rss_bytes);
+        after_rss_bytes = wave.after_rss_bytes;
+
+        common::log_always(format!(
+            "storage_cmp: flush job {job}/{MAX_FLUSH_JOBS} rows_flushed={} elapsed={}",
+            wave.rows_flushed,
+            format_duration(wave.duration),
+        ));
+
+        if wave.rows_flushed <= 0 {
+            break;
+        }
+    }
+
+    let status = common::describe_table(client, relation).await?;
+    anyhow::ensure!(
+        status.hot_rows <= hot_limit,
+        "flush did not drain to hot_limit (hot_rows={}, hot_limit={hot_limit}, cold={}, rows_flushed={total_rows})",
+        status.hot_rows,
+        status.cold_row_count
+    );
+
+    Ok(FlushMetrics {
+        rows_flushed: total_rows,
+        duration: total_duration,
+        before_rss_bytes,
+        peak_rss_bytes,
+        after_rss_bytes,
     })
 }
 

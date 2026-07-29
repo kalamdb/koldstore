@@ -454,4 +454,25 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         "second read of the same segment must reuse cached footer metadata"
     );
     assert!(profile2.format_io_summary().contains("footer_cache=hit"));
+
+    let (missing_rows, missing_profile) = read_clean_cold_rows_from_object_store_with_size(
+        client.store(),
+        key,
+        Some(file_size),
+        &[PgColumn::new("id", PgType::Int8, false)],
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_row_groups([0, 1, 2])
+            .with_pk_values("id", ["7"]),
+    )
+    .unwrap();
+    assert!(missing_rows.is_empty());
+    assert_eq!(
+        missing_profile.row_groups_selected,
+        Vec::<usize>::new(),
+        "footer stats must refine catalog-selected row groups"
+    );
+    assert_eq!(missing_profile.row_groups_skipped, 3);
+    assert!(missing_profile.stats_pruned);
 }

@@ -25,7 +25,10 @@ from [`tests/storage/schema.sql`](../../tests/storage/schema.sql).
 
 Typical published scale: **10,000,000 rows**, `hot_row_limit = 100000`,
 `max_rows_per_file = 1000000`, `--dml-sample 50000` (~9.9M rows flushed, zstd
-Parquet). Published RESULTS use `--all-sides --repetitions 6`: six
+Parquet). The harness sets `koldstore_max_rows_per_flush` to the cold excess
+(override with `KOLDSTORE_STORAGE_MAX_ROWS_PER_FLUSH`) so one `flush_table`
+call can drain to the hot limit — the product default (10k × 64 waves) only
+covers 640k rows per job. Published RESULTS use `--all-sides --repetitions 6`: six
 counterbalanced orders of pg, async, and strict, with every sample alone on a
 fresh pgrx PostgreSQL. They are **not** parallel and do **not** share a live
 server or dual-table I/O during measurement. Each cell reports the median and

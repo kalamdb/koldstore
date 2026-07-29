@@ -38,12 +38,15 @@ fn cold_segment_index_uses_sort_key_v1_bounds_and_mirrored_indexes() {
     assert!(table_sql.contains("column_id smallint NOT NULL"));
     assert!(table_sql.contains("type_oid oid NOT NULL"));
     assert!(table_sql.contains("codec_version smallint NOT NULL"));
-    assert!(table_sql.contains("min_value bytea NOT NULL"));
-    assert!(table_sql.contains("max_value bytea NOT NULL"));
+    assert!(table_sql.contains("min_value bytea"));
+    assert!(table_sql.contains("max_value bytea"));
+    assert!(table_sql.contains("row_group_min_values bytea[] NOT NULL"));
+    assert!(table_sql.contains("row_group_max_values bytea[] NOT NULL"));
+    assert!(table_sql.contains("row_group_null_counts bigint[] NOT NULL"));
     assert!(table_sql.contains("PRIMARY KEY (segment_id, column_id)"));
-    assert!(table_sql.contains("CHECK (min_value <= max_value)"));
+    assert!(table_sql.contains("CHECK ((min_value IS NULL) = (max_value IS NULL))"));
+    assert!(table_sql.contains("CHECK (min_value IS NULL OR min_value <= max_value)"));
     assert!(!table_sql.contains("column_name"));
-    assert!(!table_sql.contains("null_count"));
     assert!(!table_sql.contains("distinct_count"));
 
     assert!(INSTALL_SQL.contains(
@@ -54,6 +57,26 @@ fn cold_segment_index_uses_sort_key_v1_bounds_and_mirrored_indexes() {
     ));
     assert!(!INSTALL_SQL.contains("cold_segment_stats"));
     assert!(!INSTALL_SQL.contains("cold_segment_stats_lookup_idx"));
+}
+
+#[test]
+fn cold_segments_store_aligned_row_group_arrays() {
+    let table_start = INSTALL_SQL
+        .find("CREATE TABLE IF NOT EXISTS koldstore.cold_segments")
+        .unwrap();
+    let table_sql = &INSTALL_SQL[table_start..];
+    let table_end = table_sql.find(");").unwrap();
+    let table_sql = &table_sql[..table_end];
+
+    assert!(table_sql.contains("row_group_count integer NOT NULL"));
+    assert!(table_sql.contains("row_group_row_counts bigint[] NOT NULL"));
+    assert!(table_sql.contains("row_group_min_seqs bigint[] NOT NULL"));
+    assert!(table_sql.contains("row_group_max_seqs bigint[] NOT NULL"));
+    assert!(table_sql.contains("CHECK (row_group_count > 0)"));
+    assert!(table_sql.contains("cardinality(row_group_row_counts) = row_group_count"));
+    assert!(table_sql.contains("cardinality(row_group_min_seqs) = row_group_count"));
+    assert!(table_sql.contains("cardinality(row_group_max_seqs) = row_group_count"));
+    assert!(table_sql.contains("array_position(row_group_row_counts, NULL) IS NULL"));
 }
 
 #[test]

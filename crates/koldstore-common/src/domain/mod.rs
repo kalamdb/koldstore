@@ -7,9 +7,11 @@
 pub mod column;
 pub mod commit_sequence;
 pub mod filter;
+pub mod object_keys;
 pub mod pk;
 pub mod row;
 pub mod scope;
+pub mod segment_paths;
 pub mod seq;
 pub mod snowflake;
 pub mod storage_id;

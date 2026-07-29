@@ -4,7 +4,6 @@
 //! path helpers live in `koldstore-manifest`. SPI execution and file writes stay
 //! in `pg_koldstore`.
 
-pub use koldstore_manifest::relative_manifest_path;
 use koldstore_manifest::Manifest;
 
 /// Outcome of writing one or more flush batches.

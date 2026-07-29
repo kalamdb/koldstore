@@ -223,37 +223,6 @@ RETURNING id
     })
 }
 
-/// Plans clean-schema flush selection from the mirror and base table.
-///
-/// Unbounded variant kept for unit tests that assert SQL shape. Production
-/// encode uses [`plan_mirror_flush_selection_batch`].
-///
-/// The query is bounded by a captured mirror `seq` cutoff and joins the base
-/// table only for live rows. Delete mirror rows still produce PK + metadata
-/// records so cold tombstones can mask older cold rows.
-///
-/// # Errors
-///
-/// Returns an error when identifiers are unsafe or statement metadata cannot be prepared.
-pub fn plan_mirror_flush_selection(
-    table: &QualifiedTableName,
-    mirror_table: &QualifiedTableName,
-    primary_key_columns: &[String],
-    base_columns: &[String],
-    scope_column: Option<&str>,
-) -> Result<MirrorFlushSelectionPlan, OpsError> {
-    plan_mirror_flush_selection_inner(
-        table,
-        mirror_table,
-        primary_key_columns,
-        base_columns,
-        scope_column,
-        None,
-        MirrorFlushPaging::Unbounded,
-        false,
-    )
-}
-
 /// Plans one keyset-batched page of mirror-backed flush rows.
 ///
 /// PERFORMANCE: Used by the streaming flush path. Returns one page of rows as a plain
@@ -307,17 +276,8 @@ pub fn plan_mirror_flush_selection_batch_with_order_key(
         base_columns,
         scope_column,
         mirror_ops,
-        MirrorFlushPaging::KeysetLimit,
         include_order_key,
     )
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MirrorFlushPaging {
-    /// Full selection up to `$1` max seq (tests / non-streaming callers).
-    Unbounded,
-    /// Keyset page: `$1` max seq, `$2` after seq, `$3` limit.
-    KeysetLimit,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,7 +288,6 @@ fn plan_mirror_flush_selection_inner(
     base_columns: &[String],
     scope_column: Option<&str>,
     mirror_ops: Option<&[i16]>,
-    paging: MirrorFlushPaging,
     include_order_key: bool,
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     if primary_key_columns.is_empty() {
@@ -373,28 +332,16 @@ fn plan_mirror_flush_selection_inner(
         select_columns.push("mirror.\"order_key\" AS order_key".to_string());
     }
 
-    let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];
-    let (mut param_types, operation, limit_sql, scope_param) = match paging {
-        MirrorFlushPaging::Unbounded => (
-            vec![SqlParamType::BigInt],
-            "select mirror-backed flush rows",
-            "",
-            2_usize,
-        ),
-        MirrorFlushPaging::KeysetLimit => (
-            vec![
-                SqlParamType::BigInt,
-                SqlParamType::BigInt,
-                SqlParamType::BigInt,
-            ],
-            "select mirror-backed flush rows batch",
-            "\nLIMIT $3::bigint",
-            4_usize,
-        ),
-    };
-    if matches!(paging, MirrorFlushPaging::KeysetLimit) {
-        where_clauses.push("mirror.\"seq\" > $2::bigint".to_string());
-    }
+    let mut where_clauses = vec![
+        "mirror.\"seq\" <= $1::bigint".to_string(),
+        "mirror.\"seq\" > $2::bigint".to_string(),
+    ];
+    let mut param_types = vec![
+        SqlParamType::BigInt,
+        SqlParamType::BigInt,
+        SqlParamType::BigInt,
+    ];
+    let scope_param = 4_usize;
     if let Some(ops) = mirror_ops {
         if !ops.is_empty() {
             where_clauses
@@ -415,17 +362,18 @@ FROM {mirror} AS mirror
 LEFT JOIN ONLY {table} AS hot
   ON {join}
 WHERE {where_clause}
-ORDER BY mirror."seq" ASC{limit_sql}
+ORDER BY mirror."seq" ASC
+LIMIT $3::bigint
 "#,
         select_columns = select_columns.join(", "),
         mirror = mirror_table.quoted(),
         table = table.quoted(),
         join = join,
         where_clause = where_clauses.join(" AND "),
-        limit_sql = limit_sql,
     );
-    let statement = SqlStatement::read_with_params(operation, &sql, param_types)
-        .map_err(|error| OpsError::Sql(error.to_string()))?;
+    let statement =
+        SqlStatement::read_with_params("select mirror-backed flush rows batch", &sql, param_types)
+            .map_err(|error| OpsError::Sql(error.to_string()))?;
 
     Ok(MirrorFlushSelectionPlan {
         table: table.clone(),

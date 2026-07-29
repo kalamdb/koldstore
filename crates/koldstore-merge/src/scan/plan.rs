@@ -51,6 +51,9 @@ pub struct SegmentStatsHint {
     pub min_seq: SeqId,
     /// Segment maximum `seq` (inclusive).
     pub max_seq: SeqId,
+    /// Catalog-selected Parquet row groups; `None` means no packed prune ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_row_groups: Option<Vec<usize>>,
 }
 
 /// Min/max predicate proven safe for segment-level candidate pruning.
@@ -149,7 +152,7 @@ pub struct ColdPruneColumnPolicy {
 impl ColdPruneColumnPolicy {
     /// Whether `predicate` may prune segments before winner resolution.
     #[must_use]
-    pub fn allows_predicate(self, _predicate: &SegmentPrunePredicate) -> bool {
+    pub fn allows_predicate(self) -> bool {
         if !(self.is_primary_key || self.is_scope || self.is_order_column) {
             return false;
         }
@@ -168,7 +171,7 @@ pub fn retain_pre_merge_cold_prune_predicates(
     predicates
         .into_iter()
         .filter(|predicate| {
-            policy_for(predicate.column_id).is_some_and(|policy| policy.allows_predicate(predicate))
+            policy_for(predicate.column_id).is_some_and(ColdPruneColumnPolicy::allows_predicate)
         })
         .collect()
 }

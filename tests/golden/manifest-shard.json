@@ -1,12 +1,13 @@
 {
-  "version": 1,
+  "version": 2,
   "folder": "001",
   "table": "items",
   "namespace": "app",
   "schema_version": 1,
   "segments": [
     {
-      "batch": 0,
+      "segment_id": "11111111-1111-1111-1111-111111111111",
+      "batch": 1,
       "path": "001/segment-0001-aaaaaaaa.parquet",
       "min_seq": 1,
       "max_seq": 10,
@@ -15,6 +16,22 @@
       "row_count": 10,
       "byte_size": 4096,
       "schema_version": 1,
+      "row_group_count": 2,
+      "row_group_row_counts": [5, 5],
+      "row_group_min_seqs": [1, 6],
+      "row_group_max_seqs": [5, 10],
+      "column_indexes": [
+        {
+          "column_id": 1,
+          "type_oid": 20,
+          "codec_version": 1,
+          "min_value": "0101",
+          "max_value": "010a",
+          "row_group_min_values": ["0101", "0106"],
+          "row_group_max_values": ["0105", "010a"],
+          "row_group_null_counts": [0, 0]
+        }
+      ],
       "pk_filter": {
         "kind": "exact",
         "column_ids": [1]

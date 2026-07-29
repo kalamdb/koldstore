@@ -162,8 +162,16 @@ pub(super) fn stream_write_flush_batches(
         parquet_columns: ctx
             .catalog_columns
             .iter()
+            // Delete markers retain every PK value but intentionally leave
+            // non-PK payload columns null, even when the source column is
+            // declared NOT NULL. Keeping only PK columns non-null also makes
+            // their footer bounds a required publication invariant.
             .map(|column| {
-                koldstore_parquet::PgColumn::new(column.name.clone(), column.pg_type, true)
+                koldstore_parquet::PgColumn::new(
+                    column.name.clone(),
+                    column.pg_type,
+                    !column.is_primary_key,
+                )
             })
             .collect(),
         indexed_columns: ctx.indexed_columns.clone(),
@@ -253,16 +261,9 @@ fn write_streamed_chunk(
 ) -> Result<(), String> {
     crate::failpoints::hit("during_parquet_write")?;
     let chunk_stats = FlushStats::from_write_chunk(&chunk)?;
-    let primary_key_names = ctx
-        .snapshot
-        .primary_key_names()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
     let written = write_flush_segment_with_client(
         client,
         table_prefix,
-        &ctx.storage.compression,
-        &primary_key_names,
         ctx.storage.schema_version,
         *batch_number,
         &chunk,
@@ -334,7 +335,7 @@ pub(super) fn finalize_flush(
     write_manifest_with_client(client, &outcome.manifest_path, &outcome.manifest)?;
     crate::failpoints::hit("before_activate")?;
     let expected_generation = manifest_generation(table_oid)?;
-    let _new_generation = activate_flush_segments(
+    activate_flush_segments(
         table_oid,
         expected_generation,
         outcome.manifest.segments.len() as i32,

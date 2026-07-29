@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::time::Instant;
 
-use koldstore_merge::scan::MergeScanResult;
 use koldstore_parquet::{BloomPruneMode, ParquetReadProfile};
 use pgrx::pg_sys;
 
@@ -59,15 +58,7 @@ pub(super) trait ScanProfileSink {
     fn start_timer(&self) -> Option<Instant>;
     fn record_hot_scan(&mut self, started: Option<Instant>);
     fn record_hot_buffer(&mut self, row_count: usize);
-    #[allow(dead_code)]
-    fn record_cold_rows(&mut self, row_count: usize);
     fn record_mirror_scan(&mut self, row_count: usize, started: Option<Instant>);
-    #[allow(dead_code)]
-    fn record_overlay(&mut self, input_rows: usize, output_rows: usize, started: Option<Instant>);
-    #[allow(dead_code)]
-    fn record_merge(&mut self, merged: &MergeScanResult, started: Option<Instant>);
-    #[allow(dead_code)]
-    fn record_materialization(&mut self, started: Option<Instant>);
 }
 
 /// Zero-cost profiling sink used outside `EXPLAIN ANALYZE`.
@@ -86,29 +77,7 @@ impl ScanProfileSink for DisabledScanProfiler {
     fn record_hot_buffer(&mut self, _row_count: usize) {}
 
     #[inline(always)]
-    #[allow(dead_code)]
-    fn record_cold_rows(&mut self, _row_count: usize) {}
-
-    #[inline(always)]
     fn record_mirror_scan(&mut self, _row_count: usize, _started: Option<Instant>) {}
-
-    #[inline(always)]
-    #[allow(dead_code)]
-    fn record_overlay(
-        &mut self,
-        _input_rows: usize,
-        _output_rows: usize,
-        _started: Option<Instant>,
-    ) {
-    }
-
-    #[inline(always)]
-    #[allow(dead_code)]
-    fn record_merge(&mut self, _merged: &MergeScanResult, _started: Option<Instant>) {}
-
-    #[inline(always)]
-    #[allow(dead_code)]
-    fn record_materialization(&mut self, _started: Option<Instant>) {}
 }
 
 impl ScanProfiler {
@@ -172,45 +141,10 @@ impl ScanProfileSink for ScanProfiler {
         }
     }
 
-    #[allow(dead_code)]
-    fn record_cold_rows(&mut self, row_count: usize) {
-        if let Some(execution) = self.execution.as_mut() {
-            execution.cold_rows = row_count;
-        }
-    }
-
     fn record_mirror_scan(&mut self, row_count: usize, started: Option<Instant>) {
         if let Some(execution) = self.execution.as_mut() {
             execution.mirror_rows = row_count;
             execution.mirror_scan_ms = started.map(elapsed_ms);
-        }
-    }
-
-    #[allow(dead_code)]
-    fn record_overlay(&mut self, input_rows: usize, output_rows: usize, started: Option<Instant>) {
-        if let Some(execution) = self.execution.as_mut() {
-            execution.overlay_rows_removed = input_rows.saturating_sub(output_rows);
-            execution.overlay_ms = started.map(elapsed_ms);
-        }
-    }
-
-    #[allow(dead_code)]
-    fn record_merge(&mut self, merged: &MergeScanResult, started: Option<Instant>) {
-        if let Some(execution) = self.execution.as_mut() {
-            execution.merge_ms = started.map(elapsed_ms);
-            execution.merge_executed = true;
-            execution.merge_input_rows = merged.hot_rows_seen + merged.cold_rows_seen;
-            execution.merge_output_rows = merged.rows.len();
-            execution.merge_rows_removed = execution
-                .merge_input_rows
-                .saturating_sub(execution.merge_output_rows);
-        }
-    }
-
-    #[allow(dead_code)]
-    fn record_materialization(&mut self, started: Option<Instant>) {
-        if let Some(execution) = self.execution.as_mut() {
-            execution.materialization_ms = started.map(elapsed_ms);
         }
     }
 }

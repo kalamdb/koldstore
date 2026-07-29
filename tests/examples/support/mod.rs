@@ -4,7 +4,7 @@
 pub mod e2e;
 
 use std::future::Future;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -621,10 +621,11 @@ pub async fn assert_indexes_exist(
 pub async fn load_cold_segments(client: &Client, relation: &str) -> Result<Vec<ColdSegmentInfo>> {
     let rows = client
         .query(
-            r#"
+            &format!(
+                r#"
             SELECT
               scope_key,
-              format('%s/%s/%s', n.nspname, c.relname, cs.path),
+              {object},
               row_count,
               byte_size,
               batch_number
@@ -635,6 +636,8 @@ pub async fn load_cold_segments(client: &Client, relation: &str) -> Result<Vec<C
               AND status = 'active'
             ORDER BY scope_key, batch_number
             "#,
+                object = e2e::SQL_DEFAULT_COLD_OBJECT_KEY,
+            ),
             &[&relation],
         )
         .await?;
@@ -658,10 +661,11 @@ pub async fn load_cold_segments(client: &Client, relation: &str) -> Result<Vec<C
 pub async fn load_manifests(client: &Client, relation: &str) -> Result<Vec<ManifestInfo>> {
     let rows = client
         .query(
-            r#"
+            &format!(
+                r#"
             SELECT
               scope_key,
-              format('%s/%s/manifest.json', n.nspname, c.relname),
+              {manifest},
               sync_state,
               generation
             FROM koldstore.manifest m
@@ -670,6 +674,8 @@ pub async fn load_manifests(client: &Client, relation: &str) -> Result<Vec<Manif
             WHERE m.table_oid = $1::text::regclass::oid
             ORDER BY scope_key
             "#,
+                manifest = e2e::SQL_DEFAULT_MANIFEST_OBJECT_KEY,
+            ),
             &[&relation],
         )
         .await?;
@@ -1254,13 +1260,6 @@ pub async fn assert_merge_scan_uses_cold(
     ));
     e2e::assert_kold_merge_scan_cold_reads(&plan, "manifest.json", min_parquet_segments)?;
     Ok(())
-}
-
-/// Absolute path under an example storage root.
-#[must_use]
-#[allow(dead_code)]
-pub fn storage_file(storage_root: &Path, relative: &str) -> PathBuf {
-    storage_root.join(relative)
 }
 
 fn env_i64(name: &str, default: i64) -> i64 {

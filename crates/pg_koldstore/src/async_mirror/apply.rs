@@ -274,14 +274,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                 }
                 match decode_message(&data).map_err(|error| error.to_string())? {
                     PgOutputMessage::Begin { final_lsn, .. } => {
-                        flush_batch(
-                            &mut batch,
-                            &relations,
-                            &mut managed,
-                            &mut type_names,
-                            final_lsn,
-                            &request,
-                        )?;
+                        flush_batch(&mut batch, &relations, &mut managed, &mut type_names)?;
                         transaction_lsn = Some(final_lsn);
                         skipping_flush_origin = false;
                         skipping_transaction = skip_through
@@ -302,16 +295,10 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                         }
                     }
                     PgOutputMessage::Commit { end_lsn, .. } => {
-                        let lsn = transaction_lsn
-                            .ok_or_else(|| "pgoutput COMMIT arrived without BEGIN".to_string())?;
-                        flush_batch(
-                            &mut batch,
-                            &relations,
-                            &mut managed,
-                            &mut type_names,
-                            lsn,
-                            &request,
-                        )?;
+                        if transaction_lsn.is_none() {
+                            return Err("pgoutput COMMIT arrived without BEGIN".to_string());
+                        }
+                        flush_batch(&mut batch, &relations, &mut managed, &mut type_names)?;
                         transaction_lsn = None;
                         // Flush-origin txns are intentionally not mirrored but must
                         // still advance applied_lsn so the slot can move past them.
@@ -660,7 +647,9 @@ fn push_change(
     transaction_lsn: Option<u64>,
     request: &BoundedApplyRequest,
 ) -> Result<(), String> {
-    let lsn = transaction_lsn.ok_or_else(|| "pgoutput row arrived without BEGIN".to_string())?;
+    if transaction_lsn.is_none() {
+        return Err("pgoutput row arrived without BEGIN".to_string());
+    }
     let relation = relations
         .get(&relation_id)
         .ok_or_else(|| format!("pgoutput row references unknown relation {relation_id}"))?;
@@ -717,7 +706,7 @@ fn push_change(
         None => false,
     };
     if needs_flush {
-        flush_batch(batch, relations, managed, type_names, lsn, request)?;
+        flush_batch(batch, relations, managed, type_names)?;
     }
     let current = batch.get_or_insert_with(|| ApplyBatch::new(key));
     current.seen.insert(identity);
@@ -730,8 +719,6 @@ fn flush_batch(
     relations: &HashMap<u32, PgOutputRelation>,
     managed: &mut HashMap<u32, Option<ManagedRelation>>,
     type_names: &mut HashMap<(u32, i32), String>,
-    _commit_lsn: u64,
-    request: &BoundedApplyRequest,
 ) -> Result<(), String> {
     let Some(batch) = batch.take() else {
         return Ok(());
@@ -752,7 +739,6 @@ fn flush_batch(
         type_names,
         batch.key.operation,
         &batch.rows,
-        request,
     )?;
     // After SPI mirror writes succeed but before applied_lsn is recorded.
     crate::failpoints::hit(ASYNC_MIRROR_APPLY_AFTER_BATCH_FAILPOINT)?;
@@ -913,7 +899,6 @@ fn apply_batch(
     type_names: &mut HashMap<(u32, i32), String>,
     operation: MirrorOperation,
     rows: &[Value],
-    _request: &BoundedApplyRequest,
 ) -> Result<(), String> {
     ensure_pk_type_names(config, relation, type_names)?;
     let pk_refs = config
@@ -931,7 +916,6 @@ fn apply_batch(
                         &config.mirror,
                         &pk_refs,
                         pk_types,
-                        "unused",
                         include_order_key,
                     )
                     .map_err(|error| error.to_string())?,

@@ -34,8 +34,8 @@ belongs in PostgreSQL; object-store `manifest.json` is a derived export.
    1. Encode Parquet; publish immutable object (temp → create → byte verify)
    2. Hash payload once (sha256 over the encode buffer); persist `checksum` +
       `object_etag` with `INSERT … status = 'pending'`
-   3. Write derived folder-sharded object export (`manifest.json` root +
-      `{folder}/manifest-shard.json`)
+   3. Write immutable content-addressed folder shards, then the derived thin
+      `manifest.json` root
    4. CAS `manifest.generation` (`bigint`) and `UPDATE` pending → `active` for
       this flush’s segment ids in one catalog step
    5. Only then prune hot/mirror rows

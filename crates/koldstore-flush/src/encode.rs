@@ -4,15 +4,14 @@
 //! Post-flush cleanup uses a seq-range DELETE (see `cleanup::plan_seq_range_cleanup`)
 //! so this path no longer materializes per-row cleanup JSON.
 
-use std::collections::BTreeMap;
-
-use koldstore_common::{ColumnId, ColumnRef, QualifiedTableName, SqlStatement};
+use koldstore_common::{ColumnRef, QualifiedTableName, SqlStatement};
 use koldstore_parquet::{
-    CleanColdRecordBatchBuilder, ColdMetadataColumn, ColdRecordBatch, FlushMirrorRow, PgColumn,
-    SegmentSplitPolicy, StreamingParquetSegmentWriter, WriterOptions,
+    extract_packed_segment_metadata, CleanColdRecordBatchBuilder, ColdMetadataColumn,
+    ColdRecordBatch, FlushMirrorRow, PgColumn, SegmentSplitPolicy, StreamingParquetSegmentWriter,
+    WriterOptions,
 };
 
-use crate::write::{merge_indexed_bounds, FlushWriteChunk};
+use crate::write::FlushWriteChunk;
 
 /// Input for one streaming flush encode pass.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,9 +53,9 @@ struct SegmentBuilder {
     split_policy: SegmentSplitPolicy,
     writer: Option<StreamingParquetSegmentWriter>,
     row_count: usize,
-    min_seq: Option<i64>,
-    max_seq: Option<i64>,
-    indexed_bounds: BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
+    parquet_columns: Vec<PgColumn>,
+    indexed_columns: Vec<ColumnRef>,
+    primary_key_columns: Vec<String>,
 }
 
 impl SegmentBuilder {
@@ -86,9 +85,9 @@ impl SegmentBuilder {
             ),
             writer: None,
             row_count: 0,
-            min_seq: None,
-            max_seq: None,
-            indexed_bounds: BTreeMap::new(),
+            parquet_columns: input.parquet_columns.clone(),
+            indexed_columns: input.indexed_columns.clone(),
+            primary_key_columns: input.primary_key_columns.clone(),
         }
     }
 
@@ -97,6 +96,7 @@ impl SegmentBuilder {
     }
 
     fn push_batch(&mut self, batch: ColdRecordBatch) -> Result<bool, String> {
+        let batch_row_count = batch.batch.num_rows();
         let writer = if let Some(writer) = self.writer.as_mut() {
             writer
         } else {
@@ -108,16 +108,7 @@ impl SegmentBuilder {
         writer
             .write_batch(&batch.batch)
             .map_err(|error| error.to_string())?;
-        self.row_count = self.row_count.saturating_add(batch.row_count);
-        self.min_seq = Some(
-            self.min_seq
-                .map_or(batch.min_seq, |current| current.min(batch.min_seq)),
-        );
-        self.max_seq = Some(
-            self.max_seq
-                .map_or(batch.max_seq, |current| current.max(batch.max_seq)),
-        );
-        merge_indexed_bounds(&mut self.indexed_bounds, &batch.indexed_bounds);
+        self.row_count = self.row_count.saturating_add(batch_row_count);
         // PERFORMANCE: drop Arrow immediately after encode so uncompressed row
         // groups never sit beside the growing compressed Parquet buffer.
         drop(batch);
@@ -130,17 +121,17 @@ impl SegmentBuilder {
         let Some(writer) = self.writer.take() else {
             return Ok(None);
         };
-        let parquet_bytes = writer.finish().map_err(|error| error.to_string())?;
-        let chunk = FlushWriteChunk::from_parts(
-            parquet_bytes,
-            self.row_count,
-            self.min_seq.unwrap_or(0),
-            self.max_seq.unwrap_or(0),
-            std::mem::take(&mut self.indexed_bounds),
-        );
+        let encoded = writer
+            .finish_with_metadata()
+            .map_err(|error| error.to_string())?;
+        let packed_metadata = extract_packed_segment_metadata(
+            encoded.metadata.as_ref(),
+            &self.parquet_columns,
+            &self.indexed_columns,
+            &self.primary_key_columns,
+        )?;
+        let chunk = FlushWriteChunk::from_encoded(encoded, packed_metadata);
         self.row_count = 0;
-        self.min_seq = None;
-        self.max_seq = None;
         Ok(Some(chunk))
     }
 }
@@ -156,16 +147,14 @@ pub struct StreamEncodeOutcome {
 
 struct ChunkBuilder {
     parquet_columns: Vec<PgColumn>,
-    indexed_columns: Vec<ColumnRef>,
     batch_builder: CleanColdRecordBatchBuilder,
 }
 
 impl ChunkBuilder {
-    fn new(parquet_columns: &[PgColumn], indexed_columns: &[ColumnRef]) -> Result<Self, String> {
+    fn new(parquet_columns: &[PgColumn]) -> Result<Self, String> {
         Ok(Self {
             parquet_columns: parquet_columns.to_vec(),
-            indexed_columns: indexed_columns.to_vec(),
-            batch_builder: CleanColdRecordBatchBuilder::new(parquet_columns, indexed_columns)?,
+            batch_builder: CleanColdRecordBatchBuilder::new(parquet_columns)?,
         })
     }
 
@@ -191,7 +180,7 @@ impl ChunkBuilder {
     fn take_batch(&mut self) -> Result<ColdRecordBatch, String> {
         let cold_batch = std::mem::replace(
             &mut self.batch_builder,
-            CleanColdRecordBatchBuilder::new(&self.parquet_columns, &self.indexed_columns)?,
+            CleanColdRecordBatchBuilder::new(&self.parquet_columns)?,
         )
         .finish()?;
         Ok(cold_batch)
@@ -226,7 +215,7 @@ where
     let mut after_seq = 0_i64;
     let mut rows_written = 0_usize;
     let mut max_seq = 0_i64;
-    let mut chunk_builder = ChunkBuilder::new(&input.parquet_columns, &input.indexed_columns)?;
+    let mut chunk_builder = ChunkBuilder::new(&input.parquet_columns)?;
     let mut segment_builder = SegmentBuilder::new(input);
     let pk_indices =
         koldstore_parquet::pk_column_indices(&input.base_column_names, &input.primary_key_columns)?;
@@ -367,6 +356,7 @@ mod tests {
     use super::*;
     use koldstore_common::{ColumnId, ColumnRef};
     use koldstore_parquet::{FlushColumnValue, PgType};
+    use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue};
 
     fn input(target_file_size_bytes: Option<u64>, max_rows_per_file: usize) -> StreamEncodeInput {
         StreamEncodeInput {
@@ -441,6 +431,52 @@ mod tests {
 
         assert_eq!(outcome.rows_written, 5);
         assert_eq!(segment_rows, vec![1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn streamed_chunk_carries_footer_derived_packed_metadata() {
+        let mut encode_input = input(None, 100);
+        encode_input.row_group_size = 2;
+        let mut fetched = false;
+        let mut packed = None;
+
+        stream_flush_chunks(
+            &encode_input,
+            |_, _, _| {
+                if fetched {
+                    Ok(Vec::new())
+                } else {
+                    fetched = true;
+                    Ok(rows())
+                }
+            },
+            |chunk| {
+                packed = Some(chunk.packed_metadata.clone());
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        let packed = packed.unwrap();
+        assert_eq!(packed.row_group_count, 3);
+        assert_eq!(packed.row_group_row_counts, vec![2, 2, 1]);
+        assert_eq!(packed.row_group_min_seqs, vec![1, 3, 5]);
+        assert_eq!(packed.row_group_max_seqs, vec![2, 4, 5]);
+        let id = &packed.column_indexes[0];
+        assert_eq!(id.column_id, ColumnId::from_attnum(1));
+        assert_eq!(
+            id.row_group_min_values
+                .iter()
+                .map(|value| {
+                    decode_sort_key(SortKeyType::Int8, value.as_deref().unwrap()).unwrap()
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                SortKeyValue::Int8(1),
+                SortKeyValue::Int8(3),
+                SortKeyValue::Int8(5),
+            ]
+        );
     }
 
     #[test]

@@ -64,10 +64,11 @@ async fn flush_to_cold_writes_catalog_manifest_and_parquet_on_pgrx() -> Result<(
         let artifact = db
             .client
             .query_one(
-                r#"
+                &format!(
+                    r#"
                 SELECT
-                  format('%s/%s/manifest.json', n.nspname, c.relname),
-                  format('%s/%s/%s', n.nspname, c.relname, cs.path),
+                  {manifest},
+                  {object},
                   cs.row_count,
                   cs.byte_size,
                   cs.path
@@ -84,6 +85,9 @@ async fn flush_to_cold_writes_catalog_manifest_and_parquet_on_pgrx() -> Result<(
                 ORDER BY cs.batch_number
                 LIMIT 1
                 "#,
+                    manifest = common::SQL_DEFAULT_MANIFEST_OBJECT_KEY,
+                    object = common::SQL_DEFAULT_COLD_OBJECT_KEY,
+                ),
                 &[&table.relation],
             )
             .await?;

@@ -299,9 +299,11 @@ unsafe fn execute_scan_sources_with_profile<P: ScanProfileSink>(
     }
 
     let (mode, emit_path, hot_rows) = match cold_stream {
-        None if hot_child_planstate(inputs.node).is_some() => {
-            (ScanEmitMode::HotChild, EmitPath::HotChild, 0)
-        }
+        None if hot_child_planstate(inputs.node).is_some() => (
+            ScanEmitMode::HotChild { prefetched: None },
+            EmitPath::HotChild,
+            0,
+        ),
         None => {
             let started = profiler.start_timer();
             let rows = load_native_hot_rows(&inputs, &mut memory, "hot-only read");

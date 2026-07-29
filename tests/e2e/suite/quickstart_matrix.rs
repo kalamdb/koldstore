@@ -46,10 +46,16 @@ async fn quickstart_managed_table_keeps_size_and_index_overhead_bounded() -> Res
             ),
         )
         .await?;
-        common::assert_kold_merge_scan_explain(&plan)?;
-        assert!(
-            plan.contains("Filter:") && plan.contains("item-000777"),
-            "expected filtered merge scan plan, got:\n{plan}"
+        // Pre-flush: no published cold segments, so the locked hot-only path
+        // keeps a native index plan. After flush, the same query may wrap under
+        // KoldMergeScan when cold can contribute.
+        common::assert_managed_read_plan(&plan)?;
+        anyhow::ensure!(
+            plan.contains("item-000777")
+                && (plan.contains("Filter:")
+                    || plan.contains("Index Cond:")
+                    || plan.contains("Recheck Cond:")),
+            "expected title predicate in managed read plan, got:\n{plan}"
         );
     }
 

@@ -164,10 +164,11 @@ async fn flushed_artifacts(
     let row = db
         .client
         .query_one(
-            r#"
+            &format!(
+                r#"
             SELECT
-              format('%s/%s/manifest.json', n.nspname, c.relname),
-              format('%s/%s/%s', n.nspname, c.relname, cs.path)
+              {manifest},
+              {object}
             FROM koldstore.manifest m
             JOIN pg_class c ON c.oid = m.table_oid
             JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -181,6 +182,9 @@ async fn flushed_artifacts(
             ORDER BY cs.batch_number
             LIMIT 1
             "#,
+                manifest = common::SQL_DEFAULT_MANIFEST_OBJECT_KEY,
+                object = common::SQL_DEFAULT_COLD_OBJECT_KEY,
+            ),
             &[&relation],
         )
         .await
@@ -355,14 +359,17 @@ async fn partial_multi_segment_outage_fails_merge_scan_closed() -> Result<()> {
         let segments: Vec<String> = db
             .client
             .query(
-                r#"
-                SELECT format('%s/%s/%s', n.nspname, c.relname, cs.path)
+                &format!(
+                    r#"
+                SELECT {object}
                 FROM koldstore.cold_segments cs
                 JOIN pg_class c ON c.oid = cs.table_oid
                 JOIN pg_namespace n ON n.oid = c.relnamespace
                 WHERE cs.table_oid = $1::text::regclass::oid AND cs.status = 'active'
                 ORDER BY cs.batch_number
                 "#,
+                    object = common::SQL_DEFAULT_COLD_OBJECT_KEY,
+                ),
                 &[&table.relation],
             )
             .await?

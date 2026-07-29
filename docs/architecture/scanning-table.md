@@ -1,9 +1,10 @@
 # Scanning Table Workflow (KoldMergeScan)
 
-This document describes how `SELECT` queries against managed tables are planned
-and executed through the `KoldMergeScan` custom scan node. It covers shared
-preload, planner gates, catalog caching, cold Parquet reads, native hot child
-plans, mirror overlay, winner resolution, and ownership boundaries.
+This document describes how `SELECT` queries against managed tables either keep
+PostgreSQL's native plan or execute through the `KoldMergeScan` custom scan
+node. It covers shared preload, planner gates, catalog caching, cold Parquet
+reads, native hot child plans, mirror overlay, winner resolution, and ownership
+boundaries.
 
 **Planner hook:** `set_rel_pathlist` in `crates/pg_koldstore/src/merge_scan/pg.rs`  
 **Rust merge:** `crates/koldstore-merge/src/core/resolver.rs`  
@@ -15,7 +16,7 @@ plans, mirror overlay, winner resolution, and ownership boundaries.
 ## Design principle
 
 ```text
-Primary path: shared_preload → planner hook → KoldMergeScan
+Primary path: shared_preload → planner hook → native scan or KoldMergeScan
 If hook/preload missing: ERROR at install/manage (fail closed)
 Never: silent SeqScan that returns hot-only rows for managed tables
 ```
@@ -41,6 +42,13 @@ only managed relations become `KoldMergeScan`.
   at begin — never silent heap-only.
 - Unmanaged tables keep normal `Seq Scan` / `Index Scan` after a cheap in-memory
   OID cache lookup (absences are cached so SPI is not repeated).
+- Managed tables with no published cold segments also keep PostgreSQL's native
+  paths. Flush publication broadcasts relcache invalidation, which invalidates
+  cached native plans before cold rows become visible.
+- Constant PK, scope, and segment-order predicates keep native paths when
+  complete aggregate Sort Key bounds prove that no cold segment can match.
+  The backend cache stores only two byte strings per table generation and
+  indexed column; it does not cache Parquet footers or row-group arrays.
 - Shared preload is mandatory so every backend has the planner hook before any
   query. A silent heap `SeqScan` fallback for managed SELECTs is forbidden: it
   would return incomplete results after flush.
@@ -136,10 +144,12 @@ flowchart TD
   cacheHit -->|hit None| absent --> heap
   cacheHit -->|hit Some| present --> active
   active -->|false| heap
-  active -->|true| inject --> custom
+  active -->|true| coldState{published cold can match?}
+  coldState -->|no| heap
+  coldState -->|yes or unknown| inject --> custom
   cacheHit -->|miss| spiMiss --> store
   store -->|None| heap
-  store -->|Some active| inject
+  store -->|Some active| coldState
 ```
 
 `manage_table` / `unmanage_table` call `invalidate_table_globally` so peer
@@ -148,9 +158,15 @@ backends drop stale negative (“not managed”) entries.
 For a managed relation the planner then:
 
 1. Picks the cheapest non-custom path as the hot child.
-2. Clears `pathlist` and `partial_pathlist` (required so Gather Merge cannot
+2. Retains the native paths when the manifest has no active segments, or when
+   safe constant bounds are disjoint from complete cached aggregate cold
+   bounds.
+3. Otherwise clears `pathlist` and `partial_pathlist` (required so Gather Merge cannot
    prefer a hot-only ordered path after flush).
-3. Installs one `CustomPath` whose `custom_paths` holds that child.
+4. Installs one `CustomPath` whose `custom_paths` holds that child.
+
+Catalog errors, missing index rows, unknown min/max values, mutable-column
+predicates, and unsupported Sort Key types all retain `KoldMergeScan`.
 
 ---
 
@@ -161,7 +177,13 @@ flowchart TD
   Begin["BeginCustomScan"]
   Guc{enable_merge_scan?}
   Err[ERROR]
-  Cat[Catalog + MergeScanPlan]
+  Exact{complete PK equality?}
+  Probe["ExecCustomScan: native hot child"]
+  Hit{visible hot row?}
+  Direct["Return child slot directly"]
+  RuntimePrune{prepared bounds exclude cold?}
+  Delegate["Delegate every tuple to native child"]
+  Cat["Catalog + merge metadata"]
   Mirror[Load mirror overlay]
   Cold[Cold prune + Parquet]
   Merge[Mask cold by mirror PKs]
@@ -171,7 +193,15 @@ flowchart TD
 
   Begin --> Guc
   Guc -->|off| Err
-  Guc -->|on| Cat
+  Guc -->|on| Exact
+  Exact -->|yes| Probe --> Hit
+  Hit -->|yes| Direct
+  Hit -->|no| RuntimePrune
+  Exact -->|no| RuntimePrune
+  RuntimePrune -->|yes| Delegate
+  RuntimePrune -->|no or unknown| Cat
+  Hit -->|no| Cat
+  Exact -->|no| Cat
   Cat --> Mirror
   Cat --> Cold
   Mirror --> Merge
@@ -184,16 +214,30 @@ flowchart TD
 ### BeginCustomScan
 
 1. Error if `enable_merge_scan` is off.
-2. Deserialize `MergeScanPlan` when present.
-3. Load catalog snapshot + mirror tombstone overlay.
-4. Prune cold segments from local catalog stats; prepare a lazy newest-first
+2. Read the complete-PK marker from the sole native PostgreSQL `Integer` in
+   `custom_private`; no JSON plan payload is produced or decoded.
+3. For an uninstrumented complete-PK equality plan whose child has no
+   executor-path parameterization (constants and external prepared parameters
+   are allowed), initialize the native PostgreSQL hot child and defer its first
+   probe until `ExecCustomScan`. A visible hit returns the child slot directly:
+   no catalog lookup, merge allocation, thread-local scan entry, or tuple copy.
+   Instrumented execution probes during begin so `EXPLAIN ANALYZE` retains its
+   detailed counters and labels.
+4. On a native-child miss, lazily load the catalog snapshot and continue
+   through the owner-visible hot-PK, tombstone, and cold checks. This prevents
+   RLS, deletes, or an additional mutable-column predicate from resurrecting an
+   older cold version.
+5. Prune cold segments from local catalog stats; prepare a lazy newest-first
    cold stream (no Parquet open yet).
-5. Hot-only + native child → stream mode; otherwise open a paged hot JSON
+6. Hot-only + native child → stream mode; otherwise open a paged hot JSON
    reader and a merge stream (pages load during `ExecCustomScan`).
 
 ### ExecCustomScan / End / Rescan
 
-- Hot-child mode: `ExecProcNode` on the child.
+- Exact-PK hot-child mode: `ExecProcNode` on the child and return its projected
+  slot directly. The child is unique by the complete primary key.
+- PostgreSQL's `nodeCustom.c` performs the per-call interrupt check before the
+  provider callback; KoldStore does not repeat it.
 - Hot-native buffer mode: emit the next materialized hot-only row (cold pruned).
 - Merge stream: emit hot SPI pages first (drop each row image after Datum
   materialization), then decode one cold segment group at a time against the
@@ -329,9 +373,12 @@ Custom Scan (KoldMergeScan)
 
 ## Implementation notes / remaining polish
 
-1. Overlap merge path still uses paged SPI JSON hot load for winner resolution
-   when a full PK equality probe is not available; PK point lookups use
-   hot-native / cold-native emit. Peak retained hot JSON is one SPI page
+1. Exact PK hot hits use the native PostgreSQL child before KoldStore executor
+   metadata initialization. The common uninstrumented path keeps its lifecycle
+   in provider-owned `KoldMergeScanState`; the global Rust scan map exists only
+   for instrumented hits and merge fallback. Misses retain the conservative
+   hot-native / cold-native resolution path; overlap scans still use paged SPI
+   JSON winner resolution. Peak retained hot JSON is one SPI page
    (`HOT_MERGE_BATCH_ROWS`); the exact PK seen-set stays in RAM until spill.
 2. User-scoped cold segment loading beyond `scope_key = ''` continues to land
    with catalog scope work.

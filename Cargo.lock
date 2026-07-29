@@ -1445,6 +1445,7 @@ dependencies = [
 name = "koldstore-flush"
 version = "0.1.8-beta.0"
 dependencies = [
+ "hex",
  "koldstore-catalog",
  "koldstore-common",
  "koldstore-manifest",
@@ -1454,6 +1455,7 @@ dependencies = [
  "koldstore-parquet",
  "koldstore-sortkey",
  "koldstore-storage",
+ "parquet",
  "serde_json",
  "tempfile",
  "thiserror",
@@ -1465,6 +1467,7 @@ name = "koldstore-manifest"
 version = "0.1.8-beta.0"
 dependencies = [
  "chrono",
+ "hex",
  "koldstore-catalog",
  "koldstore-common",
  "koldstore-sortkey",
@@ -1528,6 +1531,7 @@ dependencies = [
  "futures-util",
  "koldstore-common",
  "koldstore-schema",
+ "koldstore-sortkey",
  "koldstore-storage",
  "object_store",
  "parquet",
@@ -2007,6 +2011,7 @@ name = "pg_koldstore"
 version = "0.1.8-beta.0"
 dependencies = [
  "cc",
+ "hex",
  "koldstore-catalog",
  "koldstore-common",
  "koldstore-flush",

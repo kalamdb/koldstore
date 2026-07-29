@@ -1,6 +1,6 @@
 //! Kalamdb-compatible folder-sharded manifest model, assembly, I/O, and publish.
 //!
-//! Owns the on-disk export (`manifest.json` root + `{folder}/manifest-shard.json`),
+//! Owns the on-disk export (`manifest.json` root + content-addressed folder shards),
 //! catalog→manifest assembly, and path helpers. Catalog sync-state FSM lives in
 //! `koldstore-catalog`. Must not depend on `pgrx`. Flush orchestration stays in
 //! `koldstore-flush`; SPI stays in `pg_koldstore`.
@@ -24,13 +24,12 @@ pub use io::{
 };
 pub use koldstore_catalog::{CatalogManifestSegmentRow, SyncState};
 pub use model::{
-    FilesState, Manifest, ManifestBatchAppend, ManifestBloomFilter, ManifestColumnStats,
+    FilesState, Manifest, ManifestBatchAppend, ManifestBloomFilter, ManifestColumnIndex,
     ManifestSegment, ManifestShard, ManifestShardRef, PkFilter, PublishState, SegmentStatus,
     MANIFEST_SHARD_VERSION, MANIFEST_VERSION,
 };
 pub use paths::{
-    manifest_paths, relative_manifest_path, relative_manifest_shard_object_path,
-    relative_manifest_shard_path_for_folder, segment_folder_number, segment_object_path,
-    segment_path_token, segment_relative_object_path, table_object_prefix,
-    MANIFEST_SHARD_FILE_NAME, SEGMENTS_PER_FOLDER, SEGMENT_PATH_TOKEN_LEN,
+    manifest_paths, relative_manifest_path, relative_manifest_shard_content_path,
+    segment_folder_number, segment_path_token, segment_relative_object_path, table_object_prefix,
+    SEGMENTS_PER_FOLDER, SEGMENT_PATH_TOKEN_LEN,
 };

@@ -175,7 +175,9 @@ async fn exercise_merge_scan_reads(db: &common::TestDb, relation: &str) -> Resul
         &format!("SELECT id, title FROM {relation} WHERE id = 1"),
     )
     .await?;
-    common::assert_kold_merge_scan_explain(&plan)?;
+    // Hot-only (pre-flush) keeps native Index Scan; post-flush cold-capable
+    // predicates use KoldMergeScan. Both are valid managed read plans.
+    common::assert_managed_read_plan(&plan)?;
 
     let cold = db
         .client
@@ -522,9 +524,10 @@ async fn exercise_minio_parquet_reads(db: &common::TestDb, relation: &str) -> Re
     let artifacts = db
         .client
         .query(
-            r#"
+            &format!(
+                r#"
             SELECT
-              format('%s/%s/%s', n.nspname, c.relname, cs.path),
+              {object},
               cs.row_count
             FROM koldstore.cold_segments cs
             JOIN pg_class c ON c.oid = cs.table_oid
@@ -533,6 +536,8 @@ async fn exercise_minio_parquet_reads(db: &common::TestDb, relation: &str) -> Re
               AND cs.status = 'active'
             ORDER BY cs.batch_number
             "#,
+                object = common::SQL_DEFAULT_COLD_OBJECT_KEY,
+            ),
             &[&relation],
         )
         .await

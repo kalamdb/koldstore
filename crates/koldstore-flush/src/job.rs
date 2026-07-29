@@ -3,24 +3,15 @@
 //! **Not on the live `flush_table` path.** Production encode uses
 //! [`crate::encode::stream_flush_chunks`] plus
 //! [`crate::segment_catalog::plan_flush_segments_batch_insert`]. Types here
-//! (`FlushBatchBuilder`, `HotRowCandidate`, `plan_cold_segment_insert`, …)
-//! remain for unit tests and benches that exercise bounded-batch semantics.
+//! (`FlushBatchBuilder`, `HotRowCandidate`, …) remain for unit tests and benches
+//! that exercise bounded-batch semantics.
 
 use std::{
-    cmp::Ordering,
     collections::{btree_map::Entry, BTreeMap},
     num::NonZeroUsize,
 };
 
-use koldstore_catalog::SyncState;
-use koldstore_common::{
-    compare_json_values, ColumnRef, CommitSeq, KoldstoreError, MirrorOperation, Result, ScopeKey,
-    SeqId, StablePkHash,
-};
-use koldstore_parquet::{ColumnStats, FooterSummary, RowGroupStats, SegmentFooterMetadata};
-
-/// Manifest sync state alias used by flush orchestration.
-pub use koldstore_catalog::SyncState as ManifestSyncState;
+use koldstore_common::{CommitSeq, KoldstoreError, MirrorOperation, Result, SeqId, StablePkHash};
 
 /// Bounded flush execution settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,8 +218,6 @@ pub struct HotRowCandidate {
     pub commit_seq: CommitSeq,
     /// Whether this candidate is a hot tombstone.
     pub deleted: bool,
-    /// Optional app/system column values used to compute cold stats.
-    pub column_values: BTreeMap<String, serde_json::Value>,
 }
 
 impl HotRowCandidate {
@@ -240,7 +229,6 @@ impl HotRowCandidate {
             seq,
             commit_seq,
             deleted: false,
-            column_values: BTreeMap::new(),
         }
     }
 
@@ -252,22 +240,7 @@ impl HotRowCandidate {
             seq,
             commit_seq,
             deleted: true,
-            column_values: BTreeMap::new(),
         }
-    }
-
-    /// Attaches column values captured for the flushed row image.
-    #[must_use]
-    pub fn with_column_values<I, K>(mut self, values: I) -> Self
-    where
-        I: IntoIterator<Item = (K, serde_json::Value)>,
-        K: Into<String>,
-    {
-        self.column_values = values
-            .into_iter()
-            .map(|(column, value)| (column.into(), value))
-            .collect();
-        self
     }
 }
 
@@ -322,215 +295,6 @@ pub struct FlushBatchPlan {
     pub tombstones_retained: usize,
     /// Whether another bounded batch should be scanned.
     pub should_continue: bool,
-}
-
-impl FlushBatchPlan {
-    /// Builds a footer summary for live rows in this planned batch.
-    #[must_use]
-    pub fn footer_summary(&self) -> FooterSummary {
-        let mut min_seq = None::<i64>;
-        let mut max_seq = None::<i64>;
-        let mut min_commit_seq = None::<i64>;
-        let mut max_commit_seq = None::<i64>;
-
-        for row in self.rows.iter().filter(|row| !row.deleted) {
-            let seq = row.seq.get();
-            let commit_seq = row.commit_seq.get();
-            min_seq = Some(min_seq.map_or(seq, |current| current.min(seq)));
-            max_seq = Some(max_seq.map_or(seq, |current| current.max(seq)));
-            min_commit_seq =
-                Some(min_commit_seq.map_or(commit_seq, |current| current.min(commit_seq)));
-            max_commit_seq =
-                Some(max_commit_seq.map_or(commit_seq, |current| current.max(commit_seq)));
-        }
-
-        FooterSummary {
-            row_groups: vec![RowGroupStats {
-                row_group: 0,
-                min_seq,
-                max_seq,
-                min_commit_seq,
-                max_commit_seq,
-            }],
-        }
-    }
-
-    /// Computes min/max stats for configured columns from live flushed rows.
-    #[must_use]
-    pub fn column_stats(&self, columns: &[ColumnRef]) -> BTreeMap<String, ColumnStats> {
-        let mut accumulators = BTreeMap::<String, (&str, ColumnStatsAccumulator)>::new();
-        for column in columns {
-            if !column.name.trim().is_empty() {
-                accumulators
-                    .entry(column.column_id.to_string())
-                    .or_insert_with(|| (&column.name, ColumnStatsAccumulator::default()));
-            }
-        }
-
-        for row in self.rows.iter().filter(|row| !row.deleted) {
-            for (column_name, accumulator) in accumulators.values_mut() {
-                if let Some(value) = row.column_values.get(*column_name) {
-                    accumulator.push(value);
-                }
-            }
-        }
-
-        accumulators
-            .into_iter()
-            .filter_map(|(column_id, (_, accumulator))| {
-                accumulator.finish().map(|stats| (column_id, stats))
-            })
-            .collect()
-    }
-
-    /// Computes ID-keyed segment stats for configured application columns.
-    #[must_use]
-    pub fn segment_column_stats(&self, columns: &[ColumnRef]) -> BTreeMap<String, ColumnStats> {
-        self.column_stats(columns)
-    }
-}
-
-#[derive(Debug, Default)]
-struct ColumnStatsAccumulator {
-    min: Option<serde_json::Value>,
-    max: Option<serde_json::Value>,
-    invalid: bool,
-}
-
-impl ColumnStatsAccumulator {
-    fn push(&mut self, value: &serde_json::Value) {
-        if value.is_null() || self.invalid {
-            return;
-        }
-        match (&self.min, &self.max) {
-            (None, None) => {
-                self.min = Some(value.clone());
-                self.max = Some(value.clone());
-            }
-            (Some(min), Some(max)) => {
-                let Some(min_ordering) = compare_json_values(value, min) else {
-                    self.invalidate();
-                    return;
-                };
-                let Some(max_ordering) = compare_json_values(value, max) else {
-                    self.invalidate();
-                    return;
-                };
-                if min_ordering == Ordering::Less {
-                    self.min = Some(value.clone());
-                }
-                if max_ordering == Ordering::Greater {
-                    self.max = Some(value.clone());
-                }
-            }
-            _ => self.invalidate(),
-        }
-    }
-
-    fn finish(self) -> Option<ColumnStats> {
-        if self.invalid {
-            return None;
-        }
-        Some(ColumnStats {
-            min: self.min?,
-            max: self.max?,
-        })
-    }
-
-    fn invalidate(&mut self) {
-        self.invalid = true;
-        self.min = None;
-        self.max = None;
-    }
-}
-
-/// Planned `koldstore.cold_segments` catalog insertion after manifest commit.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ColdSegmentCatalogInsert {
-    /// Managed table oid.
-    pub table_oid: u32,
-    /// Optional user-scope key.
-    pub scope_key: Option<ScopeKey>,
-    /// Final Parquet object path.
-    pub object_path: String,
-    /// Minimum `_seq`.
-    pub min_seq: SeqId,
-    /// Maximum `_seq`.
-    pub max_seq: SeqId,
-    /// Minimum `_commit_seq`.
-    pub min_commit_seq: CommitSeq,
-    /// Maximum `_commit_seq`.
-    pub max_commit_seq: CommitSeq,
-    /// Segment row count.
-    pub row_count: u64,
-    /// Segment byte size.
-    pub byte_size: u64,
-    /// Segment schema version.
-    pub schema_version: u32,
-    /// Segment column stats.
-    pub column_stats: BTreeMap<String, ColumnStats>,
-    /// Insert as pending until activate CAS (query-visible only when active).
-    pub status: &'static str,
-    /// Sha256 hex of the published object (empty in planning-only helpers).
-    pub checksum: String,
-    /// Optional object-store etag from publish.
-    pub object_etag: String,
-}
-
-/// Failure plan for a flush attempt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FlushFailurePlan {
-    /// Next local manifest cache state.
-    pub next_manifest_state: ManifestSyncState,
-    /// Whether hot heap data remains authoritative.
-    pub hot_data_authoritative: bool,
-    /// Job state recorded for operators.
-    pub job_state: &'static str,
-    /// Last error message.
-    pub last_error: Option<String>,
-}
-
-impl FlushFailurePlan {
-    /// Builds failure metadata for object-store outage.
-    #[must_use]
-    pub fn object_store_outage(error: impl Into<String>) -> Self {
-        Self {
-            next_manifest_state: SyncState::Error,
-            hot_data_authoritative: true,
-            job_state: "error",
-            last_error: Some(error.into()),
-        }
-    }
-}
-
-/// Plans `koldstore.cold_segments` insertion from published footer metadata.
-///
-/// Planning helper only — live flush uses [`plan_flush_segments_batch_insert`].
-/// Status is `pending` until activate CAS.
-pub fn plan_cold_segment_insert(
-    table_oid: u32,
-    scope_key: Option<ScopeKey>,
-    object_path: impl Into<String>,
-    metadata: SegmentFooterMetadata,
-    checksum: impl Into<String>,
-    object_etag: impl Into<String>,
-) -> Result<ColdSegmentCatalogInsert> {
-    Ok(ColdSegmentCatalogInsert {
-        table_oid,
-        scope_key,
-        object_path: object_path.into(),
-        min_seq: SeqId::new(metadata.min_seq)?,
-        max_seq: SeqId::new(metadata.max_seq)?,
-        min_commit_seq: CommitSeq::new(metadata.min_commit_seq)?,
-        max_commit_seq: CommitSeq::new(metadata.max_commit_seq)?,
-        row_count: metadata.row_count,
-        byte_size: metadata.byte_size,
-        schema_version: metadata.schema_version,
-        column_stats: metadata.column_stats,
-        status: "pending",
-        checksum: checksum.into(),
-        object_etag: object_etag.into(),
-    })
 }
 
 /// Returns whether a flushed live row may be removed from hot storage.

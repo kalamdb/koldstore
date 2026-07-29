@@ -51,8 +51,7 @@ and retain the existing bounded exponential backoff.
 
 `koldstore.async_mirror_max_retained_bytes` is health telemetry only. Crossing
 it marks `async_mirror_status().retention.ok` and overall `healthy` false, but
-never rejects apply or a fence. The older `admission` JSON object remains an
-additive compatibility alias. PostgreSQL disk monitoring,
+never rejects apply or a fence. PostgreSQL disk monitoring,
 `max_slot_wal_keep_size`, and slot-loss recovery are independent operational
 safeguards.
 

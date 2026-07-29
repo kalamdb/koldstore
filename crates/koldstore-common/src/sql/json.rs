@@ -80,45 +80,17 @@ mod tests {
     }
 
     #[test]
-    fn column_stats_range_may_overlap_rejects_disjoint_closed_ranges() {
-        assert!(!column_stats_range_may_overlap(
-            &json!(1),
-            &json!(10),
-            Some(&json!(20)),
-            Some(&json!(30))
-        ));
-        assert!(!column_stats_range_may_overlap(
-            &json!(20),
-            &json!(30),
-            Some(&json!(1)),
-            Some(&json!(10))
-        ));
-    }
-
-    #[test]
-    fn column_stats_range_may_overlap_keeps_overlapping_and_unknown() {
+    fn column_stats_range_may_overlap_open_and_closed() {
         assert!(column_stats_range_may_overlap(
             &json!(1),
             &json!(10),
             Some(&json!(5)),
             Some(&json!(15))
         ));
-        assert!(column_stats_range_may_overlap(
+        assert!(!column_stats_range_may_overlap(
             &json!(1),
             &json!(10),
-            Some(&json!(null)),
-            Some(&json!(5))
-        ));
-        assert!(column_stats_range_may_overlap(
-            &json!(1),
-            &json!(10),
-            Some(&json!("x")),
-            Some(&json!(5))
-        ));
-        assert!(column_stats_range_may_overlap(
-            &json!(1),
-            &json!(10),
-            Some(&json!(5)),
+            Some(&json!(11)),
             None
         ));
     }

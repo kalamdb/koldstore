@@ -404,10 +404,11 @@ impl TestDb {
         let artifact = self
             .client
             .query_one(
-                r#"
+                &format!(
+                    r#"
                 SELECT
-                  format('%s/%s/manifest.json', n.nspname, c.relname),
-                  format('%s/%s/%s', n.nspname, c.relname, cs.path),
+                  {manifest},
+                  {object},
                   cs.row_count,
                   cs.byte_size
                 FROM koldstore.manifest m
@@ -423,6 +424,9 @@ impl TestDb {
                 ORDER BY cs.batch_number
                 LIMIT 1
                 "#,
+                    manifest = super::SQL_DEFAULT_MANIFEST_OBJECT_KEY,
+                    object = super::SQL_DEFAULT_COLD_OBJECT_KEY,
+                ),
                 &[&relation],
             )
             .await

@@ -4,11 +4,13 @@
 //! `koldstore-catalog`. This module owns the pure conversion into the on-disk
 //! manifest model.
 
-use koldstore_catalog::{column_stats_from_index_bounds, CatalogManifestSegmentRow};
+use koldstore_catalog::CatalogManifestSegmentRow;
 use koldstore_common::ColumnRef;
 use thiserror::Error;
 
-use crate::model::{Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment, PkFilter};
+use crate::model::{
+    Manifest, ManifestBloomFilter, ManifestColumnIndex, ManifestSegment, PkFilter, SegmentStatus,
+};
 
 /// Manifest assembly error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -39,9 +41,7 @@ pub fn manifest_from_catalog_rows(
     );
     let segments = rows
         .into_iter()
-        .map(|row| {
-            build_manifest_segment_from_catalog_row(namespace, table_name, primary_key_columns, row)
-        })
+        .map(|row| build_manifest_segment_from_catalog_row(primary_key_columns, row))
         .collect::<Result<Vec<_>, _>>()?;
     let _ = manifest.append_segment_batch(segments);
     Ok(manifest)
@@ -49,18 +49,39 @@ pub fn manifest_from_catalog_rows(
 
 /// Builds one manifest segment from an active cold-segment catalog row.
 ///
-/// Column stats are decoded from `cold_segment_index` rows carried on
+/// Packed Sort Key bounds are copied from `cold_segment_index` rows carried on
 /// [`CatalogManifestSegmentRow::index_bounds`].
 ///
 /// # Errors
 ///
 /// Returns an error when segment metadata cannot be converted into manifest form.
 pub fn build_manifest_segment_from_catalog_row(
-    _namespace: &str,
-    _table_name: &str,
     primary_key_columns: &[ColumnRef],
     row: CatalogManifestSegmentRow,
 ) -> Result<ManifestSegment, ManifestAssemblyError> {
+    let row_group_count = usize::try_from(row.row_group_count)
+        .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?;
+    if row_group_count == 0
+        || row.row_group_row_counts.len() != row_group_count
+        || row.row_group_min_seqs.len() != row_group_count
+        || row.row_group_max_seqs.len() != row_group_count
+    {
+        return Err(ManifestAssemblyError::InvalidSegment(format!(
+            "segment {} has malformed row-group arrays",
+            row.segment_id
+        )));
+    }
+    for index in &row.index_bounds {
+        if index.row_group_min_values.len() != row_group_count
+            || index.row_group_max_values.len() != row_group_count
+            || index.row_group_null_counts.len() != row_group_count
+        {
+            return Err(ManifestAssemblyError::InvalidSegment(format!(
+                "segment {} column {} has malformed row-group arrays",
+                row.segment_id, index.column_id
+            )));
+        }
+    }
     let mut segment = ManifestSegment::committed(
         u32::try_from(row.batch_number)
             .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?,
@@ -74,11 +95,47 @@ pub fn build_manifest_segment_from_catalog_row(
         u32::try_from(row.schema_version)
             .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?,
     );
-    segment.column_stats = column_stats_from_index_bounds(&row.index_bounds)
-        .map_err(ManifestAssemblyError::InvalidSegment)?
+    segment.segment_id = Some(row.segment_id);
+    segment.row_group_count = u32::try_from(row_group_count)
+        .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?;
+    segment.row_group_row_counts = row.row_group_row_counts;
+    segment.row_group_min_seqs = row.row_group_min_seqs;
+    segment.row_group_max_seqs = row.row_group_max_seqs;
+    segment.column_indexes = row
+        .index_bounds
         .into_iter()
-        .map(|(column, (min, max))| (column, ManifestColumnStats::new(min, max)))
+        .map(|index| ManifestColumnIndex {
+            column_id: index.column_id,
+            type_oid: index.type_oid,
+            codec_version: index.codec_version,
+            min_value: index.min_value,
+            max_value: index.max_value,
+            row_group_min_values: index.row_group_min_values,
+            row_group_max_values: index.row_group_max_values,
+            row_group_null_counts: index.row_group_null_counts,
+        })
         .collect();
+    segment.status = match row.status.as_str() {
+        "pending" => SegmentStatus::Pending,
+        "active" => SegmentStatus::Active,
+        "compacted" => SegmentStatus::Compacted,
+        "deleted" => SegmentStatus::Deleted,
+        other => {
+            return Err(ManifestAssemblyError::InvalidSegment(format!(
+                "segment has unsupported status `{other}`"
+            )))
+        }
+    };
+    segment.checksum = Some(row.checksum);
+    segment.etag = row.object_etag;
+    segment.created_at = row
+        .created_at
+        .map(|value| {
+            chrono::DateTime::parse_from_rfc3339(&value)
+                .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+                .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))
+        })
+        .transpose()?;
     if !primary_key_columns.is_empty() {
         let column_ids = primary_key_columns
             .iter()

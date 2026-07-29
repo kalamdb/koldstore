@@ -4,10 +4,9 @@ use koldstore_common::{
 };
 use koldstore_mirror::{
     mirror_relation_for_source, plan_async_mirror_batch_delete_existing,
-    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert,
-    plan_delete_selected_mirror_rows, plan_mirror_schema, plan_mirror_stats,
-    plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorAccess, MirrorColumn,
-    SqlParamType,
+    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, plan_mirror_schema,
+    plan_mirror_stats, plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorAccess,
+    MirrorColumn, SqlParamType,
 };
 
 fn pk_shape(name: &str, type_name: &str) -> PrimaryKeyColumnShape {
@@ -130,7 +129,6 @@ fn async_mirror_batch_update_updates_existing_rows_then_upserts_missing_rows() {
         "\"koldstore\".\"items__cl\"",
         &["tenant_id", "id"],
         &["uuid".to_string(), "bigint".to_string()],
-        "unused",
         false,
     )
     .unwrap();
@@ -189,29 +187,4 @@ fn mirror_changes_since_scan_keeps_callers_in_control_of_predicates() {
     assert!(stats.sql.contains("'row_count', count(*)"));
     assert!(stats.sql.contains("FROM \"koldstore\".\"items__cl\""));
     assert!(stats.param_types.is_empty());
-}
-
-#[test]
-fn selected_record_columns_match_flush_cleanup_contract() {
-    let columns = koldstore_mirror::selected_record_columns(&["id"]).unwrap();
-    assert_eq!(columns, "\"id\" text, \"seq\" bigint, \"op\" smallint");
-}
-
-#[test]
-fn selected_delete_uses_caller_supplied_selected_set() {
-    let mirror = mirror_relation_for_source(&TableName::parse("app.items").unwrap()).unwrap();
-    let delete = plan_delete_selected_mirror_rows(
-        &mirror,
-        &["id"],
-        "    SELECT * FROM jsonb_to_recordset($1::jsonb) AS selected(\"id\" text, \"seq\" bigint)",
-    )
-    .unwrap();
-
-    assert!(delete.sql.contains("WITH selected AS"));
-    assert!(delete
-        .sql
-        .contains("DELETE FROM \"koldstore\".\"items__cl\" AS mirror"));
-    assert!(delete.sql.contains("mirror.\"id\"::text = selected.\"id\""));
-    assert!(delete.sql.contains("mirror.\"seq\" = selected.\"seq\""));
-    assert_eq!(delete.param_types, vec![SqlParamType::Jsonb]);
 }

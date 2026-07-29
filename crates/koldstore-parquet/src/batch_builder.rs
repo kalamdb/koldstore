@@ -4,7 +4,6 @@
 //! from SPI. Avoids per-row `BTreeMap` retention plus a second full-table scan
 //! when converting planned rows to Parquet.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use arrow_array::builder::{
@@ -13,7 +12,6 @@ use arrow_array::builder::{
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::SchemaRef;
-use koldstore_common::{compare_json_values, ColumnId, ColumnRef};
 use koldstore_schema::PgType;
 
 use crate::pg_type_codec::{json_bool, json_f32, json_f64, json_i16, json_i64, json_string_cell};
@@ -53,70 +51,6 @@ pub fn pk_column_indices(
         .collect()
 }
 
-/// Builds one cleanup JSON object for post-flush hot/mirror pruning.
-///
-/// Only primary-key cells are serialized; full row payloads are not materialized.
-///
-/// # Errors
-///
-/// Returns an error when a primary-key value is null or missing.
-pub fn cleanup_row_json(
-    pk_columns: &[String],
-    pk_indices: &[usize],
-    values: &[FlushColumnValue],
-    seq: i64,
-    op: i16,
-) -> Result<serde_json::Value, String> {
-    let mut cleanup = serde_json::Map::new();
-    for (pk, index) in pk_columns.iter().zip(pk_indices) {
-        let value = values
-            .get(*index)
-            .ok_or_else(|| format!("flush row is missing primary-key field `{pk}`"))?;
-        cleanup.insert(pk.clone(), flush_cell_to_cleanup_json(value)?);
-    }
-    cleanup.insert("seq".to_string(), serde_json::json!(seq));
-    cleanup.insert("op".to_string(), serde_json::json!(op));
-    Ok(serde_json::Value::Object(cleanup))
-}
-
-fn flush_cell_to_cleanup_json(value: &FlushColumnValue) -> Result<serde_json::Value, String> {
-    match value {
-        FlushColumnValue::Null => {
-            Err("cleanup row cannot contain null primary-key values".to_string())
-        }
-        FlushColumnValue::Bool(value) => Ok(serde_json::json!(value)),
-        FlushColumnValue::Int16(value) => Ok(serde_json::json!(value)),
-        FlushColumnValue::Int32(value) => Ok(serde_json::json!(value)),
-        FlushColumnValue::Int64(value) => Ok(serde_json::json!(value)),
-        FlushColumnValue::Float32(value) => Ok(serde_json::json!(value)),
-        FlushColumnValue::Float64(value) => Ok(serde_json::json!(value)),
-        FlushColumnValue::Utf8(value) => Ok(serde_json::Value::String(value.clone())),
-        FlushColumnValue::TimestamptzMicros(_) => Ok(serde_json::Value::String(
-            flush_cell_to_cleanup_text(value)?,
-        )),
-    }
-}
-
-fn flush_cell_to_cleanup_text(value: &FlushColumnValue) -> Result<String, String> {
-    match value {
-        FlushColumnValue::Null => {
-            Err("cleanup row cannot contain null primary-key values".to_string())
-        }
-        FlushColumnValue::Bool(value) => Ok(value.to_string()),
-        FlushColumnValue::Int16(value) => Ok(value.to_string()),
-        FlushColumnValue::Int32(value) => Ok(value.to_string()),
-        FlushColumnValue::Int64(value) => Ok(value.to_string()),
-        FlushColumnValue::Float32(value) => Ok(value.to_string()),
-        FlushColumnValue::Float64(value) => Ok(value.to_string()),
-        FlushColumnValue::Utf8(value) => Ok(value.clone()),
-        FlushColumnValue::TimestamptzMicros(value) => {
-            let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(*value)
-                .ok_or_else(|| "timestamp value out of range for cleanup row".to_string())?;
-            Ok(timestamp.to_rfc3339())
-        }
-    }
-}
-
 /// One typed column value decoded from SPI or a planned cold row.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlushColumnValue {
@@ -140,19 +74,11 @@ pub enum FlushColumnValue {
     TimestamptzMicros(i64),
 }
 
-/// Finished cold row batch plus chunk-level stats captured while building.
+/// Finished cold row batch ready for Parquet encoding.
 #[derive(Debug, Clone)]
 pub struct ColdRecordBatch {
     /// Arrow batch ready for Parquet encoding.
     pub batch: RecordBatch,
-    /// Minimum mirror `seq` in the chunk.
-    pub min_seq: i64,
-    /// Maximum mirror `seq` in the chunk.
-    pub max_seq: i64,
-    /// Number of logical rows encoded.
-    pub row_count: usize,
-    /// Running min/max for indexed columns (non-delete rows only).
-    pub indexed_bounds: BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
 }
 
 enum TypedColumnBuilder {
@@ -390,10 +316,6 @@ pub struct CleanColdRecordBatchBuilder {
     op_builder: Int16Builder,
     deleted_builder: BooleanBuilder,
     schema_version_builder: UInt32Builder,
-    indexed_columns: Vec<ColumnRef>,
-    indexed_bounds: BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
-    min_seq: Option<i64>,
-    max_seq: Option<i64>,
     row_count: usize,
 }
 
@@ -410,18 +332,12 @@ impl CleanColdRecordBatchBuilder {
         &self.columns
     }
 
-    /// Returns indexed columns tracked for segment stats.
-    #[must_use]
-    pub fn indexed_columns(&self) -> &[ColumnRef] {
-        &self.indexed_columns
-    }
-
     /// Creates a builder for one flush chunk.
     ///
     /// # Errors
     ///
     /// Returns an error when the Arrow schema cannot be built.
-    pub fn new(columns: &[PgColumn], indexed_columns: &[ColumnRef]) -> Result<Self, String> {
+    pub fn new(columns: &[PgColumn]) -> Result<Self, String> {
         Ok(Self {
             schema: Arc::new(build_clean_arrow_schema(columns).map_err(|error| error.to_string())?),
             builders: columns
@@ -433,10 +349,6 @@ impl CleanColdRecordBatchBuilder {
             op_builder: Int16Builder::new(),
             deleted_builder: BooleanBuilder::new(),
             schema_version_builder: UInt32Builder::new(),
-            indexed_columns: indexed_columns.to_vec(),
-            indexed_bounds: BTreeMap::new(),
-            min_seq: None,
-            max_seq: None,
             row_count: 0,
         })
     }
@@ -487,41 +399,12 @@ impl CleanColdRecordBatchBuilder {
         self.op_builder.append_value(op);
         self.deleted_builder.append_value(deleted);
         self.schema_version_builder.append_value(schema_version);
-        self.min_seq = Some(self.min_seq.map_or(seq, |current| current.min(seq)));
-        self.max_seq = Some(self.max_seq.map_or(seq, |current| current.max(seq)));
         self.row_count += 1;
 
-        for indexed_column in &self.indexed_columns {
-            if deleted
-                && !primary_key_columns
-                    .iter()
-                    .any(|pk| pk == &indexed_column.name)
-            {
-                continue;
-            }
-            let Some(column) = self
-                .columns
-                .iter()
-                .find(|column| column.name == indexed_column.name)
-            else {
-                continue;
-            };
-            let column_index = self
-                .columns
-                .iter()
-                .position(|entry| entry.name == column.name)
-                .expect("indexed column is present");
-            let value = &column_values[column_index];
-            if matches!(value, FlushColumnValue::Null) {
-                continue;
-            }
-            let json = flush_value_to_json(value);
-            update_indexed_bounds(&mut self.indexed_bounds, indexed_column.column_id, &json)?;
-        }
         Ok(())
     }
 
-    /// Appends one planned clean cold row (legacy/test path).
+    /// Appends one planned clean cold row (test / helper encode path).
     ///
     /// # Errors
     ///
@@ -551,19 +434,8 @@ impl CleanColdRecordBatchBuilder {
         self.deleted_builder.append_value(row.deleted);
         self.schema_version_builder
             .append_value(u32::try_from(schema_version).map_err(|error| error.to_string())?);
-        self.min_seq = Some(self.min_seq.map_or(seq, |current| current.min(seq)));
-        self.max_seq = Some(self.max_seq.map_or(seq, |current| current.max(seq)));
         self.row_count += 1;
 
-        for indexed_column in &self.indexed_columns {
-            let Some(value) = row.values.get(&indexed_column.name) else {
-                continue;
-            };
-            if value.is_null() {
-                continue;
-            }
-            update_indexed_bounds(&mut self.indexed_bounds, indexed_column.column_id, value)?;
-        }
         Ok(())
     }
 
@@ -586,13 +458,7 @@ impl CleanColdRecordBatchBuilder {
         arrays.push(Arc::new(self.schema_version_builder.finish()));
         let batch =
             RecordBatch::try_new(self.schema.clone(), arrays).map_err(|error| error.to_string())?;
-        Ok(ColdRecordBatch {
-            batch,
-            min_seq: self.min_seq.expect("row_count > 0"),
-            max_seq: self.max_seq.expect("row_count > 0"),
-            row_count: self.row_count,
-            indexed_bounds: self.indexed_bounds,
-        })
+        Ok(ColdRecordBatch { batch })
     }
 }
 
@@ -644,62 +510,18 @@ fn plan_value_to_flush_cell(
     }
 }
 
-fn flush_value_to_json(value: &FlushColumnValue) -> serde_json::Value {
-    match value {
-        FlushColumnValue::Null => serde_json::Value::Null,
-        FlushColumnValue::Bool(value) => serde_json::json!(value),
-        FlushColumnValue::Int16(value) => serde_json::json!(value),
-        FlushColumnValue::Int32(value) => serde_json::json!(value),
-        FlushColumnValue::Int64(value) => serde_json::json!(value),
-        FlushColumnValue::Float32(value) => serde_json::json!(value),
-        FlushColumnValue::Float64(value) => serde_json::json!(value),
-        FlushColumnValue::Utf8(value) => serde_json::Value::String(value.clone()),
-        FlushColumnValue::TimestamptzMicros(value) => {
-            let timestamp = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(*value)
-                .unwrap_or_else(chrono::Utc::now);
-            serde_json::Value::String(timestamp.to_rfc3339())
-        }
-    }
-}
-
-fn update_indexed_bounds(
-    bounds: &mut BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
-    column_id: ColumnId,
-    value: &serde_json::Value,
-) -> Result<(), String> {
-    match bounds.get_mut(&column_id) {
-        None => {
-            bounds.insert(column_id, (value.clone(), value.clone()));
-        }
-        Some((min, max)) => {
-            if compare_json_values(value, min).is_some_and(|ordering| ordering.is_lt()) {
-                *min = value.clone();
-            }
-            if compare_json_values(value, max).is_some_and(|ordering| ordering.is_gt()) {
-                *max = value.clone();
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use koldstore_common::{ColumnId, ColumnRef};
 
     #[test]
-    fn typed_rows_track_indexed_bounds_by_stable_column_id() {
+    fn typed_rows_build_arrow_without_manual_index_accumulation() {
         let columns = [
             PgColumn::new("tenant_id", PgType::Int8, false),
             PgColumn::new("event_id", PgType::Text, false),
         ];
         let primary_key = ["tenant_id".to_string(), "event_id".to_string()];
-        let indexed_columns = [
-            ColumnRef::new(ColumnId::from_attnum(2), "tenant_id"),
-            ColumnRef::new(ColumnId::from_attnum(5), "event_id"),
-        ];
-        let mut builder = CleanColdRecordBatchBuilder::new(&columns, &indexed_columns).unwrap();
+        let mut builder = CleanColdRecordBatchBuilder::new(&columns).unwrap();
 
         builder
             .push_typed_row(
@@ -715,14 +537,6 @@ mod tests {
             .unwrap();
 
         let batch = builder.finish().unwrap();
-        assert_eq!(batch.row_count, 1);
-        assert_eq!(
-            batch.indexed_bounds.get(&ColumnId::from_attnum(2)),
-            Some(&(serde_json::json!(7), serde_json::json!(7)))
-        );
-        assert_eq!(
-            batch.indexed_bounds.get(&ColumnId::from_attnum(5)),
-            Some(&(serde_json::json!("evt-1"), serde_json::json!("evt-1")))
-        );
+        assert_eq!(batch.batch.num_rows(), 1);
     }
 }

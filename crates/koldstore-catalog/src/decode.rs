@@ -39,8 +39,6 @@ pub struct ManifestScanSegmentStats {
 pub struct InSyncManifestScanContext {
     /// Normalized object-store table prefix (`{namespace}/{table}/` style).
     pub table_prefix: String,
-    /// Configured regular table path template from `koldstore.storage`.
-    pub regular_path_tmpl: String,
     /// Monotonic catalog generation (CAS identity).
     pub generation: u64,
     /// Object-store base path for the managed table.
@@ -104,9 +102,6 @@ pub fn in_sync_manifest_scan_context(
 
     Ok(InSyncManifestScanContext {
         table_prefix: required_string(value, "table_prefix")?.to_string(),
-        regular_path_tmpl: optional_string(value, "regular_path_tmpl")
-            .unwrap_or("{namespace}/{tableName}/")
-            .to_string(),
         generation: required_u64(value, "generation")?,
         base_path: required_string(value, "base_path")?.to_string(),
         storage_type: optional_string(value, "storage_type")
@@ -153,62 +148,6 @@ pub fn manifest_scan_segment_stats(
     })
 }
 
-/// Extracts `{column_id: (min, max)}` pairs from catalog column-stats JSON.
-///
-/// Keys are canonical stringified PostgreSQL attribute numbers. Entries with a
-/// non-numeric/zero key or missing either bound are skipped. Prefer
-/// [`column_stats_from_index_bounds`] for live export — this helper remains for
-/// parsing already-decoded JSON maps in tests and legacy fixtures.
-#[must_use]
-pub fn column_stats_min_max_map(
-    column_stats: &serde_json::Value,
-) -> BTreeMap<String, (serde_json::Value, serde_json::Value)> {
-    let mut stats = BTreeMap::new();
-    let Some(columns) = column_stats.as_object() else {
-        return stats;
-    };
-    for (column, value) in columns {
-        let Some(column_id) = canonical_column_id_key(column) else {
-            continue;
-        };
-        let Some(min) = value.get("min") else {
-            continue;
-        };
-        let Some(max) = value.get("max") else {
-            continue;
-        };
-        stats.insert(column_id, (min.clone(), max.clone()));
-    }
-    stats
-}
-
-/// Like [`column_stats_min_max_map`], but takes ownership and moves min/max out.
-#[must_use]
-pub fn column_stats_min_max_map_into(
-    column_stats: serde_json::Value,
-) -> BTreeMap<String, (serde_json::Value, serde_json::Value)> {
-    let mut stats = BTreeMap::new();
-    let serde_json::Value::Object(columns) = column_stats else {
-        return stats;
-    };
-    for (column, value) in columns {
-        let Some(column_id) = canonical_column_id_key(&column) else {
-            continue;
-        };
-        let serde_json::Value::Object(mut bounds) = value else {
-            continue;
-        };
-        let Some(min) = bounds.remove("min") else {
-            continue;
-        };
-        let Some(max) = bounds.remove("max") else {
-            continue;
-        };
-        stats.insert(column_id, (min, max));
-    }
-    stats
-}
-
 /// Decodes Sort Key V1 index rows into the manifest export `{column_id: {min,max}}` map.
 ///
 /// Unsupported type OIDs and codec mismatches are skipped. Corrupt hex or Storekey
@@ -233,9 +172,12 @@ pub fn column_stats_from_index_bounds(
         if bound.column_id == 0 {
             continue;
         }
-        let min_bytes = decode_hex(&bound.min_value)
+        let (Some(min_value), Some(max_value)) = (&bound.min_value, &bound.max_value) else {
+            continue;
+        };
+        let min_bytes = decode_hex(min_value)
             .map_err(|error| format!("index min_value for column {}: {error}", bound.column_id))?;
-        let max_bytes = decode_hex(&bound.max_value)
+        let max_bytes = decode_hex(max_value)
             .map_err(|error| format!("index max_value for column {}: {error}", bound.column_id))?;
         let min = decode_sort_key(sort_key_type, &min_bytes)
             .map_err(|error| format!("decode min for column {}: {error}", bound.column_id))?
@@ -270,11 +212,6 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
         b'A'..=b'F' => Ok(byte - b'A' + 10),
         _ => Err(format!("invalid hex digit `{}`", byte as char)),
     }
-}
-
-fn canonical_column_id_key(value: &str) -> Option<String> {
-    let column_id = value.parse::<i16>().ok()?;
-    (column_id != 0).then(|| column_id.to_string())
 }
 
 /// Decodes a flush storage context JSON payload.
@@ -362,7 +299,7 @@ fn optional_u64(value: &serde_json::Value, field: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{column_stats_min_max_map, flush_storage_context, in_sync_manifest_scan_context};
+    use super::{flush_storage_context, in_sync_manifest_scan_context};
 
     #[test]
     fn in_sync_manifest_scan_context_decodes_segment_stats() {
@@ -387,10 +324,7 @@ mod tests {
         assert_eq!(context.base_path, "/tmp/koldstore");
         assert_eq!(context.storage_type, "filesystem");
         assert_eq!(context.segments.len(), 1);
-        assert_eq!(
-            context.segments[0].path,
-            "001/segment-0001-abcd.parquet"
-        );
+        assert_eq!(context.segments[0].path, "001/segment-0001-abcd.parquet");
         assert_eq!(context.segments[0].byte_size, None);
     }
 
@@ -437,27 +371,14 @@ mod tests {
             column_id: 1,
             type_oid: 20,
             codec_version: CODEC_VERSION,
-            min_value: hex(&min),
-            max_value: hex(&max),
+            min_value: Some(hex(&min)),
+            max_value: Some(hex(&max)),
+            row_group_min_values: vec![Some(hex(&min))],
+            row_group_max_values: vec![Some(hex(&max))],
+            row_group_null_counts: vec![Some(0)],
         }])
         .unwrap();
         assert_eq!(stats["1"], (serde_json::json!(1), serde_json::json!(10)));
-    }
-
-    #[test]
-    fn column_stats_min_max_map_skips_incomplete_bounds() {
-        let value = serde_json::json!({
-            "1": {"min": 1, "max": 100},
-            "2": {"min": 1},
-            "3": {"max": 9},
-            "not-a-column-id": {"min": 0, "max": 0}
-        });
-        let stats = column_stats_min_max_map(&value);
-        assert_eq!(stats.len(), 1);
-        assert_eq!(
-            stats.get("1"),
-            Some(&(serde_json::json!(1), serde_json::json!(100)))
-        );
     }
 
     #[test]

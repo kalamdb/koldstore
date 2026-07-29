@@ -184,7 +184,7 @@ If `selection.stats.row_count == 0`:
 ### 4.1 Setup
 
 - Manifest paths: thin root `{base_path}/{namespace}/{table}/manifest.json` plus
-  per-folder `{folder:03}/manifest-shard.json` (see export shape below)
+  per-folder content-addressed shard files (see export shape below)
 - Open the configured filesystem/S3 client and load the existing manifest object, or create a new shared manifest
 - `next_flush_batch_number` from `koldstore.cold_segments`
 - Build `StreamEncodeInput` (columns, Parquet schema, `max_seq`, optional `mirror_ops`)
@@ -231,24 +231,21 @@ rows (`op = 3`) carry PK values from mirror only.
 1. Fetch page of up to 8192 rows (`FLUSH_MIRROR_FETCH_BATCH_SIZE`)
 2. `CleanColdRecordBatchBuilder::push_typed_row` per row
    - App columns + metadata: `seq`, `op`, `deleted`, `schema_version`
-   - Tracks `indexed_bounds` as `serde_json::Value` min/max keyed by stable
-     `ColumnId` (manual pass; Parquet writer also records chunk stats on the
-     same columns — see planned change below)
 3. When chunk reaches `max_rows_per_file` → `FlushWriteChunk`
 4. Callback writes Parquet segment
 
-**No per-row cleanup JSON** is built in the encode loop. `cleanup_row_json` in
-`batch_builder.rs` exists for tests/legacy only.
+**No per-row cleanup JSON** is built in the encode loop; prune uses
+`plan_seq_range_cleanup` (`seq <= max_seq`).
 
-**Planned (ADR-002):** derive catalog `column_stats` from Parquet footer
-statistics after encode and drop `indexed_bounds` tracking so flush does not
-compute min/max twice. Catalog/manifest remains the segment-prune authority;
-in-file row-group prune already uses the footer. Details:
+Finalization retains the `ParquetMetaData` returned by `ArrowWriter::close()`.
+Catalog scalar bounds, aligned row-group arrays, row counts, null counts, and
+SeqId ranges are derived from that metadata and encoded directly as Sort Key V1
+bytes. There is no manual per-cell `indexed_bounds` path. Details:
 [ADR-002: Footer-Derived Catalog Segment Stats](../decisions/002-footer-derived-catalog-stats.md).
 
 ### 4.4 Parquet write
 
-`write_flush_segment_file` (`segment_write.rs`):
+`write_flush_segment_with_client` (`segment_write.rs`):
 
 1. Path: `{namespace}/{table}/{folder:03}/segment-{NNNN}-{token}.parquet`
    (100 segments per folder; `token` is 8 hex chars from the catalog
@@ -256,8 +253,9 @@ in-file row-group prune already uses the footer. Details:
    the same `batch_number`). Manifest stores the table-relative form
    `{folder:03}/segment-{NNNN}-{token}.parquet`. One layout for all tables
    (no per-scope object prefixes).
-2. Encode in memory via `encode_parquet_segment_bytes` (Arrow `RecordBatch` →
-   native Parquet), then `validate_parquet_bytes` (magic + footer open)
+2. Encode in memory and close `ArrowWriter`, returning final bytes plus the
+   exact in-memory footer metadata. Write validation checks the Parquet
+   envelope and that metadata without reopening the footer.
 3. Durable publish through `koldstore-storage`:
    - temp key under `{prefix}/.tmp/…` (flat file; UUID in the name — no
      per-attempt subdirectories that would linger empty after cleanup)
@@ -268,18 +266,16 @@ in-file row-group prune already uses the footer. Details:
    - Column statistics on `seq` + PK + indexed columns
    - Bloom filters on PK columns (`max_ndv` = row-group size)
    - Compression from storage context (default `zstd`)
-5. Sort Key V1 rows for `cold_segment_index` (from merged `indexed_bounds` +
-   type OIDs). Manifest export reconstructs on-disk `column_stats` from those
-   rows (no duplicated JSON on `cold_segments`):
-   ```json
-   { "1": {"min": N, "max": M}, "4": {"min": "...", "max": "..."} }
-   ```
+5. Sort Key V1 rows for `cold_segment_index` come directly from footer
+   statistics. Each row stores scalar segment min/max and aligned
+   `row_group_min_values`, `row_group_max_values`, and
+   `row_group_null_counts` arrays.
 6. `byte_size` from published object metadata (not recomputed by scanning rows)
 7. Assemble `ManifestSegment`s from catalog rows (+ index bounds) once, then `manifest.append_segment_batch(...)`
 8. Collect `WrittenFlushSegment` (new `segment_id = Uuid::new_v4()`)
 
-Manifest finalize uses `write_manifest_with_client` and the same atomic put path
-(`publish_mutable_object`) so root and shard JSON are never truncate-written in place.
+Manifest finalize publishes immutable content-addressed shard objects, then
+atomically overwrites the thin root.
 Changed shards are published before the root; completed folders whose content hash
 is unchanged are not rewritten. Each root reference carries the shard SHA-256 so a
 crash or external mutation is detected instead of silently merging inconsistent JSON.
@@ -408,15 +404,15 @@ See [ADR-004](../decisions/004-segment-publication-protocol.md).
 
 ### Object-store manifest export shape (`koldstore-manifest`)
 
-Folder-sharded layout only (manifest version `1`):
+Folder-sharded layout only (manifest version `2`):
 
 - Root `{namespace}/{table}/manifest.json`: watermarks (`max_seq`,
   `max_commit_seq`), schema/publish metadata, `files` folder counters, and
   `shards[]` (`folder`, `path`, `content_sha256`, segment/seq ranges). No
   embedded segment bodies.
-- Shard `{folder:03}/manifest-shard.json`: that folder’s `segments[]` with
-  `path`, seq/commit ranges, `row_count`, `byte_size`, `schema_version`, and
-  `column_stats` (decoded from `cold_segment_index` at export time).
+- Shard `{folder:03}/manifest-shard-{sha256}.json`: that folder’s `segments[]`
+  with segment identity/path/status/checksum, scalar ranges, row-group arrays,
+  and per-column hex Sort Key V1 segment/row-group bounds mirroring PostgreSQL.
 
 PostgreSQL catalog remains query authority; object manifests are derived export
 only.

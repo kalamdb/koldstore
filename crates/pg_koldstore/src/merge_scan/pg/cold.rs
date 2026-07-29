@@ -1,5 +1,6 @@
 //! Cold Parquet load and segment pruning for KoldMergeScan.
 
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use koldstore_catalog::{preferred_segment_index_access, SegmentIndexLookupShape};
@@ -20,6 +21,83 @@ use super::profile::{elapsed_ms, ColdReadProfile, SegmentReadProfile};
 use super::qual::segment_prune_predicates;
 use super::with_hook_disabled;
 
+/// Returns whether safe bounds prove that no active cold segment can match.
+///
+/// Planner calls pass no parameters and therefore consider constants only.
+/// Executor calls may resolve external prepared-statement parameters.
+/// Unsupported or mutable columns produce no proof, while missing/incomplete
+/// catalog statistics conservatively retain KoldMergeScan.
+///
+/// # Safety
+///
+/// `qual` must be a planner-owned expression list for `scanrelid`.
+pub(super) unsafe fn cold_side_proven_empty(
+    table_oid: pg_sys::Oid,
+    scanrelid: pg_sys::Index,
+    snapshot: &koldstore_catalog::ManagedTableSnapshot,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    qual: *mut pg_sys::List,
+    manifest_generation: u64,
+    params: pg_sys::ParamListInfo,
+) -> Result<bool, String> {
+    let predicates = retain_pre_merge_cold_prune_predicates(
+        unsafe { segment_prune_predicates(scanrelid, qual, &catalog.columns, params) },
+        |column_id| {
+            let column = catalog
+                .columns
+                .iter()
+                .find(|column| column.column_id.get() == column_id)?;
+            Some(cold_prune_column_policy(
+                column,
+                snapshot.scope_column_id,
+                snapshot.segment_order_column_id,
+            ))
+        },
+    );
+    let encoded_bounds = encode_prune_predicate_bounds(catalog, &predicates)?;
+
+    let mut candidate_columns = encoded_bounds.keys().copied().collect::<Vec<_>>();
+    candidate_columns.sort_by_key(|column_id| {
+        let preferred = snapshot
+            .segment_order_column_id
+            .is_some_and(|id| id.get() == *column_id);
+        (!preferred, *column_id)
+    });
+
+    for column_id in candidate_columns {
+        let Some(column) = catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id.get() == column_id)
+        else {
+            continue;
+        };
+        let key = crate::catalog::cache::ColdColumnBoundsCacheKey::new(
+            table_oid.to_u32(),
+            manifest_generation,
+            column_id,
+            column.pg_type.type_oid(),
+        );
+        let Some(cold_bounds) = crate::catalog::cache::cached_cold_column_bounds(key)? else {
+            continue;
+        };
+        let Some((lower, upper)) = encoded_bounds.get(&column_id) else {
+            continue;
+        };
+        if lower
+            .as_deref()
+            .is_some_and(|value| value > cold_bounds.max_value.as_ref())
+            || upper
+                .as_deref()
+                .is_some_and(|value| value < cold_bounds.min_value.as_ref())
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 /// Lazily opens safe newest-first segment groups for one CustomScan.
 #[derive(Debug)]
 pub(super) struct ColdRowStream {
@@ -34,6 +112,21 @@ pub(super) struct ColdRowStream {
 }
 
 type ColdBatch = (Vec<ColdRow>, Vec<SegmentReadProfile>);
+type PackedRowGroupSpiRow = (
+    uuid::Uuid,
+    i16,
+    i32,
+    Vec<i64>,
+    Vec<Option<Vec<u8>>>,
+    Vec<Option<Vec<u8>>>,
+    Vec<Option<i64>>,
+);
+type SegmentIndexCandidateSpiRow = (
+    uuid::Uuid,
+    SegmentStatsHint,
+    i16,
+    std::sync::Arc<crate::catalog::cache::CachedPackedRowGroupIndex>,
+);
 
 impl ColdRowStream {
     /// Reads the next overlapping segment group and closes every reader before
@@ -148,7 +241,7 @@ fn plan_cold_segments(
     let scope_column_id = snapshot.scope_column_id;
     let segment_order_column_id = snapshot.segment_order_column_id;
     let prune_predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(table_oid, scanrelid, qual, &catalog.columns, params) },
+        unsafe { segment_prune_predicates(scanrelid, qual, &catalog.columns, params) },
         |column_id| {
             let column = catalog
                 .columns
@@ -200,6 +293,7 @@ fn plan_cold_segments(
     let index_started = Instant::now();
     let resolved = resolve_segment_index_candidates(
         table_oid,
+        manifest_stats.generation,
         catalog,
         segment_order_column_id,
         &prune_predicates,
@@ -214,8 +308,9 @@ fn plan_cold_segments(
     let segment_index_lookup_ms = indexed_candidates
         .as_ref()
         .map(|_| elapsed_ms(index_started));
-    let segment_index_candidate_segments =
-        indexed_candidates.as_ref().map(|candidates| candidates.len());
+    let segment_index_candidate_segments = indexed_candidates
+        .as_ref()
+        .map(|candidates| candidates.len());
     let segments = indexed_candidates.unwrap_or_else(|| manifest_stats.segments.clone());
     let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
     let projection = projection_columns
@@ -224,7 +319,7 @@ fn plan_cold_segments(
         .collect::<Vec<_>>();
     let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
     let profile = ColdReadProfile {
-        manifest_path: manifest_stats.manifest_path.clone(),
+        manifest_path: manifest_stats.manifest_path(),
         storage_type: manifest_stats.storage_type.clone(),
         base_path: manifest_stats.base_path.clone(),
         manifest_read_ms: Some(manifest_read_ms),
@@ -295,6 +390,7 @@ fn cold_prune_column_policy(
 /// to the full active segment list when no indexable predicate exists.
 fn resolve_segment_index_candidates(
     table_oid: pg_sys::Oid,
+    manifest_generation: u64,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     segment_order_column_id: Option<ColumnId>,
     predicates: &[SegmentPrunePredicate],
@@ -336,7 +432,8 @@ fn resolve_segment_index_candidates(
             plan: None,
         });
     };
-    let loaded = load_segment_index_candidates(table_oid, column, predicates)?;
+    let loaded =
+        load_segment_index_candidates(table_oid, manifest_generation, catalog, column, predicates)?;
     Ok(SegmentIndexCandidateResolution {
         candidates: loaded.candidates,
         shape: loaded.shape,
@@ -348,40 +445,18 @@ fn resolve_segment_index_candidates(
 
 fn load_segment_index_candidates(
     table_oid: pg_sys::Oid,
+    manifest_generation: u64,
+    catalog: &koldstore_migrate::ExistingTableCatalog,
     column: &koldstore_migrate::order::CatalogColumn,
     predicates: &[SegmentPrunePredicate],
 ) -> Result<SegmentIndexCandidateLoad, String> {
     use pgrx::datum::DatumWithOid;
 
-    let Some(sort_type) = koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
-    else {
-        return Ok(SegmentIndexCandidateLoad {
-            candidates: None,
-            shape: SegmentIndexLookupShape::AllActive,
-            plan: None,
-        });
-    };
-    let mut lower = None::<Vec<u8>>;
-    let mut upper = None::<Vec<u8>>;
-    for predicate in predicates
-        .iter()
-        .filter(|predicate| predicate.column_id == column.column_id.get())
-    {
-        if let Some(value) = predicate.min.as_ref() {
-            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
-                .map_err(|error| error.to_string())?;
-            if lower.as_ref().is_none_or(|current| encoded > *current) {
-                lower = Some(encoded);
-            }
-        }
-        if let Some(value) = predicate.max.as_ref() {
-            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
-                .map_err(|error| error.to_string())?;
-            if upper.as_ref().is_none_or(|current| encoded < *current) {
-                upper = Some(encoded);
-            }
-        }
-    }
+    let encoded_bounds = encode_prune_predicate_bounds(catalog, predicates)?;
+    let (lower, upper) = encoded_bounds
+        .get(&column.column_id.get())
+        .cloned()
+        .unwrap_or((None, None));
     let (statement, shape) = match (&lower, &upper) {
         (Some(_), Some(_)) => (
             koldstore_catalog::queries::plan_cold_segment_candidates_closed_range(),
@@ -411,11 +486,11 @@ fn load_segment_index_candidates(
         DatumWithOid::from(pg_sys::Oid::from(column.pg_type.type_oid())),
         DatumWithOid::from(i32::from(koldstore_sortkey::CODEC_VERSION)),
     ];
-    if let Some(value) = lower {
-        args.push(DatumWithOid::from(value));
+    if let Some(value) = &lower {
+        args.push(DatumWithOid::from(value.clone()));
     }
-    if let Some(value) = upper {
-        args.push(DatumWithOid::from(value));
+    if let Some(value) = &upper {
+        args.push(DatumWithOid::from(value.clone()));
     }
 
     // Report the index PostgreSQL is expected to prefer for this bound shape.
@@ -425,62 +500,341 @@ fn load_segment_index_candidates(
     // contexts during ordinary SELECTs.
     let plan = Some(preferred_segment_index_access(shape).to_string());
 
-    let candidates = crate::catalog::owner::with_extension_owner(|| {
-        crate::spi::execute_prepared(&statement, &args, |tuples| {
-            tuples
-                .into_iter()
-                .map(|tuple| {
-                    let object_path = tuple
-                        .get::<String>(1)?
-                        .ok_or_else(|| missing_candidate_field("object_path"))?;
-                    let byte_size = tuple
-                        .get::<i64>(2)?
-                        .and_then(|value| u64::try_from(value).ok());
-                    let schema_version = tuple
-                        .get::<i32>(3)?
-                        .ok_or_else(|| missing_candidate_field("schema_version"))?;
-                    let min_seq_raw = tuple
-                        .get::<i64>(4)?
-                        .ok_or_else(|| missing_candidate_field("min_seq"))?;
-                    let max_seq_raw = tuple
-                        .get::<i64>(5)?
-                        .ok_or_else(|| missing_candidate_field("max_seq"))?;
-                    let physical_names = tuple
-                        .get::<String>(8)?
-                        .map(|json| serde_json::from_str(&json).unwrap_or_default())
-                        .unwrap_or_default();
-                    let min_seq = SeqId::new(min_seq_raw).map_err(|error| {
-                        pgrx::spi::SpiError::DatumError(
-                            pgrx::datum::TryFromDatumError::NoSuchAttributeName(format!(
-                                "invalid min_seq {min_seq_raw}: {error}"
-                            )),
-                        )
-                    })?;
-                    let max_seq = SeqId::new(max_seq_raw).map_err(|error| {
-                        pgrx::spi::SpiError::DatumError(
-                            pgrx::datum::TryFromDatumError::NoSuchAttributeName(format!(
-                                "invalid max_seq {max_seq_raw}: {error}"
-                            )),
-                        )
-                    })?;
-                    Ok(SegmentStatsHint {
-                        object_path,
-                        schema_version,
-                        physical_names,
-                        byte_size,
-                        min_seq,
-                        max_seq,
+    let loaded_candidates: Vec<SegmentIndexCandidateSpiRow> =
+        crate::catalog::owner::with_extension_owner(|| {
+            crate::spi::execute_prepared(&statement, &args, |tuples| {
+                tuples
+                    .into_iter()
+                    .map(|tuple| {
+                        let object_path = tuple
+                            .get::<String>(1)?
+                            .ok_or_else(|| missing_candidate_field("path"))?;
+                        let byte_size = tuple
+                            .get::<i64>(2)?
+                            .and_then(|value| u64::try_from(value).ok());
+                        let schema_version = tuple
+                            .get::<i32>(3)?
+                            .ok_or_else(|| missing_candidate_field("schema_version"))?;
+                        let min_seq_raw = tuple
+                            .get::<i64>(4)?
+                            .ok_or_else(|| missing_candidate_field("min_seq"))?;
+                        let max_seq_raw = tuple
+                            .get::<i64>(5)?
+                            .ok_or_else(|| missing_candidate_field("max_seq"))?;
+                        let physical_names = tuple
+                            .get::<String>(6)?
+                            .map(|json| serde_json::from_str(&json).unwrap_or_default())
+                            .unwrap_or_default();
+                        let segment_id = tuple
+                            .get::<pgrx::Uuid>(7)?
+                            .map(crate::spi::uuid_from_pgrx)
+                            .ok_or_else(|| missing_candidate_field("segment_id"))?;
+                        let column_id = tuple
+                            .get::<i16>(8)?
+                            .ok_or_else(|| missing_candidate_field("column_id"))?;
+                        let row_group_count = tuple
+                            .get::<i32>(9)?
+                            .and_then(|value| usize::try_from(value).ok())
+                            .ok_or_else(|| missing_candidate_field("row_group_count"))?;
+                        let row_group_row_counts = tuple
+                            .get::<Vec<i64>>(10)?
+                            .ok_or_else(|| missing_candidate_field("row_group_row_counts"))?;
+                        let row_group_min_values = tuple
+                            .get::<pgrx::Array<&[u8]>>(11)?
+                            .ok_or_else(|| missing_candidate_field("row_group_min_values"))?
+                            .iter()
+                            .map(|value| value.map(<[u8]>::to_vec))
+                            .collect::<Vec<_>>();
+                        let row_group_max_values = tuple
+                            .get::<pgrx::Array<&[u8]>>(12)?
+                            .ok_or_else(|| missing_candidate_field("row_group_max_values"))?
+                            .iter()
+                            .map(|value| value.map(<[u8]>::to_vec))
+                            .collect::<Vec<_>>();
+                        let row_group_null_counts = tuple
+                            .get::<Vec<Option<i64>>>(13)?
+                            .ok_or_else(|| missing_candidate_field("row_group_null_counts"))?;
+                        let min_seq = SeqId::new(min_seq_raw).map_err(|error| {
+                            pgrx::spi::SpiError::DatumError(
+                                pgrx::datum::TryFromDatumError::NoSuchAttributeName(format!(
+                                    "invalid min_seq {min_seq_raw}: {error}"
+                                )),
+                            )
+                        })?;
+                        let max_seq = SeqId::new(max_seq_raw).map_err(|error| {
+                            pgrx::spi::SpiError::DatumError(
+                                pgrx::datum::TryFromDatumError::NoSuchAttributeName(format!(
+                                    "invalid max_seq {max_seq_raw}: {error}"
+                                )),
+                            )
+                        })?;
+                        Ok((
+                            segment_id,
+                            SegmentStatsHint {
+                                object_path,
+                                schema_version,
+                                physical_names,
+                                byte_size,
+                                min_seq,
+                                max_seq,
+                                selected_row_groups: None,
+                            },
+                            column_id,
+                            std::sync::Arc::new(crate::catalog::cache::CachedPackedRowGroupIndex {
+                                row_group_count,
+                                row_group_row_counts: row_group_row_counts.into(),
+                                row_group_min_values: row_group_min_values.into(),
+                                row_group_max_values: row_group_max_values.into(),
+                                row_group_null_counts: row_group_null_counts.into(),
+                            }),
+                        ))
                     })
-                })
-                .collect()
-        })
-        .map_err(|error| error.to_string())
-    })??;
+                    .collect()
+            })
+            .map_err(|error| error.to_string())
+        })??;
+    let mut candidates = Vec::with_capacity(loaded_candidates.len());
+    for (segment_id, hint, column_id, packed_index) in loaded_candidates {
+        let key = crate::catalog::cache::PackedRowGroupCacheKey::new(
+            table_oid.to_u32(),
+            manifest_generation,
+            segment_id,
+            column_id,
+        );
+        crate::catalog::cache::cache_packed_row_group_index(key, Some(packed_index));
+        candidates.push((segment_id, hint));
+    }
+    let candidates =
+        refine_candidate_row_groups(table_oid, manifest_generation, candidates, &encoded_bounds)?
+            .into_iter()
+            .filter(|candidate| {
+                candidate
+                    .selected_row_groups
+                    .as_ref()
+                    .is_none_or(|row_groups| !row_groups.is_empty())
+            })
+            .collect();
     Ok(SegmentIndexCandidateLoad {
         candidates: Some(candidates),
         shape,
         plan,
     })
+}
+
+type EncodedPredicateBounds = BTreeMap<i16, (Option<Vec<u8>>, Option<Vec<u8>>)>;
+
+fn encode_prune_predicate_bounds(
+    catalog: &koldstore_migrate::ExistingTableCatalog,
+    predicates: &[SegmentPrunePredicate],
+) -> Result<EncodedPredicateBounds, String> {
+    let mut bounds = EncodedPredicateBounds::new();
+    for predicate in predicates {
+        let Some(column) = catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id.get() == predicate.column_id)
+        else {
+            continue;
+        };
+        let Some(sort_type) =
+            koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+        else {
+            continue;
+        };
+        let entry = bounds.entry(predicate.column_id).or_default();
+        if let Some(value) = predicate.min.as_ref() {
+            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
+                .map_err(|error| error.to_string())?;
+            if entry.0.as_ref().is_none_or(|current| encoded > *current) {
+                entry.0 = Some(encoded);
+            }
+        }
+        if let Some(value) = predicate.max.as_ref() {
+            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
+                .map_err(|error| error.to_string())?;
+            if entry.1.as_ref().is_none_or(|current| encoded < *current) {
+                entry.1 = Some(encoded);
+            }
+        }
+    }
+    Ok(bounds)
+}
+
+fn refine_candidate_row_groups(
+    table_oid: pg_sys::Oid,
+    manifest_generation: u64,
+    mut candidates: Vec<(uuid::Uuid, SegmentStatsHint)>,
+    encoded_bounds: &EncodedPredicateBounds,
+) -> Result<Vec<SegmentStatsHint>, String> {
+    use pgrx::datum::DatumWithOid;
+
+    if candidates.is_empty() || encoded_bounds.is_empty() {
+        return Ok(candidates.into_iter().map(|(_, hint)| hint).collect());
+    }
+    let segment_ids = candidates
+        .iter()
+        .map(|(segment_id, _)| *segment_id)
+        .collect::<Vec<_>>();
+    let column_ids = encoded_bounds.keys().copied().collect::<Vec<_>>();
+    let candidate_positions = candidates
+        .iter()
+        .enumerate()
+        .map(|(position, (segment_id, _))| (*segment_id, position))
+        .collect::<BTreeMap<_, _>>();
+    let table_oid_u32 = table_oid.to_u32();
+    let mut packed_indexes = BTreeMap::new();
+    let mut missing_segments = BTreeMap::new();
+    for segment_id in &segment_ids {
+        for &column_id in &column_ids {
+            let key = crate::catalog::cache::PackedRowGroupCacheKey::new(
+                table_oid_u32,
+                manifest_generation,
+                *segment_id,
+                column_id,
+            );
+            match crate::catalog::cache::cached_packed_row_group_index(&key) {
+                Some(Some(index)) => {
+                    packed_indexes.insert((*segment_id, column_id), index);
+                }
+                Some(None) => {}
+                None => {
+                    missing_segments.insert(*segment_id, ());
+                }
+            }
+        }
+    }
+
+    if !missing_segments.is_empty() {
+        let statement = koldstore_catalog::queries::plan_cold_segment_candidate_row_group_indexes()
+            .map_err(|error| error.to_string())?;
+        let args = [
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(""),
+            DatumWithOid::from(
+                missing_segments
+                    .keys()
+                    .copied()
+                    .map(crate::spi::uuid_to_pgrx)
+                    .collect::<Vec<_>>(),
+            ),
+            DatumWithOid::from(column_ids.clone()),
+        ];
+        crate::catalog::cache::record_packed_row_group_spi_load();
+        let packed_rows: Vec<PackedRowGroupSpiRow> =
+            crate::catalog::owner::with_extension_owner(|| {
+                crate::spi::execute_prepared(&statement, &args, |tuples| {
+                    tuples
+                        .into_iter()
+                        .map(|tuple| {
+                            Ok((
+                                tuple
+                                    .get::<pgrx::Uuid>(1)?
+                                    .map(crate::spi::uuid_from_pgrx)
+                                    .ok_or_else(|| missing_candidate_field("segment_id"))?,
+                                tuple
+                                    .get::<i16>(2)?
+                                    .ok_or_else(|| missing_candidate_field("column_id"))?,
+                                tuple
+                                    .get::<i32>(3)?
+                                    .ok_or_else(|| missing_candidate_field("row_group_count"))?,
+                                tuple.get::<Vec<i64>>(4)?.ok_or_else(|| {
+                                    missing_candidate_field("row_group_row_counts")
+                                })?,
+                                tuple
+                                    .get::<pgrx::Array<&[u8]>>(5)?
+                                    .ok_or_else(|| missing_candidate_field("row_group_min_values"))?
+                                    .iter()
+                                    .map(|value| value.map(<[u8]>::to_vec))
+                                    .collect(),
+                                tuple
+                                    .get::<pgrx::Array<&[u8]>>(6)?
+                                    .ok_or_else(|| missing_candidate_field("row_group_max_values"))?
+                                    .iter()
+                                    .map(|value| value.map(<[u8]>::to_vec))
+                                    .collect(),
+                                tuple.get::<Vec<Option<i64>>>(7)?.ok_or_else(|| {
+                                    missing_candidate_field("row_group_null_counts")
+                                })?,
+                            ))
+                        })
+                        .collect()
+                })
+                .map_err(|error| error.to_string())
+            })??;
+
+        for (
+            segment_id,
+            column_id,
+            row_group_count,
+            row_group_row_counts,
+            row_group_min_values,
+            row_group_max_values,
+            row_group_null_counts,
+        ) in packed_rows
+        {
+            if !missing_segments.contains_key(&segment_id) {
+                return Err(format!(
+                    "packed row-group metadata returned unknown segment `{segment_id}`"
+                ));
+            }
+            let index = std::sync::Arc::new(crate::catalog::cache::CachedPackedRowGroupIndex {
+                row_group_count: usize::try_from(row_group_count)
+                    .map_err(|error| error.to_string())?,
+                row_group_row_counts: row_group_row_counts.into(),
+                row_group_min_values: row_group_min_values.into(),
+                row_group_max_values: row_group_max_values.into(),
+                row_group_null_counts: row_group_null_counts.into(),
+            });
+            let key = crate::catalog::cache::PackedRowGroupCacheKey::new(
+                table_oid_u32,
+                manifest_generation,
+                segment_id,
+                column_id,
+            );
+            crate::catalog::cache::cache_packed_row_group_index(key, Some(index.clone()));
+            packed_indexes.insert((segment_id, column_id), index);
+        }
+
+        for (segment_id, ()) in missing_segments {
+            for &column_id in &column_ids {
+                if packed_indexes.contains_key(&(segment_id, column_id)) {
+                    continue;
+                }
+                let key = crate::catalog::cache::PackedRowGroupCacheKey::new(
+                    table_oid_u32,
+                    manifest_generation,
+                    segment_id,
+                    column_id,
+                );
+                crate::catalog::cache::cache_packed_row_group_index(key, None);
+            }
+        }
+    }
+
+    for ((segment_id, column_id), index) in packed_indexes {
+        let Some((lower, upper)) = encoded_bounds.get(&column_id) else {
+            continue;
+        };
+        let Some(&position) = candidate_positions.get(&segment_id) else {
+            continue;
+        };
+        let selected = koldstore_catalog::select_packed_row_groups(
+            index.row_group_count,
+            &index.row_group_row_counts,
+            &index.row_group_min_values,
+            &index.row_group_max_values,
+            &index.row_group_null_counts,
+            lower.as_deref(),
+            upper.as_deref(),
+        )?;
+        let hint = &mut candidates[position].1;
+        let retained = hint
+            .selected_row_groups
+            .get_or_insert_with(|| (0..index.row_group_count).collect());
+        retained.retain(|row_group_id| selected.binary_search(row_group_id).is_ok());
+    }
+
+    Ok(candidates.into_iter().map(|(_, hint)| hint).collect())
 }
 
 fn missing_candidate_field(name: &str) -> pgrx::spi::SpiError {
@@ -504,7 +858,7 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             .and_then(|snapshot| snapshot.segment_order_column_id)
             .map(ColumnId::get);
         Ok(ColdReadProfile {
-            manifest_path: manifest_stats.manifest_path.clone(),
+            manifest_path: manifest_stats.manifest_path(),
             storage_type: manifest_stats.storage_type.clone(),
             base_path: manifest_stats.base_path.clone(),
             manifest_read_ms: None,
@@ -656,6 +1010,9 @@ fn cold_rows_from_segments(
                 .map(|(_, name)| name.clone())
                 .collect::<Vec<_>>(),
         );
+        if let Some(row_groups) = &hint.selected_row_groups {
+            options = options.with_row_groups(row_groups.iter().copied());
+        }
         if let Some((pk_column, values)) = &pk_probe {
             let physical_pk = physical_name_for_segment(pk_column, hint, current_schema_version)?
                 .ok_or_else(|| {
@@ -756,7 +1113,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use koldstore_catalog::{preferred_segment_index_access, SegmentIndexLookupShape};
-    use koldstore_common::{ColumnId, ColumnRef};
+    use koldstore_common::{ColumnId, ColumnRef, SeqId};
     use koldstore_merge::scan::plan::SegmentStatsHint;
     use koldstore_schema::PgType;
     use koldstore_sortkey::SortKeyType;
@@ -807,6 +1164,7 @@ mod tests {
             byte_size: None,
             min_seq: SeqId::new(1).unwrap(),
             max_seq: SeqId::new(10).unwrap(),
+            selected_row_groups: None,
         };
 
         assert_eq!(

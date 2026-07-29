@@ -1,9 +1,8 @@
-use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use koldstore::spi::prepared_plan_key;
-use koldstore_common::{ColumnId, ColumnRef, CommitSeq, SeqId, StablePkHash, TableName};
+use koldstore_common::{CommitSeq, SeqId, StablePkHash, TableName};
 use koldstore_flush::job::{
     conditional_cleanup_allowed, FlushBatchBuilder, FlushBatchInput, FlushExecutionConfig,
     FlushWatermark, HotRowCandidate,
@@ -11,7 +10,6 @@ use koldstore_flush::job::{
 use koldstore_merge::events::plan_mirror_changes_since;
 use koldstore_migrate::QualifiedTableName;
 use koldstore_mirror::{mirror_relation_for_source, mirror_to_sql, plan_mirror_stats};
-use serde_json::json;
 
 fn bench_flush_candidate_selection(c: &mut Criterion) {
     let mut group = c.benchmark_group("flush_candidate_selection");
@@ -37,20 +35,6 @@ fn bench_flush_batch_builder(c: &mut Criterion) {
             }
             builder.finish()
         })
-    });
-}
-
-fn bench_flush_metadata(c: &mut Criterion) {
-    let plan = flush_input(10_000).plan();
-    let columns = [
-        ColumnRef::new(ColumnId::from_attnum(2), "created_day"),
-        ColumnRef::new(ColumnId::from_attnum(3), "priority"),
-    ];
-    c.bench_function("flush_footer_summary", |b| {
-        b.iter(|| black_box(&plan).footer_summary())
-    });
-    c.bench_function("flush_column_stats", |b| {
-        b.iter(|| black_box(&plan).column_stats(&columns))
     });
 }
 
@@ -86,18 +70,16 @@ fn bench_spi_plan_cache_shapes(c: &mut Criterion) {
         b.iter(|| black_box(&cached_flush_key))
     });
 
-    let table = QualifiedTableName::parse("app.items").expect("valid table");
     let mirror_table = QualifiedTableName::parse("koldstore.items__cl").expect("valid mirror");
     let primary_key = vec!["tenant_id".to_string(), "id".to_string()];
     let cached_changes_since =
-        plan_mirror_changes_since(&table, &mirror_table, &primary_key, Some("tenant_id"))
+        plan_mirror_changes_since(&mirror_table, &primary_key, Some("tenant_id"))
             .expect("valid changes_since plan");
     let cached_changes_key = prepared_plan_key(&cached_changes_since.statement);
 
     c.bench_function("one_shot_changes_since_statement_key", |b| {
         b.iter(|| {
             let plan = plan_mirror_changes_since(
-                black_box(&table),
                 black_box(&mirror_table),
                 black_box(&primary_key),
                 Some("tenant_id"),
@@ -128,22 +110,17 @@ fn candidate(seq: i64, deleted: bool) -> HotRowCandidate {
     let pk_hash = StablePkHash::from_hex(format!("{seq:064x}")).expect("valid hash");
     let seq_id = SeqId::new(seq).expect("valid seq");
     let commit_seq = CommitSeq::new(seq).expect("valid commit seq");
-    let base = if deleted {
+    if deleted {
         HotRowCandidate::tombstone(pk_hash, seq_id, commit_seq)
     } else {
         HotRowCandidate::live(pk_hash, seq_id, commit_seq)
-    };
-    base.with_column_values(BTreeMap::from([
-        ("created_day", json!(seq % 365)),
-        ("priority", json!(seq % 10)),
-    ]))
+    }
 }
 
 criterion_group!(
     benches,
     bench_flush_candidate_selection,
     bench_flush_batch_builder,
-    bench_flush_metadata,
     bench_cleanup_policy,
     bench_spi_plan_cache_shapes
 );

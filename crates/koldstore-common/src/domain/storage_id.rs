@@ -28,15 +28,6 @@ impl StorageId {
         Ok(Self(value))
     }
 
-    /// Parses a short hexadecimal token.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the token is invalid.
-    pub fn from_hex_token(value: impl Into<String>) -> Result<Self, String> {
-        Self::new(value)
-    }
-
     /// Returns the identifier as text.
     #[must_use]
     pub fn as_str(&self) -> &str {

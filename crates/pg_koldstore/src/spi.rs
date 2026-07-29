@@ -29,6 +29,8 @@ fn sql_param_pg_oid(param: SqlParamType) -> pgrx::pg_sys::PgOid {
         SqlParamType::Bytea => pgrx::pg_sys::BYTEAOID,
         SqlParamType::Oid => pgrx::pg_sys::OIDOID,
         SqlParamType::Uuid => pgrx::pg_sys::UUIDOID,
+        SqlParamType::UuidArray => pgrx::pg_sys::UUIDARRAYOID,
+        SqlParamType::SmallIntArray => pgrx::pg_sys::INT2ARRAYOID,
         SqlParamType::Boolean => pgrx::pg_sys::BOOLOID,
     };
     pgrx::pg_sys::PgOid::from(oid)

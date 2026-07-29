@@ -6,11 +6,9 @@
 //! remain for tests and flush validation.
 
 use std::path::Path;
-use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
 use arrow_array::{Array, BooleanArray, Int64Array, RecordBatch, UInt32Array};
-use bytes::Bytes;
 use futures_util::StreamExt;
 use koldstore_common::{ColdRow, CommitSeq, LogicalPk, PkColumn, SeqId};
 use object_store::ObjectStore;
@@ -23,10 +21,6 @@ use parquet::schema::types::SchemaDescriptor;
 use crate::object_reader::ObjectStoreParquetReader;
 use crate::prune::{bloom_may_contain, column_index, select_row_groups_from_metadata};
 use crate::schema::{ColdMetadataColumn, PgColumn};
-
-/// Boxed record-batch stream.
-pub type RecordBatchFileStream =
-    Pin<Box<dyn futures_util::Stream<Item = Result<RecordBatch, String>> + Send>>;
 
 /// Read options for projection and pruning.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -473,62 +467,61 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         pruning_applied = true;
     }
 
-    if options.row_groups.is_none() {
-        if let Some(pk) = &options.pk_values {
-            bloom_mode = BloomPruneMode::SkippedAfterStats;
-            let (stats_selected, _) = select_row_groups_from_metadata(
-                builder.metadata(),
-                builder.parquet_schema(),
-                &pk.column,
-                &pk.values,
-            )?;
-            // Intersect with any prior seq prune.
-            let stats_selected: Vec<usize> = if pruning_applied {
-                stats_selected
-                    .into_iter()
-                    .filter(|idx| selected_row_groups.contains(idx))
-                    .collect()
-            } else {
-                stats_selected
-            };
-            stats_pruned |= stats_selected.len() < total_row_groups;
-            if stats_selected.is_empty() {
-                let (range_calls, bytes_read) = io.snapshot();
-                return Ok((
-                    Vec::new(),
-                    ParquetReadProfile {
-                        object_path: object_path.to_string(),
-                        file_size,
-                        footer_first: true,
-                        row_groups_total: total_row_groups,
-                        row_groups_selected: Vec::new(),
-                        row_groups_skipped: total_row_groups,
-                        stats_pruned: true,
-                        bloom: bloom_mode,
-                        bloom_filters_fetched: 0,
-                        projected_columns: application_columns,
-                        pk_probe: Some((pk.column.clone(), pk.values.clone())),
-                        range_calls,
-                        bytes_read,
-                        rows_returned: 0,
-                        footer_cache_hit,
-                    },
-                ));
-            }
-            selected_row_groups = if stats_selected.len() <= 1 {
-                // Point lookups on seq-ordered flush segments usually collapse
-                // here — skip bloom range GETs entirely.
-                bloom_mode = BloomPruneMode::SkippedAfterStats;
-                stats_selected
-            } else {
-                let (refined, fetched) =
-                    refine_row_groups_with_bloom(&mut builder, &stats_selected, pk).await?;
-                bloom_mode = BloomPruneMode::Applied;
-                bloom_filters_fetched = fetched;
-                refined
-            };
-            pruning_applied = true;
+    if let Some(pk) = &options.pk_values {
+        bloom_mode = BloomPruneMode::SkippedAfterStats;
+        let (stats_selected, _) = select_row_groups_from_metadata(
+            builder.metadata(),
+            builder.parquet_schema(),
+            &pk.column,
+            &pk.values,
+        )?;
+        // Catalog-selected row groups are a prefilter. Footer statistics refine
+        // conservative groups whose packed catalog bounds were unavailable.
+        let stats_selected: Vec<usize> = if pruning_applied {
+            stats_selected
+                .into_iter()
+                .filter(|idx| selected_row_groups.contains(idx))
+                .collect()
+        } else {
+            stats_selected
+        };
+        stats_pruned |= stats_selected.len() < selected_row_groups.len();
+        if stats_selected.is_empty() {
+            let (range_calls, bytes_read) = io.snapshot();
+            return Ok((
+                Vec::new(),
+                ParquetReadProfile {
+                    object_path: object_path.to_string(),
+                    file_size,
+                    footer_first: true,
+                    row_groups_total: total_row_groups,
+                    row_groups_selected: Vec::new(),
+                    row_groups_skipped: total_row_groups,
+                    stats_pruned: true,
+                    bloom: bloom_mode,
+                    bloom_filters_fetched: 0,
+                    projected_columns: application_columns,
+                    pk_probe: Some((pk.column.clone(), pk.values.clone())),
+                    range_calls,
+                    bytes_read,
+                    rows_returned: 0,
+                    footer_cache_hit,
+                },
+            ));
         }
+        selected_row_groups = if stats_selected.len() <= 1 {
+            // Point lookups on seq-ordered flush segments usually collapse
+            // here — skip bloom range GETs entirely.
+            bloom_mode = BloomPruneMode::SkippedAfterStats;
+            stats_selected
+        } else {
+            let (refined, fetched) =
+                refine_row_groups_with_bloom(&mut builder, &stats_selected, pk).await?;
+            bloom_mode = BloomPruneMode::Applied;
+            bloom_filters_fetched = fetched;
+            refined
+        };
+        pruning_applied = true;
     }
 
     if pruning_applied {
@@ -677,25 +670,6 @@ async fn refine_row_groups_with_bloom(
     Ok((selected, fetched))
 }
 
-/// Reads clean-schema cold rows from a local Parquet file.
-///
-/// # Errors
-///
-/// Returns an error when the file cannot be opened, Parquet decoding fails, or
-/// required metadata/primary-key columns are missing.
-pub fn read_clean_cold_rows_from_path(
-    path: impl AsRef<Path>,
-    columns: &[PgColumn],
-    primary_key_columns: &[String],
-) -> Result<Vec<CleanColdRow>, String> {
-    read_clean_cold_rows_with_options(
-        path,
-        columns,
-        primary_key_columns,
-        &ParquetReadOptions::default(),
-    )
-}
-
 /// Reads clean-schema cold rows from a local Parquet file with projection and row-group options.
 ///
 /// When `options.columns` is non-empty, only those application columns are decoded in addition
@@ -703,8 +677,8 @@ pub fn read_clean_cold_rows_from_path(
 /// appear in the projection or this function returns an error.
 ///
 /// When `options.row_groups` is set, only the selected row groups are scanned.
-/// When `options.pk_values` is set and `row_groups` is unset, row groups are pruned first via
-/// column-chunk min/max and native Parquet bloom filters on a single file handle.
+/// When `options.pk_values` is set, footer min/max and native Parquet bloom
+/// filters refine any catalog-selected row groups on the same file handle.
 ///
 /// # Errors
 ///
@@ -718,20 +692,6 @@ pub fn read_clean_cold_rows_with_options(
 ) -> Result<Vec<CleanColdRow>, String> {
     let file = std::fs::File::open(path.as_ref()).map_err(|error| error.to_string())?;
     read_clean_cold_rows_from_reader(file, columns, primary_key_columns, options)
-}
-
-/// Reads clean-schema cold rows from an in-memory Parquet object.
-///
-/// # Errors
-///
-/// Returns an error when Parquet decoding, projection, or PK pruning fails.
-pub fn read_clean_cold_rows_from_bytes(
-    bytes: Bytes,
-    columns: &[PgColumn],
-    primary_key_columns: &[String],
-    options: &ParquetReadOptions,
-) -> Result<Vec<CleanColdRow>, String> {
-    read_clean_cold_rows_from_reader(bytes, columns, primary_key_columns, options)
 }
 
 fn read_clean_cold_rows_from_reader<R>(
@@ -748,42 +708,48 @@ where
     let application_columns = application_columns_for_read(columns, primary_key_columns, options)?;
 
     let mut effective = options.clone();
-    if effective.row_groups.is_none() {
-        if let Some(pk) = &options.pk_values {
-            let (mut selected, _) = select_row_groups_from_metadata(
-                builder.metadata(),
-                builder.parquet_schema(),
-                &pk.column,
-                &pk.values,
-            )?;
-            if selected.is_empty() {
-                return Ok(Vec::new());
-            }
-            if selected.len() > 1 {
-                let column_idx = column_index(builder.parquet_schema(), &pk.column)?;
-                let physical_type = builder.parquet_schema().column(column_idx).physical_type();
-                let mut refined = Vec::new();
-                for rg_index in selected {
-                    match builder.get_row_group_column_bloom_filter(rg_index, column_idx) {
-                        Ok(Some(bloom)) => {
-                            if pk
-                                .values
-                                .iter()
-                                .any(|value| bloom_may_contain(&bloom, physical_type, value))
-                            {
-                                refined.push(rg_index);
-                            }
-                        }
-                        Ok(None) | Err(_) => refined.push(rg_index),
-                    }
-                }
-                selected = refined;
-            }
-            if selected.is_empty() {
-                return Ok(Vec::new());
-            }
-            effective.row_groups = Some(selected);
+    if let Some(pk) = &options.pk_values {
+        let (selected_from_footer, _) = select_row_groups_from_metadata(
+            builder.metadata(),
+            builder.parquet_schema(),
+            &pk.column,
+            &pk.values,
+        )?;
+        let mut selected = if let Some(catalog_selected) = &effective.row_groups {
+            selected_from_footer
+                .into_iter()
+                .filter(|row_group| catalog_selected.contains(row_group))
+                .collect()
+        } else {
+            selected_from_footer
+        };
+        if selected.is_empty() {
+            return Ok(Vec::new());
         }
+        if selected.len() > 1 {
+            let column_idx = column_index(builder.parquet_schema(), &pk.column)?;
+            let physical_type = builder.parquet_schema().column(column_idx).physical_type();
+            let mut refined = Vec::new();
+            for rg_index in selected {
+                match builder.get_row_group_column_bloom_filter(rg_index, column_idx) {
+                    Ok(Some(bloom)) => {
+                        if pk
+                            .values
+                            .iter()
+                            .any(|value| bloom_may_contain(&bloom, physical_type, value))
+                        {
+                            refined.push(rg_index);
+                        }
+                    }
+                    Ok(None) | Err(_) => refined.push(rg_index),
+                }
+            }
+            selected = refined;
+        }
+        if selected.is_empty() {
+            return Ok(Vec::new());
+        }
+        effective.row_groups = Some(selected);
     }
 
     if !effective.columns.is_empty() {

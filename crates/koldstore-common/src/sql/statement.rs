@@ -45,6 +45,10 @@ pub enum SqlParamType {
     Bytea,
     Oid,
     Uuid,
+    /// PostgreSQL `uuid[]`.
+    UuidArray,
+    /// PostgreSQL `smallint[]`.
+    SmallIntArray,
     Boolean,
 }
 

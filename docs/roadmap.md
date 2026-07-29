@@ -140,12 +140,10 @@ Built-in row-limit auto-flush scheduling is available on the database worker
 
 ## Storage layout and pruning
 
-- **Footer-derived catalog segment stats** — stop hand-maintaining
-  `indexed_bounds` during encode; after Parquet write, extract min/max from
-  footer chunk statistics into `column_stats` (catalog still owns
-  prune-before-open). Accepted in
-  [ADR-002](decisions/002-footer-derived-catalog-stats.md); schedule after
-  cold PK scan wins. `byte_size` already comes from publish metadata only.
+- **Footer-derived packed catalog stats** — implemented. Finalized Parquet
+  metadata supplies Sort Key V1 segment bounds and row-group arrays; scalar
+  SQL candidate lookup is refined in Rust before opening an object. See
+  [ADR-002](decisions/002-footer-derived-catalog-stats.md).
 - Operator-configurable `pruning_columns` and `bloom_filter_columns`.
 - Configurable `flush_order_by`; flush selection is always ordered by mirror
   `seq` today.

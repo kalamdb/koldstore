@@ -24,10 +24,11 @@ pub use cache::{
     DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT, MANAGED_TABLE_SNAPSHOT_CACHE_LIMIT,
 };
 pub use cold_segments::SegmentVisibility;
-pub use decode::{
-    column_stats_from_index_bounds, column_stats_min_max_map, column_stats_min_max_map_into,
-};
+pub use decode::column_stats_from_index_bounds;
 pub use koldstore_common::FlushPolicy;
 pub use manifest_row::{CatalogManifestSegmentRow, CatalogSegmentIndexBound};
-pub use segment_index::{preferred_segment_index_access, SegmentIndexLookupShape};
+pub use segment_index::{
+    preferred_segment_index_access, select_packed_row_groups, select_row_groups_after_seq,
+    SegmentIndexLookupShape,
+};
 pub use sync_state::SyncState;

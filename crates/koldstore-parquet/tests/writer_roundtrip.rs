@@ -1,8 +1,11 @@
+use koldstore_common::{ColumnId, ColumnRef};
 use koldstore_parquet::{
-    plan_clean_cold_record, record_batch_from_clean_cold_records, ColumnStats, FooterSummary,
-    ParquetSegmentWriter, PgColumn, PgType, RowGroupStats, SegmentFooterMetadata,
-    SegmentMetadataInput, SegmentSplitPolicy, StreamingParquetSegmentWriter, WriterOptions,
+    extract_packed_segment_metadata, plan_clean_cold_record, record_batch_from_clean_cold_records,
+    ColumnStats, FooterSummary, ParquetSegmentWriter, PgColumn, PgType, RowGroupStats,
+    SegmentFooterMetadata, SegmentMetadataInput, SegmentSplitPolicy, StreamingParquetSegmentWriter,
+    WriterOptions,
 };
+use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue};
 use std::sync::Arc;
 
 use arrow_array::{
@@ -14,9 +17,17 @@ use serde_json::json;
 #[test]
 fn writer_plan_records_kalamdb_compatible_layout_metadata() {
     let writer = ParquetSegmentWriter::new(WriterOptions::default());
-    let plan = writer.plan_segment("app/items", 7, 1, 10, 11, 20);
+    let plan = writer.plan_segment(
+        "app/items",
+        7,
+        "11111111",
+        SegmentMetadataInput::seq_bounds(1, 10, 11, 20),
+    );
 
-    assert_eq!(plan.object_path, "app/items/001/segment-0007.parquet");
+    assert_eq!(
+        plan.object_path,
+        "app/items/001/segment-0007-11111111.parquet"
+    );
     assert_eq!(plan.min_seq, 1);
     assert_eq!(plan.max_seq, 10);
     assert_eq!(plan.min_commit_seq, 11);
@@ -60,9 +71,10 @@ fn clean_cold_record_plan_writes_live_rows_and_pk_only_delete_markers() {
 #[test]
 fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
     let writer = ParquetSegmentWriter::new(WriterOptions::default());
-    let plan = writer.plan_segment_with_metadata(
+    let plan = writer.plan_segment(
         "app/items",
         7,
+        "11111111",
         SegmentMetadataInput {
             min_seq: 1,
             max_seq: 10,
@@ -99,7 +111,10 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
         },
     );
 
-    assert_eq!(plan.object_path, "app/items/001/segment-0007.parquet");
+    assert_eq!(
+        plan.object_path,
+        "app/items/001/segment-0007-11111111.parquet"
+    );
     assert_eq!(plan.row_count, 100);
     assert_eq!(plan.byte_size, 4096);
     assert_eq!(plan.pk_filter_kind.as_deref(), Some("bloom"));
@@ -176,6 +191,206 @@ fn streaming_segment_writer_reports_compressed_bytes_before_close() {
     let bytes = writer.finish().unwrap();
     let validation = koldstore_parquet::validate_parquet_bytes(&bytes).unwrap();
     assert_eq!(validation.row_count, 3);
+}
+
+#[test]
+fn finalized_writer_metadata_produces_packed_row_group_stats() {
+    let rows = (1_i64..=5)
+        .map(|id| {
+            plan_clean_cold_record(
+                [("id", json!(id)), ("nullable_rank", json!(id * 10))],
+                ["id"],
+                id + 100,
+                1,
+                1,
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let columns = [
+        PgColumn::new("id", PgType::Int8, false),
+        PgColumn::new("nullable_rank", PgType::Int8, true),
+    ];
+    let batch = record_batch_from_clean_cold_records(&columns, &rows).unwrap();
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 2,
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "nullable_rank", "seq"]),
+    );
+
+    let encoded = writer.encode_record_batch_with_metadata(&batch).unwrap();
+    let packed = extract_packed_segment_metadata(
+        encoded.metadata.as_ref(),
+        &columns,
+        &[
+            ColumnRef::new(ColumnId::from_attnum(1), "id"),
+            ColumnRef::new(ColumnId::from_attnum(2), "nullable_rank"),
+        ],
+        &["id".to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(packed.row_group_count, 3);
+    assert_eq!(packed.row_group_row_counts, vec![2, 2, 1]);
+    assert_eq!(packed.row_group_min_seqs, vec![101, 103, 105]);
+    assert_eq!(packed.row_group_max_seqs, vec![102, 104, 105]);
+    assert_eq!(packed.min_seq, 101);
+    assert_eq!(packed.max_seq, 105);
+    assert_eq!(packed.row_count, 5);
+    let id = packed
+        .column_indexes
+        .iter()
+        .find(|index| index.column_id == ColumnId::from_attnum(1))
+        .unwrap();
+    assert_eq!(id.row_group_null_counts, vec![Some(0), Some(0), Some(0)]);
+    assert_eq!(
+        id.row_group_min_values
+            .iter()
+            .map(|value| { decode_sort_key(SortKeyType::Int8, value.as_deref().unwrap()).unwrap() })
+            .collect::<Vec<_>>(),
+        vec![
+            SortKeyValue::Int8(1),
+            SortKeyValue::Int8(3),
+            SortKeyValue::Int8(5)
+        ]
+    );
+    assert_eq!(
+        decode_sort_key(SortKeyType::Int8, id.min_value.as_deref().unwrap()).unwrap(),
+        SortKeyValue::Int8(1)
+    );
+    assert_eq!(
+        decode_sort_key(SortKeyType::Int8, id.max_value.as_deref().unwrap()).unwrap(),
+        SortKeyValue::Int8(5)
+    );
+}
+
+#[test]
+fn packed_footer_stats_distinguish_all_null_partial_null_and_unknown_groups() {
+    let rows = [
+        (1, serde_json::Value::Null),
+        (2, serde_json::Value::Null),
+        (3, serde_json::Value::Null),
+        (4, json!(40)),
+    ]
+    .into_iter()
+    .map(|(id, rank)| {
+        plan_clean_cold_record(
+            [("id", json!(id)), ("nullable_rank", rank)],
+            ["id"],
+            id,
+            1,
+            1,
+        )
+        .unwrap()
+    })
+    .collect::<Vec<_>>();
+    let columns = [
+        PgColumn::new("id", PgType::Int8, false),
+        PgColumn::new("nullable_rank", PgType::Int8, true),
+    ];
+    let batch = record_batch_from_clean_cold_records(&columns, &rows).unwrap();
+    let indexed = [
+        ColumnRef::new(ColumnId::from_attnum(1), "id"),
+        ColumnRef::new(ColumnId::from_attnum(2), "nullable_rank"),
+    ];
+    let encoded = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 2,
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "nullable_rank", "seq"]),
+    )
+    .encode_record_batch_with_metadata(&batch)
+    .unwrap();
+    let packed = extract_packed_segment_metadata(
+        encoded.metadata.as_ref(),
+        &columns,
+        &indexed,
+        &["id".to_string()],
+    )
+    .unwrap();
+    let rank = &packed.column_indexes[1];
+    assert_eq!(rank.row_group_null_counts, vec![Some(2), Some(1)]);
+    assert_eq!(rank.row_group_min_values[0], None);
+    assert_eq!(
+        decode_sort_key(
+            SortKeyType::Int8,
+            rank.row_group_min_values[1].as_deref().unwrap()
+        )
+        .unwrap(),
+        SortKeyValue::Int8(40)
+    );
+    assert!(rank.min_value.is_some());
+
+    let unknown_encoded = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 2,
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "seq"]),
+    )
+    .encode_record_batch_with_metadata(&batch)
+    .unwrap();
+    let unknown = extract_packed_segment_metadata(
+        unknown_encoded.metadata.as_ref(),
+        &columns,
+        &indexed,
+        &["id".to_string()],
+    )
+    .unwrap();
+    let rank = &unknown.column_indexes[1];
+    assert_eq!(rank.row_group_null_counts, vec![None, None]);
+    assert_eq!(rank.row_group_min_values, vec![None, None]);
+    assert_eq!(rank.min_value, None);
+}
+
+#[test]
+fn packed_footer_stats_require_primary_key_bounds_and_omit_unsupported_types() {
+    let rows = vec![plan_clean_cold_record(
+        [("id", json!(1)), ("body", json!("hello"))],
+        ["id"],
+        1,
+        1,
+        1,
+    )
+    .unwrap()];
+    let columns = [
+        PgColumn::new("id", PgType::Int8, false),
+        PgColumn::new("body", PgType::Text, true),
+    ];
+    let batch = record_batch_from_clean_cold_records(&columns, &rows).unwrap();
+    let indexed = [
+        ColumnRef::new(ColumnId::from_attnum(1), "id"),
+        ColumnRef::new(ColumnId::from_attnum(2), "body"),
+    ];
+    let encoded =
+        ParquetSegmentWriter::new(WriterOptions::default().with_statistics_columns(["seq"]))
+            .encode_record_batch_with_metadata(&batch)
+            .unwrap();
+    let error = extract_packed_segment_metadata(
+        encoded.metadata.as_ref(),
+        &columns,
+        &indexed,
+        &["id".to_string()],
+    )
+    .unwrap_err();
+    assert!(error.contains("required `id` statistics"));
+
+    let encoded =
+        ParquetSegmentWriter::new(WriterOptions::default().with_statistics_columns(["id", "seq"]))
+            .encode_record_batch_with_metadata(&batch)
+            .unwrap();
+    let packed = extract_packed_segment_metadata(
+        encoded.metadata.as_ref(),
+        &columns,
+        &indexed,
+        &["id".to_string()],
+    )
+    .unwrap();
+    assert_eq!(packed.column_indexes.len(), 1);
+    assert_eq!(packed.column_indexes[0].column_id, ColumnId::from_attnum(1));
 }
 
 #[test]

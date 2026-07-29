@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    RecordBatch, StringArray, TimestampMicrosecondArray,
+    StringArray, TimestampMicrosecondArray,
 };
 use arrow_schema::{DataType, TimeUnit};
 use koldstore_schema::PgType;
@@ -118,20 +118,6 @@ pub fn arrow_array_from_json(
     Ok(array)
 }
 
-/// Decodes one Arrow cell into JSON for a supported PostgreSQL column type.
-///
-/// # Errors
-///
-/// Returns an error when the Arrow physical type does not match the column type.
-pub fn json_value_from_arrow_column(
-    batch: &RecordBatch,
-    column: &PgColumn,
-    row_index: usize,
-) -> Result<serde_json::Value, String> {
-    let array = required_column(batch, &column.name)?;
-    json_from_arrow_cell(column.pg_type, &column.name, array, row_index)
-}
-
 /// Decodes one Arrow cell into JSON for a supported PostgreSQL type.
 ///
 /// # Errors
@@ -197,13 +183,6 @@ pub fn json_from_arrow_cell(
     }
 }
 
-fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a dyn Array, String> {
-    batch
-        .column_by_name(name)
-        .map(|column| column.as_ref())
-        .ok_or_else(|| format!("cold segment is missing required column `{name}`"))
-}
-
 fn array_for<'a, T: 'static>(array: &'a dyn Array, name: &str) -> Result<&'a T, String> {
     array
         .as_any()
@@ -224,13 +203,6 @@ pub fn json_bool(value: Option<&serde_json::Value>) -> Result<Option<bool>, Stri
 pub fn json_i16(value: Option<&serde_json::Value>) -> Result<Option<i16>, String> {
     json_i64(value)?
         .map(|value| i16::try_from(value).map_err(|error| error.to_string()))
-        .transpose()
-}
-
-/// Coerces a JSON cell into an optional `u32`.
-pub fn json_u32(value: Option<&serde_json::Value>) -> Result<Option<u32>, String> {
-    json_i64(value)?
-        .map(|value| u32::try_from(value).map_err(|error| error.to_string()))
         .transpose()
 }
 

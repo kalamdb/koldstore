@@ -10,6 +10,57 @@
 
 use koldstore_common::{SqlParamType, SqlResult, SqlStatement};
 
+/// Trailing-slash table prefix from `st.regular_path_tmpl` + `n`/`c` relation names.
+///
+/// This fragment is inserted via `{SQL_TABLE_PREFIX}` into outer `format!`
+/// templates, so braces here are copied verbatim into the emitted SQL.
+const SQL_TABLE_PREFIX: &str = r#"CASE
+      WHEN regexp_replace(
+          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
+          '(^/+)|(/+$)',
+          '',
+          'g'
+      ) = ''
+      THEN ''
+      ELSE regexp_replace(
+          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
+          '(^/+)|(/+$)',
+          '',
+          'g'
+      ) || '/'
+  END"#;
+
+/// `jsonb_object_agg(column_id → name)` over one historical schema version.
+///
+/// Inserted via `{SQL_PHYSICAL_NAMES_*}`; braces are literal SQL (not `format!`
+/// escapes). Empty object default must be `'{}'::jsonb`, not `'{{}}'::jsonb`.
+const SQL_PHYSICAL_NAMES_ALL: &str = r#"COALESCE((
+        SELECT jsonb_object_agg(
+            (column_value->>'column_id'),
+            (column_value->>'name')
+        )
+        FROM koldstore.schemas historical_schema
+        CROSS JOIN LATERAL jsonb_array_elements(historical_schema.columns) column_value
+        WHERE historical_schema.table_oid = cs.table_oid
+          AND historical_schema.version = cs.schema_version
+    ), '{}'::jsonb)"#;
+
+/// Like [`SQL_PHYSICAL_NAMES_ALL`] but filtered to requested column ids in `$2`.
+const SQL_PHYSICAL_NAMES_REQUESTED: &str = r#"COALESCE((
+                  SELECT jsonb_object_agg(
+                      (column_value->>'column_id'),
+                      (column_value->>'name')
+                  )
+                  FROM koldstore.schemas historical_schema
+                  CROSS JOIN LATERAL jsonb_array_elements(historical_schema.columns) column_value
+                  WHERE historical_schema.table_oid = cs.table_oid
+                    AND historical_schema.version = cs.schema_version
+                    AND (column_value->>'column_id')::smallint IN (
+                        SELECT value::smallint
+                        FROM pg_catalog.jsonb_array_elements_text($2::jsonb) AS requested(value)
+                    )
+              ), '{}'::jsonb)"#;
+
 /// Builds a relation name lookup by PostgreSQL OID.
 ///
 /// # Errors
@@ -217,29 +268,15 @@ LIMIT 1
 pub fn plan_in_sync_manifest_scan_context() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "resolve published manifest scan context",
-        r#"
+        &format!(
+            r#"
 SELECT jsonb_build_object(
-  'table_prefix', CASE
-      WHEN regexp_replace(
-          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
-          '(^/+)|(/+$)',
-          '',
-          'g'
-      ) = ''
-      THEN ''
-      ELSE regexp_replace(
-          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
-          '(^/+)|(/+$)',
-          '',
-          'g'
-      ) || '/'
-  END,
-  'regular_path_tmpl', st.regular_path_tmpl,
+  'table_prefix', {SQL_TABLE_PREFIX},
   'generation', m.generation,
   'base_path', st.base_path,
   'storage_type', st.storage_type,
-  'credentials', COALESCE(st.credentials, '{}'::jsonb),
-  'config', COALESCE(st.config, '{}'::jsonb),
+  'credentials', COALESCE(st.credentials, '{{}}'::jsonb),
+  'config', COALESCE(st.config, '{{}}'::jsonb),
   'segments', COALESCE((
       SELECT jsonb_agg(
           jsonb_build_object(
@@ -247,20 +284,7 @@ SELECT jsonb_build_object(
               'schema_version', cs.schema_version,
               'min_seq', cs.min_seq,
               'max_seq', cs.max_seq,
-              'physical_names', COALESCE((
-                  SELECT jsonb_object_agg(
-                      (column_value->>'column_id'),
-                      (column_value->>'name')
-                  )
-                  FROM koldstore.schemas historical_schema
-                  CROSS JOIN LATERAL jsonb_array_elements(historical_schema.columns) column_value
-                  WHERE historical_schema.table_oid = cs.table_oid
-                    AND historical_schema.version = cs.schema_version
-                    AND (column_value->>'column_id')::smallint IN (
-                        SELECT value::smallint
-                        FROM pg_catalog.jsonb_array_elements_text($2::jsonb) AS requested(value)
-                    )
-              ), '{}'::jsonb),
+              'physical_names', {SQL_PHYSICAL_NAMES_REQUESTED},
               'byte_size', cs.byte_size
           )
           ORDER BY cs.batch_number
@@ -280,7 +304,8 @@ WHERE m.table_oid = $1::oid
   AND m.generation > 0
 ORDER BY m.generation DESC
 LIMIT 1
-"#,
+"#
+        ),
         [SqlParamType::Oid, SqlParamType::Jsonb],
     )
 }
@@ -296,7 +321,8 @@ LIMIT 1
 pub fn plan_cold_segment_candidates_closed_range() -> SqlResult<SqlStatement> {
     plan_cold_segment_candidates(
         "resolve active cold segment candidates for closed range",
-        "AND csi.min_value <= $7::bytea\n  AND csi.max_value >= $6::bytea",
+        "AND csi.min_value <= $7::bytea\n      AND csi.max_value >= $6::bytea",
+        "csi.min_value IS NULL",
         vec![
             SqlParamType::Oid,
             SqlParamType::Text,
@@ -321,6 +347,7 @@ pub fn plan_cold_segment_candidates_lower_bound() -> SqlResult<SqlStatement> {
     plan_cold_segment_candidates(
         "resolve active cold segment candidates for lower bound",
         "AND csi.max_value >= $6::bytea",
+        "csi.max_value IS NULL",
         vec![
             SqlParamType::Oid,
             SqlParamType::Text,
@@ -344,6 +371,7 @@ pub fn plan_cold_segment_candidates_upper_bound() -> SqlResult<SqlStatement> {
     plan_cold_segment_candidates(
         "resolve active cold segment candidates for upper bound",
         "AND csi.min_value <= $6::bytea",
+        "csi.min_value IS NULL",
         vec![
             SqlParamType::Oid,
             SqlParamType::Text,
@@ -355,48 +383,185 @@ pub fn plan_cold_segment_candidates_upper_bound() -> SqlResult<SqlStatement> {
     )
 }
 
+/// Builds a compact aggregate-bound lookup for one indexed cold column.
+///
+/// The result contains the active-segment count, the matching index-row count,
+/// the count of index rows with unknown scalar bounds, and the lowest/highest
+/// Sort Key V1 byte strings. Callers may prune the entire cold side only when
+/// the two counts match and no bound is unknown.
+///
+/// Parameters are table OID, scope key, stable column ID, type OID, and codec
+/// version.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_column_aggregate_bounds() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve aggregate active cold column bounds",
+        r#"
+WITH active_segments AS MATERIALIZED (
+    SELECT cs.segment_id
+    FROM koldstore.cold_segments cs
+    WHERE cs.table_oid = $1::oid
+      AND cs.scope_key = $2::text
+      AND cs.status = 'active'
+),
+matching_index AS MATERIALIZED (
+    SELECT csi.min_value, csi.max_value
+    FROM koldstore.cold_segment_index csi
+    JOIN active_segments active
+      ON active.segment_id = csi.segment_id
+    WHERE csi.table_oid = $1::oid
+      AND csi.scope_key = $2::text
+      AND csi.column_id = $3::smallint
+      AND csi.type_oid = $4::oid
+      AND csi.codec_version = $5::smallint
+)
+SELECT
+    (SELECT count(*) FROM active_segments) AS active_segment_count,
+    (SELECT count(*) FROM matching_index) AS indexed_segment_count,
+    (
+        SELECT count(*)
+        FROM matching_index
+        WHERE min_value IS NULL OR max_value IS NULL
+    ) AS unknown_bound_count,
+    (
+        SELECT min_value
+        FROM matching_index
+        WHERE min_value IS NOT NULL
+        ORDER BY min_value ASC
+        LIMIT 1
+    ) AS min_value,
+    (
+        SELECT max_value
+        FROM matching_index
+        WHERE max_value IS NOT NULL
+        ORDER BY max_value DESC
+        LIMIT 1
+    ) AS max_value
+"#,
+        [
+            SqlParamType::Oid,
+            SqlParamType::Text,
+            SqlParamType::Integer,
+            SqlParamType::Oid,
+            SqlParamType::Integer,
+        ],
+    )
+}
+
+/// Loads packed row-group arrays for already-selected candidate segments.
+///
+/// Parameters are table OID, scope key, candidate segment UUIDs, and indexed
+/// column IDs. Segment-level lookup happens first through the scalar B-tree
+/// plans; this statement only refines that bounded candidate set.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_segment_candidate_row_group_indexes() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "resolve packed row-group indexes for candidate segments",
+        r#"
+SELECT
+    csi.segment_id,
+    csi.column_id,
+    cs.row_group_count,
+    cs.row_group_row_counts,
+    csi.row_group_min_values,
+    csi.row_group_max_values,
+    csi.row_group_null_counts
+FROM koldstore.cold_segment_index csi
+JOIN koldstore.cold_segments cs
+  ON cs.segment_id = csi.segment_id
+ AND cs.table_oid = csi.table_oid
+ AND cs.scope_key = csi.scope_key
+WHERE csi.table_oid = $1::oid
+  AND csi.scope_key = $2::text
+  AND csi.segment_id = ANY($3::uuid[])
+  AND csi.column_id = ANY($4::smallint[])
+  AND cs.status = 'active'
+ORDER BY csi.segment_id, csi.column_id
+"#,
+        [
+            SqlParamType::Oid,
+            SqlParamType::Text,
+            SqlParamType::UuidArray,
+            SqlParamType::SmallIntArray,
+        ],
+    )
+}
+
 fn plan_cold_segment_candidates(
     operation: &str,
     bound_predicate: &str,
+    unknown_predicate: &str,
     param_types: Vec<SqlParamType>,
 ) -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         operation,
         &format!(
             r#"
+WITH matching_index AS (
+    SELECT
+        csi.segment_id,
+        csi.table_oid,
+        csi.scope_key,
+        csi.column_id,
+        csi.row_group_min_values,
+        csi.row_group_max_values,
+        csi.row_group_null_counts
+    FROM koldstore.cold_segment_index csi
+    WHERE csi.table_oid = $1::oid
+      AND csi.scope_key = $2::text
+      AND csi.column_id = $3::smallint
+      AND csi.type_oid = $4::oid
+      AND csi.codec_version = $5::smallint
+      {bound_predicate}
+
+    UNION ALL
+
+    SELECT
+        csi.segment_id,
+        csi.table_oid,
+        csi.scope_key,
+        csi.column_id,
+        csi.row_group_min_values,
+        csi.row_group_max_values,
+        csi.row_group_null_counts
+    FROM koldstore.cold_segment_index csi
+    WHERE csi.table_oid = $1::oid
+      AND csi.scope_key = $2::text
+      AND csi.column_id = $3::smallint
+      AND csi.type_oid = $4::oid
+      AND csi.codec_version = $5::smallint
+      AND {unknown_predicate}
+)
 SELECT
     CASE
       WHEN pref.prefix = '' THEN cs.path
-      ELSE pref.prefix || '/' || cs.path
+      ELSE pref.prefix || cs.path
     END,
     cs.byte_size,
     cs.schema_version,
     cs.min_seq,
     cs.max_seq,
-    cs.min_commit_seq,
-    cs.max_commit_seq,
-    COALESCE((
-        SELECT jsonb_object_agg(
-            (column_value->>'column_id'),
-            (column_value->>'name')
-        )
-        FROM koldstore.schemas historical_schema
-        CROSS JOIN LATERAL jsonb_array_elements(historical_schema.columns) column_value
-        WHERE historical_schema.table_oid = cs.table_oid
-          AND historical_schema.version = cs.schema_version
-    ), '{{}}'::jsonb)::text AS physical_names
-FROM koldstore.cold_segment_index csi
+    {SQL_PHYSICAL_NAMES_ALL}::text AS physical_names,
+    cs.segment_id,
+    csi.column_id,
+    cs.row_group_count,
+    cs.row_group_row_counts,
+    csi.row_group_min_values,
+    csi.row_group_max_values,
+    csi.row_group_null_counts
+FROM matching_index csi
 JOIN koldstore.cold_segments cs
   ON cs.segment_id = csi.segment_id
  AND cs.table_oid = csi.table_oid
  AND cs.scope_key = csi.scope_key
 JOIN LATERAL (
-    SELECT regexp_replace(
-        replace(replace(st.regular_path_tmpl, '{{namespace}}', n.nspname), '{{tableName}}', c.relname),
-        '(^/+)|(/+$)',
-        '',
-        'g'
-    ) AS prefix
+    SELECT {SQL_TABLE_PREFIX} AS prefix
     FROM koldstore.schemas s
     JOIN koldstore.storage st ON st.id = s.storage_id
     JOIN pg_catalog.pg_class c ON c.oid = s.table_oid
@@ -407,13 +572,7 @@ JOIN LATERAL (
     ORDER BY s.version DESC
     LIMIT 1
 ) pref ON true
-WHERE csi.table_oid = $1::oid
-  AND csi.scope_key = $2::text
-  AND csi.column_id = $3::smallint
-  AND csi.type_oid = $4::oid
-  AND csi.codec_version = $5::smallint
-  AND cs.status = 'active'
-  {bound_predicate}
+WHERE cs.status = 'active'
 ORDER BY cs.batch_number, cs.segment_id
 "#
         ),
@@ -468,6 +627,7 @@ fn plan_cold_segments_for_manifest_json_with_statuses(
             r#"
 SELECT COALESCE(jsonb_agg(
     jsonb_build_object(
+        'segment_id', cs.segment_id::text,
         'path', cs.path,
         'batch_number', cs.batch_number,
         'min_seq', cs.min_seq,
@@ -477,14 +637,51 @@ SELECT COALESCE(jsonb_agg(
         'row_count', cs.row_count,
         'byte_size', cs.byte_size,
         'schema_version', cs.schema_version,
+        'row_group_count', cs.row_group_count,
+        'row_group_row_counts', to_jsonb(cs.row_group_row_counts),
+        'row_group_min_seqs', to_jsonb(cs.row_group_min_seqs),
+        'row_group_max_seqs', to_jsonb(cs.row_group_max_seqs),
+        'status', cs.status,
+        'checksum', cs.checksum,
+        'object_etag', cs.object_etag,
+        'created_at', cs.created_at,
         'index_bounds', (
             SELECT COALESCE(jsonb_agg(
                 jsonb_build_object(
                     'column_id', i.column_id,
                     'type_oid', i.type_oid::bigint,
                     'codec_version', i.codec_version,
-                    'min_value', encode(i.min_value, 'hex'),
-                    'max_value', encode(i.max_value, 'hex')
+                    'min_value', CASE
+                        WHEN i.min_value IS NULL THEN NULL
+                        ELSE encode(i.min_value, 'hex')
+                    END,
+                    'max_value', CASE
+                        WHEN i.max_value IS NULL THEN NULL
+                        ELSE encode(i.max_value, 'hex')
+                    END,
+                    'row_group_min_values', (
+                        SELECT jsonb_agg(
+                            CASE
+                                WHEN value IS NULL THEN NULL
+                                ELSE to_jsonb(encode(value, 'hex'))
+                            END
+                            ORDER BY ordinal
+                        )
+                        FROM unnest(i.row_group_min_values)
+                            WITH ORDINALITY AS bounds(value, ordinal)
+                    ),
+                    'row_group_max_values', (
+                        SELECT jsonb_agg(
+                            CASE
+                                WHEN value IS NULL THEN NULL
+                                ELSE to_jsonb(encode(value, 'hex'))
+                            END
+                            ORDER BY ordinal
+                        )
+                        FROM unnest(i.row_group_max_values)
+                            WITH ORDINALITY AS bounds(value, ordinal)
+                    ),
+                    'row_group_null_counts', to_jsonb(i.row_group_null_counts)
                 )
                 ORDER BY i.column_id
             ), '[]'::jsonb)
@@ -561,7 +758,8 @@ WHERE table_oid = $1::oid
 #[cfg(test)]
 mod tests {
     use super::{
-        plan_async_managed_relation_by_oid, plan_cold_segment_candidates_closed_range,
+        plan_async_managed_relation_by_oid, plan_cold_column_aggregate_bounds,
+        plan_cold_segment_candidate_row_group_indexes, plan_cold_segment_candidates_closed_range,
         plan_cold_segment_candidates_lower_bound, plan_cold_segment_candidates_upper_bound,
         plan_in_sync_manifest_scan_context, plan_publishable_cold_segments_for_manifest_json,
     };
@@ -590,15 +788,60 @@ mod tests {
     }
 
     #[test]
-    fn closed_range_candidates_use_both_non_nullable_bounds() {
+    fn interpolated_sql_fragments_keep_literal_json_and_path_braces() {
+        let scan = plan_in_sync_manifest_scan_context().unwrap();
+        let candidates = plan_cold_segment_candidates_closed_range().unwrap();
+        for statement in [&scan, &candidates] {
+            assert!(
+                statement.sql.contains("'{}'::jsonb"),
+                "empty jsonb default must be valid JSON literal"
+            );
+            assert!(
+                !statement.sql.contains("'{{}}'::jsonb"),
+                "doubled braces survive format! insertion and break ::jsonb"
+            );
+            assert!(statement.sql.contains("'{namespace}'"));
+            assert!(statement.sql.contains("'{tableName}'"));
+            assert!(!statement.sql.contains("'{{namespace}}'"));
+            assert!(!statement.sql.contains("'{{tableName}}'"));
+        }
+    }
+
+    #[test]
+    fn closed_range_candidates_keep_unknown_bounds_then_fetch_packed_arrays() {
         let statement = plan_cold_segment_candidates_closed_range().unwrap();
+        let packed = plan_cold_segment_candidate_row_group_indexes().unwrap();
 
         assert!(statement.sql.contains("koldstore.cold_segment_index"));
         assert!(statement.sql.contains("csi.min_value <= $7::bytea"));
         assert!(statement.sql.contains("csi.max_value >= $6::bytea"));
         assert!(statement.sql.contains("cs.status = 'active'"));
         assert!(statement.sql.contains("AS physical_names"));
-        assert!(!statement.sql.contains("IS NULL OR"));
+        assert!(statement.sql.contains("UNION ALL"));
+        assert!(statement.sql.contains("AND csi.min_value IS NULL"));
+        assert!(!statement.sql.contains("\n    OR csi."));
+        assert!(statement.sql.contains("cs.segment_id,"));
+        assert!(statement.sql.contains("csi.row_group_min_values"));
+        assert!(statement.sql.contains("csi.row_group_max_values"));
+        assert!(statement.sql.contains("csi.row_group_null_counts"));
+        assert!(packed.sql.contains("cs.row_group_count"));
+        assert!(packed.sql.contains("cs.row_group_row_counts"));
+        assert!(packed.sql.contains("csi.row_group_min_values"));
+        assert!(packed.sql.contains("csi.row_group_max_values"));
+        assert!(!packed.sql.contains("unnest("));
+        assert!(!packed.sql.contains("jsonb_agg"));
+        assert!(!packed.sql.contains("encode("));
+        assert!(packed.sql.contains("csi.row_group_null_counts"));
+        assert!(packed.sql.contains("csi.segment_id = ANY($3::uuid[])"));
+        assert_eq!(
+            packed.param_types,
+            vec![
+                SqlParamType::Oid,
+                SqlParamType::Text,
+                SqlParamType::UuidArray,
+                SqlParamType::SmallIntArray,
+            ]
+        );
         assert_eq!(
             statement.param_types,
             vec![
@@ -617,15 +860,19 @@ mod tests {
     fn one_sided_candidate_plans_use_only_the_relevant_index_bound() {
         let lower = plan_cold_segment_candidates_lower_bound().unwrap();
         assert!(lower.sql.contains("csi.max_value >= $6::bytea"));
+        assert!(lower.sql.contains("UNION ALL"));
+        assert!(lower.sql.contains("csi.max_value IS NULL"));
+        assert!(!lower.sql.contains("csi.max_value IS NULL OR"));
         assert!(!lower.sql.contains("csi.min_value <="));
-        assert!(!lower.sql.contains("IS NULL OR"));
         assert!(!lower.sql.contains("INDEX"));
         assert!(!lower.sql.contains("column_name"));
 
         let upper = plan_cold_segment_candidates_upper_bound().unwrap();
         assert!(upper.sql.contains("csi.min_value <= $6::bytea"));
+        assert!(upper.sql.contains("UNION ALL"));
+        assert!(upper.sql.contains("csi.min_value IS NULL"));
+        assert!(!upper.sql.contains("csi.min_value IS NULL OR"));
         assert!(!upper.sql.contains("csi.max_value >="));
-        assert!(!upper.sql.contains("IS NULL OR"));
         assert!(!upper.sql.contains("INDEX"));
         assert!(!upper.sql.contains("column_name"));
 
@@ -642,6 +889,30 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_bounds_require_complete_active_segment_coverage() {
+        let statement = plan_cold_column_aggregate_bounds().unwrap();
+
+        assert!(statement.sql.contains("active_segment_count"));
+        assert!(statement.sql.contains("indexed_segment_count"));
+        assert!(statement.sql.contains("unknown_bound_count"));
+        assert!(statement.sql.contains("cs.status = 'active'"));
+        assert!(statement.sql.contains("ORDER BY min_value ASC"));
+        assert!(statement.sql.contains("ORDER BY max_value DESC"));
+        assert!(!statement.sql.contains("row_group_min_values"));
+        assert!(!statement.sql.contains("row_group_max_values"));
+        assert_eq!(
+            statement.param_types,
+            vec![
+                SqlParamType::Oid,
+                SqlParamType::Text,
+                SqlParamType::Integer,
+                SqlParamType::Oid,
+                SqlParamType::Integer,
+            ]
+        );
+    }
+
+    #[test]
     fn candidate_sql_never_forces_both_indexes() {
         for statement in [
             plan_cold_segment_candidates_closed_range().unwrap(),
@@ -651,7 +922,6 @@ mod tests {
             assert!(!statement.sql.contains("BitmapAnd"));
             assert!(!statement.sql.contains("IndexScan"));
             assert!(!statement.sql.contains("FORCE"));
-            assert!(!statement.sql.contains("IS NULL OR"));
             assert!(!statement.sql.contains("column_name"));
         }
     }
@@ -677,6 +947,8 @@ mod tests {
         assert!(statement.sql.contains("koldstore.cold_segment_index"));
         assert!(statement.sql.contains("'index_bounds'"));
         assert!(statement.sql.contains("encode(i.min_value, 'hex')"));
+        assert!(statement.sql.contains("'row_group_min_values'"));
+        assert!(statement.sql.contains("'row_group_null_counts'"));
         assert!(!statement.sql.contains("'column_stats'"));
         assert!(!statement.sql.contains("cs.column_stats"));
     }

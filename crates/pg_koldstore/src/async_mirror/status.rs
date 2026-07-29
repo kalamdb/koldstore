@@ -89,9 +89,6 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
             },
         },
         "retention": retention_health,
-        // Compatibility alias for clients written before the threshold became
-        // health-only. New consumers should read `retention`.
-        "admission": retention_health,
         "healthy": metrics.healthy && retained_wal_within_threshold,
     }))
 }

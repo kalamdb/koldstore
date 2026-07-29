@@ -42,6 +42,7 @@ fn plan() -> MergeScanPlan {
         table_oid: 42,
         scanrelid: 1,
         primary_key_columns: vec!["id".to_string()],
+        exact_pk_lookup: false,
         merge_metadata_attnums: MergeMetadataAttnums {
             seq: 3,
             commit_seq: 4,
@@ -290,6 +291,7 @@ fn versioned_segment(path: &str, min_seq: i64, max_seq: i64) -> SegmentStatsHint
         byte_size: None,
         min_seq: SeqId::new(min_seq).unwrap(),
         max_seq: SeqId::new(max_seq).unwrap(),
+        selected_row_groups: None,
     }
 }
 
@@ -351,6 +353,7 @@ fn newest_first_segment_groups_reject_reversed_sequence_range() {
         byte_size: None,
         min_seq: SeqId::new(20).unwrap(),
         max_seq: SeqId::new(10).unwrap(),
+        selected_row_groups: None,
     }])
     .unwrap_err();
 

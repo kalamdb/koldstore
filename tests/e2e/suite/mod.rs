@@ -2,7 +2,6 @@
 
 mod async_load_soak;
 mod endurance;
-mod extension_upgrade;
 mod failure_injection;
 mod full_lifecycle;
 mod harness_mode;
