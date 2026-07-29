@@ -1174,6 +1174,7 @@ async fn apply_schema_sql(client: &Client, schema: &str, table: &str) -> Result<
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn manage_with_hot_limit(
     client: &Client,
     storage: &str,
