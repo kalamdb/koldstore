@@ -589,9 +589,10 @@ async fn run_managed_only_body(
             &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {hot_id}"),
         )
         .await?;
-        common::assert_kold_merge_scan_explain(&plan_pre_flush)?;
+        common::assert_managed_read_plan(&plan_pre_flush)?;
         anyhow::ensure!(
-            plan_pre_flush.contains("Parquet Segments Opened: 0")
+            !plan_pre_flush.contains("Custom Scan (KoldMergeScan)")
+                || plan_pre_flush.contains("Parquet Segments Opened: 0")
                 || plan_pre_flush.contains("Parquet Segments Planned: 0"),
             "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
         );
@@ -836,9 +837,10 @@ async fn run_storage_comparison_body(
             &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {hot_id}"),
         )
         .await?;
-        common::assert_kold_merge_scan_explain(&plan_pre_flush)?;
+        common::assert_managed_read_plan(&plan_pre_flush)?;
         anyhow::ensure!(
-            plan_pre_flush.contains("Parquet Segments Opened: 0")
+            !plan_pre_flush.contains("Custom Scan (KoldMergeScan)")
+                || plan_pre_flush.contains("Parquet Segments Opened: 0")
                 || plan_pre_flush.contains("Parquet Segments Planned: 0"),
             "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
         );
