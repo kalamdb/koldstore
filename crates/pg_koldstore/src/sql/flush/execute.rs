@@ -10,13 +10,15 @@ use koldstore_catalog::ManagedTableSnapshot;
 use koldstore_common::{ColumnRef, FlushPolicy, QualifiedTableName};
 use koldstore_flush::{
     flush_mirror_fetch_limit, flush_phase, max_rows_per_file_from_policy,
-    plan_apply_flush_row_count_deltas, relative_manifest_path, should_continue_flush_catchup,
-    should_start_catchup_wave, stream_flush_chunks, validate_flush_row_selection,
-    write_flush_segment_with_client, FlushStats, FlushWriteChunk, ResolvedFlushSelection,
-    StreamEncodeInput, TableFlushBatchOutcome, WrittenFlushSegment,
+    plan_apply_flush_row_count_deltas, should_continue_flush_catchup, should_start_catchup_wave,
+    stream_flush_chunks, validate_flush_row_selection, write_flush_segment_with_client, FlushStats,
+    FlushWriteChunk, ResolvedFlushSelection, StreamEncodeInput, TableFlushBatchOutcome,
+    WrittenFlushSegment,
 };
 use koldstore_manifest::write_manifest_with_client;
-use koldstore_storage::open_client_from_catalog_fields;
+use koldstore_storage::{
+    manifest_object_key, open_client_from_catalog_fields, render_regular_table_prefix, PathTemplate,
+};
 
 use super::jobs::{
     ensure_flush_job, flush_cancel_requested, mark_flush_job_cancelled, mark_flush_job_completed,
@@ -127,7 +129,12 @@ pub(super) fn stream_write_flush_batches(
     client: &koldstore_storage::ObjectStoreClient,
 ) -> Result<TableFlushBatchOutcome, String> {
     let stats = &selection.stats;
-    let manifest_path = relative_manifest_path(&ctx.relation.namespace, &ctx.relation.name);
+    let table_prefix = render_regular_table_prefix(
+        &PathTemplate::new(&ctx.storage.regular_path_tmpl),
+        &ctx.relation.namespace,
+        &ctx.relation.name,
+    )?;
+    let manifest_path = manifest_object_key(&table_prefix);
     let schema_version =
         u32::try_from(ctx.storage.schema_version).map_err(|error| error.to_string())?;
     let mut batch_number = next_flush_batch_number(table_oid)?;
@@ -191,6 +198,7 @@ pub(super) fn stream_write_flush_batches(
                 write_streamed_chunk(
                     client,
                     ctx,
+                    &table_prefix,
                     table_oid,
                     &mut batch_number,
                     &mut total_rows_flushed,
@@ -234,6 +242,7 @@ pub(super) fn stream_write_flush_batches(
 fn write_streamed_chunk(
     client: &koldstore_storage::ObjectStoreClient,
     ctx: &FlushPreparedContext,
+    table_prefix: &str,
     table_oid: pgrx::pg_sys::Oid,
     batch_number: &mut i32,
     total_rows_flushed: &mut i64,
@@ -251,8 +260,7 @@ fn write_streamed_chunk(
         .collect::<Vec<_>>();
     let written = write_flush_segment_with_client(
         client,
-        &ctx.relation.namespace,
-        &ctx.relation.name,
+        table_prefix,
         &ctx.storage.compression,
         &primary_key_names,
         ctx.storage.schema_version,
@@ -329,7 +337,6 @@ pub(super) fn finalize_flush(
     let _new_generation = activate_flush_segments(
         table_oid,
         expected_generation,
-        &outcome.manifest_path,
         outcome.manifest.segments.len() as i32,
         outcome.manifest.max_seq,
         outcome.manifest.max_commit_seq,

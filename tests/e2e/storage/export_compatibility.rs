@@ -34,8 +34,8 @@ async fn export_query_reads_manifest_and_segments_from_pgrx() -> Result<()> {
             .query_one(&executable_sql, &[&table.relation])
             .await?;
 
-        let manifest_path = row.get::<_, String>(0);
-        let object_path = row.get::<_, String>(1);
+        let generation = row.get::<_, i64>(0);
+        let path = row.get::<_, String>(1);
         let row_count = row.get::<_, i64>(2);
         let byte_size = row.get::<_, i64>(3);
 
@@ -43,8 +43,8 @@ async fn export_query_reads_manifest_and_segments_from_pgrx() -> Result<()> {
             export.archive_manifest_path,
             format!("{}/manifest.json", table.relation.replace('.', "/"))
         );
-        assert!(manifest_path.ends_with("manifest.json"));
-        assert!(object_path.ends_with(".parquet"));
+        assert!(generation > 0);
+        assert!(path.starts_with("001/") && path.ends_with(".parquet"));
         assert_eq!(row_count, 12);
         assert!(byte_size > 0);
     }

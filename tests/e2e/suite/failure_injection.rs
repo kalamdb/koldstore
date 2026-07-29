@@ -165,12 +165,17 @@ async fn flushed_artifacts(
         .client
         .query_one(
             r#"
-            SELECT m.manifest_path, cs.object_path
+            SELECT
+              format('%s/%s/manifest.json', n.nspname, c.relname),
+              format('%s/%s/%s', n.nspname, c.relname, cs.path)
             FROM koldstore.manifest m
+            JOIN pg_class c ON c.oid = m.table_oid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
             JOIN koldstore.cold_segments cs
               ON cs.table_oid = m.table_oid
              AND cs.scope_key = m.scope_key
             WHERE m.table_oid = $1::text::regclass::oid
+              AND m.generation > 0
               AND m.sync_state = 'in_sync'
               AND cs.status = 'active'
             ORDER BY cs.batch_number
@@ -250,23 +255,11 @@ async fn missing_manifest_after_flush_fails_merge_scan_closed() -> Result<()> {
         common::fence_async_mirror_if_needed(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
-        let (manifest_abs, segment_abs, manifest_rel) =
-            flushed_artifacts(&db, &table.relation).await?;
+        let (manifest_abs, segment_abs, _) = flushed_artifacts(&db, &table.relation).await?;
         std::fs::remove_file(&manifest_abs)
             .with_context(|| format!("remove {}", manifest_abs.display()))?;
         std::fs::remove_file(&segment_abs)
             .with_context(|| format!("remove {}", segment_abs.display()))?;
-        db.client
-            .execute(
-                r#"
-                UPDATE koldstore.manifest
-                SET manifest_path = $2
-                WHERE table_oid = $1::text::regclass::oid
-                "#,
-                &[&table.relation, &format!("missing/{manifest_rel}")],
-            )
-            .await?;
-
         let err = db
             .client
             .query_one(&format!("SELECT count(*) FROM {}", table.relation), &[])
@@ -363,10 +356,12 @@ async fn partial_multi_segment_outage_fails_merge_scan_closed() -> Result<()> {
             .client
             .query(
                 r#"
-                SELECT object_path
-                FROM koldstore.cold_segments
-                WHERE table_oid = $1::text::regclass::oid AND status = 'active'
-                ORDER BY batch_number
+                SELECT format('%s/%s/%s', n.nspname, c.relname, cs.path)
+                FROM koldstore.cold_segments cs
+                JOIN pg_class c ON c.oid = cs.table_oid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE cs.table_oid = $1::text::regclass::oid AND cs.status = 'active'
+                ORDER BY cs.batch_number
                 "#,
                 &[&table.relation],
             )

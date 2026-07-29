@@ -29,7 +29,7 @@ fn index_bound(column_id: i16, min: i64, max: i64) -> CatalogSegmentIndexBound {
 #[test]
 fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
     let rows = vec![CatalogManifestSegmentRow {
-        object_path: "app/items/001/segment-0001-aaaaaaaa.parquet".to_string(),
+        path: "001/segment-0001-aaaaaaaa.parquet".to_string(),
         batch_number: 1,
         min_seq: 1,
         max_seq: 10,
@@ -100,7 +100,7 @@ fn manifest_paths_and_sharded_round_trip_io() {
         "notes",
         &[ColumnRef::new(ColumnId::from_attnum(7), "id")],
         CatalogManifestSegmentRow {
-            object_path: "app/notes/001/segment-0001-aaaaaaaa.parquet".to_string(),
+            path: "001/segment-0001-aaaaaaaa.parquet".to_string(),
             batch_number: 1,
             min_seq: 5,
             max_seq: 5,
@@ -139,7 +139,7 @@ fn pending_write_sync_state_matches_hot_dml_constant() {
 fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
     let rows = vec![
         CatalogManifestSegmentRow {
-            object_path: "app/items/001/segment-0001-aaaaaaaa.parquet".to_string(),
+            path: "001/segment-0001-aaaaaaaa.parquet".to_string(),
             batch_number: 1,
             min_seq: 1,
             max_seq: 10,
@@ -151,7 +151,7 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
             index_bounds: vec![],
         },
         CatalogManifestSegmentRow {
-            object_path: "app/items/001/segment-0002-bbbbbbbb.parquet".to_string(),
+            path: "001/segment-0002-bbbbbbbb.parquet".to_string(),
             batch_number: 2,
             min_seq: 11,
             max_seq: 20,

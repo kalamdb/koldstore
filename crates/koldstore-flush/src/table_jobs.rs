@@ -7,6 +7,8 @@
 use koldstore_common::SqlStatement;
 use thiserror::Error;
 
+use crate::jobs_sql::ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE;
+
 /// Flush job `phase` values written to `koldstore.jobs`.
 pub mod flush_phase {
     /// Job row inserted, not yet started.
@@ -44,7 +46,8 @@ pub fn plan_lookup_active_inline_flush_job() -> std::result::Result<SqlStatement
 {
     SqlStatement::read_with_params(
         "lookup active inline flush job",
-        r#"
+        &format!(
+            r#"
 SELECT COALESCE((
     SELECT jsonb_build_object(
         'id', id::text,
@@ -53,12 +56,12 @@ SELECT COALESCE((
     FROM koldstore.jobs
     WHERE table_oid = $1::oid
       AND scope_key = ''
-      AND job_type = 'flush'
-      AND status IN ('pending', 'running')
+      AND {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
     ORDER BY updated_at, id
     LIMIT 1
 ), '')
-"#,
+"#
+        ),
         [koldstore_common::SqlParamType::Oid],
     )
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))

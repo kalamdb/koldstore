@@ -121,7 +121,7 @@ WITH segment_input AS (
         $13::text[]
     ) AS u(
         segment_id,
-        object_path,
+        path,
         batch_number,
         min_seq,
         max_seq,
@@ -139,7 +139,7 @@ inserted_segments AS (
         segment_id,
         table_oid,
         scope_key,
-        object_path,
+        path,
         batch_number,
         min_seq,
         max_seq,
@@ -156,7 +156,7 @@ inserted_segments AS (
         u.segment_id,
         $1::oid,
         '',
-        u.object_path,
+        u.path,
         u.batch_number,
         u.min_seq,
         u.max_seq,
@@ -229,11 +229,10 @@ DO UPDATE SET
 /// - `$1` table oid
 /// - `$2` expected generation
 /// - `$3` new generation (`expected + 1`)
-/// - `$4` manifest path
-/// - `$5` segment_count
-/// - `$6` max_seq
-/// - `$7` max_commit_seq
-/// - `$8` pending segment id array
+/// - `$4` segment_count
+/// - `$5` max_seq
+/// - `$6` max_commit_seq
+/// - `$7` pending segment id array
 ///
 /// Returns one row with the new generation when CAS succeeds; zero rows on
 /// generation conflict (caller must fail the job).
@@ -251,7 +250,6 @@ WITH cas AS (
     INSERT INTO koldstore.manifest (
         table_oid,
         scope_key,
-        manifest_path,
         etag,
         generation,
         sync_state,
@@ -264,19 +262,17 @@ WITH cas AS (
     VALUES (
         $1::oid,
         '',
-        $4::text,
         NULL,
         $3::bigint,
         '{in_sync}',
-        $5::integer,
+        $4::integer,
+        $5::bigint,
         $6::bigint,
-        $7::bigint,
         NULL,
         now()
     )
     ON CONFLICT (table_oid, scope_key)
     DO UPDATE SET
-        manifest_path = EXCLUDED.manifest_path,
         generation = EXCLUDED.generation,
         sync_state = '{in_sync}',
         segment_count = EXCLUDED.segment_count,
@@ -293,7 +289,7 @@ activated AS (
     WHERE table_oid = $1::oid
       AND scope_key = ''
       AND status = 'pending'
-      AND segment_id = ANY($8::uuid[])
+      AND segment_id = ANY($7::uuid[])
       AND EXISTS (SELECT 1 FROM cas)
     RETURNING segment_id
 )
@@ -372,6 +368,6 @@ mod tests {
             .sql
             .contains("WHERE koldstore.manifest.generation = $2::bigint"));
         assert!(statement.sql.contains("SET status = 'active'"));
-        assert!(statement.sql.contains("segment_id = ANY($8::uuid[])"));
+        assert!(statement.sql.contains("segment_id = ANY($7::uuid[])"));
     }
 }

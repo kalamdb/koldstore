@@ -340,20 +340,22 @@ fn cached_from_context(
         .segments
         .into_iter()
         .map(|segment| {
+            let object_path =
+                koldstore_storage::join_object_key(&context.table_prefix, &segment.path);
             let min_seq = koldstore_common::SeqId::new(segment.min_seq).map_err(|error| {
                 format!(
-                    "catalog segment `{}` has invalid min_seq {}: {error}",
-                    segment.object_path, segment.min_seq
+                    "catalog segment `{object_path}` has invalid min_seq {}: {error}",
+                    segment.min_seq
                 )
             })?;
             let max_seq = koldstore_common::SeqId::new(segment.max_seq).map_err(|error| {
                 format!(
-                    "catalog segment `{}` has invalid max_seq {}: {error}",
-                    segment.object_path, segment.max_seq
+                    "catalog segment `{object_path}` has invalid max_seq {}: {error}",
+                    segment.max_seq
                 )
             })?;
             Ok(SegmentStatsHint {
-                object_path: segment.object_path,
+                object_path,
                 schema_version: segment.schema_version,
                 physical_names: segment.physical_names,
                 byte_size: segment.byte_size,
@@ -363,7 +365,7 @@ fn cached_from_context(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(CachedManifestScanContext {
-        manifest_path: context.manifest_path,
+        manifest_path: koldstore_storage::manifest_object_key(&context.table_prefix),
         generation: context.generation,
         base_path: context.base_path,
         storage_type: context.storage_type,

@@ -5,11 +5,13 @@
 
 use koldstore_catalog::CatalogManifestSegmentRow;
 use koldstore_common::ColumnId;
-use koldstore_manifest::{segment_object_path, segment_path_token, table_object_prefix};
+use koldstore_manifest::{
+    segment_object_path, segment_path_token, segment_relative_object_path, table_object_prefix,
+};
 use koldstore_parquet::validate_parquet_bytes;
 use koldstore_storage::{
-    open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
-    ObjectStoreClient,
+    join_object_key, open_filesystem_client, publish_immutable_object, temp_object_key,
+    unique_temp_file_name, ObjectStoreClient,
 };
 use uuid::Uuid;
 
@@ -24,7 +26,9 @@ use crate::write::FlushWriteChunk;
 pub struct WrittenFlushSegment {
     /// New segment id for catalog inserts.
     pub segment_id: uuid::Uuid,
-    /// Full object path under the table prefix (also stored on the manifest).
+    /// Relative object path stored in the catalog and manifest.
+    pub path: String,
+    /// Full object path under the table prefix used for publication.
     pub object_path: String,
     /// Final on-disk byte size.
     pub byte_size: i64,
@@ -47,6 +51,12 @@ pub struct WrittenFlushSegment {
 #[must_use]
 pub fn flush_segment_object_path(prefix: &str, batch_number: i32, segment_id: Uuid) -> String {
     segment_object_path(prefix, batch_number, segment_path_token(segment_id))
+}
+
+/// Builds the table-relative object key for one flush segment.
+#[must_use]
+pub fn flush_segment_relative_path(batch_number: i32, segment_id: Uuid) -> String {
+    segment_relative_object_path(batch_number, segment_path_token(segment_id))
 }
 
 /// Writes one Parquet segment via encode → validate → durable Create publish.
@@ -73,8 +83,7 @@ pub fn write_flush_segment_file(
     let client = open_filesystem_client(base_path).map_err(|error| error.to_string())?;
     write_flush_segment_with_client(
         &client,
-        namespace,
-        table_name,
+        &table_object_prefix(namespace, table_name),
         compression,
         primary_key_columns,
         schema_version,
@@ -92,8 +101,7 @@ pub fn write_flush_segment_file(
 #[allow(clippy::too_many_arguments)]
 pub fn write_flush_segment_with_client(
     client: &ObjectStoreClient,
-    namespace: &str,
-    table_name: &str,
+    table_prefix: &str,
     _compression: &str,
     _primary_key_columns: &[String],
     schema_version: i32,
@@ -101,15 +109,16 @@ pub fn write_flush_segment_with_client(
     chunk: &FlushWriteChunk,
     chunk_stats: &FlushStats,
 ) -> Result<WrittenFlushSegment, String> {
-    let prefix = table_object_prefix(namespace, table_name);
+    let prefix = table_prefix.trim_matches('/');
     // Allocate the segment id before publish so the final key is unique per
     // write attempt. Retries after abort must not reuse an orphaned object.
     let segment_id = Uuid::new_v4();
-    let object_path = flush_segment_object_path(&prefix, batch_number, segment_id);
+    let path = flush_segment_relative_path(batch_number, segment_id);
+    let object_path = join_object_key(prefix, &path);
     // Flat temp under `{prefix}/.tmp/` — uniqueness is in the file name UUID.
     // Avoids leaving empty per-attempt directories after temp cleanup.
     let temp_key = temp_object_key(
-        &prefix,
+        prefix,
         "",
         &unique_temp_file_name(&format!(
             "segment-{batch_number:04}-{}.parquet",
@@ -133,7 +142,7 @@ pub fn write_flush_segment_with_client(
 
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
     let catalog_row = CatalogManifestSegmentRow {
-        object_path: object_path.clone(),
+        path: path.clone(),
         batch_number,
         min_seq: chunk_stats.min_seq,
         max_seq: chunk_stats.max_seq,
@@ -147,6 +156,7 @@ pub fn write_flush_segment_with_client(
 
     Ok(WrittenFlushSegment {
         segment_id,
+        path,
         object_path,
         byte_size,
         checksum: published.checksum,

@@ -16,8 +16,8 @@ pub struct RelationContext {
 /// Active cold-segment row returned by merge-scan catalog lookups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestScanSegmentStats {
-    /// Final object-store path.
-    pub object_path: String,
+    /// Table-relative object-store path (`001/segment-….parquet`).
+    pub path: String,
     /// Schema version used to write the segment.
     pub schema_version: i32,
     /// Physical Parquet field names keyed by stable column ID.
@@ -37,8 +37,10 @@ pub struct ManifestScanSegmentStats {
 /// readable from the last published generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InSyncManifestScanContext {
-    /// Latest published manifest object path.
-    pub manifest_path: String,
+    /// Normalized object-store table prefix (`{namespace}/{table}/` style).
+    pub table_prefix: String,
+    /// Configured regular table path template from `koldstore.storage`.
+    pub regular_path_tmpl: String,
     /// Monotonic catalog generation (CAS identity).
     pub generation: u64,
     /// Object-store base path for the managed table.
@@ -64,6 +66,8 @@ pub struct FlushStorageContext {
     pub credentials: serde_json::Value,
     /// Storage backend config JSON.
     pub config: serde_json::Value,
+    /// Configured regular table path template.
+    pub regular_path_tmpl: String,
     /// Active KoldStore schema version.
     pub schema_version: i32,
     /// Configured Parquet compression codec.
@@ -99,7 +103,10 @@ pub fn in_sync_manifest_scan_context(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(InSyncManifestScanContext {
-        manifest_path: required_string(value, "manifest_path")?.to_string(),
+        table_prefix: required_string(value, "table_prefix")?.to_string(),
+        regular_path_tmpl: optional_string(value, "regular_path_tmpl")
+            .unwrap_or("{namespace}/{tableName}/")
+            .to_string(),
         generation: required_u64(value, "generation")?,
         base_path: required_string(value, "base_path")?.to_string(),
         storage_type: optional_string(value, "storage_type")
@@ -126,7 +133,7 @@ pub fn manifest_scan_segment_stats(
     value: &serde_json::Value,
 ) -> Result<ManifestScanSegmentStats, String> {
     Ok(ManifestScanSegmentStats {
-        object_path: required_string(value, "object_path")?.to_string(),
+        path: required_string(value, "path")?.to_string(),
         schema_version: required_i32(value, "schema_version")?,
         physical_names: value
             .get("physical_names")
@@ -290,6 +297,9 @@ pub fn flush_storage_context(value: &serde_json::Value) -> Result<FlushStorageCo
             .get("config")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
+        regular_path_tmpl: optional_string(value, "regular_path_tmpl")
+            .unwrap_or("{namespace}/{tableName}/")
+            .to_string(),
         schema_version,
         compression: required_string(value, "compression")?.to_string(),
     })
@@ -357,46 +367,47 @@ mod tests {
     #[test]
     fn in_sync_manifest_scan_context_decodes_segment_stats() {
         let value = serde_json::json!({
-            "manifest_path": "ns/table/manifest.json",
+            "table_prefix": "ns/table/",
             "generation": 3,
             "base_path": "/tmp/koldstore",
             "segments": [
                 {
-                    "object_path": "ns/table/batch-1.parquet",
+                    "path": "001/segment-0001-abcd.parquet",
                     "schema_version": 1,
                     "physical_names": {"1": "id"},
                     "min_seq": 1,
-                    "max_seq": 100,
-                    "column_stats": {"1": {"min": 1, "max": 100}}
+                    "max_seq": 100
                 }
             ]
         });
 
         let context = in_sync_manifest_scan_context(&value).unwrap();
-        assert_eq!(context.manifest_path, "ns/table/manifest.json");
+        assert_eq!(context.table_prefix, "ns/table/");
         assert_eq!(context.generation, 3);
         assert_eq!(context.base_path, "/tmp/koldstore");
         assert_eq!(context.storage_type, "filesystem");
         assert_eq!(context.segments.len(), 1);
-        assert_eq!(context.segments[0].object_path, "ns/table/batch-1.parquet");
+        assert_eq!(
+            context.segments[0].path,
+            "001/segment-0001-abcd.parquet"
+        );
         assert_eq!(context.segments[0].byte_size, None);
     }
 
     #[test]
     fn in_sync_manifest_scan_context_decodes_byte_size() {
         let value = serde_json::json!({
-            "manifest_path": "ns/table/manifest.json",
+            "table_prefix": "ns/table/",
             "generation": 3,
             "base_path": "s3://bucket/prefix",
             "storage_type": "s3",
             "segments": [
                 {
-                    "object_path": "ns/table/batch-1.parquet",
+                    "path": "001/segment-0001-abcd.parquet",
                     "schema_version": 2,
                     "physical_names": {"1": "old_id"},
                     "min_seq": 1,
                     "max_seq": 10,
-                    "column_stats": {"1": {"min": 1, "max": 10}},
                     "byte_size": 4096
                 }
             ]

@@ -323,7 +323,6 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
 
 #[test]
 fn operation_boundaries_document_safe_defaults() {
-    assert!(koldstore_flush::worker::requires_shared_preload());
     assert!(koldstore_flush::cleanup::cleanup_allowed(true));
     assert!(!koldstore_flush::cleanup::cleanup_allowed(false));
     assert_eq!(koldstore_merge::events::DEFAULT_CHANGE_LIMIT, 1000);

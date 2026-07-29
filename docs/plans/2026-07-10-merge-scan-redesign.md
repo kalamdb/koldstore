@@ -26,6 +26,14 @@ metadata and readers; `ExecCustomScan` advances the merge and emits rows
 incrementally. Scan-owned memory must remain bounded and be reset as rows and
 segment batches are consumed.
 
+The first streaming delivery bounds decoded cold payloads and PostgreSQL Datum
+materialization to one overlapping sequence-range group and one output tuple.
+Hot JSON for mixed scans is likewise paged (one SPI batch at a time) and each
+emitted row image is dropped after Datum materialization. Exact winner
+resolution still retains a compact in-memory primary-key identity set for the
+full scan; fully constant-memory execution therefore still requires spillable
+identity state.
+
 The executor state should use focused Rust domain types for scan identity,
 segment cursors, primary keys, projected columns, and row ownership. PostgreSQL
 Datum conversion stays at the extension boundary.
@@ -76,12 +84,13 @@ publication changes.
 
 1. Stabilize typed scan/catalog boundaries and preserve existing correctness
    tests.
-2. Introduce iterator-based cold reads and bounded scan state.
-3. Integrate hot rows, tombstones, and deterministic winner resolution.
+2. Introduce iterator-based cold reads and payload-bounded scan state.
+3. Integrate hot rows, tombstones, and deterministic winner resolution with a
+   compact exact primary-key identity set.
 4. Add safe pruning/projection pushdown and detailed `EXPLAIN` diagnostics.
 5. Validate rescans, errors, RLS behavior, object-store limits, and memory use.
 6. Benchmark hot-only, point lookup, selective mixed, and full mixed scans
-   before making the streaming path the default.
+   (streaming is the default mixed/cold emit path).
 
 ## Verification
 

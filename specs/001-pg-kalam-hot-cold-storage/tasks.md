@@ -192,7 +192,7 @@
 - [X] T103 [US3] Implement `koldstore.cold_segments` insertion after manifest commit with min/max `_seq`, min/max `_commit_seq`, row count, byte size, stats, schema version, and manifest identity in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
 - [X] T104 [US3] Implement local `koldstore.cold_pk_hints` update after successful flush using exact hashes when configured and bloom/range hints otherwise in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/job.rs`
 - [X] T105 [US3] Implement hot cleanup after manifest commit, including live-row removal and tombstone retention while older cold segments may contain the PK in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/cleanup.rs`
-- [X] T106 [US3] Implement built-in background worker registration and SQL/pg_cron fallback boundaries in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/worker.rs`
+- [X] T106 [US3] Implement built-in background worker registration and SQL/pg_cron fallback boundaries in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/database_worker/flush_task.rs`
 - [X] T107 [US3] Implement idempotent orphan temp/final object recovery and quarantine behavior in `/Users/jamal/git/pg-kalam/crates/pg_koldstore/src/flush/recovery.rs`
 
 **Checkpoint**: User Story 3 is independently functional and testable.

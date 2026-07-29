@@ -81,7 +81,6 @@ flowchart BT
     flush --> parquet
     flush --> mirror
     flush --> storage
-    flush --> worker
     migrate --> common
     migrate --> schema
     migrate --> mirror

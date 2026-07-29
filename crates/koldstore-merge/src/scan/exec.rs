@@ -303,9 +303,3 @@ fn value_matches_expected(value: &serde_json::Value, expected: &str) -> bool {
     }
     value.is_null() && expected == "null"
 }
-
-/// Returns true when a residual/security qual must be evaluated after merge.
-#[must_use]
-pub const fn evaluate_after_winner_resolution(is_safe_prune: bool) -> bool {
-    !is_safe_prune
-}

@@ -355,7 +355,8 @@ mid-flush); the origin stays armed through COMMIT so pgoutput emits ORIGIN,
 then a xact callback restores the prior session state. The trigger-control
 setting above remains transaction-local SQL state.
 
-`plan_clean_schema_cleanup` (JSON `jsonb_to_recordset`) remains for tests only.
+Production prune uses `plan_seq_range_cleanup` (`seq <= max_seq`); the JSON
+`jsonb_to_recordset` cleanup planner was removed.
 
 ---
 

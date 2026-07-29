@@ -405,12 +405,19 @@ impl TestDb {
             .client
             .query_one(
                 r#"
-                SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size
+                SELECT
+                  format('%s/%s/manifest.json', n.nspname, c.relname),
+                  format('%s/%s/%s', n.nspname, c.relname, cs.path),
+                  cs.row_count,
+                  cs.byte_size
                 FROM koldstore.manifest m
+                JOIN pg_class c ON c.oid = m.table_oid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
                 JOIN koldstore.cold_segments cs
                   ON cs.table_oid = m.table_oid
                  AND cs.scope_key = m.scope_key
                 WHERE m.table_oid = $1::text::regclass::oid
+                  AND m.generation > 0
                   AND m.sync_state = 'in_sync'
                   AND cs.status = 'active'
                 ORDER BY cs.batch_number

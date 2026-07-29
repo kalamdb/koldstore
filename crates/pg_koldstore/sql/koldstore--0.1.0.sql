@@ -18,7 +18,7 @@ GRANT USAGE ON SCHEMA koldstore TO PUBLIC;
 CREATE TYPE koldstore.managed_table_info AS (
   table_oid oid,
   table_type text,
-  storage_id uuid,
+  storage_id text,
   schema_version integer,
   scope_column text
 );
@@ -39,7 +39,7 @@ CREATE TYPE koldstore.change_event AS (
 );
 
 CREATE TABLE IF NOT EXISTS koldstore.storage (
-  id uuid PRIMARY KEY,
+  id text PRIMARY KEY,
   name text NOT NULL UNIQUE,
   storage_type text NOT NULL CHECK (storage_type IN ('filesystem', 's3', 'gcs', 'azure')),
   base_path text NOT NULL,
@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS koldstore.schemas (
   indexed_columns jsonb NOT NULL DEFAULT '[]'::jsonb,
   type_matrix jsonb NOT NULL DEFAULT '{}'::jsonb,
   options jsonb NOT NULL DEFAULT '{}'::jsonb,
-  storage_id uuid REFERENCES koldstore.storage(id),
+  storage_id text REFERENCES koldstore.storage(id),
   last_flush_seq bigint NOT NULL DEFAULT 0,
   last_flush_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -112,7 +112,6 @@ CREATE TABLE IF NOT EXISTS koldstore.async_mirror_state (
 CREATE TABLE IF NOT EXISTS koldstore.manifest (
   table_oid oid NOT NULL,
   scope_key text NOT NULL DEFAULT '',
-  manifest_path text NOT NULL,
   etag text,
   -- Monotonic CAS generation: flush activate bumps with WHERE generation = $expected.
   generation bigint NOT NULL DEFAULT 0,
@@ -191,7 +190,7 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   segment_id uuid PRIMARY KEY,
   table_oid oid NOT NULL,
   scope_key text NOT NULL DEFAULT '',
-  object_path text NOT NULL,
+  path text NOT NULL,
   batch_number integer NOT NULL,
   min_seq bigint NOT NULL,
   max_seq bigint NOT NULL,
@@ -204,14 +203,12 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   -- Object identity from publish (sha256 hex + backend etag). Set at pending insert.
   checksum text,
   object_etag text,
-  created_xid xid,
-  created_lsn pg_lsn,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx
   ON koldstore.cold_segments (table_oid, scope_key, min_seq, max_seq)
-  INCLUDE (segment_id, object_path, min_commit_seq, max_commit_seq, row_count, byte_size, schema_version, object_etag, checksum)
+  INCLUDE (segment_id, path, min_commit_seq, max_commit_seq, row_count, byte_size, schema_version, object_etag, checksum)
   WHERE status = 'active';
 
 CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx
@@ -265,10 +262,9 @@ AS $$
   INSERT INTO koldstore.manifest (
     table_oid,
     scope_key,
-    manifest_path,
     sync_state
   )
-  VALUES (p_table_oid, '', 'pending', 'pending_write')
+  VALUES (p_table_oid, '', 'pending_write')
   ON CONFLICT (table_oid, scope_key) DO NOTHING;
 $$;
 

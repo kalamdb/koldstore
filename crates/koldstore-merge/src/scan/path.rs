@@ -107,12 +107,6 @@ pub const fn custom_scan_explain_label() -> &'static str {
     "Custom Scan (KoldMergeScan)"
 }
 
-/// Returns whether heap-only final paths must be replaced for a managed relation.
-#[must_use]
-pub const fn replace_heap_final_path(is_managed: bool) -> bool {
-    is_managed
-}
-
 /// Builds the pure path replacement decision for a relation.
 ///
 /// Managed relations expose only the KoldMergeScan final path; the best

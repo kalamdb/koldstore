@@ -523,8 +523,12 @@ async fn exercise_minio_parquet_reads(db: &common::TestDb, relation: &str) -> Re
         .client
         .query(
             r#"
-            SELECT cs.object_path, cs.row_count
+            SELECT
+              format('%s/%s/%s', n.nspname, c.relname, cs.path),
+              cs.row_count
             FROM koldstore.cold_segments cs
+            JOIN pg_class c ON c.oid = cs.table_oid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE cs.table_oid = $1::text::regclass::oid
               AND cs.status = 'active'
             ORDER BY cs.batch_number

@@ -7,8 +7,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::PathTemplate;
-use koldstore_common::SqlStatement;
+use crate::{render_regular_table_prefix, PathTemplate};
+use koldstore_common::{SqlStatement, StorageId};
+
+/// Generates a short storage id from a UUID v4.
+#[must_use]
+pub fn generate_storage_id() -> StorageId {
+    let token = Uuid::new_v4().simple().to_string();
+    StorageId::new(&token[..8]).expect("UUID-derived storage id is valid")
+}
 
 /// Default regular (unscoped) table object path template.
 pub const DEFAULT_REGULAR_PATH_TMPL: &str = "{namespace}/{tableName}/";
@@ -128,7 +135,7 @@ pub struct StorageRegistration {
 #[derive(Debug, Clone, PartialEq)]
 pub struct StorageRegistrationPlan {
     /// Storage id to bind as parameter `$1`.
-    pub storage_id: Uuid,
+    pub storage_id: StorageId,
     /// Validated registration values to bind as parameters `$2` through `$8`.
     pub registration: StorageRegistration,
     /// Parameterized catalog mutation statement.
@@ -178,7 +185,11 @@ impl StorageRegistration {
         namespace: &str,
         table_name: &str,
     ) -> Result<String, String> {
-        PathTemplate::new(&self.regular_path_tmpl).render(namespace, table_name, None)
+        render_regular_table_prefix(
+            &PathTemplate::new(&self.regular_path_tmpl),
+            namespace,
+            table_name,
+        )
     }
 
     /// Renders the scoped object prefix for a managed table.
@@ -237,7 +248,7 @@ impl StorageRegistration {
     /// Returns an error when the registration is invalid or the SQL statement
     /// metadata cannot be prepared.
     pub fn register_plan(&self) -> DdlResult<StorageRegistrationPlan> {
-        self.register_plan_with_id(Uuid::new_v4())
+        self.register_plan_with_id(generate_storage_id())
     }
 
     /// Builds a storage registration catalog mutation plan with a caller-provided id.
@@ -246,7 +257,10 @@ impl StorageRegistration {
     ///
     /// Returns an error when the registration is invalid or the SQL statement
     /// metadata cannot be prepared.
-    pub fn register_plan_with_id(&self, storage_id: Uuid) -> DdlResult<StorageRegistrationPlan> {
+    pub fn register_plan_with_id(
+        &self,
+        storage_id: StorageId,
+    ) -> DdlResult<StorageRegistrationPlan> {
         self.validate()?;
         let statement = SqlStatement::write("register storage", REGISTER_STORAGE_SQL)
             .map_err(|error| DdlError::Sql(error.to_string()))?;

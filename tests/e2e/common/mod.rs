@@ -34,8 +34,9 @@ pub use catalog::{
     primary_key_columns, published_manifest_count,
 };
 pub use cluster::{
-    connect, expected_pg_ports, expected_pg_versions, local_pg_matrix, require_pgrx_server,
-    require_pgrx_server_sync, scenario_pg_matrix, wait_for_postgres, PgTarget, PgrxServer,
+    connect, error_chain_contains, expected_pg_ports, expected_pg_versions, local_pg_matrix,
+    require_pgrx_server, require_pgrx_server_sync, scenario_pg_matrix, wait_for_postgres, PgTarget,
+    PgrxServer,
 };
 pub use db::{FixtureStorage, ManagedTable, TestDb};
 pub use describe_table::{

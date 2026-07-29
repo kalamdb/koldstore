@@ -151,7 +151,7 @@ pg_koldstore/
       plan.rs
       exec.rs              # glue -> koldstore-merge + koldstore-parquet + FFI
     flush/
-      worker.rs
+      # historical; built-in scheduler now lives in database_worker/flush_task.rs
       job.rs
       cleanup.rs
     migrate/
@@ -173,7 +173,9 @@ Rules:
 
 ## Background Worker Boundary
 
-Built-in scheduler code lives in `pg_koldstore/flush/worker.rs` because PostgreSQL background workers are extension integration. Flush job logic should be thin orchestration over:
+Built-in scheduler code lives in `pg_koldstore/src/database_worker/flush_task.rs`
+because PostgreSQL background workers are extension integration. Flush job logic
+should be thin orchestration over:
 
 - `koldstore-manifest` for manifest state and publish
 - `koldstore-parquet` for segment writer

@@ -136,6 +136,7 @@ SELECT jsonb_build_object(
     'storage_type', st.storage_type,
     'credentials', COALESCE(st.credentials, '{}'::jsonb),
     'config', COALESCE(st.config, '{}'::jsonb),
+    'regular_path_tmpl', st.regular_path_tmpl,
     'schema_version', s.version,
     'compression', COALESCE(s.options->>'compression', 'zstd')
 )::text
@@ -204,12 +205,11 @@ LIMIT 1
 
 /// Builds the latest published manifest scan context for merge-scan planning.
 ///
-/// Returns one JSON text row with manifest path, generation, storage base path,
+/// Returns one JSON text row with table prefix, generation, storage base path,
 /// and active shared-scope cold-segment stats when a published manifest exists.
 ///
 /// `sync_state = 'pending_write'` after hot DML still exposes the last published
-/// cold segments; only the placeholder pre-flush row (`manifest_path = 'pending'`)
-/// is treated as hot-only.
+/// cold segments; only rows with a published generation are returned.
 ///
 /// # Errors
 ///
@@ -219,7 +219,22 @@ pub fn plan_in_sync_manifest_scan_context() -> SqlResult<SqlStatement> {
         "resolve published manifest scan context",
         r#"
 SELECT jsonb_build_object(
-  'manifest_path', m.manifest_path,
+  'table_prefix', CASE
+      WHEN regexp_replace(
+          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
+          '(^/+)|(/+$)',
+          '',
+          'g'
+      ) = ''
+      THEN ''
+      ELSE regexp_replace(
+          replace(replace(st.regular_path_tmpl, '{namespace}', n.nspname), '{tableName}', c.relname),
+          '(^/+)|(/+$)',
+          '',
+          'g'
+      ) || '/'
+  END,
+  'regular_path_tmpl', st.regular_path_tmpl,
   'generation', m.generation,
   'base_path', st.base_path,
   'storage_type', st.storage_type,
@@ -228,7 +243,7 @@ SELECT jsonb_build_object(
   'segments', COALESCE((
       SELECT jsonb_agg(
           jsonb_build_object(
-              'object_path', cs.object_path,
+              'path', cs.path,
               'schema_version', cs.schema_version,
               'min_seq', cs.min_seq,
               'max_seq', cs.max_seq,
@@ -258,9 +273,10 @@ SELECT jsonb_build_object(
 )::text
 FROM koldstore.manifest m
 JOIN koldstore.schemas s ON s.table_oid = m.table_oid AND s.active AND s.initialization_state = 'complete'
+JOIN pg_catalog.pg_class c ON c.oid = s.table_oid
+JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 JOIN koldstore.storage st ON st.id = s.storage_id
 WHERE m.table_oid = $1::oid
-  AND m.manifest_path IS DISTINCT FROM 'pending'
   AND m.generation > 0
 ORDER BY m.generation DESC
 LIMIT 1
@@ -349,7 +365,10 @@ fn plan_cold_segment_candidates(
         &format!(
             r#"
 SELECT
-    cs.object_path,
+    CASE
+      WHEN pref.prefix = '' THEN cs.path
+      ELSE pref.prefix || '/' || cs.path
+    END,
     cs.byte_size,
     cs.schema_version,
     cs.min_seq,
@@ -371,6 +390,23 @@ JOIN koldstore.cold_segments cs
   ON cs.segment_id = csi.segment_id
  AND cs.table_oid = csi.table_oid
  AND cs.scope_key = csi.scope_key
+JOIN LATERAL (
+    SELECT regexp_replace(
+        replace(replace(st.regular_path_tmpl, '{{namespace}}', n.nspname), '{{tableName}}', c.relname),
+        '(^/+)|(/+$)',
+        '',
+        'g'
+    ) AS prefix
+    FROM koldstore.schemas s
+    JOIN koldstore.storage st ON st.id = s.storage_id
+    JOIN pg_catalog.pg_class c ON c.oid = s.table_oid
+    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE s.table_oid = cs.table_oid
+      AND s.active
+      AND s.initialization_state = 'complete'
+    ORDER BY s.version DESC
+    LIMIT 1
+) pref ON true
 WHERE csi.table_oid = $1::oid
   AND csi.scope_key = $2::text
   AND csi.column_id = $3::smallint
@@ -432,7 +468,7 @@ fn plan_cold_segments_for_manifest_json_with_statuses(
             r#"
 SELECT COALESCE(jsonb_agg(
     jsonb_build_object(
-        'object_path', cs.object_path,
+        'path', cs.path,
         'batch_number', cs.batch_number,
         'min_seq', cs.min_seq,
         'max_seq', cs.max_seq,
@@ -492,7 +528,7 @@ pub fn plan_expired_pending_segment_paths() -> SqlResult<SqlStatement> {
     SqlStatement::read_with_params(
         "resolve expired pending segment paths",
         r#"
-SELECT COALESCE(jsonb_agg(object_path ORDER BY created_at, segment_id)::text, '[]')
+SELECT COALESCE(jsonb_agg(path ORDER BY created_at, segment_id)::text, '[]')
 FROM koldstore.cold_segments
 WHERE table_oid = $1::oid
   AND scope_key = ''

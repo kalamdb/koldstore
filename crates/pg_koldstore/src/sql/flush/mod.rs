@@ -1,7 +1,5 @@
 //! PostgreSQL flush SQL entrypoints and SPI adapters.
 
-pub use koldstore_flush::ops::*;
-
 #[cfg(feature = "pg")]
 pub(crate) mod counters;
 #[cfg(feature = "pg")]
@@ -15,6 +13,8 @@ pub(crate) mod spi;
 
 #[cfg(feature = "pg")]
 use koldstore_common::TableName;
+#[cfg(feature = "pg")]
+use koldstore_flush::{enqueue_flush_job_plan, flush_table_request};
 
 /// Enqueues a flush job through the SQL API.
 ///
@@ -81,9 +81,9 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
         apply_recovery_plan, discover_orphan_objects, plan_recovery_actions, ObjectPath,
         RecoveryAction, RecoveryStep,
     };
-    use koldstore_manifest::{
-        relative_manifest_path, table_object_prefix, try_load_manifest_with_client,
-        CatalogManifestSegmentRow,
+    use koldstore_manifest::{try_load_manifest_with_client, CatalogManifestSegmentRow};
+    use koldstore_storage::{
+        join_object_key, manifest_object_key, render_regular_table_prefix, PathTemplate,
     };
     use pgrx::datum::DatumWithOid;
 
@@ -96,8 +96,12 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
         &storage.config,
     )
     .map_err(|error| error.to_string())?;
-    let prefix = table_object_prefix(&relation.namespace, &relation.name);
-    let manifest_path = relative_manifest_path(&relation.namespace, &relation.name);
+    let prefix = render_regular_table_prefix(
+        &PathTemplate::new(&storage.regular_path_tmpl),
+        &relation.namespace,
+        &relation.name,
+    )?;
+    let manifest_path = manifest_object_key(&prefix);
     let mut referenced = HashSet::from([manifest_path.clone()]);
     if let Some(manifest) = try_load_manifest_with_client(&client, &manifest_path)? {
         referenced.extend(
@@ -110,7 +114,7 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
             manifest
                 .segments
                 .into_iter()
-                .map(|segment| format!("{prefix}/{}", segment.path.trim_start_matches('/'))),
+                .map(|segment| join_object_key(&prefix, &segment.path)),
         );
     }
     // Include pending + active so in-flight uploads are not quarantined early.
@@ -123,7 +127,11 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
             .unwrap_or_else(|| "[]".to_string());
     let catalog_rows: Vec<CatalogManifestSegmentRow> =
         serde_json::from_str(&catalog_json).map_err(|error| error.to_string())?;
-    referenced.extend(catalog_rows.into_iter().map(|row| row.object_path));
+    referenced.extend(
+        catalog_rows
+            .into_iter()
+            .map(|row| join_object_key(&prefix, &row.path)),
+    );
 
     let ttl_seconds = crate::guc::pending_segment_ttl_seconds();
     let expired_plan = koldstore_catalog::queries::plan_expired_pending_segment_paths()
@@ -143,14 +151,15 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
     // Expired pending paths are removed from the referenced set so LIST recovery
     // can quarantine them; catalog rows are deleted after object actions.
     for path in &expired_paths {
-        referenced.remove(path);
+        referenced.remove(&join_object_key(&prefix, path));
     }
 
     let objects = discover_orphan_objects(&client, &prefix, &referenced)?;
     let mut recovery = plan_recovery_actions(objects);
 
     // Explicitly plan quarantine for expired pending objects even if LIST missed them.
-    for path in &expired_paths {
+    for relative_path in &expired_paths {
+        let path = join_object_key(&prefix, relative_path);
         if recovery
             .actions
             .iter()
@@ -158,7 +167,7 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
         {
             continue;
         }
-        let Ok(object_path) = ObjectPath::parse(path) else {
+        let Ok(object_path) = ObjectPath::parse(&path) else {
             continue;
         };
         recovery.actions.push(RecoveryStep {

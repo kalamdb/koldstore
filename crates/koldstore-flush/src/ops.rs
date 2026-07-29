@@ -10,6 +10,8 @@ use koldstore_common::{
 };
 use thiserror::Error;
 
+use crate::jobs_sql::ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE;
+
 /// Placeholder status key names returned by table status.
 pub const TABLE_STATUS_FIELDS: &[&str] = &[
     "hot_rows",
@@ -183,7 +185,8 @@ pub fn enqueue_flush_job_plan(
 ) -> Result<FlushJobEnqueuePlan, OpsError> {
     let statement = SqlStatement::write(
         "enqueue flush job",
-        r#"
+        &format!(
+            r#"
 INSERT INTO koldstore.jobs (
     id,
     table_oid,
@@ -205,10 +208,11 @@ VALUES (
     jsonb_build_object('force', $4::boolean)
 )
 ON CONFLICT (table_oid, scope_key)
-WHERE job_type = 'flush' AND status IN ('pending', 'running')
+WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
 DO NOTHING
 RETURNING id
-"#,
+"#
+        ),
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 
@@ -220,6 +224,9 @@ RETURNING id
 }
 
 /// Plans clean-schema flush selection from the mirror and base table.
+///
+/// Unbounded variant kept for unit tests that assert SQL shape. Production
+/// encode uses [`plan_mirror_flush_selection_batch`].
 ///
 /// The query is bounded by a captured mirror `seq` cutoff and joins the base
 /// table only for live rows. Delete mirror rows still produce PK + metadata
@@ -390,7 +397,8 @@ fn plan_mirror_flush_selection_inner(
     }
     if let Some(ops) = mirror_ops {
         if !ops.is_empty() {
-            where_clauses.push(mirror_ops_where_clause(ops));
+            where_clauses
+                .push(crate::jobs_sql::mirror_ops_where_clause(ops).expect("non-empty ops"));
         }
     }
     if let Some(scope_column) = scope_column {
@@ -424,19 +432,6 @@ ORDER BY mirror."seq" ASC{limit_sql}
         mirror_table: mirror_table.clone(),
         statement,
     })
-}
-
-fn mirror_ops_where_clause(ops: &[i16]) -> String {
-    if ops.len() == 1 {
-        format!("mirror.\"op\" = {}", ops[0])
-    } else {
-        let literals = ops
-            .iter()
-            .map(i16::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!("mirror.\"op\" IN ({literals})")
-    }
 }
 
 /// Parses the limited `koldstore_exec` command boundary.
@@ -602,7 +597,7 @@ pub fn backup_manifest_plan(
 ) -> Result<BackupManifestPlan, OpsError> {
     let statement = SqlStatement::read(
         "backup manifest",
-        "SELECT manifest_path, etag, generation, max_seq, max_commit_seq FROM koldstore.manifest WHERE ($1::regclass IS NULL OR table_oid = $1::regclass::oid) AND ($2::text IS NULL OR scope_key = $2)",
+        "SELECT etag, generation, max_seq, max_commit_seq FROM koldstore.manifest WHERE ($1::regclass IS NULL OR table_oid = $1::regclass::oid) AND ($2::text IS NULL OR scope_key = $2)",
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 
@@ -623,7 +618,7 @@ pub fn validate_cold_storage_plan(
 ) -> Result<ValidateColdStoragePlan, OpsError> {
     let statement = SqlStatement::read(
         "validate cold storage",
-        "SELECT m.manifest_path, cs.object_path, cs.row_count FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
+        "SELECT m.generation, cs.path, cs.row_count FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
     )
     .map_err(|error| OpsError::Sql(error.to_string()))?;
 
@@ -667,7 +662,7 @@ pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError>
                 koldstore_manifest::relative_manifest_path(namespace, table_name.relation());
             let statement = SqlStatement::read(
                 "export table archive",
-                "SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE m.table_oid = $1::regclass::oid",
+                "SELECT m.generation, cs.path, cs.row_count, cs.byte_size FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE m.table_oid = $1::regclass::oid",
             )
             .map_err(|error| OpsError::Sql(error.to_string()))?;
             Ok(KoldstoreExecPlan {
