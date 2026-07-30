@@ -374,6 +374,8 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
     }
     for expected in [
         "Emit Path: merge_stream",
+        "Peak Hot Batch Rows: 1",
+        "Seen Keys: 4",
         "Hot Rows: 1",
         "Rows Scanned: 3",
         "Input Rows: 4",
