@@ -55,10 +55,6 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
     assert!(!plan.create_table.sql.contains("commit_lsn"));
     assert!(plan.create_table.sql.contains("PRIMARY KEY (\"id\")"));
     assert!(plan
-        .drop_legacy_commit_lsn
-        .sql
-        .contains("DROP COLUMN IF EXISTS \"commit_lsn\""));
-    assert!(plan
         .seq_index
         .sql
         .contains("ON \"koldstore\".\"items__cl\" (\"seq\")"));
@@ -66,7 +62,7 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
         .tombstone_index
         .sql
         .contains("ON \"koldstore\".\"items__cl\" (\"seq\") WHERE \"op\" = 3"));
-    assert_eq!(plan.create_statements().len(), 4);
+    assert_eq!(plan.create_statements().len(), 3);
 }
 
 #[test]
@@ -97,8 +93,9 @@ fn async_mirror_batch_upsert_uses_typed_unnest_and_xmax_counters() {
     )
     .unwrap();
 
-    assert!(sql.contains("unnest($2::text[], $3::bigint[])"));
-    assert!(sql.contains("incoming.pk_0::bigint AS \"id\""));
+    assert!(sql.contains("unnest($2::bigint[], $3::bigint[])"));
+    assert!(sql.contains("incoming.pk_0 AS \"id\""));
+    assert!(!sql.contains("incoming.pk_0::bigint"));
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(sql.contains("RETURNING (xmax = 0) AS inserted"));
     assert!(!sql.contains("jsonb_to_recordset"));
@@ -117,10 +114,24 @@ fn async_mirror_batch_upsert_includes_order_key_bind() {
     )
     .unwrap();
 
-    assert!(sql.contains("unnest($2::text[], $3::bigint[], $4::bytea[])"));
+    assert!(sql.contains("unnest($2::bigint[], $3::bigint[], $4::bytea[])"));
     assert!(sql.contains("incoming.order_key AS \"order_key\""));
     assert!(sql.contains("\"order_key\", \"seq\", \"op\""));
     assert!(!sql.contains("\"order_key\" = EXCLUDED.\"order_key\""));
+}
+
+#[test]
+fn async_mirror_batch_upsert_keeps_text_cast_for_uuid() {
+    let sql = plan_async_mirror_batch_upsert(
+        "\"koldstore\".\"items__cl\"",
+        &["id"],
+        &["uuid".to_string()],
+        false,
+    )
+    .unwrap();
+
+    assert!(sql.contains("unnest($2::text[], $3::bigint[])"));
+    assert!(sql.contains("incoming.pk_0::uuid AS \"id\""));
 }
 
 #[test]

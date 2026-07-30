@@ -18,29 +18,6 @@
 CREATE SCHEMA IF NOT EXISTS koldstore;
 GRANT USAGE ON SCHEMA koldstore TO PUBLIC;
 
-CREATE TYPE koldstore.managed_table_info AS (
-  table_oid oid,
-  table_type text,
-  storage_id text,
-  schema_version integer,
-  scope_column text
-);
-
-CREATE TYPE koldstore.dml_result AS (
-  affected_rows bigint,
-  tombstone_written boolean,
-  cold_lookup_performed boolean
-);
-
-CREATE TYPE koldstore.change_event AS (
-  commit_seq bigint,
-  seq bigint,
-  op text,
-  pk jsonb,
-  deleted boolean,
-  row_image jsonb
-);
-
 CREATE TABLE IF NOT EXISTS koldstore.storage (
   id text PRIMARY KEY,
   name text NOT NULL UNIQUE,
@@ -272,9 +249,6 @@ ON koldstore.cold_segment_index (
 -- NOTE: Do not add per-PK catalog tables (e.g. exact cold_pk_hints). Cold
 -- presence is discovered via Sort Key V1 bounds in cold_segment_index and
 -- Parquet stats/bloom, so catalog size stays O(segments × indexed columns).
-
-CREATE SEQUENCE IF NOT EXISTS koldstore.global_seq AS bigint;
-CREATE SEQUENCE IF NOT EXISTS koldstore.global_commit_seq AS bigint;
 
 -- PERFORMANCE: maintain O(1) row counters on koldstore.manifest (see table_counters.rs).
 CREATE OR REPLACE FUNCTION koldstore.internal_ensure_manifest_row(p_table_oid oid)

@@ -18,12 +18,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use koldstore_catalog::queries::plan_async_managed_relation_by_oid;
+use koldstore_catalog::{async_managed_relation, queries::plan_async_managed_relation_by_oid};
 use koldstore_common::{format_pg_lsn, next_id_after, MirrorOperation};
 use koldstore_mirror::{
-    decode_message, must_flush_before_push, pk_identity, plan_async_mirror_batch_delete_existing,
-    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, primary_key_json,
-    PgOutputMessage, PgOutputRelation, PgOutputTuple, PgOutputValue, APPLY_BATCH_ROWS,
+    decode_message, must_flush_before_push, pg_value_text, pk_identity,
+    plan_async_mirror_batch_delete_existing, plan_async_mirror_batch_update,
+    plan_async_mirror_batch_upsert, primary_key_json, PgOutputMessage, PgOutputRelation,
+    PgOutputTuple, APPLY_BATCH_ROWS,
 };
 use pgrx::datum::DatumWithOid;
 use serde_json::Value;
@@ -764,58 +765,15 @@ fn managed_relation(
 
 fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
     let value: Value = serde_json::from_str(json).map_err(|error| error.to_string())?;
-    let table_oid = value
-        .get("table_oid")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "async schema metadata has no table_oid".to_string())?
-        .parse::<u32>()
-        .map(pgrx::pg_sys::Oid::from)
-        .map_err(|error| error.to_string())?;
-    let mirror = value
-        .get("mirror")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "async schema metadata has no mirror relation".to_string())?
-        .to_string();
-    let primary_key = value
-        .get("primary_key")
-        .and_then(Value::as_array)
-        .ok_or_else(|| "async schema metadata has no primary key".to_string())?
-        .iter()
-        .map(|column| {
-            column
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| "async primary key entry missing name".to_string())
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let order_column = match (
-        value.get("segment_order_column").and_then(Value::as_str),
-        value
-            .get("segment_order_type_oid")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                value
-                    .get("segment_order_type_oid")
-                    .and_then(Value::as_i64)
-                    .and_then(|n| u64::try_from(n).ok())
-            }),
-    ) {
-        (Some(name), Some(type_oid)) => Some(OrderColumnConfig {
-            name: name.to_string(),
-            type_oid: type_oid as u32,
-        }),
-        (None, None) => None,
-        _ => {
-            return Err(
-                "async schema metadata has incomplete segment_order_column fields".to_string(),
-            )
-        }
-    };
+    let meta = async_managed_relation(&value)?;
     Ok(ManagedRelation {
-        table_oid,
-        mirror,
-        primary_key,
-        order_column,
+        table_oid: pgrx::pg_sys::Oid::from(meta.table_oid),
+        mirror: meta.mirror,
+        primary_key: meta.primary_key,
+        order_column: meta.order_column.map(|order| OrderColumnConfig {
+            name: order.name,
+            type_oid: order.type_oid,
+        }),
         pk_type_names: None,
         upsert_sql: None,
         update_sql: None,
@@ -842,20 +800,7 @@ fn order_column_text(
         .values
         .get(relation_index)
         .ok_or_else(|| format!("tuple omits segment order column {}", order.name))?;
-    match value {
-        PgOutputValue::Null => Err(format!("segment order column {} is NULL", order.name)),
-        PgOutputValue::UnchangedToast => Err(format!(
-            "segment order column {} was emitted as unchanged TOAST",
-            order.name
-        )),
-        PgOutputValue::Text(bytes) => std::str::from_utf8(bytes)
-            .map(str::to_string)
-            .map_err(|error| error.to_string()),
-        PgOutputValue::Binary(_) => Err(format!(
-            "segment order column {} arrived as binary pgoutput",
-            order.name
-        )),
-    }
+    pg_value_text(value, &order.name, "segment order")
 }
 
 fn ensure_pk_type_names(
@@ -992,8 +937,8 @@ fn apply_batch(
     let result = pgrx::Spi::connect(|client| -> Result<(i64, i64), String> {
         let mut args: Vec<DatumWithOid<'_>> = Vec::with_capacity(pk_columns.len() + 3);
         args.push(DatumWithOid::from(operation.code()));
-        for column in &pk_columns {
-            args.push(DatumWithOid::from(column.clone()));
+        for (index, column) in pk_columns.iter().enumerate() {
+            push_typed_pk_array_arg(&mut args, &pk_types[index], column)?;
         }
         args.push(DatumWithOid::from(seqs.clone()));
         if let Some(order_keys) = order_keys.as_ref() {
@@ -1034,6 +979,67 @@ fn apply_batch(
     };
     crate::row_counter_cache::record_delta(config.table_oid, hot_delta, mirror_delta);
     Ok(())
+}
+
+/// Binds one primary-key column as a typed array when the SQL planner emitted
+/// `{type}[]`, otherwise as `text[]` for the cast fallback path.
+fn push_typed_pk_array_arg(
+    args: &mut Vec<DatumWithOid<'_>>,
+    type_name: &str,
+    cells: &[String],
+) -> Result<(), String> {
+    let normalized = type_name.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "bigint" | "int8" => {
+            let values = parse_pk_ints::<i64>(cells, type_name)?;
+            args.push(DatumWithOid::from(values));
+        }
+        "integer" | "int4" | "int" => {
+            let values = parse_pk_ints::<i32>(cells, type_name)?;
+            args.push(DatumWithOid::from(values));
+        }
+        "smallint" | "int2" => {
+            let values = parse_pk_ints::<i16>(cells, type_name)?;
+            args.push(DatumWithOid::from(values));
+        }
+        "boolean" | "bool" => {
+            let values = cells
+                .iter()
+                .map(|cell| parse_pk_bool(cell))
+                .collect::<Result<Vec<_>, _>>()?;
+            args.push(DatumWithOid::from(values));
+        }
+        "text" | "varchar" | "character varying" | "name" => {
+            args.push(DatumWithOid::from(cells.to_vec()));
+        }
+        _ => {
+            // uuid / float / domains / uncommon scalars: SQL casts from text[].
+            args.push(DatumWithOid::from(cells.to_vec()));
+        }
+    }
+    Ok(())
+}
+
+fn parse_pk_ints<T>(cells: &[String], type_name: &str) -> Result<Vec<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    cells
+        .iter()
+        .map(|cell| {
+            cell.parse::<T>()
+                .map_err(|error| format!("async mirror PK {type_name} value `{cell}`: {error}"))
+        })
+        .collect()
+}
+
+fn parse_pk_bool(cell: &str) -> Result<bool, String> {
+    match cell.trim().to_ascii_lowercase().as_str() {
+        "t" | "true" | "1" | "yes" | "on" => Ok(true),
+        "f" | "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(format!("async mirror PK boolean value `{other}`")),
+    }
 }
 
 fn is_background_worker() -> bool {

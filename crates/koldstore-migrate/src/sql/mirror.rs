@@ -8,10 +8,10 @@
 use koldstore_common::{PrimaryKeyColumnShape, PrimaryKeyShape, SqlStatement};
 use koldstore_mirror::{
     mirror_relation_for_source as storage_mirror_relation_for_source,
-    plan_mirror_schema_with_order_key, statement::mirror_to_sql, MirrorStatement,
+    plan_mirror_schema_with_order_key, statement::mirror_to_sql, MirrorCapturePlan,
+    MirrorStatement,
 };
 
-use crate::capture::MirrorCapturePlan;
 use crate::QualifiedTableName;
 
 pub type MirrorResult<T> = Result<T, MirrorError>;

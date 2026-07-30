@@ -2,10 +2,8 @@ use koldstore_common::{
     ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
     PrimaryKeyShape,
 };
-use koldstore_migrate::{
-    capture::{plan_drop_mirror_dml_triggers, plan_mirror_capture, MirrorCapturePlan},
-    mirror, QualifiedTableName,
-};
+use koldstore_migrate::{mirror, QualifiedTableName};
+use koldstore_mirror::{plan_drop_mirror_dml_triggers, plan_mirror_capture, MirrorCapturePlan};
 
 fn pk_column(name: &str, ordinal: u16) -> PrimaryKeyColumnShape {
     PrimaryKeyColumnShape::new(
@@ -174,13 +172,10 @@ fn mirror_capture_cleanup_drops_triggers_before_function() {
         .drop_triggers
         .sql
         .contains("\"messages__cl_pk_update_guard\""));
-    assert!(plan.drop_triggers.sql.contains("\"messages__cl_aki\""));
-    assert!(plan.drop_triggers.sql.contains("\"messages__cl_aku\""));
-    assert!(plan.drop_triggers.sql.contains("\"messages__cl_akd\""));
-    assert!(plan
-        .drop_triggers
-        .sql
-        .contains("\"messages__cl_async_worker_kick\""));
+    assert!(!plan.drop_triggers.sql.contains("_aki"));
+    assert!(!plan.drop_triggers.sql.contains("_aku"));
+    assert!(!plan.drop_triggers.sql.contains("_akd"));
+    assert!(!plan.drop_triggers.sql.contains("async_worker_kick"));
     assert_eq!(
         plan.drop_function.sql,
         "DROP FUNCTION IF EXISTS \"koldstore\".\"messages__cl_capture\"()"
@@ -237,16 +232,4 @@ fn async_capture_switch_drops_only_statement_dml_triggers() {
     assert!(statement.sql.contains("messages__cl_delete_capture"));
     assert!(!statement.sql.contains("messages__cl_pk_update_guard"));
     assert_eq!(statement.sql.matches("DROP TRIGGER IF EXISTS").count(), 3);
-}
-
-#[test]
-fn async_worker_kick_name_matches_postgres_identifier_truncation() {
-    let long = "a_very_long_managed_table_name_that_nearly_fills_a_postgres_identifier__cl";
-    let names = koldstore_migrate::capture::async_worker_kick_trigger_names(long);
-    assert!(names.iter().all(|name| name.len() <= 63));
-    assert_ne!(names[0], names[1]);
-    assert_ne!(names[1], names[2]);
-    assert!(names[0].ends_with("_aki"));
-    assert!(names[1].ends_with("_aku"));
-    assert!(names[2].ends_with("_akd"));
 }

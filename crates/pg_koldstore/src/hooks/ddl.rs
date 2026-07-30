@@ -449,9 +449,10 @@ fn apply_management_options(
     use pgrx::datum::DatumWithOid;
 
     validate_management_option_conflicts(values)?;
-    let catalog_lookup = "SELECT (SELECT jsonb_build_object('storage', st.name, 'options', s.options) FROM koldstore.schemas s JOIN koldstore.storage st ON st.id=s.storage_id WHERE s.table_oid=$1)";
+    let catalog_lookup = koldstore_catalog::queries::plan_management_options_lookup()
+        .map_err(|error| error.to_string())?;
     let row = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
-        catalog_lookup,
+        &catalog_lookup.sql,
         &[DatumWithOid::from(table_oid)],
     )
     .map_err(|e| e.to_string())?;
@@ -459,7 +460,7 @@ fn apply_management_options(
         ensure_initial_management(table_oid, values)?;
     }
     let current = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(
-        catalog_lookup,
+        &catalog_lookup.sql,
         &[DatumWithOid::from(table_oid)],
     )
     .map_err(|e| e.to_string())?
@@ -473,8 +474,10 @@ fn apply_management_options(
     let (min, file, max) = resolve_flush_batching(values, options.flush_policy().as_ref())?;
     apply_flush_policy_updates(&mut options, values, min, file, max)?;
     let json = pgrx::JsonB(options.to_value());
+    let update = koldstore_migrate::register::plan_update_schema_options()
+        .map_err(|error| error.to_string())?;
     pgrx::Spi::run_with_args(
-        "UPDATE koldstore.schemas SET options=$2 WHERE table_oid=$1",
+        &update.sql,
         &[DatumWithOid::from(table_oid), DatumWithOid::from(json)],
     )
     .map_err(|e| e.to_string())?;

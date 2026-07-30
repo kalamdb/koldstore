@@ -3,6 +3,10 @@
 //! These counters avoid repeated `COUNT(*)` scans over hot heaps and mirrors during
 //! flush logging, `describe_table`, and operator diagnostics. DML capture triggers
 //! bump hot counts; flush finalization applies mirror/hot prune and cold deltas.
+//!
+//! Catalog **reads** for counter JSON live in
+//! [`koldstore_catalog::queries::plan_read_table_row_counters`]. This module owns
+//! counter **write** plans (bump / apply / refresh) and flush fetch sizing.
 
 use koldstore_common::SqlStatement;
 use thiserror::Error;
@@ -21,7 +25,8 @@ pub struct TableRowCounters {
 }
 
 impl TableRowCounters {
-    /// Decodes the JSON object returned by [`plan_read_table_row_counters`].
+    /// Decodes the JSON object returned by
+    /// [`koldstore_catalog::queries::plan_read_table_row_counters`].
     #[must_use]
     pub fn from_json_value(value: &serde_json::Value) -> Self {
         Self {
@@ -44,7 +49,8 @@ impl TableRowCounters {
         }
     }
 
-    /// Decodes a JSON text payload from [`plan_read_table_row_counters`].
+    /// Decodes a JSON text payload from
+    /// [`koldstore_catalog::queries::plan_read_table_row_counters`].
     ///
     /// # Errors
     ///
@@ -82,30 +88,6 @@ pub fn flush_mirror_fetch_limit(max_rows_per_file: usize) -> i64 {
     }
     let per_file = i64::try_from(max_rows_per_file).unwrap_or(FLUSH_MIRROR_FETCH_BATCH_SIZE);
     per_file.clamp(1, FLUSH_MIRROR_FETCH_BATCH_SIZE)
-}
-
-/// Plans a read of cached row counters from `koldstore.manifest`.
-///
-/// # Errors
-///
-/// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_read_table_row_counters() -> Result<SqlStatement, TableCounterError> {
-    SqlStatement::read_with_params(
-        "read manifest row counters",
-        r#"
-SELECT jsonb_build_object(
-  'hot_row_count', COALESCE(m.hot_row_count, 0)::bigint,
-  'mirror_row_count', COALESCE(m.mirror_row_count, 0)::bigint,
-  'cold_row_count', COALESCE(m.cold_row_count, 0)::bigint,
-  'cold_segment_count', COALESCE(m.segment_count, 0)::bigint
-)::text
-FROM koldstore.manifest m
-WHERE m.table_oid = $1::oid
-  AND m.scope_key = ''
-"#,
-        [koldstore_common::SqlParamType::Oid],
-    )
-    .map_err(|error| TableCounterError::Sql(error.to_string()))
 }
 
 /// Plans DML-time counter bumps from mirror capture triggers.

@@ -164,27 +164,6 @@ pub fn plan_mirror_capture_with_order_column(
             "DROP TRIGGER IF EXISTS {} ON {source}",
             quote_ident(&pk_guard_trigger_name(&mirror_table.name))
         ));
-        for kick_name in async_worker_kick_trigger_names(&mirror_table.name) {
-            drops.push(format!(
-                "DROP TRIGGER IF EXISTS {} ON {source}",
-                quote_ident(&kick_name)
-            ));
-        }
-        // Legacy kick names from earlier async installs.
-        for suffix in [
-            "_async_worker_kick",
-            "_async_worker_kick_ins",
-            "_async_worker_kick_upd",
-            "_async_worker_kick_del",
-        ] {
-            drops.push(format!(
-                "DROP TRIGGER IF EXISTS {} ON {source}",
-                quote_ident(&truncate_pg_identifier(&format!(
-                    "{mirror_table_name}{suffix}",
-                    mirror_table_name = &mirror_table.name
-                )))
-            ));
-        }
         drops.join(";\n")
     })
     .map_err(|error| MirrorCaptureError::Sql(error.to_string()))?;
@@ -230,7 +209,7 @@ pub fn plan_mirror_capture_teardown(
         name: format!("{}_pk_guard", mirror_table.name),
     };
     let source = source_table.quoted();
-    let mut statements = Vec::with_capacity(7);
+    let mut statements = Vec::with_capacity(6);
     for operation in MirrorOperation::ALL {
         let trigger_name = operation.capture_trigger_name(&mirror_table.name);
         statements.push(SqlStatement::write(
@@ -252,35 +231,6 @@ pub fn plan_mirror_capture_teardown(
         ),
     )?);
     statements.push(SqlStatement::write(
-        "drop async mirror worker kick triggers",
-        &{
-            let mut drops = async_worker_kick_trigger_names(&mirror_table.name)
-                .into_iter()
-                .map(|kick_name| {
-                    format!(
-                        "DROP TRIGGER IF EXISTS {} ON {source}",
-                        quote_ident(&kick_name)
-                    )
-                })
-                .collect::<Vec<_>>();
-            for suffix in [
-                "_async_worker_kick",
-                "_async_worker_kick_ins",
-                "_async_worker_kick_upd",
-                "_async_worker_kick_del",
-            ] {
-                drops.push(format!(
-                    "DROP TRIGGER IF EXISTS {} ON {source}",
-                    quote_ident(&truncate_pg_identifier(&format!(
-                        "{}{suffix}",
-                        &mirror_table.name
-                    )))
-                ));
-            }
-            drops.join(";\n")
-        },
-    )?);
-    statements.push(SqlStatement::write(
         "drop change-log mirror capture function",
         &format!("DROP FUNCTION IF EXISTS {}()", function_name.quoted()),
     )?);
@@ -289,47 +239,6 @@ pub fn plan_mirror_capture_teardown(
         &format!("DROP FUNCTION IF EXISTS {}()", guard_function_name.quoted()),
     )?);
     Ok(statements)
-}
-
-/// Returns the deterministic statement triggers that keep the async applier running.
-///
-/// PostgreSQL forbids transition tables on multi-event triggers, so INSERT /
-/// UPDATE / DELETE each get their own kick trigger. Suffixes are short and
-/// reserved before truncating the mirror-table prefix so long names stay unique.
-#[must_use]
-pub fn async_worker_kick_trigger_names(mirror_table_name: &str) -> [String; 3] {
-    [
-        trigger_name_with_suffix(mirror_table_name, "_aki"),
-        trigger_name_with_suffix(mirror_table_name, "_aku"),
-        trigger_name_with_suffix(mirror_table_name, "_akd"),
-    ]
-}
-
-/// Legacy single kick trigger name kept for teardown of older installs.
-#[must_use]
-pub fn async_worker_kick_trigger_name(mirror_table_name: &str) -> String {
-    truncate_pg_identifier(&format!("{mirror_table_name}_async_worker_kick"))
-}
-
-fn trigger_name_with_suffix(mirror_table_name: &str, suffix: &str) -> String {
-    let max_base = 63usize.saturating_sub(suffix.len());
-    let mut end = mirror_table_name.len().min(max_base);
-    while end > 0 && !mirror_table_name.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{suffix}", &mirror_table_name[..end])
-}
-
-fn truncate_pg_identifier(identifier: &str) -> String {
-    const MAX_IDENTIFIER_BYTES: usize = 63;
-    if identifier.len() <= MAX_IDENTIFIER_BYTES {
-        return identifier.to_string();
-    }
-    let mut end = MAX_IDENTIFIER_BYTES;
-    while !identifier.is_char_boundary(end) {
-        end -= 1;
-    }
-    identifier[..end].to_string()
 }
 
 /// Plans removal of only the statement-level mirror DML triggers.

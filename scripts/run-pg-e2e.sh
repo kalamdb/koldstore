@@ -237,6 +237,29 @@ done < <("$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 -tAc
   >/dev/null || true
 drop_database_retry "${TEMPLATE_DB}"
 
+# Roles are cluster-global and survive DROP DATABASE. E2E app roles use
+# e2e_{label}_{pid}_{n}_app; PID reuse then makes CREATE ROLE fail. Clear them
+# on every prepare (best-effort if a role still owns objects).
+echo "dropping leftover e2e_*_app roles"
+"$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=0 <<'SQL'
+DO $$
+DECLARE
+  role_name text;
+BEGIN
+  FOR role_name IN
+    SELECT rolname
+    FROM pg_roles
+    WHERE rolname LIKE 'e2e\_%\_app' ESCAPE '\'
+  LOOP
+    BEGIN
+      EXECUTE format('DROP ROLE IF EXISTS %I', role_name);
+    EXCEPTION WHEN OTHERS THEN
+      RAISE NOTICE 'skip drop role %: %', role_name, SQLERRM;
+    END;
+  END LOOP;
+END $$;
+SQL
+
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
   -c "CREATE DATABASE \"${TEMPLATE_DB}\""
 "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$TEMPLATE_DB" -v ON_ERROR_STOP=1 \

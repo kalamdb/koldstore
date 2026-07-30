@@ -24,7 +24,7 @@ pub use koldstore_schema::{PgIntegerArrayOid, PgType, SchemaError};
 pub use object_reader::{ObjectStoreParquetReader, ObjectStoreReadStats};
 pub use pg_type_codec::{
     arrow_array_for_column, arrow_array_from_json, arrow_data_type, json_bool,
-    json_from_arrow_cell, json_i16, json_i64,
+    json_from_arrow_cell, json_i16, json_i64, jsonb_cell_to_utf8, pg_bytea_hex,
 };
 pub use prune::{select_row_groups_for_pk_values, PruneDecision, RowGroupPruner};
 pub use reader::{

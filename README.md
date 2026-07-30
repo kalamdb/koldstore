@@ -113,14 +113,15 @@ KoldStore is a **storage lifecycle tool**, not a universal query accelerator. Af
 | └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB    | **99% smaller**      |
 | └ cold Parquet                      | — → 599 MiB          | outside the database |
 | Indexes (hot + `__cl`)              | 415 MiB → 11.5 MiB   | **97% smaller**      |
-| `VACUUM (FULL, ANALYZE)`            | 149.29 s → 3.44 s    | **43× faster**       |
+| `VACUUM (FULL, ANALYZE)`            | 221.94 s → 5.12 s    | **43× faster**       |
 
 
 Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000`,
-`--warmup-rows 1000000` (local PG16.13 `release-pg`, 2026-07-20). Each side
-gets a fresh pgrx server, an untimed 1M warm-up, then the timed run. Managed
-PostgreSQL sizes include the hot heap **and** `koldstore.<table>__cl` plus its
-indexes. Full tables: [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
+`--warmup-rows 1000000`, `max_rows_per_file = 1000000` (local PG16.13
+`release-pg`, 2026-07-29). Each side gets a fresh pgrx server, an untimed 1M
+warm-up, then the timed run. Managed PostgreSQL sizes include the hot heap
+**and** `koldstore.<table>__cl` plus its indexes. Full tables:
+[docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
 
 ### Latest UPDATE verification
 
@@ -147,30 +148,31 @@ publication results. Release publication requires six clean-tree,
 counterbalanced samples plus worker-on backlog and drain metrics. See the
 [benchmark methodology](docs/benchmarks/README.md).
 
-### Published 10M-row snapshot (historical)
+### Published 10M-row snapshot
 
-This pre-optimization storage-scale run reports foreground DML separately from
-mirror catch-up. It was a dirty-tree single sample and remains here for 10M-row
-storage context until the guarded repeated publication run replaces it. Async
-commits the source heap first; strict mode includes mirror maintenance in the
-application transaction.
-
-
-| Operation           | PostgreSQL only | KoldStore async | Trade-off                                                |
-| ------------------- | --------------- | --------------- | -------------------------------------------------------- |
-| INSERT              | 94,302 ops/s    | 107,030 ops/s   | ≈ within noise (not a product win)                       |
-| UPDATE              | 69,239 ops/s    | 52,446 ops/s    | historical pre-optimization single sample; **24% lower** |
-| DELETE              | 119,350 ops/s   | 179,882 ops/s   | single-sample — do not claim faster                      |
-| Hot-only PK lookup  | 1,800 ops/s     | 1,825 ops/s     | ≈ same                                                   |
-| Hot+cold PK lookup  | 1,793 ops/s     | 1,529 ops/s     | **15% slower**                                           |
-| Cold-only PK lookup | 1,762 ops/s     | 1,242 ops/s     | **30% slower**                                           |
+This storage-scale run reports foreground DML separately from mirror catch-up.
+It is a clean-tree single sample (draft publication); release publication still
+prefers six counterbalanced repetitions. Async commits the source heap first;
+strict mode includes mirror maintenance in the application transaction.
 
 
-Async mirror catch-up measured 30,173 INSERT, 914 UPDATE, 28,417 DELETE, and
-24,906 restore operations per second in that historical run. The current
-focused UPDATE catch-up result above is 49,358 ops/s. Published runs warm up
-before timing so cold-start after install does not fake an async insert win.
-Full methodology and strict-mode column:
+| Operation           | PostgreSQL only | KoldStore async | Trade-off                                          |
+| ------------------- | --------------- | --------------- | -------------------------------------------------- |
+| INSERT              | 39,802 ops/s    | 67,229 ops/s    | noise / order — not a product win (same full-heap seed) |
+| UPDATE              | 73,412 ops/s    | 54,378 ops/s    | single sample; **26% lower**                       |
+| DELETE              | 105,673 ops/s   | 136,293 ops/s   | single-sample — do not claim faster                |
+| Hot-only PK lookup  | 3,204 ops/s     | 3,248 ops/s     | ≈ same (native Index Scan pre-flush)               |
+| Hot+cold PK lookup  | 4,424 ops/s     | 1,055 ops/s     | noisy prior method (PG after FULL vacuum)          |
+| Cold-only PK lookup | 3,117 ops/s     | 575 ops/s       | noisy prior method (PG after FULL vacuum)          |
+
+
+Async mirror catch-up measured 30,773 INSERT, 1,272 UPDATE, 29,531 DELETE, and
+26,186 restore operations per second in this run. The focused UPDATE catch-up
+result in the verification table above is 49,358 ops/s. Timed INSERT seeds an
+empty table to 10M on every side — `hot_row_limit` does not make managed INSERT
+faster. Cold/hot+cold phases were reordered after this snapshot (PG cold
+lookups now run before `VACUUM FULL`); re-run before treating those gaps as
+product claims. Full methodology:
 [docs/benchmarks/](docs/benchmarks/README.md).
 
 Managed tables support two mirror paths. The default `strict` mode writes the

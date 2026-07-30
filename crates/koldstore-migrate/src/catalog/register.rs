@@ -7,9 +7,7 @@ use serde_json::{Map, Value};
 use thiserror::Error;
 use uuid::Uuid;
 
-use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions};
-
-use koldstore_common::SqlStatement;
+use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions, SqlParamType, SqlStatement};
 use koldstore_common::{
     PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
     PrimaryKeyShape,
@@ -455,7 +453,6 @@ pub fn schema_columns_from_catalog(columns: &[crate::order::CatalogColumn]) -> V
                 column.pg_type,
                 column.catalog_type_name(),
                 true,
-                false,
             )
         })
         .collect()
@@ -482,6 +479,66 @@ SET active = true,
     updated_at = now()
 WHERE table_oid = $1::oid
 "#,
+    )
+    .map_err(|error| RegistryError::Spi(error.to_string()))
+}
+
+/// Plans an update of active schema `options` for a managed table.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be prepared.
+pub fn plan_update_schema_options() -> RegistryResult<SqlStatement> {
+    SqlStatement::write_with_params(
+        "update managed schema options",
+        "UPDATE koldstore.schemas SET options = $2 WHERE table_oid = $1",
+        [SqlParamType::Oid, SqlParamType::Jsonb],
+    )
+    .map_err(|error| RegistryError::Spi(error.to_string()))
+}
+
+/// Plans enabling/disabling automatic flush for an active managed table.
+///
+/// When `enabled` is true, removes the `auto_flush` opt-out key; otherwise
+/// stores `auto_flush = false`.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be prepared.
+pub fn plan_set_table_auto_flush() -> RegistryResult<SqlStatement> {
+    SqlStatement::write_with_params(
+        "set table auto_flush option",
+        r#"
+WITH updated AS (
+    UPDATE koldstore.schemas
+    SET options = CASE
+            WHEN $2::boolean THEN options - 'auto_flush'
+            ELSE jsonb_set(COALESCE(options, '{}'::jsonb), '{auto_flush}', 'false'::jsonb, true)
+        END,
+        updated_at = now()
+    WHERE table_oid = $1::oid
+      AND active
+    RETURNING 1
+)
+SELECT EXISTS (SELECT 1 FROM updated)
+"#,
+        [SqlParamType::Oid, SqlParamType::Boolean],
+    )
+    .map_err(|error| RegistryError::Spi(error.to_string()))
+}
+
+/// Plans an `EXISTS` probe for whether a table currently has any rows.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata cannot be prepared.
+pub fn plan_table_has_rows(table: &crate::QualifiedTableName) -> RegistryResult<SqlStatement> {
+    SqlStatement::read(
+        "probe whether table has rows",
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM ONLY {} LIMIT 1)",
+            table.quoted()
+        ),
     )
     .map_err(|error| RegistryError::Spi(error.to_string()))
 }

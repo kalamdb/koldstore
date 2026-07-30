@@ -6,7 +6,6 @@
 
 pub mod cleanup;
 pub mod encode;
-pub mod job;
 pub mod jobs_sql;
 pub mod ops;
 pub mod policy;
@@ -46,8 +45,7 @@ pub use stats::{
 };
 pub use table_counters::{
     flush_mirror_fetch_limit, plan_apply_flush_row_count_deltas, plan_bump_table_row_counts,
-    plan_read_table_row_counters, plan_refresh_table_row_counters, TableRowCounters,
-    FLUSH_MIRROR_FETCH_BATCH_SIZE,
+    plan_refresh_table_row_counters, TableRowCounters, FLUSH_MIRROR_FETCH_BATCH_SIZE,
 };
 pub use table_flush::{max_rows_per_file_from_policy, TableFlushBatchOutcome};
 pub use table_jobs::{

@@ -41,24 +41,13 @@ fn async_slot_exists_for_current_database() -> Result<bool, String> {
     .ok_or_else(|| "async slot probe returned no row".to_string())
 }
 
-/// Ensures one persistent database worker is running for the current database.
-///
-/// Covers async mirror apply and built-in auto-flush scheduling.
-///
-/// # Errors
-///
-/// Returns an error when PostgreSQL cannot inspect or start the worker.
-pub(crate) fn ensure_database_worker() -> Result<bool, String> {
-    ensure_async_mirror_worker()
-}
-
 /// Ensures one persistent WAL applier is running for the current database.
 ///
 /// Appliers use `BGW_NEVER_RESTART` so dropping the slot can leave them stopped.
 /// Session ensure (manage / fences / SQL) starts the applier directly. The
 /// cluster launcher is registered only from shared_preload (or a future
 /// explicit admin path) so a crashing launcher cannot starve worker slots
-/// under `cargo pgrx test`.
+/// under `cargo pgrx test`. The same worker also runs auto-flush scheduling.
 ///
 /// # Errors
 ///

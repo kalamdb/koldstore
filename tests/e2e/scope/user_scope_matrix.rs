@@ -140,14 +140,13 @@ async fn non_owner_rls_is_enforced_for_hot_cold_and_mixed_rows() -> Result<()> {
             )
             .await?;
 
-        let app_role = format!("{}_app", db.schema);
+        let app_role = db.ensure_app_role().await?;
         db.client
             .batch_execute(&format!(
                 r#"
                 ALTER TABLE {relation} FORCE ROW LEVEL SECURITY;
                 CREATE POLICY koldstore_body_guard ON {relation}
                   AS RESTRICTIVE FOR SELECT USING (body <> 'blocked');
-                CREATE ROLE {app_role};
                 GRANT USAGE ON SCHEMA {schema} TO {app_role};
                 GRANT SELECT ON {relation} TO {app_role};
                 SET ROLE {app_role};
@@ -351,11 +350,10 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
             .await?;
         common::fence_async_mirror_if_needed(&db.client).await?;
 
-        let app_role = format!("{}_app", db.schema);
+        let app_role = db.ensure_app_role().await?;
         db.client
             .batch_execute(&format!(
-                "CREATE ROLE {app_role}; \
-                 GRANT USAGE ON SCHEMA {schema} TO {app_role}; \
+                "GRANT USAGE ON SCHEMA {schema} TO {app_role}; \
                  GRANT SELECT ON {relation} TO {app_role}; \
                  SET standard_conforming_strings = off; \
                  SET ROLE {app_role};",

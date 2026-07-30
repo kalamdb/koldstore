@@ -125,10 +125,15 @@ static MANAGED_TABLE_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
 static PACKED_ROW_GROUP_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "pg")]
+type ManifestPlannerHintCache = OptionalLookupCache<u32, (usize, u64)>;
+
+#[cfg(feature = "pg")]
 thread_local! {
     static MANAGED_TABLE_CACHE: std::cell::RefCell<ManagedTableSnapshotCache> =
         std::cell::RefCell::new(ManagedTableSnapshotCache::default());
     static MANIFEST_SCAN_CACHE: std::cell::RefCell<ManifestScanCache> =
+        std::cell::RefCell::new(OptionalLookupCache::default());
+    static MANIFEST_PLANNER_HINT_CACHE: std::cell::RefCell<ManifestPlannerHintCache> =
         std::cell::RefCell::new(OptionalLookupCache::default());
     static MIGRATION_CATALOG_CACHE: std::cell::RefCell<
         BoundedOidCache<Arc<koldstore_migrate::ExistingTableCatalog>>,
@@ -234,6 +239,9 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
             .borrow_mut()
             .retain(|(table_oid, _)| *table_oid != key);
     });
+    MANIFEST_PLANNER_HINT_CACHE.with(|cache| {
+        cache.borrow_mut().retain(|table_oid| *table_oid != key);
+    });
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().invalidate(key);
     });
@@ -258,6 +266,9 @@ pub fn invalidate_all() {
         cache.borrow_mut().clear();
     });
     MANIFEST_SCAN_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
+    MANIFEST_PLANNER_HINT_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
     MIGRATION_CATALOG_CACHE.with(|cache| {
@@ -459,6 +470,61 @@ pub fn is_managed_relation(table_oid: pgrx::pg_sys::Oid) -> bool {
         .ok()
         .flatten()
         .is_some_and(|snapshot| snapshot.active)
+}
+
+/// Returns `(active_segment_count, generation)` for merge-scan planning.
+///
+/// PERFORMANCE: Avoids the full segment JSON / credentials load used by
+/// [`cached_manifest_scan_context`]. Planner hot-only prune and cost only need
+/// these scalars.
+///
+/// # Errors
+///
+/// Returns an error when SPI execution fails.
+#[cfg(feature = "pg")]
+pub fn cached_manifest_planner_hint(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<(usize, u64)>, String> {
+    let key = table_oid.to_u32();
+    if let Some(cached) = MANIFEST_PLANNER_HINT_CACHE.with(|cache| cache.borrow().get(&key)) {
+        return Ok(cached);
+    }
+    let hint = load_manifest_planner_hint(table_oid)?;
+    MANIFEST_PLANNER_HINT_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, hint);
+    });
+    Ok(hint)
+}
+
+#[cfg(feature = "pg")]
+fn load_manifest_planner_hint(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<(usize, u64)>, String> {
+    super::owner::with_extension_owner(|| {
+        let statement = koldstore_catalog::queries::plan_published_manifest_planner_hint()
+            .map_err(|error| error.to_string())?;
+        require_read_only(&statement).map_err(|error| error.to_string())?;
+        let row = execute_prepared(
+            &statement,
+            &[pgrx::datum::DatumWithOid::from(table_oid)],
+            |mut tuples| {
+                let Some(tuple) = tuples.next() else {
+                    return Ok(None);
+                };
+                let generation = tuple.get::<i64>(1)?.ok_or_else(|| {
+                    pgrx::spi::SpiError::DatumError(
+                        pgrx::datum::TryFromDatumError::NoSuchAttributeName(
+                            "generation".to_string(),
+                        ),
+                    )
+                })? as u64;
+                let segment_count = tuple.get::<i64>(2)?.unwrap_or(0).max(0) as usize;
+                Ok(Some((segment_count, generation)))
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(row)
+    })?
 }
 
 /// Loads published manifest path, base path, and active segment stats for merge scan.

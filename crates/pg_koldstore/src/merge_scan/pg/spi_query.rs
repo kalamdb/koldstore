@@ -2,7 +2,30 @@
 
 use std::ffi::CString;
 
+use koldstore_common::quote_ident;
 use pgrx::pg_sys;
+
+/// Builds `jsonb_build_object` key/value pairs for primary-key columns.
+///
+/// Each pair is `'escaped_name', alias."quoted_name"`. Used by hot merge and
+/// mirror overlay SQL so escaping stays identical on both paths.
+#[must_use]
+pub(super) fn jsonb_pk_object_pairs<'a>(
+    alias: &str,
+    columns: impl IntoIterator<Item = &'a str>,
+) -> String {
+    columns
+        .into_iter()
+        .map(|name| {
+            format!(
+                "'{escaped}', {alias}.{quoted}",
+                escaped = name.replace('\'', "''"),
+                quoted = quote_ident(name),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// Executes a read-only SPI query and exposes its tuple table to a decoder.
 ///

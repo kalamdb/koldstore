@@ -38,7 +38,7 @@ pub(super) struct FlushPreparedContext {
     relation: RelationContext,
     storage: FlushStorageContext,
     snapshot: Arc<ManagedTableSnapshot>,
-    catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
+    catalog: Arc<koldstore_migrate::ExistingTableCatalog>,
     indexed_columns: Vec<ColumnRef>,
     max_rows_per_file: usize,
     target_file_size_bytes: Option<u64>,
@@ -115,7 +115,7 @@ fn load_flush_prepared_context(
         relation,
         storage,
         snapshot,
-        catalog_columns: catalog.columns,
+        catalog,
         indexed_columns,
         max_rows_per_file,
         target_file_size_bytes,
@@ -155,12 +155,14 @@ pub(super) fn stream_write_flush_batches(
             .map(str::to_string)
             .collect(),
         base_column_names: ctx
-            .catalog_columns
+            .catalog
+            .columns
             .iter()
             .map(|column| column.name.clone())
             .collect(),
         parquet_columns: ctx
-            .catalog_columns
+            .catalog
+            .columns
             .iter()
             // Delete markers retain every PK value but intentionally leave
             // non-PK payload columns null, even when the source column is
@@ -185,7 +187,7 @@ pub(super) fn stream_write_flush_batches(
         mirror_ops: selection.mirror_ops.clone(),
         sort_by_order_key: ctx.snapshot.segment_order_column_id.is_some(),
     };
-    let catalog_columns = ctx.catalog_columns.clone();
+    let catalog_columns = &ctx.catalog.columns;
     let fetch_batch_size = encode_input.fetch_batch_size;
     // Failpoint after pending catalog inserts lives in write_streamed_chunk.
 
@@ -194,7 +196,7 @@ pub(super) fn stream_write_flush_batches(
             &encode_input,
             |statement, max_seq, after_seq| {
                 fetch_mirror_batch(
-                    &catalog_columns,
+                    catalog_columns,
                     statement,
                     max_seq,
                     after_seq,

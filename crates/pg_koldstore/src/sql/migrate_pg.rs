@@ -85,7 +85,6 @@ fn manage_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("storage lookup failed: {error}"));
     let catalog = migration_catalog(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let registry_catalog = catalog.clone();
     let constraints = manage_table_constraints_catalog(table_oid_u32)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let already_managed = table_is_already_managed(table_oid)
@@ -105,7 +104,7 @@ fn manage_table_pg_impl(
             max_rows_per_file,
             Some(mirror_capture_mode),
             auto_flush,
-            &catalog,
+            catalog.as_ref(),
             constraints,
         ))
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
@@ -139,7 +138,7 @@ fn manage_table_pg_impl(
         .options
         .segment_order_column_id
         .and_then(|column_id| {
-            registry_catalog
+            catalog
                 .columns
                 .iter()
                 .find(|column| column.column_id.get() == column_id)
@@ -164,9 +163,9 @@ fn manage_table_pg_impl(
             mirror_relation: &mirror_plan.mirror_table,
             primary_key_shape: &primary_key_shape,
             initialization_state: koldstore_schema::MirrorInitializationState::Complete,
-            primary_key: &registry_catalog.primary_key.columns,
-            columns: &registry_catalog.columns,
-            indexed_columns: &registry_catalog.indexed_columns,
+            primary_key: &catalog.primary_key.columns,
+            columns: &catalog.columns,
+            indexed_columns: &catalog.indexed_columns,
             options: &request.options,
             active: true,
             migration_status: MigrationStatus::Active,
@@ -200,7 +199,7 @@ fn manage_table_pg_impl(
             order_column_name,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-        ensure_database_worker_for_managed_options(&request.options);
+        ensure_async_mirror_worker_for_managed_options(&request.options);
         return crate::spi::uuid_to_pgrx(job_id);
     }
 
@@ -210,7 +209,7 @@ fn manage_table_pg_impl(
             table_oid: table_oid_u32,
             storage_id: storage_id.clone(),
         },
-        catalog,
+        (*catalog).clone(),
         job_id,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
@@ -227,9 +226,9 @@ fn manage_table_pg_impl(
         mirror_relation: &mirror_plan.mirror_table,
         primary_key_shape: &primary_key_shape,
         initialization_state: koldstore_schema::MirrorInitializationState::Capturing,
-        primary_key: &registry_catalog.primary_key.columns,
-        columns: &registry_catalog.columns,
-        indexed_columns: &registry_catalog.indexed_columns,
+        primary_key: &catalog.primary_key.columns,
+        columns: &catalog.columns,
+        indexed_columns: &catalog.indexed_columns,
         options: &request.options,
         active: false,
         migration_status: MigrationStatus::MirrorInitializing,
@@ -260,15 +259,15 @@ fn manage_table_pg_impl(
         order_column_name,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    ensure_database_worker_for_managed_options(&request.options);
+    ensure_async_mirror_worker_for_managed_options(&request.options);
 
     crate::spi::uuid_to_pgrx(job_id)
 }
 
 #[cfg(feature = "pg")]
-fn ensure_database_worker_for_managed_options(options: &ManageTableOptions) {
+fn ensure_async_mirror_worker_for_managed_options(options: &ManageTableOptions) {
     if options.auto_flush_enabled() && options.flush_enabled() {
-        let _ = crate::database_worker::ensure_database_worker();
+        let _ = crate::database_worker::ensure_async_mirror_worker();
     }
 }
 
@@ -302,21 +301,20 @@ fn apply_user_scope_policy(
 }
 
 #[cfg(feature = "pg")]
-fn table_has_rows(table: &koldstore_migrate::QualifiedTableName) -> Result<bool, pgrx::spi::Error> {
-    pgrx::Spi::get_one::<bool>(&format!(
-        "SELECT EXISTS (SELECT 1 FROM ONLY {} LIMIT 1)",
-        table.quoted()
-    ))
-    .map(|value| value.unwrap_or(false))
+fn table_has_rows(table: &koldstore_migrate::QualifiedTableName) -> Result<bool, String> {
+    let statement = koldstore_migrate::register::plan_table_has_rows(table)
+        .map_err(|error| error.to_string())?;
+    pgrx::Spi::get_one::<bool>(&statement.sql)
+        .map(|value| value.unwrap_or(false))
+        .map_err(|error| error.to_string())
 }
 
 /// Returns the migration catalog, preferring the backend-local cache used by merge scan.
 #[cfg(feature = "pg")]
 pub(crate) fn migration_catalog(
     table_oid: u32,
-) -> Result<koldstore_migrate::ExistingTableCatalog, String> {
+) -> Result<std::sync::Arc<koldstore_migrate::ExistingTableCatalog>, String> {
     crate::catalog::cache::cached_migration_catalog(pgrx::pg_sys::Oid::from(table_oid))
-        .map(|catalog| (*catalog).clone())
 }
 
 /// Loads the migration catalog via SPI introspection (uncached).
@@ -381,12 +379,11 @@ fn manage_table_constraints_catalog(
 fn table_is_already_managed(table_oid: pgrx::pg_sys::Oid) -> Result<bool, String> {
     use pgrx::datum::DatumWithOid;
 
-    pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (SELECT 1 FROM koldstore.schemas WHERE table_oid = $1::oid)",
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map(|value| value.unwrap_or(false))
-    .map_err(|error| error.to_string())
+    let statement = koldstore_catalog::queries::plan_table_already_managed()
+        .map_err(|error| error.to_string())?;
+    pgrx::Spi::get_one_with_args::<bool>(&statement.sql, &[DatumWithOid::from(table_oid)])
+        .map(|value| value.unwrap_or(false))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "pg")]
@@ -967,21 +964,10 @@ fn set_table_auto_flush_pg_impl(
     use pgrx::datum::DatumWithOid;
 
     crate::sql::job_lock_pg::lock_table_job(table_oid)?;
+    let statement = koldstore_migrate::register::plan_set_table_auto_flush()
+        .map_err(|error| error.to_string())?;
     let updated = pgrx::Spi::get_one_with_args::<bool>(
-        r#"
-WITH updated AS (
-    UPDATE koldstore.schemas
-    SET options = CASE
-            WHEN $2::boolean THEN options - 'auto_flush'
-            ELSE jsonb_set(COALESCE(options, '{}'::jsonb), '{auto_flush}', 'false'::jsonb, true)
-        END,
-        updated_at = now()
-    WHERE table_oid = $1::oid
-      AND active
-    RETURNING 1
-)
-SELECT EXISTS (SELECT 1 FROM updated)
-"#,
+        &statement.sql,
         &[DatumWithOid::from(table_oid), DatumWithOid::from(enabled)],
     )
     .map_err(|error| error.to_string())?
@@ -991,7 +977,7 @@ SELECT EXISTS (SELECT 1 FROM updated)
     }
     crate::catalog::cache::invalidate_table_globally(table_oid);
     if enabled {
-        let _ = crate::database_worker::ensure_database_worker();
+        let _ = crate::database_worker::ensure_async_mirror_worker();
     }
     Ok(true)
 }

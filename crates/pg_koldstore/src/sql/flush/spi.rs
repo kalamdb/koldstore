@@ -10,24 +10,21 @@ use koldstore_flush::{
 };
 use koldstore_manifest::manifest_from_catalog_rows;
 use koldstore_mirror::{
-    mirror_to_sql, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats, plan_mirror_stats,
-    MirrorRelation, MirrorSeqStats,
+    mirror_to_sql, plan_mirror_force_flush_stats, plan_mirror_oldest_rows_max_seq,
+    plan_mirror_stats, MirrorRelation, MirrorSeqStats,
 };
 
 pub(crate) fn resolve_flush_stats(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<ResolvedFlushSelection, String> {
-    use koldstore_common::MirrorOperation;
     use koldstore_flush::{
         apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
         FORCE_FLUSH_WAVE_ROW_CAP,
     };
 
     if force {
-        let all = mirror_flush_stats(table_oid)?;
-        let delete_code = MirrorOperation::Delete.code();
-        let delete_stats = mirror_op_stats(table_oid, delete_code)?;
+        let (all, delete_stats) = mirror_force_flush_stats(table_oid)?;
         let selection = resolve_force_flush_selection(all, delete_stats);
         // Cap large force mirrors into waves so encode/publish peak stays bounded.
         if selection.mirror_ops.is_none() && selection.stats.row_count > FORCE_FLUSH_WAVE_ROW_CAP {
@@ -807,6 +804,41 @@ fn mirror_flush_stats(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStats, String
     Ok(stats.into())
 }
 
+/// One mirror scan for force-flush all-row + delete aggregates.
+fn mirror_force_flush_stats(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<(FlushStats, FlushStats), String> {
+    use koldstore_common::MirrorOperation;
+
+    let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
+    let mirror = MirrorRelation::new(snapshot.mirror_relation.clone());
+    let delete_code = MirrorOperation::Delete.code();
+    let stats = mirror_to_sql(plan_mirror_force_flush_stats(&mirror, delete_code))
+        .map_err(|error| error.to_string())?;
+    let json = crate::spi::execute_prepared(&stats, &[], crate::spi::first_row::<String>)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "force flush stats lookup returned no rows".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    let all: MirrorSeqStats = serde_json::from_value(
+        value
+            .get("all")
+            .cloned()
+            .ok_or_else(|| "force flush stats missing `all`".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let delete_stats: MirrorSeqStats = serde_json::from_value(
+        value
+            .get("delete")
+            .cloned()
+            .ok_or_else(|| "force flush stats missing `delete`".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((all.into(), delete_stats.into()))
+}
+
 /// Mirror `max(seq)` at flush-job start, used to pin multi-wave catch-up.
 pub(super) fn mirror_catchup_watermark(
     table_oid: pgrx::pg_sys::Oid,
@@ -822,18 +854,4 @@ pub(super) fn mirror_catchup_watermark(
 /// Row count for the flush progress bar at claim time (mirror backlog size).
 pub(super) fn mirror_catchup_row_estimate(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     Ok(mirror_flush_stats(table_oid)?.row_count.max(0))
-}
-
-fn mirror_op_stats(table_oid: pgrx::pg_sys::Oid, op: i16) -> Result<FlushStats, String> {
-    let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
-    let mirror = MirrorRelation::new(snapshot.mirror_relation.clone());
-    let stats =
-        mirror_to_sql(plan_mirror_op_stats(&mirror, op)).map_err(|error| error.to_string())?;
-    let json = crate::spi::execute_prepared(&stats, &[], crate::spi::first_row::<String>)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "mirror op stats lookup returned no rows".to_string())?;
-    let stats: MirrorSeqStats = serde_json::from_str(&json).map_err(|error| error.to_string())?;
-    Ok(stats.into())
 }

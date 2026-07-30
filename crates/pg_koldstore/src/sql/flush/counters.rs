@@ -1,9 +1,7 @@
 //! Manifest-backed row counter SPI adapters for flush and diagnostics.
 
 use koldstore_common::QualifiedTableName;
-use koldstore_flush::{
-    plan_read_table_row_counters, plan_refresh_table_row_counters, TableRowCounters,
-};
+use koldstore_flush::{plan_refresh_table_row_counters, TableRowCounters};
 
 /// Reads O(1) row counters from `koldstore.manifest`.
 ///
@@ -15,7 +13,8 @@ pub(crate) fn read_table_row_counters(
 ) -> Result<TableRowCounters, String> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_read_table_row_counters().map_err(|error| error.to_string())?;
+    let statement = koldstore_catalog::queries::plan_read_table_row_counters()
+        .map_err(|error| error.to_string())?;
     let json = crate::spi::select_one::<String>(&statement, &[DatumWithOid::from(table_oid)])
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "manifest row counters are not initialized for this table".to_string())?;

@@ -35,10 +35,7 @@ fn mirror_backed_flush_selection_reads_mirror_and_base_rows_without_system_colum
     assert!(plan.statement.sql.contains("mirror.\"seq\" <= $1::bigint"));
     assert!(plan.statement.sql.contains("mirror.\"op\""));
     assert!(!plan.statement.sql.contains("mirror.\"changed_at\""));
-    assert!(plan
-        .statement
-        .sql
-        .contains("(mirror.\"op\" = 3) AS deleted"));
+    assert!(!plan.statement.sql.contains(" AS deleted"));
     assert!(plan.statement.sql.contains("ORDER BY mirror.\"seq\" ASC"));
     assert_eq!(
         plan.statement.param_types,
@@ -127,6 +124,11 @@ fn batched_flush_selection_can_filter_mirror_ops() {
     .unwrap();
 
     assert!(plan.statement.sql.contains("mirror.\"op\" = 3"));
+    assert!(
+        !plan.statement.sql.contains("LEFT JOIN ONLY"),
+        "delete-only waves must not join hot payloads"
+    );
+    assert!(plan.statement.sql.contains("NULL AS \"body\""));
 }
 
 #[test]

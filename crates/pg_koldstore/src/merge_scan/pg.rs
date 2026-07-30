@@ -20,6 +20,7 @@ mod cold;
 mod emit;
 mod execute;
 mod hot;
+mod keyset;
 mod literals;
 mod mirror;
 mod profile;
@@ -341,8 +342,8 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     };
 
     let known_manifest = with_hook_disabled(|| {
-        match crate::catalog::cache::cached_manifest_scan_context(table_oid, &[]) {
-            Ok(Some(stats)) => Some((stats.segments.len(), stats.generation)),
+        match crate::catalog::cache::cached_manifest_planner_hint(table_oid) {
+            Ok(Some(hint)) => Some(hint),
             Ok(None) => Some((0, 0)),
             Err(_) => None,
         }
@@ -580,8 +581,9 @@ unsafe fn runtime_cold_side_proven_empty(
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "managed table snapshot is unavailable".to_string())?;
         let catalog = crate::catalog::cache::cached_migration_catalog(table_oid)?;
-        let manifest = crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?
-            .ok_or_else(|| "published manifest is unavailable".to_string())?;
+        let manifest_generation = crate::catalog::cache::cached_manifest_planner_hint(table_oid)?
+            .ok_or_else(|| "published manifest is unavailable".to_string())?
+            .1;
         unsafe {
             cold_side_proven_empty(
                 table_oid,
@@ -589,7 +591,7 @@ unsafe fn runtime_cold_side_proven_empty(
                 &snapshot,
                 &catalog,
                 qual,
-                manifest.generation,
+                manifest_generation,
                 params,
             )
         }

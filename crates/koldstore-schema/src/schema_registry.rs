@@ -18,7 +18,6 @@ pub struct SchemaColumn {
     /// Original catalog type spelling preserved for diagnostics and matrix capture.
     pub catalog_type_name: String,
     pub nullable: bool,
-    pub system: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -27,8 +26,6 @@ struct SchemaColumnWire {
     name: String,
     type_name: String,
     nullable: bool,
-    #[serde(default)]
-    system: bool,
 }
 
 impl TryFrom<SchemaColumnWire> for SchemaColumn {
@@ -44,7 +41,6 @@ impl TryFrom<SchemaColumnWire> for SchemaColumn {
             pg_type: PgType::from_postgres_name(&wire.type_name)?,
             catalog_type_name: wire.type_name,
             nullable: wire.nullable,
-            system: wire.system,
         })
     }
 }
@@ -59,7 +55,6 @@ impl Serialize for SchemaColumn {
             name: self.name.clone(),
             type_name: self.catalog_type_name.clone(),
             nullable: self.nullable,
-            system: self.system,
         }
         .serialize(serializer)
     }
@@ -93,7 +88,7 @@ impl SchemaColumn {
         let catalog_type_name = type_name.into();
         let pg_type = PgType::from_postgres_name(&catalog_type_name)
             .expect("schema column builders must use supported PostgreSQL types");
-        Self::typed(column_id, name, pg_type, catalog_type_name, nullable, false)
+        Self::typed(column_id, name, pg_type, catalog_type_name, nullable)
     }
 
     /// Creates an application column from a supported PostgreSQL type.
@@ -104,7 +99,6 @@ impl SchemaColumn {
         pg_type: PgType,
         catalog_type_name: impl Into<String>,
         nullable: bool,
-        system: bool,
     ) -> Self {
         Self {
             column_id: ColumnId::from_attnum(column_id),
@@ -112,7 +106,6 @@ impl SchemaColumn {
             pg_type,
             catalog_type_name: catalog_type_name.into(),
             nullable,
-            system,
         }
     }
 
@@ -139,19 +132,10 @@ pub struct SchemaRegistryEntry {
 }
 
 impl SchemaRegistryEntry {
-    /// Returns application-owned columns, excluding KoldStore metadata.
+    /// Returns all registered columns for this schema version.
     #[must_use]
     pub fn application_columns(&self) -> Vec<&SchemaColumn> {
-        self.columns
-            .iter()
-            .filter(|column| !column.system)
-            .collect()
-    }
-
-    /// Returns KoldStore-owned metadata columns if a legacy schema still has any.
-    #[must_use]
-    pub fn system_columns(&self) -> Vec<&SchemaColumn> {
-        self.columns.iter().filter(|column| column.system).collect()
+        self.columns.iter().collect()
     }
 
     /// Looks up a column by stable ID.

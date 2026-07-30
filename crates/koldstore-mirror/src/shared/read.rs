@@ -91,6 +91,38 @@ FROM {mirror}"#,
     )
 }
 
+/// Plans all-row and delete-only mirror aggregates in one scan.
+///
+/// Force flush previously ran [`plan_mirror_stats`] then [`plan_mirror_op_stats`];
+/// this collapses both into a single pass with `FILTER (WHERE op = delete)`.
+#[must_use]
+pub fn plan_mirror_force_flush_stats(
+    mirror_table: &MirrorRelation,
+    delete_op: i16,
+) -> MirrorStatement {
+    MirrorStatement::read(
+        "select mirror force-flush stats",
+        format!(
+            r#"SELECT jsonb_build_object(
+    'all', jsonb_build_object(
+        {stats_fields}
+    ),
+    'delete', jsonb_build_object(
+        'row_count', count(*) FILTER (WHERE "op" = {delete_op})::bigint,
+        'min_seq', COALESCE(min("seq") FILTER (WHERE "op" = {delete_op}), 0),
+        'max_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0),
+        'min_commit_seq', COALESCE(min("seq") FILTER (WHERE "op" = {delete_op}), 0),
+        'max_commit_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0)
+    )
+)::text
+FROM {mirror}"#,
+            stats_fields = MIRROR_SEQ_STATS_JSON_FIELDS,
+            mirror = mirror_table.quoted(),
+            delete_op = delete_op,
+        ),
+    )
+}
+
 /// Plans the `max(seq)` among the oldest `limit` mirror rows.
 ///
 /// PERFORMANCE: Prefer this when the caller already knows `row_count` (for

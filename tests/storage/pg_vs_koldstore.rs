@@ -2,10 +2,17 @@
 //!
 //! Schema: [`schema.sql`](schema.sql). Seeds a wide (~50 column) table, measures
 //! DML, then **hot-only PK lookups before flush** (heaps still hold all rows —
-//! fair merge-scan overhead), flushes older rows to zstd Parquet (timing and
-//! peak cluster RSS), then measures **cold-only** and **hot+cold (50/50 mix)**
-//! PK lookups and compares PostgreSQL heap/index sizes versus total hot+cold
-//! footprint.
+//! fair merge-scan overhead). On PostgreSQL-only, **cold-id / hot+cold PK
+//! lookups also run before `VACUUM FULL`** so they are not compared against a
+//! freshly rewritten 10M heap. Managed sides flush older rows to zstd Parquet
+//! (timing + peak RSS), time **cold-only** and **hot+cold (50/50)** after flush
+//! (before hot-heap VACUUM), then VACUUM for the maintenance metric and compare
+//! PostgreSQL heap/index sizes versus total hot+cold footprint.
+//!
+//! Timed INSERT always seeds into an empty table growing to `rows` on every
+//! side — `hot_row_limit` does **not** make managed INSERT faster (flush has
+//! not run yet). Async looking faster than PG is machine/order noise, not a
+//! smaller-hot-set effect.
 //! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
 //!
 //! Published runs isolate each column via `KOLDSTORE_STORAGE_SIDE=pg|async|strict`
@@ -35,8 +42,11 @@ const DEFAULT_INSERT_BATCH_ROWS: i64 = 100_000;
 /// Default when unset: `min(rows, max(1_000_000, 5 * insert_batch_rows))` so
 /// published 10M runs heat the server before measurement.
 const DEFAULT_WARMUP_ROWS_SENTINEL: i64 = -1;
-/// Point-lookup iterations for throughput + p99 (needs enough samples for p99).
-const QUERY_LOOPS: usize = 100;
+/// Point-lookup iterations counted toward throughput + p99.
+const QUERY_LOOPS: usize = 400;
+/// Untimed leading lookups discarded so EXPLAIN / first Parquet open / plan
+/// cache do not dominate the steady-state sample (especially cold paths).
+const QUERY_WARMUP_DISCARD: usize = 40;
 /// Update/delete latency sample size when splitting the DML sample into batches.
 const DEFAULT_DML_LATENCY_BATCH_ROWS: i64 = 1_000;
 
@@ -463,9 +473,20 @@ async fn run_pg_only_body(
 
     let hot_id = rows;
     let cold_id = 1_i64;
+    // All PK phases before VACUUM FULL: cold-id is still on the full heap, same
+    // post-DML state as hot-only. Measuring after FULL vacuum would compare a
+    // freshly rewritten 10M table to managed Parquet and inflate the gap.
     let query_hot_only = {
         let _step = common::log_step_always("storage_cmp: time pg-only hot PK lookups");
         time_point_queries(&db.client, baseline, hot_id).await?
+    };
+    let query_cold_only = {
+        let _step = common::log_step_always("storage_cmp: time pg-only cold-id PK lookups");
+        time_point_queries(&db.client, baseline, cold_id).await?
+    };
+    let query_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time pg-only mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
     };
 
     // No flush on unmanaged heap; still time VACUUM FULL on the full table so
@@ -478,15 +499,6 @@ async fn run_pg_only_body(
         let _step = common::log_step_always("storage_cmp: REINDEX pg-only");
         reindex_relation(&db.client, baseline).await?;
     }
-
-    let query_cold_only = {
-        let _step = common::log_step_always("storage_cmp: time pg-only cold-id PK lookups");
-        time_point_queries(&db.client, baseline, cold_id).await?
-    };
-    let query_hot_cold = {
-        let _step = common::log_step_always("storage_cmp: time pg-only mixed hot+cold PK lookups");
-        time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
-    };
     let sizes = relation_sizes(&db.client, baseline, None).await?;
 
     let metrics = SideMetrics {
@@ -640,19 +652,6 @@ async fn run_managed_only_body(
         status.hot_rows, status.cold_row_count, status.mirror_rows
     ));
 
-    let vacuum = {
-        let _step = common::log_step_always("storage_cmp: VACUUM FULL managed (hot heap)");
-        time_vacuum_full(&db.client, managed).await?
-    };
-    {
-        let _step = common::log_step_always("storage_cmp: REINDEX + vacuum mirror");
-        reindex_relation(&db.client, managed).await?;
-        if let Some(mirror) = mirror_relation(managed) {
-            time_vacuum_full(&db.client, &mirror).await?;
-            reindex_relation(&db.client, &mirror).await?;
-        }
-    }
-
     {
         let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
         let plan_cold = common::explain(
@@ -668,6 +667,9 @@ async fn run_managed_only_body(
             "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
         );
     }
+    // Time cold / hot+cold after flush but before hot-heap VACUUM so the PG
+    // baseline (full heap, pre-VACUUM) and managed Parquet path are not mixed
+    // with a post-FULL-vacuum heap rewrite on the unmanaged side.
     let query_cold_only = {
         let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
         time_point_queries(&db.client, managed, cold_id).await?
@@ -676,6 +678,19 @@ async fn run_managed_only_body(
         let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
         time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
     };
+
+    let vacuum = {
+        let _step = common::log_step_always("storage_cmp: VACUUM FULL managed (hot heap)");
+        time_vacuum_full(&db.client, managed).await?
+    };
+    {
+        let _step = common::log_step_always("storage_cmp: REINDEX + vacuum mirror");
+        reindex_relation(&db.client, managed).await?;
+        if let Some(mirror) = mirror_relation(managed) {
+            time_vacuum_full(&db.client, &mirror).await?;
+            reindex_relation(&db.client, &mirror).await?;
+        }
+    }
 
     let sizes = relation_sizes(&db.client, managed, Some(managed)).await?;
     anyhow::ensure!(
@@ -895,26 +910,6 @@ async fn run_storage_comparison_body(
         status.hot_rows, status.cold_row_count, status.mirror_rows
     ));
 
-    // After flush the managed heap is smaller; time VACUUM FULL as the
-    // maintenance-cost comparison, then REINDEX so size numbers are clean.
-    let baseline_vacuum = {
-        let _step = common::log_step_always("storage_cmp: VACUUM FULL baseline (~full heap)");
-        time_vacuum_full(&db.client, baseline).await?
-    };
-    let managed_vacuum = {
-        let _step = common::log_step_always("storage_cmp: VACUUM FULL managed (hot heap)");
-        time_vacuum_full(&db.client, managed).await?
-    };
-    {
-        let _step = common::log_step_always("storage_cmp: REINDEX + vacuum mirror");
-        reindex_relation(&db.client, baseline).await?;
-        reindex_relation(&db.client, managed).await?;
-        if let Some(mirror) = mirror_relation(managed) {
-            time_vacuum_full(&db.client, &mirror).await?;
-            reindex_relation(&db.client, &mirror).await?;
-        }
-    }
-
     {
         let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
         let plan_cold = common::explain(
@@ -937,6 +932,8 @@ async fn run_storage_comparison_body(
         assert_point_row_matches(&db.client, baseline, managed, mid_cold_id).await?;
     }
 
+    // Baseline cold/hot+cold on the full heap before VACUUM FULL; managed on
+    // Parquet after flush before hot-heap VACUUM — same contract as isolated sides.
     let baseline_cold_only = {
         let _step = common::log_step_always("storage_cmp: time baseline cold-only PK lookups");
         time_point_queries(&db.client, baseline, cold_id).await?
@@ -953,6 +950,26 @@ async fn run_storage_comparison_body(
         let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
         time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
     };
+
+    // After flush the managed heap is smaller; time VACUUM FULL as the
+    // maintenance-cost comparison, then REINDEX so size numbers are clean.
+    let baseline_vacuum = {
+        let _step = common::log_step_always("storage_cmp: VACUUM FULL baseline (~full heap)");
+        time_vacuum_full(&db.client, baseline).await?
+    };
+    let managed_vacuum = {
+        let _step = common::log_step_always("storage_cmp: VACUUM FULL managed (hot heap)");
+        time_vacuum_full(&db.client, managed).await?
+    };
+    {
+        let _step = common::log_step_always("storage_cmp: REINDEX + vacuum mirror");
+        reindex_relation(&db.client, baseline).await?;
+        reindex_relation(&db.client, managed).await?;
+        if let Some(mirror) = mirror_relation(managed) {
+            time_vacuum_full(&db.client, &mirror).await?;
+            reindex_relation(&db.client, &mirror).await?;
+        }
+    }
 
     let baseline_sizes = relation_sizes(&db.client, baseline, None).await?;
     let managed_sizes = relation_sizes(&db.client, managed, Some(managed)).await?;
@@ -1927,14 +1944,17 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
     // prune + hot equality pushdown the same way applications with Const quals do.
     // Parameterized `$1` is also supported via ParamListInfo resolution.
     let sql = format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {id}");
+    let total = QUERY_WARMUP_DISCARD + QUERY_LOOPS;
     let mut samples = Vec::with_capacity(QUERY_LOOPS);
-    for _ in 0..QUERY_LOOPS {
+    for i in 0..total {
         let started = Instant::now();
         let _ = client
             .query_one(&sql, &[])
             .await
             .with_context(|| format!("point query {relation} id={id}"))?;
-        samples.push(started.elapsed());
+        if i >= QUERY_WARMUP_DISCARD {
+            samples.push(started.elapsed());
+        }
     }
     let elapsed: Duration = samples.iter().copied().sum();
     Ok(Timing::with_p99(elapsed, QUERY_LOOPS as i64, &samples))
@@ -1951,15 +1971,19 @@ async fn time_mixed_hot_cold_queries(
         format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {hot_id}");
     let cold_sql =
         format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {cold_id}");
+    let total = QUERY_WARMUP_DISCARD + QUERY_LOOPS;
     let mut samples = Vec::with_capacity(QUERY_LOOPS);
-    for i in 0..QUERY_LOOPS {
+    for i in 0..total {
+        // Keep 50/50 across the counted window; warmup uses the same cadence.
         let sql = if i % 2 == 0 { &hot_sql } else { &cold_sql };
         let started = Instant::now();
         let _ = client
             .query_one(sql, &[])
             .await
             .with_context(|| format!("mixed hot/cold point query {relation}"))?;
-        samples.push(started.elapsed());
+        if i >= QUERY_WARMUP_DISCARD {
+            samples.push(started.elapsed());
+        }
     }
     let elapsed: Duration = samples.iter().copied().sum();
     Ok(Timing::with_p99(elapsed, QUERY_LOOPS as i64, &samples))
@@ -2312,11 +2336,18 @@ fn build_comparison_report(
             "warm-up: untimed insert of {warmup_rows} rows into a throwaway table (same schema/manage mode), then DROP + CHECKPOINT before the timed seed — rejects cold-start insert skew."
         ));
     }
+    notes.push(format!(
+        "p99: insert = per insert-batch commit; update = per 1k-row update batch; \
+         hot/cold query = per PK lookup ({QUERY_LOOPS} timed loops after \
+         {QUERY_WARMUP_DISCARD} discarded warm-up lookups)."
+    ));
     notes.push(
-        "p99: insert = per insert-batch commit; update = per 1k-row update batch; hot/cold query = per PK lookup (100 loops).".to_string(),
-    );
-    notes.push(
-        "hot+cold query = 50/50 mix of newest hot PK and oldest cold PK after flush; cold-only = cold PK only.".to_string(),
+        "hot-only PK = newest id before flush (full heap both sides). \
+         PG cold-id / hot+cold also run on the full heap before VACUUM FULL. \
+         Managed cold-only / hot+cold run after flush (Parquet) before hot-heap VACUUM. \
+         Timed INSERT seeds an empty table to `rows` on every side — hot_row_limit \
+         does not shrink the insert working set."
+            .to_string(),
     );
     if baseline.is_none() || managed.is_none() {
         notes.push(

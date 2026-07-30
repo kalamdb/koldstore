@@ -214,6 +214,88 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
     }
 }
 
+/// Active async managed-relation metadata used by the WAL applier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncManagedRelationMeta {
+    /// Managed source table OID.
+    pub table_oid: u32,
+    /// Quoted or catalog-text mirror relation name.
+    pub mirror: String,
+    /// Ordered primary-key column names.
+    pub primary_key: Vec<String>,
+    /// Optional immutable segment-order column.
+    pub order_column: Option<AsyncOrderColumnMeta>,
+}
+
+/// Segment-order column published into async capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncOrderColumnMeta {
+    /// Column name in the live catalog / pgoutput relation.
+    pub name: String,
+    /// PostgreSQL type OID for SPI encoding.
+    pub type_oid: u32,
+}
+
+/// Decodes async managed-relation metadata from catalog JSON.
+///
+/// # Errors
+///
+/// Returns an error when required fields are missing, incomplete, or mistyped.
+pub fn async_managed_relation(
+    value: &serde_json::Value,
+) -> Result<AsyncManagedRelationMeta, String> {
+    let table_oid = value
+        .get("table_oid")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "async schema metadata has no table_oid".to_string())?
+        .parse::<u32>()
+        .map_err(|error| error.to_string())?;
+    let mirror = required_string(value, "mirror")?.to_string();
+    let primary_key = value
+        .get("primary_key")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "async schema metadata has no primary key".to_string())?
+        .iter()
+        .map(|column| {
+            column
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "async primary key entry missing name".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let order_column = match (
+        value
+            .get("segment_order_column")
+            .and_then(serde_json::Value::as_str),
+        value
+            .get("segment_order_type_oid")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                value
+                    .get("segment_order_type_oid")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|n| u64::try_from(n).ok())
+            }),
+    ) {
+        (Some(name), Some(type_oid)) => Some(AsyncOrderColumnMeta {
+            name: name.to_string(),
+            type_oid: type_oid as u32,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "async schema metadata has incomplete segment_order_column fields".to_string(),
+            )
+        }
+    };
+    Ok(AsyncManagedRelationMeta {
+        table_oid,
+        mirror,
+        primary_key,
+        order_column,
+    })
+}
+
 /// Decodes a flush storage context JSON payload.
 ///
 /// # Errors
@@ -379,6 +461,22 @@ mod tests {
         }])
         .unwrap();
         assert_eq!(stats["1"], (serde_json::json!(1), serde_json::json!(10)));
+    }
+
+    #[test]
+    fn async_managed_relation_decodes_order_column() {
+        let value = serde_json::json!({
+            "table_oid": "42",
+            "mirror": "koldstore.items__cl",
+            "primary_key": ["tenant_id", "id"],
+            "segment_order_column": "created_at",
+            "segment_order_type_oid": 1184
+        });
+        let meta = super::async_managed_relation(&value).unwrap();
+        assert_eq!(meta.table_oid, 42);
+        assert_eq!(meta.primary_key, vec!["tenant_id", "id"]);
+        assert_eq!(meta.order_column.as_ref().unwrap().name, "created_at");
+        assert_eq!(meta.order_column.as_ref().unwrap().type_oid, 1184);
     }
 
     #[test]

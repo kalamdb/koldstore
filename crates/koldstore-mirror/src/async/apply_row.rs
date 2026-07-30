@@ -72,22 +72,33 @@ pub fn primary_key_json(
     Ok(row)
 }
 
+/// Converts one `pgoutput` value into a UTF-8 text cell.
+///
+/// # Errors
+///
+/// Returns an error for NULL, unchanged TOAST, binary, or non-UTF8 text.
+pub fn pg_value_text(value: &PgOutputValue, column: &str, role: &str) -> Result<String, String> {
+    match value {
+        PgOutputValue::Null => Err(format!("{role} column {column} is NULL")),
+        PgOutputValue::UnchangedToast => Err(format!(
+            "{role} column {column} was emitted as unchanged TOAST"
+        )),
+        PgOutputValue::Text(bytes) => std::str::from_utf8(bytes)
+            .map(str::to_string)
+            .map_err(|error| error.to_string()),
+        PgOutputValue::Binary(_) => {
+            Err(format!("{role} column {column} arrived as binary pgoutput"))
+        }
+    }
+}
+
 /// Converts one `pgoutput` value into a JSON cell for mirror batch apply.
 ///
 /// # Errors
 ///
 /// Returns an error for NULL, unchanged TOAST, binary, or non-UTF8 text.
 pub fn pg_value_json(value: &PgOutputValue, column: &str) -> Result<Value, String> {
-    match value {
-        PgOutputValue::Null => Err(format!("primary-key column {column} is NULL")),
-        PgOutputValue::UnchangedToast => Err(format!(
-            "primary-key column {column} was emitted as unchanged TOAST"
-        )),
-        PgOutputValue::Text(bytes) => std::str::from_utf8(bytes)
-            .map(|text| Value::String(text.to_string()))
-            .map_err(|error| error.to_string()),
-        PgOutputValue::Binary(_) => Err("binary pgoutput values are not requested".to_string()),
-    }
+    Ok(Value::String(pg_value_text(value, column, "primary-key")?))
 }
 
 #[cfg(test)]

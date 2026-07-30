@@ -16,6 +16,32 @@ use koldstore_schema::PgType;
 
 use crate::schema::PgColumn;
 
+/// Converts a JSONB cell into the UTF-8 form stored in Parquet Utf8 columns.
+///
+/// JSON strings stay unquoted; other JSON values are serialized compactly.
+#[must_use]
+pub fn jsonb_cell_to_utf8(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// Encodes raw bytes in PostgreSQL `bytea` hex output form (`\xdeadbeef`).
+///
+/// PERFORMANCE: nibble table lookup avoids per-byte `format!` allocations.
+#[must_use]
+pub fn pg_bytea_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(2 + bytes.len() * 2);
+    out.push_str("\\x");
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0xf) as usize] as char);
+    }
+    out
+}
+
 /// Returns the Arrow physical type for a supported PostgreSQL type.
 #[must_use]
 pub const fn arrow_data_type(pg_type: PgType) -> DataType {
@@ -309,5 +335,26 @@ mod tests {
         let decoded =
             json_from_arrow_cell(PgType::Int8, "id", batch.column(0).as_ref(), 0).unwrap();
         assert_eq!(decoded, serde_json::json!(42));
+    }
+
+    #[test]
+    fn pg_bytea_hex_matches_postgres_hex_output() {
+        assert_eq!(
+            super::pg_bytea_hex(&[0xde, 0xad, 0xbe, 0xef]),
+            "\\xdeadbeef"
+        );
+        assert_eq!(super::pg_bytea_hex(&[]), "\\x");
+    }
+
+    #[test]
+    fn jsonb_cell_to_utf8_keeps_strings_unquoted() {
+        assert_eq!(
+            super::jsonb_cell_to_utf8(&serde_json::json!("hello")),
+            "hello"
+        );
+        assert_eq!(
+            super::jsonb_cell_to_utf8(&serde_json::json!({"a": 1})),
+            "{\"a\":1}"
+        );
     }
 }

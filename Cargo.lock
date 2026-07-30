@@ -1500,6 +1500,7 @@ dependencies = [
 name = "koldstore-migrate"
 version = "0.1.8-beta.0"
 dependencies = [
+ "koldstore-catalog",
  "koldstore-common",
  "koldstore-mirror",
  "koldstore-schema",

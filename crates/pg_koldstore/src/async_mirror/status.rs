@@ -18,39 +18,25 @@ pub fn async_mirror_status() -> pgrx::JsonB {
 }
 
 fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
+    use koldstore_catalog::queries::{
+        plan_async_mirror_slot_status, plan_async_mirror_state_status,
+    };
+
     let slot = current_slot_name();
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
     let metrics = crate::observability::async_apply_metrics();
 
-    // Prefer CAST(... AS text) over `expr::text`: this SPI path failed with
-    // `syntax error at or near "."` when using `::` casts on nested
-    // jsonb_build_object results.
+    let slot_plan = plan_async_mirror_slot_status().map_err(|error| error.to_string())?;
     let slot_row = pgrx::Spi::get_one_with_args::<String>(
-        "SELECT COALESCE(\
-           (SELECT CAST(jsonb_build_object(\
-              'slot_name', slot_name,\
-              'active', active,\
-              'confirmed_flush_lsn', CAST(confirmed_flush_lsn AS text),\
-              'retained_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)\
-            ) AS text)\
-            FROM pg_catalog.pg_replication_slots WHERE slot_name = $1), \
-           CAST(jsonb_build_object('slot_name', $1, 'present', false) AS text)\
-         )",
+        &slot_plan.sql,
         &[DatumWithOid::from(slot.as_str())],
     )
     .map_err(|error| error.to_string())?
     .unwrap_or_else(|| json!({ "slot_name": slot, "present": false }).to_string());
 
+    let state_plan = plan_async_mirror_state_status().map_err(|error| error.to_string())?;
     let state_row = pgrx::Spi::get_one_with_args::<String>(
-        "SELECT COALESCE(\
-           (SELECT CAST(jsonb_build_object(\
-              'applied_lsn', CAST(applied_lsn AS text),\
-              'updated_at', updated_at,\
-              'updated_at_age_seconds', EXTRACT(EPOCH FROM (now() - updated_at))\
-            ) AS text)\
-            FROM koldstore.async_mirror_state WHERE database_oid = $1), \
-           CAST(jsonb_build_object('present', false) AS text)\
-         )",
+        &state_plan.sql,
         &[DatumWithOid::from(database_oid)],
     )
     .map_err(|error| error.to_string())?

@@ -69,11 +69,45 @@ pub fn quoted_pk_columns(primary_key: &[&str]) -> MirrorResult<Vec<String>> {
         .collect()
 }
 
+/// How async apply binds one primary-key column array into SPI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PkArrayBindKind {
+    /// Bind a native `{type}[]` datum (`bigint[]`, `text[]`, …).
+    Native,
+    /// Bind `text[]` and cast each element to `type` in SQL (uuid/domains/etc.).
+    TextThenCast,
+}
+
+fn pk_array_bind_kind(type_name: &str) -> PkArrayBindKind {
+    match type_name.trim().to_ascii_lowercase().as_str() {
+        "bigint" | "int8" | "integer" | "int4" | "int" | "smallint" | "int2" | "boolean"
+        | "bool" | "text" | "varchar" | "character varying" | "name" => PkArrayBindKind::Native,
+        _ => PkArrayBindKind::TextThenCast,
+    }
+}
+
+fn unnest_pk_array_arg(param: usize, type_name: &str) -> String {
+    match pk_array_bind_kind(type_name) {
+        PkArrayBindKind::Native => format!("${param}::{type_name}[]"),
+        PkArrayBindKind::TextThenCast => format!("${param}::text[]"),
+    }
+}
+
+fn projected_pk_column(alias: &str, quoted: &str, type_name: &str) -> String {
+    match pk_array_bind_kind(type_name) {
+        PkArrayBindKind::Native => format!("incoming.{alias} AS {quoted}"),
+        PkArrayBindKind::TextThenCast => {
+            format!("incoming.{alias}::{type_name} AS {quoted}")
+        }
+    }
+}
+
 /// Plans a set-based async-mirror upsert from typed `unnest` array binds.
 ///
 /// Bind contract:
 /// - `$1` — operation code (`smallint`)
-/// - `$2..$N+1` — one `text[]` per primary-key column (cast to `pk_type_names`)
+/// - `$2..$N+1` — one array per primary-key column (`{type}[]` for common
+///   scalars, otherwise `text[]` with a cast)
 /// - `$N+2` — `bigint[]` of preallocated `seq` values
 /// - `$N+3` — `bytea[]` of Sort Key V1 `order_key` values when `include_order_key`
 ///
@@ -97,7 +131,7 @@ pub fn plan_async_mirror_batch_upsert(
     let quoted_keys = quoted_pk_columns(primary_key)?;
     let conflict_keys = quoted_keys.join(", ");
     let pk_count = quoted_keys.len();
-    // $1 = op; $2..$(pk_count+1) = pk text arrays; $(pk_count+2) = seq bigint[]
+    // $1 = op; $2..$(pk_count+1) = pk arrays; $(pk_count+2) = seq bigint[]
     // optional $(pk_count+3) = order_key bytea[]
     let mut unnest_args = Vec::with_capacity(pk_count + 2);
     let mut unnest_aliases = Vec::with_capacity(pk_count + 2);
@@ -105,9 +139,9 @@ pub fn plan_async_mirror_batch_upsert(
     for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
         let param = index + 2;
         let alias = format!("pk_{index}");
-        unnest_args.push(format!("${param}::text[]"));
+        unnest_args.push(unnest_pk_array_arg(param, type_name));
         unnest_aliases.push(alias.clone());
-        select_keys.push(format!("incoming.{alias}::{type_name} AS {quoted}"));
+        select_keys.push(projected_pk_column(&alias, quoted, type_name));
     }
     let seq_param = pk_count + 2;
     unnest_args.push(format!("${seq_param}::bigint[]"));
@@ -188,9 +222,9 @@ pub fn plan_async_mirror_batch_update(
     for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
         let param = index + 2;
         let alias = format!("pk_{index}");
-        unnest_args.push(format!("${param}::text[]"));
+        unnest_args.push(unnest_pk_array_arg(param, type_name));
         unnest_aliases.push(alias.clone());
-        projected.push(format!("incoming.{alias}::{type_name} AS {quoted}"));
+        projected.push(projected_pk_column(&alias, quoted, type_name));
     }
     let seq_param = pk_count + 2;
     unnest_args.push(format!("${seq_param}::bigint[]"));
@@ -297,9 +331,9 @@ pub fn plan_async_mirror_batch_delete_existing(
     for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
         let param = index + 2;
         let alias = format!("pk_{index}");
-        unnest_args.push(format!("${param}::text[]"));
+        unnest_args.push(unnest_pk_array_arg(param, type_name));
         unnest_aliases.push(alias.clone());
-        projected.push(format!("incoming.{alias}::{type_name} AS {quoted}"));
+        projected.push(projected_pk_column(&alias, quoted, type_name));
     }
     let seq_param = pk_count + 2;
     unnest_args.push(format!("${seq_param}::bigint[]"));

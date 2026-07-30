@@ -15,24 +15,24 @@ pub mod strict;
 
 // Stable top-level paths (existing callers).
 pub use r#async::{
-    decode_message, must_flush_before_push, pg_value_json, pk_identity, primary_key_json,
-    BatchFlushReason, PgOutputColumn, PgOutputDecodeError, PgOutputMessage, PgOutputRelation,
-    PgOutputTuple, PgOutputValue, APPLY_BATCH_ROWS,
+    decode_message, must_flush_before_push, pg_value_json, pg_value_text, pk_identity,
+    primary_key_json, BatchFlushReason, PgOutputColumn, PgOutputDecodeError, PgOutputMessage,
+    PgOutputRelation, PgOutputTuple, PgOutputValue, APPLY_BATCH_ROWS,
 };
 pub use shared::{
     mirror_relation_for_source, mirror_to_sql, plan_async_mirror_batch_delete_existing,
     plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, plan_drop_mirror_table,
-    plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats, plan_mirror_pk_column_renames,
-    plan_mirror_schema, plan_mirror_schema_with_order_key, plan_mirror_stats,
-    plan_select_mirror_rows_after_seq, plan_select_mirror_rows_after_seq_with_params,
-    plan_upsert_mirror_row, quoted_pk_columns, MirrorAccess, MirrorColumn, MirrorError,
-    MirrorRelation, MirrorResult, MirrorSchemaPlan, MirrorSeqStats, MirrorStatement, SqlParamType,
-    CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,
+    plan_mirror_force_flush_stats, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats,
+    plan_mirror_pk_column_renames, plan_mirror_schema, plan_mirror_schema_with_order_key,
+    plan_mirror_stats, plan_select_mirror_rows_after_seq,
+    plan_select_mirror_rows_after_seq_with_params, plan_upsert_mirror_row, quoted_pk_columns,
+    MirrorAccess, MirrorColumn, MirrorError, MirrorRelation, MirrorResult, MirrorSchemaPlan,
+    MirrorSeqStats, MirrorStatement, SqlParamType, CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,
 };
 pub use strict::{
-    async_worker_kick_trigger_name, async_worker_kick_trigger_names, plan_drop_mirror_dml_triggers,
-    plan_mirror_capture, plan_mirror_capture_teardown, plan_mirror_capture_with_order_column,
-    MirrorCaptureError, MirrorCapturePlan, MirrorCaptureResult,
+    plan_drop_mirror_dml_triggers, plan_mirror_capture, plan_mirror_capture_teardown,
+    plan_mirror_capture_with_order_column, MirrorCaptureError, MirrorCapturePlan,
+    MirrorCaptureResult,
 };
 
 // Module aliases so `koldstore_mirror::pgoutput` / `::batch` keep working.

@@ -26,8 +26,10 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 - **schema** (`koldstore-schema`): `koldstore.schemas` registry — column sets,
   versions, type matrix, initialization state for migrated tables.
 - **catalog** (`koldstore-catalog`): cold bookkeeping — segment visibility,
-  sync-state FSM, managed-table snapshots, flush policy config, catalog
-  query/decode/cache (capped OID maps). Must stay free of `koldstore-storage`.
+  sync-state FSM, managed-table snapshots, flush policy config, shared catalog
+  **reads** (cold prune, row counters, operator backup/validate/export SELECTs,
+  active schema refresh context), decode/cache (capped OID maps). Must stay free
+  of `koldstore-storage`.
 
 **Do not merge schema and catalog.** Schema stays a leaf used by migrate and
 parquet; catalog depends on schema one-way for typed init state. Combining them
@@ -86,6 +88,7 @@ flowchart BT
     flush --> storage
     flush --> sortkey
     migrate --> common
+    migrate --> catalog
     migrate --> schema
     migrate --> mirror
     migrate --> worker

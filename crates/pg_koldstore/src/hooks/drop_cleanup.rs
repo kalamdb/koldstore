@@ -37,8 +37,19 @@ pub(super) fn cleanup_managed_tables_before_drop(
 
 /// Drops change-log mirrors captured before DROP (best-effort after heap gone).
 pub(super) fn drop_captured_mirrors(mirrors: &[QualifiedTableName]) {
+    use koldstore_mirror::{plan_drop_mirror_table, MirrorRelation};
+
     for mirror in mirrors {
-        let sql = format!("DROP TABLE IF EXISTS {}", mirror.quoted());
+        let sql = match mirror.as_table_name() {
+            Ok(table_name) => plan_drop_mirror_table(&MirrorRelation::new(table_name)).sql,
+            Err(error) => {
+                pgrx::warning!(
+                    "koldstore drop: invalid mirror {}: {error}",
+                    mirror.quoted()
+                );
+                continue;
+            }
+        };
         if let Err(error) = pgrx::Spi::run(&sql) {
             pgrx::warning!(
                 "koldstore drop: failed to drop mirror {}: {error}",

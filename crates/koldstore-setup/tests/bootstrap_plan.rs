@@ -16,14 +16,6 @@ fn canonical_install_sql_has_required_setup_objects() {
     assert!(missing_catalog_tables(&plan).is_empty());
     assert!(missing_catalog_indexes(&plan).is_empty());
     assert!(plan.contains_object(BootstrapObjectKind::Schema, "koldstore"));
-    assert!(plan.contains_object(
-        BootstrapObjectKind::CompositeType,
-        "koldstore.managed_table_info"
-    ));
-    assert!(plan.contains_object(BootstrapObjectKind::CompositeType, "koldstore.dml_result"));
-    assert!(plan.contains_object(BootstrapObjectKind::CompositeType, "koldstore.change_event"));
-    assert!(plan.contains_object(BootstrapObjectKind::Sequence, "koldstore.global_seq"));
-    assert!(plan.contains_object(BootstrapObjectKind::Sequence, "koldstore.global_commit_seq"));
 }
 
 #[test]

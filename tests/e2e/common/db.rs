@@ -179,6 +179,25 @@ impl TestDb {
         format!("{}.{}", self.schema, table_name)
     }
 
+    /// Creates a disposable non-owner role named `{schema}_app`.
+    ///
+    /// Roles are cluster-global and survive pooled-DB resets, so this drops any
+    /// leftover role from a prior PID/counter collision before creating.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when role DDL fails.
+    pub async fn ensure_app_role(&self) -> Result<String> {
+        let app_role = format!("{}_app", self.schema);
+        self.client
+            .batch_execute(&format!(
+                "DROP ROLE IF EXISTS {app_role}; CREATE ROLE {app_role};"
+            ))
+            .await
+            .with_context(|| format!("ensure app role {app_role}"))?;
+        Ok(app_role)
+    }
+
     /// Creates and populates an indexed fixture table.
     ///
     /// # Errors

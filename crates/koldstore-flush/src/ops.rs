@@ -1,8 +1,10 @@
 //! Operational SQL planning for flush jobs and maintenance commands.
 //!
-//! Owns parameterized catalog statements for flush enqueue, recovery, and table
-//! status queries. Inline flush job lifecycle lives in `table_jobs`. PostgreSQL
-//! `#[pg_extern]` wrappers stay in `pg_koldstore`.
+//! Owns flush enqueue, recovery request shapes, `describe_table` (which mixes
+//! catalog counters with live hot/mirror SQL), and thin wrappers around
+//! catalog-owned backup/validate/export SELECTs. Inline flush job lifecycle
+//! lives in `table_jobs`. PostgreSQL `#[pg_extern]` wrappers stay in
+//! `pg_koldstore`.
 
 use koldstore_common::{
     is_safe_identifier, quote_ident, QualifiedTableName, ScopeKey, SeqId, SqlParamType,
@@ -302,16 +304,16 @@ fn plan_mirror_flush_selection_inner(
         .iter()
         .map(|column| validate_identifier(column))
         .collect::<Result<Vec<_>, _>>()?;
-    let join = pk_columns
-        .iter()
-        .map(|column| format!("mirror.{column} = hot.{column}"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
+    // Tombstone-only waves only need PK + seq/op from the mirror; joining hot
+    // would pull TOAST payloads that parquet nulls for deletes anyway.
+    let delete_only = mirror_ops.is_some_and(|ops| ops == [3]);
     let mut select_columns = base_columns
         .iter()
         .map(|column| {
             if pk_columns.iter().any(|pk| pk == column) {
                 format!("mirror.{column} AS {column}")
+            } else if delete_only {
+                format!("NULL AS {column}")
             } else {
                 format!("hot.{column} AS {column}")
             }
@@ -326,7 +328,6 @@ fn plan_mirror_flush_selection_inner(
             "mirror.{} AS \"op\"",
             koldstore_mirror::MirrorColumn::Op.quoted_name()
         ),
-        "(mirror.\"op\" = 3) AS deleted".to_string(),
     ]);
     if include_order_key {
         select_columns.push("mirror.\"order_key\" AS order_key".to_string());
@@ -355,20 +356,29 @@ fn plan_mirror_flush_selection_inner(
         where_clauses.push(predicate);
         param_types.push(SqlParamType::Text);
     }
+    let from_clause = if delete_only {
+        format!("FROM {mirror} AS mirror", mirror = mirror_table.quoted())
+    } else {
+        let join = pk_columns
+            .iter()
+            .map(|column| format!("mirror.{column} = hot.{column}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        format!(
+            "FROM {mirror} AS mirror\nLEFT JOIN ONLY {table} AS hot\n  ON {join}",
+            mirror = mirror_table.quoted(),
+            table = table.quoted(),
+        )
+    };
     let sql = format!(
         r#"
 SELECT {select_columns}
-FROM {mirror} AS mirror
-LEFT JOIN ONLY {table} AS hot
-  ON {join}
+{from_clause}
 WHERE {where_clause}
 ORDER BY mirror."seq" ASC
 LIMIT $3::bigint
 "#,
         select_columns = select_columns.join(", "),
-        mirror = mirror_table.quoted(),
-        table = table.quoted(),
-        join = join,
         where_clause = where_clauses.join(" AND "),
     );
     let statement =
@@ -543,11 +553,8 @@ pub fn backup_manifest_plan(
     table_name: Option<TableName>,
     scope_key: Option<ScopeKey>,
 ) -> Result<BackupManifestPlan, OpsError> {
-    let statement = SqlStatement::read(
-        "backup manifest",
-        "SELECT etag, generation, max_seq, max_commit_seq FROM koldstore.manifest WHERE ($1::regclass IS NULL OR table_oid = $1::regclass::oid) AND ($2::text IS NULL OR scope_key = $2)",
-    )
-    .map_err(|error| OpsError::Sql(error.to_string()))?;
+    let statement = koldstore_catalog::queries::plan_backup_manifest_rows()
+        .map_err(|error| OpsError::Sql(error.to_string()))?;
 
     Ok(BackupManifestPlan {
         table_name,
@@ -564,11 +571,8 @@ pub fn backup_manifest_plan(
 pub fn validate_cold_storage_plan(
     table_name: Option<TableName>,
 ) -> Result<ValidateColdStoragePlan, OpsError> {
-    let statement = SqlStatement::read(
-        "validate cold storage",
-        "SELECT m.generation, cs.path, cs.row_count FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE ($1::regclass IS NULL OR m.table_oid = $1::regclass::oid)",
-    )
-    .map_err(|error| OpsError::Sql(error.to_string()))?;
+    let statement = koldstore_catalog::queries::plan_validate_cold_storage_rows()
+        .map_err(|error| OpsError::Sql(error.to_string()))?;
 
     Ok(ValidateColdStoragePlan {
         table_name,
@@ -608,11 +612,8 @@ pub fn plan_koldstore_exec(command: &str) -> Result<KoldstoreExecPlan, OpsError>
             let namespace = table_name.schema().unwrap_or("public");
             let archive_manifest_path =
                 koldstore_manifest::relative_manifest_path(namespace, table_name.relation());
-            let statement = SqlStatement::read(
-                "export table archive",
-                "SELECT m.generation, cs.path, cs.row_count, cs.byte_size FROM koldstore.manifest m LEFT JOIN koldstore.cold_segments cs ON cs.table_oid = m.table_oid AND cs.scope_key = m.scope_key AND cs.status = 'active' WHERE m.table_oid = $1::regclass::oid",
-            )
-            .map_err(|error| OpsError::Sql(error.to_string()))?;
+            let statement = koldstore_catalog::queries::plan_export_table_archive_segments()
+                .map_err(|error| OpsError::Sql(error.to_string()))?;
             Ok(KoldstoreExecPlan {
                 command: OpsCommand::ExportTable { table_name },
                 archive_manifest_path,

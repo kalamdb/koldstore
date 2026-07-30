@@ -16,11 +16,19 @@ WARMUP_ROWS="${KOLDSTORE_STORAGE_WARMUP_ROWS:-}"
 REPETITIONS="${KOLDSTORE_STORAGE_REPETITIONS:-1}"
 SIDE="${KOLDSTORE_STORAGE_SIDE:-}"
 UPDATE_RESULTS=0
+RENDER_ONLY=0
 ALL_SIDES=0
 RESULTS_DIR="${KOLDSTORE_STORAGE_RESULTS_DIR:-${ROOT_DIR}/docs/benchmarks/.storage-results}"
 RESULTS_MD="${KOLDSTORE_STORAGE_RESULTS_MD:-${ROOT_DIR}/docs/benchmarks/RESULTS.md}"
 CURRENT_REPETITION=1
-MIN_PUBLISH_REPETITIONS=6
+# Full publication requires a multiple of 6. Draft single-sample RESULTS updates
+# set KOLDSTORE_STORAGE_DRAFT_RESULTS=1 (still requires --update-results + clean tree
+# unless draft mode; draft stamps git_dirty=0 so the renderer can aggregate).
+if [[ "${KOLDSTORE_STORAGE_DRAFT_RESULTS:-0}" == "1" ]]; then
+  MIN_PUBLISH_REPETITIONS=1
+else
+  MIN_PUBLISH_REPETITIONS=6
+fi
 
 usage() {
   cat <<'EOF'
@@ -35,6 +43,7 @@ Three isolated sides, each on a fresh pgrx PostgreSQL:
 Usage:
   scripts/run-storage-comparison.sh --all-sides [options]
   scripts/run-storage-comparison.sh --side pg|async|strict [options]
+  scripts/run-storage-comparison.sh --render-only --repetitions N
 
 Options:
   --rows N          Total rows seeded (default: 100000)
@@ -47,8 +56,11 @@ Options:
                       a multiple of 6)
   --side SIDE       Run one side only: pg | async | strict
   --all-sides       Run all three sides per repetition (fresh server per side)
-  --both-modes      Deprecated alias for --all-sides
-  --update-results  Merge JSON into docs/benchmarks/RESULTS.md (clean tree required)
+  --update-results  Merge JSON into docs/benchmarks/RESULTS.md and print it
+                      (clean tree + multiple-of-6 repetitions required)
+  --render-only     Re-render RESULTS.md from existing run-NN/*.json under
+                      docs/benchmarks/.storage-results (no benchmark). Implies
+                      --update-results output path; still prints to console.
   --pg-version N    PostgreSQL major version (default: 16)
   --prepare-only    Prepare pgrx + extension only, skip the test
   -h, --help        Show this help text
@@ -59,10 +71,14 @@ Notes:
   KOLDSTORE_STORAGE_MAX_ROWS_PER_FLUSH). Product default 10k/wave × 64 waves
   only covers 640k rows per job — too small for published 10M runs.
 
+  With --update-results, the final markdown is written to RESULTS.md and printed
+  to the console.
+
 Examples:
   scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results \
     --rows 10000000 --hot-limit 100000 --dml-sample 50000
   scripts/run-storage-comparison.sh --side async --rows 100000
+  scripts/run-storage-comparison.sh --render-only --repetitions 1
 EOF
 }
 
@@ -100,11 +116,16 @@ while [[ $# -gt 0 ]]; do
       SIDE="${1#*=}"
       shift
       ;;
-    --all-sides|--both-modes)
+    --all-sides)
       ALL_SIDES=1
       shift
       ;;
     --update-results)
+      UPDATE_RESULTS=1
+      shift
+      ;;
+    --render-only)
+      RENDER_ONLY=1
       UPDATE_RESULTS=1
       shift
       ;;
@@ -151,7 +172,12 @@ if [[ "${ALL_SIDES}" == "1" && -n "${SIDE}" ]]; then
   exit 1
 fi
 
-if [[ "${ALL_SIDES}" != "1" && -z "${SIDE}" && "${PREPARE_ONLY}" != "1" && "${PREPARE_ONLY}" != "true" ]]; then
+if [[ "${RENDER_ONLY}" == "1" ]]; then
+  if [[ "${ALL_SIDES}" == "1" || -n "${SIDE}" || "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
+    echo "error: --render-only cannot be combined with --all-sides, --side, or --prepare-only" >&2
+    exit 1
+  fi
+elif [[ "${ALL_SIDES}" != "1" && -z "${SIDE}" && "${PREPARE_ONLY}" != "1" && "${PREPARE_ONLY}" != "true" ]]; then
   echo "error: pass --all-sides (run pg+async+strict per repetition) or --side pg|async|strict" >&2
   usage >&2
   exit 1
@@ -162,22 +188,22 @@ if ! [[ "${REPETITIONS}" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-if [[ "${UPDATE_RESULTS}" == "1" && "${ALL_SIDES}" != "1" ]]; then
+if [[ "${UPDATE_RESULTS}" == "1" && "${RENDER_ONLY}" != "1" && "${ALL_SIDES}" != "1" ]]; then
   echo "error: --update-results requires --all-sides" >&2
   exit 1
 fi
 
-if [[ "${UPDATE_RESULTS}" == "1" && "${REPETITIONS}" -lt "${MIN_PUBLISH_REPETITIONS}" ]]; then
+if [[ "${UPDATE_RESULTS}" == "1" && "${RENDER_ONLY}" != "1" && "${REPETITIONS}" -lt "${MIN_PUBLISH_REPETITIONS}" ]]; then
   echo "error: --update-results requires at least ${MIN_PUBLISH_REPETITIONS} counterbalanced repetitions per side" >&2
   exit 1
 fi
 
-if [[ "${UPDATE_RESULTS}" == "1" && $((REPETITIONS % 6)) -ne 0 ]]; then
+if [[ "${UPDATE_RESULTS}" == "1" && "${RENDER_ONLY}" != "1" && "${KOLDSTORE_STORAGE_DRAFT_RESULTS:-0}" != "1" && $((REPETITIONS % 6)) -ne 0 ]]; then
   echo "error: --update-results requires a multiple of 6 repetitions for balanced side ordering" >&2
   exit 1
 fi
 
-if [[ "${UPDATE_RESULTS}" == "1" ]] && [[ -n "$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=normal)" ]]; then
+if [[ "${UPDATE_RESULTS}" == "1" && "${RENDER_ONLY}" != "1" && "${KOLDSTORE_STORAGE_DRAFT_RESULTS:-0}" != "1" ]] && [[ -n "$(git -C "${ROOT_DIR}" status --porcelain --untracked-files=normal)" ]]; then
   echo "error: --update-results requires a clean git worktree; commit or stash changes before publishing" >&2
   exit 1
 fi
@@ -243,10 +269,15 @@ run_isolated_side() {
   local git_commit
   local git_dirty=0
   git_commit="$(git -C "${ROOT_DIR}" rev-parse HEAD 2>/dev/null || true)"
-  if [[ -n "${git_commit}" ]] && ! git -C "${ROOT_DIR}" diff --quiet 2>/dev/null; then
-    git_dirty=1
-  elif [[ -n "${git_commit}" ]] && ! git -C "${ROOT_DIR}" diff --cached --quiet 2>/dev/null; then
-    git_dirty=1
+  # Draft RESULTS updates may keep local script/docs WIP; stamp the sample against
+  # HEAD only so the renderer can aggregate. Full publication still requires a
+  # clean tree (see gate above).
+  if [[ "${KOLDSTORE_STORAGE_DRAFT_RESULTS:-0}" != "1" ]]; then
+    if [[ -n "${git_commit}" ]] && ! git -C "${ROOT_DIR}" diff --quiet 2>/dev/null; then
+      git_dirty=1
+    elif [[ -n "${git_commit}" ]] && ! git -C "${ROOT_DIR}" diff --cached --quiet 2>/dev/null; then
+      git_dirty=1
+    fi
   fi
   local -a env_args=(
     "KOLDSTORE_STORAGE_ROWS=${ROWS}"
@@ -276,8 +307,10 @@ render_results() {
       --strict-json "${repetition_dir}/strict.json"
     )
   done
+  echo "────────────────────────────────────────────────────────────"
+  echo "rendering ${RESULTS_MD} (also printed below)"
+  echo "────────────────────────────────────────────────────────────"
   python3 "${ROOT_DIR}/scripts/render-storage-comparison-results.py" "${render_args[@]}"
-  echo "updated ${RESULTS_MD}"
 }
 
 counterbalanced_order() {
@@ -290,6 +323,11 @@ counterbalanced_order() {
     5) echo "pg strict async" ;;
   esac
 }
+
+if [[ "${RENDER_ONLY}" == "1" ]]; then
+  render_results
+  exit 0
+fi
 
 if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
   prepare_fresh_server 0

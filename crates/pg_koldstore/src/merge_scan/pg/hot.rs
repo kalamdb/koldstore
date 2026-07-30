@@ -45,15 +45,18 @@ pub(super) const HOT_MERGE_BATCH_ROWS: usize = 1024;
 
 /// Paged SPI reader for merge-path hot JSON rows.
 ///
-/// Pages are ordered by primary-key columns so `LIMIT`/`OFFSET` is stable for
-/// one scan snapshot. Application-table PK uniqueness makes cross-page hot
-/// duplicates impossible.
+/// Pages are ordered by primary-key columns. After the first page, later pages
+/// use a keyset predicate `(pk…) > (last…)` instead of `OFFSET` so PostgreSQL
+/// does not re-scan already-emitted rows. Application-table PK uniqueness makes
+/// cross-page hot duplicates impossible.
 #[derive(Debug)]
 pub(super) struct HotMergeBatchReader {
+    /// Base SELECT … ORDER BY SQL without LIMIT / keyset predicate.
     ordered_sql: String,
     pk_columns: Vec<PkColumn>,
     batch_size: usize,
-    offset: usize,
+    /// Exclusive lower bound for the next page (`None` = first page).
+    after_pk: Option<LogicalPk>,
     exhausted: bool,
     relation_owner: pg_sys::Oid,
 }
@@ -66,7 +69,7 @@ impl HotMergeBatchReader {
             ordered_sql: String::new(),
             pk_columns: Vec::new(),
             batch_size: HOT_MERGE_BATCH_ROWS,
-            offset: 0,
+            after_pk: None,
             exhausted: true,
             relation_owner,
         }
@@ -104,24 +107,13 @@ impl HotMergeBatchReader {
             .map(|name| format!("hot.{}", quote_ident(name)))
             .collect::<Vec<_>>()
             .join(", ");
-        let hot_pk = snapshot
-            .primary_key_columns
-            .iter()
-            .map(|column| {
-                format!(
-                    "'{column}', proj.{quoted}",
-                    column = column.name.replace('\'', "''"),
-                    quoted = quote_ident(&column.name),
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let order_by = snapshot
-            .primary_key_columns
-            .iter()
-            .map(|column| format!("proj.{}", quote_ident(&column.name)))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let hot_pk = super::spi_query::jsonb_pk_object_pairs(
+            "proj",
+            snapshot
+                .primary_key_columns
+                .iter()
+                .map(|column| column.name.as_str()),
+        );
         let where_clause = where_clause_sql(equality_filters);
         let ordered_sql = format!(
             r#"
@@ -133,20 +125,18 @@ FROM (
     FROM ONLY {table} AS hot
     {where_clause}
 ) AS proj
-ORDER BY {order_by}
 "#,
             hot_pk = hot_pk,
             select_list = select_list,
             table = table.quoted(),
             where_clause = where_clause,
-            order_by = order_by,
         );
 
         Ok(Self {
             ordered_sql,
             pk_columns,
             batch_size: HOT_MERGE_BATCH_ROWS,
-            offset: 0,
+            after_pk: None,
             exhausted: false,
             relation_owner,
         })
@@ -159,31 +149,42 @@ ORDER BY {order_by}
         if self.exhausted {
             return Ok(None);
         }
-        let sql = format!(
-            "{prefix} LIMIT {limit} OFFSET {offset}",
-            prefix = self.ordered_sql,
+        let mut sql = self.ordered_sql.clone();
+        if let Some(after) = &self.after_pk {
+            let predicate = super::keyset::keyset_after_predicate("proj", &self.pk_columns, after)?;
+            sql.push_str(" WHERE ");
+            sql.push_str(&predicate);
+        }
+        sql.push_str(&format!(
+            " ORDER BY {order_by} LIMIT {limit}",
+            order_by = self
+                .pk_columns
+                .iter()
+                .map(|column| format!("proj.{}", quote_ident(column.as_str())))
+                .collect::<Vec<_>>()
+                .join(", "),
             limit = self.batch_size,
-            offset = self.offset,
-        );
+        ));
         let rows =
             crate::catalog::owner::with_relation_owner_for_merge(self.relation_owner, || {
                 with_hook_disabled(|| unsafe { execute_hot_rows_query(&sql, &self.pk_columns) })
             })?;
         let fetched = rows.len();
-        self.offset = self.offset.saturating_add(fetched);
         if fetched < self.batch_size {
             self.exhausted = true;
         }
         if fetched == 0 {
             Ok(None)
         } else {
+            // Exclusive lower bound for the next page is the last emitted PK.
+            self.after_pk = rows.last().map(|row| row.pk.clone());
             Ok(Some(rows))
         }
     }
 
     /// Rewinds paging for PostgreSQL rescan without dropping prepared SQL.
     pub(super) fn reset(&mut self) {
-        self.offset = 0;
+        self.after_pk = None;
         self.exhausted = self.ordered_sql.is_empty();
     }
 }

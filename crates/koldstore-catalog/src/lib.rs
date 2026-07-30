@@ -8,7 +8,9 @@
 //! - `koldstore-manifest`: derived object-store `manifest.json` (assembly/I/O)
 //!
 //! Schema registry **writes** live in `koldstore-migrate`; cold segment/manifest
-//! **writes** live in `koldstore-flush`.
+//! **writes** live in `koldstore-flush`. Catalog also owns shared **reads** used
+//! by flush/migrate (row counters, operator backup/validate/export SELECTs,
+//! active schema refresh context).
 
 pub mod cache;
 pub mod cold_segments;
@@ -24,7 +26,10 @@ pub use cache::{
     DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT, MANAGED_TABLE_SNAPSHOT_CACHE_LIMIT,
 };
 pub use cold_segments::SegmentVisibility;
-pub use decode::column_stats_from_index_bounds;
+pub use decode::{
+    async_managed_relation, column_stats_from_index_bounds, AsyncManagedRelationMeta,
+    AsyncOrderColumnMeta,
+};
 pub use koldstore_common::FlushPolicy;
 pub use manifest_row::{CatalogManifestSegmentRow, CatalogSegmentIndexBound};
 pub use segment_index::{
