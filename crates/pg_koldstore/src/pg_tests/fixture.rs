@@ -74,6 +74,10 @@ pub(crate) fn manage_shared(relation: &str, storage: &str) {
 /// Manages a table so force-flush prunes nearly all live rows into cold storage.
 ///
 /// `hot_row_limit => 1` keeps at most one hot row after flush (newest by `id`).
+///
+/// For fixtures that need a flushable mirror under `#[pg_test]`, seed heap rows
+/// **before** calling this helper so activation backfill fills `__cl`. Post-manage
+/// DML is invisible to WAL apply until commit, which the test harness never does.
 pub(crate) fn manage_for_cold_flush(relation: &str, storage: &str) {
     let sql = format!(
         r#"

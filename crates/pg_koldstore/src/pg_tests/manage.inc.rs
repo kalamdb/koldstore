@@ -82,12 +82,11 @@ fn manage_describe_flush_unmanage_roundtrip_preserves_values() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_shared(&relation, &storage);
-
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'alpha'), (2, 'beta')"
     ))
     .expect("insert rows");
+    manage_shared(&relation, &storage);
 
     let before = spi_get_text(&format!(
         "SELECT string_agg(body, ',' ORDER BY id) FROM {relation}"
@@ -106,7 +105,7 @@ fn manage_describe_flush_unmanage_roundtrip_preserves_values() {
     );
 
     let flushed = flush_table_rows(&relation, true);
-    assert!(flushed >= 0, "flush_table should record rows_flushed");
+    assert!(flushed >= 2, "flush_table should publish seeded rows");
 
     let after = spi_get_text(&format!(
         "SELECT string_agg(body, ',' ORDER BY id) FROM {relation}"

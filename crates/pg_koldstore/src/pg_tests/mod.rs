@@ -12,6 +12,10 @@
 //! before any SPI write so `#[pg_test]`'s wrapping transaction does not deadlock
 //! slot creation.
 //!
+//! Flush fixtures must seed heap rows **before** `manage_*` so activation backfill
+//! fills `__cl`. Post-manage DML is not WAL-visible until commit, which `#[pg_test]`
+//! never does mid-body.
+//!
 //! `#[pgrx::pg_schema]` only accepts inline `mod { ... }` blocks, so test bodies are
 //! `include!`d into the schema module below.
 

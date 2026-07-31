@@ -263,6 +263,12 @@ fn flush_scheduler_skips_auto_flush_disabled_tables() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    for i in 1..=10 {
+        Spi::run(&format!(
+            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
+        ))
+        .expect("insert");
+    }
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -277,20 +283,14 @@ fn flush_scheduler_skips_auto_flush_disabled_tables() {
     ))
     .expect("manage_table");
 
-    for i in 1..=10 {
-        Spi::run(&format!(
-            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
-        ))
-        .expect("insert");
-    }
-
     let ran = Spi::get_one::<bool>("SELECT koldstore.internal_run_flush_scheduler_tick()")
         .expect("scheduler tick")
         .expect("non-null");
     assert!(!ran, "scheduler must skip auto_flush=false tables");
 
-    // Manual flush still works.
-    let _ = flush_table_rows(&relation, false);
+    // Manual flush still works (mirror populated by manage backfill).
+    let flushed = flush_table_rows(&relation, false);
+    assert!(flushed >= 1, "manual flush should publish backfilled rows");
     let completed = spi_get_i64(&format!(
         r#"
         SELECT count(*)::bigint

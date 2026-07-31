@@ -45,11 +45,11 @@ fn prepared_native_plan_is_invalidated_when_first_cold_segment_is_published() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
     ))
     .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "PREPARE {statement} AS SELECT count(*)::bigint FROM {relation}"
     ))
@@ -87,11 +87,11 @@ fn hot_primary_key_range_above_cold_max_keeps_native_postgresql_plan() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b'), (3, 'cold-c')"
     ))
     .expect("insert cold candidates");
+    manage_for_cold_flush(&relation, &storage);
     assert!(flush_table_rows(&relation, true) >= 1);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (100, 'hot-a'), (101, 'hot-b'), (102, 'hot-c')"
@@ -125,11 +125,11 @@ fn prepared_native_range_plan_is_invalidated_when_catalog_bounds_expand() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b')"
     ))
     .expect("insert initial cold candidates");
+    manage_for_cold_flush(&relation, &storage);
     assert!(flush_table_rows(&relation, true) >= 1);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (100, 'newer-hot')"
@@ -184,11 +184,11 @@ fn explain_analyze_uses_native_hot_child_counters() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b'), (3, 'cold-c')"
     ))
     .expect("insert cold candidates");
+    manage_for_cold_flush(&relation, &storage);
     assert!(flush_table_rows(&relation, true) >= 1);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (10, 'a'), (11, 'b'), (12, 'c')"
@@ -234,11 +234,11 @@ fn explain_json_nests_parquet_segment_groups() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
     ))
     .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
     let flushed = flush_table_rows(&relation, true);
     assert!(flushed >= 1, "expected flush to publish cold rows");
 
@@ -285,11 +285,11 @@ fn explain_analyze_shows_prune_summary_after_flush() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_shared(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
     ))
     .expect("insert");
+    manage_shared(&relation, &storage);
     let flushed = flush_table_rows(&relation, true);
     assert!(flushed >= 1, "expected flush to publish cold rows");
 
@@ -329,12 +329,12 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES \
          (1, 'cold-a'), (2, 'cold-b'), (3, 'cold-c')"
     ))
     .expect("insert cold candidates");
+    manage_for_cold_flush(&relation, &storage);
     let flushed = flush_table_rows(&relation, true);
     assert!(flushed >= 1, "expected flush to publish cold rows");
     Spi::run(&format!(
@@ -399,11 +399,11 @@ fn plain_explain_never_reuses_prior_analyze_counters() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b')"
     ))
     .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
     let flushed = flush_table_rows(&relation, true);
     assert!(flushed >= 1, "expected flush to publish cold rows");
 
@@ -440,16 +440,16 @@ fn explain_analyze_counts_mirror_overlay_rows() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
     manage_for_cold_flush(&relation, &storage);
     let mirror = spi_get_text(&format!(
         "SELECT mirror_relation::text \
          FROM koldstore.schemas \
          WHERE table_oid = '{relation}'::regclass AND active"
     ));
-    Spi::run(&format!(
-        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
-    ))
-    .expect("insert");
     let flushed = flush_table_rows(&relation, true);
     assert!(flushed >= 1, "expected flush to publish cold rows");
 
@@ -468,7 +468,7 @@ fn explain_analyze_counts_mirror_overlay_rows() {
             "SELECT COALESCE(max(op), -1)::bigint FROM {mirror} WHERE id = 2"
         )),
         3,
-        "expected strict mirror tombstone before EXPLAIN"
+        "expected mirror tombstone before EXPLAIN"
     );
 
     let plan = spi_get_explain(&format!(
@@ -502,11 +502,11 @@ fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
     ))
     .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
     let flushed = flush_table_rows(&relation, true);
     assert!(flushed >= 1, "expected flush to publish cold rows");
 
@@ -545,11 +545,11 @@ fn hot_pk_hit_skips_parquet_open_when_cold_segment_index_overlaps() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'cold'), (3, 'c')"
     ))
     .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
     let flushed = flush_table_rows(&relation, true);
     assert!(flushed >= 1, "expected flush to publish cold rows");
 
@@ -617,11 +617,11 @@ fn exact_hot_pk_hit_avoids_merge_runtime_bookkeeping() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
-        "INSERT INTO {relation} (id, body) VALUES (1, 'cold')"
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold'), (2, 'pad')"
     ))
-    .expect("insert cold candidate");
+    .expect("insert cold candidates");
+    manage_for_cold_flush(&relation, &storage);
     assert!(flush_table_rows(&relation, true) >= 1);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'hot')"
@@ -654,11 +654,11 @@ fn parameterized_hot_range_above_cold_max_skips_merge_fallback() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b'), (3, 'cold-c')"
     ))
     .expect("insert cold candidates");
+    manage_for_cold_flush(&relation, &storage);
     assert!(flush_table_rows(&relation, true) >= 1);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (100, 'hot-a'), (101, 'hot-b'), (102, 'hot-c')"
@@ -699,11 +699,11 @@ fn parameterized_primary_key_miss_above_cold_max_skips_merge_fallback() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b')"
     ))
     .expect("insert cold candidates");
+    manage_for_cold_flush(&relation, &storage);
     assert!(flush_table_rows(&relation, true) >= 1);
     Spi::run("SET LOCAL plan_cache_mode = force_generic_plan").expect("force generic plan");
     Spi::run(&format!(
@@ -734,6 +734,18 @@ fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
     create_messages_table(&schema, table);
     Spi::run(&format!(
         r#"
+        INSERT INTO {relation} (id, body)
+        SELECT id, 'row-' || id::text
+        FROM (
+          SELECT generate_series(1, 1024)::bigint AS id
+          UNION ALL
+          SELECT generate_series(2000, 3023)::bigint AS id
+        ) rows
+        "#
+    ))
+    .expect("insert disjoint row-group ranges");
+    Spi::run(&format!(
+        r#"
         SELECT koldstore.manage_table(
           table_name     => '{relation}'::regclass,
           storage        => '{storage}',
@@ -745,18 +757,6 @@ fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
         "#
     ))
     .expect("manage table with two row groups in one segment");
-    Spi::run(&format!(
-        r#"
-        INSERT INTO {relation} (id, body)
-        SELECT id, 'row-' || id::text
-        FROM (
-          SELECT generate_series(1, 1024)::bigint AS id
-          UNION ALL
-          SELECT generate_series(2000, 3023)::bigint AS id
-        ) rows
-        "#
-    ))
-    .expect("insert disjoint row-group ranges");
     assert_eq!(flush_table_rows(&relation, true), 2048);
 
     let arrays_aligned = Spi::get_one::<bool>(&format!(
@@ -833,12 +833,11 @@ fn hot_only_and_mixed_hot_cold_results_match_expected_values() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_shared(&relation, &storage);
-
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) VALUES (1, 'hot-a'), (2, 'hot-b')"
     ))
     .expect("insert hot");
+    manage_shared(&relation, &storage);
 
     let hot_only = spi_get_text(&format!(
         "SELECT string_agg(body, ',' ORDER BY id) FROM {relation}"
@@ -950,13 +949,13 @@ fn merge_scan_fails_closed_when_seen_key_limit_is_exceeded() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body)
          SELECT gs, 'body-' || gs::text
          FROM generate_series(1, 250) AS gs"
     ))
     .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
     let flushed = flush_table_rows(&relation, true);
     assert!(flushed >= 200, "expected cold rows, rows_flushed={flushed}");
 
