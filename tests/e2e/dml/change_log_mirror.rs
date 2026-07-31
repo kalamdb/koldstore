@@ -7,7 +7,6 @@ const MIRROR_DEADLINE: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(
             target.clone(),
@@ -36,8 +35,7 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
                   storage        => $2,
                   hot_row_limit  => 1000,
                   min_flush_rows => 1,
-                  migration_order_by => 'id',
-                  mirror_capture_mode => $3
+                  migration_order_by => 'id'
                 )
                 "#,
                 &[&relation, &db.storage_name, &mode.as_str()],
@@ -124,7 +122,6 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
 
 #[tokio::test]
 async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(
             target.clone(),
@@ -153,8 +150,7 @@ async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
                   storage        => $2,
                   hot_row_limit  => 10000,
                   min_flush_rows => 1,
-                  migration_order_by => 'id',
-                  mirror_capture_mode => $3
+                  migration_order_by => 'id'
                 )
                 "#,
                 &[&relation, &db.storage_name, &mode.as_str()],

@@ -63,12 +63,16 @@ fn rename_preserves_column_id_in_new_version() {
 
 #[test]
 fn mirror_initialization_state_serializes_as_schema_value() {
-    let value = serde_json::to_value(MirrorInitializationState::Capturing).unwrap();
+    let value = serde_json::to_value(MirrorInitializationState::Backfilling).unwrap();
 
-    assert_eq!(value, serde_json::json!("capturing"));
+    assert_eq!(value, serde_json::json!("backfilling"));
     assert_eq!(MirrorInitializationState::Complete.as_str(), "complete");
     assert_eq!(
         MirrorInitializationState::parse("capturing"),
-        Some(MirrorInitializationState::Capturing)
+        Some(MirrorInitializationState::Backfilling)
+    );
+    assert_eq!(
+        MirrorInitializationState::parse("catching_up"),
+        Some(MirrorInitializationState::CatchingUp)
     );
 }

@@ -23,8 +23,7 @@ fn async_manage_starts_database_worker() {
         SELECT koldstore.manage_table(
           table_name => '{relation}'::regclass,
           storage => '{storage}',
-          hot_row_limit => 1000,
-          mirror_capture_mode => 'async'
+          hot_row_limit => 1000
         )
         "#
     ))

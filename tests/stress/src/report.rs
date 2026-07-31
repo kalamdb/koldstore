@@ -109,10 +109,9 @@ fn format_text(report: &StressReport) -> String {
 /// Summarizes config for the log header.
 pub fn log_config(config: &StressConfig) {
     log_always(format!(
-        "config packs={:?} mirror={} soak={:?} writers={} history={} tenants={} conv/tenant={} \
+        "config packs={:?} capture=wal-async soak={:?} writers={} history={} tenants={} conv/tenant={} \
          payload={}B blob={}B multiplier={}",
         config.packs.names(),
-        config.mirror_mode.as_str(),
         config.soak,
         config.clients,
         config.history_clients,

@@ -154,10 +154,6 @@ async fn select_during_manifest_publish_window_keeps_pk_unique() -> Result<()> {
 /// mirror worker is stopped (Timescale: readers must not wait on compression).
 #[tokio::test]
 async fn committed_hot_visible_while_async_mirror_lags() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async lag visibility test in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {

@@ -7,10 +7,6 @@ const BACKGROUND_APPLY_DEADLINE: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async-only mirror lifecycle assertions in strict mode");
-        return Ok(());
-    }
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_change_log_mirror").await?;
         let table_name = format!("{}_events", db.schema);
@@ -45,8 +41,7 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
                   table_name => $1::text::regclass,
                   storage => $2,
                   hot_row_limit => 1000,
-                  auto_flush => false,
-                  mirror_capture_mode => 'async'
+                  auto_flush => false
                 )
                 "#,
                 &[&relation, &db.storage_name],
@@ -223,8 +218,7 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
                   table_name => $1::text::regclass,
                   storage => $2,
                   hot_row_limit => 1000,
-                  auto_flush => false,
-                  mirror_capture_mode => 'async'
+                  auto_flush => false
                 )
                 "#,
                 &[&reenabled_relation, &db.storage_name],

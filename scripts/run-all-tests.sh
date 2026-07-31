@@ -27,7 +27,7 @@ Usage:
 
 Runs (in order):
   fmt, clippy, workspace unit tests (nextest), pgrx feature compile/install,
-  #[pg_test] via nextest, E2E (strict + async, nextest), examples (strict + async),
+  #[pg_test] via nextest, E2E (WAL-async, nextest), examples (WAL-async),
   storage comparison, SQL regression, memory checks, short benchmarks.
 
 Options:
@@ -356,8 +356,7 @@ if [[ "${SKIP_E2E}" -eq 0 ]]; then
     pg="$(echo "${pg}" | xargs)"
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
-      run_local_pgrx_e2e "${pg}" strict
-      run_local_pgrx_e2e "${pg}" async
+      run_local_pgrx_e2e "${pg}"
     fi
   done
 fi
@@ -368,8 +367,7 @@ if [[ "${SKIP_EXAMPLES}" -eq 0 ]]; then
     pg="$(echo "${pg}" | xargs)"
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
-      run_local_examples "${pg}" strict
-      run_local_examples "${pg}" async
+      run_local_examples "${pg}"
     fi
   done
 fi

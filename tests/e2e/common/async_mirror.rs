@@ -249,8 +249,8 @@ pub async fn wait_for_confirmed_flush_past(
 ///
 /// Returns an error when mode detection or the async fence fails.
 pub async fn fence_async_mirror_if_needed(client: &tokio_postgres::Client) -> Result<()> {
-    if super::selected_mirror_capture_mode()?.is_async() {
-        let _ = wait_for_async_mirror(client).await?;
-    }
+    let _ = wait_for_async_mirror(client).await?;
+    Ok(())
+}
     Ok(())
 }

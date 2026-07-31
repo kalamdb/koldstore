@@ -44,7 +44,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.8-beta.1"
+version = "0.1.9-beta.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/kalamdb/koldstore"
@@ -77,14 +77,14 @@ hex = "0.4.3"
 # feature: aws-base + rustls-no-provider/ring) stay out of crates that only
 # need the `ObjectStore` trait.
 object_store = { version = "0.14.1", default-features = false }
-pgrx = { version = "0.19.1", default-features = false }
-pgrx-bench = { version = "0.19.1", default-features = false }
-pgrx-tests = { version = "0.19.1", default-features = false }
+pgrx = { version = "0.19.2", default-features = false }
+pgrx-bench = { version = "0.19.2", default-features = false }
+pgrx-tests = { version = "0.19.2", default-features = false }
 parquet = { version = "59.1.0", default-features = false, features = ["arrow", "async", "zstd", "snap"] }
 # Shared with object_store's HTTP transport. `rustls-no-provider` + ring keeps
 # aws-lc and OpenSSL out of the extension (OpenSSL conflicts with PostgreSQL).
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }
-rustls = { version = "0.23.42", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"

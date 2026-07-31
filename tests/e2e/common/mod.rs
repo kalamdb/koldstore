@@ -47,7 +47,7 @@ pub use equality::{
 };
 pub use log::{log, log_always, log_step, log_step_always, timed_sync, verbose_enabled, StepGuard};
 pub use minio::{minio_enabled, MinioConfig};
-pub use mirror_mode::{fence_selected_mirror, selected_mirror_capture_mode, MirrorCaptureMode};
+pub use mirror_mode::{fence_async_mirror, fence_selected_mirror};
 pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
     relation_size, row_count, row_count_from_sql, RelationSize, SQL_DEFAULT_COLD_OBJECT_KEY,

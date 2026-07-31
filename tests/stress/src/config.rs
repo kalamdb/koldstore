@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use anyhow::{bail, Result};
 
-use crate::e2e::MirrorCaptureMode;
 use crate::packs::PackSet;
 
 const ENV_PREFIX: &str = "KOLDSTORE_STRESS_";
@@ -13,7 +12,6 @@ const ENV_PREFIX: &str = "KOLDSTORE_STRESS_";
 #[derive(Debug, Clone)]
 pub struct StressConfig {
     pub packs: PackSet,
-    pub mirror_mode: MirrorCaptureMode,
     pub soak: Duration,
     pub clients: usize,
     pub history_clients: usize,
@@ -48,22 +46,6 @@ impl StressConfig {
     /// Returns an error when packs or numeric knobs are invalid.
     pub fn from_env() -> Result<Self> {
         let packs = PackSet::from_env()?;
-        let mirror_mode_value =
-            std::env::var(format!("{ENV_PREFIX}MIRROR_MODE")).unwrap_or_else(|_| "strict".into());
-        let mut mirror_mode = MirrorCaptureMode::parse(&mirror_mode_value).ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid {ENV_PREFIX}MIRROR_MODE={mirror_mode_value:?}; expected strict or async"
-            )
-        })?;
-        if packs.async_mirror() {
-            mirror_mode = MirrorCaptureMode::Async;
-        }
-
-        // Apply mirror mode early so e2e helpers see it during manage_table.
-        // SAFETY: single-threaded before workers spawn; intentional for test harness.
-        unsafe {
-            std::env::set_var("KOLDSTORE_E2E_MIRROR_CAPTURE_MODE", mirror_mode.as_str());
-        }
 
         let soak = soak_duration()?;
         let clients = env_usize("CLIENTS", 24)?.max(1);
@@ -100,7 +82,6 @@ impl StressConfig {
 
         Ok(Self {
             packs,
-            mirror_mode,
             soak,
             clients,
             history_clients,

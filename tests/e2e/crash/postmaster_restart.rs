@@ -96,7 +96,6 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
         .next()
         .context("no pgrx target")?;
     let version = target.version;
-    let mode = common::selected_mirror_capture_mode()?.as_str();
 
     let db = common::TestDb::start(target.clone(), "crash_pm").await?;
     let dbname = db.target.dbname.clone();
@@ -117,8 +116,7 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
               min_flush_rows => 1,
               max_rows_per_file => 12,
               migration_order_by => 'id',
-              auto_flush => false,
-              mirror_capture_mode => $3
+              auto_flush => false
             )
             "#,
             &[&relation, &db.storage_name, &mode],

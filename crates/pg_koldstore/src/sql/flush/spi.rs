@@ -146,29 +146,12 @@ fn older_than_cutoff(
     Ok(max_seq.map(|seq| (count, seq)))
 }
 
-/// Returns the managed table's mirror capture mode (defaults to strict).
-pub(super) fn active_mirror_capture_mode(
-    table_oid: pgrx::pg_sys::Oid,
-) -> Result<koldstore_common::MirrorCaptureMode, String> {
-    use pgrx::datum::DatumWithOid;
-
-    let statement = koldstore_catalog::queries::plan_active_flush_policy_options()
-        .map_err(|error| error.to_string())?;
-    let options =
-        crate::spi::select_one::<pgrx::JsonB>(&statement, &[DatumWithOid::from(table_oid)])
-            .map_err(|error| error.to_string())?;
-    let Some(options) = options else {
-        return Ok(koldstore_common::MirrorCaptureMode::Strict);
-    };
-    Ok(koldstore_common::ManageTableOptions::from_value(&options.0).mirror_capture_mode())
-}
-
 /// Blocks concurrent source DML for the async prune fence.
 ///
 /// Uses `SHARE ROW EXCLUSIVE` so in-flight writers finish, new writers wait,
 /// and ordinary `SELECT` continues. Sets a local `lock_timeout` so an idle
 /// blocker fails the flush before prune rather than waiting forever.
-pub(super) fn lock_source_table_share_row_exclusive(
+pub(crate) fn lock_source_table_share_row_exclusive(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<(), String> {
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
@@ -505,9 +488,7 @@ pub(super) fn prune_flushed_hot_rows(
     // DELETE instead of materializing every PK into JSON and chunking
     // jsonb_to_recordset deletes.
     let plan = prepare_seq_range_cleanup(table_oid, primary_key_columns, mirror_ops)?;
-    let stamp_replication_origin =
-        active_mirror_capture_mode(table_oid)? == koldstore_common::MirrorCaptureMode::Async;
-    execute_seq_range_cleanup(&plan, max_seq, stamp_replication_origin)
+    execute_seq_range_cleanup(&plan, max_seq, true)
 }
 
 fn prepare_seq_range_cleanup(

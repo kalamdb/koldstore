@@ -223,8 +223,7 @@ async fn manage_auto_flush(
               hot_row_limit => 5,
               min_flush_rows => 1,
               max_rows_per_file => 1000,
-              auto_flush => $3,
-              mirror_capture_mode => 'strict'
+              auto_flush => $3
             )
             "#,
             &[&relation, &storage, &auto_flush],

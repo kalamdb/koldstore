@@ -50,7 +50,6 @@ async fn manage_with_hot_limit(
     relation: &str,
     hot_row_limit: i64,
 ) -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?.as_str();
     db.client
         .execute(
             r#"
@@ -61,8 +60,7 @@ async fn manage_with_hot_limit(
               min_flush_rows => 1,
               max_rows_per_file => 5000,
               migration_order_by => 'id',
-              auto_flush => false,
-              mirror_capture_mode => $4
+              auto_flush => false
             )
             "#,
             &[&relation, &db.storage_name, &hot_row_limit, &mode],
@@ -326,9 +324,7 @@ async fn drop_table_while_mirror_capture_is_active() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(80)).await;
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = tokio::time::timeout(Duration::from_secs(5), dml_handle).await;
-        if common::selected_mirror_capture_mode()?.is_async() {
-            let _ = common::fence_async_mirror_if_needed(&db.client).await;
-        }
+        let _ = common::fence_async_mirror_if_needed(&db.client).await;
 
         let mut dropped = false;
         for _ in 0..8 {

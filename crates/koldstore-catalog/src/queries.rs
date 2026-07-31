@@ -97,10 +97,10 @@ WHERE c.oid = $1::oid",
     )
 }
 
-/// Builds an async-capture managed-relation lookup by source table OID.
+/// Builds a managed-relation lookup by source table OID for WAL capture.
 ///
 /// Returns JSON text with `table_oid`, `mirror` (`regclass` text), and
-/// `primary_key` for active schemas with `mirror_capture_mode = async`.
+/// `primary_key` for active schemas.
 ///
 /// # Errors
 ///
@@ -136,7 +136,6 @@ SELECT (SELECT jsonb_build_object(
 )::text
 FROM koldstore.schemas s
 WHERE s.active AND s.table_oid = $1::oid
-  AND COALESCE(s.options->>'mirror_capture_mode', 'strict') = 'async'
 LIMIT 1)
 "#,
         [SqlParamType::Oid],

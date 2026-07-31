@@ -409,11 +409,7 @@ fn run_async_prelock_catchup(
     phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
 ) -> Result<Option<crate::async_mirror::apply::AppliedWalBoundary>, String> {
     use crate::async_mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
-    use koldstore_common::MirrorCaptureMode;
 
-    if super::spi::active_mirror_capture_mode(table_oid)? != MirrorCaptureMode::Async {
-        return Ok(phase0_applied);
-    }
     if prune_max_seq <= 0 {
         return Ok(phase0_applied);
     }
@@ -471,11 +467,7 @@ fn run_async_prune_fence(
     skip_through: Option<crate::async_mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     use crate::async_mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
-    use koldstore_common::MirrorCaptureMode;
 
-    if super::spi::active_mirror_capture_mode(table_oid)? != MirrorCaptureMode::Async {
-        return Ok(());
-    }
     if prune_max_seq <= 0 {
         return Ok(());
     }

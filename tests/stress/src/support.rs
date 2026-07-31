@@ -112,7 +112,6 @@ pub async fn manage_user_scoped_with_policy(
     min_flush_rows: i64,
     max_rows_per_file: i64,
 ) -> Result<()> {
-    let mode = e2e::selected_mirror_capture_mode()?.as_str();
     client
         .execute(
             r#"
@@ -124,8 +123,7 @@ pub async fn manage_user_scoped_with_policy(
               max_rows_per_file => $5,
               table_type        => 'user',
               scope_column      => $6,
-              migration_order_by => $7,
-              mirror_capture_mode => $8
+              migration_order_by => $7
             )
             "#,
             &[

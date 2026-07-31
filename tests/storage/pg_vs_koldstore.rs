@@ -1215,7 +1215,6 @@ async fn manage_with_hot_limit(
               max_rows_per_file => $5,
               migration_order_by => 'id',
               compression       => 'zstd',
-              mirror_capture_mode => $6,
               auto_flush        => false
             )
             "#,

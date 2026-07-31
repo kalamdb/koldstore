@@ -6,10 +6,6 @@ use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn async_apply_drains_above_retained_wal_health_threshold() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async retained-WAL drain assertion in strict mode");
-        return Ok(());
-    }
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_retained_wal_drain").await?;
         clear_async_failpoint(&db.client).await?;
@@ -64,10 +60,6 @@ async fn async_apply_drains_above_retained_wal_health_threshold() -> Result<()> 
 
 #[tokio::test]
 async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async worker lifecycle assertions in strict mode");
-        return Ok(());
-    }
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mirror_worker").await?;
         clear_async_failpoint(&db.client).await?;
@@ -128,10 +120,6 @@ async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Re
 
 #[tokio::test]
 async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async worker failpoint assertions in strict mode");
-        return Ok(());
-    }
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mirror_failpoint").await?;
         clear_async_failpoint(&db.client).await?;
@@ -219,10 +207,6 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
 
 #[tokio::test]
 async fn async_worker_respects_guc_and_cleanup_lifecycle() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async worker GUC/cleanup assertions in strict mode");
-        return Ok(());
-    }
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mirror_guc").await?;
         clear_async_failpoint(&db.client).await?;
@@ -246,8 +230,7 @@ async fn async_worker_respects_guc_and_cleanup_lifecycle() -> Result<()> {
                 SELECT koldstore.manage_table(
                   table_name => $1::text::regclass,
                   storage => $2,
-                  hot_row_limit => 1000,
-                  mirror_capture_mode => 'async'
+                  hot_row_limit => 1000
                 )
                 "#,
                 &[&relation, &db.storage_name],
@@ -282,10 +265,6 @@ async fn async_worker_respects_guc_and_cleanup_lifecycle() -> Result<()> {
 
 #[tokio::test]
 async fn async_worker_survives_truncate_noise_in_slot() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async truncate resilience in strict mode");
-        return Ok(());
-    }
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mirror_truncate").await?;
         clear_async_failpoint(&db.client).await?;
@@ -356,10 +335,6 @@ async fn async_worker_survives_truncate_noise_in_slot() -> Result<()> {
 /// mirror rows together (one PostgreSQL transaction per apply tick).
 #[tokio::test]
 async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping mid-tick applied_lsn abort assertions in strict mode");
-        return Ok(());
-    }
 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mid_tick_abort").await?;
@@ -467,10 +442,6 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
 /// budgets, which flake under parallel e2e WAL + `lock_apply` contention.
 #[tokio::test]
 async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async idle WAL retention regression in strict mode");
-        return Ok(());
-    }
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_idle_wal_skip").await?;
         clear_async_failpoint(&db.client).await?;
@@ -496,8 +467,7 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
                   table_name => $1::text::regclass,
                   storage => $2,
                   hot_row_limit => 1000,
-                  auto_flush => false,
-                  mirror_capture_mode => 'async'
+                  auto_flush => false
                 )
                 "#,
                 &[&relation, &db.storage_name],
@@ -806,8 +776,7 @@ async fn manage_async(
             SELECT koldstore.manage_table(
               table_name => $1::text::regclass,
               storage => $2,
-              hot_row_limit => 1000,
-              mirror_capture_mode => 'async'
+              hot_row_limit => 1000
             )
             "#,
             &[&relation, &storage],

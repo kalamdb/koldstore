@@ -1,12 +1,13 @@
-//! Logical-slot and publication lifecycle for asynchronous mirror capture.
+//! Logical-slot and publication lifecycle for mirror capture.
 //!
 //! A database owns one slot and one publication. Tables enter the publication
-//! only after strict capture has initialized their mirror, which prevents a gap
-//! while switching the write path from triggers to committed WAL.
+//! under a short source-table lock during manage_table activation so concurrent
+//! DML cannot escape capture. Authoritative mirror `seq` values are allocated
+//! only by the serialized WAL applier.
 
 use std::time::Duration;
 
-use koldstore_common::{quote_ident, MirrorCaptureMode, QualifiedTableName};
+use koldstore_common::{quote_ident, QualifiedTableName};
 use koldstore_worker::DatabaseOid;
 use pgrx::datum::DatumWithOid;
 
@@ -65,15 +66,12 @@ pub(crate) fn slot_name(database_oid: u32) -> String {
 /// cannot provision the publication, the current transaction already has an
 /// XID (slot creation would deadlock), or the deterministic slot name is
 /// incompatible.
-pub(crate) fn prepare_capture(mode: MirrorCaptureMode) -> Result<(), String> {
-    if mode != MirrorCaptureMode::Async {
-        return Ok(());
-    }
+pub(crate) fn prepare_capture() -> Result<(), String> {
     if unsafe { pgrx::pg_sys::wal_level }
         != pgrx::pg_sys::WalLevel::WAL_LEVEL_LOGICAL as std::os::raw::c_int
     {
         return Err(
-            "mirror_capture_mode=async requires wal_level=logical (restart PostgreSQL after changing it)"
+            "koldstore.manage_table requires wal_level=logical (restart PostgreSQL after changing it)"
                 .to_string(),
         );
     }
@@ -121,7 +119,7 @@ fn require_no_assigned_xid_for_slot_provision() -> Result<(), String> {
     if xid != pgrx::pg_sys::InvalidTransactionId {
         return Err(
             "async mirror slot provisioning cannot run after the current transaction has written; \
-             commit preceding statements first, then call manage_table with mirror_capture_mode => 'async'"
+             commit preceding statements first, then call manage_table"
                 .to_string(),
         );
     }
@@ -192,26 +190,21 @@ fn native_slot_provision_lock(database_oid: u32, acquire: bool) {
     }
 }
 
-/// Atomically switches one initialized table from triggers to WAL capture.
+/// Publishes one managed table for WAL capture and starts the applier.
 ///
-/// The publication membership and trigger removal share the migration
-/// transaction. Earlier WAL was already mirrored by strict triggers; later WAL
-/// is visible to the async applier.
+/// Publication membership is transactional with manage_table. The source table
+/// should already hold a short write lock (or be empty) so concurrent DML cannot
+/// escape capture between ADD TABLE and the recorded activation boundary.
 ///
 /// # Errors
 ///
-/// Returns an error when publication DDL or trigger removal fails.
+/// Returns an error when publication DDL fails.
 pub(crate) fn activate_table(
-    mode: MirrorCaptureMode,
     source: &QualifiedTableName,
-    mirror: &QualifiedTableName,
+    _mirror: &QualifiedTableName,
     primary_key: &koldstore_common::PrimaryKeyShape,
     order_column: Option<&str>,
 ) -> Result<(), String> {
-    if mode != MirrorCaptureMode::Async {
-        return Ok(());
-    }
-
     let publication = quote_ident(PUBLICATION_NAME);
 
     let source_oid = pgrx::Spi::get_one_with_args::<pgrx::pg_sys::Oid>(
@@ -246,9 +239,6 @@ pub(crate) fn activate_table(
         reconcile_publication_columns(source, primary_key, order_column)?;
     }
 
-    let drop = koldstore_mirror::plan_drop_mirror_dml_triggers(source, mirror)
-        .map_err(|error| error.to_string())?;
-    pgrx::Spi::run(&drop.sql).map_err(|error| error.to_string())?;
     // No per-DML kick: the WAL applier is started here, auto-restarted by
     // postmaster on crash, and re-ensured after postmaster restart by the
     // shared_preload launcher / first backend transaction.
@@ -513,14 +503,14 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
     let active = pgrx::Spi::get_one::<bool>(
         "SELECT EXISTS (\
            SELECT 1 FROM koldstore.schemas \
-           WHERE active AND COALESCE(options->>'mirror_capture_mode', 'strict') = 'async'\
+           WHERE active\
          )",
     )
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     if active {
         return Err(
-            "unmanage every async table before disabling async mirror infrastructure".to_string(),
+            "unmanage every managed table before disabling async mirror infrastructure".to_string(),
         );
     }
     let slot = slot_name(database_oid);

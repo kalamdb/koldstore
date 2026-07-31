@@ -161,20 +161,18 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
         // In async mode, stop the background applier so the next INSERT stays in
         // WAL until flush's own fence applies it in the same transaction. That is
         // the path where pending counter deltas must be visible to flush selection.
-        if common::selected_mirror_capture_mode()?.is_async() {
-            let dbname: String = db
-                .client
-                .query_one("SELECT current_database()", &[])
-                .await?
-                .get(0);
-            db.client
-                .batch_execute(&format!(
-                    "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off; \
-                     SET koldstore.internal_async_mirror_worker = off"
-                ))
-                .await?;
-            let _ = common::terminate_async_worker(&db.client).await?;
-        }
+        let dbname: String = db
+            .client
+            .query_one("SELECT current_database()", &[])
+            .await?
+            .get(0);
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off; \
+                 SET koldstore.internal_async_mirror_worker = off"
+            ))
+            .await?;
+        let _ = common::terminate_async_worker(&db.client).await?;
 
         db.client
             .batch_execute(&format!(
@@ -188,19 +186,17 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
             .await?;
         let flush_result = db.flush_table(&table.relation).await;
 
-        if common::selected_mirror_capture_mode()?.is_async() {
-            let dbname: String = db
-                .client
-                .query_one("SELECT current_database()", &[])
-                .await?
-                .get(0);
-            db.client
-                .batch_execute(&format!(
-                    "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
-                     RESET koldstore.internal_async_mirror_worker"
-                ))
-                .await?;
-        }
+        let dbname: String = db
+            .client
+            .query_one("SELECT current_database()", &[])
+            .await?
+            .get(0);
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+                 RESET koldstore.internal_async_mirror_worker"
+            ))
+            .await?;
         flush_result?;
 
         let rebuilt = koldstore_manifest::try_load_manifest_from_path(&absolute_manifest_path)

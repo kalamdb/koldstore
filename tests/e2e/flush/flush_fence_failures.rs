@@ -14,10 +14,6 @@ use crate::flush::harness::{
 /// authoritative until the writer finishes, then flush can complete.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn async_flush_fence_waits_on_writer_without_pruning_early() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async fence writer-block in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -76,10 +72,6 @@ async fn async_flush_fence_waits_on_writer_without_pruning_early() -> Result<()>
 /// Continuous DML on a second async table must not corrupt the flushed table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping multi-table WAL fence test in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -135,10 +127,6 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
 /// Apply failpoint during flush phase-0 must leave retryable state and succeed later.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping apply-failpoint-during-flush in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -225,10 +213,6 @@ async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
 /// Killing the async worker while flush is paused must not leave duplicate mirror rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn worker_kill_during_flush_upload_leaves_consistent_mirror() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping worker-kill-during-flush in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {

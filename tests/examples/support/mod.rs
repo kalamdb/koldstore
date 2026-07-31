@@ -55,11 +55,8 @@ pub async fn timed_async<T, E: std::fmt::Display>(
 
 /// Logs scenario sizing and filesystem layout at startup.
 pub fn log_scenario_start(name: &str, relation: &str, storage_root: &Path, config: ExampleConfig) {
-    let mode = e2e::selected_mirror_capture_mode()
-        .map(|mode| mode.as_str())
-        .unwrap_or("strict");
     log_always(format!(
-        "{name}: rows={} scopes={} clients={} ({} rows/scope) mirror_capture_mode={mode}",
+        "{name}: rows={} scopes={} clients={} ({} rows/scope) capture=wal-async",
         config.rows,
         config.scopes,
         config.clients,
@@ -72,14 +69,11 @@ pub fn log_scenario_start(name: &str, relation: &str, storage_root: &Path, confi
     ));
 }
 
-/// Establishes a mirror-consistency boundary when examples run in async mode.
-///
-/// Strict mode is a no-op. Async mode waits until committed WAL has been
-/// applied so subsequent flush / merge-scan asserts see the same rows.
+/// Establishes a mirror-consistency boundary after source commits.
 ///
 /// # Errors
 ///
-/// Returns an error when mode selection or the async SQL fence fails.
+/// Returns an error when the async SQL fence fails.
 pub async fn fence_mirror_if_needed(client: &Client) -> Result<()> {
     e2e::fence_selected_mirror(client).await?;
     Ok(())
@@ -311,7 +305,6 @@ pub async fn manage_user_scoped_with_policy(
     min_flush_rows: i64,
     max_rows_per_file: i64,
 ) -> Result<()> {
-    let mode = e2e::selected_mirror_capture_mode()?.as_str();
     client
         .execute(
             r#"
@@ -323,8 +316,7 @@ pub async fn manage_user_scoped_with_policy(
               max_rows_per_file => $5,
               table_type        => 'user',
               scope_column      => $6,
-              migration_order_by => $7,
-              mirror_capture_mode => $8
+              migration_order_by => $7
             )
             "#,
             &[
@@ -335,7 +327,6 @@ pub async fn manage_user_scoped_with_policy(
                 &max_rows_per_file,
                 &scope_column,
                 &migration_order_by,
-                &mode,
             ],
         )
         .await?;

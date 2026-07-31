@@ -308,7 +308,6 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
                 &[&key],
             )
             .await?;
-        let mode = common::selected_mirror_capture_mode()?.as_str().to_string();
         db.client
             .execute(
                 r#"
@@ -318,8 +317,7 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
                   hot_row_limit => NULL,
                   table_type => 'user',
                   scope_column => 'user_id',
-                  migration_order_by => 'migration_seq',
-                  mirror_capture_mode => $3
+                  migration_order_by => 'migration_seq'
                 )
                 "#,
                 &[&relation, &db.storage_name, &mode],
@@ -448,7 +446,6 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
                  VALUES ('CaseKey', 'user-a', 'cold-a', 1);"
             ))
             .await?;
-        let mode = common::selected_mirror_capture_mode()?.as_str().to_string();
         let error = db
             .client
             .execute(
@@ -459,8 +456,7 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
                   hot_row_limit => NULL,
                   table_type => 'user',
                   scope_column => 'user_id',
-                  migration_order_by => 'migration_seq',
-                  mirror_capture_mode => $3
+                  migration_order_by => 'migration_seq'
                 )
                 "#,
                 &[&relation, &db.storage_name, &mode],

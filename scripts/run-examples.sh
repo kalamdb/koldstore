@@ -6,7 +6,6 @@ cd "$ROOT_DIR"
 
 PG_VERSION="${KOLDSTORE_EXAMPLE_PGVERSION:-${KOLDSTORE_E2E_PGVERSION:-16}}"
 PREPARE_ONLY="${KOLDSTORE_EXAMPLE_PREPARE_ONLY:-0}"
-MIRROR_CAPTURE_MODE="${KOLDSTORE_EXAMPLE_MIRROR_CAPTURE_MODE:-${KOLDSTORE_E2E_MIRROR_CAPTURE_MODE:-strict}}"
 FILTER=""
 
 usage() {
@@ -14,7 +13,7 @@ usage() {
 Run KoldStore real-world example scenarios (separate from the default E2E matrix).
 
 Usage:
-  scripts/run-examples.sh [scenario] [--mode <strict|async>]
+  scripts/run-examples.sh [scenario] 
 
 Scenarios:
   chat_history     WhatsApp / Intercom-style chat history
@@ -25,7 +24,7 @@ Scenarios:
   (omit)           Run all scenarios
 
 Options:
-  --mode strict|async   Mirror capture mode (default: strict)
+  Capture is always WAL-async
 
 Environment:
   KOLDSTORE_EXAMPLE_ROWS=50000      Total rows seeded per scenario
@@ -51,19 +50,6 @@ while [[ $# -gt 0 ]]; do
       usage
       exit 0
       ;;
-    --mode)
-      if [[ $# -lt 2 ]]; then
-        echo "error: --mode requires strict or async" >&2
-        usage >&2
-        exit 2
-      fi
-      MIRROR_CAPTURE_MODE="$2"
-      shift 2
-      ;;
-    --mode=*)
-      MIRROR_CAPTURE_MODE="${1#*=}"
-      shift
-      ;;
     chat_history|ai_memory|iot_telemetry|audit_events|game_events)
       if [[ -n "${FILTER}" ]]; then
         echo "error: unexpected extra scenario '${1}' (already selected '${FILTER}')" >&2
@@ -86,23 +72,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${MIRROR_CAPTURE_MODE}" != "strict" && "${MIRROR_CAPTURE_MODE}" != "async" ]]; then
-  echo "error: invalid --mode '${MIRROR_CAPTURE_MODE}'; expected strict or async" >&2
-  exit 2
-fi
 
 echo "preparing pgrx PostgreSQL ${PG_VERSION} for KoldStore examples (--mode ${MIRROR_CAPTURE_MODE})"
 E2E_ENV_FILE="${KOLDSTORE_E2E_ENV_FILE:-$ROOT_DIR/.e2e-env}"
 KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
   KOLDSTORE_E2E_PREPARE_ONLY=1 \
-  KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="${MIRROR_CAPTURE_MODE}" \
-  scripts/run-pg-e2e.sh "${PG_VERSION}" --mode "${MIRROR_CAPTURE_MODE}"
+  KOLDSTORE_E2E_  scripts/run-pg-e2e.sh "${PG_VERSION}" --mode "${MIRROR_CAPTURE_MODE}"
 # Prepare-only creates worker DBs and writes pool env; source it for nextest.
 # shellcheck disable=SC1090
 source "${E2E_ENV_FILE}"
 # Ensure the example process sees the selected mode even if .e2e-env is stale.
-export KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="${MIRROR_CAPTURE_MODE}"
-
+export KOLDSTORE_E2E_
 if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
   echo "examples database is ready (prepare-only; skipping tests)"
   exit 0

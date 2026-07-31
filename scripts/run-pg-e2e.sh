@@ -8,11 +8,11 @@ source "${ROOT_DIR}/scripts/lib/pgrx-lifecycle.sh"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run-pg-e2e.sh [PG_VERSION] [--mode <strict|async>]
+Usage: scripts/run-pg-e2e.sh [PG_VERSION] 
 
 Runs the complete E2E suite with one mirror capture mode. PG_VERSION defaults
 to KOLDSTORE_E2E_PGVERSION or 16; mode defaults to
-KOLDSTORE_E2E_MIRROR_CAPTURE_MODE or strict.
+WAL-async capture only.
 
 Parallelism: KOLDSTORE_E2E_THREADS (default 4) prepares that many worker
 databases from a template so each concurrent test gets its own async slot.
@@ -20,23 +20,9 @@ EOF
 }
 
 PG_VERSION="${KOLDSTORE_E2E_PGVERSION:-16}"
-MIRROR_CAPTURE_MODE="${KOLDSTORE_E2E_MIRROR_CAPTURE_MODE:-strict}"
 pg_version_seen=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --mode)
-      if [[ $# -lt 2 ]]; then
-        echo "error: --mode requires strict or async" >&2
-        usage >&2
-        exit 2
-      fi
-      MIRROR_CAPTURE_MODE="$2"
-      shift 2
-      ;;
-    --mode=*)
-      MIRROR_CAPTURE_MODE="${1#*=}"
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -291,7 +277,6 @@ export KOLDSTORE_E2E_PGPORT="$PG_PORT"
 export KOLDSTORE_E2E_PGUSER="$PG_USER"
 export KOLDSTORE_E2E_PGPASSWORD="$PG_PASSWORD"
 export KOLDSTORE_E2E_PGDATABASE="$PG_DATABASE"
-export KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="$MIRROR_CAPTURE_MODE"
 export KOLDSTORE_E2E_WAIT_FOR_STARTUP=1
 export KOLDSTORE_E2E_THREADS="$THREADS"
 export KOLDSTORE_E2E_DB_POOL=1
@@ -305,7 +290,6 @@ export KOLDSTORE_E2E_PGPORT='$PG_PORT'
 export KOLDSTORE_E2E_PGUSER='$PG_USER'
 export KOLDSTORE_E2E_PGPASSWORD='$PG_PASSWORD'
 export KOLDSTORE_E2E_PGDATABASE='$PG_DATABASE'
-export KOLDSTORE_E2E_MIRROR_CAPTURE_MODE='$MIRROR_CAPTURE_MODE'
 export KOLDSTORE_E2E_WAIT_FOR_STARTUP=1
 export KOLDSTORE_E2E_THREADS='$THREADS'
 export KOLDSTORE_E2E_DB_POOL=1

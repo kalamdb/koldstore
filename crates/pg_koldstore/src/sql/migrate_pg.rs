@@ -1,7 +1,7 @@
 //! PostgreSQL table management and unmanagement SQL entrypoints.
 
 #[cfg(feature = "pg")]
-use koldstore_common::{ManageTableOptions, MigrationStatus, MirrorCaptureMode};
+use koldstore_common::{ManageTableOptions, MigrationStatus};
 #[cfg(feature = "pg")]
 use koldstore_migrate::rehydrate::DemigrateOptions;
 #[cfg(feature = "pg")]
@@ -12,7 +12,9 @@ use uuid::Uuid;
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, mirror_capture_mode default 'strict', auto_flush default true, segment_order_column default null)`.
+/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, auto_flush default true, segment_order_column default null)`.
+///
+/// Capture is always committed-WAL / async apply. `wal_level=logical` is required.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
@@ -27,7 +29,6 @@ pub fn manage_table_pg(
     migration_order_by: pgrx::default!(Option<&str>, "NULL"),
     compression: pgrx::default!(Option<&str>, "NULL"),
     target_file_size_mb: pgrx::default!(Option<i64>, "NULL"),
-    mirror_capture_mode: pgrx::default!(&str, "'strict'"),
     auto_flush: pgrx::default!(bool, true),
     segment_order_column: pgrx::default!(Option<&str>, "NULL"),
 ) -> pgrx::Uuid {
@@ -42,7 +43,6 @@ pub fn manage_table_pg(
         hot_row_limit,
         min_flush_rows,
         max_rows_per_file,
-        mirror_capture_mode,
         auto_flush,
         segment_order_column,
     )
@@ -61,19 +61,12 @@ fn manage_table_pg_impl(
     hot_row_limit: Option<i64>,
     min_flush_rows: i64,
     max_rows_per_file: i64,
-    mirror_capture_mode: &str,
     auto_flush: bool,
     segment_order_column: Option<&str>,
 ) -> pgrx::Uuid {
     crate::preload::require_shared_preload();
     // Validate logical decoding before taking the transaction-scoped job lock.
-    let requested_capture_mode =
-        MirrorCaptureMode::parse(mirror_capture_mode).unwrap_or_else(|| {
-            pgrx::error!(
-                "migrate table failed: unsupported mirror capture mode '{mirror_capture_mode}'"
-            )
-        });
-    crate::async_mirror::lifecycle::prepare_capture(requested_capture_mode)
+    crate::async_mirror::lifecycle::prepare_capture()
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let table_oid_u32 = table_oid.to_u32();
     let table_oid = pgrx::pg_sys::Oid::from(table_oid_u32);
@@ -102,14 +95,12 @@ fn manage_table_pg_impl(
             hot_row_limit,
             min_flush_rows,
             max_rows_per_file,
-            Some(mirror_capture_mode),
             auto_flush,
             catalog.as_ref(),
             constraints,
         ))
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let options = validation.options;
-    let capture_mode = options.mirror_capture_mode();
     let storage_id = storage_id
         .unwrap_or_else(|| unreachable!("validated storage registration must have an id"))
         .to_string();
@@ -192,7 +183,6 @@ fn manage_table_pg_impl(
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
         crate::async_mirror::lifecycle::activate_table(
-            capture_mode,
             &empty_plan.table,
             &mirror_plan.mirror_table,
             &primary_key_shape,
@@ -218,6 +208,23 @@ fn manage_table_pg_impl(
         pgrx::Spi::run(&statement.sql)
             .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     }
+    // Hold the apply lock for the whole publish → backfill → catch-up window so
+    // the shared applied_lsn cannot advance past this table's undecoded WAL.
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    crate::async_mirror::lifecycle::lock_apply(database_oid)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    crate::sql::flush::spi::lock_source_table_share_row_exclusive(table_oid)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    crate::async_mirror::lifecycle::activate_table(
+        &plan.table,
+        &mirror_plan.mirror_table,
+        &primary_key_shape,
+        order_column_name,
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let activation_lsn = pgrx::Spi::get_one::<String>("SELECT pg_catalog.pg_current_wal_insert_lsn()::text")
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"))
+        .unwrap_or_else(|| pgrx::error!("migrate table failed: missing activation LSN"));
     register_schema_version(SchemaRegistrationInput {
         table_oid: table_oid_u32,
         table_type,
@@ -225,7 +232,7 @@ fn manage_table_pg_impl(
         scope_column: plan.effective_scope_column.as_deref(),
         mirror_relation: &mirror_plan.mirror_table,
         primary_key_shape: &primary_key_shape,
-        initialization_state: koldstore_schema::MirrorInitializationState::Capturing,
+        initialization_state: koldstore_schema::MirrorInitializationState::Backfilling,
         primary_key: &catalog.primary_key.columns,
         columns: &catalog.columns,
         indexed_columns: &catalog.indexed_columns,
@@ -234,6 +241,18 @@ fn manage_table_pg_impl(
         migration_status: MigrationStatus::MirrorInitializing,
     })
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    pgrx::Spi::run_with_args(
+        "UPDATE koldstore.schemas \
+         SET activation_lsn = $2::pg_lsn, updated_at = pg_catalog.clock_timestamp() \
+         WHERE table_oid = $1::oid AND active = false",
+        &[
+            pgrx::datum::DatumWithOid::from(table_oid),
+            pgrx::datum::DatumWithOid::from(activation_lsn.as_str()),
+        ],
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    // Source lock was for the publication ADD only; concurrent DML now hits WAL.
+    // Apply lock remains held through backfill + catch-up.
     enqueue_migration_job(&plan)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     mark_migration_job_running(job_id, table_oid_u32, 0)
@@ -245,20 +264,52 @@ fn manage_table_pg_impl(
         job_id,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    pgrx::Spi::run_with_args(
+        "UPDATE koldstore.schemas \
+         SET initialization_state = 'catching_up', updated_at = pg_catalog.clock_timestamp() \
+         WHERE table_oid = $1::oid AND NOT active",
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let wal_apply_floor = pgrx::Spi::get_one_with_args::<i64>(
+        &format!(
+            "SELECT COALESCE(MAX(seq), 0) FROM {}",
+            mirror_plan.mirror_table.quoted()
+        ),
+        &[],
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"))
+    .unwrap_or(0);
+    // Catch up WAL under the apply lock so concurrent commits cannot escape.
+    let _ = crate::async_mirror::apply::apply_bounded(
+        crate::async_mirror::apply::BoundedApplyRequest {
+            upper_bound: None,
+            skip_through: None,
+            acknowledge_durable_checkpoint: true,
+            target_prune_floor: Some((
+                table_oid,
+                crate::async_mirror::apply::PruneSeqFloor::new(wal_apply_floor),
+            )),
+            max_rows: Some(0),
+            max_ms: Some(0),
+        },
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    pgrx::Spi::run_with_args(
+        &koldstore_migrate::register::plan_activate_managed_schema(table_oid_u32)
+            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"))
+            .sql,
+        &[pgrx::datum::DatumWithOid::from(table_oid)],
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    crate::catalog::cache::invalidate_table(table_oid);
+    crate::spi::invalidate_all_prepared_plans();
     apply_user_scope_policy(&plan.table, plan.effective_scope_column.as_deref())
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     complete_migration_job(job_id, table_oid_u32, processed_rows)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     refresh_managed_table_row_counters(table_oid_u32, &plan.table, &mirror_plan.mirror_table)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    crate::async_mirror::lifecycle::activate_table(
-        capture_mode,
-        &plan.table,
-        &mirror_plan.mirror_table,
-        &primary_key_shape,
-        order_column_name,
-    )
-    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     ensure_async_mirror_worker_for_managed_options(&request.options);
 
     crate::spi::uuid_to_pgrx(job_id)
@@ -400,7 +451,6 @@ fn manage_table_validation_context<'a>(
     hot_row_limit: Option<i64>,
     min_flush_rows: i64,
     max_rows_per_file: i64,
-    mirror_capture_mode: Option<&'a str>,
     auto_flush: bool,
     catalog: &'a koldstore_migrate::ExistingTableCatalog,
     constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
@@ -477,7 +527,6 @@ fn manage_table_validation_context<'a>(
         scope_column: scope_column_input,
         segment_order_column,
         compression,
-        mirror_capture_mode,
         policy: koldstore_migrate::manage_table::ManageTablePolicyInput {
             hot_row_limit,
             min_flush_rows,
@@ -711,7 +760,7 @@ fn sync_runtime_artifacts_after_schema_refresh(
     catalog: &koldstore_migrate::ExistingTableCatalog,
     primary_key_shape: &koldstore_common::PrimaryKeyShape,
 ) -> Result<(), String> {
-    use koldstore_common::{ManageTableOptions, MirrorCaptureMode};
+    use koldstore_common::ManageTableOptions;
     use koldstore_migrate::{
         primary_key_renames, resolve_scope_column_name, runtime_artifacts_need_sync,
         QualifiedTableName,
@@ -750,31 +799,32 @@ fn sync_runtime_artifacts_after_schema_refresh(
             .find(|column| column.column_id.get() == column_id)
             .map(|column| column.name.as_str())
     });
-    let capture = koldstore_mirror::plan_mirror_capture_with_order_column(
+    let pk_guard = koldstore_mirror::plan_mirror_pk_guard(
         &source,
         &mirror,
         primary_key_shape.columns(),
         order_column_name,
     )
     .map_err(|error| error.to_string())?;
-    pgrx::Spi::run(&capture.drop_triggers.sql).map_err(|error| error.to_string())?;
-    for statement in capture.create_statements() {
+    // Drop any leftover legacy DML capture triggers from pre-WAL-only installs.
+    for statement in koldstore_mirror::plan_mirror_source_teardown(&source, &mirror)
+        .map_err(|error| error.to_string())?
+    {
+        pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+    }
+    for statement in pk_guard.create_statements() {
         pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
     }
 
     let scope_column = resolve_scope_column_name(active, catalog, &options);
     apply_user_scope_policy(&source, scope_column.as_deref())?;
 
-    let capture_mode = options.mirror_capture_mode();
-    if capture_mode == MirrorCaptureMode::Async {
-        crate::async_mirror::lifecycle::activate_table(
-            capture_mode,
-            &source,
-            &mirror,
-            primary_key_shape,
-            order_column_name,
-        )?;
-    }
+    crate::async_mirror::lifecycle::activate_table(
+        &source,
+        &mirror,
+        primary_key_shape,
+        order_column_name,
+    )?;
     Ok(())
 }
 
@@ -931,15 +981,6 @@ fn run_existing_table_mirror_initialization_inline(
         )?;
     }
 
-    pgrx::Spi::run_with_args(
-        &koldstore_migrate::register::plan_activate_managed_schema(plan.table_oid)
-            .map_err(|error| error.to_string())?
-            .sql,
-        &[pgrx::datum::DatumWithOid::from(pgrx::pg_sys::Oid::from(
-            plan.table_oid,
-        ))],
-    )
-    .map_err(|error| error.to_string())?;
     crate::catalog::cache::invalidate_table(pgrx::pg_sys::Oid::from(plan.table_oid));
     crate::spi::invalidate_all_prepared_plans();
     Ok(processed_rows)

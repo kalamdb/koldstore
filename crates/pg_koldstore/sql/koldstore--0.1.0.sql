@@ -43,7 +43,16 @@ CREATE TABLE IF NOT EXISTS koldstore.schemas (
   mirror_relation regclass,
   primary_key_shape jsonb NOT NULL DEFAULT '[]'::jsonb,
   initialization_state text NOT NULL DEFAULT 'not_started'
-    CHECK (initialization_state IN ('not_started', 'capturing', 'complete', 'failed')),
+    CHECK (initialization_state IN (
+      'not_started',
+      'capturing',
+      'backfilling',
+      'catching_up',
+      'complete',
+      'failed'
+    )),
+  -- WAL insert LSN recorded when the table entered the publication (activation boundary).
+  activation_lsn pg_lsn,
   indexed_columns jsonb NOT NULL DEFAULT '[]'::jsonb,
   type_matrix jsonb NOT NULL DEFAULT '{}'::jsonb,
   options jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -80,6 +89,8 @@ $koldstore_publication$;
 CREATE TABLE IF NOT EXISTS koldstore.async_mirror_state (
   database_oid oid PRIMARY KEY,
   applied_lsn pg_lsn NOT NULL,
+  -- Durable floor for WAL-applied seq allocation (restart / clock regression safe).
+  seq_high_watermark bigint NOT NULL DEFAULT 0,
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -98,7 +109,6 @@ CREATE TABLE IF NOT EXISTS koldstore.manifest (
   sync_state text NOT NULL CHECK (sync_state IN ('in_sync', 'pending_write', 'syncing', 'stale', 'error')),
   segment_count integer NOT NULL DEFAULT 0,
   max_seq bigint NOT NULL DEFAULT 0,
-  max_commit_seq bigint NOT NULL DEFAULT 0,
   -- PERFORMANCE: O(1) row accounting for describe/flush logging (see table_counters.rs).
   hot_row_count bigint NOT NULL DEFAULT 0,
   mirror_row_count bigint NOT NULL DEFAULT 0,
@@ -174,8 +184,6 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   batch_number integer NOT NULL,
   min_seq bigint NOT NULL,
   max_seq bigint NOT NULL,
-  min_commit_seq bigint NOT NULL,
-  max_commit_seq bigint NOT NULL,
   row_count bigint NOT NULL,
   byte_size bigint NOT NULL,
   schema_version integer NOT NULL,
@@ -189,7 +197,6 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   object_etag text,
   created_at timestamptz NOT NULL DEFAULT now(),
   CHECK (min_seq > 0 AND min_seq <= max_seq),
-  CHECK (min_commit_seq > 0 AND min_commit_seq <= max_commit_seq),
   CHECK (row_count > 0),
   CHECK (byte_size > 0),
   CHECK (cardinality(row_group_row_counts) = row_group_count),
@@ -203,11 +210,7 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
 
 CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx
   ON koldstore.cold_segments (table_oid, scope_key, min_seq, max_seq)
-  INCLUDE (segment_id, path, min_commit_seq, max_commit_seq, row_count, byte_size, schema_version, object_etag, checksum)
-  WHERE status = 'active';
-
-CREATE INDEX IF NOT EXISTS cold_segments_active_commit_idx
-  ON koldstore.cold_segments (table_oid, scope_key, min_commit_seq, max_commit_seq)
+  INCLUDE (segment_id, path, row_count, byte_size, schema_version, object_etag, checksum)
   WHERE status = 'active';
 
 -- Pending expiry / recovery: find stale uploading rows without a full table scan.
