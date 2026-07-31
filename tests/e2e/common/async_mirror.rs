@@ -204,6 +204,37 @@ pub async fn async_mirror_progress(client: &tokio_postgres::Client) -> Result<As
     })
 }
 
+/// Byte distance between two LSNs (`pg_wal_lsn_diff(newer, older)`).
+///
+/// # Errors
+///
+/// Returns an error when the LSN cast or diff probe fails.
+pub async fn wal_lsn_diff_bytes(
+    client: &tokio_postgres::Client,
+    newer_lsn: &str,
+    older_lsn: &str,
+) -> Result<i64> {
+    Ok(client
+        .query_one(
+            "SELECT pg_wal_lsn_diff($1::text::pg_lsn, $2::text::pg_lsn)::bigint",
+            &[&newer_lsn, &older_lsn],
+        )
+        .await?
+        .get(0))
+}
+
+/// Current insert LSN as text (`pg_current_wal_lsn()`).
+///
+/// # Errors
+///
+/// Returns an error when the probe fails.
+pub async fn current_wal_lsn(client: &tokio_postgres::Client) -> Result<String> {
+    Ok(client
+        .query_one("SELECT pg_current_wal_lsn()::text", &[])
+        .await?
+        .get(0))
+}
+
 /// Waits until `confirmed_flush_lsn` moves past `before_lsn`.
 ///
 /// Used to assert empty peeks advance the slot past non-publication WAL.
@@ -216,22 +247,46 @@ pub async fn wait_for_confirmed_flush_past(
     before_lsn: &str,
     deadline: Duration,
 ) -> Result<AsyncMirrorProgress> {
+    wait_for_confirmed_flush_cmp(client, before_lsn, ">", deadline).await
+}
+
+/// Waits until `confirmed_flush_lsn` reaches at least `target_lsn`.
+///
+/// Prefer this after accumulating non-publication WAL: wait until the slot has
+/// caught the post-noise horizon, not merely any advance past an older baseline.
+/// Absolute `retained_bytes` is not a reliable gate under parallel e2e WAL.
+///
+/// # Errors
+///
+/// Returns an error when the deadline elapses or probes fail.
+pub async fn wait_for_confirmed_flush_at_least(
+    client: &tokio_postgres::Client,
+    target_lsn: &str,
+    deadline: Duration,
+) -> Result<AsyncMirrorProgress> {
+    wait_for_confirmed_flush_cmp(client, target_lsn, ">=", deadline).await
+}
+
+async fn wait_for_confirmed_flush_cmp(
+    client: &tokio_postgres::Client,
+    bound_lsn: &str,
+    op: &str,
+    deadline: Duration,
+) -> Result<AsyncMirrorProgress> {
     let started = Instant::now();
+    let sql = format!("SELECT $1::text::pg_lsn {op} $2::text::pg_lsn");
     loop {
         let progress = async_mirror_progress(client).await?;
-        let advanced: bool = client
-            .query_one(
-                "SELECT $1::text::pg_lsn > $2::text::pg_lsn",
-                &[&progress.confirmed_flush_lsn, &before_lsn],
-            )
+        let ready: bool = client
+            .query_one(&sql, &[&progress.confirmed_flush_lsn, &bound_lsn])
             .await?
             .get(0);
-        if advanced {
+        if ready {
             return Ok(progress);
         }
         anyhow::ensure!(
             started.elapsed() <= deadline,
-            "confirmed_flush_lsn did not advance past {before_lsn} within {deadline:?} \
+            "confirmed_flush_lsn did not satisfy {op} {bound_lsn} within {deadline:?} \
              (still {}, retained_bytes={})",
             progress.confirmed_flush_lsn,
             progress.retained_bytes

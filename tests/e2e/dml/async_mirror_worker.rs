@@ -436,9 +436,10 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
 ///
 /// Before the fix, every latch wake peeked against a lagged `restart_lsn`,
 /// pinning a core and flooding "starting logical decoding" logs while
-/// `applied_lsn` stayed put. Assertions are structural (retention collapse,
-/// frozen apply watermarks, repeatable second wave) — not wall-clock fence
-/// budgets, which flake under parallel e2e WAL + `lock_apply` contention.
+/// `applied_lsn` stayed put. Assertions are structural (confirmed_flush
+/// advances through the retained gap, frozen apply watermarks, repeatable
+/// second wave) — not absolute `retained_bytes`, which grows under parallel
+/// e2e cluster WAL, and not wall-clock fence budgets.
 #[tokio::test]
 async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Result<()> {
     for target in common::scenario_pg_matrix() {
@@ -513,22 +514,34 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
             "expected retained WAL behind a stopped slot, got {} bytes",
             blocked.retained_bytes
         );
+        // Horizon the idle peek must reach; neighbor WAL after this only grows
+        // absolute retention and must not be charged against the drain assertion.
+        let noise_horizon = common::current_wal_lsn(&db.client).await?;
         common::log_always(format!(
-            "accumulated {} bytes of non-publication WAL behind stopped applier",
-            blocked.retained_bytes
+            "accumulated {} bytes of non-publication WAL behind stopped applier \
+             (horizon {})",
+            blocked.retained_bytes, noise_horizon
         ));
 
         common::wait_for_async_worker(&db.client).await?;
-        let drained = common::wait_for_confirmed_flush_past(
+        let drained = common::wait_for_confirmed_flush_at_least(
             &db.client,
-            &baseline.confirmed_flush_lsn,
+            &noise_horizon,
             Duration::from_secs(15),
         )
         .await?;
+        let advanced_bytes = common::wal_lsn_diff_bytes(
+            &db.client,
+            &drained.confirmed_flush_lsn,
+            &baseline.confirmed_flush_lsn,
+        )
+        .await?;
         common::log_always(format!(
-            "idle empty-peek advanced confirmed_flush {} -> {} (retained_bytes {} -> {})",
+            "idle empty-peek advanced confirmed_flush {} -> {} \
+             (advanced_bytes {}, retained_bytes {} -> {})",
             baseline.confirmed_flush_lsn,
             drained.confirmed_flush_lsn,
+            advanced_bytes,
             blocked.retained_bytes,
             drained.retained_bytes
         ));
@@ -547,16 +560,10 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
             "idle path must not rewrite mirror rows"
         );
         assert!(
-            drained.retained_bytes < blocked.retained_bytes / 2,
-            "confirmed_flush advance must shrink retention substantially \
-             (before={}, after={})",
-            blocked.retained_bytes,
-            drained.retained_bytes
-        );
-        assert!(
-            drained.retained_bytes < 2 * 1024 * 1024,
-            "retention after idle advance should be small, got {} bytes",
-            drained.retained_bytes
+            advanced_bytes >= blocked.retained_bytes / 2,
+            "confirmed_flush must advance through the retained non-publication gap \
+             (advanced_bytes={advanced_bytes}, blocked_retained={})",
+            blocked.retained_bytes
         );
 
         // After catch-up, neighbor databases may keep advancing cluster WAL.
@@ -604,18 +611,26 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
             before_second.retained_bytes,
             blocked_again.retained_bytes
         );
+        let second_horizon = common::current_wal_lsn(&db.client).await?;
         common::wait_for_async_worker(&db.client).await?;
-        let drained_again = common::wait_for_confirmed_flush_past(
+        let drained_again = common::wait_for_confirmed_flush_at_least(
             &db.client,
-            &before_second.confirmed_flush_lsn,
+            &second_horizon,
             Duration::from_secs(15),
+        )
+        .await?;
+        let advanced_again = common::wal_lsn_diff_bytes(
+            &db.client,
+            &drained_again.confirmed_flush_lsn,
+            &before_second.confirmed_flush_lsn,
         )
         .await?;
         common::log_always(format!(
             "second idle empty-peek advanced confirmed_flush {} -> {} \
-             (retained_bytes {} -> {})",
+             (advanced_bytes {}, retained_bytes {} -> {})",
             before_second.confirmed_flush_lsn,
             drained_again.confirmed_flush_lsn,
+            advanced_again,
             blocked_again.retained_bytes,
             drained_again.retained_bytes
         ));
@@ -633,11 +648,10 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
             "second idle drain must not rewrite mirror rows"
         );
         assert!(
-            drained_again.retained_bytes < blocked_again.retained_bytes / 2,
-            "second confirmed_flush advance must shrink retention \
-             (before={}, after={})",
-            blocked_again.retained_bytes,
-            drained_again.retained_bytes
+            advanced_again >= (blocked_again.retained_bytes - before_second.retained_bytes) / 2,
+            "second confirmed_flush must advance through the new non-publication gap \
+             (advanced_bytes={advanced_again}, gap={})",
+            blocked_again.retained_bytes - before_second.retained_bytes
         );
 
         // Explicit fences must stay empty for publication changes. Timing is
