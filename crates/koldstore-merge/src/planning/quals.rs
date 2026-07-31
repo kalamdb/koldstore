@@ -29,8 +29,6 @@ pub struct PruningPlan {
     pub scope_columns: Vec<ColumnId>,
     /// Optional `seq` range.
     pub seq_range: Option<PruningRange>,
-    /// Optional commit-sequence range.
-    pub commit_seq_range: Option<PruningRange>,
     /// Immutable/stat-only columns safe for pre-merge pruning.
     pub immutable_stat_columns: Vec<ColumnId>,
     /// Columns that must remain post-merge residual filters.
@@ -98,9 +96,6 @@ pub fn build_pruning_plan(predicates: &[Predicate]) -> Result<PruningPlan> {
             ColumnClass::Scope => plan.scope_columns.push(predicate.column_id),
             ColumnClass::Seq => {
                 plan.seq_range = range_from_predicate(&predicate);
-            }
-            ColumnClass::CommitSeq => {
-                plan.commit_seq_range = range_from_predicate(&predicate);
             }
             ColumnClass::Immutable => plan.immutable_stat_columns.push(predicate.column_id),
             ColumnClass::Mutable | ColumnClass::Security => {}

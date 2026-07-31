@@ -21,7 +21,7 @@ fn writer_plan_records_kalamdb_compatible_layout_metadata() {
         "app/items",
         7,
         "11111111",
-        SegmentMetadataInput::seq_bounds(1, 10, 11, 20),
+        SegmentMetadataInput::seq_bounds(1, 10),
     );
 
     assert_eq!(
@@ -30,8 +30,6 @@ fn writer_plan_records_kalamdb_compatible_layout_metadata() {
     );
     assert_eq!(plan.min_seq, 1);
     assert_eq!(plan.max_seq, 10);
-    assert_eq!(plan.min_commit_seq, 11);
-    assert_eq!(plan.max_commit_seq, 20);
     assert_eq!(plan.compression, "zstd");
 }
 
@@ -78,8 +76,6 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
         SegmentMetadataInput {
             min_seq: 1,
             max_seq: 10,
-            min_commit_seq: 11,
-            max_commit_seq: 20,
             row_count: 100,
             byte_size: 4096,
             pk_columns: vec!["id".to_string()],
@@ -98,13 +94,6 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
                     ColumnStats {
                         min: json!(1),
                         max: json!(10),
-                    },
-                ),
-                (
-                    "commit_seq".to_string(),
-                    ColumnStats {
-                        min: json!(11),
-                        max: json!(20),
                     },
                 ),
             ],
@@ -129,7 +118,6 @@ fn writer_plan_records_stats_and_pk_bloom_metadata_for_manifest_round_trip() {
         Some((&json!(1), &json!(10)))
     );
     assert!(plan.column_stats.contains_key("id"));
-    assert!(plan.column_stats.contains_key("commit_seq"));
 }
 
 #[test]
@@ -582,15 +570,11 @@ fn footer_summary_extracts_segment_pruning_metadata_for_manifest() {
                 row_group: 0,
                 min_seq: Some(1),
                 max_seq: Some(10),
-                min_commit_seq: Some(11),
-                max_commit_seq: Some(20),
             },
             RowGroupStats {
                 row_group: 1,
                 min_seq: Some(11),
                 max_seq: Some(30),
-                min_commit_seq: Some(21),
-                max_commit_seq: Some(40),
             },
         ],
     };
@@ -612,8 +596,6 @@ fn footer_summary_extracts_segment_pruning_metadata_for_manifest() {
 
     assert_eq!(metadata.min_seq, 1);
     assert_eq!(metadata.max_seq, 30);
-    assert_eq!(metadata.min_commit_seq, 11);
-    assert_eq!(metadata.max_commit_seq, 40);
     assert_eq!(metadata.row_count, 250);
     assert_eq!(metadata.byte_size, 8192);
     assert_eq!(metadata.schema_version, 3);

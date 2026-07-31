@@ -833,8 +833,6 @@ SELECT COALESCE(jsonb_agg(
         'batch_number', cs.batch_number,
         'min_seq', cs.min_seq,
         'max_seq', cs.max_seq,
-        'min_commit_seq', cs.min_commit_seq,
-        'max_commit_seq', cs.max_commit_seq,
         'row_count', cs.row_count,
         'byte_size', cs.byte_size,
         'schema_version', cs.schema_version,
@@ -951,7 +949,7 @@ pub fn plan_backup_manifest_rows() -> SqlResult<SqlStatement> {
     // param metadata stays empty to match the historical ops SPI contract.
     SqlStatement::read(
         "backup manifest",
-        "SELECT etag, generation, max_seq, max_commit_seq \
+        "SELECT etag, generation, max_seq \
 FROM koldstore.manifest \
 WHERE ($1::regclass IS NULL OR table_oid = $1::regclass::oid) \
   AND ($2::text IS NULL OR scope_key = $2)",

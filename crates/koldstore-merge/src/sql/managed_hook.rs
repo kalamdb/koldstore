@@ -4,7 +4,7 @@
 //! PostgreSQL DML hooks. Mirror SQL expressions stay in `pg_koldstore`.
 
 use koldstore_catalog::SyncState;
-use koldstore_common::{CommitSeq, MirrorOperation, SeqId};
+use koldstore_common::{MirrorOperation, SeqId};
 
 use crate::dml::{delete_decision, DeleteDecision, DmlStamp, ManagedDmlOperation};
 
@@ -72,10 +72,9 @@ pub fn extract_simple_pk_delete_predicate(
 
 /// Plans a managed INSERT effect.
 #[must_use]
-pub fn plan_managed_insert_effect(seq: SeqId, commit_seq: CommitSeq) -> ManagedDmlEffect {
+pub fn plan_managed_insert_effect(seq: SeqId) -> ManagedDmlEffect {
     plan_managed_effect(
         seq,
-        commit_seq,
         ManagedDmlOperation::Insert,
         MirrorOperation::Insert,
         None,
@@ -84,10 +83,9 @@ pub fn plan_managed_insert_effect(seq: SeqId, commit_seq: CommitSeq) -> ManagedD
 
 /// Plans a managed UPDATE effect.
 #[must_use]
-pub fn plan_managed_update_effect(seq: SeqId, commit_seq: CommitSeq) -> ManagedDmlEffect {
+pub fn plan_managed_update_effect(seq: SeqId) -> ManagedDmlEffect {
     plan_managed_effect(
         seq,
-        commit_seq,
         ManagedDmlOperation::Update,
         MirrorOperation::Update,
         None,
@@ -98,12 +96,10 @@ pub fn plan_managed_update_effect(seq: SeqId, commit_seq: CommitSeq) -> ManagedD
 #[must_use]
 pub fn plan_managed_delete_effect(
     seq: SeqId,
-    commit_seq: CommitSeq,
     cold_may_contain_pk: bool,
 ) -> ManagedDmlEffect {
     plan_managed_effect(
         seq,
-        commit_seq,
         ManagedDmlOperation::Delete,
         MirrorOperation::Delete,
         Some(delete_decision(cold_may_contain_pk)),
@@ -112,12 +108,11 @@ pub fn plan_managed_delete_effect(
 
 fn plan_managed_effect(
     seq: SeqId,
-    commit_seq: CommitSeq,
     operation: ManagedDmlOperation,
     mirror_operation: MirrorOperation,
     delete_decision: Option<DeleteDecision>,
 ) -> ManagedDmlEffect {
-    let stamp = DmlStamp::new(seq, commit_seq, operation);
+    let stamp = DmlStamp::new(seq, operation);
     ManagedDmlEffect {
         stamp,
         mirror_operation,

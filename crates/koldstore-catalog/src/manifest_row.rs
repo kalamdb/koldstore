@@ -44,10 +44,6 @@ pub struct CatalogManifestSegmentRow {
     pub min_seq: i64,
     /// Maximum `_seq`.
     pub max_seq: i64,
-    /// Minimum `_commit_seq`.
-    pub min_commit_seq: i64,
-    /// Maximum `_commit_seq`.
-    pub max_commit_seq: i64,
     /// Segment row count.
     pub row_count: i64,
     /// Segment byte size.

@@ -140,7 +140,6 @@ pub(super) fn stream_write_flush_batches(
     let mut batch_number = next_flush_batch_number(table_oid)?;
     let mut total_rows_flushed = 0_i64;
     let mut last_max_seq = 0_i64;
-    let mut last_max_commit_seq = 0_i64;
     let mut written_segments: Vec<WrittenFlushSegment> = Vec::new();
 
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
@@ -213,7 +212,6 @@ pub(super) fn stream_write_flush_batches(
                     &mut batch_number,
                     &mut total_rows_flushed,
                     &mut last_max_seq,
-                    &mut last_max_commit_seq,
                     &mut written_segments,
                     chunk,
                 )
@@ -239,7 +237,6 @@ pub(super) fn stream_write_flush_batches(
     Ok(TableFlushBatchOutcome {
         total_rows_flushed,
         last_max_seq,
-        last_max_commit_seq,
         mirror_ops: selection.mirror_ops.clone(),
         prune_max_seq: stream_outcome.max_seq,
         manifest,
@@ -257,7 +254,6 @@ fn write_streamed_chunk(
     batch_number: &mut i32,
     total_rows_flushed: &mut i64,
     last_max_seq: &mut i64,
-    last_max_commit_seq: &mut i64,
     written_segments: &mut Vec<WrittenFlushSegment>,
     chunk: FlushWriteChunk,
 ) -> Result<(), String> {
@@ -279,7 +275,6 @@ fn write_streamed_chunk(
     crate::failpoints::hit("after_pending_segment")?;
     *total_rows_flushed = total_rows_flushed.saturating_add(chunk_stats.row_count);
     *last_max_seq = chunk_stats.max_seq;
-    *last_max_commit_seq = chunk_stats.max_commit_seq;
     pgrx::log!(
         "koldstore flush: wrote+cataloged segment batch={} rows={} total_rows={}",
         *batch_number,
@@ -342,7 +337,6 @@ pub(super) fn finalize_flush(
         expected_generation,
         outcome.manifest.segments.len() as i32,
         outcome.manifest.max_seq,
-        outcome.manifest.max_commit_seq,
         &outcome.pending_segment_ids,
     )?;
     crate::failpoints::hit("after_manifest_publish")?;
@@ -561,7 +555,6 @@ fn flush_prepared_table(
     let mut total_rows_flushed = 0_i64;
     let mut total_batches = 0_i32;
     let mut last_max_seq = 0_i64;
-    let mut last_max_commit_seq = 0_i64;
     let mut skip_through = phase0_applied;
     let mut waves = 0_u32;
     // Pin the backlog visible at job start. Async fence apply can insert newer
@@ -581,8 +574,7 @@ fn flush_prepared_table(
     let report_progress = |phase: &str,
                            rows_flushed: i64,
                            batches_completed: i32,
-                           checkpoint_seq: i64,
-                           checkpoint_commit_seq: i64|
+                           checkpoint_seq: i64|
      -> Result<(), String> {
         update_flush_job_progress(
             ctx.job_id,
@@ -591,7 +583,6 @@ fn flush_prepared_table(
                 rows_flushed,
                 batches_completed,
                 checkpoint_seq,
-                checkpoint_commit_seq,
                 phase,
                 progress_total,
             },
@@ -606,16 +597,14 @@ fn flush_prepared_table(
                 total_rows_flushed,
                 total_batches,
                 last_max_seq,
-                last_max_commit_seq,
-            );
+                    );
         }
         report_progress(
             flush_phase::SELECTING,
             total_rows_flushed,
             total_batches,
             last_max_seq,
-            last_max_commit_seq,
-        )?;
+            )?;
         let selection = resolve_flush_stats(table_oid, ctx.force)?;
         crate::failpoints::hit("after_select_rows")?;
         // Re-check after the select barrier so peer cancel/DROP can stop work
@@ -628,8 +617,7 @@ fn flush_prepared_table(
                 total_rows_flushed,
                 total_batches,
                 last_max_seq,
-                last_max_commit_seq,
-            );
+                    );
         }
         if !should_start_catchup_wave(
             catchup_upto_seq,
@@ -653,8 +641,7 @@ fn flush_prepared_table(
             total_rows_flushed,
             total_batches,
             last_max_seq,
-            last_max_commit_seq,
-        )?;
+            )?;
         let outcome = stream_write_flush_batches(table_oid, ctx, &selection, &client)?;
         let wave_batches =
             i32::try_from(outcome.pending_segment_ids.len()).map_err(|error| error.to_string())?;
@@ -668,16 +655,14 @@ fn flush_prepared_table(
                 total_rows_flushed,
                 total_batches,
                 last_max_seq,
-                last_max_commit_seq,
-            );
+                    );
         }
         report_progress(
             flush_phase::ACTIVATING,
             total_rows_flushed,
             total_batches,
             last_max_seq,
-            last_max_commit_seq,
-        )?;
+            )?;
         finalize_flush(table_oid, ctx, &outcome, &client, skip_through)?;
         // Later waves have no async phase-0 boundary to skip through.
         skip_through = None;
@@ -685,7 +670,6 @@ fn flush_prepared_table(
         total_rows_flushed = total_rows_flushed.saturating_add(outcome.total_rows_flushed);
         total_batches = total_batches.saturating_add(wave_batches);
         last_max_seq = outcome.last_max_seq;
-        last_max_commit_seq = outcome.last_max_commit_seq;
 
         // Drop wave-owned buffers before the next selection / encode pass.
         drop(outcome);
@@ -696,8 +680,7 @@ fn flush_prepared_table(
             total_rows_flushed,
             total_batches,
             last_max_seq,
-            last_max_commit_seq,
-        )?;
+            )?;
 
         // Policy and force waves are both row-capped; keep draining the pinned
         // start-of-job watermark (not rows applied during this flush).
@@ -714,7 +697,6 @@ fn flush_prepared_table(
         table_oid,
         total_rows_flushed,
         last_max_seq,
-        last_max_commit_seq,
         total_batches,
     )?;
     release_flush_memory(table_oid);
@@ -727,7 +709,6 @@ fn finish_flush_after_cancel(
     total_rows_flushed: i64,
     total_batches: i32,
     last_max_seq: i64,
-    last_max_commit_seq: i64,
 ) -> Result<(), String> {
     if total_rows_flushed > 0 {
         // Publish already committed in an earlier wave of this statement: do not
@@ -737,8 +718,7 @@ fn finish_flush_after_cancel(
             table_oid,
             total_rows_flushed,
             last_max_seq,
-            last_max_commit_seq,
-            total_batches,
+                total_batches,
         )?;
     } else {
         mark_flush_job_cancelled(job_id, table_oid)?;

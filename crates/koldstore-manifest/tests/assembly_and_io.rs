@@ -46,8 +46,6 @@ fn catalog_row(
         batch_number,
         min_seq,
         max_seq,
-        min_commit_seq: min_seq,
-        max_commit_seq: max_seq,
         row_count,
         byte_size,
         schema_version,
@@ -208,5 +206,4 @@ fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
         "001/segment-0002-bbbbbbbb.parquet"
     );
     assert_eq!(manifest.max_seq, 20);
-    assert_eq!(manifest.max_commit_seq, 20);
 }

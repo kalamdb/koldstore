@@ -8,7 +8,7 @@
 use std::ffi::CStr;
 
 use koldstore_common::{
-    quote_ident, ColumnRef, CommitSeq, HotRow, LogicalPk, PkColumn, QualifiedTableName, SeqId,
+    quote_ident, ColumnRef, HotRow, LogicalPk, PkColumn, QualifiedTableName, SeqId,
 };
 use koldstore_merge::scan::HOT_SEQ_SENTINEL;
 use pgrx::pg_sys;
@@ -258,13 +258,10 @@ unsafe fn execute_hot_rows_query(
                 let pk = LogicalPk::from_json_object(&pk_json, pk_columns)
                     .map_err(|error| error.to_string())?;
                 let seq = SeqId::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
-                let commit_seq =
-                    CommitSeq::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
                 rows.push(HotRow {
                     pk,
                     scope_key: None,
                     seq,
-                    commit_seq,
                     deleted: false,
                     row_image,
                 });

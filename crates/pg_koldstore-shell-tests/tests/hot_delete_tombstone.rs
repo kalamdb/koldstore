@@ -1,5 +1,5 @@
 use koldstore::hooks::executor;
-use koldstore_common::{CommitSeq, SeqId};
+use koldstore_common::SeqId;
 use koldstore_merge::dml::{
     delete_decision, delete_decision_with_flush_fence, DeleteDecision, DmlStamp,
     ManagedDmlOperation,
@@ -14,35 +14,19 @@ fn hot_delete_routes_to_physical_delete_or_tombstone_from_cold_hints() {
         DeleteDecision::Tombstone
     );
 
-    let physical_delete_stamp = DmlStamp::new(
-        SeqId::new(10).unwrap(),
-        CommitSeq::new(20).unwrap(),
-        ManagedDmlOperation::Delete,
-    );
-    let tombstone_stamp = DmlStamp::new(
-        SeqId::new(11).unwrap(),
-        CommitSeq::new(21).unwrap(),
-        ManagedDmlOperation::Delete,
-    );
+    let physical_delete_stamp =
+        DmlStamp::new(SeqId::new(10).unwrap(), ManagedDmlOperation::Delete);
+    let tombstone_stamp = DmlStamp::new(SeqId::new(11).unwrap(), ManagedDmlOperation::Delete);
 
     assert!(physical_delete_stamp.deleted);
     assert!(tombstone_stamp.deleted);
     assert!(tombstone_stamp.seq > physical_delete_stamp.seq);
-    assert!(tombstone_stamp.commit_seq > physical_delete_stamp.commit_seq);
 }
 
 #[test]
 fn managed_delete_effect_routes_physical_delete_or_tombstone_and_records_mirror_delete() {
-    let physical = executor::plan_managed_delete_effect(
-        SeqId::new(10).unwrap(),
-        CommitSeq::new(20).unwrap(),
-        false,
-    );
-    let tombstone = executor::plan_managed_delete_effect(
-        SeqId::new(11).unwrap(),
-        CommitSeq::new(21).unwrap(),
-        true,
-    );
+    let physical = executor::plan_managed_delete_effect(SeqId::new(10).unwrap(), false);
+    let tombstone = executor::plan_managed_delete_effect(SeqId::new(11).unwrap(), true);
 
     assert_eq!(physical.stamp.operation, ManagedDmlOperation::Delete);
     assert_eq!(
@@ -60,5 +44,4 @@ fn managed_delete_effect_routes_physical_delete_or_tombstone_and_records_mirror_
     assert_eq!(tombstone.delete_decision, Some(DeleteDecision::Tombstone));
     assert!(tombstone.stamp.deleted);
     assert!(tombstone.stamp.seq > physical.stamp.seq);
-    assert!(tombstone.stamp.commit_seq > physical.stamp.commit_seq);
 }

@@ -58,7 +58,6 @@ pub fn plan_select_mirror_rows_after_seq_with_params(
         "changes_since from change-log mirror",
         format!(
             r#"SELECT
-    mirror."seq" AS commit_seq,
     mirror."seq" AS seq,
     mirror."op" AS op,
     jsonb_build_object({pk_json}) AS pk,
@@ -110,9 +109,7 @@ pub fn plan_mirror_force_flush_stats(
     'delete', jsonb_build_object(
         'row_count', count(*) FILTER (WHERE "op" = {delete_op})::bigint,
         'min_seq', COALESCE(min("seq") FILTER (WHERE "op" = {delete_op}), 0),
-        'max_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0),
-        'min_commit_seq', COALESCE(min("seq") FILTER (WHERE "op" = {delete_op}), 0),
-        'max_commit_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0)
+        'max_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0)
     )
 )::text
 FROM {mirror}"#,
@@ -170,9 +167,7 @@ WHERE "op" = {op}"#,
 const MIRROR_SEQ_STATS_JSON_FIELDS: &str = r#"
     'row_count', count(*)::bigint,
     'min_seq', COALESCE(min("seq"), 0),
-    'max_seq', COALESCE(max("seq"), 0),
-    'min_commit_seq', COALESCE(min("seq"), 0),
-    'max_commit_seq', COALESCE(max("seq"), 0)
+    'max_seq', COALESCE(max("seq"), 0)
 "#;
 
 fn pk_json_projection(primary_key: &[&str]) -> MirrorResult<String> {

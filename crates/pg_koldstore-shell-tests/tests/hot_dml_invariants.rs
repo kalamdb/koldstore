@@ -1,5 +1,5 @@
 use koldstore::hooks::{executor, xact};
-use koldstore_common::{CommitSeq, MirrorOperation, SeqId};
+use koldstore_common::{MirrorOperation, SeqId};
 use koldstore_merge::dml;
 
 #[test]
@@ -22,8 +22,7 @@ fn dml_helpers_keep_one_hot_row_per_pk_by_using_upsert_revival() {
 
 #[test]
 fn managed_insert_effect_stamps_live_mirror_operation_and_pending_manifest() {
-    let effect =
-        executor::plan_managed_insert_effect(SeqId::new(10).unwrap(), CommitSeq::new(20).unwrap());
+    let effect = executor::plan_managed_insert_effect(SeqId::new(10).unwrap());
 
     assert_eq!(effect.stamp.operation, dml::ManagedDmlOperation::Insert);
     assert_eq!(

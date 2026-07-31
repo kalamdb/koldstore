@@ -27,10 +27,6 @@ pub struct FlushStats {
     pub min_seq: i64,
     /// Maximum selected `_seq`.
     pub max_seq: i64,
-    /// Minimum selected `_commit_seq`.
-    pub min_commit_seq: i64,
-    /// Maximum selected `_commit_seq`.
-    pub max_commit_seq: i64,
 }
 
 impl From<koldstore_mirror::MirrorSeqStats> for FlushStats {
@@ -39,8 +35,6 @@ impl From<koldstore_mirror::MirrorSeqStats> for FlushStats {
             row_count: stats.row_count,
             min_seq: stats.min_seq,
             max_seq: stats.max_seq,
-            min_commit_seq: stats.min_commit_seq,
-            max_commit_seq: stats.max_commit_seq,
         }
     }
 }
@@ -53,8 +47,6 @@ impl FlushStats {
             row_count: 0,
             min_seq: 0,
             max_seq: 0,
-            min_commit_seq: 0,
-            max_commit_seq: 0,
         }
     }
 
@@ -68,9 +60,6 @@ impl FlushStats {
             row_count: chunk.packed_metadata.row_count,
             min_seq: chunk.packed_metadata.min_seq,
             max_seq: chunk.packed_metadata.max_seq,
-            // Clean segments use SeqId as their commit-order value.
-            min_commit_seq: chunk.packed_metadata.min_seq,
-            max_commit_seq: chunk.packed_metadata.max_seq,
         })
     }
 }
@@ -123,8 +112,6 @@ pub fn resolve_policy_flush_selection(
         row_count: selected_count,
         min_seq: 0,
         max_seq,
-        min_commit_seq: 0,
-        max_commit_seq: max_seq,
     })
 }
 
@@ -200,8 +187,6 @@ pub fn apply_force_flush_wave_cap(
         row_count: selected_count.min(selection.stats.row_count),
         min_seq: selection.stats.min_seq,
         max_seq,
-        min_commit_seq: selection.stats.min_commit_seq,
-        max_commit_seq: max_seq,
     })
 }
 

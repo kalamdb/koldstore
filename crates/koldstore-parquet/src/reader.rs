@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 use arrow_array::{Array, BooleanArray, Int64Array, RecordBatch, UInt32Array};
 use futures_util::StreamExt;
-use koldstore_common::{ColdRow, CommitSeq, LogicalPk, PkColumn, SeqId};
+use koldstore_common::{ColdRow, LogicalPk, PkColumn, SeqId};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
@@ -28,7 +28,6 @@ pub struct ParquetReadOptions {
     pub columns: Vec<String>,
     pub row_groups: Option<Vec<usize>>,
     pub seq_range: Option<SeqRange>,
-    pub commit_seq_range: Option<CommitSeqRange>,
     pub pk_values: Option<PkValues>,
 }
 
@@ -94,21 +93,6 @@ impl ParquetReadOptions {
         self
     }
 
-    /// Adds commit-sequence range pruning for the given column name.
-    #[must_use]
-    pub fn with_commit_seq_range(
-        mut self,
-        column: impl Into<String>,
-        min: CommitSeq,
-        max: CommitSeq,
-    ) -> Self {
-        self.commit_seq_range = Some(CommitSeqRange {
-            column: column.into(),
-            min,
-            max,
-        });
-        self
-    }
 
     /// Adds PK may-contain values for bloom/exact pruning.
     #[must_use]
@@ -133,13 +117,6 @@ pub struct SeqRange {
     pub max: SeqId,
 }
 
-/// Commit sequence range pruning.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitSeqRange {
-    pub column: String,
-    pub min: CommitSeq,
-    pub max: CommitSeq,
-}
 
 /// PK values for pruning.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -284,7 +261,6 @@ pub struct CleanColdRow {
     pub seq: i64,
     /// Commit sequence used for winner ordering. Clean segments currently use
     /// `seq` as the commit ordering value.
-    pub commit_seq: i64,
     /// Whether this row is a cold delete marker.
     pub deleted: bool,
     /// Schema version used to write the segment.
@@ -449,19 +425,6 @@ pub async fn read_clean_cold_rows_from_object_store_async(
             &seq_range.column,
             seq_range.min.get(),
             seq_range.max.get(),
-        );
-        stats_pruned |= selected_row_groups.len() < before;
-        pruning_applied = true;
-    }
-    if let Some(commit_range) = &options.commit_seq_range {
-        let before = selected_row_groups.len();
-        selected_row_groups = prune_row_groups_by_seq_stats(
-            builder.metadata(),
-            builder.parquet_schema(),
-            &selected_row_groups,
-            &commit_range.column,
-            commit_range.min.get(),
-            commit_range.max.get(),
         );
         stats_pruned |= selected_row_groups.len() < before;
         pruning_applied = true;
@@ -817,7 +780,6 @@ pub fn clean_cold_row_to_common(
         pk,
         scope_key: None,
         seq: SeqId::new(row.seq).map_err(|error| error.to_string())?,
-        commit_seq: CommitSeq::new(row.commit_seq).map_err(|error| error.to_string())?,
         deleted: row.deleted,
         schema_version: row.schema_version,
         row_image: row.row_image,
@@ -934,7 +896,6 @@ fn clean_rows_from_batch(
             pk_json: serde_json::Value::Object(pk_json),
             row_image,
             seq: seq_value,
-            commit_seq: seq_value,
             deleted: deleted_value,
             schema_version: schema_version.value(row_index),
         });

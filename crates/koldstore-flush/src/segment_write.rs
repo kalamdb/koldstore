@@ -102,8 +102,6 @@ pub fn write_flush_segment_with_client(
         batch_number,
         min_seq: chunk_stats.min_seq,
         max_seq: chunk_stats.max_seq,
-        min_commit_seq: chunk_stats.min_commit_seq,
-        max_commit_seq: chunk_stats.max_commit_seq,
         row_count: chunk_stats.row_count,
         byte_size,
         schema_version,

@@ -5,7 +5,6 @@
 //! in [`crate::config`].
 
 pub mod column;
-pub mod commit_sequence;
 pub mod filter;
 pub mod object_keys;
 pub mod pk;

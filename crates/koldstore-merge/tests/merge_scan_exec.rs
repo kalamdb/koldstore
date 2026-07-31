@@ -1,4 +1,4 @@
-use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
 use koldstore_merge::scan::exec::{
     begin_merge_scan, begin_merge_scan_with_plan, execute_merge_scan_with_filters,
     ColdAvailability, FilterPlan, ScanResourceCounters,
@@ -14,23 +14,21 @@ fn pk(id: i64) -> LogicalPk {
     LogicalPk::from_json_object(&json!({"id": id}), &[PkColumn::new("id").unwrap()]).unwrap()
 }
 
-fn hot(id: i64, seq: i64, commit_seq: i64, deleted: bool, status: &str) -> HotRow {
+fn hot(id: i64, seq: i64, deleted: bool, status: &str) -> HotRow {
     HotRow {
         pk: pk(id),
         scope_key: None,
         seq: SeqId::new(seq).unwrap(),
-        commit_seq: CommitSeq::new(commit_seq).unwrap(),
         deleted,
         row_image: json!({"id": id, "status": status}),
     }
 }
 
-fn cold(id: i64, seq: i64, commit_seq: i64, status: &str) -> ColdRow {
+fn cold(id: i64, seq: i64, status: &str) -> ColdRow {
     ColdRow {
         pk: pk(id),
         scope_key: None,
         seq: SeqId::new(seq).unwrap(),
-        commit_seq: CommitSeq::new(commit_seq).unwrap(),
         deleted: false,
         schema_version: 1,
         row_image: json!({"id": id, "status": status}),
@@ -44,7 +42,6 @@ fn plan() -> MergeScanPlan {
         primary_key_columns: vec!["id".to_string()],
         merge_metadata_attnums: MergeMetadataAttnums {
             seq: 3,
-            commit_seq: 4,
             deleted: 5,
             scope: None,
         },
@@ -139,10 +136,10 @@ fn direct_begin_merge_scan_tracks_each_cold_segment_handle() {
 fn residual_and_security_quals_run_after_winner_resolution() {
     let result = execute_merge_scan_with_filters(
         vec![
-            hot(1, 20, 20, false, "open"),
-            hot(2, 21, 21, false, "closed"),
+            hot(1, 20, false, "open"),
+            hot(2, 21, false, "closed"),
         ],
-        vec![cold(1, 10, 10, "closed")],
+        vec![cold(1, 10, "closed")],
         FilterPlan::new()
             .with_required_json_eq("status", "open")
             .with_security_json_eq("id", 1),

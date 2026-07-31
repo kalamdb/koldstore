@@ -3,7 +3,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
 use koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 use koldstore_catalog::FlushPolicy;
-use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId};
 use koldstore_merge::resolve_rows;
 use koldstore_storage::PathTemplate;
 use serde_json::json;
@@ -105,7 +105,6 @@ fn hot_rows(count: usize) -> Vec<HotRow> {
             pk: pk(idx),
             scope_key: Some(ScopeKey::new("user-42").expect("valid scope")),
             seq: SeqId::new((idx + 20_000) as i64).expect("valid seq"),
-            commit_seq: CommitSeq::new((idx + 20_000) as i64).expect("valid commit seq"),
             deleted: idx % 23 == 0,
             row_image: json!({ "id": idx, "source": "hot" }),
         })
@@ -118,7 +117,6 @@ fn cold_rows(count: usize) -> Vec<ColdRow> {
             pk: pk(idx),
             scope_key: Some(ScopeKey::new("user-42").expect("valid scope")),
             seq: SeqId::new((idx + 1) as i64).expect("valid seq"),
-            commit_seq: CommitSeq::new((idx + 1) as i64).expect("valid commit seq"),
             deleted: false,
             schema_version: 1,
             row_image: json!({ "id": idx, "source": "cold" }),

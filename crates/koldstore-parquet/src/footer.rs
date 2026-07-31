@@ -28,8 +28,6 @@ pub struct RowGroupStats {
     pub row_group: usize,
     pub min_seq: Option<i64>,
     pub max_seq: Option<i64>,
-    pub min_commit_seq: Option<i64>,
-    pub max_commit_seq: Option<i64>,
 }
 
 /// File footer summary.
@@ -45,10 +43,6 @@ pub struct SegmentFooterMetadata {
     pub min_seq: i64,
     /// Maximum `_seq`.
     pub max_seq: i64,
-    /// Minimum `_commit_seq`.
-    pub min_commit_seq: i64,
-    /// Maximum `_commit_seq`.
-    pub max_commit_seq: i64,
     /// Segment row count.
     pub row_count: u64,
     /// Final object byte size.
@@ -417,20 +411,10 @@ fn exact_sort_key_bounds(
 impl FooterSummary {
     /// Returns segment-level sequence and commit bounds from row groups.
     #[must_use]
-    pub fn segment_bounds(&self) -> Option<(i64, i64, i64, i64)> {
+    pub fn segment_bounds(&self) -> Option<(i64, i64)> {
         let min_seq = self.row_groups.iter().filter_map(|rg| rg.min_seq).min()?;
         let max_seq = self.row_groups.iter().filter_map(|rg| rg.max_seq).max()?;
-        let min_commit_seq = self
-            .row_groups
-            .iter()
-            .filter_map(|rg| rg.min_commit_seq)
-            .min()?;
-        let max_commit_seq = self
-            .row_groups
-            .iter()
-            .filter_map(|rg| rg.max_commit_seq)
-            .max()?;
-        Some((min_seq, max_seq, min_commit_seq, max_commit_seq))
+        Some((min_seq, max_seq))
     }
 }
 
@@ -444,13 +428,11 @@ impl SegmentFooterMetadata {
         schema_version: u32,
         column_stats: Vec<(String, ColumnStats)>,
     ) -> Option<Self> {
-        let (min_seq, max_seq, min_commit_seq, max_commit_seq) = footer.segment_bounds()?;
+        let (min_seq, max_seq) = footer.segment_bounds()?;
 
         Some(Self {
             min_seq,
             max_seq,
-            min_commit_seq,
-            max_commit_seq,
             row_count,
             byte_size,
             schema_version,

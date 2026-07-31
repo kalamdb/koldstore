@@ -28,7 +28,6 @@ pub struct Manifest {
     pub scope_id: Option<String>,
     pub schema_version: u32,
     pub max_seq: i64,
-    pub max_commit_seq: i64,
     pub updated_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub publish: Option<PublishState>,
@@ -52,8 +51,6 @@ pub struct ManifestShardRef {
     pub segment_count: u32,
     pub min_seq: i64,
     pub max_seq: i64,
-    pub min_commit_seq: i64,
-    pub max_commit_seq: i64,
 }
 
 /// Per-folder shard document written beside cold segment objects.
@@ -98,8 +95,6 @@ pub struct ManifestSegment {
     pub temp_path: Option<String>,
     pub min_seq: i64,
     pub max_seq: i64,
-    pub min_commit_seq: i64,
-    pub max_commit_seq: i64,
     pub row_count: u64,
     pub byte_size: u64,
     pub schema_version: u32,
@@ -133,16 +128,12 @@ impl ManifestSegment {
         batch: u32,
         path: impl Into<String>,
         seq_range: RangeInclusive<i64>,
-        commit_range: RangeInclusive<i64>,
         row_count: u64,
         byte_size: u64,
         schema_version: u32,
     ) -> Self {
         let min_seq = *seq_range.start();
-        let max_seq = *seq_range.end();
-        let min_commit_seq = *commit_range.start();
-        let max_commit_seq = *commit_range.end();
-        let row_group_rows = i64::try_from(row_count).unwrap_or(i64::MAX);
+        let max_seq = *seq_range.end();        let row_group_rows = i64::try_from(row_count).unwrap_or(i64::MAX);
         Self {
             segment_id: None,
             batch,
@@ -150,8 +141,6 @@ impl ManifestSegment {
             temp_path: None,
             min_seq,
             max_seq,
-            min_commit_seq,
-            max_commit_seq,
             row_count,
             byte_size,
             schema_version,

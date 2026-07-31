@@ -12,7 +12,6 @@ fn one_segment_manifest() -> Manifest {
         1,
         "001/segment-0001-aaaaaaaa.parquet",
         1..=10,
-        1..=10,
         10,
         100,
         1,
@@ -31,7 +30,6 @@ fn sharded_write_and_load_round_trip() {
         1,
         "001/segment-0001-aaaaaaaa.parquet",
         1..=10,
-        1..=10,
         10,
         100,
         1,
@@ -39,7 +37,6 @@ fn sharded_write_and_load_round_trip() {
     manifest.append_segment(ManifestSegment::committed(
         101,
         "002/segment-0101-bbbbbbbb.parquet",
-        11..=20,
         11..=20,
         10,
         200,
@@ -89,7 +86,6 @@ fn root_with_embedded_segments_is_rejected() {
     monolith.append_segment(ManifestSegment::committed(
         1,
         "001/segment-0001-aaaaaaaa.parquet",
-        5..=5,
         5..=5,
         1,
         32,
@@ -189,7 +185,6 @@ fn segment_batch_must_match_its_folder() {
     manifest.append_segment(ManifestSegment::committed(
         101,
         "001/segment-0101-aaaaaaaa.parquet",
-        1..=10,
         1..=10,
         10,
         100,

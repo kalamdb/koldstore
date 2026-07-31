@@ -19,7 +19,6 @@ fn policy_selection_uses_cutoff_when_excess_exists() {
         resolve_policy_flush_selection(250, Some(&policy), Some((150, 999)), FlushStats::empty());
     assert_eq!(selection.stats.row_count, 150);
     assert_eq!(selection.stats.max_seq, 999);
-    assert_eq!(selection.stats.max_commit_seq, 999);
 }
 
 #[test]
@@ -28,15 +27,11 @@ fn force_selection_prefers_small_tombstone_only_batch() {
         row_count: 10_000,
         min_seq: 1,
         max_seq: 10_000,
-        min_commit_seq: 1,
-        max_commit_seq: 10_000,
     };
     let deletes = FlushStats {
         row_count: FORCE_TOMBSTONE_ONLY_CAP,
         min_seq: 1,
         max_seq: 4_096,
-        min_commit_seq: 1,
-        max_commit_seq: 4_096,
     };
     let selection = resolve_force_flush_selection(all, deletes);
     assert_eq!(selection.stats.row_count, FORCE_TOMBSTONE_ONLY_CAP);
@@ -49,15 +44,11 @@ fn force_selection_falls_back_to_full_mirror_when_tombstones_exceed_cap() {
         row_count: 20_000,
         min_seq: 1,
         max_seq: 20_000,
-        min_commit_seq: 1,
-        max_commit_seq: 20_000,
     };
     let deletes = FlushStats {
         row_count: FORCE_TOMBSTONE_ONLY_CAP + 1,
         min_seq: 1,
         max_seq: 5_000,
-        min_commit_seq: 1,
-        max_commit_seq: 5_000,
     };
     let selection = resolve_force_flush_selection(all, deletes);
     assert_eq!(selection.stats.row_count, 20_000);
@@ -73,8 +64,6 @@ fn force_wave_cap_limits_full_mirror_selection() {
             row_count: 50_000,
             min_seq: 1,
             max_seq: 50_000,
-            min_commit_seq: 1,
-            max_commit_seq: 50_000,
         },
         FlushStats::empty(),
     );

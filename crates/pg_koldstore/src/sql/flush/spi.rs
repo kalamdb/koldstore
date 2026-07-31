@@ -290,8 +290,6 @@ pub(super) fn persist_flush_segments_batch(
     let mut batch_numbers = Vec::with_capacity(segments.len());
     let mut min_seqs = Vec::with_capacity(segments.len());
     let mut max_seqs = Vec::with_capacity(segments.len());
-    let mut min_commit_seqs = Vec::with_capacity(segments.len());
-    let mut max_commit_seqs = Vec::with_capacity(segments.len());
     let mut row_counts = Vec::with_capacity(segments.len());
     let mut byte_sizes = Vec::with_capacity(segments.len());
     let mut schema_versions = Vec::with_capacity(segments.len());
@@ -334,8 +332,6 @@ pub(super) fn persist_flush_segments_batch(
         batch_numbers.push(row.batch_number);
         min_seqs.push(row.min_seq);
         max_seqs.push(row.max_seq);
-        min_commit_seqs.push(row.min_commit_seq);
-        max_commit_seqs.push(row.max_commit_seq);
         row_counts.push(row.row_count);
         byte_sizes.push(row.byte_size);
         schema_versions.push(row.schema_version);
@@ -388,8 +384,6 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(batch_numbers),
             DatumWithOid::from(min_seqs),
             DatumWithOid::from(max_seqs),
-            DatumWithOid::from(min_commit_seqs),
-            DatumWithOid::from(max_commit_seqs),
             DatumWithOid::from(row_counts),
             DatumWithOid::from(byte_sizes),
             DatumWithOid::from(schema_versions),
@@ -439,7 +433,6 @@ pub(super) fn activate_flush_segments(
     expected_generation: i64,
     segment_count: i32,
     max_seq: i64,
-    max_commit_seq: i64,
     pending_segment_ids: &[uuid::Uuid],
 ) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
@@ -461,7 +454,6 @@ pub(super) fn activate_flush_segments(
             DatumWithOid::from(new_generation),
             DatumWithOid::from(segment_count),
             DatumWithOid::from(max_seq),
-            DatumWithOid::from(max_commit_seq),
             DatumWithOid::from(segment_ids),
         ],
     )

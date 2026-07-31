@@ -1,4 +1,4 @@
-//! Sequence, commit-sequence, and scope-key newtypes.
+//! Sequence and scope-key newtypes.
 
 use std::{fmt, num::NonZeroI64, str::FromStr};
 
@@ -41,46 +41,6 @@ impl SeqId {
 }
 
 impl fmt::Display for SeqId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.get())
-    }
-}
-
-/// Durable commit-order cursor. Gaps are allowed after rollbacks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct CommitSeq(NonZeroI64);
-
-impl CommitSeq {
-    /// Creates a positive commit sequence.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value <= 0`.
-    pub fn new(value: i64) -> Result<Self> {
-        let Some(inner) = NonZeroI64::new(value) else {
-            return Err(KoldstoreError::InvalidSequence {
-                field: "commit_seq",
-                value,
-            });
-        };
-        if inner.get() < 0 {
-            return Err(KoldstoreError::InvalidSequence {
-                field: "commit_seq",
-                value,
-            });
-        }
-        Ok(Self(inner))
-    }
-
-    /// Returns the raw integer value.
-    #[must_use]
-    pub fn get(self) -> i64 {
-        self.0.get()
-    }
-}
-
-impl fmt::Display for CommitSeq {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.get())
     }

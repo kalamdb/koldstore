@@ -4,7 +4,7 @@ use anyhow::Result;
 use koldstore::merge_scan::exec::{
     execute_merge_scan, execute_merge_scan_with_filters, FilterPlan,
 };
-use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, PkColumn, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, SeqId};
 use serde_json::json;
 
 fn pk(id: i64) -> LogicalPk {
@@ -12,35 +12,27 @@ fn pk(id: i64) -> LogicalPk {
     LogicalPk::from_json_object(&json!({"id": id}), &columns).unwrap()
 }
 
-fn hot(id: i64, seq: i64, commit_seq: i64, deleted: bool, body: &str) -> HotRow {
+fn hot(id: i64, seq: i64, body: &str) -> HotRow {
     HotRow {
         pk: pk(id),
         scope_key: None,
         seq: SeqId::new(seq).unwrap(),
-        commit_seq: CommitSeq::new(commit_seq).unwrap(),
         deleted,
         row_image: json!({"id": id, "body": body}),
     }
 }
 
-fn cold(id: i64, seq: i64, commit_seq: i64, body: &str) -> ColdRow {
-    ColdRow {
-        pk: pk(id),
-        scope_key: None,
+fn cold(id: i64, seq: i64, scope_key: None,
         seq: SeqId::new(seq).unwrap(),
-        commit_seq: CommitSeq::new(commit_seq).unwrap(),
         deleted: false,
         schema_version: 1,
         row_image: json!({"id": id, "body": body}),
     }
 }
 
-fn cold_deleted(id: i64, seq: i64, commit_seq: i64) -> ColdRow {
+fn cold_deleted(id: i64, seq: i64) -> ColdRow {
     ColdRow {
-        pk: pk(id),
-        scope_key: None,
-        seq: SeqId::new(seq).unwrap(),
-        commit_seq: CommitSeq::new(commit_seq).unwrap(),
+        pk: pk(id)).unwrap(),
         deleted: true,
         schema_version: 1,
         row_image: json!({"id": id}),
@@ -54,12 +46,12 @@ fn merge_scan_results_resolve_hot_winner_and_tombstone_masking() {
 
     let result = execute_merge_scan(
         vec![
-            hot(1, 20, 20, false, "hot-winner"),
-            hot(2, 21, 21, true, "deleted"),
+            hot(1, 20, false, "hot-winner"),
+            hot(2, 21, true, "deleted"),
         ],
         vec![
-            cold(1, 10, 10, "older-cold"),
-            cold(2, 10, 10, "masked-cold"),
+            cold(1, 10, "older-cold"),
+            cold(2, 10, "masked-cold"),
         ],
     )
     .unwrap();
@@ -80,8 +72,8 @@ fn merge_scan_results_apply_residual_filters_after_winner_resolution() {
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
     let result = execute_merge_scan_with_filters(
-        vec![hot(1, 20, 20, false, "hot-winner")],
-        vec![cold(1, 10, 10, "older-cold"), cold(2, 11, 11, "cold-only")],
+        vec![hot(1, 20, false, "hot-winner")],
+        vec![cold(1, 10, "older-cold"), cold(2, 11, "cold-only")],
         FilterPlan::new().with_required_json_eq("body", "hot-winner"),
     )
     .unwrap();
@@ -101,15 +93,15 @@ fn merge_scan_results_apply_cold_delete_markers_and_newer_reinserts() {
 
     let deleted = execute_merge_scan(
         vec![],
-        vec![cold(1, 10, 10, "old"), cold_deleted(1, 20, 20)],
+        vec![cold(1, 10, "old"), cold_deleted(1, 20)],
     )
     .unwrap();
     assert!(deleted.rows.is_empty());
     assert_eq!(deleted.tombstones_masked, 0);
 
     let reinserted = execute_merge_scan(
-        vec![hot(1, 30, 30, false, "reinserted")],
-        vec![cold(1, 10, 10, "old"), cold_deleted(1, 20, 20)],
+        vec![hot(1, 30, false, "reinserted")],
+        vec![cold(1, 10, "old"), cold_deleted(1, 20)],
     )
     .unwrap();
     assert_eq!(reinserted.rows.len(), 1);

@@ -10,8 +10,6 @@ use serde::{Deserialize, Serialize};
 pub struct MergeMetadataAttnums {
     /// Mirror/cold `seq` attribute number.
     pub seq: i16,
-    /// Commit-order cursor attribute number.
-    pub commit_seq: i16,
     /// Delete/tombstone attribute number.
     pub deleted: i16,
     /// Optional scope attribute number.
@@ -302,7 +300,6 @@ impl MergeScanPlan {
             primary_key_columns,
             merge_metadata_attnums: MergeMetadataAttnums {
                 seq: 0,
-                commit_seq: 0,
                 deleted: 0,
                 scope: None,
             },

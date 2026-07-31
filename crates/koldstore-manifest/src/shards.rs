@@ -52,8 +52,6 @@ pub(crate) fn split_manifest_for_export(
         max_folder_num = max_folder_num.max(folder_num);
         let min_seq = segments.iter().map(|s| s.min_seq).min().unwrap_or(0);
         let max_seq = segments.iter().map(|s| s.max_seq).max().unwrap_or(0);
-        let min_commit_seq = segments.iter().map(|s| s.min_commit_seq).min().unwrap_or(0);
-        let max_commit_seq = segments.iter().map(|s| s.max_commit_seq).max().unwrap_or(0);
         let segment_count = u32::try_from(segments.len()).map_err(|error| error.to_string())?;
 
         let shard = ManifestShard {
@@ -74,8 +72,6 @@ pub(crate) fn split_manifest_for_export(
             segment_count,
             min_seq,
             max_seq,
-            min_commit_seq,
-            max_commit_seq,
         });
         shard_docs.push((path, shard));
     }
@@ -215,8 +211,6 @@ fn validate_shard_segments(
     let expected = (
         shard_ref.min_seq,
         shard_ref.max_seq,
-        shard_ref.min_commit_seq,
-        shard_ref.max_commit_seq,
     );
     if ranges != expected {
         return Err(format!("shard {} range metadata mismatch", shard_ref.path));
@@ -362,7 +356,7 @@ fn validate_hex_bound(value: &str, path: &str, column_id: i16) -> Result<(), Str
     })
 }
 
-fn shard_ranges(segments: &[crate::model::ManifestSegment]) -> (i64, i64, i64, i64) {
+fn shard_ranges(segments: &[crate::model::ManifestSegment]) -> (i64, i64) {
     (
         segments
             .iter()
@@ -372,16 +366,6 @@ fn shard_ranges(segments: &[crate::model::ManifestSegment]) -> (i64, i64, i64, i
         segments
             .iter()
             .map(|segment| segment.max_seq)
-            .max()
-            .unwrap_or(0),
-        segments
-            .iter()
-            .map(|segment| segment.min_commit_seq)
-            .min()
-            .unwrap_or(0),
-        segments
-            .iter()
-            .map(|segment| segment.max_commit_seq)
             .max()
             .unwrap_or(0),
     )
@@ -396,23 +380,21 @@ mod tests {
     fn split_groups_by_folder_and_clears_root_segments() {
         let mut manifest = Manifest::new_shared("app", "items", 1);
         manifest.append_segment(ManifestSegment::committed(
-            1,
-            "001/segment-0001-aaaaaaaa.parquet",
-            1..=10,
-            1..=10,
-            10,
-            100,
-            1,
-        ));
+        1,
+        "001/segment-0001-aaaaaaaa.parquet",
+        1..=10,
+        10,
+        100,
+        1,
+    ));
         manifest.append_segment(ManifestSegment::committed(
-            101,
-            "002/segment-0101-bbbbbbbb.parquet",
-            11..=20,
-            11..=20,
-            10,
-            100,
-            1,
-        ));
+        101,
+        "002/segment-0101-bbbbbbbb.parquet",
+        11..=20,
+        10,
+        100,
+        1,
+    ));
 
         let export = split_manifest_for_export(&manifest).unwrap();
         assert_eq!(export.root.version, MANIFEST_VERSION);

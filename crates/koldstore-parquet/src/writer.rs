@@ -553,8 +553,6 @@ impl ParquetSegmentWriter {
             ),
             min_seq: metadata.min_seq,
             max_seq: metadata.max_seq,
-            min_commit_seq: metadata.min_commit_seq,
-            max_commit_seq: metadata.max_commit_seq,
             compression: self.options.compression.clone(),
             row_count: metadata.row_count,
             byte_size: metadata.byte_size,
@@ -681,10 +679,6 @@ pub struct SegmentMetadataInput {
     pub min_seq: i64,
     /// Maximum `_seq`.
     pub max_seq: i64,
-    /// Minimum `_commit_seq`.
-    pub min_commit_seq: i64,
-    /// Maximum `_commit_seq`.
-    pub max_commit_seq: i64,
     /// Number of rows written.
     pub row_count: u64,
     /// Final object byte size.
@@ -705,14 +699,10 @@ impl SegmentMetadataInput {
     pub fn seq_bounds(
         min_seq: i64,
         max_seq: i64,
-        min_commit_seq: i64,
-        max_commit_seq: i64,
     ) -> Self {
         Self {
             min_seq,
             max_seq,
-            min_commit_seq,
-            max_commit_seq,
             row_count: 0,
             byte_size: 0,
             pk_columns: Vec::new(),
@@ -732,10 +722,6 @@ pub struct SegmentWritePlan {
     pub min_seq: i64,
     /// Maximum `_seq`.
     pub max_seq: i64,
-    /// Minimum `_commit_seq`.
-    pub min_commit_seq: i64,
-    /// Maximum `_commit_seq`.
-    pub max_commit_seq: i64,
     /// Compression codec.
     pub compression: String,
     /// Number of rows written.

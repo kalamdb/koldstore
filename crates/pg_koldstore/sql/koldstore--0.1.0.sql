@@ -135,7 +135,6 @@ CREATE TABLE IF NOT EXISTS koldstore.jobs (
   phase text NOT NULL DEFAULT 'pending',
   flush_seq_upper_bound bigint,
   checkpoint_seq bigint NOT NULL DEFAULT 0,
-  checkpoint_commit_seq bigint NOT NULL DEFAULT 0,
   batches_completed integer NOT NULL DEFAULT 0,
   rows_processed bigint NOT NULL DEFAULT 0,
   rows_flushed bigint NOT NULL DEFAULT 0,
