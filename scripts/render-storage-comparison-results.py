@@ -377,7 +377,7 @@ def render(
         "**Cold-only** repeatedly looks up only `id = 1` (Parquet on managed).",
         "**Hot-only** (before flush) repeatedly looks up `id = <rows>`.",
         "p99 insert = per insert-batch; update = per 1k-row batch; queries = per",
-        "PK lookup (`QUERY_LOOPS = 100`). See [README.md](README.md).",
+        "PK lookup (`QUERY_LOOPS = 400` after 40 discarded warm-up lookups). See [README.md](README.md).",
         "",
         "## Detail (throughput and storage)",
         "",

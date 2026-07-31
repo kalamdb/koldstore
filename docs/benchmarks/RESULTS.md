@@ -5,8 +5,8 @@ Published numbers from the most recent storage comparison run(s). Re-run
 this file. Each column is measured alone on a fresh pgrx PostgreSQL
 (stop → recreate DBs → one side). Methodology: [README.md](README.md).
 
-**When:** 2026-07-29 UTC (pg 21:35:28Z, async 21:48:33Z, strict 22:02:02Z)
-**Git:** `db9550fd25cc` (`db9550fd25cc14d1226d1f1a0628c136554e824f`)
+**When:** 2026-07-31 UTC (pg 04:42:16Z, async 04:53:46Z, strict 05:04:55Z)
+**Git:** `efb93e2b2d55` (`efb93e2b2d557305721a0d877819bbb1c2760925`)
 **Run:** 10000000 rows · `hot_row_limit = 100000` · `max_rows_per_file = 1000000` · `--dml-sample 50000` · `insert_batch_rows = 100000` · `warmup_rows = 1000000` · zstd Parquet · **counterbalanced sequential** isolated fresh server per sample (not parallel) · sides measured: **pg + async + strict** · **single sample per side**
 
 Managed PostgreSQL sizes include hot heap + `koldstore.<table>__cl` + mirror
@@ -17,24 +17,24 @@ indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
 
 | Metric | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |
 | --- | --- | --- | --- |
-| foreground insert throughput | 39802 ops/s | 67229 ops/s | 21091 ops/s |
+| foreground insert throughput | 37926 ops/s | 81771 ops/s | 24819 ops/s |
 | sustainable insert throughput | TODO | TODO | TODO |
 | sustainable update throughput | TODO | TODO | TODO |
-| insert p99 latency | 5852.87 ms | 8283.65 ms | 10403.31 ms |
-| update p99 latency | 117.36 ms | 130.11 ms | 153.04 ms |
-| hot-query p99 latency | 592 µs | 356 µs | 452 µs |
-| cold-query p99 latency | 386 µs | 2.41 ms | 2.56 ms |
-| hot+cold query throughput | 4424 ops/s | 1055 ops/s | 985 ops/s |
-| cold-only query throughput | 3117 ops/s | 575 ops/s | 562 ops/s |
+| insert p99 latency | 7068.24 ms | 3785.01 ms | 10483.58 ms |
+| update p99 latency | 208.38 ms | 110.04 ms | 112.61 ms |
+| hot-query p99 latency | 359 µs | 359 µs | 420 µs |
+| cold-query p99 latency | 361 µs | 2.32 ms | 2.08 ms |
+| hot+cold query throughput | 4452 ops/s | 976 ops/s | 901 ops/s |
+| cold-only query throughput | 4393 ops/s | 610 ops/s | 581 ops/s |
 | cold files fetched/query | — | TODO | TODO |
 | cold bytes fetched/query | — | TODO | TODO |
 | peak memory under workload | TODO | TODO | TODO |
-| peak RSS during flush | — | 337.86 MiB (before=337.86 MiB, after=177.70 MiB) | 190.12 MiB (before=190.12 MiB, after=182.08 MiB) |
-| flush duration | — | 188.14 s (52621 rows/s) | 292.98 s (33791 rows/s) |
+| peak RSS during flush | — | 607.44 MiB (before=339.77 MiB, after=607.44 MiB) | 954.7 MiB (before=180.05 MiB, after=954.70 MiB) |
+| flush duration | — | 139.33 s (71054 rows/s) | 231.99 s (42675 rows/s) |
 | CPU seconds per 1M operations | TODO | TODO | TODO |
 | WAL generated per 1M operations | TODO | TODO | TODO |
 | local bytes written | TODO | TODO | TODO |
-| VACUUM duration | 221.94 s | 5.12 s | 5.96 s |
+| VACUUM duration | 174.36 s | 3.59 s | 3.67 s |
 | local PostgreSQL storage | 5.85 GiB | 72.23 MiB | 72.23 MiB |
 | total hot+cold storage | 5.85 GiB | 670.75 MiB | 670.78 MiB |
 | peak open file descriptors | TODO | TODO | TODO |
@@ -43,30 +43,28 @@ indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
 | mirror backlog after workload | — | TODO | TODO |
 | backlog drain time | — | TODO | TODO |
 
-‡ **Hot-only** (before flush) repeatedly looks up `id = <rows>` on the full
-heap. **PostgreSQL-only cold-id / hot+cold** use the same full-heap state
-**before** `VACUUM FULL`. **Managed cold-only / hot+cold** run after flush
-(Parquet) before hot-heap VACUUM — hot+cold is a **50/50** mix of newest hot
-PK and oldest cold PK (`id = 1`). Timed INSERT seeds an empty table on every
-side; `hot_row_limit` does not shrink the insert working set.
+‡ **Hot+cold query** alternates newest hot PK (`id = <rows>`) and oldest
+cold PK (`id = 1`) after flush — **50/50** of the lookup loop.
+**Cold-only** repeatedly looks up only `id = 1` (Parquet on managed).
+**Hot-only** (before flush) repeatedly looks up `id = <rows>`.
 p99 insert = per insert-batch; update = per 1k-row batch; queries = per
-PK lookup after discarded warm-up loops. See [README.md](README.md).
+PK lookup (`QUERY_LOOPS = 400` after 40 discarded warm-up lookups). See [README.md](README.md).
 
 ## Detail (throughput and storage)
 
 | Operation | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |
 | --- | --- | --- | --- |
-| insert speed† | 39802 ops/s (25 µs/op) | 67229 ops/s (15 µs/op) | 21091 ops/s (47 µs/op) |
-| update speed† | 73412 ops/s (14 µs/op) | 54378 ops/s (18 µs/op) | 49825 ops/s (20 µs/op) |
-| delete speed† | 105673 ops/s (9 µs/op) | 136293 ops/s (7 µs/op) | 51466 ops/s (19 µs/op) |
-| └ async insert mirror catch-up | — | 30773 ops/s (32 µs/op) | — |
-| └ async update mirror catch-up | — | 1272 ops/s (786 µs/op) | — |
-| └ async delete mirror catch-up | — | 29531 ops/s (34 µs/op) | — |
-| └ async restore mirror catch-up | — | 26186 ops/s (38 µs/op) | — |
-| query hot only (before flush) | 3204 ops/s (312 µs/op) | 3248 ops/s (308 µs/op) | 2675 ops/s (374 µs/op) |
-| query with hot+cold (after flush) | 4424 ops/s (226 µs/op) | 1055 ops/s (948 µs/op) | 985 ops/s (1015 µs/op) |
-| query cold only (after flush) | 3117 ops/s (321 µs/op) | 575 ops/s (1740 µs/op) | 562 ops/s (1780 µs/op) |
-| VACUUM time (after flush) | 221.94 s | 5.12 s | 5.96 s |
+| insert speed† | 37926 ops/s (26 µs/op) | 81771 ops/s (12 µs/op) | 24819 ops/s (40 µs/op) |
+| update speed† | 63194 ops/s (16 µs/op) | 54640 ops/s (18 µs/op) | 50226 ops/s (20 µs/op) |
+| delete speed† | 36267 ops/s (28 µs/op) | 114842 ops/s (9 µs/op) | 49935 ops/s (20 µs/op) |
+| └ async insert mirror catch-up | — | 30360 ops/s (33 µs/op) | — |
+| └ async update mirror catch-up | — | 1563 ops/s (640 µs/op) | — |
+| └ async delete mirror catch-up | — | 29968 ops/s (33 µs/op) | — |
+| └ async restore mirror catch-up | — | 25272 ops/s (40 µs/op) | — |
+| query hot only (before flush) | 4181 ops/s (239 µs/op) | 3547 ops/s (282 µs/op) | 2975 ops/s (336 µs/op) |
+| query with hot+cold (after flush) | 4452 ops/s (225 µs/op) | 976 ops/s (1024 µs/op) | 901 ops/s (1110 µs/op) |
+| query cold only (after flush) | 4393 ops/s (228 µs/op) | 610 ops/s (1639 µs/op) | 581 ops/s (1722 µs/op) |
+| VACUUM time (after flush) | 174.36 s | 3.59 s | 3.67 s |
 | dead tuples after workload | 99916 (live=10000000) | 99916 (live=10000000) | 99916 (live=10000000) |
 | index storage (hot + __cl) | 414.86 MiB | 11.45 MiB | 11.45 MiB |
 | table storage (hot + __cl) | 5.45 GiB | 60.79 MiB | 60.79 MiB |
@@ -86,30 +84,16 @@ column.
 
 KoldStore is a **storage lifecycle** tool. The durable wins after flush are heap
 size, index size, and VACUUM time — not universal DML/query acceleration.
+Async column below (vs PostgreSQL-only). Single-sample draft after a clean
+single-pg16 lab (no concurrent pgrx 15/17/18).
 
-Each side used a **fresh** pgrx PostgreSQL, then an **untimed 1M-row warm-up**
-(throwaway table → `DROP` → `CHECKPOINT`) before the timed 10M seed.
-
-| Result | PostgreSQL only → async after flush | Tradeoff |
+| Result | Before → after flush | Tradeoff |
 | --- | --- | --- |
-| Total footprint (hot + cold) | 5.85 GiB → 670.75 MiB | **89% smaller** |
-| └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72.23 MiB | **99% smaller** |
-| └ cold Parquet | — → 598.52 MiB | outside the database |
-| Indexes (hot + `__cl`) | 414.86 MiB → 11.45 MiB | **97% smaller** |
-| `VACUUM (FULL, ANALYZE)` | 221.94 s → 5.12 s | **43× faster** |
-
-### DML / query (this single sample)
-
-| Operation | PG only | Async foreground | Strict | How to read |
-| --- | ---: | ---: | ---: | --- |
-| INSERT | 39.8k ops/s | 67.2k ops/s | 21.1k ops/s | Async ≈ heap path (mirror deferred). Strict pays mirror in-txn. Do not claim async accelerates INSERT. |
-| UPDATE | 73.4k ops/s | 54.4k ops/s | 49.8k ops/s | Async −26%; strict −32%. Catch-up was 1.3k ops/s — not sustainable throughput. |
-| DELETE | 105.7k ops/s | 136.3k ops/s | 51.5k ops/s | Single-sample noise — do not claim DELETE is faster. |
-| Hot-only PK | 3.20k ops/s | 3.25k ops/s | 2.68k ops/s | Pre-flush native Index Scan; ≈ PG. |
-| Hot+cold PK | 4.42k ops/s | 1.06k ops/s | 0.99k ops/s | Parquet open cost after flush. |
-| Cold-only PK | 3.12k ops/s | 0.58k ops/s | 0.56k ops/s | Parquet open cost after flush. |
-
-Async mirror catch-up: insert 30.8k, update 1.3k, delete 29.5k, restore 26.2k ops/s.
+| Total footprint (hot + cold) | 5.85 GiB → 671 MiB | **89% smaller** |
+| └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB | **99% smaller** |
+| └ cold Parquet | — → 599 MiB | outside the database |
+| Indexes (hot + `__cl`) | 415 MiB → 11.5 MiB | **97% smaller** |
+| `VACUUM (FULL, ANALYZE)` | 174.36 s → 3.59 s | **49× faster** |
 
 ### Why was delete reported faster before — and is it?
 

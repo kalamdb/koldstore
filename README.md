@@ -113,15 +113,15 @@ KoldStore is a **storage lifecycle tool**, not a universal query accelerator. Af
 | └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB    | **99% smaller**      |
 | └ cold Parquet                      | — → 599 MiB          | outside the database |
 | Indexes (hot + `__cl`)              | 415 MiB → 11.5 MiB   | **97% smaller**      |
-| `VACUUM (FULL, ANALYZE)`            | 221.94 s → 5.12 s    | **43× faster**       |
+| `VACUUM (FULL, ANALYZE)`            | 174.36 s → 3.59 s    | **49× faster**       |
 
 
 Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000`,
 `--warmup-rows 1000000`, `max_rows_per_file = 1000000` (local PG16.13
-`release-pg`, 2026-07-29). Each side gets a fresh pgrx server, an untimed 1M
-warm-up, then the timed run. Managed PostgreSQL sizes include the hot heap
-**and** `koldstore.<table>__cl` plus its indexes. Full tables:
-[docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
+`release-pg`, 2026-07-31, single pgrx instance). Each side gets a fresh pgrx
+server, an untimed 1M warm-up, then the timed run. Managed PostgreSQL sizes
+include the hot heap **and** `koldstore.<table>__cl` plus its indexes. Full
+tables: [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
 
 ### Latest UPDATE verification
 
@@ -153,26 +153,26 @@ counterbalanced samples plus worker-on backlog and drain metrics. See the
 This storage-scale run reports foreground DML separately from mirror catch-up.
 It is a clean-tree single sample (draft publication); release publication still
 prefers six counterbalanced repetitions. Async commits the source heap first;
-strict mode includes mirror maintenance in the application transaction.
+strict mode includes mirror maintenance in the application transaction. Query
+phases use the fair harness order (PG cold lookups before `VACUUM FULL`;
+managed cold after flush).
 
 
 | Operation           | PostgreSQL only | KoldStore async | Trade-off                                          |
 | ------------------- | --------------- | --------------- | -------------------------------------------------- |
-| INSERT              | 39,802 ops/s    | 67,229 ops/s    | noise / order — not a product win (same full-heap seed) |
-| UPDATE              | 73,412 ops/s    | 54,378 ops/s    | single sample; **26% lower**                       |
-| DELETE              | 105,673 ops/s   | 136,293 ops/s   | single-sample — do not claim faster                |
-| Hot-only PK lookup  | 3,204 ops/s     | 3,248 ops/s     | ≈ same (native Index Scan pre-flush)               |
-| Hot+cold PK lookup  | 4,424 ops/s     | 1,055 ops/s     | noisy prior method (PG after FULL vacuum)          |
-| Cold-only PK lookup | 3,117 ops/s     | 575 ops/s       | noisy prior method (PG after FULL vacuum)          |
+| INSERT              | 60,928 ops/s    | 92,097 ops/s    | noise / order — not a product win (same full-heap seed) |
+| UPDATE              | 68,449 ops/s    | 29,892 ops/s    | single sample; **56% lower**                       |
+| DELETE              | 122,535 ops/s   | 132,737 ops/s   | single-sample — do not claim faster                |
+| Hot-only PK lookup  | 3,894 ops/s     | 2,392 ops/s     | single-sample noise (pre-flush full heap)          |
+| Hot+cold PK lookup  | 4,043 ops/s     | 821 ops/s       | **80% slower** (Parquet vs full-heap baseline)     |
+| Cold-only PK lookup | 4,085 ops/s     | 496 ops/s       | **88% slower** (Parquet vs full-heap baseline)     |
 
 
-Async mirror catch-up measured 30,773 INSERT, 1,272 UPDATE, 29,531 DELETE, and
-26,186 restore operations per second in this run. The focused UPDATE catch-up
+Async mirror catch-up measured 28,758 INSERT, 814 UPDATE, 21,812 DELETE, and
+18,313 restore operations per second in this run. The focused UPDATE catch-up
 result in the verification table above is 49,358 ops/s. Timed INSERT seeds an
 empty table to 10M on every side — `hot_row_limit` does not make managed INSERT
-faster. Cold/hot+cold phases were reordered after this snapshot (PG cold
-lookups now run before `VACUUM FULL`); re-run before treating those gaps as
-product claims. Full methodology:
+faster. Full methodology:
 [docs/benchmarks/](docs/benchmarks/README.md).
 
 Managed tables support two mirror paths. The default `strict` mode writes the
