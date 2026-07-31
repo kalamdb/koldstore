@@ -108,7 +108,7 @@ fn row_group_pruner_uses_pk_bloom_may_contain_metadata() {
 fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
         read_clean_cold_rows_with_options, select_row_groups_for_pk_values, ParquetSegmentWriter,
@@ -123,6 +123,7 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
     ]));
@@ -131,6 +132,7 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
         vec![
             Arc::new(Int64Array::from(ids.clone())),
             Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
             Arc::new(BooleanArray::from(vec![false; ids.len()])),
             Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
         ],
@@ -177,7 +179,7 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
 fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
         read_clean_cold_rows_from_object_store, ParquetSegmentWriter, PgColumn, PgType,
@@ -189,6 +191,7 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
     ]));
@@ -197,6 +200,7 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
         vec![
             Arc::new(Int64Array::from(ids.clone())),
             Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
             Arc::new(BooleanArray::from(vec![false; ids.len()])),
             Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
         ],
@@ -240,7 +244,7 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
 fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
         read_clean_cold_rows_from_object_store_with_stats, ObjectStoreReadStats,
@@ -252,6 +256,7 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
     ]));
@@ -260,6 +265,7 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
         vec![
             Arc::new(Int64Array::from(ids.clone())),
             Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
             Arc::new(BooleanArray::from(vec![false; ids.len()])),
             Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
         ],
@@ -319,7 +325,7 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
 fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
         read_clean_cold_rows_from_object_store_with_size, BloomPruneMode, ParquetSegmentWriter,
@@ -331,6 +337,7 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
     ]));
@@ -339,6 +346,7 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         vec![
             Arc::new(Int64Array::from(ids.clone())),
             Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
             Arc::new(BooleanArray::from(vec![false; ids.len()])),
             Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
         ],

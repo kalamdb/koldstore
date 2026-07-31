@@ -68,13 +68,17 @@ fn changes_since_pg(
     }
 }
 
+/// One `changes_since` output row: `(seq, op, pk, deleted, row_image, source)`.
+#[cfg(feature = "pg")]
+type ChangesSinceRow = (i64, i16, pgrx::JsonB, bool, Option<pgrx::JsonB>, String);
+
 #[cfg(feature = "pg")]
 fn changes_since_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     since_seq: i64,
     limit_rows: Option<i32>,
     last_rows: Option<i32>,
-) -> Result<Vec<(i64, i16, pgrx::JsonB, bool, Option<pgrx::JsonB>, String)>, String> {
+) -> Result<Vec<ChangesSinceRow>, String> {
     if since_seq < 0 {
         return Err("since_seq must be >= 0".to_string());
     }
