@@ -12,7 +12,7 @@ fn pk(id: i64) -> LogicalPk {
     LogicalPk::from_json_object(&json!({"id": id}), &columns).unwrap()
 }
 
-fn hot(id: i64, seq: i64, body: &str) -> HotRow {
+fn hot(id: i64, seq: i64, deleted: bool, body: &str) -> HotRow {
     HotRow {
         pk: pk(id),
         scope_key: None,
@@ -22,7 +22,10 @@ fn hot(id: i64, seq: i64, body: &str) -> HotRow {
     }
 }
 
-fn cold(id: i64, seq: i64, scope_key: None,
+fn cold(id: i64, seq: i64, body: &str) -> ColdRow {
+    ColdRow {
+        pk: pk(id),
+        scope_key: None,
         seq: SeqId::new(seq).unwrap(),
         deleted: false,
         schema_version: 1,
@@ -32,7 +35,9 @@ fn cold(id: i64, seq: i64, scope_key: None,
 
 fn cold_deleted(id: i64, seq: i64) -> ColdRow {
     ColdRow {
-        pk: pk(id)).unwrap(),
+        pk: pk(id),
+        scope_key: None,
+        seq: SeqId::new(seq).unwrap(),
         deleted: true,
         schema_version: 1,
         row_image: json!({"id": id}),

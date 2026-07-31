@@ -141,7 +141,7 @@ async fn run_greenfield_scenario(
     client
         .execute(
             "SELECT koldstore.manage_table(table_name => $1::text::regclass, storage => 'local-minio', hot_row_limit => NULL, table_type => $2, scope_column => $3)",
-            &[&relation, &scenario.table_type, &scenario.scope_column, &mode],
+            &[&relation, &scenario.table_type, &scenario.scope_column],
         )
         .await?;
 

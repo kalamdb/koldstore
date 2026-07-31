@@ -512,7 +512,6 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
                 &relation(pg_version),
                 &storage_name(pg_version),
                 &FLUSH_POLICY_ROW_LIMIT,
-                &mode,
             ],
         )
         .await?;

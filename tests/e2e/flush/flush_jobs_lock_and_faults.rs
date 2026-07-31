@@ -63,7 +63,7 @@ async fn manage_with_hot_limit(
               auto_flush => false
             )
             "#,
-            &[&relation, &db.storage_name, &hot_row_limit, &mode],
+            &[&relation, &db.storage_name, &hot_row_limit],
         )
         .await
         .with_context(|| format!("manage_table {relation}"))?;

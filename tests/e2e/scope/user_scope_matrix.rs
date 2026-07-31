@@ -320,7 +320,7 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
                   migration_order_by => 'migration_seq'
                 )
                 "#,
-                &[&relation, &db.storage_name, &mode],
+                &[&relation, &db.storage_name],
             )
             .await?;
         db.client
@@ -459,7 +459,7 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
                   migration_order_by => 'migration_seq'
                 )
                 "#,
-                &[&relation, &db.storage_name, &mode],
+                &[&relation, &db.storage_name],
             )
             .await
             .expect_err("nondeterministic primary-key collation must fail closed");

@@ -64,7 +64,7 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
               auto_flush => false
             )
             "#,
-            &[&table.relation, &db.storage_name, &mode],
+            &[&table.relation, &db.storage_name],
         )
         .await?;
 

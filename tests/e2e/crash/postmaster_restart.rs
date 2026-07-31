@@ -119,7 +119,7 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
               auto_flush => false
             )
             "#,
-            &[&relation, &db.storage_name, &mode],
+            &[&relation, &db.storage_name],
         )
         .await?;
 

@@ -714,7 +714,7 @@ async fn cleanup_leftover_async_tables(client: &tokio_postgres::Client) -> Resul
     let leftovers = client
         .query(
             "SELECT table_oid::regclass::text FROM koldstore.schemas \
-             WHERE active AND COALESCE(options->>'mirror_capture_mode', 'strict') = 'async'",
+             WHERE active",
             &[],
         )
         .await?;

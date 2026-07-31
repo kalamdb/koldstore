@@ -10,7 +10,7 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(
             target.clone(),
-            &format!("change_log_mirror_{}", mode.as_str()),
+            "change_log_mirror",
         )
         .await?;
         let table_name = format!("{}_messages", db.schema);
@@ -38,7 +38,7 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
                   migration_order_by => 'id'
                 )
                 "#,
-                &[&relation, &db.storage_name, &mode.as_str()],
+                &[&relation, &db.storage_name],
             )
             .await?;
 
@@ -125,7 +125,7 @@ async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(
             target.clone(),
-            &format!("change_log_mirror_bulk_{}", mode.as_str()),
+            "change_log_mirror_bulk",
         )
         .await?;
         let table_name = format!("{}_messages", db.schema);
@@ -153,7 +153,7 @@ async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
                   migration_order_by => 'id'
                 )
                 "#,
-                &[&relation, &db.storage_name, &mode.as_str()],
+                &[&relation, &db.storage_name],
             )
             .await?;
         db.client

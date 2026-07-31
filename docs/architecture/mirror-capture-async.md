@@ -1,14 +1,13 @@
-# Async Mirror Capture
+# Async Mirror Capture (WAL Apply)
 
-Async mode is opt-in. PostgreSQL commits the source heap change first; a
-database-scoped background worker later decodes committed WAL and applies
-bounded, set-based mirror batches. Foreground DML does **not** write the mirror
-and does **not** run a per-statement kick trigger.
+Committed-WAL capture is the only mirror path. PostgreSQL commits the source
+heap change first; a database-scoped background worker later decodes committed
+WAL and applies bounded, set-based mirror batches. Foreground DML does **not**
+write the mirror.
 
-See also the [mode comparison](mirror-capture-modes.md) and
-[strict mode](mirror-capture-strict.md). The rationale for the specialized
-UPDATE and progress policy is in
-[ADR-005](../decisions/005-async-apply-progress-and-health.md).
+See [mirror-capture-modes.md](mirror-capture-modes.md) for the product contract
+and [ADR-005](../decisions/005-async-apply-progress-and-health.md) for worker
+lifecycle and retained-WAL health.
 
 ## Enable
 
@@ -24,38 +23,36 @@ UPDATE and progress policy is in
    CREATE EXTENSION IF NOT EXISTS koldstore;
    ```
 
-3. Opt a table into async capture:
+3. Manage a table (always configures WAL capture):
 
    ```sql
    SELECT koldstore.manage_table(
      table_name          => 'public.events',
      storage             => 'archive',
-     hot_row_limit       => 100000,
-     mirror_capture_mode => 'async'
+     hot_row_limit       => 100000
    );
    ```
 
 The slot name is `koldstore_async_<database_oid>`
-(`koldstore.async_mirror_slot_name()`). If `wal_level` is not `logical`, the
-first async `manage_table` fails before any table/catalog writes. That server
-setting (and restart) is the only administrator step KoldStore cannot perform
-from the extension.
+(`koldstore.async_mirror_slot_name()`). If `wal_level` is not `logical`,
+`manage_table` fails before any table/catalog writes. That server setting (and
+restart) is the only administrator step KoldStore cannot perform from the
+extension.
 
 ## Activation without a capture gap
 
-`manage_table` initially installs strict triggers in both modes. For a populated
-table it also completes the initial mirror backfill. Only then, in the same
-migration transaction, it:
+`manage_table` never installs DML capture triggers. For a populated table it:
 
-1. adds the source table to publication `koldstore_async_mirror`;
-2. publishes only the primary-key columns;
-3. drops the INSERT / UPDATE / DELETE capture triggers;
-4. retains the primary-key mutation guard;
-5. starts the WAL applier (cluster launcher is shared-preload only).
+1. acquires the database apply lock;
+2. takes a short source-table lock, adds the table to publication
+   `koldstore_async_mirror` (PK columns only), and records `activation_lsn`;
+3. snapshot-backfills `__cl` while concurrent DML lands in WAL;
+4. runs apply catch-up with a seq floor of `max(mirror.seq)`;
+5. marks `initialization_state = complete` / `active` and releases the lock.
 
-Changes before the switch are covered by strict capture; committed changes after
-it are covered by WAL. Publication and trigger changes are transactional, so
-there is no unprotected interval.
+Empty tables skip backfill and complete under the same lock. The PK mutation
+guard remains installed. Existing active tables retain WAL via the shared slot
+for the duration of the apply lock.
 
 ### Why PK-only publication
 

@@ -42,7 +42,7 @@ async fn baseline_equality_smoke_matches_after_shared_dml() -> Result<()> {
                   auto_flush => false
                 )
                 "#,
-                &[&managed, &db.storage_name, &mode],
+                &[&managed, &db.storage_name],
             )
             .await?;
 

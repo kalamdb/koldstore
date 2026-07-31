@@ -34,7 +34,7 @@ async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> R
               auto_flush => false
             )
             "#,
-            &[&relation, &db.storage_name, &"id", &mode],
+            &[&relation, &db.storage_name, &"id"],
         )
         .await?;
     common::assert_system_columns_absent(&db.client, &relation).await?;

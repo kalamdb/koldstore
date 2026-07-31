@@ -52,17 +52,15 @@ If the current database has no async logical slot, this is a cheap no-op.
 Otherwise it applies all committed async source changes available before the
 flush takes its table lock or resolves mirror statistics.
 
-This makes flush selection a strong consistency boundary for both capture modes:
-strict changes already exist in the mirror, and async changes are caught up
-before selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
+This makes flush selection a strong consistency boundary: committed WAL changes
+are caught up before selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
 The retained-WAL health threshold never rejects this drain path: once retention
 is high, continuing apply is the recovery action. Slot loss/invalidation and
 flush lock/time budgets remain separate fail-closed correctness boundaries.
 
 ## Phase 6 — Async prune fence (after manifest publish)
 
-For tables with `mirror_capture_mode = async`, after manifest publish and before
-`prune_flushed_hot_rows`:
+After manifest publish and before `prune_flushed_hot_rows`:
 
 1. `LOCK TABLE ONLY … IN SHARE ROW EXCLUSIVE MODE` (local `lock_timeout`)
 2. Capture durable WAL upper bound `F1`
@@ -71,7 +69,7 @@ For tables with `mirror_capture_mode = async`, after manifest publish and before
 4. Existing atomic mirror+hot prune
 
 Parquet upload stays concurrent with DML; only this short finalize window blocks
-writers. Strict tables skip the fence. Design notes:
+writers. Design notes:
 [async-flush-prune-race](../cases/async-flush-prune-race.md).
 
 ---
@@ -151,7 +149,7 @@ It returns `ResolvedFlushSelection { stats: FlushStats, mirror_ops: Option<Vec<i
    - Returns `(selected_count, max_seq)`
    - Fallback if counters overshoot: live `mirror_flush_stats` + capped cutoff
 
-Policy-path `FlushStats` uses `min_seq = 0`; `commit_seq` equals mirror `seq`.
+Policy-path `FlushStats` uses `min_seq = 0`.
 
 ### Mirror stats serde (fallback / force paths)
 
@@ -331,8 +329,8 @@ SELECT count(removed_mirror), count(deleted_hot)
 ```
 
 - Bind parameter: single `bigint max_seq`
-- Runs under `SET LOCAL session_replication_role = replica` so strict-mode
-  source triggers do not capture KoldStore's own pruning
+- Runs under `SET LOCAL session_replication_role = replica` so source triggers
+  do not capture KoldStore's own pruning
 - The hot DELETE runs with PostgreSQL's session replication origin set to the
   named origin `koldstore_flush` for the remainder of the flush transaction
   (restored after commit/abort). pgoutput emits ORIGIN from the commit
@@ -406,8 +404,8 @@ See [ADR-004](../decisions/004-segment-publication-protocol.md).
 
 Folder-sharded layout only (manifest version `2`):
 
-- Root `{namespace}/{table}/manifest.json`: watermarks (`max_seq`,
-  `max_commit_seq`), schema/publish metadata, `files` folder counters, and
+- Root `{namespace}/{table}/manifest.json`: watermarks (`max_seq`),
+  schema/publish metadata, `files` folder counters, and
   `shards[]` (`folder`, `path`, `content_sha256`, segment/seq ranges). No
   embedded segment bodies.
 - Shard `{folder:03}/manifest-shard-{sha256}.json`: that folder’s `segments[]`

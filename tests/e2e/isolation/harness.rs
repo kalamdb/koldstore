@@ -76,7 +76,7 @@ pub async fn seed_managed_items(db: &TestDb, table: &str, rows: i64) -> Result<S
               auto_flush => false
             )
             "#,
-            &[&managed.relation, &db.storage_name, &mode],
+            &[&managed.relation, &db.storage_name],
         )
         .await?;
     Ok(managed.relation)

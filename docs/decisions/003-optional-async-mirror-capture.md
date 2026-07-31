@@ -2,11 +2,15 @@
 
 ## Status
 
-Accepted; amended by [ADR-005](005-async-apply-progress-and-health.md)
+**Superseded for product shape by issue #71 (WAL-only capture).**
 
-ADR-003 records the original mode-selection and logical-slot decision. ADR-005
-is authoritative for the current no-kick worker lifecycle, specialized UPDATE
-apply, retry fairness, and retained-WAL health semantics.
+The dual `strict` / `async` mode selection described below is no longer the
+product contract. KoldStore now supports committed-WAL capture only; strict
+trigger capture and `mirror_capture_mode` are removed. Retain this ADR as the
+historical rationale for introducing logical-slot apply.
+
+Amended in detail by [ADR-005](005-async-apply-progress-and-health.md) for
+worker lifecycle and retained-WAL health.
 
 ## Date
 

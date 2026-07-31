@@ -166,7 +166,7 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
             .query_one(
                 "SELECT count(*)::bigint FROM koldstore.schemas \
                  WHERE active \
-                   AND COALESCE(options->>'mirror_capture_mode', 'strict') = 'async'",
+                   AND active",
                 &[],
             )
             .await?

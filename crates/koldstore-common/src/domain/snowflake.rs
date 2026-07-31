@@ -220,6 +220,16 @@ mod tests {
     }
 
     #[test]
+    fn next_id_after_survives_simulated_clock_regression_via_floor() {
+        // A durable watermark far above "now" forces allocation above the floor
+        // even when wall-clock snowflake ids would otherwise regress.
+        let floor = (1_i64 << 50) + 42;
+        let above = next_id_after(9, floor).unwrap();
+        assert!(above > floor);
+        assert_eq!(worker_id(above), 9);
+    }
+
+    #[test]
     fn cutoff_id_excludes_every_id_in_cutoff_millisecond() {
         let cutoff_ms = KOLDSTORE_EPOCH_MILLIS as i64 + 42;
         let cutoff = minimum_id_at_unix_millis(cutoff_ms).unwrap();

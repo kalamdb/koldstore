@@ -345,7 +345,7 @@ async fn setup_order_table(db: &common::TestDb, table: &str) -> Result<String> {
               segment_order_column => 'event_time'
             )
             "#,
-            &[&relation, &db.storage_name, &mode],
+            &[&relation, &db.storage_name],
         )
         .await?;
     db.client

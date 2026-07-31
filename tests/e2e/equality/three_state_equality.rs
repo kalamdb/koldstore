@@ -61,7 +61,7 @@ async fn three_state_baseline_equality_with_curated_queries() -> Result<()> {
                   auto_flush => false
                 )
                 "#,
-                &[&managed, &db.storage_name, &mode],
+                &[&managed, &db.storage_name],
             )
             .await?;
 

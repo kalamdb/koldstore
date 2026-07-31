@@ -71,7 +71,7 @@ Those happen on the first `koldstore.flush_table` call.
 | `migration_order_by` | null | Explicit ordering for existing-table backfill |
 | `compression` | null | `snappy`, `zstd`, or `uncompressed` |
 | `target_file_size_mb` | null | Optional target Parquet segment size in MiB |
-| `mirror_capture_mode` | `strict` | `strict` transaction triggers or opt-in `async` committed-WAL capture |
+| `auto_flush` | `true` | When `true`, the built-in worker may enqueue flushes |
 
 When `hot_row_limit` is set, the triple `(hot_row_limit, min_flush_rows,
 max_rows_per_file)` is validated and stored in `ManageTableOptions` as a
@@ -81,12 +81,11 @@ max_rows_per_file)` is validated and stored in `ManageTableOptions` as a
 as `ManageTableOptions` (`koldstore-common/src/config.rs`) before catalog
 persistence.
 
-`async` mode requires `wal_level=logical`. `CREATE EXTENSION` creates the empty
-`koldstore_async_mirror` publication, and the first async call creates or reuses
-the deterministic database slot before migration writes. Setup and consistency
-semantics are documented in
-[mirror-capture-modes.md](mirror-capture-modes.md)
-([strict](mirror-capture-strict.md), [async](mirror-capture-async.md)).
+`manage_table` always configures committed-WAL capture and requires
+`wal_level=logical`. `CREATE EXTENSION` creates the empty
+`koldstore_async_mirror` publication; the first managed table creates or reuses
+the deterministic database slot. Setup and consistency semantics are documented
+in [mirror-capture-modes.md](mirror-capture-modes.md).
 
 ---
 

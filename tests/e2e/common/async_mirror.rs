@@ -240,17 +240,15 @@ pub async fn wait_for_confirmed_flush_past(
     }
 }
 
-/// When the suite runs in async capture mode, fence until mirror catch-up.
+/// Fence until mirror catch-up for WAL-only capture.
 ///
-/// Strict mode is a no-op. Call this before assertions that inspect `__cl`
-/// contents or merge-scan overlays that depend on the latest-state mirror.
+/// Call this before assertions that inspect `__cl` contents or merge-scan
+/// overlays that depend on the latest-state mirror.
 ///
 /// # Errors
 ///
-/// Returns an error when mode detection or the async fence fails.
+/// Returns an error when the async fence fails.
 pub async fn fence_async_mirror_if_needed(client: &tokio_postgres::Client) -> Result<()> {
     let _ = wait_for_async_mirror(client).await?;
-    Ok(())
-}
     Ok(())
 }

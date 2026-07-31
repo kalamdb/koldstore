@@ -218,8 +218,7 @@ SELECT koldstore.manage_table(
   min_flush_rows    => 1000,
   max_rows_per_file => 1000,
   target_file_size_mb => 256,
-  migration_order_by  => 'created_at',
-  mirror_capture_mode => 'strict'
+  migration_order_by  => 'created_at'
 );
 ```
 
@@ -241,7 +240,6 @@ also available.
 | `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
 | `compression` | `NULL` | Optional Parquet compression name |
 | `target_file_size_mb` | `NULL` | Optional target Parquet segment size in MiB; stored for future size-aware flushing |
-| `mirror_capture_mode` | `'strict'` | `strict` updates the mirror in the source transaction; `async` applies committed PK-only WAL after source commit |
 | `auto_flush` | `true` | When `true`, the built-in database worker may enqueue and run flushes for this table; set `false` to reserve flushes for cron / manual `flush_table` |
 
 **Returns:** `uuid` — the migration job id written to `koldstore.jobs` (empty
@@ -264,22 +262,18 @@ on normal DML. See [Limitations](limitations.md#unique-and-foreign-key-constrain
 | 11,250 | Flush `1,000` rows, keep `10,250` hot |
 | 11,500 | Flush `1,500` rows into `2` files |
 
-#### Mirror capture modes
+#### Mirror capture
 
-`strict` is the default and requires no logical-replication setup. Its
-statement triggers update the latest-state mirror in the same transaction as
-the heap, providing immediate read-your-writes behavior.
+`manage_table` always configures committed-WAL capture. It requires
+`wal_level=logical`; KoldStore manages the empty `koldstore_async_mirror`
+publication and one deterministic logical slot per database. Applications must
+tolerate the normal short lag or call `koldstore.wait_for_async_mirror()` at a
+required consistency boundary. `flush_table` invokes the same catch-up path
+automatically.
 
-`async` removes mirror writes from foreground DML. It requires
-`wal_level=logical`; KoldStore automatically manages the empty
-`koldstore_async_mirror` publication and one deterministic logical slot per
-database. Applications must tolerate the normal short lag or call
-`koldstore.wait_for_async_mirror()` at a required consistency boundary.
-`flush_table` invokes the same catch-up path automatically.
-
-The mode is selected when the table is first managed. See
-[Mirror capture modes](architecture/mirror-capture-modes.md) for the complete
-transaction, rollback, WAL-retention, worker, and cleanup model.
+Authoritative mirror `seq` values are allocated only by the serialized WAL
+applier and are the exclusive `changes_since` cursor (`seq > last_seq`). See
+[Mirror capture](architecture/mirror-capture-modes.md).
 
 ### `koldstore.set_table_auto_flush`
 
@@ -487,7 +481,6 @@ Sample result after a small flush:
       "rows_flushed": 12,
       "checkpoint_seq": 332882280212668416,
       "rows_processed": 12,
-      "checkpoint_commit_seq": 332882280212668416
     },
     {
       "id": "2c2bcf44-d6ea-4b3e-b62c-cfaf18ad5225",
@@ -499,7 +492,6 @@ Sample result after a small flush:
       "rows_flushed": 0,
       "checkpoint_seq": 0,
       "rows_processed": 1012,
-      "checkpoint_commit_seq": 0
     }
   ],
   "hot_rows": 1000,
@@ -546,7 +538,7 @@ Each element of `jobs`:
 | `rows_processed` | `bigint` | Rows processed by the job |
 | `rows_flushed` | `bigint` | Rows written cold by the job |
 | `checkpoint_seq` | `bigint` | Mirror `seq` checkpoint |
-| `checkpoint_commit_seq` | `bigint` | Commit-seq checkpoint |
+| `checkpoint_seq` | `bigint` | Seq checkpoint |
 | `duration_ms` | `bigint` | Wall time from job start (flush run start when available) to last update; live for in-progress jobs |
 | `updated_at` | `timestamptz` | Last job update time |
 

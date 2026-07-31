@@ -200,7 +200,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                   id::text AS job_id
                 FROM job
                 "#,
-                &[&table.relation, &db.storage_name, &mode],
+                &[&table.relation, &db.storage_name],
             )
             .await?;
         assert_eq!(migrated.get::<_, String>("return_type"), "uuid");
