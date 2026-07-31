@@ -105,40 +105,37 @@ fi
 install_ubuntu_deps() {
   local pg="$1"
   require_command sudo
-  bash "${ROOT_DIR}/scripts/ci/disable-broken-runner-apt-sources.sh"
-  sudo apt-get update
-  sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
-  sudo install -d /usr/share/postgresql-common/pgdg
-  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    | sudo gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
-  echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-    | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
-  sudo apt-get update
-  sudo apt-get install -y --no-install-recommends \
-    build-essential \
+  # Shared CI installer: apt timeouts/retries + PGDG + base packages.
+  bash "${ROOT_DIR}/scripts/ci/install-pgdg-dev.sh" "${pg}" --no-install-recommends \
     clang \
     dpkg-dev \
     libclang-dev \
-    libreadline-dev \
-    libssl-dev \
-    pkg-config \
-    "postgresql-${pg}" \
-    "postgresql-server-dev-${pg}"
+    libreadline-dev
 }
 
 install_debian_deps() {
   local pg="$1"
   require_command apt-get
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl gnupg
+  # Mirror stalls hang builds; prefer fail-fast + retry even in containers.
+  if [[ -w /etc/apt/apt.conf.d ]]; then
+    cat >/etc/apt/apt.conf.d/99koldstore-ci <<'EOF'
+Acquire::Retries "3";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+Acquire::ForceIPv4 "true";
+Dpkg::Use-Pty "0";
+EOF
+  fi
+  bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" update -y -qq
+  bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" install -y --no-install-recommends ca-certificates curl gnupg
   install -d /usr/share/keyrings
   curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
-  echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+  echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
     > /etc/apt/sources.list.d/pgdg.list
-  apt-get update
-  apt-get install -y --no-install-recommends \
+  bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" update -y -qq
+  bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" install -y --no-install-recommends \
     build-essential \
     clang \
     curl \

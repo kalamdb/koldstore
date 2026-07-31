@@ -125,18 +125,8 @@ jobs:
 
       - name: Install PostgreSQL ${{ matrix.pg }} development packages
         run: |
-          bash scripts/ci/disable-broken-runner-apt-sources.sh
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ca-certificates curl gnupg lsb-release
-          sudo install -d /usr/share/postgresql-common/pgdg
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang libclang-dev libreadline-dev libssl-dev pkg-config \
-            postgresql-${PG_VER} postgresql-server-dev-${PG_VER}
+          bash scripts/ci/install-pgdg-dev.sh "${PG_VER}" --no-install-recommends \
+            clang libclang-dev libreadline-dev
 
       - name: Install cargo-pgrx
         run: |
@@ -215,8 +205,9 @@ jobs:
 
       - name: Install curl for rustup
         run: |
-          bash scripts/ci/disable-broken-runner-apt-sources.sh
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends ca-certificates curl
+          bash scripts/ci/configure-apt.sh
+          bash scripts/ci/apt-get-retry.sh update -y -qq
+          bash scripts/ci/apt-get-retry.sh install -y --no-install-recommends ca-certificates curl
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -269,7 +260,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install curl for rustup
-        run: apt-get update && apt-get install -y --no-install-recommends ca-certificates curl
+        run: |
+          cat >/etc/apt/apt.conf.d/99koldstore-ci <<'EOF'
+          Acquire::Retries "3";
+          Acquire::http::Timeout "30";
+          Acquire::https::Timeout "30";
+          Acquire::ForceIPv4 "true";
+          Dpkg::Use-Pty "0";
+          EOF
+          bash scripts/ci/apt-get-retry.sh update -y -qq
+          bash scripts/ci/apt-get-retry.sh install -y --no-install-recommends ca-certificates curl
 
       - uses: dtolnay/rust-toolchain@master
         with:

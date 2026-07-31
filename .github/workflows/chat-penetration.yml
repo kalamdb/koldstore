@@ -77,15 +77,7 @@ jobs:
 
       - name: Install PostgreSQL 16 development packages
         run: |
-          bash scripts/ci/disable-broken-runner-apt-sources.sh
-          sudo apt-get update -y -qq
-          sudo apt-get install -y wget gnupg lsb-release
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-          sudo apt-get update -y -qq
-          sudo apt-get install -y \
-            build-essential libssl-dev pkg-config \
-            postgresql-16 postgresql-server-dev-16
+          bash scripts/ci/install-pgdg-dev.sh 16
 
       - name: Install cargo-pgrx
         run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
