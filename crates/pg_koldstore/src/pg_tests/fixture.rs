@@ -56,6 +56,9 @@ pub(crate) fn create_messages_table(schema: &str, table: &str) {
 }
 
 /// Manages a shared table with flush-friendly settings for small fixtures.
+///
+/// Includes `migration_order_by => 'id'` so seeded (pre-manage) heaps can backfill
+/// under `#[pg_test]` without an identity/serial primary key.
 pub(crate) fn manage_shared(relation: &str, storage: &str) {
     let sql = format!(
         r#"
@@ -64,7 +67,8 @@ pub(crate) fn manage_shared(relation: &str, storage: &str) {
           storage        => '{storage}',
           hot_row_limit  => 1000,
           min_flush_rows => 1,
-          max_rows_per_file => 1000
+          max_rows_per_file => 1000,
+          migration_order_by => 'id'
         )
         "#
     );
