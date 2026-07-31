@@ -62,7 +62,6 @@ fn build_segments(count: usize) -> Vec<ManifestSegment> {
                 idx as u32,
                 format!("bench/bench_events/batch-{idx}.parquet"),
                 min_seq..=max_seq,
-                min_seq..=max_seq,
                 1_000,
                 128 * 1024,
                 1,
