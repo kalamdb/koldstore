@@ -192,11 +192,71 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
         )
         .await?;
 
+    // SC-002a measures isolated foreground latency. Keep the apply worker off
+    // after manage so background catch-up is not charged to hot UPDATE/INSERT.
+    disable_async_worker_for_foreground_bench(&client).await?;
+
     let version = client
         .query_one("SHOW server_version", &[])
         .await?
         .get::<_, String>(0);
     Ok(version)
+}
+
+/// Pins the async apply worker off and terminates any running applier.
+///
+/// Matches the storage-comparison measurement control: manage may start the
+/// worker for activation, then foreground OLTP benches run without apply load.
+async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Client) -> Result<()> {
+    let dbname: String = client
+        .query_one("SELECT current_database()", &[])
+        .await?
+        .get(0);
+    // Separate Query messages: ALTER DATABASE cannot run inside a multi-statement
+    // implicit transaction with other commands.
+    client
+        .batch_execute(&format!(
+            "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off"
+        ))
+        .await
+        .context("pin async mirror worker GUC off for foreground latency benches")?;
+    client
+        .batch_execute("SET koldstore.internal_async_mirror_worker = off")
+        .await
+        .context("disable async mirror worker GUC in benchmark session")?;
+
+    for _ in 0..40 {
+        let _ = client
+            .query_one(
+                "SELECT COALESCE((\
+                   SELECT pg_terminate_backend(pid) \
+                   FROM pg_catalog.pg_stat_activity \
+                   WHERE backend_type = 'koldstore async mirror ' \
+                     || (SELECT oid::text FROM pg_catalog.pg_database \
+                         WHERE datname = current_database()) \
+                   LIMIT 1\
+                 ), false)",
+                &[],
+            )
+            .await?;
+        let running: bool = client
+            .query_one(
+                "SELECT EXISTS (\
+                   SELECT 1 FROM pg_catalog.pg_stat_activity \
+                   WHERE backend_type = 'koldstore async mirror ' \
+                     || (SELECT oid::text FROM pg_catalog.pg_database \
+                         WHERE datname = current_database())\
+                 )",
+                &[],
+            )
+            .await?
+            .get(0);
+        if !running {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    Ok(())
 }
 
 async fn run_pair(
