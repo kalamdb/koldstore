@@ -112,6 +112,9 @@ SELECT extname FROM pg_extension WHERE extname = 'koldstore';
 SQL
 
 echo "==> ALTER TABLE management syntax works in the release image"
+# Slot provisioning cannot run after this backend has written. Keep register /
+# CREATE in their own statements (autocommit), then manage in a fresh call so
+# the ALTER TABLE path can create the async mirror slot.
 psql_exec -v ON_ERROR_STOP=1 <<'SQL'
 SELECT koldstore.register_storage(
   name         => 'release-smoke',
@@ -124,6 +127,8 @@ CREATE TABLE release_smoke_messages (
   id bigint PRIMARY KEY,
   body text NOT NULL
 );
+SQL
+psql_exec -v ON_ERROR_STOP=1 <<'SQL'
 ALTER TABLE release_smoke_messages SET (
   koldstore_enabled = true,
   koldstore_storage = 'release-smoke',

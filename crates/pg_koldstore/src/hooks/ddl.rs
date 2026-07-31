@@ -448,6 +448,15 @@ fn apply_management_options(
     use pgrx::datum::DatumWithOid;
 
     validate_management_option_conflicts(values)?;
+    // Initial ALTER TABLE … SET (koldstore_enabled=true, …) looks up the
+    // management catalog via SPI before calling manage_table. SPI assigns an
+    // XID, and logical-slot creation then deadlocks with this backend. Provision
+    // the async mirror first — same constraint as manage_table_pg_impl.
+    let initial_enable = option_value(values, "koldstore_enabled")
+        .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "on" | "1"));
+    if initial_enable {
+        crate::async_mirror::lifecycle::prepare_capture()?;
+    }
     let catalog_lookup = koldstore_catalog::queries::plan_management_options_lookup()
         .map_err(|error| error.to_string())?;
     let row = pgrx::Spi::get_one_with_args::<pgrx::JsonB>(

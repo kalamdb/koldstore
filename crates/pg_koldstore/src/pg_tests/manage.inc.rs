@@ -1,7 +1,8 @@
 #[pg_test]
 fn alter_table_manages_and_replaces_flush_policy() {
-    // Slot provisioning must precede SPI writes; see preprovision_async_mirror.
-    preprovision_async_mirror();
+    // register_temp_storage pre-provisions the async slot. ALTER TABLE now also
+    // calls prepare_capture before SPI, but #[pg_test] is one transaction so
+    // register_storage would still assign an XID before that path runs.
     let suffix = unique_suffix("alterpolicy");
     let schema = format!("pgtest_{suffix}");
     let relation = format!("{schema}.messages");
