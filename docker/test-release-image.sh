@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Smoke-test a published/candidate pg-koldstore release image.
 # Verifies PostgreSQL starts, koldstore is created, and pg_cron is packaged
-# (but not auto-enabled). Asserts koldstore is shared-preloaded.
+# (but not auto-enabled). Asserts koldstore is shared-preloaded and
+# wal_level=logical (required for manage_table).
 #
 # Does not require host `psql` — all SQL runs via docker exec / a client
 # container so release CI runners without postgresql-client still work.
@@ -75,7 +76,7 @@ until psql_exec -tAc \
   sleep 2
 done
 
-echo "==> confirming pg_cron is packaged but not preloaded; koldstore is preloaded"
+echo "==> confirming pg_cron is packaged but not preloaded; koldstore is preloaded; wal_level=logical"
 docker exec "${CONTAINER_NAME}" bash -lc '
   set -euo pipefail
   test -f "$(pg_config --sharedir)/extension/pg_cron.control"
@@ -97,6 +98,11 @@ case ",${preload}," in
     exit 1
     ;;
 esac
+wal_level="$(psql_exec -tAc "SHOW wal_level" | tr -d '[:space:]')"
+if [[ "${wal_level}" != "logical" ]]; then
+  echo "error: wal_level must be logical for manage_table (got '${wal_level}')" >&2
+  exit 1
+fi
 
 echo "==> CREATE EXTENSION koldstore is idempotent"
 psql_exec -v ON_ERROR_STOP=1 <<'SQL'
@@ -156,4 +162,4 @@ docker run --rm \
   -v ON_ERROR_STOP=1 \
   -c "SELECT koldstore_version();" >/dev/null
 
-echo "ok: ${IMAGE} starts with koldstore preloaded; pg_cron packaged but not enabled"
+echo "ok: ${IMAGE} starts with koldstore preloaded and wal_level=logical; pg_cron packaged but not enabled"

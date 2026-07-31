@@ -7,9 +7,10 @@ until after that baseline is stable.
 ## Priority near-term
 
 1. **Scoped storage** — place each `scope_column` value in its own cold folder
-2. **Change API** — `changes_since` / change-cursor SQL for real-time catch-up
+2. **Change API** — done: `changes_since` / change-cursor SQL for real-time catch-up
 3. **Compaction** — combine small cold segments to reduce object count and scan cost
 4. **Backup / export** — KoldStore-aware dump, restore, and table/scope archives
+5. **FILE datatype** — KalamDB-style files stored in cold storage (heap holds a reference)
 
 ## Scoped storage
 
@@ -117,6 +118,13 @@ Today: `koldstore.backup_manifest` and validation helpers exist;
 `EXPORT TABLE` is the intended archive boundary; `IMPORT TABLE` is still
 rejected until those rules land.
 
+## FILE datatype
+
+KalamDB-style column type for binary/file payloads. The heap stores a compact
+reference; the blob lives in the table’s registered cold backend (filesystem or
+object store). Upload and fetch APIs read and write through that backend rather
+than embedding large values in row storage.
+
 ## Other near-term product surface
 
 - **Improve `KoldMergeScan`** — prioritize cold PK point-lookup latency
@@ -126,8 +134,6 @@ rejected until those rules land.
   paged in SPI batches instead of being retained for the full scan. The exact
   PK seen-set remains in RAM (compact, payload-free) until spill lands. See
   [performance](performance.md).
-- **Storage file datatype** — upload and fetch files directly from registered
-  cold storage backends.
 
 Built-in row-limit auto-flush scheduling is available on the database worker
 (`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Time-based

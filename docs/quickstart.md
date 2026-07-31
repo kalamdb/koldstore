@@ -18,10 +18,11 @@ echo "shared_preload_libraries = 'koldstore'" | \
 sudo systemctl restart postgresql@16-main   # reload is NOT enough
 ```
 
-Docker release images already set this. Confirm:
+Docker release images already set this and `wal_level=logical`. Confirm:
 
 ```sql
 SHOW shared_preload_libraries;          -- must include koldstore
+SHOW wal_level;                         -- must be logical
 SELECT koldstore.preload_status();      -- loaded_via_shared_preload = true
 ```
 

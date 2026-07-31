@@ -18,10 +18,11 @@ docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore
 psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
 ```
 
-Multi-arch (`linux/amd64`, `linux/arm64`). Default database is `koldstoredb`. Extension `koldstore` is created on first init and **shared-preloaded** (required for `KoldMergeScan` on every connection).
+Multi-arch (`linux/amd64`, `linux/arm64`). Default database is `koldstoredb`. Extension `koldstore` is created on first init, **shared-preloaded** (required for `KoldMergeScan` on every connection), and started with `wal_level=logical` (required for `manage_table` / async mirror).
 
 ```sql
 SHOW shared_preload_libraries;  -- includes koldstore
+SHOW wal_level;                 -- logical
 SELECT koldstore.preload_status();
 
 SELECT koldstore.register_storage(
@@ -60,7 +61,7 @@ SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 | Component | Notes |
 | --- | --- |
 | PostgreSQL | 16 (Ubuntu 24.04 / PGDG) |
-| `koldstore` | Preinstalled + in `shared_preload_libraries` (required for KoldMergeScan + auto-flush worker) |
+| `koldstore` | Preinstalled + in `shared_preload_libraries` (required for KoldMergeScan + auto-flush worker); `wal_level=logical` by default |
 | `pg_cron` | Packaged only; not preloaded. Enable yourself if you want cron-based flush |
 | Entrypoint | Compatible with official `POSTGRES_*` env vars |
 

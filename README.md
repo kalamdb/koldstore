@@ -273,8 +273,8 @@ Details: [Quickstart](docs/quickstart.md#0-shared-preload-required) · [SQL API]
 
 ## Try it in five minutes
 
-Published release images ship PostgreSQL 16 with `koldstore` **shared-preloaded**
-and `CREATE EXTENSION` applied on first init:
+Published release images ship PostgreSQL 16 with `koldstore` **shared-preloaded**,
+`wal_level=logical`, and `CREATE EXTENSION` applied on first init:
 
 ```bash
 docker pull jamals86/pg-koldstore:latest
@@ -282,10 +282,11 @@ docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore
 psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
 ```
 
-Confirm preload (required for correct hot+cold reads on every connection):
+Confirm preload and WAL level (required for manage_table / hot+cold reads):
 
 ```sql
 SHOW shared_preload_libraries;       -- must include koldstore
+SHOW wal_level;                      -- must be logical
 SELECT koldstore.preload_status();
 ```
 
@@ -387,11 +388,12 @@ Full list: [docs/limitations.md](docs/limitations.md).
 Priority after the 0.1 hot/cold baseline:
 
 1. **Scoped storage** — store each `scope_column` value under its own cold folder (`{namespace}/{table}/{scopeId}/…`), so tenant/user data stays physically separated and easier to prune, backup, or delete independently
-2. **Change API** — shipped: `koldstore.changes_since` merges hot `__cl` + cold Parquet latest-state by `seq`; next: scoped cursors polish and payload projection options
-3. **Compaction** — combine small cold segments into larger files to cut object-store chatter and improve scan efficiency
-4. **Backup / export** — first-class dump and restore that understands KoldStore: coordinated PostgreSQL + cold-object backups, and table/scope archive export/import of managed hot+cold data
+2. **FILE datatype** — KalamDB-style column type that stores file payloads in cold storage rather than in the heap (hot rows keep a compact reference; upload/fetch use the table’s cold backend)
+3. **Stream Table Changes** — stream changes to Kalam gateway for Websocket real-time notifications
+4. **Compaction** — combine small cold segments into larger files to cut object-store chatter and improve scan efficiency
+5. **Backup / export** — first-class dump and restore that understands KoldStore: coordinated PostgreSQL + cold-object backups, and table/scope archive export/import of managed hot+cold data
 
-Also planned: faster cold PK lookups, time-based / predicate flush policies, and a storage file datatype.
+Also planned: faster cold PK lookups, and time-based / predicate flush policies.
 
 Tracked in [docs/roadmap.md](docs/roadmap.md).
 

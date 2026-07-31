@@ -71,5 +71,6 @@ RUN EXTDIR="$(pg_config --sharedir)/extension" \
     && rm -rf /tmp/koldstore-ext /tmp/koldstore-lib \
     && conf_sample="$(pg_config --sharedir)/postgresql.conf.sample" \
     && printf "\n# pg-koldstore local image defaults\n" >> "${conf_sample}" \
-    && printf "shared_preload_libraries = 'koldstore'\n" >> "${conf_sample}"
+    && printf "shared_preload_libraries = 'koldstore'\n" >> "${conf_sample}" \
+    && printf "wal_level = logical\n" >> "${conf_sample}"
 USER postgres
