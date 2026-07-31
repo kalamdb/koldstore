@@ -253,10 +253,7 @@ async fn user_scope_cold_segment_lookup_is_index_backed_on_pgrx() -> Result<()> 
         .await?;
         common::assertions::assert_catalog_index_plan_uses_any(
             &plan,
-            &[
-                "cold_segments_active_scope_seq_idx",
-                "cold_segments_active_commit_idx",
-            ],
+            &["cold_segments_active_scope_seq_idx"],
         )?;
         assert!(plan.contains("scope_key = 'user-a'::text"), "{plan}");
         assert!(plan.contains("min_seq <= 5"), "{plan}");
