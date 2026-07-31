@@ -316,8 +316,8 @@ active).
 
 ## Async Mirror Operations
 
-These functions operate on database-scoped infrastructure used by tables
-managed with `mirror_capture_mode => 'async'`.
+These functions operate on database-scoped infrastructure used by managed
+tables (WAL-only committed-WAL mirror capture).
 
 ### `koldstore.wait_for_async_mirror`
 

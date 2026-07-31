@@ -133,7 +133,8 @@ impl ManifestSegment {
         schema_version: u32,
     ) -> Self {
         let min_seq = *seq_range.start();
-        let max_seq = *seq_range.end();        let row_group_rows = i64::try_from(row_count).unwrap_or(i64::MAX);
+        let max_seq = *seq_range.end();
+        let row_group_rows = i64::try_from(row_count).unwrap_or(i64::MAX);
         Self {
             segment_id: None,
             batch,

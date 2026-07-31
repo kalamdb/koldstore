@@ -135,10 +135,7 @@ fn direct_begin_merge_scan_tracks_each_cold_segment_handle() {
 #[test]
 fn residual_and_security_quals_run_after_winner_resolution() {
     let result = execute_merge_scan_with_filters(
-        vec![
-            hot(1, 20, false, "open"),
-            hot(2, 21, false, "closed"),
-        ],
+        vec![hot(1, 20, false, "open"), hot(2, 21, false, "closed")],
         vec![cold(1, 10, "closed")],
         FilterPlan::new()
             .with_required_json_eq("status", "open")

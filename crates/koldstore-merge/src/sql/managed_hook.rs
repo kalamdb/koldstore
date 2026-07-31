@@ -94,10 +94,7 @@ pub fn plan_managed_update_effect(seq: SeqId) -> ManagedDmlEffect {
 
 /// Plans a managed DELETE effect from local cold PK metadata.
 #[must_use]
-pub fn plan_managed_delete_effect(
-    seq: SeqId,
-    cold_may_contain_pk: bool,
-) -> ManagedDmlEffect {
+pub fn plan_managed_delete_effect(seq: SeqId, cold_may_contain_pk: bool) -> ManagedDmlEffect {
     plan_managed_effect(
         seq,
         ManagedDmlOperation::Delete,

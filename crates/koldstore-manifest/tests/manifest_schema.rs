@@ -36,14 +36,8 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
         max_files_per_subfolder: 100,
         total_files: Some(7),
     };
-    let mut segment = ManifestSegment::committed(
-        1,
-        "001/segment-0001-aaaaaaaa.parquet",
-        20..=30,
-        11,
-        8192,
-        1,
-    );
+    let mut segment =
+        ManifestSegment::committed(1, "001/segment-0001-aaaaaaaa.parquet", 20..=30, 11, 8192, 1);
     segment.pk_filter = Some(PkFilter::exact(vec![1, 2]));
     manifest.append_segment(segment);
 
@@ -61,14 +55,8 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
 #[test]
 fn manifest_v2_round_trip_preserves_packed_row_group_indexes_and_bloom_filters() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
-    let mut segment = ManifestSegment::committed(
-        1,
-        "001/segment-0001-aaaaaaaa.parquet",
-        20..=30,
-        11,
-        8192,
-        1,
-    );
+    let mut segment =
+        ManifestSegment::committed(1, "001/segment-0001-aaaaaaaa.parquet", 20..=30, 11, 8192, 1);
     segment.row_group_count = 2;
     segment.row_group_row_counts = vec![5, 6];
     segment.row_group_min_seqs = vec![20, 26];
@@ -104,22 +92,8 @@ fn manifest_v2_round_trip_preserves_packed_row_group_indexes_and_bloom_filters()
 fn manifest_batch_append_reserves_once_and_updates_watermarks_once_per_flush() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
     let segments = vec![
-        ManifestSegment::committed(
-        1,
-        "001/segment-0001-aaaaaaaa.parquet",
-        1..=10,
-        10,
-        1024,
-        1,
-    ),
-        ManifestSegment::committed(
-        2,
-        "001/segment-0002-bbbbbbbb.parquet",
-        11..=30,
-        20,
-        2048,
-        1,
-    ),
+        ManifestSegment::committed(1, "001/segment-0001-aaaaaaaa.parquet", 1..=10, 10, 1024, 1),
+        ManifestSegment::committed(2, "001/segment-0002-bbbbbbbb.parquet", 11..=30, 20, 2048, 1),
     ];
 
     let update = manifest.append_segment_batch(segments);

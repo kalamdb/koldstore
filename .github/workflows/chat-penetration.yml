@@ -15,14 +15,6 @@ on:
         required: true
         default: "chat"
         type: string
-      mirror_mode:
-        description: "Mirror capture mode (async pack forces async)"
-        required: true
-        default: "strict"
-        type: choice
-        options:
-          - strict
-          - async
       clients:
         description: "Writer client count"
         required: true
@@ -70,7 +62,6 @@ jobs:
       PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
       KOLDSTORE_STRESS_MINUTES: ${{ inputs.minutes }}
       KOLDSTORE_STRESS_PACKS: ${{ inputs.packs }}
-      KOLDSTORE_STRESS_MIRROR_MODE: ${{ inputs.mirror_mode }}
       KOLDSTORE_STRESS_CLIENTS: ${{ inputs.clients }}
       KOLDSTORE_STRESS_HISTORY_CLIENTS: ${{ inputs.history_clients }}
       KOLDSTORE_STRESS_PAYLOAD_BYTES: ${{ inputs.payload_bytes }}

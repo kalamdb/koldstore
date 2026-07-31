@@ -14,8 +14,7 @@ fn hot_delete_routes_to_physical_delete_or_tombstone_from_cold_hints() {
         DeleteDecision::Tombstone
     );
 
-    let physical_delete_stamp =
-        DmlStamp::new(SeqId::new(10).unwrap(), ManagedDmlOperation::Delete);
+    let physical_delete_stamp = DmlStamp::new(SeqId::new(10).unwrap(), ManagedDmlOperation::Delete);
     let tombstone_stamp = DmlStamp::new(SeqId::new(11).unwrap(), ManagedDmlOperation::Delete);
 
     assert!(physical_delete_stamp.deleted);

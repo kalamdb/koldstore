@@ -224,7 +224,7 @@ infrastructure. The next async `manage_table` recreates publication and slot.
 | Area | E2E coverage |
 | --- | --- |
 | No kick triggers; PK guard only | `tests/e2e/dml/async_change_log_mirror.rs` |
-| Worker startup, bounded lag, fence, rollback, cleanup | same + `change_log_mirror.rs` in `--mode async` |
+| Worker startup, bounded lag, fence, rollback, cleanup | same + `change_log_mirror.rs` |
 | Kill applier → launcher / ensure restart, no duplicate PKs | `tests/e2e/dml/async_mirror_worker.rs` |
 | Apply failpoint ERROR → recovery without duplicates | same |
 | Mid-tick after-batch abort → no durable applied_lsn / mirror | same |
@@ -237,7 +237,7 @@ infrastructure. The next async `manage_table` recreates publication and slot.
 Run:
 
 ```bash
-scripts/run-pg-e2e.sh 16 --mode async
+scripts/run-pg-e2e.sh 16
 ```
 
 Not covered as a dedicated E2E today: full postmaster restart with only the

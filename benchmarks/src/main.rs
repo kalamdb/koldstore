@@ -18,7 +18,7 @@ mod verdict;
 use pgbench::{PgbenchConfig, PgbenchMeasurement, PgbenchWorkload};
 use report::{BenchmarkReport, BenchmarkResult, MachineMetadata};
 
-##[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct BenchmarkConfig {
     database_url: String,
     rows: u64,
@@ -103,7 +103,7 @@ async fn run_real_pgbench_suite(config: BenchmarkConfig) -> Result<()> {
     .await?;
 
     let report = BenchmarkReport {
-        suite: "pg-koldstore-wal-async".to_string(),
+        suite: "pg-koldstore-wal".to_string(),
         generated_at: chrono::Utc::now(),
         machine: MachineMetadata {
             postgres_version: Some(postgres_version),
@@ -176,7 +176,8 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
          INSERT INTO bench.koldstore_items
             SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
          SELECT koldstore.manage_table(table_name => 'bench.koldstore_items'::regclass, storage => 'bench-local', hot_row_limit => NULL, migration_order_by => 'id');",
-        rows = config.rows,    );
+        rows = config.rows,
+    );
     client.batch_execute(&seed_sql).await?;
 
     let version = client
@@ -304,9 +305,6 @@ impl BenchmarkConfig {
             database_url: value_arg(&args, "--database-url")
                 .or_else(|| env::var("DATABASE_URL").ok())
                 .unwrap_or(default_database_url),
-                .map(|value| Ok(&value))
-                .transpose()?
-                .unwrap_or(BenchmarkMirrorMode::Strict),
             rows: parse_arg(&args, "--rows", 10_000)?,
             clients: parse_arg(&args, "--clients", 4)?,
             jobs: parse_arg(&args, "--jobs", 4)?,

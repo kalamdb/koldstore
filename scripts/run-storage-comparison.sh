@@ -34,15 +34,14 @@ usage() {
   cat <<'EOF'
 Run the PostgreSQL vs KoldStore storage comparison harness (tests/storage/).
 
-Three isolated sides, each on a fresh pgrx PostgreSQL:
+Two isolated sides, each on a fresh pgrx PostgreSQL:
 
   1. pg      — PostgreSQL only
-  2. async   — PG + KoldStore (async mirror)
-  3. strict  — PG + KoldStore (strict / trigger mirror)
+  2. async   — PG + KoldStore (WAL-only mirror)
 
 Usage:
   scripts/run-storage-comparison.sh --all-sides [options]
-  scripts/run-storage-comparison.sh --side pg|async|strict [options]
+  scripts/run-storage-comparison.sh --side pg|async [options]
   scripts/run-storage-comparison.sh --render-only --repetitions N
 
 Options:
@@ -54,8 +53,8 @@ Options:
                       min(rows, max(1M, 5*batch)); 0 disables)
   --repetitions N    Isolated samples per side (default: 1; publishing requires
                       a multiple of 6)
-  --side SIDE       Run one side only: pg | async | strict
-  --all-sides       Run all three sides per repetition (fresh server per side)
+  --side SIDE       Run one side only: pg | async
+  --all-sides       Run both sides per repetition (fresh server per side)
   --update-results  Merge JSON into docs/benchmarks/RESULTS.md and print it
                       (clean tree + multiple-of-6 repetitions required)
   --render-only     Re-render RESULTS.md from existing run-NN/*.json under
@@ -137,14 +136,6 @@ while [[ $# -gt 0 ]]; do
       PREPARE_ONLY=1
       shift
       ;;
-    # Kept for older docs/scripts; ignored — sides are isolated now.
-    --mode|--mode=*)
-      if [[ "$1" == --mode ]]; then
-        shift 2
-      else
-        shift
-      fi
-      ;;
     -h|--help|help)
       usage
       exit 0
@@ -159,9 +150,9 @@ done
 
 if [[ -n "${SIDE}" ]]; then
   case "${SIDE}" in
-    pg|postgres|baseline|async|strict) ;;
+    pg|postgres|baseline|async) ;;
     *)
-      echo "error: --side must be pg, async, or strict (got: ${SIDE})" >&2
+      echo "error: --side must be pg or async (got: ${SIDE})" >&2
       exit 1
       ;;
   esac
@@ -178,7 +169,7 @@ if [[ "${RENDER_ONLY}" == "1" ]]; then
     exit 1
   fi
 elif [[ "${ALL_SIDES}" != "1" && -z "${SIDE}" && "${PREPARE_ONLY}" != "1" && "${PREPARE_ONLY}" != "true" ]]; then
-  echo "error: pass --all-sides (run pg+async+strict per repetition) or --side pg|async|strict" >&2
+  echo "error: pass --all-sides (run pg+async per repetition) or --side pg|async" >&2
   usage >&2
   exit 1
 fi
@@ -218,7 +209,7 @@ normalize_side() {
   esac
 }
 
-# Async needs logical WAL; pg/strict are fine with the same prepare.
+# Managed sides need logical WAL; prepare the same way for every side.
 prepare_fresh_server() {
   local skip_install="${1:-0}"
   echo "────────────────────────────────────────────────────────────"
@@ -232,16 +223,14 @@ prepare_fresh_server() {
       KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
       KOLDSTORE_E2E_PREPARE_ONLY=1 \
       KOLDSTORE_PGRX_INSTALL_RELEASE=1 \
-      KOLDSTORE_E2E_MIRROR_CAPTURE_MODE=async \
       KOLDSTORE_E2E_THREADS=1 \
-      scripts/run-pg-e2e.sh "${PG_VERSION}" --mode async
+      scripts/run-pg-e2e.sh "${PG_VERSION}"
   else
     KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
       KOLDSTORE_E2E_PREPARE_ONLY=1 \
       KOLDSTORE_PGRX_INSTALL_RELEASE=1 \
-      KOLDSTORE_E2E_MIRROR_CAPTURE_MODE=async \
       KOLDSTORE_E2E_THREADS=1 \
-      scripts/run-pg-e2e.sh "${PG_VERSION}" --mode async
+      scripts/run-pg-e2e.sh "${PG_VERSION}"
   fi
   # shellcheck disable=SC1090
   source "${E2E_ENV_FILE}"
@@ -304,7 +293,6 @@ render_results() {
     render_args+=(
       --pg-json "${repetition_dir}/pg.json"
       --async-json "${repetition_dir}/async.json"
-      --strict-json "${repetition_dir}/strict.json"
     )
   done
   echo "────────────────────────────────────────────────────────────"
@@ -314,13 +302,9 @@ render_results() {
 }
 
 counterbalanced_order() {
-  case "$(( (CURRENT_REPETITION - 1) % 6 ))" in
-    0) echo "pg async strict" ;;
-    1) echo "async strict pg" ;;
-    2) echo "strict pg async" ;;
-    3) echo "strict async pg" ;;
-    4) echo "async pg strict" ;;
-    5) echo "pg strict async" ;;
+  case "$(( (CURRENT_REPETITION - 1) % 2 ))" in
+    0) echo "pg async" ;;
+    1) echo "async pg" ;;
   esac
 }
 

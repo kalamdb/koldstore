@@ -15,14 +15,14 @@ pub mod guard;
 pub mod shared;
 
 // Stable top-level paths (existing callers).
+pub use guard::{
+    plan_mirror_pk_guard, plan_mirror_source_teardown, MirrorGuardError, MirrorGuardResult,
+    MirrorPkGuardPlan,
+};
 pub use r#async::{
     decode_message, must_flush_before_push, pg_value_json, pg_value_text, pk_identity,
     primary_key_json, BatchFlushReason, PgOutputColumn, PgOutputDecodeError, PgOutputMessage,
     PgOutputRelation, PgOutputTuple, PgOutputValue, APPLY_BATCH_ROWS,
-};
-pub use guard::{
-    plan_mirror_pk_guard, plan_mirror_source_teardown, MirrorGuardError, MirrorGuardResult,
-    MirrorPkGuardPlan,
 };
 pub use shared::{
     mirror_relation_for_source, mirror_to_sql, plan_async_mirror_batch_delete_existing,

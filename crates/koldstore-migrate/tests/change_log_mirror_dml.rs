@@ -22,11 +22,7 @@ fn pk_column(name: &str, ordinal: u16) -> PrimaryKeyColumnShape {
 #[test]
 fn change_log_mirror_installs_pk_guard_only() {
     let source = QualifiedTableName::parse("public.messages").unwrap();
-    let shape = PrimaryKeyShape::new(vec![
-        pk_column("tenant_id", 1),
-        pk_column("id", 2),
-    ])
-    .unwrap();
+    let shape = PrimaryKeyShape::new(vec![pk_column("tenant_id", 1), pk_column("id", 2)]).unwrap();
     let plan = mirror::plan_change_log_mirror(&source, &shape).unwrap();
     let create_sql = plan
         .create_statements()
@@ -41,13 +37,7 @@ fn change_log_mirror_installs_pk_guard_only() {
     assert!(!create_sql.contains("_update_capture"));
     assert!(!create_sql.contains("_delete_capture"));
 
-    let guard = plan_mirror_pk_guard(
-        &source,
-        &plan.mirror_table,
-        shape.columns(),
-        None,
-    )
-    .unwrap();
+    let guard = plan_mirror_pk_guard(&source, &plan.mirror_table, shape.columns(), None).unwrap();
     assert!(guard
         .trigger
         .sql

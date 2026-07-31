@@ -6,5 +6,5 @@ SELECT koldstore.manage_table(
   max_rows_per_file => 25000,
   table_type        => 'user',
   scope_column      => 'tenant_id',
-  migration_order_by => 'ts'  -- or 'async'; scripts/run-examples.sh --mode selects this
+  migration_order_by => 'ts'
 );

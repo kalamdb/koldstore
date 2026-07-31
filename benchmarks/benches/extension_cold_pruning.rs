@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use koldstore_common::{SeqId};
+use koldstore_common::SeqId;
 use koldstore_parquet::{
     ColumnStats, FooterSummary, RowGroupPruner, RowGroupStats, SegmentFooterMetadata,
 };
@@ -21,7 +21,6 @@ fn bench_row_group_pruning(c: &mut Criterion) {
             )
         })
     });
-
 }
 
 fn bench_pk_bloom_pruning(c: &mut Criterion) {

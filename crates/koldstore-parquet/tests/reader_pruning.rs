@@ -72,7 +72,6 @@ fn row_group_pruner_skips_non_overlapping_seq_ranges() {
     assert_eq!(decision.skipped_row_groups, 1);
 }
 
-
 #[test]
 fn row_group_pruner_uses_pk_bloom_may_contain_metadata() {
     let footer = FooterSummary {

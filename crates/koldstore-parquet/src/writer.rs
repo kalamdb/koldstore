@@ -696,10 +696,7 @@ pub struct SegmentMetadataInput {
 impl SegmentMetadataInput {
     /// Sequence bounds only; row counts, filters, and stats stay empty.
     #[must_use]
-    pub fn seq_bounds(
-        min_seq: i64,
-        max_seq: i64,
-    ) -> Self {
+    pub fn seq_bounds(min_seq: i64, max_seq: i64) -> Self {
         Self {
             min_seq,
             max_seq,

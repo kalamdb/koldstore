@@ -8,11 +8,10 @@ source "${ROOT_DIR}/scripts/lib/pgrx-lifecycle.sh"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run-pg-e2e.sh [PG_VERSION] 
+Usage: scripts/run-pg-e2e.sh [PG_VERSION]
 
-Runs the complete E2E suite with one mirror capture mode. PG_VERSION defaults
-to KOLDSTORE_E2E_PGVERSION or 16; mode defaults to
-WAL-async capture only.
+Runs the complete E2E suite against WAL-only mirror capture. PG_VERSION
+defaults to KOLDSTORE_E2E_PGVERSION or 16.
 
 Parallelism: KOLDSTORE_E2E_THREADS (default 4) prepares that many worker
 databases from a template so each concurrent test gets its own async slot.
@@ -44,11 +43,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [[ "$MIRROR_CAPTURE_MODE" != "strict" && "$MIRROR_CAPTURE_MODE" != "async" ]]; then
-  echo "error: invalid --mode '$MIRROR_CAPTURE_MODE'; expected strict or async" >&2
-  exit 2
-fi
 
 PREPARE_ONLY="${KOLDSTORE_E2E_PREPARE_ONLY:-0}"
 PG_FEATURE="pg${PG_VERSION}"
@@ -300,7 +294,7 @@ if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
   exit 0
 fi
 
-echo "running pg-koldstore E2E tests in ${MIRROR_CAPTURE_MODE} mode against pgrx PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT} (threads=${THREADS})"
+echo "running pg-koldstore E2E tests against pgrx PostgreSQL ${PG_VERSION} on ${PG_HOST}:${PG_PORT} (threads=${THREADS})"
 if [[ "${KOLDSTORE_MINIO:-}" == "1" || -n "${KOLDSTORE_MINIO_ENDPOINT:-}" ]]; then
   echo "MinIO-backed E2E enabled (KOLDSTORE_MINIO / KOLDSTORE_MINIO_ENDPOINT)"
 else

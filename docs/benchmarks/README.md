@@ -29,7 +29,7 @@ Parquet). The harness sets `koldstore_max_rows_per_flush` to the cold excess
 (override with `KOLDSTORE_STORAGE_MAX_ROWS_PER_FLUSH`) so one `flush_table`
 call can drain to the hot limit — the product default (10k × 64 waves) only
 covers 640k rows per job. Published RESULTS use `--all-sides --repetitions 6`: six
-counterbalanced orders of pg, async, and strict, with every sample alone on a
+counterbalanced orders of pg and async (WAL-only managed), with every sample alone on a
 fresh pgrx PostgreSQL. They are **not** parallel and do **not** share a live
 server or dual-table I/O during measurement. Each cell reports the median and
 range. Inserts use committed 100k-row batches. Numbers vary by machine; re-run
@@ -145,11 +145,10 @@ then `DROP` + `CHECKPOINT`) so the first heavy write after install is not the
 measured insert. Override with `--warmup-rows N` (`0` disables).
 
 Additional pgbench-oriented suites live under [`benchmarks/`](../../benchmarks/).
-Run the single-row hot-DML gate explicitly by consistency mode:
+Capture is always WAL-only:
 
 ```bash
-cargo run -p pg-koldstore-benchmarks -- --mirror-capture-mode async
-cargo run -p pg-koldstore-benchmarks -- --mirror-capture-mode strict
+cargo run -p pg-koldstore-benchmarks
 ```
 
 HammerDB selective-manage comparison: [hammerdb.md](hammerdb.md).

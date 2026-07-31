@@ -335,7 +335,6 @@ async fn async_worker_survives_truncate_noise_in_slot() -> Result<()> {
 /// mirror rows together (one PostgreSQL transaction per apply tick).
 #[tokio::test]
 async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
-
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mid_tick_abort").await?;
         clear_async_failpoint(&db.client).await?;

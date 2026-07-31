@@ -50,14 +50,8 @@ fn merge_scan_results_resolve_hot_winner_and_tombstone_masking() {
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
     let result = execute_merge_scan(
-        vec![
-            hot(1, 20, false, "hot-winner"),
-            hot(2, 21, true, "deleted"),
-        ],
-        vec![
-            cold(1, 10, "older-cold"),
-            cold(2, 10, "masked-cold"),
-        ],
+        vec![hot(1, 20, false, "hot-winner"), hot(2, 21, true, "deleted")],
+        vec![cold(1, 10, "older-cold"), cold(2, 10, "masked-cold")],
     )
     .unwrap();
 
@@ -96,11 +90,8 @@ fn merge_scan_results_apply_cold_delete_markers_and_newer_reinserts() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
-    let deleted = execute_merge_scan(
-        vec![],
-        vec![cold(1, 10, "old"), cold_deleted(1, 20)],
-    )
-    .unwrap();
+    let deleted =
+        execute_merge_scan(vec![], vec![cold(1, 10, "old"), cold_deleted(1, 20)]).unwrap();
     assert!(deleted.rows.is_empty());
     assert_eq!(deleted.tombstones_masked, 0);
 

@@ -55,7 +55,6 @@ fn scope_column_is_persisted_by_attnum() {
     assert_eq!(validated.options.scope_column_id, Some(3));
 }
 
-
 #[test]
 fn segment_order_column_rejects_nullable_or_unsupported_types() {
     let mut nullable = valid_context();
@@ -192,8 +191,6 @@ fn invalid_compression_is_rejected() {
         MigrationConstraintError::UnsupportedCompression("brotli".to_string())
     );
 }
-
-
 
 #[test]
 fn configured_migration_order_by_must_exist() {

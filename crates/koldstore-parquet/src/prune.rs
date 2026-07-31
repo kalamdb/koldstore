@@ -61,7 +61,6 @@ impl RowGroupPruner {
         }
     }
 
-
     /// Prunes row groups using PK bloom/may-contain metadata.
     ///
     /// Row groups with no bloom metadata are selected because they cannot be

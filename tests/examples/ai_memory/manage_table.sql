@@ -6,5 +6,5 @@ SELECT koldstore.manage_table(
   max_rows_per_file => 10000,
   table_type        => 'user',
   scope_column      => 'workspace_id',
-  migration_order_by => 'created_at'  -- or 'async'; scripts/run-examples.sh --mode selects this
+  migration_order_by => 'created_at'
 );

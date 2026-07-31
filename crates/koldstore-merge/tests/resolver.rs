@@ -87,10 +87,7 @@ fn resolver_emits_at_most_one_visible_winner_per_pk() {
 
 #[test]
 fn resolver_masks_deleted_winners() {
-    let rows = resolve_rows(
-        &[hot(1, 11, true, "deleted")],
-        &[cold(1, 10, false, "old")],
-    );
+    let rows = resolve_rows(&[hot(1, 11, true, "deleted")], &[cold(1, 10, false, "old")]);
 
     assert!(rows.is_empty());
 }
@@ -168,10 +165,7 @@ fn streaming_resolver_fails_closed_when_seen_key_limit_is_exceeded() {
     let mut resolver = NewestFirstWinnerResolver::default().with_max_seen_keys(Some(2));
 
     let first = resolver
-        .resolve_cold_batch(vec![
-            cold(1, 10, false, "one"),
-            cold(2, 10, false, "two"),
-        ])
+        .resolve_cold_batch(vec![cold(1, 10, false, "one"), cold(2, 10, false, "two")])
         .unwrap();
     assert_eq!(first.len(), 2);
 

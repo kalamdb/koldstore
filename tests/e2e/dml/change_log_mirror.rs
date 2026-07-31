@@ -8,11 +8,7 @@ const MIRROR_DEADLINE: Duration = Duration::from_secs(5);
 #[tokio::test]
 async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()> {
     for target in common::scenario_pg_matrix() {
-        let db = common::TestDb::start(
-            target.clone(),
-            "change_log_mirror",
-        )
-        .await?;
+        let db = common::TestDb::start(target.clone(), "change_log_mirror").await?;
         let table_name = format!("{}_messages", db.schema);
         let relation = db.relation(&table_name);
         let mirror = format!("koldstore.{table_name}__cl");
@@ -123,11 +119,7 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
 #[tokio::test]
 async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
     for target in common::scenario_pg_matrix() {
-        let db = common::TestDb::start(
-            target.clone(),
-            "change_log_mirror_bulk",
-        )
-        .await?;
+        let db = common::TestDb::start(target.clone(), "change_log_mirror_bulk").await?;
         let table_name = format!("{}_messages", db.schema);
         let relation = db.relation(&table_name);
         let mirror = format!("koldstore.{table_name}__cl");

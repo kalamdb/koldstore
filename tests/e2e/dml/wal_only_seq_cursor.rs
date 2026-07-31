@@ -111,10 +111,7 @@ async fn wal_apply_assigns_seq_in_commit_order_not_start_order() -> Result<()> {
 
         let rows = db
             .client
-            .query(
-                &format!("SELECT id, seq FROM {mirror} ORDER BY id"),
-                &[],
-            )
+            .query(&format!("SELECT id, seq FROM {mirror} ORDER BY id"), &[])
             .await?;
         assert_eq!(rows.len(), 2);
         let seq1: i64 = rows[0].get(1);
@@ -347,16 +344,17 @@ async fn populated_activation_under_concurrent_dml_is_gap_free() -> Result<()> {
         let writer = tokio::spawn({
             let relation = relation.clone();
             async move {
-                for id in 201..=250 {
+                for id in 201_i64..=250 {
                     peer.execute(
-                        &format!("INSERT INTO {relation} VALUES ($1, 'concurrent-' || $1)"),
-                        &[&id],
+                        &format!("INSERT INTO {relation} (id, body) VALUES ($1, $2)"),
+                        &[&id, &format!("concurrent-{id}")],
                     )
                     .await?;
                     if id % 5 == 0 {
+                        let target = id - 4;
                         peer.execute(
-                            &format!("UPDATE {relation} SET body = 'upd-' || id WHERE id = $1"),
-                            &[&(id - 4)],
+                            &format!("UPDATE {relation} SET body = $2 WHERE id = $1"),
+                            &[&target, &format!("upd-{target}")],
                         )
                         .await?;
                     }
@@ -438,6 +436,7 @@ async fn manage_table(
               table_name => $1::text::regclass,
               storage => $2,
               hot_row_limit => 1000,
+              migration_order_by => 'id',
               auto_flush => false
             )
             "#,
@@ -457,10 +456,7 @@ async fn unmanage(client: &tokio_postgres::Client, relation: &str) -> Result<()>
     Ok(())
 }
 
-async fn source_triggers(
-    client: &tokio_postgres::Client,
-    relation: &str,
-) -> Result<Vec<String>> {
+async fn source_triggers(client: &tokio_postgres::Client, relation: &str) -> Result<Vec<String>> {
     let rows = client
         .query(
             "SELECT tgname::text FROM pg_trigger \

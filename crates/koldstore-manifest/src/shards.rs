@@ -208,10 +208,7 @@ fn validate_shard_segments(
         }
     }
     let ranges = shard_ranges(&shard.segments);
-    let expected = (
-        shard_ref.min_seq,
-        shard_ref.max_seq,
-    );
+    let expected = (shard_ref.min_seq, shard_ref.max_seq);
     if ranges != expected {
         return Err(format!("shard {} range metadata mismatch", shard_ref.path));
     }
@@ -380,21 +377,21 @@ mod tests {
     fn split_groups_by_folder_and_clears_root_segments() {
         let mut manifest = Manifest::new_shared("app", "items", 1);
         manifest.append_segment(ManifestSegment::committed(
-        1,
-        "001/segment-0001-aaaaaaaa.parquet",
-        1..=10,
-        10,
-        100,
-        1,
-    ));
+            1,
+            "001/segment-0001-aaaaaaaa.parquet",
+            1..=10,
+            10,
+            100,
+            1,
+        ));
         manifest.append_segment(ManifestSegment::committed(
-        101,
-        "002/segment-0101-bbbbbbbb.parquet",
-        11..=20,
-        10,
-        100,
-        1,
-    ));
+            101,
+            "002/segment-0101-bbbbbbbb.parquet",
+            11..=20,
+            10,
+            100,
+            1,
+        ));
 
         let export = split_manifest_for_export(&manifest).unwrap();
         assert_eq!(export.root.version, MANIFEST_VERSION);

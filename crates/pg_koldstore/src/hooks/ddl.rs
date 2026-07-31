@@ -337,7 +337,6 @@ fn ensure_initial_management(
         None,
         None,
         None,
-        "strict",
         true,
         None,
     );

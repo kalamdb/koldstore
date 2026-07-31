@@ -7,9 +7,9 @@
 
 use koldstore_common::{PrimaryKeyColumnShape, PrimaryKeyShape, SqlStatement};
 use koldstore_mirror::{
-    mirror_relation_for_source as storage_mirror_relation_for_source,
-    plan_mirror_pk_guard, plan_mirror_schema_with_order_key, statement::mirror_to_sql,
-    MirrorPkGuardPlan, MirrorStatement,
+    mirror_relation_for_source as storage_mirror_relation_for_source, plan_mirror_pk_guard,
+    plan_mirror_schema_with_order_key, statement::mirror_to_sql, MirrorPkGuardPlan,
+    MirrorStatement,
 };
 
 use crate::QualifiedTableName;

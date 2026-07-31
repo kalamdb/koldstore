@@ -713,5 +713,4 @@ mod tests {
             Some(MigrationStatus::MirrorInitializing)
         );
     }
-
 }

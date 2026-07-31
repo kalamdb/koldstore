@@ -176,39 +176,29 @@ struct FlushMetrics {
 enum StorageSide {
     /// Plain PostgreSQL heap only (`postgres_only` column).
     Pg,
-    /// Managed table with async mirror capture.
+    /// Managed table with WAL-only mirror capture.
     Async,
-    /// Managed table with strict (trigger) mirror capture.
-    Strict,
     /// Interleaved baseline + managed on one server (smoke only).
     Combined,
 }
 
-fn parse_storage_side(mirror_capture_mode: &str) -> Result<StorageSide> {
+fn parse_storage_side() -> Result<StorageSide> {
     let raw = std::env::var("KOLDSTORE_STORAGE_SIDE").unwrap_or_else(|_| "combined".to_string());
     match raw.as_str() {
         "pg" | "postgres" | "baseline" => Ok(StorageSide::Pg),
         "async" => Ok(StorageSide::Async),
-        "strict" => Ok(StorageSide::Strict),
-        "combined" | "both" => {
-            anyhow::ensure!(
-                matches!(mirror_capture_mode, "strict" | "async"),
-                "combined side requires KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE=strict|async"
-            );
-            Ok(StorageSide::Combined)
-        }
+        "combined" | "both" => Ok(StorageSide::Combined),
         other => {
-            anyhow::bail!("KOLDSTORE_STORAGE_SIDE must be pg|async|strict|combined (got {other})")
+            anyhow::bail!("KOLDSTORE_STORAGE_SIDE must be pg|async|combined (got {other})")
         }
     }
 }
 
-fn side_mode_label(side: StorageSide, combined_mode: &str) -> &str {
+fn side_mode_label(side: StorageSide) -> &'static str {
     match side {
         StorageSide::Pg => "pg",
         StorageSide::Async => "async",
-        StorageSide::Strict => "strict",
-        StorageSide::Combined => combined_mode,
+        StorageSide::Combined => "combined",
     }
 }
 
@@ -225,13 +215,9 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
     )
     .clamp(1, rows);
     let warmup_rows = resolve_warmup_rows(rows, insert_batch_rows);
-    let mirror_capture_mode = std::env::var("KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE")
-        .unwrap_or_else(|_| "strict".to_string());
-    anyhow::ensure!(
-        matches!(mirror_capture_mode.as_str(), "strict" | "async"),
-        "KOLDSTORE_STORAGE_MIRROR_CAPTURE_MODE must be strict or async"
-    );
-    let side = parse_storage_side(&mirror_capture_mode)?;
+    // Capture is always WAL-only; keep the label for JSON/notes compatibility.
+    let mirror_capture_mode = "async".to_string();
+    let side = parse_storage_side()?;
     let max_rows_per_file = env_i64(
         "KOLDSTORE_STORAGE_MAX_ROWS_PER_FILE",
         (rows / 10).max(1_000),
@@ -265,7 +251,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
 
     common::log_always(format!(
         "storage_cmp: side={} rows={} hot_limit={} dml_sample={} insert_batch_rows={} warmup_rows={} max_rows_per_flush={}",
-        side_mode_label(side, &mirror_capture_mode),
+        side_mode_label(side),
         rows,
         hot_limit,
         dml_sample,
@@ -292,12 +278,8 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
             )
             .await
         }
-        StorageSide::Async | StorageSide::Strict => {
-            let mode = match side {
-                StorageSide::Async => "async",
-                StorageSide::Strict => "strict",
-                _ => unreachable!(),
-            };
+        StorageSide::Async => {
+            let mode = "async";
             let table = format!("{}_managed", db.schema);
             let relation = format!("{}.{}", db.schema, table);
             apply_schema_sql(&db.client, &db.schema, &table).await?;
@@ -1200,7 +1182,7 @@ async fn manage_with_hot_limit(
     min_flush_rows: i64,
     max_rows_per_file: i64,
     max_rows_per_flush: i64,
-    mirror_capture_mode: &str,
+    _mirror_capture_mode: &str,
 ) -> Result<()> {
     // auto_flush=false so background DB-worker waves don't steal the timed
     // flush_table measurement (and leave rows_flushed=0 at the explicit call).
@@ -1224,7 +1206,6 @@ async fn manage_with_hot_limit(
                 &hot_row_limit,
                 &min_flush_rows,
                 &max_rows_per_file,
-                &mirror_capture_mode,
             ],
         )
         .await
@@ -2328,7 +2309,7 @@ fn build_comparison_report(
         ));
     }
     notes.push(
-        "† Strict DML updates the change-log mirror in the foreground. Async DML records heap WAL in the foreground and catch-up rows are reported separately.".to_string(),
+        "† DML records heap WAL in the foreground; catch-up rows are reported separately after apply.".to_string(),
     );
     if warmup_rows > 0 {
         notes.push(format!(

@@ -18,8 +18,8 @@ pub mod sql;
 // Stable top-level paths used across the workspace.
 pub use config::privileges;
 pub use domain::{
-    column, filter, object_keys, pk, row, scope, segment_paths, seq, snowflake,
-    storage_id, table_kind, table_name,
+    column, filter, object_keys, pk, row, scope, segment_paths, seq, snowflake, storage_id,
+    table_kind, table_name,
 };
 pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 

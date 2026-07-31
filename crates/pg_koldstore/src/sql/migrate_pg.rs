@@ -222,9 +222,10 @@ fn manage_table_pg_impl(
         order_column_name,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    let activation_lsn = pgrx::Spi::get_one::<String>("SELECT pg_catalog.pg_current_wal_insert_lsn()::text")
-        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"))
-        .unwrap_or_else(|| pgrx::error!("migrate table failed: missing activation LSN"));
+    let activation_lsn =
+        pgrx::Spi::get_one::<String>("SELECT pg_catalog.pg_current_wal_insert_lsn()::text")
+            .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"))
+            .unwrap_or_else(|| pgrx::error!("migrate table failed: missing activation LSN"));
     register_schema_version(SchemaRegistrationInput {
         table_oid: table_oid_u32,
         table_type,

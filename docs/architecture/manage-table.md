@@ -294,7 +294,6 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
   "compression": "zstd",
   "backfill_batch_size": 10000,
   "allow_fk_hot_only": true,
-  "mirror_capture_mode": "async",
   "migration_status": "active",
   "scope_column_id": 3,
   "cold_metadata": {
@@ -313,8 +312,8 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
 
 `FlushPolicy` is read back with `FlushPolicy::from_value(&options)` — not a
 separate column. Flat `hot_row_limit` keys are not accepted; only tagged
-`flush_policy` is authoritative. `mirror_capture_mode` is present only for async
-mode; a missing value means the strict default.
+`flush_policy` is authoritative. Capture is always WAL-only; there is no
+`mirror_capture_mode` option.
 
 User-scoped tables also persist `scope_column_id` in `options`. It is the stable
 source attnum used to authorize scope segment pruning; `scope_column` remains

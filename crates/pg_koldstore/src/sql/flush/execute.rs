@@ -597,14 +597,14 @@ fn flush_prepared_table(
                 total_rows_flushed,
                 total_batches,
                 last_max_seq,
-                    );
+            );
         }
         report_progress(
             flush_phase::SELECTING,
             total_rows_flushed,
             total_batches,
             last_max_seq,
-            )?;
+        )?;
         let selection = resolve_flush_stats(table_oid, ctx.force)?;
         crate::failpoints::hit("after_select_rows")?;
         // Re-check after the select barrier so peer cancel/DROP can stop work
@@ -617,7 +617,7 @@ fn flush_prepared_table(
                 total_rows_flushed,
                 total_batches,
                 last_max_seq,
-                    );
+            );
         }
         if !should_start_catchup_wave(
             catchup_upto_seq,
@@ -641,7 +641,7 @@ fn flush_prepared_table(
             total_rows_flushed,
             total_batches,
             last_max_seq,
-            )?;
+        )?;
         let outcome = stream_write_flush_batches(table_oid, ctx, &selection, &client)?;
         let wave_batches =
             i32::try_from(outcome.pending_segment_ids.len()).map_err(|error| error.to_string())?;
@@ -655,14 +655,14 @@ fn flush_prepared_table(
                 total_rows_flushed,
                 total_batches,
                 last_max_seq,
-                    );
+            );
         }
         report_progress(
             flush_phase::ACTIVATING,
             total_rows_flushed,
             total_batches,
             last_max_seq,
-            )?;
+        )?;
         finalize_flush(table_oid, ctx, &outcome, &client, skip_through)?;
         // Later waves have no async phase-0 boundary to skip through.
         skip_through = None;
@@ -680,7 +680,7 @@ fn flush_prepared_table(
             total_rows_flushed,
             total_batches,
             last_max_seq,
-            )?;
+        )?;
 
         // Policy and force waves are both row-capped; keep draining the pinned
         // start-of-job watermark (not rows applied during this flush).
@@ -718,7 +718,7 @@ fn finish_flush_after_cancel(
             table_oid,
             total_rows_flushed,
             last_max_seq,
-                total_batches,
+            total_batches,
         )?;
     } else {
         mark_flush_job_cancelled(job_id, table_oid)?;

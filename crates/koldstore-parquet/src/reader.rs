@@ -93,7 +93,6 @@ impl ParquetReadOptions {
         self
     }
 
-
     /// Adds PK may-contain values for bloom/exact pruning.
     #[must_use]
     pub fn with_pk_values<I, S>(mut self, column: impl Into<String>, values: I) -> Self
@@ -116,7 +115,6 @@ pub struct SeqRange {
     pub min: SeqId,
     pub max: SeqId,
 }
-
 
 /// PK values for pruning.
 #[derive(Debug, Clone, PartialEq, Eq)]

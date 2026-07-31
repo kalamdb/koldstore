@@ -6,7 +6,6 @@ cd "$ROOT_DIR"
 
 PG_VERSION="${KOLDSTORE_STRESS_PGVERSION:-${KOLDSTORE_E2E_PGVERSION:-16}}"
 PREPARE_ONLY="${KOLDSTORE_STRESS_PREPARE_ONLY:-0}"
-MIRROR_CAPTURE_MODE="${KOLDSTORE_STRESS_MIRROR_MODE:-${KOLDSTORE_E2E_MIRROR_CAPTURE_MODE:-strict}}"
 PACKS="${KOLDSTORE_STRESS_PACKS:-chat}"
 
 usage() {
@@ -14,12 +13,13 @@ usage() {
 Run the KoldStore chat penetration stress soak (manual / CI).
 
 Usage:
-  scripts/run-chat-penetration.sh [--mode <strict|async>] [--packs <list>]
+  scripts/run-chat-penetration.sh [--packs <list>]
 
 Options:
-  --mode strict|async   Mirror capture mode (default: strict; async pack forces async)
   --packs list          Comma-separated packs (default: chat)
                         v1: chat,cold_dml,multi_table,joins,async
+
+Capture is always WAL-only committed-WAL apply.
 
 Environment (selected):
   KOLDSTORE_STRESS_RUN=1            Set by this script before nextest
@@ -42,7 +42,7 @@ Cold storage: <repo>/tmp/chat_penetration/ (cleared before each run)
 Examples:
   scripts/run-chat-penetration.sh
   KOLDSTORE_STRESS_SOAK_SECONDS=30 scripts/run-chat-penetration.sh --packs chat,cold_dml
-  scripts/run-chat-penetration.sh --packs chat,cold_dml,multi_table,joins --mode async
+  scripts/run-chat-penetration.sh --packs chat,cold_dml,multi_table,joins
 EOF
 }
 
@@ -51,19 +51,6 @@ while [[ $# -gt 0 ]]; do
     -h|--help|help)
       usage
       exit 0
-      ;;
-    --mode)
-      if [[ $# -lt 2 ]]; then
-        echo "error: --mode requires strict or async" >&2
-        usage >&2
-        exit 2
-      fi
-      MIRROR_CAPTURE_MODE="$2"
-      shift 2
-      ;;
-    --mode=*)
-      MIRROR_CAPTURE_MODE="${1#*=}"
-      shift
       ;;
     --packs)
       if [[ $# -lt 2 ]]; then
@@ -91,29 +78,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# async pack implies async mirror mode for prepare + manage_table.
-if [[ ",${PACKS}," == *",async,"* ]]; then
-  MIRROR_CAPTURE_MODE="async"
-fi
-
-if [[ "${MIRROR_CAPTURE_MODE}" != "strict" && "${MIRROR_CAPTURE_MODE}" != "async" ]]; then
-  echo "error: invalid --mode '${MIRROR_CAPTURE_MODE}'; expected strict or async" >&2
-  exit 2
-fi
-
 export KOLDSTORE_STRESS_PACKS="${PACKS}"
-export KOLDSTORE_STRESS_MIRROR_MODE="${MIRROR_CAPTURE_MODE}"
-export KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="${MIRROR_CAPTURE_MODE}"
 
-echo "preparing pgrx PostgreSQL ${PG_VERSION} for chat penetration (--mode ${MIRROR_CAPTURE_MODE}, packs=${PACKS})"
+echo "preparing pgrx PostgreSQL ${PG_VERSION} for chat penetration (packs=${PACKS})"
 E2E_ENV_FILE="${KOLDSTORE_E2E_ENV_FILE:-$ROOT_DIR/.e2e-env}"
 KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \
   KOLDSTORE_E2E_PREPARE_ONLY=1 \
-  KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="${MIRROR_CAPTURE_MODE}" \
-  scripts/run-pg-e2e.sh "${PG_VERSION}" --mode "${MIRROR_CAPTURE_MODE}"
+  scripts/run-pg-e2e.sh "${PG_VERSION}"
 # shellcheck disable=SC1090
 source "${E2E_ENV_FILE}"
-export KOLDSTORE_E2E_MIRROR_CAPTURE_MODE="${MIRROR_CAPTURE_MODE}"
 
 if [[ "${PREPARE_ONLY}" == "1" || "${PREPARE_ONLY}" == "true" ]]; then
   echo "stress database is ready (prepare-only; skipping soak)"
@@ -125,8 +98,8 @@ if ! cargo nextest --version >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "running chat penetration soak (packs=${PACKS}, mode=${MIRROR_CAPTURE_MODE})"
+echo "running chat penetration soak (packs=${PACKS})"
 export KOLDSTORE_STRESS_RUN=1
 cargo nextest run -p stress --test chat_penetration --no-capture
 
-echo "chat penetration passed (packs=${PACKS}, mode=${MIRROR_CAPTURE_MODE})"
+echo "chat penetration passed (packs=${PACKS})"
