@@ -170,15 +170,27 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
              );",
         )
         .await?;
+    // Seed and manage in separate simple-Query batches. A single batch_execute
+    // runs as one implicit transaction, and async slot provisioning refuses to
+    // run after the current XID has already written.
     let seed_sql = format!(
         "INSERT INTO bench.heap_items
             SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
          INSERT INTO bench.koldstore_items
-            SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;
-         SELECT koldstore.manage_table(table_name => 'bench.koldstore_items'::regclass, storage => 'bench-local', hot_row_limit => NULL, migration_order_by => 'id');",
+            SELECT g, 'payload-' || g::text, g FROM generate_series(1, {rows}) g;",
         rows = config.rows,
     );
     client.batch_execute(&seed_sql).await?;
+    client
+        .batch_execute(
+            "SELECT koldstore.manage_table(
+                table_name => 'bench.koldstore_items'::regclass,
+                storage => 'bench-local',
+                hot_row_limit => NULL,
+                migration_order_by => 'id'
+            );",
+        )
+        .await?;
 
     let version = client
         .query_one("SHOW server_version", &[])
