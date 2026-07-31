@@ -317,15 +317,45 @@ ALTER TABLE messages SET (
 INSERT INTO messages (id, body)
 SELECT gs, 'row ' || gs FROM generate_series(1, 1012) AS gs;
 
+-- Fence so the WAL applier has assigned authoritative mirror seq values.
+SELECT koldstore.wait_for_async_mirror();
+
+-- Change feed: exclusive seq cursor over hot mirror + cold Parquet metadata.
+-- One row per primary key; op is 1=insert, 2=update, 3=delete.
+-- Page with LIMIT and advance since_seq from the highest seq you consumed.
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since(
+  table_name => 'messages'::regclass,
+  since_seq  => 0,
+  limit_rows => 100
+);
+
+-- Or rewind to the newest N changes (KalamDB last_rows); delivered oldest→newest.
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since(
+  table_name => 'messages'::regclass,
+  since_seq  => 0,
+  limit_rows => 1000,
+  last_rows  => 50
+);
+
 -- Optional: run a policy flush now. Otherwise the built-in worker auto-flushes
 -- when hot rows exceed hot_row_limit.
 SELECT koldstore.flush_table(table_name => 'messages'::regclass);
+
+-- After flush, the same cursor still returns flushed latest-state from cold.
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since('messages'::regclass, 0, 100);
 
 SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 SELECT jsonb_pretty(koldstore.describe_table(table_name => 'messages'::regclass));
 ```
 
-Mirror inspection, job UUIDs, `EXPLAIN`, shared/user tables, and storage backends: [docs/quickstart.md](docs/quickstart.md).
+`since_seq = 0` means from the start of retained history. A positive cursor older
+than the retained cold/hot floor raises a retention-gap error. Mirror inspection,
+job UUIDs, `EXPLAIN`, shared/user tables, and storage backends:
+[docs/quickstart.md](docs/quickstart.md) · [SQL API](docs/sql-api.md) ·
+[Change API](docs/roadmap.md#change-api-changes_since).
 
 Auto-flush runs on the built-in database worker (`koldstore.flush_check_interval_seconds`). To control flushes yourself (for example with `pg_cron`), disable it with `SELECT koldstore.set_table_auto_flush('messages'::regclass, false)` and schedule `koldstore.flush_table`: [docs/operations/scheduling.md](docs/operations/scheduling.md).
 
@@ -357,7 +387,7 @@ Full list: [docs/limitations.md](docs/limitations.md).
 Priority after the 0.1 hot/cold baseline:
 
 1. **Scoped storage** — store each `scope_column` value under its own cold folder (`{namespace}/{table}/{scopeId}/…`), so tenant/user data stays physically separated and easier to prune, backup, or delete independently
-2. **Change API** — public `changes_since` / change-cursor SQL for a table (and scope) since a last-seen seq, built for real-time sync and catch-up consumers
+2. **Change API** — shipped: `koldstore.changes_since` merges hot `__cl` + cold Parquet latest-state by `seq`; next: scoped cursors polish and payload projection options
 3. **Compaction** — combine small cold segments into larger files to cut object-store chatter and improve scan efficiency
 4. **Backup / export** — first-class dump and restore that understands KoldStore: coordinated PostgreSQL + cold-object backups, and table/scope archive export/import of managed hot+cold data
 

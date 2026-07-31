@@ -87,6 +87,28 @@ pgrx_postmaster_alive() {
   kill -0 "${pid}" 2>/dev/null
 }
 
+# Remove a version's data directory after a successful force-stop.
+# The next `cargo pgrx start` re-runs initdb so each storage-comparison side
+# starts from an empty cluster (not just DROP DATABASE on a dirty data dir).
+pgrx_wipe_data() {
+  local ver="$1"
+  local data_dir
+  data_dir="$(pgrx_data_dir "${ver}")"
+  local home
+  home="$(pgrx_home)"
+  local port="${KOLDSTORE_E2E_PGPORT:-288${ver}}"
+
+  if pgrx_postmaster_alive "${data_dir}" || pgrx_port_in_use "${port}"; then
+    echo "error: refusing to wipe data-${ver}: PostgreSQL ${ver} is still running" >&2
+    return 1
+  fi
+  if [[ -d "${data_dir}" ]]; then
+    echo "wiping pgrx data directory ${data_dir}"
+    rm -rf "${data_dir}"
+  fi
+  rm -f "${home}/.s.PGSQL.${port}" "${home}/.s.PGSQL.${port}.lock" 2>/dev/null || true
+}
+
 # Stop a pgrx cluster hard enough that the next start is not racing a dying postmaster.
 pgrx_force_stop() {
   local ver="$1"

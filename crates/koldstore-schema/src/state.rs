@@ -40,8 +40,7 @@ impl MirrorInitializationState {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "not_started" => Some(Self::NotStarted),
-            // Legacy spelling from trigger-bootstrap activation.
-            "capturing" | "backfilling" => Some(Self::Backfilling),
+            "backfilling" => Some(Self::Backfilling),
             "catching_up" => Some(Self::CatchingUp),
             "complete" => Some(Self::Complete),
             "failed" => Some(Self::Failed),

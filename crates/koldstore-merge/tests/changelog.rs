@@ -1,5 +1,5 @@
 use koldstore_common::{ChangeSource, LogicalPk, MirrorChange, MirrorOperation, PkColumn, SeqId};
-use koldstore_merge::{changes_since, ChangeCursor};
+use koldstore_merge::{changes_last, changes_since, ChangeCursor};
 use serde_json::json;
 
 #[test]
@@ -44,6 +44,16 @@ fn changelog_orders_by_mirror_seq_and_reports_retention_gap() {
         },
         Some(SeqId::new(2).unwrap())
     )
+    .is_ok());
+
+    assert!(changes_since(
+        &changes,
+        ChangeCursor {
+            since_seq: 1,
+            limit: 10
+        },
+        Some(SeqId::new(3).unwrap())
+    )
     .is_err());
 }
 
@@ -82,4 +92,37 @@ fn changelog_returns_latest_state_per_primary_key() {
     assert_eq!(result[0].seq.get(), 5);
     assert_eq!(result[0].operation, MirrorOperation::Delete);
     assert!(result[0].deleted);
+}
+
+#[test]
+fn changelog_last_rows_returns_newest_n_in_ascending_order() {
+    let columns = vec![PkColumn::new("id").unwrap()];
+    let change = |id, seq| MirrorChange {
+        table_oid: 1,
+        scope_key: None,
+        pk_json: LogicalPk::from_json_object(&json!({"id": id}), &columns)
+            .unwrap()
+            .to_canonical_json(),
+        operation: MirrorOperation::Insert,
+        seq: SeqId::new(seq).unwrap(),
+        deleted: false,
+        row_image_json: None,
+        source: ChangeSource::HotMirror,
+    };
+
+    let changes = vec![
+        change(1, 10),
+        change(2, 20),
+        change(3, 30),
+        change(4, 40),
+        change(5, 50),
+    ];
+    let result = changes_last(&changes, 3);
+    assert_eq!(
+        result
+            .iter()
+            .map(|row| (row.pk_json["id"].as_i64().unwrap(), row.seq.get()))
+            .collect::<Vec<_>>(),
+        vec![(3, 30), (4, 40), (5, 50)]
+    );
 }

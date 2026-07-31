@@ -19,14 +19,11 @@ setup vs B-tree) is the main read-path focus.
 
 ## Success Criteria
 
-- SC-002a: async foreground hot UPDATE throughput for small statements remains
+- SC-002a: managed foreground hot UPDATE throughput for small statements remains
   within 10 percent of a regular heap table under the same isolated workload.
-- SC-002b: async sustainable UPDATE throughput is measured with the worker on;
+- SC-002b: sustainable UPDATE throughput is measured with the WAL applier on;
   at the supported rate, backlog must remain bounded and drain within the
   documented SLO after load stops.
-- SC-002c: strict hot UPDATE may cost up to 2x the regular heap baseline because
-  the mirror is updated transactionally. This is an explicit consistency cost,
-  not a PostgreSQL-parity claim.
 - SC-006: PK point lookups skip at least 90 percent of cold row groups.
 
 ## Priority order (accepted direction)
@@ -34,9 +31,9 @@ setup vs B-tree) is the main read-path focus.
 1. **Cold PK point lookups** — backend Parquet footer/reader cache; cold-native
    emit that skips the JSON merge path when a PK equality hits cold only.
    Dominates the hot+cold ops/s gap after flush.
-2. **Managed mirror DML** — statement-level capture with NEW-only UPDATE,
-   direct mirror updates, and adaptive INSERT (`ON CONFLICT` / `MERGE`). Landed;
-   index-layout and native-capture follow-ups stay gated.
+2. **Managed mirror DML** — WAL-only capture keeps foreground DML on the heap;
+   the applier maintains the latest-state mirror. Landed; index-layout and
+   apply-batch follow-ups stay gated.
 3. **Footer-derived packed catalog stats** — implemented. Finalized footer
    metadata supplies scalar segment bounds and aligned row-group arrays, so
    flush no longer computes JSON min/max per cell. PostgreSQL performs scalar

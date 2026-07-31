@@ -480,7 +480,7 @@ pub(super) fn prune_flushed_hot_rows(
     // DELETE instead of materializing every PK into JSON and chunking
     // jsonb_to_recordset deletes.
     let plan = prepare_seq_range_cleanup(table_oid, primary_key_columns, mirror_ops)?;
-    execute_seq_range_cleanup(&plan, max_seq, true)
+    execute_seq_range_cleanup(&plan, max_seq)
 }
 
 fn prepare_seq_range_cleanup(
@@ -501,7 +501,6 @@ fn prepare_seq_range_cleanup(
 fn execute_seq_range_cleanup(
     plan: &koldstore_flush::CleanSchemaCleanupPlan,
     max_seq: i64,
-    stamp_replication_origin: bool,
 ) -> Result<(i64, i64), String> {
     use pgrx::datum::DatumWithOid;
 
@@ -511,13 +510,10 @@ fn execute_seq_range_cleanup(
             client
                 .update("SET LOCAL session_replication_role = replica", None, &[])
                 .map_err(|error| error.to_string())?;
-            if stamp_replication_origin {
-                // Keep the database-scoped origin set through COMMIT. pgoutput
-                // emits ORIGIN from the commit record's origin; restoring before
-                // commit leaves PG15 prune DELETEs without an ORIGIN message.
-                // Strict capture has no logical stream and must not acquire one.
-                arm_flush_replication_origin()?;
-            }
+            // Keep the database-scoped origin set through COMMIT. pgoutput
+            // emits ORIGIN from the commit record's origin; restoring before
+            // commit leaves PG15 prune DELETEs without an ORIGIN message.
+            arm_flush_replication_origin()?;
             let tuples = client
                 .update(&plan.statement.sql, None, &cleanup_arg)
                 .map_err(|error| error.to_string())?;

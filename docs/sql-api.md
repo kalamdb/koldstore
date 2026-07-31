@@ -608,10 +608,42 @@ the extension (tracked: https://github.com/kalamdb/koldstore/issues/55):
 
 ## Changes and Operations
 
+### `koldstore.changes_since`
+
+```sql
+-- Resume from an exclusive last-seen cursor (KalamDB `from` / `from_seq_id`).
+SELECT seq, op, pk, deleted, row_image, source
+FROM koldstore.changes_since(
+  table_name => 'messages'::regclass,
+  since_seq  => 0,
+  limit_rows => 1000
+);
+
+-- Newest-N rewind (KalamDB `last_rows`); delivered oldest→newest.
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since(
+  table_name => 'messages'::regclass,
+  since_seq  => 0,
+  limit_rows => 1000,
+  last_rows  => 100
+);
+```
+
+Returns latest-state changes ordered by `seq`, merging the hot `__cl` mirror and
+flushed cold Parquet metadata. Modes match KalamDB live subscribe options:
+
+| Mode | Args | Behavior |
+|------|------|----------|
+| Resume | `since_seq > 0` | exclusive `seq > since_seq`, ASC, capped by `limit_rows`; **`last_rows` ignored** |
+| Rewind | `since_seq = 0` + `last_rows` | newest N retained changes, ASC after rewind; no older pages |
+| From start | `since_seq = 0`, no `last_rows` | from start of retained history, ASC, `limit_rows` |
+
+`last_rows` must be `<= limit_rows`. A positive `since_seq` older than the
+retained floor raises a retention-gap error. `source` is `hot` or `cold`.
+
 The following operator SQL functions are planned but not yet exposed by the
 extension (tracked: https://github.com/kalamdb/koldstore/issues/56):
 
-- `koldstore.changes_since(...)`
 - `koldstore.backup_manifest(...)`
 - `koldstore.validate_cold_storage(...)`
 - `koldstore_exec('EXPORT TABLE ...')` — `IMPORT TABLE` remains rejected until

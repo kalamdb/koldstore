@@ -41,47 +41,43 @@ it end-to-end.
 
 ## Change API (`changes_since`)
 
-Managing a table already creates a **latest-state change-log mirror**
+Managing a table creates a **latest-state change-log mirror**
 (`koldstore.<table>__cl`): one row per primary key with a monotonic `seq` and
-`op` (`INSERT` / `UPDATE` / `DELETE`). Capture triggers are installed at
-`manage_table` so flush can cut by `seq` and scans know which keys are still
+`op` (`INSERT` / `UPDATE` / `DELETE`). Committed WAL is applied by the async
+mirror worker so flush can cut by `seq` and scans know which keys are still
 hot. The mirror is not an append-only history of every intermediate update (a
 later `UPDATE` overwrites the previous mirror row for that PK).
 
-That mirror is the foundation for incremental sync / real-time catch-up without
-a separate CDC stack. Planned SQL surface:
+Shipped SQL surface (KalamDB subscribe-compatible):
 
 ```sql
-SELECT *
+-- Resume (from / from_seq_id)
+SELECT seq, op, pk, deleted, row_image, source
 FROM koldstore.changes_since(
   table_name => 'app.messages',
   since_seq  => 332882280164896768,
   limit_rows => 1000
 );
+
+-- Newest-N rewind (last_rows); delivered oldest→newest
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since(
+  table_name => 'app.messages',
+  since_seq  => 0,
+  limit_rows => 1000,
+  last_rows  => 100
+);
 ```
 
-For user-scoped tables, the cursor is filtered to the active scope (session
-`koldstore.user_id` / `scope_column` value). That returns the latest state per
-primary key with `seq > since_seq` (including deletes), ordered by `seq`. The
-merge library already implements the cursor logic; the public SQL function is
-not exposed yet.
+Precedence matches KalamDB: when `since_seq > 0`, resume mode wins and
+`last_rows` is ignored. Otherwise `last_rows` rewinds to the newest N retained
+changes. `since_seq = 0` with no `last_rows` means from the start of retained
+history. A positive cursor older than the retained floor raises a retention-gap
+error.
 
-Until then you can inspect the hot mirror directly for keys still in the hot
-working set:
-
-```sql
-SELECT id, seq, op
-FROM koldstore.messages__cl
-WHERE seq > 332882280164896768
-ORDER BY seq
-LIMIT 1000;
-```
-
-Note: today’s `__cl` mirror is **latest-state**, not an append-only WAL.
+Note: today’s feed is **latest-state**, not an append-only WAL.
 `changes_since` targets “catch me up to current state since this cursor,” not
-full temporal audit replay. Cold-flushed keys are represented through
-flush/manifest metadata; the public cursor API will document how hot + cold
-changes are unified.
+full temporal audit replay.
 
 ## Compaction
 

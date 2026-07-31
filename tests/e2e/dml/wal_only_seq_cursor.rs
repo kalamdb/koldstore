@@ -1,12 +1,16 @@
 //! WAL-only seq cursor coverage for issue #71.
 //!
-//! Focused activation, commit-order seq assignment, changes_since pagination,
-//! watermark continuity across worker restart, and flush cursor continuity.
+//! Focused activation, commit-order seq assignment, `koldstore.changes_since`
+//! pagination (hot + cold), watermark continuity across worker restart, and
+//! flush cursor continuity.
 
 use crate::common;
 use crate::flush::harness::connect_peer;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use koldstore_common::QualifiedTableName;
+use koldstore_merge::events;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 #[tokio::test]
@@ -406,6 +410,684 @@ async fn populated_activation_under_concurrent_dml_is_gap_free() -> Result<()> {
         unmanage(&db.client, &relation).await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn changes_since_hot_mirror_index_scan_for_seq_pagination() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_changes_since_idx").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_idx", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+        let seq_index = format!("{table_name}__cl_seq_idx");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        manage_table(&db.client, &relation, &db.storage_name).await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} SELECT id, 'row-' || id FROM generate_series(1, 5000) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, 5000).await?;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        let indexes: Vec<String> = db
+            .client
+            .query(
+                "SELECT indexname::text FROM pg_indexes \
+                 WHERE schemaname = 'koldstore' AND tablename = $1 \
+                 ORDER BY indexname",
+                &[&format!("{table_name}__cl")],
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert!(
+            indexes.iter().any(|name| name == &seq_index),
+            "expected {seq_index} among {indexes:?}"
+        );
+        assert!(
+            indexes
+                .iter()
+                .any(|name| name == &format!("{table_name}__cl_tombstone_seq_idx")),
+            "expected tombstone seq index among {indexes:?}"
+        );
+
+        let plan = common::explain_with_seqscan_disabled(
+            &db.client,
+            &format!("SELECT id, seq, op FROM {mirror} WHERE seq > 0 ORDER BY seq ASC LIMIT 100"),
+        )
+        .await?;
+        common::assert_index_scan(&plan, &seq_index)?;
+
+        let mirror_qtn = QualifiedTableName::parse(&mirror)?;
+        let planned = events::plan_mirror_changes_since(&mirror_qtn, &["id".to_string()], None)?;
+        assert!(
+            planned
+                .statement
+                .sql
+                .contains("mirror.\"seq\" > $1::bigint"),
+            "planned feed SQL must use exclusive seq cursor"
+        );
+        assert!(
+            planned
+                .statement
+                .sql
+                .contains("ORDER BY mirror.\"seq\" ASC"),
+            "planned feed SQL must order by seq"
+        );
+        assert!(
+            !planned.statement.sql.contains("row_events"),
+            "planned feed SQL must not touch legacy row_events"
+        );
+        let planned_explain_sql = planned
+            .statement
+            .sql
+            .replace("$1::bigint", "0")
+            .replace("$3::integer", "100");
+        let planned_plan =
+            common::explain_with_seqscan_disabled(&db.client, &planned_explain_sql).await?;
+        common::assert_index_scan(&planned_plan, &seq_index)?;
+
+        let page = page_changes_since(&db.client, &mirror, 0, 100).await?;
+        assert_eq!(page.len(), 100);
+        assert!(page.windows(2).all(|w| w[0].seq < w[1].seq));
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn changes_since_pagination_no_skip_or_dup_under_concurrent_dml() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_changes_since_race").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_race", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        manage_table(&db.client, &relation, &db.storage_name).await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} SELECT id, 'seed-' || id FROM generate_series(1, 100) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, 100).await?;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        let peer = connect_peer(&db).await?;
+        let writer = tokio::spawn({
+            let relation = relation.clone();
+            async move {
+                for id in 101_i64..=300 {
+                    peer.execute(
+                        &format!("INSERT INTO {relation} (id, body) VALUES ($1, $2)"),
+                        &[&id, &format!("live-{id}")],
+                    )
+                    .await?;
+                    if id % 7 == 0 {
+                        let target = id - 50;
+                        if target >= 1 {
+                            peer.execute(
+                                &format!("UPDATE {relation} SET body = $2 WHERE id = $1"),
+                                &[&target, &format!("bump-{target}")],
+                            )
+                            .await?;
+                        }
+                    }
+                    if id % 11 == 0 {
+                        let target = id - 30;
+                        if (1..=100).contains(&target) {
+                            peer.execute(
+                                &format!("DELETE FROM {relation} WHERE id = $1"),
+                                &[&target],
+                            )
+                            .await?;
+                            peer.execute(
+                                &format!("INSERT INTO {relation} (id, body) VALUES ($1, $2)"),
+                                &[&target, &format!("revive-{target}")],
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            }
+        });
+
+        let mut observed: BTreeMap<i64, (i64, i16)> = BTreeMap::new();
+        let mut last_seq = 0_i64;
+        loop {
+            let page = page_changes_since(&db.client, &mirror, last_seq, 17).await?;
+            if page.is_empty() {
+                if writer.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let _ = common::wait_for_async_mirror(&db.client).await?;
+                continue;
+            }
+            for row in page {
+                assert!(
+                    row.seq > last_seq,
+                    "exclusive seq cursor must advance: got {} after {}",
+                    row.seq,
+                    last_seq
+                );
+                last_seq = row.seq;
+                observed.insert(row.id, (row.seq, row.op));
+            }
+        }
+        writer.await??;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        // Drain anything applied after the reader observed an empty page.
+        loop {
+            let page = page_changes_since(&db.client, &mirror, last_seq, 17).await?;
+            if page.is_empty() {
+                break;
+            }
+            for row in page {
+                assert!(row.seq > last_seq);
+                last_seq = row.seq;
+                observed.insert(row.id, (row.seq, row.op));
+            }
+        }
+
+        let final_rows = db
+            .client
+            .query(
+                &format!("SELECT id, seq, op FROM {mirror} ORDER BY seq"),
+                &[],
+            )
+            .await?;
+        assert_eq!(
+            observed.len(),
+            final_rows.len(),
+            "paged feed must cover every live latest-state mirror row"
+        );
+        let mut expected_seqs = BTreeSet::new();
+        for row in &final_rows {
+            let id: i64 = row.get(0);
+            let seq: i64 = row.get(1);
+            let op: i16 = row.get(2);
+            expected_seqs.insert(seq);
+            let Some((got_seq, got_op)) = observed.get(&id) else {
+                bail!("missing id={id} from paged changes_since feed");
+            };
+            assert_eq!(*got_seq, seq);
+            assert_eq!(*got_op, op);
+        }
+        let observed_seqs: BTreeSet<_> = observed.values().map(|(seq, _)| *seq).collect();
+        assert_eq!(observed_seqs, expected_seqs);
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn changes_since_includes_delete_revive_and_omits_rollback() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_changes_since_lifecycle").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_life", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        manage_table(&db.client, &relation, &db.storage_name).await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        db.client
+            .execute(
+                &format!("INSERT INTO {relation} VALUES (1, 'v1'), (2, 'keep')"),
+                &[],
+            )
+            .await?;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        db.client
+            .execute(
+                &format!("UPDATE {relation} SET body = 'v2' WHERE id = 1"),
+                &[],
+            )
+            .await?;
+        db.client
+            .execute(&format!("DELETE FROM {relation} WHERE id = 1"), &[])
+            .await?;
+        db.client
+            .execute(
+                &format!("INSERT INTO {relation} VALUES (1, 'revived')"),
+                &[],
+            )
+            .await?;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        let before_rollback = page_all_changes_since(&db.client, &mirror, 0, 10).await?;
+        assert_eq!(
+            before_rollback.len(),
+            2,
+            "latest-state feed is one row per PK"
+        );
+        let by_id: BTreeMap<_, _> = before_rollback
+            .iter()
+            .map(|row| (row.id, row.clone()))
+            .collect();
+        assert_eq!(
+            by_id[&1].op, 1,
+            "revive must surface as insert latest-state"
+        );
+        assert_eq!(by_id[&2].op, 1);
+        assert_ne!(by_id[&1].seq, by_id[&2].seq);
+
+        let cursor = before_rollback.iter().map(|r| r.seq).max().unwrap_or(0);
+        db.client
+            .batch_execute(&format!(
+                r#"
+                BEGIN;
+                UPDATE {relation} SET body = 'rolled-back' WHERE id = 2;
+                DELETE FROM {relation} WHERE id = 1;
+                ROLLBACK;
+                "#
+            ))
+            .await?;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        let after_rollback = page_changes_since(&db.client, &mirror, cursor, 100).await?;
+        assert!(
+            after_rollback.is_empty(),
+            "rolled-back mutations must not appear on the change feed, got {after_rollback:?}"
+        );
+        let still = page_all_changes_since(&db.client, &mirror, 0, 10).await?;
+        assert_eq!(still.len(), 2);
+        assert_eq!(still.iter().find(|r| r.id == 1).unwrap().op, 1);
+        assert_eq!(still.iter().find(|r| r.id == 2).unwrap().op, 1);
+
+        // Delete that commits must appear as latest-state tombstone.
+        db.client
+            .execute(&format!("DELETE FROM {relation} WHERE id = 2"), &[])
+            .await?;
+        common::wait_for_async_mirror(&db.client).await?;
+        let with_delete = page_all_changes_since(&db.client, &mirror, 0, 10).await?;
+        assert_eq!(with_delete.len(), 2);
+        assert_eq!(with_delete.iter().find(|r| r.id == 2).unwrap().op, 3);
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn changes_since_varied_limits_cover_all_live_latest_state() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_changes_since_limits").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_lim", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        manage_table(&db.client, &relation, &db.storage_name).await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        const ROWS: i64 = 2500;
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} SELECT id, 'v1-' || id FROM generate_series(1, {ROWS}) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, ROWS).await?;
+        db.client
+            .execute(
+                &format!("UPDATE {relation} SET body = 'v2-' || id WHERE id % 3 = 0"),
+                &[],
+            )
+            .await?;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        for &limit in &[1_i64, 17, 100, 1000] {
+            let pages = page_all_changes_since(&db.client, &mirror, 0, limit).await?;
+            assert_eq!(
+                pages.len() as i64,
+                ROWS,
+                "limit={limit} must still return every latest-state row"
+            );
+            let mut prev_seq = 0_i64;
+            let mut ids = BTreeSet::new();
+            for row in &pages {
+                assert!(row.seq > prev_seq);
+                prev_seq = row.seq;
+                assert!(ids.insert(row.id), "duplicate id={} across pages", row.id);
+            }
+            assert_eq!(ids.len() as i64, ROWS);
+        }
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn changes_since_flush_prune_exposes_retention_floor_not_silent_catchup() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_changes_since_gap").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_gap", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        db.client
+            .execute(
+                r#"
+                SELECT koldstore.manage_table(
+                  table_name => $1::text::regclass,
+                  storage => $2,
+                  hot_row_limit => 1000,
+                  min_flush_rows => 1,
+                  migration_order_by => 'id',
+                  auto_flush => false
+                )
+                "#,
+                &[&relation, &db.storage_name],
+            )
+            .await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} SELECT id, 'pre-' || id FROM generate_series(1, 40) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, 40).await?;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        let pre_flush = db
+            .client
+            .query(
+                "SELECT seq, (pk->>'id')::bigint AS id, op, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 100) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(pre_flush.len(), 40);
+        let flushed_max_seq: i64 = pre_flush
+            .iter()
+            .map(|row| row.get::<_, i64>(0))
+            .max()
+            .unwrap();
+        assert!(pre_flush.iter().all(|row| row.get::<_, String>(3) == "hot"));
+
+        db.client
+            .query_one(
+                "SELECT koldstore.flush_table($1::text::regclass, true)",
+                &[&relation],
+            )
+            .await?;
+
+        let hot_after: i64 = db
+            .client
+            .query_one(&format!("SELECT count(*)::bigint FROM {mirror}"), &[])
+            .await?
+            .get(0);
+        assert_eq!(hot_after, 0, "force flush must prune flushed mirror rows");
+
+        // Packaged API must still return flushed latest-state from cold.
+        let after_flush = db
+            .client
+            .query(
+                "SELECT seq, (pk->>'id')::bigint AS id, op, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 100) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(after_flush.len(), 40);
+        assert!(after_flush
+            .iter()
+            .all(|row| row.get::<_, String>(3) == "cold"));
+        let ids: BTreeSet<i64> = after_flush.iter().map(|row| row.get(1)).collect();
+        assert_eq!(ids.len(), 40);
+
+        let cold_min: i64 = db
+            .client
+            .query_one(
+                "SELECT min(min_seq)::bigint FROM koldstore.cold_segments \
+                 WHERE table_oid = $1::text::regclass AND status = 'active'",
+                &[&relation],
+            )
+            .await?
+            .get(0);
+        assert!(cold_min > 0);
+
+        // A real (non-zero) cursor below the retained floor must error.
+        if cold_min > 2 {
+            let stale = db
+                .client
+                .query(
+                    "SELECT * FROM koldstore.changes_since($1::text::regclass, $2::bigint, 10)",
+                    &[&relation, &(cold_min - 2)],
+                )
+                .await;
+            assert!(
+                stale.is_err(),
+                "stale positive cursor must raise a retention gap"
+            );
+        }
+
+        db.client
+            .execute(
+                &format!("INSERT INTO {relation} VALUES (41, 'post-flush')"),
+                &[],
+            )
+            .await?;
+        common::wait_for_async_mirror(&db.client).await?;
+        let after = db
+            .client
+            .query(
+                "SELECT (pk->>'id')::bigint, seq, source \
+                 FROM koldstore.changes_since($1::text::regclass, $2::bigint, 10) \
+                 ORDER BY seq",
+                &[&relation, &flushed_max_seq],
+            )
+            .await?;
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].get::<_, i64>(0), 41);
+        assert!(after[0].get::<_, i64>(1) > flushed_max_seq);
+        assert_eq!(after[0].get::<_, String>(2), "hot");
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn changes_since_last_rows_rewinds_newest_n_like_kalamdb() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_changes_last_rows").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_last", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        manage_table(&db.client, &relation, &db.storage_name).await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} SELECT id, 'row-' || id FROM generate_series(1, 30) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, 30).await?;
+        common::wait_for_async_mirror(&db.client).await?;
+
+        let last = db
+            .client
+            .query(
+                "SELECT (pk->>'id')::bigint AS id, seq \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 1000, 5) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(last.len(), 5);
+        let ids: Vec<i64> = last.iter().map(|row| row.get(0)).collect();
+        assert_eq!(ids, vec![26, 27, 28, 29, 30]);
+        assert!(
+            last.windows(2)
+                .all(|w| w[0].get::<_, i64>(1) < w[1].get::<_, i64>(1)),
+            "last_rows must be delivered oldest→newest"
+        );
+
+        // Positive since_seq wins over last_rows (KalamDB precedence).
+        let max_seq: i64 = last.last().unwrap().get(1);
+        let resume = db
+            .client
+            .query(
+                "SELECT (pk->>'id')::bigint \
+                 FROM koldstore.changes_since($1::text::regclass, $2::bigint, 1000, 5)",
+                &[&relation, &max_seq],
+            )
+            .await?;
+        assert!(
+            resume.is_empty(),
+            "since_seq > 0 must ignore last_rows and resume exclusively"
+        );
+
+        // Flush then last_rows still sees cold winners.
+        db.client
+            .query_one(
+                "SELECT koldstore.flush_table($1::text::regclass, true)",
+                &[&relation],
+            )
+            .await?;
+        let after_flush = db
+            .client
+            .query(
+                "SELECT (pk->>'id')::bigint, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 1000, 3) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(after_flush.len(), 3);
+        assert_eq!(
+            after_flush
+                .iter()
+                .map(|row| row.get::<_, i64>(0))
+                .collect::<Vec<_>>(),
+            vec![28, 29, 30]
+        );
+        assert!(after_flush
+            .iter()
+            .all(|row| row.get::<_, String>(1) == "cold"));
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChangeRow {
+    id: i64,
+    seq: i64,
+    op: i16,
+}
+
+async fn page_changes_since(
+    client: &tokio_postgres::Client,
+    mirror: &str,
+    since_seq: i64,
+    limit: i64,
+) -> Result<Vec<ChangeRow>> {
+    let rows = client
+        .query(
+            &format!(
+                "SELECT id, seq, op FROM {mirror} \
+                 WHERE seq > $1 ORDER BY seq ASC LIMIT $2"
+            ),
+            &[&since_seq, &limit],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ChangeRow {
+            id: row.get(0),
+            seq: row.get(1),
+            op: row.get(2),
+        })
+        .collect())
+}
+
+async fn page_all_changes_since(
+    client: &tokio_postgres::Client,
+    mirror: &str,
+    since_seq: i64,
+    limit: i64,
+) -> Result<Vec<ChangeRow>> {
+    let mut out = Vec::new();
+    let mut cursor = since_seq;
+    loop {
+        let page = page_changes_since(client, mirror, cursor, limit).await?;
+        if page.is_empty() {
+            break;
+        }
+        for row in page {
+            cursor = row.seq;
+            out.push(row);
+        }
+    }
+    Ok(out)
 }
 
 async fn ensure_publication(client: &tokio_postgres::Client) -> Result<()> {

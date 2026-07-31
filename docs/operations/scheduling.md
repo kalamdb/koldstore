@@ -1,6 +1,6 @@
 # Scheduling flushes
 
-For common shared/strict tables, configure scheduling directly:
+For common shared managed tables, configure scheduling directly:
 
 ```sql
 ALTER TABLE events SET (
@@ -13,9 +13,9 @@ ALTER TABLE events SET (
 ```
 
 Age scheduling uses a bounded probe on the indexed mirror `seq`, never an
-application-table scan. Strict-mode age begins near statement execution;
-async-mode age begins when WAL is applied. Updating a row gives it a newer
-sequence and restarts inactivity. `seq` encodes age, not commit order.
+application-table scan. Row age begins when WAL is applied to the mirror.
+Updating a row gives it a newer sequence and restarts inactivity. `seq`
+encodes age for flush policy, not a public commit-order cursor.
 
 KoldStore includes a built-in flush scheduler on the per-database background
 worker (the same process that applies async mirror WAL). On each

@@ -68,9 +68,10 @@ fn mirror_initialization_state_serializes_as_schema_value() {
     assert_eq!(value, serde_json::json!("backfilling"));
     assert_eq!(MirrorInitializationState::Complete.as_str(), "complete");
     assert_eq!(
-        MirrorInitializationState::parse("capturing"),
+        MirrorInitializationState::parse("backfilling"),
         Some(MirrorInitializationState::Backfilling)
     );
+    assert_eq!(MirrorInitializationState::parse("capturing"), None);
     assert_eq!(
         MirrorInitializationState::parse("catching_up"),
         Some(MirrorInitializationState::CatchingUp)

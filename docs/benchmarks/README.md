@@ -5,8 +5,8 @@ These docs explain what the storage comparison harness measures when older rows
 leave the PostgreSQL heap for Parquet while applications keep querying the same
 table.
 
-**Latest numbers:** [RESULTS.md](RESULTS.md) — columns are PostgreSQL only,
-PG + KoldStore (async), and PG + KoldStore (strict). Refresh with
+**Latest numbers:** [RESULTS.md](RESULTS.md) — columns are PostgreSQL only and
+PG + KoldStore (WAL-only). Refresh with
 `scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results`
 (each sample gets a fresh pgrx PostgreSQL; publication requires a clean tree).
 
@@ -91,19 +91,18 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
   fence. Catch-up rows are therefore part of the result, not optional context.
   Do not publish comparisons from the default 1k-row sample—it is too noisy.
 - **Async foreground insert is not “faster than PostgreSQL.”** Both sides time
-  the same heap `INSERT` path (100k-row commits). Async defers mirror apply to
-  the catch-up rows; strict pays mirror work in the foreground (hence slower).
-  When async’s foreground ops/s lands above PostgreSQL-only, that is **not**
-  because the sides shared CPU/disk — they run **one after another** on fresh
-  servers. Machine noise can still move results; do not treat it as a product
-  win unless the counterbalanced median and dispersion support the claim. For
-  “row is visible in the mirror” cost,
+  the same heap `INSERT` path (100k-row commits). Managed capture defers mirror
+  apply to the catch-up rows. When managed foreground ops/s lands above
+  PostgreSQL-only, that is **not** because the sides shared CPU/disk — they run
+  **one after another** on fresh servers. Machine noise can still move results;
+  do not treat it as a product win unless the counterbalanced median and
+  dispersion support the claim. For “row is visible in the mirror” cost,
   include catch-up or measure backlog with the background worker on.
-- **Published runs use six counterbalanced repetitions** (or another multiple
-  of six): every sample stops
-  PostgreSQL, recreates empty worker DBs, and measures one side alone. The six
-  orders balance first/second/third position across pg, async, and strict.
-  `RESULTS.md` reports per-cell median and range and records the git commit.
+- **Published runs use counterbalanced repetitions** (or another multiple of
+  the side count): every sample stops PostgreSQL, recreates empty worker DBs,
+  and measures one side alone. Orders balance first/second position across pg
+  and async. `RESULTS.md` reports per-cell median and range and records the git
+  commit.
 - Insert throughput uses committed 100k-row batches on that side alone.
   Bounded source transactions also avoid presenting one large logical-decoding
   transaction as a representative application insert.
@@ -136,13 +135,17 @@ scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results \
 # Or one side at a time:
 scripts/run-storage-comparison.sh --side pg --rows 100000
 scripts/run-storage-comparison.sh --side async --rows 100000
-scripts/run-storage-comparison.sh --side strict --rows 100000
 ```
 
-Each side still uses a **fresh** pgrx PostgreSQL. Before timed seeding, the
-harness runs an **untimed warm-up** (throwaway table, same schema/manage mode,
-then `DROP` + `CHECKPOINT`) so the first heavy write after install is not the
-measured insert. Override with `--warmup-rows N` (`0` disables).
+Each side still uses a **fresh** pgrx PostgreSQL: the wrapper force-stops the
+cluster, **wipes `~/.pgrx/data-<ver>`**, then initdb + prepare so leftover WAL
+cannot skew the next side’s insert timing. Before timed seeding, the harness
+runs an **untimed warm-up** (throwaway table, same schema/manage mode, then
+`DROP` + `CHECKPOINT`) so the first heavy write after install is not the
+measured insert. Override with `--warmup-rows N` (`0` disables). After the timed
+seed it probes PK bounds and logs WAL bytes + pre-flush heap/index size so a
+surprising foreground insert gap can be diagnosed (managed should write more
+WAL than plain heap for the same SQL).
 
 Additional pgbench-oriented suites live under [`benchmarks/`](../../benchmarks/).
 Capture is always WAL-only:

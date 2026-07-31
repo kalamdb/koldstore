@@ -74,6 +74,42 @@ LIMIT ${limit_param}::integer"#,
     ))
 }
 
+/// Plans the newest-N hot mirror rows for KalamDB-style `last_rows` rewind.
+///
+/// Rows are returned newest-first (`ORDER BY seq DESC`); callers reverse to
+/// chronological order after merge.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied.
+pub fn plan_select_mirror_last_rows(
+    mirror_table: &MirrorRelation,
+    primary_key: &[&str],
+    limit_param: usize,
+) -> MirrorResult<MirrorStatement> {
+    let pk_json = pk_json_projection(primary_key)?;
+    let mut param_types = vec![SqlParamType::Text; limit_param.max(1)];
+    if limit_param > 0 {
+        param_types[limit_param - 1] = SqlParamType::Integer;
+    }
+    Ok(MirrorStatement::read_with_params(
+        "changes_last from change-log mirror",
+        format!(
+            r#"SELECT
+    mirror."seq" AS seq,
+    mirror."op" AS op,
+    jsonb_build_object({pk_json}) AS pk,
+    (mirror."op" = 3) AS deleted,
+    NULL::jsonb AS row_image
+FROM {mirror} AS mirror
+ORDER BY mirror."seq" DESC
+LIMIT ${limit_param}::integer"#,
+            mirror = mirror_table.quoted(),
+        ),
+        param_types,
+    ))
+}
+
 /// Plans aggregate stats over one mirror table.
 #[must_use]
 pub fn plan_mirror_stats(mirror_table: &MirrorRelation) -> MirrorStatement {

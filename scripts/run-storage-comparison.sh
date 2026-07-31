@@ -218,6 +218,9 @@ prepare_fresh_server() {
   # Async sides leave bgworkers that make a plain `cargo pgrx stop` race the
   # next start ("could not start server"). Force-stop until the port is free.
   pgrx_force_stop "${PG_VERSION}" || true
+  # Full cluster wipe (initdb on next start) so insert timing is not skewed by
+  # leftover WAL, clog, or a dirty data directory from the previous side.
+  pgrx_wipe_data "${PG_VERSION}" || true
   if [[ "${skip_install}" == "1" ]]; then
     KOLDSTORE_E2E_SKIP_INSTALL=1 \
       KOLDSTORE_E2E_PGVERSION="${PG_VERSION}" \

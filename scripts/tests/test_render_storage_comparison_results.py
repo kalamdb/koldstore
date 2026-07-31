@@ -42,6 +42,95 @@ def mode_report(mode: str, sample_count: int = 6) -> dict:
     return value
 
 
+def full_side_report(mode: str) -> dict:
+    """Minimal main/detail cells for glance-table rendering."""
+    if mode == "pg":
+        return {
+            "mode": "pg",
+            "generated_at": "2026-07-31T12:00:00+00:00",
+            "git_commit": "abc123",
+            "git_dirty": False,
+            "rows": 100_000,
+            "hot_limit": 10_000,
+            "dml_sample": 50_000,
+            "insert_batch_rows": 100_000,
+            "max_rows_per_file": 1_000_000,
+            "warmup_rows": 100_000,
+            "sample_count": 1,
+            "main": [
+                {
+                    "metric": "total hot+cold storage",
+                    "postgres_only": "5.85 GiB",
+                    "koldstore": "—",
+                },
+                {
+                    "metric": "local PostgreSQL storage",
+                    "postgres_only": "5.85 GiB",
+                    "koldstore": "—",
+                },
+                {
+                    "metric": "VACUUM duration",
+                    "postgres_only": "227.02 s",
+                    "koldstore": "—",
+                },
+            ],
+            "detail": [
+                {
+                    "metric": "index storage (hot + __cl)",
+                    "postgres_only": "414.86 MiB",
+                    "koldstore": "—",
+                },
+                {
+                    "metric": "└ cold Parquet",
+                    "postgres_only": "—",
+                    "koldstore": "—",
+                },
+            ],
+        }
+    return {
+        "mode": "async",
+        "generated_at": "2026-07-31T12:10:00+00:00",
+        "git_commit": "abc123",
+        "git_dirty": False,
+        "rows": 100_000,
+        "hot_limit": 10_000,
+        "dml_sample": 50_000,
+        "insert_batch_rows": 100_000,
+        "max_rows_per_file": 1_000_000,
+        "warmup_rows": 100_000,
+        "sample_count": 1,
+        "main": [
+            {
+                "metric": "total hot+cold storage",
+                "postgres_only": "—",
+                "koldstore": "670.75 MiB",
+            },
+            {
+                "metric": "local PostgreSQL storage",
+                "postgres_only": "—",
+                "koldstore": "72.23 MiB",
+            },
+            {
+                "metric": "VACUUM duration",
+                "postgres_only": "—",
+                "koldstore": "3.21 s",
+            },
+        ],
+        "detail": [
+            {
+                "metric": "index storage (hot + __cl)",
+                "postgres_only": "—",
+                "koldstore": "11.45 MiB",
+            },
+            {
+                "metric": "└ cold Parquet",
+                "postgres_only": "—",
+                "koldstore": "598.52 MiB",
+            },
+        ],
+    }
+
+
 class AggregateReportsTest(unittest.TestCase):
     def test_load_report_rejects_a_missing_requested_sample(self) -> None:
         missing = Path("/definitely/missing/storage-comparison.json")
@@ -75,14 +164,22 @@ class AggregateReportsTest(unittest.TestCase):
     def test_comparison_rejects_mismatched_counts_and_metadata(self) -> None:
         pg = mode_report("pg")
         async_report = mode_report("async", sample_count=12)
-        strict = mode_report("strict")
         with self.assertRaisesRegex(ValueError, "sample_count"):
-            renderer.validate_comparison_reports(pg, async_report, strict)
+            renderer.validate_comparison_reports(pg, async_report)
 
         async_report["sample_count"] = 6
         async_report["rows"] = 200_000
         with self.assertRaisesRegex(ValueError, "rows"):
-            renderer.validate_comparison_reports(pg, async_report, strict)
+            renderer.validate_comparison_reports(pg, async_report)
+
+    def test_storage_wins_glance_computes_tradeoffs(self) -> None:
+        glance = renderer.render_storage_wins_glance(
+            full_side_report("pg"), full_side_report("async")
+        )
+        self.assertIn("5.85 GiB → 670.75 MiB", glance)
+        self.assertIn("**89% smaller**", glance)
+        self.assertIn("**71× faster**", glance)
+        self.assertIn("599 MiB", glance)
 
 
 if __name__ == "__main__":

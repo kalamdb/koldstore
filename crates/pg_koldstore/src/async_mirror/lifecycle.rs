@@ -41,11 +41,10 @@ pub(crate) fn flush_replication_origin_name(database_oid: DatabaseOid) -> String
 
 /// Returns true when `name` is a flush-prune origin for `database_oid`.
 ///
-/// Matches `koldstore_flush_<oid>` and the older bare `koldstore_flush` name so
-/// apply still skips prune WAL stamped before the naming change.
+/// Matches the database-scoped `koldstore_flush_<oid>` name stamped by prune.
 #[must_use]
 pub(crate) fn is_flush_replication_origin(name: &str, database_oid: DatabaseOid) -> bool {
-    name == FLUSH_REPLICATION_ORIGIN_PREFIX || name == flush_replication_origin_name(database_oid)
+    name == flush_replication_origin_name(database_oid)
 }
 
 /// Returns the cluster-unique logical slot name for a database OID.

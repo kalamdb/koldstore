@@ -149,8 +149,8 @@ pub fn decode_message(input: &[u8]) -> Result<PgOutputMessage, PgOutputDecodeErr
         b'I' => decode_insert(&mut reader)?,
         b'U' => decode_update(&mut reader)?,
         b'D' => decode_delete(&mut reader)?,
-        // ORIGIN is required on PG15: flush prune stamps `koldstore_flush` and
-        // apply must skip those deletes (PG16+ also filters via origin=none).
+        // ORIGIN is required on PG15: flush prune stamps `koldstore_flush_<oid>`
+        // and apply must skip those deletes (PG16+ also filters via origin=none).
         // Wire order matches logicalrep_write_origin: LSN then cstring name.
         b'O' => decode_origin(&mut reader)?,
         // Type, truncate, and logical-message records are intentionally ignored
@@ -421,11 +421,11 @@ mod tests {
     fn origin_message_decodes_name_and_lsn() {
         let mut message = vec![b'O'];
         message.extend_from_slice(&0x11_22_33_44_55_66_77_88_u64.to_be_bytes());
-        message.extend_from_slice(b"koldstore_flush\0");
+        message.extend_from_slice(b"koldstore_flush_16384\0");
         assert_eq!(
             decode_message(&message),
             Ok(PgOutputMessage::Origin {
-                name: "koldstore_flush".to_string(),
+                name: "koldstore_flush_16384".to_string(),
             })
         );
     }

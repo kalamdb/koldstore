@@ -1,7 +1,7 @@
 # Storage comparison
 
 Compares a plain PostgreSQL heap table with the same table under KoldStore
-management.
+management (WAL-only mirror capture).
 
 This package is excluded from the default workspace `cargo nextest` run (same as
 `e2e` / `examples`) because it needs a prepared pgrx PostgreSQL. Use
@@ -12,13 +12,13 @@ Schema: [`schema.sql`](schema.sql)
 Order of measurement (isolated `--side` / `--all-sides`):
 
 0. **Warm-up (untimed):** insert into a throwaway table with the same schema
-   (and manage mode for async/strict), drain async mirror if needed, `DROP` the
-   throwaway table, then `CHECKPOINT`. Default warm-up size is
-   `min(rows, max(1_000_000, 5 * insert_batch_rows))`; override with
-   `--warmup-rows` / `KOLDSTORE_STORAGE_WARMUP_ROWS` (`0` disables). This rejects
-   cold-start insert skew after a fresh pgrx start.
+   (and manage when measuring the managed side), drain the async mirror if
+   needed, `DROP` the throwaway table, then `CHECKPOINT`. Default warm-up size
+   is `min(rows, max(1_000_000, 5 * insert_batch_rows))`; override with
+   `--warmup-rows` / `KOLDSTORE_STORAGE_WARMUP_ROWS` (`0` disables). This
+   rejects cold-start insert skew after a fresh pgrx start.
 1. Seed + DML on **one** table only (that column’s side) — **timed**
-2. In async mode, time a separate mirror catch-up after each DML phase
+2. Time a separate mirror catch-up after each DML phase on the managed side
 3. Snapshot dead tuples (`pg_stat_user_tables`, pre-flush)
 4. **Hot-only PK lookups before flush** (full heap still present)
 5. Flush older managed rows to zstd Parquet (duration + peak cluster RSS) —
@@ -28,10 +28,11 @@ Order of measurement (isolated `--side` / `--all-sides`):
    size snapshot
 8. Report p99 from the same phases (insert batch / 1k-row update / PK lookup)
 
-Published RESULTS.md use `--all-sides`: stop PostgreSQL, recreate empty worker
-DBs, measure `pg`, then `async`, then `strict` — once each, alone (**sequential**,
-not parallel). That avoids dual-table I/O contention and shared-buffer warm-up
-from a prior side. Each side’s JSON records `generated_at` and `git_commit`.
+Published RESULTS.md use `--all-sides`: stop PostgreSQL, **wipe the pgrx data
+directory**, recreate empty worker DBs, measure `pg`, then `async` — once each,
+alone (**sequential**, not parallel). That avoids dual-table I/O contention,
+shared-buffer warm-up from a prior side, and leftover WAL/clog skewing insert
+timing. Each side’s JSON records `generated_at` and `git_commit`.
 
 Both source tables have autovacuum disabled by the schema, and the harness
 applies the same benchmark-only setting to the generated mirror. A long async
@@ -39,14 +40,13 @@ catch-up therefore cannot launch maintenance during a following timed phase.
 The harness runs the documented explicit maintenance phase instead.
 
 The harness prints a **Main comparison** headline table plus a **Detail**
-section. Columns are **PostgreSQL only**, **PG + KoldStore (async)**, and
-**PG + KoldStore (strict)** (inactive mode cells are `—` for a single-mode
-run). Flush rows report duration, rows/s, and peak RSS while `flush_table`
-runs. Storage is split into **local PostgreSQL** versus **total hot+cold**.
+section. Columns are **PostgreSQL only** and **PG + KoldStore**. Flush rows
+report duration, rows/s, and peak RSS while `flush_table` runs. Storage is
+split into **local PostgreSQL** versus **total hot+cold**.
 
 Pass `--update-results` with `--all-sides` (or `--side …`) to merge into
 `docs/benchmarks/RESULTS.md` (JSON cache under
-`docs/benchmarks/.storage-results/{pg,async,strict}.json`).
+`docs/benchmarks/.storage-results/{pg,async}.json`).
 
 TODO rows not measured yet include: sustainable throughput, p99 latency, peak
 memory under the full workload, CPU/WAL/I/O, object-store efficiency, open
@@ -55,14 +55,14 @@ because autovacuum is intentionally disabled for both source relations and the
 generated mirror.
 ```bash
 # Preferred: prepare + run via the wrapper (defaults: 100k rows, 10k hot, 1k DML sample).
-# Requires --all-sides (pg + async + strict, fresh server each) or --side <one>:
+# Requires --all-sides (pg + async, fresh server each) or --side <one>:
 scripts/run-storage-comparison.sh --all-sides
 scripts/run-storage-comparison.sh --all-sides --rows 1000000 --hot-limit 50000
 scripts/run-storage-comparison.sh --all-sides --rows 100000 --hot-limit 10000 --dml-sample 100000
 scripts/run-storage-comparison.sh --side async --rows 100000 --hot-limit 10000 --dml-sample 5000
 
 # Or prepare wal_level manually, then run the test directly. CREATE EXTENSION
-# and the first async manage call create the publication and slot automatically:
+# and the first manage call create the publication and slot automatically:
 # Use release-pg for fair hot+cold timings (debug is ~3–7× slower; plain --release
 # uses panic=abort and breaks PostgreSQL ereport/longjmp from extension hooks):
 KOLDSTORE_E2E_PREPARE_ONLY=1 scripts/run-pg-e2e.sh 16
@@ -70,23 +70,34 @@ cargo pgrx install -p pg_koldstore --profile release-pg --no-default-features --
   --pg-config "$(cargo pgrx info pg-config 16)"
 cargo pgrx stop pg16 && cargo pgrx start pg16
 KOLDSTORE_STORAGE_ROWS=100000 KOLDSTORE_STORAGE_HOT_LIMIT=10000 KOLDSTORE_STORAGE_DML_SAMPLE=1000 \
-  KOLDSTORE_STORAGE_SIDE=strict \
+  KOLDSTORE_STORAGE_SIDE=async \
   cargo nextest run -p storage-comparison --test pg_vs_koldstore --no-capture --test-threads 1
 ```
+
+Each `--all-sides` / `--side` sample **force-stops PostgreSQL and wipes
+`~/.pgrx/data-<ver>`** before `initdb` + prepare, so insert timing is not
+skewed by leftover WAL/clog from the previous side. Only the version under test
+(default **pg16**) is started; other pgrx majors should stay stopped.
+
+After the timed seed, the harness probes `id ∈ {1, rows/2, rows}`, asserts
+`id = rows+1` is absent, and logs user-heap + index bytes plus WAL bytes written
+during the insert phase. Managed publication should write **more** WAL than
+plain heap for the same SQL — never less. Async looking faster than PostgreSQL
+only with similar heap sizes is machine noise (or deferred mirror work), not a
+product claim; compare catch-up rows for end-to-end mirrored cost.
 
 The harness asserts that after flush, PostgreSQL heap and index bytes for the
 managed table — **including** `koldstore.<table>__cl` and its indexes — are
 smaller than the unmanaged baseline. Progress lines are always logged for
 seed / flush / vacuum phases so large runs do not look hung.
 
-`strict` is the wrapper default and includes mirror writes in foreground DML.
-`async` removes that work from the measured foreground operation and reports
-`async mirror catchup after ...` as separate rows. Comparing the managed
+Managed capture removes mirror work from the measured foreground operation and
+reports `async mirror catchup after ...` as separate rows. Comparing the managed
 foreground number without also publishing catch-up throughput would hide the
 cost rather than move it, so benchmark reports must include both.
 
 To make those phases reproducible, the harness keeps the worker GUC on for
-`manage_table` (required for async activation), then pins
+`manage_table` (required for activation), then pins
 `koldstore.internal_async_mirror_worker=off` on the database (not only the
 session), terminates the applier, and uses explicit fences per timed phase.
 The database GUC is reset when the run finishes.

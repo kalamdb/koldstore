@@ -269,7 +269,7 @@ async fn drop_table_during_flush_after_manifest_publish() -> Result<()> {
     Ok(())
 }
 
-/// DROP while live DML has been exercising mirror capture (strict trigger or async apply).
+/// DROP while live DML has been exercising mirror capture (WAL apply).
 ///
 /// Concurrent DROP + DML can deadlock (AccessExclusive vs row locks); stop writers
 /// briefly, then DROP, after mirror activity has already run.

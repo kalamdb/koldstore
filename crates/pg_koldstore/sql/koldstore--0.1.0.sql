@@ -45,7 +45,6 @@ CREATE TABLE IF NOT EXISTS koldstore.schemas (
   initialization_state text NOT NULL DEFAULT 'not_started'
     CHECK (initialization_state IN (
       'not_started',
-      'capturing',
       'backfilling',
       'catching_up',
       'complete',

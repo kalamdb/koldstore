@@ -120,11 +120,11 @@ fn handles_truncate_origin_type_and_message_tags() {
 
     let mut origin = vec![b'O'];
     origin.extend_from_slice(&100_u64.to_be_bytes());
-    cstring(&mut origin, "koldstore_flush");
+    cstring(&mut origin, "koldstore_flush_16384");
     assert_eq!(
         decode_message(&origin),
         Ok(PgOutputMessage::Origin {
-            name: "koldstore_flush".to_string(),
+            name: "koldstore_flush_16384".to_string(),
         })
     );
 }

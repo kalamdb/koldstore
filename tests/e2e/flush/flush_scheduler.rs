@@ -8,7 +8,7 @@ const SCHEDULER_DEADLINE: Duration = Duration::from_secs(30);
 const NO_FLUSH_WINDOW: Duration = Duration::from_secs(4);
 
 #[tokio::test]
-async fn strict_auto_flush_worker_flushes_without_manual_tick() -> Result<()> {
+async fn auto_flush_worker_flushes_without_manual_tick() -> Result<()> {
     common::require_pgrx_server().await?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "sched_auto").await?;

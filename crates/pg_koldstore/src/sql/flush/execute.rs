@@ -496,9 +496,8 @@ pub(crate) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<pgrx::Uuid, String> {
-    // Flush selects authoritative latest-state rows, so async capture must be
-    // fenced before row selection. Strict databases return immediately because
-    // they have no async slot. Retain L0 for the post-publish prune fence.
+    // Flush selects authoritative latest-state rows, so WAL capture must be
+    // fenced before row selection. Retain L0 for the post-publish prune fence.
     let phase0 = crate::async_mirror::apply::apply_bounded(
         crate::async_mirror::apply::BoundedApplyRequest::available_unlimited(),
     )?;

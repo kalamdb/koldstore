@@ -750,7 +750,7 @@ fn insert_refreshed_schema_version(
 
 /// Rebuilds rename-sensitive runtime artifacts after a schema version bump.
 ///
-/// Mirror PK column names, strict capture SQL, user-scope RLS, and async
+/// Mirror PK column names, PK/order guards, user-scope RLS, and async
 /// publication column lists are name-bound at creation time. After a source
 /// rename they must be rewritten from the live catalog so DML and flush keep
 /// working without operator intervention.
