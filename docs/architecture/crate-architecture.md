@@ -136,7 +136,7 @@ a `koldstore-common` edge.
 | Parquet read/write | `koldstore-parquet` |
 | Manifest model / assembly / JSON I/O / default-prefix helpers | `koldstore-manifest` |
 | Manifest sync-state FSM (`koldstore.manifest.sync_state`) | `koldstore-catalog` |
-| Mirror SQL / DML statements / pgoutput decoder / strict capture planners | `koldstore-mirror` (`shared` / `strict` / `async`) |
+| Mirror SQL / DML statements / pgoutput decoder / PK update guard | `koldstore-mirror` (`shared` / `async` / `guard`) |
 | Hot+cold merge logic | `koldstore-merge` |
 | Database worker ensure / task / poll policy / pending retry fairness / flush-check cadence | `koldstore-worker` |
 | Flush workflow (selection, encode, segment write, catalog SQL plans, cleanup) | `koldstore-flush` |

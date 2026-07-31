@@ -17,7 +17,7 @@ Usage:
 
 Options:
   --packs list          Comma-separated packs (default: chat)
-                        v1: chat,cold_dml,multi_table,joins,async
+                        v1: chat,cold_dml,multi_table,joins
 
 Capture is always WAL-only committed-WAL apply.
 

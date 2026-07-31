@@ -15,8 +15,6 @@ pub enum Pack {
     MultiTable,
     /// Hot+cold join readers.
     Joins,
-    /// Force async mirror capture mode for the soak.
-    Async,
 }
 
 impl Pack {
@@ -26,7 +24,9 @@ impl Pack {
             "cold_dml" | "cold-dml" => Ok(Self::ColdDml),
             "multi_table" | "multi-table" => Ok(Self::MultiTable),
             "joins" | "join" => Ok(Self::Joins),
-            "async" => Ok(Self::Async),
+            "async" => bail!(
+                "pack \"async\" is obsolete: capture is always WAL-only (omit it from --packs)"
+            ),
             "schema_evo" | "scheduler" | "s3" => {
                 bail!("pack {raw:?} is not implemented in v1 (see design doc later packs)")
             }
@@ -42,7 +42,6 @@ impl Pack {
             Self::ColdDml => "cold_dml",
             Self::MultiTable => "multi_table",
             Self::Joins => "joins",
-            Self::Async => "async",
         }
     }
 }
@@ -106,11 +105,6 @@ impl PackSet {
         self.contains(Pack::Joins)
     }
 
-    #[must_use]
-    pub fn async_mirror(&self) -> bool {
-        self.contains(Pack::Async)
-    }
-
     /// Sorted pack names for logging / reports.
     #[must_use]
     pub fn names(&self) -> Vec<&'static str> {
@@ -133,6 +127,11 @@ mod tests {
         let set = PackSet::parse("joins").unwrap();
         assert!(set.joins());
         assert!(set.multi_table());
+    }
+
+    #[test]
+    fn rejects_obsolete_async_pack() {
+        assert!(PackSet::parse("async").is_err());
     }
 
     #[test]

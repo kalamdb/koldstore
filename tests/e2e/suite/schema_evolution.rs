@@ -429,7 +429,7 @@ async fn rename_primary_key_keeps_dml_and_cold_reads_working() -> Result<()> {
                 table.relation, table.relation
             ))
             .await?;
-        common::fence_selected_mirror(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert_eq!(db.flush_table(&table.relation).await?, 1);
 
         let schema = db
@@ -515,7 +515,7 @@ async fn rename_scope_column_keeps_rls_and_catalog_name_current() -> Result<()> 
                 table.relation, table.relation
             ))
             .await?;
-        common::fence_selected_mirror(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let schema = db
             .client

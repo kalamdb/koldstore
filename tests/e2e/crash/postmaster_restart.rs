@@ -195,7 +195,7 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
         "postmaster restart: retry flushed rows_flushed={rows_flushed}"
     ));
 
-    common::fence_async_mirror_if_needed(&client).await?;
+    common::fence_async_mirror(&client).await?;
     common::assert_pk_unique(&client, &relation, &["id"]).await?;
     let visible = common::relation_row_count(&client, &relation).await?;
     assert_eq!(

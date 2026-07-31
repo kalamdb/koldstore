@@ -37,7 +37,7 @@ async fn fresh_session_after_flush_uses_merge_scan_and_sees_cold_rows() -> Resul
                 &[&table.relation],
             )
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let flushed = db.flush_table(&table.relation).await?;
         anyhow::ensure!(flushed > 0, "expected flush to archive rows");

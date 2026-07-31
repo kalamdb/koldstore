@@ -5,7 +5,6 @@ pub mod ddl;
 pub(crate) mod drop_cleanup;
 pub mod executor;
 pub mod planner;
-pub mod xact;
 
 /// Registers PostgreSQL hooks.
 pub fn register_hooks() {

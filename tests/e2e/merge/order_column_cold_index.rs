@@ -86,7 +86,7 @@ async fn order_column_range_shapes_use_cold_segment_index() -> Result<()> {
                 "#
             ))
             .await?;
-        common::fence_selected_mirror(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         let renamed_row: i64 = db
             .client
             .query_one(
@@ -167,7 +167,7 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
                 "#
             ))
             .await?;
-        common::fence_selected_mirror(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let mirror = format!(
             "koldstore.{}__cl",
@@ -183,7 +183,7 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
         db.client
             .batch_execute(&format!("DELETE FROM {relation} WHERE id = 1;"))
             .await?;
-        common::fence_selected_mirror(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let after: Vec<u8> = db
             .client

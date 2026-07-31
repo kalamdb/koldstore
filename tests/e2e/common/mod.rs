@@ -12,7 +12,6 @@ pub mod equality;
 mod log;
 pub mod memory;
 mod minio;
-mod mirror_mode;
 mod sql;
 
 pub use assertions::{
@@ -22,7 +21,7 @@ pub use assertions::{
 };
 
 pub use async_mirror::{
-    async_mirror_progress, async_worker_running, fence_async_mirror_if_needed, mirror_op_count,
+    async_mirror_progress, async_worker_running, fence_async_mirror, mirror_op_count,
     terminate_async_worker, wait_for_async_mirror, wait_for_async_worker,
     wait_for_confirmed_flush_past, wait_for_mirror_op_count, AsyncMirrorProgress,
 };
@@ -47,7 +46,6 @@ pub use equality::{
 };
 pub use log::{log, log_always, log_step, log_step_always, timed_sync, verbose_enabled, StepGuard};
 pub use minio::{minio_enabled, MinioConfig};
-pub use mirror_mode::{fence_async_mirror, fence_selected_mirror};
 pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
     relation_size, row_count, row_count_from_sql, RelationSize, SQL_DEFAULT_COLD_OBJECT_KEY,

@@ -73,7 +73,7 @@ async fn run_lifecycle_memory_probe(db: &common::TestDb, use_minio: bool) -> Res
         run_hot_dml_batch(db, &table.relation, next_id, batch_rows, cycle).await?;
         next_id += batch_rows;
 
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         let flushed = db.flush_table(&table.relation).await?;
         assert!(
             flushed > 0,
@@ -244,7 +244,7 @@ async fn run_overhead_comparison(db: &common::TestDb) -> Result<()> {
         .create_indexed_items_table("kold_items", seed_rows)
         .await?;
     db.manage_shared(&managed.relation, "id").await?;
-    common::fence_async_mirror_if_needed(&db.client).await?;
+    common::fence_async_mirror(&db.client).await?;
     db.client.batch_execute("DISCARD PLANS;").await?;
 
     let mut reports = Vec::new();
@@ -305,7 +305,7 @@ async fn run_overhead_comparison(db: &common::TestDb) -> Result<()> {
             || async { run_hot_dml_batch(db, &managed.relation, kold_id_a, half, 0).await },
             || async {
                 run_hot_dml_batch(db, &managed.relation, kold_id_b, half, 1).await?;
-                common::fence_async_mirror_if_needed(&db.client).await?;
+                common::fence_async_mirror(&db.client).await?;
                 Ok(())
             },
         )
@@ -380,7 +380,7 @@ async fn run_overhead_comparison(db: &common::TestDb) -> Result<()> {
         99,
     )
     .await?;
-    common::fence_async_mirror_if_needed(&db.client).await?;
+    common::fence_async_mirror(&db.client).await?;
     db.client.batch_execute("DISCARD PLANS;").await?;
 
     reports.push(WorkloadReport {

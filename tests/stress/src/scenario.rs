@@ -185,7 +185,6 @@ pub async fn run_chat_penetration() -> Result<()> {
     let run_id = format!("{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"));
     let report = StressReport {
         packs: config.packs.names(),
-        mirror_mode: "wal-async",
         soak_secs: config.soak.as_secs(),
         baseline,
         soak,

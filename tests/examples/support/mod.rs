@@ -75,7 +75,7 @@ pub fn log_scenario_start(name: &str, relation: &str, storage_root: &Path, confi
 ///
 /// Returns an error when the async SQL fence fails.
 pub async fn fence_mirror_if_needed(client: &Client) -> Result<()> {
-    e2e::fence_selected_mirror(client).await?;
+    e2e::fence_async_mirror(client).await?;
     Ok(())
 }
 

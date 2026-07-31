@@ -280,14 +280,12 @@ fn keep_contract_helpers_referenced() {
     };
     let _thresholds = (
         verdict::ASYNC_HOT_UPDATE_MAX_OVERHEAD_RATIO,
-        verdict::STRICT_HOT_UPDATE_MAX_OVERHEAD_RATIO,
         verdict::HOT_INSERT_MAX_OVERHEAD_RATIO,
         verdict::PK_LOOKUP_MIN_ROW_GROUP_SKIP_RATIO,
     );
     let _suite = suite::FULL_SUITE;
     let _verdicts = (
         verdict::async_hot_update_within_threshold(1.0, 1.05),
-        verdict::strict_hot_update_within_threshold(1.0, 1.05),
         pruning.meets_pk_lookup_target()
             && verdict::pk_lookup_pruning_within_threshold(pruning.skipped_ratio()),
     );

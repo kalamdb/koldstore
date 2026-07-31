@@ -1,24 +1,12 @@
 //! DML hook and clean-schema mirror integration.
 
-use koldstore_common::{scope, MirrorOperation, ScopeError, ScopeKey, TableKind};
-use koldstore_merge::ManagedDmlOperation;
+use koldstore_common::{scope, ScopeError, ScopeKey, TableKind};
 
 pub use koldstore_merge::{
     extract_simple_pk_delete_predicate, plan_managed_delete_effect, plan_managed_insert_effect,
     plan_managed_update_effect, simple_pk_delete_supported, ManagedDmlEffect, SimplePkPredicate,
     HOT_DML_MANIFEST_SYNC_STATE,
 };
-
-/// Planned latest-state mirror effect for one user DML row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MirrorCaptureEffect {
-    /// Operation value written to the mirror.
-    pub operation: MirrorOperation,
-    /// SQL expression used to allocate the mirror sequence.
-    pub seq_expression: &'static str,
-    /// Whether the effect is coupled to the user transaction.
-    pub transactional: bool,
-}
 
 /// DML operations observed by the managed hook shell.
 #[must_use]
@@ -42,20 +30,4 @@ pub fn enforce_dml_scope(
         scope::enforce_row_scope(active_scope, row_scope)?;
     }
     Ok(active_scope)
-}
-
-/// Plans the mirror state transition for a managed DML operation.
-#[must_use]
-pub const fn plan_mirror_capture_effect(operation: ManagedDmlOperation) -> MirrorCaptureEffect {
-    let operation = match operation {
-        ManagedDmlOperation::Insert | ManagedDmlOperation::Revive => MirrorOperation::Insert,
-        ManagedDmlOperation::Update => MirrorOperation::Update,
-        ManagedDmlOperation::Delete => MirrorOperation::Delete,
-    };
-
-    MirrorCaptureEffect {
-        operation,
-        seq_expression: koldstore_common::snowflake_default_expression(),
-        transactional: true,
-    }
 }

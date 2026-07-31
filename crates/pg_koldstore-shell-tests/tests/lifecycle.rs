@@ -110,16 +110,6 @@ fn application_roles_cannot_set_internal_gucs() {
 }
 
 #[test]
-fn mirror_capture_stays_in_user_transaction_scope() {
-    let scope = hooks::xact::mirror_capture_transaction_scope();
-    assert_eq!(
-        scope,
-        hooks::xact::MirrorCaptureTransactionScope::SameUserTransaction
-    );
-    assert!(hooks::xact::mirror_capture_rolls_back_with_user_transaction(scope));
-}
-
-#[test]
 fn hook_shell_exposes_required_hook_names() {
     let hooks = hooks::registered_hook_names();
     assert!(hooks.contains(&"set_rel_pathlist"));

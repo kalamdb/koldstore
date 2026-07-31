@@ -204,7 +204,7 @@ async fn missing_parquet_after_flush_fails_merge_scan_closed() -> Result<()> {
             .create_indexed_items_table("missing_pq_items", 20)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         let flushed = db.flush_table(&table.relation).await?;
         assert!(flushed > 0);
 
@@ -230,7 +230,7 @@ async fn corrupt_parquet_footer_fails_merge_scan_closed() -> Result<()> {
             .create_indexed_items_table("corrupt_pq_items", 20)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         let (_manifest, segment, _) = flushed_artifacts(&db, &table.relation).await?;
@@ -256,7 +256,7 @@ async fn missing_manifest_after_flush_fails_merge_scan_closed() -> Result<()> {
             .create_indexed_items_table("missing_mf_items", 20)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         let (manifest_abs, segment_abs, _) = flushed_artifacts(&db, &table.relation).await?;
@@ -281,7 +281,7 @@ async fn stale_manifest_generation_fails_merge_scan_closed() -> Result<()> {
         let db = common::TestDb::start(target, "stale_gen").await?;
         let table = db.create_indexed_items_table("stale_gen_items", 20).await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         db.client
@@ -313,7 +313,7 @@ async fn orphan_final_object_does_not_become_visible() -> Result<()> {
         let db = common::TestDb::start(target, "orphan_obj").await?;
         let table = db.create_indexed_items_table("orphan_items", 20).await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         let before = common::row_count(&db.client, &table.relation).await?;
@@ -353,7 +353,7 @@ async fn partial_multi_segment_outage_fails_merge_scan_closed() -> Result<()> {
                 &[&table.relation, &db.storage_name],
             )
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         let segments: Vec<String> = db

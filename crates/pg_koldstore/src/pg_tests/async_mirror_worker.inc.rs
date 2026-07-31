@@ -7,9 +7,7 @@ fn async_manage_starts_database_worker() {
     // The WAL applier finishes database connect only after this transaction
     // commits, so we cannot assert pg_stat_activity visibility here. E2E tests
     // cover post-commit visibility; this test covers registration + cleanup.
-    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    crate::async_mirror::provision::provision_infrastructure(database_oid)
-        .expect("pre-provision async slot/publication");
+    preprovision_async_mirror();
 
     let suffix = unique_suffix("async_worker");
     let schema = format!("pgtest_{suffix}");

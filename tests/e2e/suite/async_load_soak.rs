@@ -41,7 +41,7 @@ async fn async_mixed_load_soak_keeps_invariants() -> Result<()> {
         for table in &tables {
             db.manage_shared(&table.relation, "id").await?;
         }
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut workers: Vec<JoinHandle<Result<()>>> = Vec::new();
@@ -120,7 +120,7 @@ async fn async_mixed_load_soak_keeps_invariants() -> Result<()> {
         }
         flush_worker.await??;
 
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         for table in &tables {
             common::assert_pk_unique(&db.client, &table.relation, &["id"]).await?;
             common::assert_no_active_jobs(&db.client, &table.relation).await?;

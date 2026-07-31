@@ -15,7 +15,6 @@ use crate::watchdog::WatchdogPeaks;
 #[derive(Debug, Serialize)]
 pub struct StressReport {
     pub packs: Vec<&'static str>,
-    pub mirror_mode: &'static str,
     pub soak_secs: u64,
     pub baseline: MetricsSnapshot,
     pub soak: MetricsSnapshot,
@@ -68,8 +67,8 @@ pub fn write_report_with_latest(report: &StressReport, run_id: &str) -> Result<P
 fn format_text(report: &StressReport) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "chat-penetration packs={:?} mirror={} soak={}s passed={}\n",
-        report.packs, report.mirror_mode, report.soak_secs, report.passed
+        "chat-penetration packs={:?} soak={}s passed={}\n",
+        report.packs, report.soak_secs, report.passed
     ));
     out.push_str(&format!(
         "seed_rows={} cold_segments_messages={}\n",

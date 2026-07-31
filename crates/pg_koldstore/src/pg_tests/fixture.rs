@@ -16,6 +16,17 @@ pub(crate) fn unique_suffix(label: &str) -> String {
     format!("{label}_{id}")
 }
 
+/// Creates the database async slot/publication before any SPI write in a `#[pg_test]`.
+///
+/// `#[pg_test]` wraps the body in one transaction. Logical-slot creation waits for
+/// concurrent XIDs, so provisioning after `register_storage` / DDL / DML deadlocks
+/// with this backend. Call this first when a test may be the first to need the slot.
+pub(crate) fn preprovision_async_mirror() {
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    crate::async_mirror::provision::provision_infrastructure(database_oid)
+        .expect("pre-provision async slot/publication");
+}
+
 /// Registers filesystem storage under a unique temp directory and returns its name.
 pub(crate) fn register_temp_storage(label: &str) -> String {
     let name = unique_suffix(label);

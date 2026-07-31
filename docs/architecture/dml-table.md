@@ -4,11 +4,10 @@ This document describes what happens when application SQL mutates a managed heap
 table: `INSERT`, `UPDATE`, and `DELETE`. It covers mirror capture, row counter
 accounting, scope enforcement, and how DML state flows into flush and scan.
 
-**Capture mechanisms:** strict statement triggers or opt-in asynchronous
-logical-WAL apply (plus a separate PK-mutation guard in both modes)
+**Capture:** committed-WAL logical decoding + database apply worker (plus a
+PK-mutation guard on the source table)
 
-**Mirror contract:** `crates/koldstore-mirror/` (`shared` / `strict` / `async`)  
-**Strict trigger planning:** `crates/koldstore-mirror/src/strict/` (re-exported via migrate)  
+**Mirror contract:** `crates/koldstore-mirror/` (`shared` / `async` / `guard`)  
 **Async apply / workers:** `crates/pg_koldstore/src/async_mirror/`  
 **Counter cache:** `crates/pg_koldstore/src/row_counter_cache.rs`
 

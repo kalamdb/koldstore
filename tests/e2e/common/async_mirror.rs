@@ -248,7 +248,6 @@ pub async fn wait_for_confirmed_flush_past(
 /// # Errors
 ///
 /// Returns an error when the async fence fails.
-pub async fn fence_async_mirror_if_needed(client: &tokio_postgres::Client) -> Result<()> {
-    let _ = wait_for_async_mirror(client).await?;
-    Ok(())
+pub async fn fence_async_mirror(client: &tokio_postgres::Client) -> Result<i64> {
+    wait_for_async_mirror(client).await
 }

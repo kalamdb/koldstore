@@ -324,7 +324,7 @@ async fn drop_table_while_mirror_capture_is_active() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(80)).await;
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = tokio::time::timeout(Duration::from_secs(5), dml_handle).await;
-        let _ = common::fence_async_mirror_if_needed(&db.client).await;
+        let _ = common::fence_async_mirror(&db.client).await;
 
         let mut dropped = false;
         for _ in 0..8 {

@@ -15,7 +15,7 @@
 //! smaller-hot-set effect.
 //! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
 //!
-//! Published runs isolate each column via `KOLDSTORE_STORAGE_SIDE=pg|async|strict`
+//! Published runs isolate each column via `KOLDSTORE_STORAGE_SIDE=pg|async`
 //! on a fresh server (see `scripts/run-storage-comparison.sh --all-sides`).
 //! `combined` keeps the interleaved dual-table smoke path for local debugging.
 
@@ -293,7 +293,6 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                     1,
                     max_rows_per_file,
                     max_rows_per_flush,
-                    mode,
                 )
                 .await?;
             }
@@ -360,7 +359,6 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                     1,
                     max_rows_per_file,
                     max_rows_per_flush,
-                    &mirror_capture_mode,
                 )
                 .await?;
             }
@@ -1112,7 +1110,6 @@ async fn warm_up_before_timed_seed(
             1,
             max_rows_per_file,
             max_rows_per_flush,
-            mode,
         )
         .await?;
         if mode == "async" {
@@ -1182,7 +1179,6 @@ async fn manage_with_hot_limit(
     min_flush_rows: i64,
     max_rows_per_file: i64,
     max_rows_per_flush: i64,
-    _mirror_capture_mode: &str,
 ) -> Result<()> {
     // auto_flush=false so background DB-worker waves don't steal the timed
     // flush_table measurement (and leave rows_flushed=0 at the explicit call).

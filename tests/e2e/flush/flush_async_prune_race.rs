@@ -49,7 +49,7 @@ async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> R
             "#
         ))
         .await?;
-    common::fence_async_mirror_if_needed(&db.client).await?;
+    common::fence_async_mirror(&db.client).await?;
     Ok(relation)
 }
 

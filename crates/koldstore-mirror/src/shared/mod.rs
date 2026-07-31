@@ -1,7 +1,7 @@
-//! Shared `__cl` mirror storage contract (strict and async).
+//! Shared `__cl` mirror storage contract for WAL-applied capture.
 //!
-//! Naming, metadata columns, DDL, and primitive read/write SQL that both
-//! capture modes share. Mode-specific planners live under `strict` / `async`.
+//! Naming, metadata columns, DDL, and primitive read/write SQL shared by migrate
+//! and the WAL apply path. Apply-specific planners live under `async/`.
 
 pub mod columns;
 pub mod error;

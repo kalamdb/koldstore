@@ -161,7 +161,7 @@ async fn non_owner_rls_is_enforced_for_hot_cold_and_mixed_rows() -> Result<()> {
             .context("hot-only RLS visibility")?;
         db.client.batch_execute("RESET ROLE").await?;
 
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         let flushed = db.flush_table(&table.relation).await?;
         anyhow::ensure!(flushed > 0, "expected a cold flush, flushed {flushed}");
         common::assert_no_active_jobs(&db.client, &table.relation).await?;
@@ -270,7 +270,7 @@ async fn non_owner_rls_is_enforced_for_hot_cold_and_mixed_rows() -> Result<()> {
             moved == 1,
             "expected one scope-changing reinsert, moved {moved}"
         );
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         db.client
             .batch_execute(&format!("SET ROLE {app_role}"))
@@ -332,7 +332,7 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
         db.client
             .batch_execute(&format!("ALTER TABLE {relation} FORCE ROW LEVEL SECURITY"))
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         anyhow::ensure!(
             db.flush_table(&relation).await? > 0,
             "expected text-PK flush"
@@ -346,7 +346,7 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
                 &[&key],
             )
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let app_role = db.ensure_app_role().await?;
         db.client
