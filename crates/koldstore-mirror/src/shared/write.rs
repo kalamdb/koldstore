@@ -5,7 +5,6 @@ use koldstore_common::{is_safe_identifier, quote_ident, MirrorOperation};
 use super::columns::MirrorColumn;
 use super::error::{MirrorError, MirrorResult};
 use super::relation::MirrorRelation;
-use super::statement::{MirrorStatement, SqlParamType};
 
 /// Builds an upsert statement fragment for the latest-state mirror row.
 ///
@@ -48,83 +47,6 @@ pub fn plan_upsert_mirror_row(
     ))
 }
 
-/// Column list for `jsonb_to_recordset` selected-set CTEs.
-///
-/// Primary-key columns are typed as `text`; mirror metadata includes `seq` and
-/// `op` for flush cleanup workflows.
-///
-/// # Errors
-///
-/// Returns an error when no primary-key columns are supplied.
-pub fn selected_record_columns(primary_key: &[&str]) -> MirrorResult<String> {
-    let pk_columns = quoted_pk_columns(primary_key)?;
-    Ok(pk_columns
-        .iter()
-        .map(|column| format!("{column} text"))
-        .chain([
-            format!("{} bigint", MirrorColumn::Seq.quoted_name()),
-            format!("{} smallint", MirrorColumn::Op.quoted_name()),
-        ])
-        .collect::<Vec<_>>()
-        .join(", "))
-}
-
-/// SQL fragment deleting mirror rows joined to a `selected` CTE.
-///
-/// # Errors
-///
-/// Returns an error when no primary-key columns are supplied.
-pub fn mirror_delete_using_selected_sql(
-    mirror_table: &MirrorRelation,
-    primary_key: &[&str],
-) -> MirrorResult<String> {
-    let join_predicate = mirror_selected_join_predicate(primary_key)?;
-    Ok(format!(
-        "DELETE FROM {mirror} AS mirror\n    USING selected\n    WHERE {join_predicate}",
-        mirror = mirror_table.quoted()
-    ))
-}
-
-/// Join predicate matching mirror rows to a `selected` CTE by PK and `seq`.
-///
-/// # Errors
-///
-/// Returns an error when no primary-key columns are supplied.
-pub fn mirror_selected_join_predicate(primary_key: &[&str]) -> MirrorResult<String> {
-    Ok(pk_selected_join_predicates(primary_key)?
-        .into_iter()
-        .chain(["mirror.\"seq\" = selected.\"seq\"".to_string()])
-        .collect::<Vec<_>>()
-        .join(" AND "))
-}
-
-/// Plans deleting mirror rows from a caller-supplied selected set.
-///
-/// The selected set must expose primary-key text columns and a `seq` column.
-///
-/// # Errors
-///
-/// Returns an error when no primary-key columns are supplied.
-pub fn plan_delete_selected_mirror_rows(
-    mirror_table: &MirrorRelation,
-    primary_key: &[&str],
-    selected_cte_sql: &str,
-) -> MirrorResult<MirrorStatement> {
-    let delete_sql = mirror_delete_using_selected_sql(mirror_table, primary_key)?;
-    Ok(MirrorStatement::write_with_params(
-        "delete selected mirror rows",
-        format!(
-            r#"
-WITH selected AS (
-{selected_cte_sql}
-)
-{delete_sql}
-"#,
-        ),
-        [SqlParamType::Jsonb],
-    ))
-}
-
 /// Validates and quotes primary-key column names.
 ///
 /// # Errors
@@ -147,18 +69,45 @@ pub fn quoted_pk_columns(primary_key: &[&str]) -> MirrorResult<Vec<String>> {
         .collect()
 }
 
-fn pk_selected_join_predicates(primary_key: &[&str]) -> MirrorResult<Vec<String>> {
-    Ok(quoted_pk_columns(primary_key)?
-        .into_iter()
-        .map(|column| format!("mirror.{column}::text = selected.{column}"))
-        .collect())
+/// How async apply binds one primary-key column array into SPI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PkArrayBindKind {
+    /// Bind a native `{type}[]` datum (`bigint[]`, `text[]`, …).
+    Native,
+    /// Bind `text[]` and cast each element to `type` in SQL (uuid/domains/etc.).
+    TextThenCast,
+}
+
+fn pk_array_bind_kind(type_name: &str) -> PkArrayBindKind {
+    match type_name.trim().to_ascii_lowercase().as_str() {
+        "bigint" | "int8" | "integer" | "int4" | "int" | "smallint" | "int2" | "boolean"
+        | "bool" | "text" | "varchar" | "character varying" | "name" => PkArrayBindKind::Native,
+        _ => PkArrayBindKind::TextThenCast,
+    }
+}
+
+fn unnest_pk_array_arg(param: usize, type_name: &str) -> String {
+    match pk_array_bind_kind(type_name) {
+        PkArrayBindKind::Native => format!("${param}::{type_name}[]"),
+        PkArrayBindKind::TextThenCast => format!("${param}::text[]"),
+    }
+}
+
+fn projected_pk_column(alias: &str, quoted: &str, type_name: &str) -> String {
+    match pk_array_bind_kind(type_name) {
+        PkArrayBindKind::Native => format!("incoming.{alias} AS {quoted}"),
+        PkArrayBindKind::TextThenCast => {
+            format!("incoming.{alias}::{type_name} AS {quoted}")
+        }
+    }
 }
 
 /// Plans a set-based async-mirror upsert from typed `unnest` array binds.
 ///
 /// Bind contract:
 /// - `$1` — operation code (`smallint`)
-/// - `$2..$N+1` — one `text[]` per primary-key column (cast to `pk_type_names`)
+/// - `$2..$N+1` — one array per primary-key column (`{type}[]` for common
+///   scalars, otherwise `text[]` with a cast)
 /// - `$N+2` — `bigint[]` of preallocated `seq` values
 /// - `$N+3` — `bytea[]` of Sort Key V1 `order_key` values when `include_order_key`
 ///
@@ -182,7 +131,7 @@ pub fn plan_async_mirror_batch_upsert(
     let quoted_keys = quoted_pk_columns(primary_key)?;
     let conflict_keys = quoted_keys.join(", ");
     let pk_count = quoted_keys.len();
-    // $1 = op; $2..$(pk_count+1) = pk text arrays; $(pk_count+2) = seq bigint[]
+    // $1 = op; $2..$(pk_count+1) = pk arrays; $(pk_count+2) = seq bigint[]
     // optional $(pk_count+3) = order_key bytea[]
     let mut unnest_args = Vec::with_capacity(pk_count + 2);
     let mut unnest_aliases = Vec::with_capacity(pk_count + 2);
@@ -190,9 +139,9 @@ pub fn plan_async_mirror_batch_upsert(
     for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
         let param = index + 2;
         let alias = format!("pk_{index}");
-        unnest_args.push(format!("${param}::text[]"));
+        unnest_args.push(unnest_pk_array_arg(param, type_name));
         unnest_aliases.push(alias.clone());
-        select_keys.push(format!("incoming.{alias}::{type_name} AS {quoted}"));
+        select_keys.push(projected_pk_column(&alias, quoted, type_name));
     }
     let seq_param = pk_count + 2;
     unnest_args.push(format!("${seq_param}::bigint[]"));
@@ -240,23 +189,6 @@ pub fn plan_async_mirror_batch_upsert(
     ))
 }
 
-/// Plans a set-based async-mirror insert upsert (alias of unified upsert).
-///
-/// Retained for callers that still distinguish insert vs update planning; both
-/// paths use the same `INSERT … ON CONFLICT` SQL.
-///
-/// # Errors
-///
-/// Returns an error when the primary key is empty or unsafe.
-pub fn plan_async_mirror_batch_insert(
-    mirror_quoted: &str,
-    primary_key: &[&str],
-    pk_type_names: &[String],
-    _seq_expression: &str,
-) -> MirrorResult<String> {
-    plan_async_mirror_batch_upsert(mirror_quoted, primary_key, pk_type_names, false)
-}
-
 /// Plans a set-based async-mirror update with an insert-missing fallback.
 ///
 /// Existing mirror rows take the direct `UPDATE` path. Rows absent after flush
@@ -274,7 +206,6 @@ pub fn plan_async_mirror_batch_update(
     mirror_quoted: &str,
     primary_key: &[&str],
     pk_type_names: &[String],
-    _seq_expression: &str,
     include_order_key: bool,
 ) -> MirrorResult<String> {
     if primary_key.len() != pk_type_names.len() {
@@ -291,9 +222,9 @@ pub fn plan_async_mirror_batch_update(
     for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
         let param = index + 2;
         let alias = format!("pk_{index}");
-        unnest_args.push(format!("${param}::text[]"));
+        unnest_args.push(unnest_pk_array_arg(param, type_name));
         unnest_aliases.push(alias.clone());
-        projected.push(format!("incoming.{alias}::{type_name} AS {quoted}"));
+        projected.push(projected_pk_column(&alias, quoted, type_name));
     }
     let seq_param = pk_count + 2;
     unnest_args.push(format!("${seq_param}::bigint[]"));
@@ -400,9 +331,9 @@ pub fn plan_async_mirror_batch_delete_existing(
     for (index, (quoted, type_name)) in quoted_keys.iter().zip(pk_type_names.iter()).enumerate() {
         let param = index + 2;
         let alias = format!("pk_{index}");
-        unnest_args.push(format!("${param}::text[]"));
+        unnest_args.push(unnest_pk_array_arg(param, type_name));
         unnest_aliases.push(alias.clone());
-        projected.push(format!("incoming.{alias}::{type_name} AS {quoted}"));
+        projected.push(projected_pk_column(&alias, quoted, type_name));
     }
     let seq_param = pk_count + 2;
     unnest_args.push(format!("${seq_param}::bigint[]"));

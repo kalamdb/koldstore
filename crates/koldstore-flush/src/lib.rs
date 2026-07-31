@@ -6,7 +6,7 @@
 
 pub mod cleanup;
 pub mod encode;
-pub mod job;
+pub mod jobs_sql;
 pub mod ops;
 pub mod policy;
 pub mod recovery;
@@ -17,24 +17,26 @@ pub mod stats;
 pub mod table_counters;
 pub mod table_flush;
 pub mod table_jobs;
-pub mod worker;
 pub mod write;
 
-pub use cleanup::{
-    plan_clean_schema_cleanup, plan_seq_range_cleanup, plan_typed_clean_schema_cleanup,
-    CleanSchemaCleanupPlan, CleanupCatalogColumn,
-};
+pub use cleanup::{plan_seq_range_cleanup, CleanSchemaCleanupPlan};
 pub use encode::{stream_flush_chunks, StreamEncodeInput, StreamEncodeOutcome};
-pub use ops::*;
+pub use ops::{
+    classify_command, describe_table_plan, enqueue_flush_job_plan, flush_table_request,
+    plan_koldstore_exec, plan_mirror_flush_selection_batch, FlushJobEnqueuePlan, FlushRequest,
+    KoldstoreExecPlan, MirrorFlushSelectionPlan, OpsCommand, OpsError,
+};
 pub use policy::policy_flush_row_count;
-pub use scheduler::{scheduler_should_flush, scheduler_should_flush_parsed};
+pub use scheduler::{
+    plan_database_has_auto_flush_tables, plan_older_than_eligible_mirror_rows,
+    plan_select_auto_flush_candidate_tables, scheduler_should_flush, scheduler_should_flush_parsed,
+    AutoFlushPlanError, AUTO_FLUSH_TABLE_PREDICATE,
+};
 pub use segment_catalog::{
-    encode_indexed_column_bounds, plan_activate_flush_segments, plan_flush_segments_batch_insert,
-    EncodedColumnBound, SegmentCatalogError,
+    plan_activate_flush_segments, plan_flush_segments_batch_insert, SegmentCatalogError,
 };
 pub use segment_write::{
-    flush_segment_object_path, write_flush_segment_file, write_flush_segment_with_client,
-    WrittenFlushSegment,
+    flush_segment_relative_path, write_flush_segment_with_client, WrittenFlushSegment,
 };
 pub use stats::{
     apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
@@ -43,18 +45,9 @@ pub use stats::{
 };
 pub use table_counters::{
     flush_mirror_fetch_limit, plan_apply_flush_row_count_deltas, plan_bump_table_row_counts,
-    plan_read_table_row_counters, plan_refresh_table_row_counters, TableRowCounters,
-    FLUSH_MIRROR_FETCH_BATCH_SIZE,
+    plan_refresh_table_row_counters, TableRowCounters, FLUSH_MIRROR_FETCH_BATCH_SIZE,
 };
-pub use table_flush::{
-    max_rows_per_file_from_policy, relative_manifest_path, TableFlushBatchOutcome,
-    TableFlushPreparedContext,
-};
-// Re-export manifest assembly/I/O so existing flush callers keep a stable path.
-pub use koldstore_catalog::CatalogManifestSegmentRow;
-pub use koldstore_manifest::{
-    build_manifest_segment_from_catalog_row, manifest_from_catalog_rows, write_manifest_to_path,
-};
+pub use table_flush::{max_rows_per_file_from_policy, TableFlushBatchOutcome};
 pub use table_jobs::{
     flush_phase, plan_abandon_running_flush_jobs, plan_cancel_jobs_for_drop,
     plan_clear_table_cancel_request, plan_flush_cancel_requested, plan_insert_inline_flush_job,

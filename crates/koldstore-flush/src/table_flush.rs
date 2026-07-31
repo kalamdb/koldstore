@@ -5,32 +5,6 @@
 //! in `pg_koldstore`.
 
 use koldstore_manifest::Manifest;
-pub use koldstore_manifest::{manifest_paths, relative_manifest_path};
-
-/// Prepared context for one synchronous flush attempt.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TableFlushPreparedContext {
-    /// Flush job id.
-    pub job_id: uuid::Uuid,
-    /// Whether policy limits were bypassed.
-    pub force: bool,
-    /// Relation namespace.
-    pub namespace: String,
-    /// Relation name.
-    pub table_name: String,
-    /// Object-store base path.
-    pub base_path: String,
-    /// Active schema version.
-    pub schema_version: i32,
-    /// Compression codec.
-    pub compression: String,
-    /// Primary-key columns.
-    pub primary_key_columns: Vec<String>,
-    /// Maximum rows per Parquet segment.
-    pub max_rows_per_file: usize,
-    /// Optional compressed-byte target per Parquet segment.
-    pub target_file_size_bytes: Option<u64>,
-}
 
 /// Outcome of writing one or more flush batches.
 #[derive(Debug, Clone, PartialEq)]

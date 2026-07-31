@@ -4,10 +4,9 @@ use koldstore_common::{
 };
 use koldstore_mirror::{
     mirror_relation_for_source, plan_async_mirror_batch_delete_existing,
-    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert,
-    plan_delete_selected_mirror_rows, plan_mirror_schema, plan_mirror_stats,
-    plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorAccess, MirrorColumn,
-    SqlParamType,
+    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, plan_mirror_schema,
+    plan_mirror_stats, plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorAccess,
+    MirrorColumn, SqlParamType,
 };
 
 fn pk_shape(name: &str, type_name: &str) -> PrimaryKeyColumnShape {
@@ -56,10 +55,6 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
     assert!(!plan.create_table.sql.contains("commit_lsn"));
     assert!(plan.create_table.sql.contains("PRIMARY KEY (\"id\")"));
     assert!(plan
-        .drop_legacy_commit_lsn
-        .sql
-        .contains("DROP COLUMN IF EXISTS \"commit_lsn\""));
-    assert!(plan
         .seq_index
         .sql
         .contains("ON \"koldstore\".\"items__cl\" (\"seq\")"));
@@ -67,7 +62,7 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
         .tombstone_index
         .sql
         .contains("ON \"koldstore\".\"items__cl\" (\"seq\") WHERE \"op\" = 3"));
-    assert_eq!(plan.create_statements().len(), 4);
+    assert_eq!(plan.create_statements().len(), 3);
 }
 
 #[test]
@@ -98,8 +93,9 @@ fn async_mirror_batch_upsert_uses_typed_unnest_and_xmax_counters() {
     )
     .unwrap();
 
-    assert!(sql.contains("unnest($2::text[], $3::bigint[])"));
-    assert!(sql.contains("incoming.pk_0::bigint AS \"id\""));
+    assert!(sql.contains("unnest($2::bigint[], $3::bigint[])"));
+    assert!(sql.contains("incoming.pk_0 AS \"id\""));
+    assert!(!sql.contains("incoming.pk_0::bigint"));
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(sql.contains("RETURNING (xmax = 0) AS inserted"));
     assert!(!sql.contains("jsonb_to_recordset"));
@@ -118,10 +114,24 @@ fn async_mirror_batch_upsert_includes_order_key_bind() {
     )
     .unwrap();
 
-    assert!(sql.contains("unnest($2::text[], $3::bigint[], $4::bytea[])"));
+    assert!(sql.contains("unnest($2::bigint[], $3::bigint[], $4::bytea[])"));
     assert!(sql.contains("incoming.order_key AS \"order_key\""));
     assert!(sql.contains("\"order_key\", \"seq\", \"op\""));
     assert!(!sql.contains("\"order_key\" = EXCLUDED.\"order_key\""));
+}
+
+#[test]
+fn async_mirror_batch_upsert_keeps_text_cast_for_uuid() {
+    let sql = plan_async_mirror_batch_upsert(
+        "\"koldstore\".\"items__cl\"",
+        &["id"],
+        &["uuid".to_string()],
+        false,
+    )
+    .unwrap();
+
+    assert!(sql.contains("unnest($2::text[], $3::bigint[])"));
+    assert!(sql.contains("incoming.pk_0::uuid AS \"id\""));
 }
 
 #[test]
@@ -130,7 +140,6 @@ fn async_mirror_batch_update_updates_existing_rows_then_upserts_missing_rows() {
         "\"koldstore\".\"items__cl\"",
         &["tenant_id", "id"],
         &["uuid".to_string(), "bigint".to_string()],
-        "unused",
         false,
     )
     .unwrap();
@@ -189,29 +198,4 @@ fn mirror_changes_since_scan_keeps_callers_in_control_of_predicates() {
     assert!(stats.sql.contains("'row_count', count(*)"));
     assert!(stats.sql.contains("FROM \"koldstore\".\"items__cl\""));
     assert!(stats.param_types.is_empty());
-}
-
-#[test]
-fn selected_record_columns_match_flush_cleanup_contract() {
-    let columns = koldstore_mirror::selected_record_columns(&["id"]).unwrap();
-    assert_eq!(columns, "\"id\" text, \"seq\" bigint, \"op\" smallint");
-}
-
-#[test]
-fn selected_delete_uses_caller_supplied_selected_set() {
-    let mirror = mirror_relation_for_source(&TableName::parse("app.items").unwrap()).unwrap();
-    let delete = plan_delete_selected_mirror_rows(
-        &mirror,
-        &["id"],
-        "    SELECT * FROM jsonb_to_recordset($1::jsonb) AS selected(\"id\" text, \"seq\" bigint)",
-    )
-    .unwrap();
-
-    assert!(delete.sql.contains("WITH selected AS"));
-    assert!(delete
-        .sql
-        .contains("DELETE FROM \"koldstore\".\"items__cl\" AS mirror"));
-    assert!(delete.sql.contains("mirror.\"id\"::text = selected.\"id\""));
-    assert!(delete.sql.contains("mirror.\"seq\" = selected.\"seq\""));
-    assert_eq!(delete.param_types, vec![SqlParamType::Jsonb]);
 }

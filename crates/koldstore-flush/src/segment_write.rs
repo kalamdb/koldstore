@@ -3,12 +3,11 @@
 //! Owns PG-free object-path planning, Parquet encoding, durable object publish,
 //! and manifest segment construction. Catalog SPI inserts stay in `pg_koldstore`.
 
-use koldstore_catalog::CatalogManifestSegmentRow;
-use koldstore_common::ColumnId;
-use koldstore_manifest::{segment_object_path, segment_path_token, table_object_prefix};
-use koldstore_parquet::validate_parquet_bytes;
+use koldstore_catalog::{CatalogManifestSegmentRow, CatalogSegmentIndexBound};
+use koldstore_manifest::{segment_path_token, segment_relative_object_path};
+use koldstore_parquet::{validate_finalized_parquet_segment, PackedSegmentMetadata};
 use koldstore_storage::{
-    open_filesystem_client, publish_immutable_object, temp_object_key, unique_temp_file_name,
+    join_object_key, publish_immutable_object, temp_object_key, unique_temp_file_name,
     ObjectStoreClient,
 };
 use uuid::Uuid;
@@ -24,29 +23,22 @@ use crate::write::FlushWriteChunk;
 pub struct WrittenFlushSegment {
     /// New segment id for catalog inserts.
     pub segment_id: uuid::Uuid,
-    /// Full object path under the table prefix (also stored on the manifest).
+    /// Full object key under the table prefix used for publication.
     pub object_path: String,
-    /// Final on-disk byte size.
-    pub byte_size: i64,
     /// Sha256 hex of the published Parquet bytes.
     pub checksum: String,
     /// Optional object-store etag from publish.
     pub object_etag: Option<String>,
-    /// Original JSON bounds awaiting catalog type resolution and Sort Key encoding.
-    pub indexed_bounds:
-        std::collections::BTreeMap<ColumnId, (serde_json::Value, serde_json::Value)>,
-    /// Catalog row shape for manifest assembly (single source of truth).
+    /// Compact footer-derived segment and row-group metadata.
+    pub packed_metadata: PackedSegmentMetadata,
+    /// Catalog row shape for manifest assembly (relative `path`, sizes, seq bounds).
     pub catalog_row: CatalogManifestSegmentRow,
 }
 
-/// Builds the immutable object key for one flush segment write attempt.
-///
-/// Layout: `{prefix}/{folder:03}/segment-{NNNN}-{token}.parquet` (100 segments
-/// per folder). `token` is 8 hex chars from `segment_id` so retries stay unique
-/// without embedding the full UUID in the filename.
+/// Builds the table-relative object key for one flush segment.
 #[must_use]
-pub fn flush_segment_object_path(prefix: &str, batch_number: i32, segment_id: Uuid) -> String {
-    segment_object_path(prefix, batch_number, segment_path_token(segment_id))
+pub fn flush_segment_relative_path(batch_number: i32, segment_id: Uuid) -> String {
+    segment_relative_object_path(batch_number, segment_path_token(segment_id))
 }
 
 /// Writes one Parquet segment via encode → validate → durable Create publish.
@@ -58,58 +50,24 @@ pub fn flush_segment_object_path(prefix: &str, batch_number: i32, segment_id: Uu
 /// # Errors
 ///
 /// Returns an error when encoding, validation, or durable publish fails.
-#[allow(clippy::too_many_arguments)]
-pub fn write_flush_segment_file(
-    namespace: &str,
-    table_name: &str,
-    base_path: &str,
-    compression: &str,
-    primary_key_columns: &[String],
-    schema_version: i32,
-    batch_number: i32,
-    chunk: &FlushWriteChunk,
-    chunk_stats: &FlushStats,
-) -> Result<WrittenFlushSegment, String> {
-    let client = open_filesystem_client(base_path).map_err(|error| error.to_string())?;
-    write_flush_segment_with_client(
-        &client,
-        namespace,
-        table_name,
-        compression,
-        primary_key_columns,
-        schema_version,
-        batch_number,
-        chunk,
-        chunk_stats,
-    )
-}
-
-/// Same as [`write_flush_segment_file`] but uses an existing storage client.
-///
-/// # Errors
-///
-/// Returns an error when encoding, validation, or durable publish fails.
-#[allow(clippy::too_many_arguments)]
 pub fn write_flush_segment_with_client(
     client: &ObjectStoreClient,
-    namespace: &str,
-    table_name: &str,
-    _compression: &str,
-    _primary_key_columns: &[String],
+    table_prefix: &str,
     schema_version: i32,
     batch_number: i32,
     chunk: &FlushWriteChunk,
     chunk_stats: &FlushStats,
 ) -> Result<WrittenFlushSegment, String> {
-    let prefix = table_object_prefix(namespace, table_name);
+    let prefix = table_prefix.trim_matches('/');
     // Allocate the segment id before publish so the final key is unique per
     // write attempt. Retries after abort must not reuse an orphaned object.
     let segment_id = Uuid::new_v4();
-    let object_path = flush_segment_object_path(&prefix, batch_number, segment_id);
+    let relative_path = flush_segment_relative_path(batch_number, segment_id);
+    let object_path = join_object_key(prefix, &relative_path);
     // Flat temp under `{prefix}/.tmp/` — uniqueness is in the file name UUID.
     // Avoids leaving empty per-attempt directories after temp cleanup.
     let temp_key = temp_object_key(
-        &prefix,
+        prefix,
         "",
         &unique_temp_file_name(&format!(
             "segment-{batch_number:04}-{}.parquet",
@@ -118,12 +76,18 @@ pub fn write_flush_segment_with_client(
     );
 
     let bytes = &chunk.parquet_bytes;
-    let validation = validate_parquet_bytes(bytes)?;
+    let validation = validate_finalized_parquet_segment(bytes, chunk.parquet_metadata.as_ref())?;
     let expected_rows = u64::try_from(chunk_stats.row_count.max(0)).unwrap_or(0);
     if validation.row_count != expected_rows {
         return Err(format!(
             "parquet row count {} does not match flush chunk stats {}",
             validation.row_count, chunk_stats.row_count
+        ));
+    }
+    if validation.row_group_count != chunk.packed_metadata.row_group_count {
+        return Err(format!(
+            "finalized Parquet metadata has {} row groups but packed metadata has {}",
+            validation.row_group_count, chunk.packed_metadata.row_group_count
         ));
     }
 
@@ -133,7 +97,8 @@ pub fn write_flush_segment_with_client(
 
     let byte_size = i64::try_from(published.byte_size).map_err(|error| error.to_string())?;
     let catalog_row = CatalogManifestSegmentRow {
-        object_path: object_path.clone(),
+        segment_id: segment_id.to_string(),
+        path: relative_path,
         batch_number,
         min_seq: chunk_stats.min_seq,
         max_seq: chunk_stats.max_seq,
@@ -142,16 +107,46 @@ pub fn write_flush_segment_with_client(
         row_count: chunk_stats.row_count,
         byte_size,
         schema_version,
-        index_bounds: Vec::new(),
+        row_group_count: i32::try_from(chunk.packed_metadata.row_group_count)
+            .map_err(|error| error.to_string())?,
+        row_group_row_counts: chunk.packed_metadata.row_group_row_counts.clone(),
+        row_group_min_seqs: chunk.packed_metadata.row_group_min_seqs.clone(),
+        row_group_max_seqs: chunk.packed_metadata.row_group_max_seqs.clone(),
+        status: "pending".to_string(),
+        checksum: published.checksum.clone(),
+        object_etag: published.etag.clone(),
+        created_at: None,
+        index_bounds: chunk
+            .packed_metadata
+            .column_indexes
+            .iter()
+            .map(|index| CatalogSegmentIndexBound {
+                column_id: index.column_id.get(),
+                type_oid: index.type_oid,
+                codec_version: index.codec_version,
+                min_value: index.min_value.as_deref().map(hex::encode),
+                max_value: index.max_value.as_deref().map(hex::encode),
+                row_group_min_values: index
+                    .row_group_min_values
+                    .iter()
+                    .map(|value| value.as_deref().map(hex::encode))
+                    .collect(),
+                row_group_max_values: index
+                    .row_group_max_values
+                    .iter()
+                    .map(|value| value.as_deref().map(hex::encode))
+                    .collect(),
+                row_group_null_counts: index.row_group_null_counts.clone(),
+            })
+            .collect(),
     };
 
     Ok(WrittenFlushSegment {
         segment_id,
         object_path,
-        byte_size,
         checksum: published.checksum,
         object_etag: published.etag,
-        indexed_bounds: chunk.indexed_bounds.clone(),
+        packed_metadata: chunk.packed_metadata.clone(),
         catalog_row,
     })
 }

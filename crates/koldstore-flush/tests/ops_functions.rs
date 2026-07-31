@@ -68,7 +68,7 @@ fn operational_functions_build_parameterized_catalog_plans() {
         Some(ScopeKey::new("tenant-a").unwrap()),
     )
     .unwrap();
-    assert!(backup.statement.sql.contains("SELECT manifest_path"));
+    assert!(backup.statement.sql.contains("SELECT etag"));
     assert_eq!(backup.scope_key.unwrap().as_str(), "tenant-a");
 
     let validation = koldstore_flush::ops::validate_cold_storage_plan(Some(table.clone())).unwrap();
@@ -79,6 +79,7 @@ fn operational_functions_build_parameterized_catalog_plans() {
         .contains("cs.scope_key = m.scope_key"));
     assert!(validation.statement.sql.contains("cs.status = 'active'"));
     assert!(!validation.statement.sql.contains("cs.column_stats"));
+    assert!(validation.statement.sql.contains("cs.path"));
     assert!(!validation.statement.sql.contains("cold_pk_hints"));
 
     let recovery = koldstore_flush::ops::recover_segments_plan(Some(table), false).unwrap();

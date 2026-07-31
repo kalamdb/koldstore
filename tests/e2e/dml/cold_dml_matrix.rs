@@ -4,7 +4,7 @@ use anyhow::Result;
 use koldstore_common::TableName;
 use koldstore_merge::dml::{
     plan_delete_row, plan_hydrate_pk, plan_update_row, ColdUpdateOutcome, DeleteInputState,
-    DeleteRowRequest, HydratePkRequest, UpdateRowRequest,
+    DeleteRowRequest, UpdateRowRequest,
 };
 use serde_json::json;
 
@@ -28,13 +28,7 @@ fn cold_dml_plans_cover_hydrate_update_delete_and_no_default_object_reads() {
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
     let table_name = TableName::parse("app.items").unwrap();
-    let hydrate = plan_hydrate_pk(
-        &HydratePkRequest {
-            table_name: table_name.clone(),
-            pk_json: json!({"id": 1}),
-        },
-        true,
-    );
+    let hydrate = plan_hydrate_pk(true);
     assert_eq!(hydrate.affected_rows, 1);
     assert!(hydrate.cold_lookup_performed);
 

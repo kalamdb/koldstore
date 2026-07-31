@@ -145,7 +145,7 @@ ORDER BY j.created_at;
 SELECT
   c.relname AS table_name,
   m.scope_key,
-  m.manifest_path,
+  m.generation,
   m.sync_state,
   m.segment_count
 FROM koldstore.manifest m

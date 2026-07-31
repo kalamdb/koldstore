@@ -1,5 +1,7 @@
 //! Object path templates.
 
+pub use koldstore_common::{join_object_key, manifest_object_key, normalize_table_prefix};
+
 /// Path template using pg-koldstore placeholder names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathTemplate {
@@ -44,5 +46,36 @@ impl PathTemplate {
             return Err("path template contains unresolved placeholders".to_string());
         }
         Ok(rendered)
+    }
+}
+
+/// Renders and normalizes a regular table prefix.
+///
+/// # Errors
+///
+/// Returns the template rendering error when placeholders are invalid.
+pub fn render_regular_table_prefix(
+    template: &PathTemplate,
+    namespace: &str,
+    table_name: &str,
+) -> Result<String, String> {
+    template
+        .render(namespace, table_name, None)
+        .map(|rendered| normalize_table_prefix(&rendered))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_and_join_default_template() {
+        let tmpl = PathTemplate::new("{namespace}/{tableName}/");
+        let prefix = render_regular_table_prefix(&tmpl, "app", "items").unwrap();
+        assert_eq!(prefix, "app/items/");
+        assert_eq!(
+            join_object_key(&prefix, "manifest.json"),
+            "app/items/manifest.json"
+        );
     }
 }

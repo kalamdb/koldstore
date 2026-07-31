@@ -58,21 +58,6 @@ impl FlushStats {
         }
     }
 
-    /// Derives flush stats from one encoded Parquet chunk.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the row count does not fit in `i64`.
-    pub fn from_cold_batch(batch: &koldstore_parquet::ColdRecordBatch) -> Result<Self, String> {
-        Ok(Self {
-            row_count: i64::try_from(batch.row_count).map_err(|error| error.to_string())?,
-            min_seq: batch.min_seq,
-            max_seq: batch.max_seq,
-            min_commit_seq: batch.min_seq,
-            max_commit_seq: batch.max_seq,
-        })
-    }
-
     /// Derives flush stats from one fully encoded segment chunk.
     ///
     /// # Errors
@@ -80,11 +65,12 @@ impl FlushStats {
     /// Returns an error when the row count does not fit in `i64`.
     pub fn from_write_chunk(chunk: &crate::write::FlushWriteChunk) -> Result<Self, String> {
         Ok(Self {
-            row_count: i64::try_from(chunk.row_count).map_err(|error| error.to_string())?,
-            min_seq: chunk.min_seq,
-            max_seq: chunk.max_seq,
-            min_commit_seq: chunk.min_seq,
-            max_commit_seq: chunk.max_seq,
+            row_count: chunk.packed_metadata.row_count,
+            min_seq: chunk.packed_metadata.min_seq,
+            max_seq: chunk.packed_metadata.max_seq,
+            // Clean segments use SeqId as their commit-order value.
+            min_commit_seq: chunk.packed_metadata.min_seq,
+            max_commit_seq: chunk.packed_metadata.max_seq,
         })
     }
 }

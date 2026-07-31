@@ -20,7 +20,7 @@ fn request(options: ManageTableOptions) -> MigrateTableRequest {
 fn context() -> MigrationTableContext {
     MigrationTableContext {
         table_oid: 42,
-        storage_id: Uuid::from_u128(7),
+        storage_id: "00000007".to_string(),
     }
 }
 
@@ -50,7 +50,7 @@ fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
     .unwrap();
 
     assert_eq!(plan.table_oid, 42);
-    assert_eq!(plan.storage_id, Uuid::from_u128(7));
+    assert_eq!(plan.storage_id, "00000007");
     assert_eq!(plan.ordering.column, "id");
     assert_eq!(
         plan.ordering.source,

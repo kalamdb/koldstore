@@ -58,7 +58,7 @@ fn registry_metadata_records_clean_schema_mirror_without_system_columns() {
     let metadata = register::RegistrationMetadata {
         table_oid: 42,
         table_type: "shared".to_string(),
-        storage_id: Uuid::from_u128(7),
+        storage_id: "00000007".to_string(),
         scope_column: None,
         mirror_relation: Some("koldstore.messages__cl".to_string()),
         primary_key_shape: Some(pk_shape()),

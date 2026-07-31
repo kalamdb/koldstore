@@ -2,12 +2,9 @@
 
 use koldstore_common::SqlStatement;
 use koldstore_migrate::order::CatalogColumn;
-use koldstore_parquet::{FlushColumnValue, FlushMirrorRow};
+use koldstore_parquet::{jsonb_cell_to_utf8, pg_bytea_hex, FlushColumnValue, FlushMirrorRow};
 use koldstore_schema::PgType;
-
-/// Microseconds between the Unix epoch (1970-01-01) and the PostgreSQL epoch
-/// (2000-01-01). Used to convert `timestamptz` datums without string round-trips.
-const PG_EPOCH_OFFSET_MICROS: i64 = 946_684_800_000_000;
+use koldstore_sortkey::PG_EPOCH_MICROS_FROM_UNIX;
 
 /// Fetches one keyset page of mirror rows selected for flush.
 ///
@@ -56,7 +53,7 @@ fn decode_mirror_batch(
     //   1..=N  application columns (catalog order)
     //   N+1    seq
     //   N+2    op
-    //   N+3    deleted
+    //   N+3    order_key (optional)
     let seq_ordinal = columns.len() + 1;
     let op_ordinal = columns.len() + 2;
     let mut rows = Vec::with_capacity(tuples.len());
@@ -91,7 +88,7 @@ fn decode_mirror_row(
         values.push(read_column(tuple, column, index + 1)?);
     }
     let order_key = include_order_key
-        .then(|| tuple.get::<Vec<u8>>(columns.len() + 4))
+        .then(|| tuple.get::<Vec<u8>>(columns.len() + 3))
         .transpose()?
         .flatten();
     Ok(FlushMirrorRow {
@@ -148,11 +145,11 @@ fn read_column(
             .unwrap_or(FlushColumnValue::Null),
         PgType::Jsonb => tuple
             .get::<pgrx::JsonB>(ordinal)?
-            .map(|json| FlushColumnValue::Utf8(json_to_utf8(&json.0)))
+            .map(|json| FlushColumnValue::Utf8(jsonb_cell_to_utf8(&json.0)))
             .unwrap_or(FlushColumnValue::Null),
         PgType::Bytea => tuple
             .get::<Vec<u8>>(ordinal)?
-            .map(|bytes| FlushColumnValue::Utf8(bytea_to_pg_hex(&bytes)))
+            .map(|bytes| FlushColumnValue::Utf8(pg_bytea_hex(&bytes)))
             .unwrap_or(FlushColumnValue::Null),
         PgType::Numeric | PgType::TextArray => tuple
             .get::<String>(ordinal)?
@@ -165,7 +162,7 @@ fn read_column(
                 Some(timestamp) => {
                     let pg_micros = timestamp.into_inner();
                     FlushColumnValue::TimestamptzMicros(
-                        pg_micros.saturating_add(PG_EPOCH_OFFSET_MICROS),
+                        pg_micros.saturating_add(PG_EPOCH_MICROS_FROM_UNIX),
                     )
                 }
                 None => FlushColumnValue::Null,
@@ -173,21 +170,4 @@ fn read_column(
         }
     };
     Ok(value)
-}
-
-fn json_to_utf8(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(text) => text.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
-    }
-}
-
-/// Encodes raw bytes in PostgreSQL `bytea` hex output form (`\xdeadbeef`).
-fn bytea_to_pg_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(2 + bytes.len() * 2);
-    out.push_str("\\x");
-    for byte in bytes {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
 }

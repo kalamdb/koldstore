@@ -97,8 +97,8 @@ Installed by `koldstore.manage_table` (see [manage-table.md](manage-table.md)):
 7. Counter refresh so manifest hot/mirror counts match live heaps before capture
    takes over
 8. In async mode only: add the source's PK columns to the shared publication and
-   drop the three DML capture triggers and any legacy worker-kick triggers; keep
-   the PK guard and start/reuse the always-on database applier
+   drop the three DML capture triggers; keep the PK guard and start/reuse the
+   always-on database applier
 
 For user-scoped tables, RLS policy `koldstore_user_scope_fail_closed` is also
 installed.
@@ -347,7 +347,7 @@ reads.
 `hooks/executor.rs::enforce_dml_scope` is a pure helper used by unit/shell
 tests and planning code. It is **not** registered as a live executor hook;
 runtime row filtering for scoped tables is RLS. Native hot scans apply it in
-PostgreSQL's child plan; buffered cold and hot+cold scans apply the compiled
+PostgreSQL's child plan; streaming cold and hot+cold scans apply the compiled
 security quals through PostgreSQL `ExecScan` after winner resolution.
 
 ---
@@ -405,8 +405,8 @@ Pure planning exists in `koldstore-merge/src/sql/dml.rs` for:
 - `koldstore.update_row` (`lookup_cold` flag)
 - `koldstore.delete_row` (`allow_may_contain`)
 
-SQL types exist in bootstrap DDL (`koldstore.dml_result`) but there are no
-`#[pg_extern]` implementations in `pg_koldstore` yet.
+There are no `#[pg_extern]` implementations in `pg_koldstore` yet; cold DML
+remains library planning only.
 
 Standard SQL `UPDATE`/`DELETE` on cold-only rows (not in the hot heap) is a
 no-op on the heap; durable cold masking requires a mirror tombstone + flush.

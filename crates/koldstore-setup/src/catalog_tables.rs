@@ -27,7 +27,7 @@ pub const REQUIRED_CATALOG_TABLES: &[CatalogTableSpec] = &[
     },
     CatalogTableSpec {
         name: "koldstore.manifest",
-        purpose: "published cold manifest location and sync state",
+        purpose: "published cold manifest generation and sync state",
     },
     CatalogTableSpec {
         name: "koldstore.jobs",

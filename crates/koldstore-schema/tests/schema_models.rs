@@ -28,8 +28,7 @@ fn schema_column_serialization_includes_column_id() {
             "column_id": 3,
             "name": "created_at",
             "type_name": "timestamptz",
-            "nullable": false,
-            "system": false
+            "nullable": false
         })
     );
 
@@ -51,7 +50,6 @@ fn schema_registry_validation_requires_pk_ids() {
     assert!(entry.validate(&[]).is_err());
     assert!(entry.validate(&[ColumnId::from_attnum(99)]).is_err());
     assert_eq!(entry.application_columns().len(), 1);
-    assert!(entry.system_columns().is_empty());
     assert_eq!(entry.physical_name(ColumnId::from_attnum(1)), Some("id"));
 }
 

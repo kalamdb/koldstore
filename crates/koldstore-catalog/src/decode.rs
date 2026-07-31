@@ -16,14 +16,18 @@ pub struct RelationContext {
 /// Active cold-segment row returned by merge-scan catalog lookups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestScanSegmentStats {
-    /// Final object-store path.
-    pub object_path: String,
+    /// Table-relative object-store path (`001/segment-….parquet`).
+    pub path: String,
     /// Schema version used to write the segment.
     pub schema_version: i32,
     /// Physical Parquet field names keyed by stable column ID.
     pub physical_names: BTreeMap<i16, String>,
     /// Object byte size when known (enables bounded footer range GETs).
     pub byte_size: Option<u64>,
+    /// Segment minimum `seq` (inclusive).
+    pub min_seq: i64,
+    /// Segment maximum `seq` (inclusive).
+    pub max_seq: i64,
 }
 
 /// Manifest-backed merge-scan context loaded from catalog SPI.
@@ -33,8 +37,8 @@ pub struct ManifestScanSegmentStats {
 /// readable from the last published generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InSyncManifestScanContext {
-    /// Latest published manifest object path.
-    pub manifest_path: String,
+    /// Normalized object-store table prefix (`{namespace}/{table}/` style).
+    pub table_prefix: String,
     /// Monotonic catalog generation (CAS identity).
     pub generation: u64,
     /// Object-store base path for the managed table.
@@ -60,6 +64,8 @@ pub struct FlushStorageContext {
     pub credentials: serde_json::Value,
     /// Storage backend config JSON.
     pub config: serde_json::Value,
+    /// Configured regular table path template.
+    pub regular_path_tmpl: String,
     /// Active KoldStore schema version.
     pub schema_version: i32,
     /// Configured Parquet compression codec.
@@ -95,7 +101,7 @@ pub fn in_sync_manifest_scan_context(
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(InSyncManifestScanContext {
-        manifest_path: required_string(value, "manifest_path")?.to_string(),
+        table_prefix: required_string(value, "table_prefix")?.to_string(),
         generation: required_u64(value, "generation")?,
         base_path: required_string(value, "base_path")?.to_string(),
         storage_type: optional_string(value, "storage_type")
@@ -122,7 +128,7 @@ pub fn manifest_scan_segment_stats(
     value: &serde_json::Value,
 ) -> Result<ManifestScanSegmentStats, String> {
     Ok(ManifestScanSegmentStats {
-        object_path: required_string(value, "object_path")?.to_string(),
+        path: required_string(value, "path")?.to_string(),
         schema_version: required_i32(value, "schema_version")?,
         physical_names: value
             .get("physical_names")
@@ -137,63 +143,9 @@ pub fn manifest_scan_segment_stats(
             })
             .unwrap_or_default(),
         byte_size: optional_u64(value, "byte_size"),
+        min_seq: required_i64(value, "min_seq")?,
+        max_seq: required_i64(value, "max_seq")?,
     })
-}
-
-/// Extracts `{column_id: (min, max)}` pairs from catalog column-stats JSON.
-///
-/// Keys are canonical stringified PostgreSQL attribute numbers. Entries with a
-/// non-numeric/zero key or missing either bound are skipped. Prefer
-/// [`column_stats_from_index_bounds`] for live export — this helper remains for
-/// parsing already-decoded JSON maps in tests and legacy fixtures.
-#[must_use]
-pub fn column_stats_min_max_map(
-    column_stats: &serde_json::Value,
-) -> BTreeMap<String, (serde_json::Value, serde_json::Value)> {
-    let mut stats = BTreeMap::new();
-    let Some(columns) = column_stats.as_object() else {
-        return stats;
-    };
-    for (column, value) in columns {
-        let Some(column_id) = canonical_column_id_key(column) else {
-            continue;
-        };
-        let Some(min) = value.get("min") else {
-            continue;
-        };
-        let Some(max) = value.get("max") else {
-            continue;
-        };
-        stats.insert(column_id, (min.clone(), max.clone()));
-    }
-    stats
-}
-
-/// Like [`column_stats_min_max_map`], but takes ownership and moves min/max out.
-#[must_use]
-pub fn column_stats_min_max_map_into(
-    column_stats: serde_json::Value,
-) -> BTreeMap<String, (serde_json::Value, serde_json::Value)> {
-    let mut stats = BTreeMap::new();
-    let serde_json::Value::Object(columns) = column_stats else {
-        return stats;
-    };
-    for (column, value) in columns {
-        let Some(column_id) = canonical_column_id_key(&column) else {
-            continue;
-        };
-        let serde_json::Value::Object(mut bounds) = value else {
-            continue;
-        };
-        let Some(min) = bounds.remove("min") else {
-            continue;
-        };
-        let Some(max) = bounds.remove("max") else {
-            continue;
-        };
-        stats.insert(column_id, (min, max));
-    }
-    stats
 }
 
 /// Decodes Sort Key V1 index rows into the manifest export `{column_id: {min,max}}` map.
@@ -220,9 +172,12 @@ pub fn column_stats_from_index_bounds(
         if bound.column_id == 0 {
             continue;
         }
-        let min_bytes = decode_hex(&bound.min_value)
+        let (Some(min_value), Some(max_value)) = (&bound.min_value, &bound.max_value) else {
+            continue;
+        };
+        let min_bytes = decode_hex(min_value)
             .map_err(|error| format!("index min_value for column {}: {error}", bound.column_id))?;
-        let max_bytes = decode_hex(&bound.max_value)
+        let max_bytes = decode_hex(max_value)
             .map_err(|error| format!("index max_value for column {}: {error}", bound.column_id))?;
         let min = decode_sort_key(sort_key_type, &min_bytes)
             .map_err(|error| format!("decode min for column {}: {error}", bound.column_id))?
@@ -259,9 +214,86 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
     }
 }
 
-fn canonical_column_id_key(value: &str) -> Option<String> {
-    let column_id = value.parse::<i16>().ok()?;
-    (column_id != 0).then(|| column_id.to_string())
+/// Active async managed-relation metadata used by the WAL applier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncManagedRelationMeta {
+    /// Managed source table OID.
+    pub table_oid: u32,
+    /// Quoted or catalog-text mirror relation name.
+    pub mirror: String,
+    /// Ordered primary-key column names.
+    pub primary_key: Vec<String>,
+    /// Optional immutable segment-order column.
+    pub order_column: Option<AsyncOrderColumnMeta>,
+}
+
+/// Segment-order column published into async capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AsyncOrderColumnMeta {
+    /// Column name in the live catalog / pgoutput relation.
+    pub name: String,
+    /// PostgreSQL type OID for SPI encoding.
+    pub type_oid: u32,
+}
+
+/// Decodes async managed-relation metadata from catalog JSON.
+///
+/// # Errors
+///
+/// Returns an error when required fields are missing, incomplete, or mistyped.
+pub fn async_managed_relation(
+    value: &serde_json::Value,
+) -> Result<AsyncManagedRelationMeta, String> {
+    let table_oid = value
+        .get("table_oid")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "async schema metadata has no table_oid".to_string())?
+        .parse::<u32>()
+        .map_err(|error| error.to_string())?;
+    let mirror = required_string(value, "mirror")?.to_string();
+    let primary_key = value
+        .get("primary_key")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "async schema metadata has no primary key".to_string())?
+        .iter()
+        .map(|column| {
+            column
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "async primary key entry missing name".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let order_column = match (
+        value
+            .get("segment_order_column")
+            .and_then(serde_json::Value::as_str),
+        value
+            .get("segment_order_type_oid")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                value
+                    .get("segment_order_type_oid")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|n| u64::try_from(n).ok())
+            }),
+    ) {
+        (Some(name), Some(type_oid)) => Some(AsyncOrderColumnMeta {
+            name: name.to_string(),
+            type_oid: type_oid as u32,
+        }),
+        (None, None) => None,
+        _ => {
+            return Err(
+                "async schema metadata has incomplete segment_order_column fields".to_string(),
+            )
+        }
+    };
+    Ok(AsyncManagedRelationMeta {
+        table_oid,
+        mirror,
+        primary_key,
+        order_column,
+    })
 }
 
 /// Decodes a flush storage context JSON payload.
@@ -284,6 +316,9 @@ pub fn flush_storage_context(value: &serde_json::Value) -> Result<FlushStorageCo
             .get("config")
             .cloned()
             .unwrap_or_else(|| serde_json::json!({})),
+        regular_path_tmpl: optional_string(value, "regular_path_tmpl")
+            .unwrap_or("{namespace}/{tableName}/")
+            .to_string(),
         schema_version,
         compression: required_string(value, "compression")?.to_string(),
     })
@@ -310,6 +345,13 @@ fn required_i32(value: &serde_json::Value, field: &str) -> Result<i32, String> {
         .and_then(serde_json::Value::as_i64)
         .ok_or_else(|| format!("missing integer field `{field}`"))?;
     i32::try_from(raw).map_err(|error| error.to_string())
+}
+
+fn required_i64(value: &serde_json::Value, field: &str) -> Result<i64, String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| format!("missing integer field `{field}`"))
 }
 
 fn required_u64(value: &serde_json::Value, field: &str) -> Result<u64, String> {
@@ -339,47 +381,49 @@ fn optional_u64(value: &serde_json::Value, field: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{column_stats_min_max_map, flush_storage_context, in_sync_manifest_scan_context};
+    use super::{flush_storage_context, in_sync_manifest_scan_context};
 
     #[test]
     fn in_sync_manifest_scan_context_decodes_segment_stats() {
         let value = serde_json::json!({
-            "manifest_path": "ns/table/manifest.json",
+            "table_prefix": "ns/table/",
             "generation": 3,
             "base_path": "/tmp/koldstore",
             "segments": [
                 {
-                    "object_path": "ns/table/batch-1.parquet",
+                    "path": "001/segment-0001-abcd.parquet",
                     "schema_version": 1,
                     "physical_names": {"1": "id"},
-                    "column_stats": {"1": {"min": 1, "max": 100}}
+                    "min_seq": 1,
+                    "max_seq": 100
                 }
             ]
         });
 
         let context = in_sync_manifest_scan_context(&value).unwrap();
-        assert_eq!(context.manifest_path, "ns/table/manifest.json");
+        assert_eq!(context.table_prefix, "ns/table/");
         assert_eq!(context.generation, 3);
         assert_eq!(context.base_path, "/tmp/koldstore");
         assert_eq!(context.storage_type, "filesystem");
         assert_eq!(context.segments.len(), 1);
-        assert_eq!(context.segments[0].object_path, "ns/table/batch-1.parquet");
+        assert_eq!(context.segments[0].path, "001/segment-0001-abcd.parquet");
         assert_eq!(context.segments[0].byte_size, None);
     }
 
     #[test]
     fn in_sync_manifest_scan_context_decodes_byte_size() {
         let value = serde_json::json!({
-            "manifest_path": "ns/table/manifest.json",
+            "table_prefix": "ns/table/",
             "generation": 3,
             "base_path": "s3://bucket/prefix",
             "storage_type": "s3",
             "segments": [
                 {
-                    "object_path": "ns/table/batch-1.parquet",
+                    "path": "001/segment-0001-abcd.parquet",
                     "schema_version": 2,
                     "physical_names": {"1": "old_id"},
-                    "column_stats": {"1": {"min": 1, "max": 10}},
+                    "min_seq": 1,
+                    "max_seq": 10,
                     "byte_size": 4096
                 }
             ]
@@ -409,27 +453,30 @@ mod tests {
             column_id: 1,
             type_oid: 20,
             codec_version: CODEC_VERSION,
-            min_value: hex(&min),
-            max_value: hex(&max),
+            min_value: Some(hex(&min)),
+            max_value: Some(hex(&max)),
+            row_group_min_values: vec![Some(hex(&min))],
+            row_group_max_values: vec![Some(hex(&max))],
+            row_group_null_counts: vec![Some(0)],
         }])
         .unwrap();
         assert_eq!(stats["1"], (serde_json::json!(1), serde_json::json!(10)));
     }
 
     #[test]
-    fn column_stats_min_max_map_skips_incomplete_bounds() {
+    fn async_managed_relation_decodes_order_column() {
         let value = serde_json::json!({
-            "1": {"min": 1, "max": 100},
-            "2": {"min": 1},
-            "3": {"max": 9},
-            "not-a-column-id": {"min": 0, "max": 0}
+            "table_oid": "42",
+            "mirror": "koldstore.items__cl",
+            "primary_key": ["tenant_id", "id"],
+            "segment_order_column": "created_at",
+            "segment_order_type_oid": 1184
         });
-        let stats = column_stats_min_max_map(&value);
-        assert_eq!(stats.len(), 1);
-        assert_eq!(
-            stats.get("1"),
-            Some(&(serde_json::json!(1), serde_json::json!(100)))
-        );
+        let meta = super::async_managed_relation(&value).unwrap();
+        assert_eq!(meta.table_oid, 42);
+        assert_eq!(meta.primary_key, vec!["tenant_id", "id"]);
+        assert_eq!(meta.order_column.as_ref().unwrap().name, "created_at");
+        assert_eq!(meta.order_column.as_ref().unwrap().type_oid, 1184);
     }
 
     #[test]

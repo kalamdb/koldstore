@@ -7,6 +7,7 @@ repository.workspace = true
 description = "Hot-to-cold flush workflow for pg-koldstore"
 
 [dependencies]
+hex.workspace = true
 koldstore-common.workspace = true
 koldstore-catalog.workspace = true
 koldstore-manifest.workspace = true
@@ -14,6 +15,7 @@ koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-sortkey.workspace = true
 koldstore-storage.workspace = true
+parquet.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

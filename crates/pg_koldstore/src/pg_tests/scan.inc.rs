@@ -1,6 +1,6 @@
 #[pg_test]
-fn explain_shows_kold_merge_scan_for_managed_table() {
-    let suffix = unique_suffix("explain");
+fn managed_table_without_published_cold_segments_keeps_native_postgresql_plan() {
+    let suffix = unique_suffix("native_no_cold");
     let schema = format!("pgtest_{suffix}");
     let table = "messages";
     let relation = format!("{schema}.{table}");
@@ -13,18 +13,166 @@ fn explain_shows_kold_merge_scan_for_managed_table() {
     ))
     .expect("insert");
 
-    let plan = spi_get_explain(&format!("EXPLAIN SELECT * FROM {relation}"));
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) SELECT body FROM {relation} WHERE id BETWEEN 1 AND 10"
+    ));
     assert!(
-        plan.contains("KoldMergeScan") || plan.contains("Custom Scan"),
-        "expected custom merge scan in EXPLAIN: {plan}"
+        !plan.contains("KoldMergeScan") && !plan.contains("Custom Scan"),
+        "zero published cold segments must retain PostgreSQL's native plan: {plan}"
     );
     assert!(
-        plan.contains("Candidate Segments")
-            || plan.contains("Segments Pruned by Catalog Index")
-            || plan.contains("Parquet Segments Opened")
-            || plan.contains("Parquet Segments Planned"),
-        "expected Timescale-style prune properties in EXPLAIN: {plan}"
+        plan.contains("Index Scan")
+            || plan.contains("Index Only Scan")
+            || plan.contains("Bitmap Heap Scan")
+            || plan.contains("Seq Scan"),
+        "expected a native PostgreSQL scan node: {plan}"
     );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id) FROM {relation} WHERE id BETWEEN 1 AND 10"
+        )),
+        "hot"
+    );
+}
+
+#[pg_test]
+fn prepared_native_plan_is_invalidated_when_first_cold_segment_is_published() {
+    let suffix = unique_suffix("native_plan_invalidation");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let statement = format!("ks_native_invalidation_{suffix}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
+    Spi::run(&format!(
+        "PREPARE {statement} AS SELECT count(*)::bigint FROM {relation}"
+    ))
+    .expect("prepare");
+
+    let before_plan = spi_get_explain(&format!("EXPLAIN (COSTS OFF) EXECUTE {statement}"));
+    assert!(
+        !before_plan.contains("KoldMergeScan") && !before_plan.contains("Custom Scan"),
+        "prepared pre-flush query must begin with a native PostgreSQL plan: {before_plan}"
+    );
+    assert_eq!(spi_get_i64(&format!("EXECUTE {statement}")), 3);
+
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+
+    let after_plan = spi_get_explain(&format!("EXPLAIN (COSTS OFF) EXECUTE {statement}"));
+    assert!(
+        after_plan.contains("KoldMergeScan") || after_plan.contains("Custom Scan"),
+        "relcache invalidation must rebuild the prepared plan with cold visibility: {after_plan}"
+    );
+    assert_eq!(
+        spi_get_i64(&format!("EXECUTE {statement}")),
+        3,
+        "replanned prepared statement must retain all flushed rows"
+    );
+    Spi::run(&format!("DEALLOCATE {statement}")).expect("deallocate");
+}
+
+#[pg_test]
+fn hot_primary_key_range_above_cold_max_keeps_native_postgresql_plan() {
+    let suffix = unique_suffix("native_above_cold");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b'), (3, 'cold-c')"
+    ))
+    .expect("insert cold candidates");
+    assert!(flush_table_rows(&relation, true) >= 1);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (100, 'hot-a'), (101, 'hot-b'), (102, 'hot-c')"
+    ))
+    .expect("insert hot range");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) \
+         SELECT body FROM {relation} WHERE id BETWEEN 100 AND 102"
+    ));
+    assert!(
+        !plan.contains("KoldMergeScan") && !plan.contains("Custom Scan"),
+        "PK bounds proving zero cold matches must retain PostgreSQL's native plan: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id) FROM {relation} \
+             WHERE id BETWEEN 100 AND 102"
+        )),
+        "hot-a,hot-b,hot-c"
+    );
+}
+
+#[pg_test]
+fn prepared_native_range_plan_is_invalidated_when_catalog_bounds_expand() {
+    let suffix = unique_suffix("native_bound_invalidation");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let statement = format!("ks_native_bound_invalidation_{suffix}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b')"
+    ))
+    .expect("insert initial cold candidates");
+    assert!(flush_table_rows(&relation, true) >= 1);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (100, 'newer-hot')"
+    ))
+    .expect("insert newer hot row");
+    Spi::run(&format!(
+        "PREPARE {statement} AS SELECT body FROM {relation} WHERE id = 100"
+    ))
+    .expect("prepare");
+
+    let before_plan = spi_get_explain(&format!("EXPLAIN (COSTS OFF) EXECUTE {statement}"));
+    assert!(
+        !before_plan.contains("KoldMergeScan") && !before_plan.contains("Custom Scan"),
+        "aggregate bounds should initially prove a native-only lookup: {before_plan}"
+    );
+    assert_eq!(spi_get_text(&format!("EXECUTE {statement}")), "newer-hot");
+
+    Spi::run(&format!(
+        "UPDATE koldstore.cold_segment_index
+         SET max_value = koldstore.internal_encode_sort_key(100::bigint)
+         WHERE table_oid = '{relation}'::regclass
+           AND scope_key = ''
+           AND column_id = 1"
+    ))
+    .expect("expand indexed cold bound");
+    let table_oid = Spi::get_one::<pg_sys::Oid>(&format!(
+        "SELECT '{relation}'::regclass::oid"
+    ))
+    .expect("read table oid")
+    .expect("table oid");
+    crate::catalog::cache::invalidate_table_globally(table_oid);
+
+    let after_plan = spi_get_explain(&format!("EXPLAIN (COSTS OFF) EXECUTE {statement}"));
+    assert!(
+        after_plan.contains("KoldMergeScan") || after_plan.contains("Custom Scan"),
+        "flush publication must invalidate the native plan after cold bounds expand: {after_plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!("EXECUTE {statement}")),
+        "newer-hot",
+        "replanned lookup must read the newly cold row"
+    );
+    Spi::run(&format!("DEALLOCATE {statement}")).expect("deallocate");
 }
 
 #[pg_test]
@@ -36,15 +184,27 @@ fn explain_analyze_uses_native_hot_child_counters() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
-    manage_shared(&relation, &storage);
+    manage_for_cold_flush(&relation, &storage);
     Spi::run(&format!(
-        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b'), (3, 'cold-c')"
     ))
-    .expect("insert");
+    .expect("insert cold candidates");
+    assert!(flush_table_rows(&relation, true) >= 1);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (10, 'a'), (11, 'b'), (12, 'c')"
+    ))
+    .expect("insert hot rows");
+    let statement = format!("ks_hot_child_counters_{suffix}");
+    Spi::run("SET LOCAL plan_cache_mode = force_generic_plan").expect("force generic plan");
+    Spi::run(&format!(
+        "PREPARE {statement}(bigint) AS \
+         SELECT body FROM {relation} WHERE id >= $1 ORDER BY id"
+    ))
+    .expect("prepare parameterized hot range");
 
     let plan = spi_get_explain(&format!(
         "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
-         SELECT body FROM {relation} ORDER BY id"
+         EXECUTE {statement}(10)"
     ));
     for expected in [
         "Emit Path: hot_child",
@@ -59,6 +219,7 @@ fn explain_analyze_uses_native_hot_child_counters() {
             "EXPLAIN ANALYZE hot-child flow missing exact counter `{expected}`: {plan}"
         );
     }
+    Spi::run(&format!("DEALLOCATE {statement}")).expect("deallocate");
 }
 
 #[pg_test]
@@ -212,7 +373,9 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
         );
     }
     for expected in [
-        "Emit Path: merge_buffer",
+        "Emit Path: merge_stream",
+        "Peak Hot Batch Rows: 1",
+        "Seen Keys: 4",
         "Hot Rows: 1",
         "Rows Scanned: 3",
         "Input Rows: 4",
@@ -309,7 +472,7 @@ fn explain_analyze_counts_mirror_overlay_rows() {
     );
 
     let plan = spi_get_explain(&format!(
-        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+        "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) \
          SELECT body FROM {relation} ORDER BY id"
     ));
     for expected in [
@@ -331,7 +494,7 @@ fn explain_analyze_counts_mirror_overlay_rows() {
 fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
     // Untyped `2` is an int4 Const against bigint `id`. Hot pushdown must accept
     // that promotion (same as `2::bigint`) so cold PK lookups do not fall through
-    // to merge_buffer and materialize the entire hot heap.
+    // to merge_stream and materialize the entire hot heap.
     let suffix = unique_suffix("int4_pk");
     let schema = format!("pgtest_{suffix}");
     let table = "messages";
@@ -360,7 +523,7 @@ fn untyped_int_literal_on_bigint_pk_uses_cold_native_emit_path() {
         "expected hot PK miss (0 rows), got: {plan}"
     );
     assert!(
-        !plan.contains("Emit Path: merge_buffer"),
+        !plan.contains("Emit Path: merge_stream"),
         "untyped bigint PK lookup must not merge-buffer the hot heap: {plan}"
     );
     assert_eq!(
@@ -396,12 +559,20 @@ fn hot_pk_hit_skips_parquet_open_when_cold_segment_index_overlaps() {
     .expect("re-insert PK so live row is hot while cold still overlaps");
 
     let plan = spi_get_explain(&format!(
-        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+        "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) \
          SELECT body FROM {relation} WHERE id = 2"
     ));
     assert!(
-        plan.contains("Emit Path: hot_native"),
-        "expected hot_native for live PK that still overlaps cold stats, got: {plan}"
+        plan.contains("Emit Path: hot_child"),
+        "expected native PostgreSQL hot child for live PK that still overlaps cold stats, got: {plan}"
+    );
+    assert!(
+        plan.contains("Access Method: PostgreSQL child plan"),
+        "exact hot PK hit must use the already-planned PostgreSQL child: {plan}"
+    );
+    assert!(
+        !plan.contains("Metadata Time:"),
+        "visible hot PK hit must not initialize KoldStore executor metadata: {plan}"
     );
     assert!(
         plan.contains("Parquet Segments Opened: 0"),
@@ -410,6 +581,246 @@ fn hot_pk_hit_skips_parquet_open_when_cold_segment_index_overlaps() {
     assert_eq!(
         spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 2")),
         "hot"
+    );
+
+    // The native child applies every query qual. If a mutable-column qual
+    // rejects the hot row, KoldStore must still discover that PK in the hot
+    // heap so the older matching cold image cannot be resurrected.
+    let residual_miss = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} WHERE id = 2 AND body = 'cold'"
+    ));
+    assert!(
+        residual_miss.contains("Emit Path: hot_native"),
+        "child miss must fall back to owner-visible hot PK resolution: {residual_miss}"
+    );
+    assert!(
+        residual_miss.contains("Parquet Segments Opened: 0"),
+        "newer hot PK must mask the older cold image without opening Parquet: {residual_miss}"
+    );
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT count(*)::bigint FROM {relation} \
+             WHERE id = 2 AND body = 'cold'"
+        )),
+        0,
+        "a rejected current hot version must not expose an older cold version"
+    );
+}
+
+#[pg_test]
+fn exact_hot_pk_hit_avoids_merge_runtime_bookkeeping() {
+    let suffix = unique_suffix("hot_runtime_work");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold')"
+    ))
+    .expect("insert cold candidate");
+    assert!(flush_table_rows(&relation, true) >= 1);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'hot')"
+    ))
+    .expect("insert newer hot row");
+
+    crate::merge_scan::pg::reset_fast_path_test_counters();
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 1")),
+        "hot"
+    );
+    assert_eq!(
+        crate::merge_scan::pg::fast_path_test_counters(),
+        crate::merge_scan::pg::FastPathTestCounters {
+            global_state_inserts: 0,
+            tuple_copies: 0,
+            fallback_initializations: 0,
+        },
+        "uninstrumented exact hot-PK hits must delegate without merge bookkeeping"
+    );
+}
+
+#[pg_test]
+fn parameterized_hot_range_above_cold_max_skips_merge_fallback() {
+    let suffix = unique_suffix("parameter_hot_delegate");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let statement = format!("ks_parameter_hot_delegate_{suffix}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b'), (3, 'cold-c')"
+    ))
+    .expect("insert cold candidates");
+    assert!(flush_table_rows(&relation, true) >= 1);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (100, 'hot-a'), (101, 'hot-b'), (102, 'hot-c')"
+    ))
+    .expect("insert hot range");
+    Spi::run("SET LOCAL plan_cache_mode = force_generic_plan").expect("force generic plan");
+    Spi::run(&format!(
+        "PREPARE {statement}(bigint, bigint) AS
+         SELECT count(*)::bigint FROM {relation} WHERE id BETWEEN $1 AND $2"
+    ))
+    .expect("prepare parameterized range");
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) EXECUTE {statement}(100, 102)"
+    ));
+    assert!(
+        plan.contains("KoldMergeScan") || plan.contains("Custom Scan"),
+        "generic parameter plan must retain a runtime-capable KoldMergeScan: {plan}"
+    );
+
+    crate::merge_scan::pg::reset_fast_path_test_counters();
+    assert_eq!(spi_get_i64(&format!("EXECUTE {statement}(100, 102)")), 3);
+    assert_eq!(
+        crate::merge_scan::pg::fast_path_test_counters()
+            .fallback_initializations,
+        0,
+        "runtime aggregate bounds should delegate directly to the native hot child"
+    );
+    Spi::run(&format!("DEALLOCATE {statement}")).expect("deallocate");
+}
+
+#[pg_test]
+fn parameterized_primary_key_miss_above_cold_max_skips_merge_fallback() {
+    let suffix = unique_suffix("parameter_pk_miss");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let statement = format!("ks_parameter_pk_miss_{suffix}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b')"
+    ))
+    .expect("insert cold candidates");
+    assert!(flush_table_rows(&relation, true) >= 1);
+    Spi::run("SET LOCAL plan_cache_mode = force_generic_plan").expect("force generic plan");
+    Spi::run(&format!(
+        "PREPARE {statement}(bigint) AS
+         SELECT count(*)::bigint FROM {relation} WHERE id = $1"
+    ))
+    .expect("prepare parameterized PK lookup");
+
+    crate::merge_scan::pg::reset_fast_path_test_counters();
+    assert_eq!(spi_get_i64(&format!("EXECUTE {statement}(100)")), 0);
+    assert_eq!(
+        crate::merge_scan::pg::fast_path_test_counters()
+            .fallback_initializations,
+        0,
+        "a PK miss beyond complete cold bounds must not initialize the merge"
+    );
+    Spi::run(&format!("DEALLOCATE {statement}")).expect("deallocate");
+}
+
+#[pg_test]
+fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
+    let suffix = unique_suffix("packed_rg");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        r#"
+        SELECT koldstore.manage_table(
+          table_name     => '{relation}'::regclass,
+          storage        => '{storage}',
+          hot_row_limit  => 1,
+          min_flush_rows => 1,
+          max_rows_per_file => 3000,
+          migration_order_by => 'id'
+        )
+        "#
+    ))
+    .expect("manage table with two row groups in one segment");
+    Spi::run(&format!(
+        r#"
+        INSERT INTO {relation} (id, body)
+        SELECT id, 'row-' || id::text
+        FROM (
+          SELECT generate_series(1, 1024)::bigint AS id
+          UNION ALL
+          SELECT generate_series(2000, 3023)::bigint AS id
+        ) rows
+        "#
+    ))
+    .expect("insert disjoint row-group ranges");
+    assert_eq!(flush_table_rows(&relation, true), 2048);
+
+    let arrays_aligned = Spi::get_one::<bool>(&format!(
+        r#"
+        SELECT count(*) = 1
+           AND bool_and(cs.row_group_count = 2)
+           AND bool_and(cardinality(cs.row_group_row_counts) = cs.row_group_count)
+           AND bool_and(cardinality(cs.row_group_min_seqs) = cs.row_group_count)
+           AND bool_and(cardinality(cs.row_group_max_seqs) = cs.row_group_count)
+           AND bool_and(cardinality(csi.row_group_min_values) = cs.row_group_count)
+           AND bool_and(cardinality(csi.row_group_max_values) = cs.row_group_count)
+           AND bool_and(cardinality(csi.row_group_null_counts) = cs.row_group_count)
+           AND bool_and(csi.min_value IS NOT NULL AND csi.max_value IS NOT NULL)
+        FROM koldstore.cold_segments cs
+        JOIN koldstore.cold_segment_index csi USING (segment_id)
+        WHERE cs.table_oid = '{relation}'::regclass
+          AND csi.column_id = (
+            SELECT attnum
+            FROM pg_attribute
+            WHERE attrelid = '{relation}'::regclass
+              AND attname = 'id'
+              AND NOT attisdropped
+          )
+        "#
+    ))
+    .expect("inspect packed catalog arrays")
+    .expect("packed catalog array assertion");
+    assert!(arrays_aligned, "expected aligned, exact PK row-group metadata");
+
+    // 1500 is inside the segment-level [1, 3023] range, but falls in the gap
+    // between row-group ranges [1, 1024] and [2000, 3023].
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} WHERE id = 1500"
+    ));
+    assert!(
+        plan.contains("Parquet Segments Opened: 0"),
+        "packed row-group pruning must skip the object before footer access: {plan}"
+    );
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT count(*)::bigint FROM {relation} WHERE id = 1500"
+        )),
+        0
+    );
+
+    crate::catalog::cache::invalidate_all();
+    crate::catalog::cache::reset_packed_row_group_spi_load_count();
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT count(*)::bigint FROM {relation} WHERE id = 1500"
+        )),
+        0
+    );
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT count(*)::bigint FROM {relation} WHERE id = 1500"
+        )),
+        0
+    );
+    assert_eq!(
+        crate::catalog::cache::packed_row_group_spi_load_count(),
+        0,
+        "one-column lookup must not execute a secondary packed-metadata query"
     );
 }
 
@@ -479,6 +890,14 @@ fn prepared_statement_repeated_execution_returns_stable_values() {
     ))
     .expect("prepare");
 
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) EXECUTE ks_prep_{suffix}(1)"
+    ));
+    assert!(
+        !plan.contains("KoldMergeScan") && !plan.contains("Custom Scan"),
+        "pre-flush prepared parameters must retain PostgreSQL's native plan: {plan}"
+    );
+
     let first = spi_get_text(&format!("EXECUTE ks_prep_{suffix}(1)"));
     let second = spi_get_text(&format!("EXECUTE ks_prep_{suffix}(1)"));
     let third = spi_get_text(&format!("EXECUTE ks_prep_{suffix}(2)"));
@@ -520,4 +939,45 @@ fn unmanaged_select_second_plan_does_not_spi_managed_lookup() {
         loads, 0,
         "second unmanaged plan must use cached absence, not SPI"
     );
+}
+
+#[pg_test]
+fn merge_scan_fails_closed_when_seen_key_limit_is_exceeded() {
+    let suffix = unique_suffix("seen_limit");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    manage_for_cold_flush(&relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, 'body-' || gs::text
+         FROM generate_series(1, 250) AS gs"
+    ))
+    .expect("insert");
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 200, "expected cold rows, rows_flushed={flushed}");
+
+    Spi::run("SET koldstore.max_merge_seen_keys = 100").expect("set seen-key limit");
+    // Catch the PostgreSQL ERROR in a subtransaction so the pg_test txn stays usable.
+    Spi::run(&format!(
+        r#"
+        DO $do$
+        BEGIN
+          PERFORM count(*) FROM {relation};
+          RAISE EXCEPTION 'expected KoldMergeScan seen-key limit to fail the scan';
+        EXCEPTION
+          WHEN OTHERS THEN
+            IF position('max_merge_seen_keys' in SQLERRM) = 0
+               AND position('exact primary-key identities' in SQLERRM) = 0 THEN
+              RAISE;
+            END IF;
+        END
+        $do$;
+        "#
+    ))
+    .expect("seen-key limit must fail closed with a clear error");
+    Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
 }

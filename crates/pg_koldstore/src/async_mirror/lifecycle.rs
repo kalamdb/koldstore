@@ -234,18 +234,7 @@ pub(crate) fn activate_table(
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     if !is_member {
-        let mut published = primary_key
-            .columns()
-            .iter()
-            .map(|column| quote_ident(column.column().as_str()))
-            .collect::<Vec<_>>();
-        if let Some(order_column) = order_column {
-            let quoted = quote_ident(order_column);
-            if !published.iter().any(|column| column == &quoted) {
-                published.push(quoted);
-            }
-        }
-        let published_columns = published.join(", ");
+        let published_columns = published_column_list(primary_key, order_column);
         pgrx::Spi::run(&format!(
             "ALTER PUBLICATION {publication} ADD TABLE {} ({published_columns})",
             source.quoted(),
@@ -260,43 +249,6 @@ pub(crate) fn activate_table(
     let drop = koldstore_mirror::plan_drop_mirror_dml_triggers(source, mirror)
         .map_err(|error| error.to_string())?;
     pgrx::Spi::run(&drop.sql).map_err(|error| error.to_string())?;
-    let kick_names = koldstore_mirror::async_worker_kick_trigger_names(&mirror.name);
-    let legacy_kicks = [
-        koldstore_mirror::async_worker_kick_trigger_name(&mirror.name),
-        // Truncated mid-migration names from the `_ins/_upd/_del` experiment.
-        {
-            let mut name = format!("{}_async_worker_kick_ins", mirror.name);
-            name.truncate(63);
-            while !name.is_char_boundary(name.len()) {
-                name.pop();
-            }
-            name
-        },
-        {
-            let mut name = format!("{}_async_worker_kick_upd", mirror.name);
-            name.truncate(63);
-            while !name.is_char_boundary(name.len()) {
-                name.pop();
-            }
-            name
-        },
-        {
-            let mut name = format!("{}_async_worker_kick_del", mirror.name);
-            name.truncate(63);
-            while !name.is_char_boundary(name.len()) {
-                name.pop();
-            }
-            name
-        },
-    ];
-    for kick_name in kick_names.iter().cloned().chain(legacy_kicks) {
-        pgrx::Spi::run(&format!(
-            "DROP TRIGGER IF EXISTS {} ON {}",
-            quote_ident(&kick_name),
-            source.quoted(),
-        ))
-        .map_err(|error| error.to_string())?;
-    }
     // No per-DML kick: the WAL applier is started here, auto-restarted by
     // postmaster on crash, and re-ensured after postmaster restart by the
     // shared_preload launcher / first backend transaction.
@@ -311,6 +263,20 @@ fn reconcile_publication_columns(
     order_column: Option<&str>,
 ) -> Result<(), String> {
     let publication = quote_ident(PUBLICATION_NAME);
+    let published_columns = published_column_list(primary_key, order_column);
+    pgrx::Spi::run(&format!(
+        "ALTER PUBLICATION {publication} SET TABLE {} ({published_columns})",
+        source.quoted(),
+    ))
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Quoted PK (+ optional segment-order) column list for publication DDL.
+fn published_column_list(
+    primary_key: &koldstore_common::PrimaryKeyShape,
+    order_column: Option<&str>,
+) -> String {
     let mut published = primary_key
         .columns()
         .iter()
@@ -322,13 +288,7 @@ fn reconcile_publication_columns(
             published.push(quoted);
         }
     }
-    let published_columns = published.join(", ");
-    pgrx::Spi::run(&format!(
-        "ALTER PUBLICATION {publication} SET TABLE {} ({published_columns})",
-        source.quoted(),
-    ))
-    .map_err(|error| error.to_string())?;
-    Ok(())
+    published.join(", ")
 }
 
 fn validate_slot(slot: &str) -> Result<(), String> {

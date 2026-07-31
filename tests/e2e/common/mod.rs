@@ -17,8 +17,8 @@ mod sql;
 
 pub use assertions::{
     assert_kold_merge_scan_cold_reads, assert_kold_merge_scan_executed_cold_reads,
-    assert_kold_merge_scan_explain, assert_kold_merge_scan_planned_cold_reads,
-    assert_merge_scan_explain, assert_minio_listing_contains,
+    assert_kold_merge_scan_explain, assert_kold_merge_scan_hot_planned_access,
+    assert_managed_read_plan, assert_minio_listing_contains,
 };
 
 pub use async_mirror::{
@@ -34,8 +34,9 @@ pub use catalog::{
     primary_key_columns, published_manifest_count,
 };
 pub use cluster::{
-    connect, expected_pg_ports, expected_pg_versions, local_pg_matrix, require_pgrx_server,
-    require_pgrx_server_sync, scenario_pg_matrix, wait_for_postgres, PgTarget, PgrxServer,
+    connect, error_chain_contains, expected_pg_ports, expected_pg_versions, local_pg_matrix,
+    require_pgrx_server, require_pgrx_server_sync, scenario_pg_matrix, wait_for_postgres, PgTarget,
+    PgrxServer,
 };
 pub use db::{FixtureStorage, ManagedTable, TestDb};
 pub use describe_table::{
@@ -49,5 +50,6 @@ pub use minio::{minio_enabled, MinioConfig};
 pub use mirror_mode::{fence_selected_mirror, selected_mirror_capture_mode, MirrorCaptureMode};
 pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
-    relation_size, row_count, row_count_from_sql, RelationSize,
+    relation_size, row_count, row_count_from_sql, RelationSize, SQL_DEFAULT_COLD_OBJECT_KEY,
+    SQL_DEFAULT_MANIFEST_OBJECT_KEY,
 };

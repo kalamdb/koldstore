@@ -6,8 +6,9 @@ use arrow_array::{Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use koldstore_parquet::{
     encode_parquet_segment_bytes, plan_clean_cold_record, read_clean_cold_rows_from_object_store,
-    record_batch_from_clean_cold_records, validate_parquet_bytes, ParquetReadOptions,
-    ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
+    record_batch_from_clean_cold_records, validate_finalized_parquet_segment,
+    validate_parquet_bytes, ParquetReadOptions, ParquetSegmentWriter, PgColumn, PgType,
+    WriterOptions,
 };
 use koldstore_storage::{
     publish_immutable_object, temp_object_key, ObjectStoreClient, StorageClient,
@@ -101,6 +102,24 @@ fn encode_validate_roundtrip_across_compression_and_row_group_sizes() {
             }
         }
     }
+}
+
+#[test]
+fn finalized_metadata_validation_does_not_reopen_the_footer() {
+    let batch = sample_batch(5);
+    let encoded =
+        ParquetSegmentWriter::new(WriterOptions::default().with_statistics_columns(["id", "seq"]))
+            .encode_record_batch_with_metadata(&batch)
+            .unwrap();
+
+    let validation =
+        validate_finalized_parquet_segment(&encoded.bytes, encoded.metadata.as_ref()).unwrap();
+    assert_eq!(validation.row_count, 5);
+    assert_eq!(validation.row_group_count, 1);
+
+    let mut corrupt = encoded.bytes.clone();
+    corrupt[0] = b'X';
+    assert!(validate_finalized_parquet_segment(&corrupt, encoded.metadata.as_ref()).is_err());
 }
 
 #[test]

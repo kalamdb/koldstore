@@ -140,14 +140,13 @@ async fn non_owner_rls_is_enforced_for_hot_cold_and_mixed_rows() -> Result<()> {
             )
             .await?;
 
-        let app_role = format!("{}_app", db.schema);
+        let app_role = db.ensure_app_role().await?;
         db.client
             .batch_execute(&format!(
                 r#"
                 ALTER TABLE {relation} FORCE ROW LEVEL SECURITY;
                 CREATE POLICY koldstore_body_guard ON {relation}
                   AS RESTRICTIVE FOR SELECT USING (body <> 'blocked');
-                CREATE ROLE {app_role};
                 GRANT USAGE ON SCHEMA {schema} TO {app_role};
                 GRANT SELECT ON {relation} TO {app_role};
                 SET ROLE {app_role};
@@ -351,11 +350,10 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
             .await?;
         common::fence_async_mirror_if_needed(&db.client).await?;
 
-        let app_role = format!("{}_app", db.schema);
+        let app_role = db.ensure_app_role().await?;
         db.client
             .batch_execute(&format!(
-                "CREATE ROLE {app_role}; \
-                 GRANT USAGE ON SCHEMA {schema} TO {app_role}; \
+                "GRANT USAGE ON SCHEMA {schema} TO {app_role}; \
                  GRANT SELECT ON {relation} TO {app_role}; \
                  SET standard_conforming_strings = off; \
                  SET ROLE {app_role};",
@@ -395,16 +393,27 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
     common::require_pgrx_server().await?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "user_scope_text_collation").await?;
-        let has_icu = db
+        // Probe CREATE COLLATION: catalog ICU rows can remain after a non-ICU rebuild.
+        let probe = format!("{}.koldstore_icu_probe", db.schema);
+        match db
             .client
-            .query_one(
-                "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_collation WHERE collprovider = 'i')",
+            .execute(
+                &format!(
+                    "CREATE COLLATION {probe} ( \
+                       provider = icu, locale = 'und-u-ks-level2', deterministic = false \
+                     )"
+                ),
                 &[],
             )
-            .await?
-            .get::<_, bool>(0);
-        if !has_icu {
-            continue;
+            .await
+        {
+            Ok(_) => {
+                db.client
+                    .execute(&format!("DROP COLLATION {probe}"), &[])
+                    .await?;
+            }
+            Err(error) if common::error_chain_contains(&error, "ICU is not supported") => continue,
+            Err(error) => return Err(error.into()),
         }
 
         let relation = db.relation("rls_collated_text_keys");

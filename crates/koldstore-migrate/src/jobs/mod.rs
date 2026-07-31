@@ -77,7 +77,7 @@ pub struct MigrationBackfillPayload {
     /// Managed table type.
     pub table_type: TableKind,
     /// Storage binding used when the table becomes active.
-    pub storage_id: Uuid,
+    pub storage_id: String,
     /// Optional user-scope column.
     pub scope_column: Option<String>,
     /// Backfill order column.
@@ -113,7 +113,7 @@ impl MigrationBackfillJobRequest {
         table_oid: u32,
         table: &QualifiedTableName,
         table_type: TableKind,
-        storage_id: Uuid,
+        storage_id: String,
         scope_column: Option<String>,
         ordering: &MigrationOrdering,
         batch_size: MigrationBatchSize,
@@ -255,7 +255,7 @@ VALUES (
         'phase', 'finished',
         'table_name', $3::text,
         'table_type', $4::text,
-        'storage_id', $5::uuid,
+        'storage_id', $5::text,
         'scope_column', $6::text,
         'processed_rows', 0
     ),

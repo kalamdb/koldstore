@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "table": "items",
   "namespace": "app",
   "scope_id": null,
@@ -16,7 +16,7 @@
   "shards": [
     {
       "folder": "001",
-      "path": "001/manifest-shard.json",
+      "path": "001/manifest-shard-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json",
       "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "segment_count": 1,
       "min_seq": 1,

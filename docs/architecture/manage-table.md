@@ -194,8 +194,8 @@ When `EXISTS (SELECT 1 FROM ONLY table LIMIT 1)` is false:
 6. **Select capture path**:
    - `strict`: keep the statement triggers
    - `async`: add the source's primary-key columns to the shared publication,
-     drop the three DML capture triggers and any legacy worker-kick triggers,
-     retain the PK guard, and ensure the always-on database applier is running
+     drop the three DML capture triggers, retain the PK guard, and ensure the
+     always-on database applier is running
 
 7. **Return** job UUID
 
@@ -234,8 +234,8 @@ When the heap already has rows:
 8. **Row counters**
 
 9. **Select capture path** — keep strict triggers, or atomically publish the
-   primary-key columns, remove the DML and legacy worker-kick triggers, retain
-   the PK guard, and ensure the database applier for async mode
+   primary-key columns, remove the DML capture triggers, retain the PK guard,
+   and ensure the database applier for async mode
 
 10. **Return** job UUID
 
@@ -262,7 +262,7 @@ This creates or updates `koldstore.manifest` for `scope_key = ''`:
 
 | Field | Value at manage time |
 |-------|----------------------|
-| `manifest_path` | `'pending'` |
+| `generation` | `0` (unpublished until first flush) |
 | `sync_state` | `'pending_write'` |
 | `hot_row_count` | live heap count |
 | `mirror_row_count` | live mirror count |

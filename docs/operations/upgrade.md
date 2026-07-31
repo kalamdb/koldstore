@@ -9,13 +9,14 @@ KoldStore packages as a normal PostgreSQL extension named `koldstore`.
 - Packaged SQL `default_version`: `crates/pg_koldstore/koldstore.control` uses
   `@CARGO_VERSION@`, which `cargo pgrx install` / `package` substitutes from
   Cargo. Fresh installs therefore get `extversion` equal to the Cargo version
-  (for example `0.1.6-beta.0`).
+  (for example `0.1.8-beta.0`).
 - Bootstrap catalog fragment: `crates/pg_koldstore/sql/koldstore--0.1.0.sql` is
   embedded into the generated install script; it is not the versioned install
   file name on disk after packaging.
-- Upgrade scripts: `crates/pg_koldstore/sql/koldstore--<from>--<to>.sql` are
-  copied next to the control file by pgrx and used by
-  `ALTER EXTENSION koldstore UPDATE`.
+- **Development:** edit `koldstore--0.1.0.sql` directly for catalog DDL. Do not
+  add `koldstore--<from>--<to>.sql` upgrade edges while the product is still
+  pre-release. Local iterative installs reinstall / resync extension SQL when
+  the bootstrap fragment changes (see e2e cluster harness).
 
 ## Install
 
@@ -39,44 +40,17 @@ SELECT koldstore.preload_status();  -- loaded_via_shared_preload must be true
 Requires the shared library and control/SQL files from `cargo pgrx install` or
 a release package to be present on the server.
 
-## Upgrade
+## Upgrade (deferred during beta)
 
-1. Install the new `.so`, `.control`, install SQL, and upgrade SQL files onto
-   the PostgreSQL host (same paths `pg_config` reports for extensions).
-2. **Before** restarting onto a build that hard-requires shared preload, ensure
-   `shared_preload_libraries` already includes `koldstore`. Otherwise backends
-   never load merge-scan hooks and managed SELECTs can silently omit cold rows.
-3. Restart PostgreSQL.
-4. In each database that has the extension:
+In-place `ALTER EXTENSION koldstore UPDATE` via
+`koldstore--<from>--<to>.sql` edges is **not** used during the current
+development / beta series. Change catalog DDL in `koldstore--0.1.0.sql` and
+reinstall the extension (or let local harnesses drop/recreate when SQL is
+stale).
 
-```sql
-ALTER EXTENSION koldstore UPDATE;
--- or pin the target:
--- ALTER EXTENSION koldstore UPDATE TO '0.1.6-beta.0';
-
-SELECT extversion FROM pg_extension WHERE extname = 'koldstore';
-SELECT koldstore.koldstore_version();
-SELECT koldstore.preload_status();
-```
-
-`extversion` should match the packaged default version. `koldstore_version()`
-reports the loaded shared library’s Cargo version and should agree after a
-correct upgrade.
-
-When releasing a new Cargo version, ensure
-`koldstore--<previous>--<new>.sql` exists for the packaged UPDATE path. During
-the `0.1.x` beta series, rename the single `0.1.0→current` script rather than
-adding beta→beta edges; update `PREVIOUS_EXTENSION_SQL_VERSION` only when
-cutting a non-beta release. See [release-checklist.md](../release-checklist.md).
-
-Live `ALTER EXTENSION koldstore UPDATE` is covered by
-`tests/e2e/suite/extension_upgrade.rs` (simulates the previous `extversion`,
-runs UPDATE, then asserts managed-table reads/flush still work). Packaging
-contract tests remain in `crates/pg_koldstore/tests/extension_upgrade.rs`.
-
-**Deferred:** cluster `pg_upgrade` across PostgreSQL major versions is not an
-automated gate yet. Treat it as an ops runbook item until a dedicated harness
-lands.
+When a supported upgrade path is introduced for a release, document the
+`ALTER EXTENSION` steps here and add the packaging edge intentionally. Until
+then, treat cluster major `pg_upgrade` as an ops runbook item as well.
 
 ## Production GUC baseline (async)
 

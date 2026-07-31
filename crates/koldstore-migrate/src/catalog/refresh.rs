@@ -1,14 +1,13 @@
 //! Active schema refresh planning for managed tables.
 //!
-//! Owns the migration-only schema refresh **read** planner and registration
-//! metadata assembly. Cross-runtime catalog reads stay in `koldstore-catalog`.
+//! Owns migration-only registration metadata assembly and refresh statement
+//! sequencing. The active-schema context **read** lives in
+//! [`koldstore_catalog::queries::plan_active_schema_refresh_context_json`].
 
 use serde::Deserialize;
 use uuid::Uuid;
 
-use koldstore_common::{
-    ColumnId, ColumnRef, ManageTableOptions, PrimaryKeyShape, SqlParamType, SqlResult, SqlStatement,
-};
+use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions, PrimaryKeyShape, SqlStatement};
 use koldstore_schema::{MirrorInitializationState, SchemaColumn};
 
 use crate::plan::ExistingTableCatalog;
@@ -17,37 +16,6 @@ use crate::register::{
     RegistrationMetadata, RegistryError, RegistryResult, SchemaRegistryPlan,
 };
 use crate::rehydrate::plan_catalog_deactivation;
-
-/// Builds the active managed-schema refresh context lookup.
-///
-/// # Errors
-///
-/// Returns an error when statement metadata is invalid.
-pub fn plan_active_schema_refresh_context_json() -> SqlResult<SqlStatement> {
-    SqlStatement::read_with_params(
-        "resolve active schema refresh context",
-        r#"
-SELECT jsonb_build_object(
-    'version', version,
-    'table_type', table_type,
-    'storage_id', storage_id::text,
-    'scope_column', scope_column,
-    'mirror_relation', mirror_relation::text,
-    'primary_key', primary_key,
-    'columns', columns,
-    'indexed_columns', indexed_columns,
-    'options', options
-)::text
-FROM koldstore.schemas
-WHERE table_oid = $1::oid
-  AND active
-  AND initialization_state = 'complete'
-ORDER BY version DESC
-LIMIT 1
-"#,
-        [SqlParamType::Oid],
-    )
-}
 
 /// Active schema row loaded before refresh planning.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -103,7 +71,7 @@ pub fn registration_metadata_for_refresh(
     RegistrationMetadata {
         table_oid,
         table_type: active.table_type.clone(),
-        storage_id: Uuid::parse_str(&active.storage_id).unwrap_or(Uuid::nil()),
+        storage_id: active.storage_id.clone(),
         scope_column,
         mirror_relation: Some(active.mirror_relation.clone()),
         primary_key_shape: Some(primary_key_shape.clone()),
@@ -119,22 +87,20 @@ pub fn registration_metadata_for_refresh(
 
 /// Resolves the current scope column name for a refreshed schema row.
 ///
-/// Prefer `scope_column_id` against the live catalog. Fall back to the previous
-/// active name only when no ID is stored (legacy rows).
+/// Looks up `options.scope_column_id` in the live catalog. Tables without a
+/// stored scope column ID have no scope (legacy name-only rows are not accepted).
 #[must_use]
 pub fn resolve_scope_column_name(
-    active: &ActiveSchemaRefreshContext,
+    _active: &ActiveSchemaRefreshContext,
     catalog: &ExistingTableCatalog,
     options: &ManageTableOptions,
 ) -> Option<String> {
-    if let Some(column_id) = options.scope_column_id {
-        return catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id.get() == column_id)
-            .map(|column| column.name.clone());
-    }
-    active.scope_column.clone()
+    let column_id = options.scope_column_id?;
+    catalog
+        .columns
+        .iter()
+        .find(|column| column.column_id.get() == column_id)
+        .map(|column| column.name.clone())
 }
 
 /// Primary-key column renames detected between the active schema and live catalog.

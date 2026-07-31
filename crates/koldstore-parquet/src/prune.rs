@@ -1,14 +1,15 @@
 //! Row-group pruning helpers.
 //!
-//! Segment-level pruning lives in `koldstore-merge`. This module prunes
-//! **row groups inside one Parquet file** using footer column stats and
-//! native Parquet bloom filters (written on flush for PK columns).
+//! Segment-level pruning lives in `koldstore-merge`. This module owns:
+//! - **Live ObjectStore path helpers** used by `reader.rs`
+//!   (`select_row_groups_from_metadata` and related).
+//! - **[`RowGroupPruner`]** — FooterSummary-oriented API kept for benches and
+//!   unit tests; production merge scan does not call it.
 
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
 
-use bytes::Bytes;
 use koldstore_common::{CommitSeq, SeqId};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Type as ParquetPhysicalType;
@@ -25,7 +26,9 @@ pub struct PruneDecision {
     pub skipped_row_groups: usize,
 }
 
-/// Row-group pruner placeholder.
+/// Row-group pruner over [`crate::FooterSummary`] (benches / unit tests).
+///
+/// Production ObjectStore reads use `select_row_groups_from_metadata` instead.
 #[derive(Debug, Default, Clone)]
 pub struct RowGroupPruner;
 
@@ -153,19 +156,6 @@ pub fn select_row_groups_for_pk_values(
     }
     let file = File::open(path.as_ref()).map_err(|error| error.to_string())?;
     select_row_groups_for_pk_values_reader(file, column, values)
-}
-
-/// Selects row groups from an in-memory Parquet object.
-///
-/// # Errors
-///
-/// Returns an error when Parquet metadata or bloom filters are invalid.
-pub fn select_row_groups_for_pk_values_bytes(
-    bytes: Bytes,
-    column: &str,
-    values: &[String],
-) -> Result<PruneDecision, String> {
-    select_row_groups_for_pk_values_reader(bytes, column, values)
 }
 
 fn select_row_groups_for_pk_values_reader<R>(

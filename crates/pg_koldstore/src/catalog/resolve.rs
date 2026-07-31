@@ -1,7 +1,6 @@
 //! PostgreSQL-backed catalog resolvers.
 
-use uuid::Uuid;
-
+use koldstore_common::StorageId;
 use koldstore_migrate::QualifiedTableName;
 
 use crate::{
@@ -57,11 +56,12 @@ pub fn mirror_relation_by_table_oid(
 /// # Errors
 ///
 /// Returns an error when SPI execution fails.
-pub fn storage_id_by_name(name: &str) -> Result<Option<Uuid>, String> {
+pub fn storage_id_by_name(name: &str) -> Result<Option<StorageId>, String> {
     let statement = queries::plan_storage_id_by_name().map_err(|error| error.to_string())?;
-    let id = spi::select_one::<pgrx::Uuid>(&statement, &[pgrx::datum::DatumWithOid::from(name)])
+    let id = spi::select_one::<String>(&statement, &[pgrx::datum::DatumWithOid::from(name)])
         .map_err(|error| error.to_string())?;
-    Ok(id.map(crate::spi::uuid_from_pgrx))
+    id.map(|value| StorageId::new(value).map_err(|error| error.to_string()))
+        .transpose()
 }
 
 /// Resolves active schema/storage metadata required by flush.

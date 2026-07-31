@@ -1,32 +1,30 @@
 //! PostgreSQL SPI adapters for flush: stats, catalog writes, and cleanup.
 
-use koldstore_catalog::{decode::RelationContext, ManagedTableSnapshot};
+use koldstore_catalog::{decode::RelationContext, CatalogManifestSegmentRow, ManagedTableSnapshot};
 use koldstore_common::QualifiedTableName;
 use koldstore_flush::policy::FlushPolicy;
 use koldstore_flush::{
-    cleanup::plan_seq_range_cleanup, encode_indexed_column_bounds, manifest_from_catalog_rows,
-    plan_activate_flush_segments, plan_flush_segments_batch_insert, policy_flush_row_count,
-    CatalogManifestSegmentRow, FlushStats, ResolvedFlushSelection, WrittenFlushSegment,
+    cleanup::plan_seq_range_cleanup, plan_activate_flush_segments,
+    plan_flush_segments_batch_insert, policy_flush_row_count, FlushStats, ResolvedFlushSelection,
+    WrittenFlushSegment,
 };
+use koldstore_manifest::manifest_from_catalog_rows;
 use koldstore_mirror::{
-    mirror_to_sql, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats, plan_mirror_stats,
-    MirrorRelation, MirrorSeqStats,
+    mirror_to_sql, plan_mirror_force_flush_stats, plan_mirror_oldest_rows_max_seq,
+    plan_mirror_stats, MirrorRelation, MirrorSeqStats,
 };
 
 pub(crate) fn resolve_flush_stats(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<ResolvedFlushSelection, String> {
-    use koldstore_common::MirrorOperation;
     use koldstore_flush::{
         apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
         FORCE_FLUSH_WAVE_ROW_CAP,
     };
 
     if force {
-        let all = mirror_flush_stats(table_oid)?;
-        let delete_code = MirrorOperation::Delete.code();
-        let delete_stats = mirror_op_stats(table_oid, delete_code)?;
+        let (all, delete_stats) = mirror_force_flush_stats(table_oid)?;
         let selection = resolve_force_flush_selection(all, delete_stats);
         // Cap large force mirrors into waves so encode/publish peak stays bounded.
         if selection.mirror_ops.is_none() && selection.stats.row_count > FORCE_FLUSH_WAVE_ROW_CAP {
@@ -126,11 +124,12 @@ fn older_than_cutoff(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let mirror = MirrorRelation::new(snapshot.mirror_relation.clone()).quoted();
-    let sql = format!("SELECT count(*)::bigint, max(seq)::bigint FROM (SELECT seq FROM {mirror} WHERE seq < $1 ORDER BY seq LIMIT $2) eligible");
+    let statement = koldstore_flush::plan_older_than_eligible_mirror_rows(&mirror)
+        .map_err(|error| error.to_string())?;
     let (count, max_seq) = pgrx::Spi::connect(|client| {
         let row = client
             .select(
-                &sql,
+                &statement.sql,
                 None,
                 &[
                     DatumWithOid::from(cutoff_seq),
@@ -285,7 +284,7 @@ pub(super) fn manifest_generation(table_oid: pgrx::pg_sys::Oid) -> Result<i64, S
 
 /// Catalogs every segment written by one `flush_table` call.
 ///
-/// Segment rows + normalized `cold_segment_index` bounds go in one SPI insert.
+/// Segment rows + packed `cold_segment_index` bounds go in one SPI insert.
 /// Exact per-PK catalog hints are intentionally not written: prune with
 /// `cold_segment_index` / Parquet stats so catalog size stays O(segments).
 ///
@@ -303,7 +302,6 @@ pub(super) fn persist_flush_segments_batch(
         return Ok(());
     }
 
-    let column_type_oids = resolve_indexed_column_type_oids(table_oid, segments)?;
     let mut segment_ids = Vec::with_capacity(segments.len());
     let mut object_paths = Vec::with_capacity(segments.len());
     let mut batch_numbers = Vec::with_capacity(segments.len());
@@ -316,17 +314,40 @@ pub(super) fn persist_flush_segments_batch(
     let mut schema_versions = Vec::with_capacity(segments.len());
     let mut checksums = Vec::with_capacity(segments.len());
     let mut object_etags = Vec::with_capacity(segments.len());
+    let mut segment_row_group_counts = Vec::with_capacity(segments.len());
+    let mut segment_row_group_offsets = Vec::with_capacity(segments.len());
+    let mut row_group_row_counts = Vec::new();
+    let mut row_group_min_seqs = Vec::new();
+    let mut row_group_max_seqs = Vec::new();
     let mut index_segment_ids = Vec::new();
     let mut index_column_ids = Vec::new();
     let mut index_type_oids = Vec::new();
     let mut index_codec_versions = Vec::new();
-    let mut index_min_values = Vec::new();
-    let mut index_max_values = Vec::new();
+    let mut index_min_values: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut index_max_values: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut index_row_group_counts = Vec::new();
+    let mut index_row_group_offsets = Vec::new();
+    let mut row_group_min_values: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut row_group_max_values: Vec<Option<Vec<u8>>> = Vec::new();
+    let mut row_group_null_counts: Vec<Option<i64>> = Vec::new();
     for segment in segments {
         let row = &segment.catalog_row;
+        let packed = &segment.packed_metadata;
+        let row_group_count = i32::try_from(packed.row_group_count)
+            .map_err(|_| "row-group count exceeds PostgreSQL integer range".to_string())?;
+        if row_group_count <= 0
+            || packed.row_group_row_counts.len() != packed.row_group_count
+            || packed.row_group_min_seqs.len() != packed.row_group_count
+            || packed.row_group_max_seqs.len() != packed.row_group_count
+        {
+            return Err(format!(
+                "segment {} has malformed packed row-group metadata",
+                segment.segment_id
+            ));
+        }
         let segment_id = crate::spi::uuid_to_pgrx(segment.segment_id);
         segment_ids.push(segment_id);
-        object_paths.push(row.object_path.clone());
+        object_paths.push(row.path.clone());
         batch_numbers.push(row.batch_number);
         min_seqs.push(row.min_seq);
         max_seqs.push(row.max_seq);
@@ -337,15 +358,40 @@ pub(super) fn persist_flush_segments_batch(
         schema_versions.push(row.schema_version);
         checksums.push(segment.checksum.clone());
         object_etags.push(segment.object_etag.clone().unwrap_or_default());
-        for bound in encode_indexed_column_bounds(&segment.indexed_bounds, &column_type_oids)
-            .map_err(|error| error.to_string())?
-        {
+        segment_row_group_counts.push(row_group_count);
+        segment_row_group_offsets.push(i32::try_from(row_group_row_counts.len()).map_err(
+            |_| "flattened segment row-group metadata exceeds PostgreSQL integer range".to_string(),
+        )?);
+        row_group_row_counts.extend_from_slice(&packed.row_group_row_counts);
+        row_group_min_seqs.extend_from_slice(&packed.row_group_min_seqs);
+        row_group_max_seqs.extend_from_slice(&packed.row_group_max_seqs);
+
+        for bound in &packed.column_indexes {
+            if bound.row_group_min_values.len() != packed.row_group_count
+                || bound.row_group_max_values.len() != packed.row_group_count
+                || bound.row_group_null_counts.len() != packed.row_group_count
+            {
+                return Err(format!(
+                    "segment {} column {} has malformed packed row-group metadata",
+                    segment.segment_id, bound.column_id
+                ));
+            }
             index_segment_ids.push(segment_id);
             index_column_ids.push(bound.column_id.get());
             index_type_oids.push(pgrx::pg_sys::Oid::from(bound.type_oid));
             index_codec_versions.push(bound.codec_version);
-            index_min_values.push(bound.min_value);
-            index_max_values.push(bound.max_value);
+            index_min_values.push(bound.min_value.clone());
+            index_max_values.push(bound.max_value.clone());
+            index_row_group_counts.push(row_group_count);
+            index_row_group_offsets.push(i32::try_from(row_group_min_values.len()).map_err(
+                |_| {
+                    "flattened column row-group metadata exceeds PostgreSQL integer range"
+                        .to_string()
+                },
+            )?);
+            row_group_min_values.extend(bound.row_group_min_values.iter().cloned());
+            row_group_max_values.extend(bound.row_group_max_values.iter().cloned());
+            row_group_null_counts.extend_from_slice(&bound.row_group_null_counts);
         }
     }
 
@@ -366,60 +412,26 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(schema_versions),
             DatumWithOid::from(checksums),
             DatumWithOid::from(object_etags),
+            DatumWithOid::from(segment_row_group_counts),
+            DatumWithOid::from(segment_row_group_offsets),
+            DatumWithOid::from(row_group_row_counts),
+            DatumWithOid::from(row_group_min_seqs),
+            DatumWithOid::from(row_group_max_seqs),
             DatumWithOid::from(index_segment_ids),
             DatumWithOid::from(index_column_ids),
             DatumWithOid::from(index_type_oids),
             DatumWithOid::from(index_codec_versions),
             DatumWithOid::from(index_min_values),
             DatumWithOid::from(index_max_values),
+            DatumWithOid::from(index_row_group_counts),
+            DatumWithOid::from(index_row_group_offsets),
+            DatumWithOid::from(row_group_min_values),
+            DatumWithOid::from(row_group_max_values),
+            DatumWithOid::from(row_group_null_counts),
         ],
     )
     .map_err(|error| error.to_string())?;
     Ok(())
-}
-
-fn resolve_indexed_column_type_oids(
-    table_oid: pgrx::pg_sys::Oid,
-    segments: &[WrittenFlushSegment],
-) -> Result<std::collections::BTreeMap<koldstore_common::ColumnId, u32>, String> {
-    use pgrx::datum::DatumWithOid;
-
-    let column_ids = segments
-        .iter()
-        .flat_map(|segment| segment.indexed_bounds.keys().copied())
-        .collect::<std::collections::BTreeSet<_>>();
-    if column_ids.is_empty() {
-        return Ok(std::collections::BTreeMap::new());
-    }
-    let attnums = column_ids
-        .iter()
-        .map(|column_id| column_id.get())
-        .collect::<Vec<_>>();
-    let json = pgrx::Spi::get_one_with_args::<String>(
-        r#"
-SELECT COALESCE(
-    jsonb_object_agg(attribute.attnum::text, attribute.atttypid::bigint)::text,
-    '{}'
-)
-FROM pg_catalog.pg_attribute attribute
-WHERE attribute.attrelid = $1::oid
-  AND attribute.attnum = ANY($2::smallint[])
-  AND attribute.attnum > 0
-  AND NOT attribute.attisdropped
-"#,
-        &[DatumWithOid::from(table_oid), DatumWithOid::from(attnums)],
-    )
-    .map_err(|error| error.to_string())?
-    .unwrap_or_else(|| "{}".to_string());
-    let raw = serde_json::from_str::<std::collections::BTreeMap<String, u32>>(&json)
-        .map_err(|error| error.to_string())?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|(attnum, type_oid)| {
-            let attnum = attnum.parse::<i16>().ok()?;
-            Some((koldstore_common::ColumnId::from_attnum(attnum), type_oid))
-        })
-        .collect())
 }
 
 /// Catalogs one written segment immediately (segment row + column stats).
@@ -442,7 +454,6 @@ pub(super) fn persist_flush_segment(
 pub(super) fn activate_flush_segments(
     table_oid: pgrx::pg_sys::Oid,
     expected_generation: i64,
-    manifest_path: &str,
     segment_count: i32,
     max_seq: i64,
     max_commit_seq: i64,
@@ -465,7 +476,6 @@ pub(super) fn activate_flush_segments(
             DatumWithOid::from(table_oid),
             DatumWithOid::from(expected_generation),
             DatumWithOid::from(new_generation),
-            DatumWithOid::from(manifest_path),
             DatumWithOid::from(segment_count),
             DatumWithOid::from(max_seq),
             DatumWithOid::from(max_commit_seq),
@@ -794,6 +804,41 @@ fn mirror_flush_stats(table_oid: pgrx::pg_sys::Oid) -> Result<FlushStats, String
     Ok(stats.into())
 }
 
+/// One mirror scan for force-flush all-row + delete aggregates.
+fn mirror_force_flush_stats(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<(FlushStats, FlushStats), String> {
+    use koldstore_common::MirrorOperation;
+
+    let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
+    let mirror = MirrorRelation::new(snapshot.mirror_relation.clone());
+    let delete_code = MirrorOperation::Delete.code();
+    let stats = mirror_to_sql(plan_mirror_force_flush_stats(&mirror, delete_code))
+        .map_err(|error| error.to_string())?;
+    let json = crate::spi::execute_prepared(&stats, &[], crate::spi::first_row::<String>)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "force flush stats lookup returned no rows".to_string())?;
+    let value: serde_json::Value =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    let all: MirrorSeqStats = serde_json::from_value(
+        value
+            .get("all")
+            .cloned()
+            .ok_or_else(|| "force flush stats missing `all`".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let delete_stats: MirrorSeqStats = serde_json::from_value(
+        value
+            .get("delete")
+            .cloned()
+            .ok_or_else(|| "force flush stats missing `delete`".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok((all.into(), delete_stats.into()))
+}
+
 /// Mirror `max(seq)` at flush-job start, used to pin multi-wave catch-up.
 pub(super) fn mirror_catchup_watermark(
     table_oid: pgrx::pg_sys::Oid,
@@ -809,18 +854,4 @@ pub(super) fn mirror_catchup_watermark(
 /// Row count for the flush progress bar at claim time (mirror backlog size).
 pub(super) fn mirror_catchup_row_estimate(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
     Ok(mirror_flush_stats(table_oid)?.row_count.max(0))
-}
-
-fn mirror_op_stats(table_oid: pgrx::pg_sys::Oid, op: i16) -> Result<FlushStats, String> {
-    let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
-    let mirror = MirrorRelation::new(snapshot.mirror_relation.clone());
-    let stats =
-        mirror_to_sql(plan_mirror_op_stats(&mirror, op)).map_err(|error| error.to_string())?;
-    let json = crate::spi::execute_prepared(&stats, &[], crate::spi::first_row::<String>)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "mirror op stats lookup returned no rows".to_string())?;
-    let stats: MirrorSeqStats = serde_json::from_str(&json).map_err(|error| error.to_string())?;
-    Ok(stats.into())
 }

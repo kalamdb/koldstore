@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (deferred implementation)
+Implemented
 
 ## Date
 
@@ -11,17 +11,16 @@ Accepted (deferred implementation)
 ## Context
 
 On flush, KoldStore publishes Sort Key V1 bounds into
-`koldstore.cold_segment_index` (and optional `column_stats` JSON on
-`cold_segments` for object-store `manifest.json`) so `KoldMergeScan` can prune
-whole Parquet files **before** opening them.
+`koldstore.cold_segment_index` so `KoldMergeScan` can prune whole Parquet files
+**before** opening them.
 
-Today those bounds are computed twice on the write path:
+The earlier implementation computed those bounds twice on the write path:
 
 1. **Manual encode tracking** — `CleanColdRecordBatchBuilder` updates
    `indexed_bounds` per indexed cell via `flush_value_to_json` +
    `compare_json_values`, then `FlushWriteChunk::from_encoded_batches` merges
    bounds across retained Arrow batches.
-2. **Parquet writer** — the same columns already have
+2. **Parquet writer** — the same columns had
    `EnabledStatistics::Chunk` (and PK blooms), so the footer already holds
    per–row-group min/max.
 
@@ -35,21 +34,21 @@ every candidate Parquet file just to read footer stats would defeat prune-before
 
 1. **Keep** catalog/manifest min/max as the authority for **segment** prune
    (no object open).
-2. **Keep** Parquet footer min/max + bloom as the authority for **row-group**
-   prune inside an opened file.
-3. **Change the write-time source** of catalog `column_stats`: after encode,
-   extract segment-level min/max from in-memory Parquet footer statistics
-   (min-of-mins / max-of-maxs across row groups), convert into the existing
-   catalog JSON shape, and publish that. Remove `indexed_bounds` /
-   `update_indexed_bounds` and stop retaining Arrow batches solely to merge
-   bounds.
-4. Extraction must use the bytes already held for validate/publish — not a
-   post-publish object GET.
-5. Conversion must be **type-aware** and preserve today’s
-   `compare_json_values` domain (e.g. `timestamptz` catalog bounds remain
-   RFC3339 strings even though Parquet stores INT64 micros). Unsupported or
-   inexact footer stats fail open for that column (omit key) or fail flush for
-   required columns — never publish bounds that can falsely exclude a segment.
+2. Persist aligned row-group arrays beside the scalar segment bounds. PostgreSQL
+   uses existing scalar B-tree indexes to find candidate segments; Rust then
+   intersects packed row-group arrays for the candidate IDs before any Parquet
+   object is opened.
+3. Derive segment bounds, row-group bounds, null counts, row counts, and SeqId
+   ranges from the `ParquetMetaData` returned by `ArrowWriter::close()`.
+4. Convert supported statistics directly into Sort Key V1 bytes. Remove
+   `indexed_bounds`, per-cell JSON conversion, and source-row min/max
+   accumulation.
+5. Extraction and publish use the finalized bytes and in-memory metadata from
+   the same writer close. They never upload and download the object to recover
+   statistics, and write-path validation does not parse the footer again.
+6. Mirror catalog arrays in Manifest V2 shard entries as hexadecimal Sort Key
+   bytes. Shards are immutable and content-addressed; the thin root is
+   published only after its shards.
 
 ## Alternatives Considered
 
@@ -76,21 +75,19 @@ every candidate Parquet file just to read footer stats would defeat prune-before
 
 - Flush encode becomes a single logical stats owner (Parquet writer), with a
   small metadata pass at finalize instead of per-cell JSON bound updates.
-- Segment prune API and catalog schema stay unchanged; scanners do not care
-  how bounds were produced.
-- Implementation needs an allowlisted physical→catalog JSON codec, multi–row-group
-  aggregation, adversarial tests, and careful rolling compatibility with
-  existing segments that already store encode-time JSON shapes.
-- **Priority:** correct architecture, but **not** the next performance
-  implementation. Cold PK lookup latency (footer/reader cache, cold-native
-  emit) outranks this flush-path dedup. See [roadmap](../roadmap.md) and
-  [performance](../performance.md).
+- Catalog size remains `O(segments × indexed columns)`; row-group detail is
+  stored in TOAST-able arrays rather than a child row per row group.
+- Segment bounds remain SQL-indexable. Array positions are evaluated in Rust;
+  there is no `unnest()` or GIN range-search path.
+- Proven all-null groups are excluded for ordinary comparisons. Unknown
+  statistics retain the segment/group conservatively. Required non-null PK and
+  SeqId statistics fail a new flush when incomplete.
+- Manifest V2 and catalog rows share the same scalar/array shape, which keeps
+  database/file serialization straightforward.
 
-## Implementation sketch (when scheduled)
+## Implementation
 
-1. Allowlist convertible types; map via PG/Arrow schema, not physical type alone.
-2. Fold footer open into validate: return row count + aggregated column stats.
-3. Tests: multi-RG, null-only groups, long strings, timestamptz, missing/inexact stats.
-4. Wire `indexed_column_stats_json` (or replacement) from footer extraction;
-   delete `indexed_bounds` tracking and batch retention for bounds.
-5. Keep `byte_size` from publish metadata.
+Completed on 2026-07-29. The bootstrap catalog adds packed arrays to
+`cold_segments` and `cold_segment_index`; the flush writer persists them from
+finalized footer metadata; merge scans refine scalar candidates in Rust; and
+Manifest V2 mirrors the same metadata in content-addressed shards.

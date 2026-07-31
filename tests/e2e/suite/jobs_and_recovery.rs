@@ -84,6 +84,7 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
                 r#"
                 SET koldstore.cold_reads = 'auto';
                 SET koldstore.max_open_parquet_readers = 32;
+                SET koldstore.max_merge_seen_keys = 1000000;
                 SET koldstore.log_level = 'info';
                 "#,
             )
@@ -99,6 +100,11 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
             .query_one("SHOW koldstore.max_open_parquet_readers", &[])
             .await?
             .get::<_, String>(0);
+        let max_seen_keys = db
+            .client
+            .query_one("SHOW koldstore.max_merge_seen_keys", &[])
+            .await?
+            .get::<_, String>(0);
         let log_level = db
             .client
             .query_one("SHOW koldstore.log_level", &[])
@@ -107,6 +113,7 @@ async fn koldstore_runtime_gucs_are_registered_and_settable_on_pgrx() -> Result<
 
         assert_eq!(cold_reads, "auto");
         assert_eq!(max_readers, "32");
+        assert_eq!(max_seen_keys, "1000000");
         assert_eq!(log_level, "info");
     }
 
@@ -280,12 +287,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
 async fn extension_catalog_dml_is_blocked_but_storage_api_is_allowed_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "catalog_dml_blocked").await?;
-        let app_role = format!("{}_app", db.schema);
-        db.client
-            .batch_execute(&format!(
-                "DROP ROLE IF EXISTS {app_role}; CREATE ROLE {app_role};"
-            ))
-            .await?;
+        let app_role = db.ensure_app_role().await?;
 
         db.client
             .batch_execute(&format!("SET ROLE {app_role};"))

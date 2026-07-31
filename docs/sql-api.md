@@ -76,6 +76,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.cold_reads` | string | `auto` | `auto`: cold eligible by catalog/cost; `on`: cold eligible without forcing unnecessary object reads; `off`: hot-only and ERROR when correctness requires cold segments. |
 | `koldstore.enable_merge_scan` | bool | `on` | Required for managed-table SELECT. When `off`, `KoldMergeScan` errors at execution instead of allowing an incorrect heap-only read. |
 | `koldstore.max_open_parquet_readers` | int | `32` | Per-backend open Parquet reader cap for cold scans (fail-fast when exceeded). Clamped to `1..=1024`. |
+| `koldstore.max_merge_seen_keys` | int | `1000000` | Per-scan cap on exact PK identities retained by `KoldMergeScan` (fail-closed when exceeded). Protects backends from accidental full-table scans. `0` disables the cap. Clamped to `0..=100000000`. |
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
 | `koldstore.flush_check_interval_seconds` | int | `30` | How often the database worker evaluates `auto_flush` tables and runs at most one needed flush. Clamped to `1..=86400`. |
@@ -84,7 +85,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.async_apply_max_ms_per_tick` | int | `0` | Max wall-clock ms per apply tick (`0` = unlimited). When exhausted, commit `applied_lsn` and continue next wake. |
 | `koldstore.flush_prelock_max_passes` | int | `3` | Max phase-5.5 pre-lock async apply passes during flush before failing closed. |
 | `koldstore.flush_prelock_max_ms` | int | `5000` | Combined wall-clock budget (ms) for flush phase-5.5 pre-lock catch-up. |
-| `koldstore.async_mirror_max_retained_bytes` | int | `1073741824` (1 GiB) | Health threshold for slot-retained WAL bytes. Exceeding it marks `async_mirror_status().retention.ok` false but never blocks the applier from draining WAL. `admission` remains a compatibility alias. `0` disables this health threshold. Configure PostgreSQL retention/disk safeguards independently. |
+| `koldstore.async_mirror_max_retained_bytes` | int | `1073741824` (1 GiB) | Health threshold for slot-retained WAL bytes. Exceeding it marks `async_mirror_status().retention.ok` false but never blocks the applier from draining WAL. `0` disables this health threshold. Configure PostgreSQL retention/disk safeguards independently. |
 
 ### Internal GUCs
 

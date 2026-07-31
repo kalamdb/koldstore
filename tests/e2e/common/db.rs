@@ -179,6 +179,25 @@ impl TestDb {
         format!("{}.{}", self.schema, table_name)
     }
 
+    /// Creates a disposable non-owner role named `{schema}_app`.
+    ///
+    /// Roles are cluster-global and survive pooled-DB resets, so this drops any
+    /// leftover role from a prior PID/counter collision before creating.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when role DDL fails.
+    pub async fn ensure_app_role(&self) -> Result<String> {
+        let app_role = format!("{}_app", self.schema);
+        self.client
+            .batch_execute(&format!(
+                "DROP ROLE IF EXISTS {app_role}; CREATE ROLE {app_role};"
+            ))
+            .await
+            .with_context(|| format!("ensure app role {app_role}"))?;
+        Ok(app_role)
+    }
+
     /// Creates and populates an indexed fixture table.
     ///
     /// # Errors
@@ -404,18 +423,29 @@ impl TestDb {
         let artifact = self
             .client
             .query_one(
-                r#"
-                SELECT m.manifest_path, cs.object_path, cs.row_count, cs.byte_size
+                &format!(
+                    r#"
+                SELECT
+                  {manifest},
+                  {object},
+                  cs.row_count,
+                  cs.byte_size
                 FROM koldstore.manifest m
+                JOIN pg_class c ON c.oid = m.table_oid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
                 JOIN koldstore.cold_segments cs
                   ON cs.table_oid = m.table_oid
                  AND cs.scope_key = m.scope_key
                 WHERE m.table_oid = $1::text::regclass::oid
+                  AND m.generation > 0
                   AND m.sync_state = 'in_sync'
                   AND cs.status = 'active'
                 ORDER BY cs.batch_number
                 LIMIT 1
                 "#,
+                    manifest = super::SQL_DEFAULT_MANIFEST_OBJECT_KEY,
+                    object = super::SQL_DEFAULT_COLD_OBJECT_KEY,
+                ),
                 &[&relation],
             )
             .await

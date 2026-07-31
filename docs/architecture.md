@@ -36,7 +36,7 @@ Rust crate layout and dependency graph.
 | ADR | Topic |
 |-----|--------|
 | [ADR-001](decisions/001-layered-crate-architecture.md) | Layered crate architecture |
-| [ADR-002](decisions/002-footer-derived-catalog-stats.md) | Footer-derived catalog segment stats (accepted, deferred) |
+| [ADR-002](decisions/002-footer-derived-catalog-stats.md) | Footer-derived packed segment and row-group stats (implemented) |
 | [ADR-003](decisions/003-optional-async-mirror-capture.md) | Optional WAL-backed async mirror capture (amended by ADR-005) |
 | [ADR-004](decisions/004-segment-publication-protocol.md) | Pending-to-active segment publication protocol |
 | [ADR-005](decisions/005-async-apply-progress-and-health.md) | Async UPDATE apply, worker progress, and retained-WAL health |
@@ -66,13 +66,14 @@ See [dml-table](architecture/dml-table.md) and
 
 ### Custom scan instead of an external query engine
 
-KoldMergeScan materializes a hot+cold winner set via SQL at scan start, then
-serves rows from a buffer. See [scanning-table](architecture/scanning-table.md).
+KoldMergeScan streams hot pages and cold segment groups through an exact
+winner resolver, retaining PK identities (not full row images) for the scan.
+See [scanning-table](architecture/scanning-table.md).
 
 ### Manifest and catalog
 
 `koldstore.manifest` tracks sync state and O(1) row counters. Object-store
-export is folder-sharded (`manifest.json` root + `{folder}/manifest-shard.json`)
+export is folder-sharded (`manifest.json` root + content-addressed folder shards)
 and is written on flush finalize. Cold segment metadata lives in
 `koldstore.cold_segments`. See [flushing-table](architecture/flushing-table.md).
 

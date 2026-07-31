@@ -67,17 +67,12 @@ pub(super) fn load_mirror_tombstone_overlay(
         .iter()
         .map(|column| PkColumn::new(&column.name).map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
-    let pk_json = primary_key_columns
-        .iter()
-        .map(|column| {
-            format!(
-                "'{escaped}', mirror.{quoted}",
-                escaped = column.name.replace('\'', "''"),
-                quoted = quote_ident(&column.name),
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    let pk_json = super::spi_query::jsonb_pk_object_pairs(
+        "mirror",
+        primary_key_columns
+            .iter()
+            .map(|column| column.name.as_str()),
+    );
 
     let mut where_clauses = vec!["mirror.\"op\" = 3".to_string()];
     let pk_filter_names: HashSet<&str> = primary_key_columns
@@ -101,9 +96,7 @@ pub(super) fn load_mirror_tombstone_overlay(
 
     let sql = format!(
         r#"
-SELECT
-    jsonb_build_object({pk_json})::text AS pk_json,
-    mirror."op" AS op
+SELECT jsonb_build_object({pk_json})::text AS pk_json
 FROM {mirror} AS mirror
 WHERE {where_clause}
 "#,

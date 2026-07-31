@@ -1,9 +1,7 @@
-use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use koldstore_manifest::{Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment};
-use serde_json::json;
+use koldstore_manifest::{Manifest, ManifestBloomFilter, ManifestColumnIndex, ManifestSegment};
 
 fn bench_manifest_segment_pruning(c: &mut Criterion) {
     let mut group = c.benchmark_group("manifest_segment_pruning");
@@ -69,7 +67,7 @@ fn build_segments(count: usize) -> Vec<ManifestSegment> {
                 128 * 1024,
                 1,
             );
-            segment.column_stats = column_stats(idx);
+            segment.column_indexes = column_indexes(idx);
             segment
                 .bloom_filters
                 .push(ManifestBloomFilter::bloom(vec![2], Some(0.01)));
@@ -78,19 +76,38 @@ fn build_segments(count: usize) -> Vec<ManifestSegment> {
         .collect()
 }
 
-fn column_stats(idx: usize) -> BTreeMap<String, ManifestColumnStats> {
+fn column_indexes(idx: usize) -> Vec<ManifestColumnIndex> {
     let day = (idx % 365) as i64;
     let user = format!("user-{}", idx % 2_500);
-    BTreeMap::from([
-        (
-            "created_day".to_string(),
-            ManifestColumnStats::new(json!(day), json!(day + 1)),
-        ),
-        (
-            "user_id".to_string(),
-            ManifestColumnStats::new(json!(user), json!(user)),
-        ),
-    ])
+    vec![
+        manifest_index(1, day_hex(day), day_hex(day + 1)),
+        manifest_index(2, text_hex(&user), text_hex(&user)),
+    ]
+}
+
+fn manifest_index(column_id: i16, min: String, max: String) -> ManifestColumnIndex {
+    ManifestColumnIndex {
+        column_id,
+        type_oid: 20,
+        codec_version: 1,
+        min_value: Some(min.clone()),
+        max_value: Some(max.clone()),
+        row_group_min_values: vec![Some(min)],
+        row_group_max_values: vec![Some(max)],
+        row_group_null_counts: vec![Some(0)],
+    }
+}
+
+fn day_hex(day: i64) -> String {
+    format!("{day:016x}")
+}
+
+fn text_hex(value: &str) -> String {
+    value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn select_segments_by_created_day(
@@ -98,19 +115,25 @@ fn select_segments_by_created_day(
     min_day: i64,
     max_day: i64,
 ) -> usize {
+    let query_min = day_hex(min_day);
+    let query_max = day_hex(max_day);
     segments
         .iter()
         .filter(|segment| {
-            let Some(stats) = segment.column_stats.get("created_day") else {
+            let Some(index) = segment
+                .column_indexes
+                .iter()
+                .find(|index| index.column_id == 1)
+            else {
                 return true;
             };
-            let Some(segment_min) = stats.min.as_i64() else {
+            let Some(segment_min) = index.min_value.as_ref() else {
                 return true;
             };
-            let Some(segment_max) = stats.max.as_i64() else {
+            let Some(segment_max) = index.max_value.as_ref() else {
                 return true;
             };
-            segment_max >= min_day && segment_min <= max_day
+            segment_max >= &query_min && segment_min <= &query_max
         })
         .count()
 }
@@ -121,23 +144,35 @@ fn lookup_by_user_and_time(
     min_day: i64,
     max_day: i64,
 ) -> usize {
+    let query_user = text_hex(user_id);
+    let query_min = day_hex(min_day);
+    let query_max = day_hex(max_day);
     segments
         .iter()
         .filter(|segment| {
             let user_matches = segment
-                .column_stats
-                .get("user_id")
-                .and_then(|stats| stats.min.as_str())
-                .is_none_or(|segment_user| segment_user == user_id);
+                .column_indexes
+                .iter()
+                .find(|index| index.column_id == 2)
+                .and_then(|index| index.min_value.as_ref())
+                .is_none_or(|segment_user| segment_user == &query_user);
             user_matches
         })
         .filter(|segment| {
-            let Some(stats) = segment.column_stats.get("created_day") else {
+            let Some(index) = segment
+                .column_indexes
+                .iter()
+                .find(|index| index.column_id == 1)
+            else {
                 return true;
             };
-            let segment_min = stats.min.as_i64().unwrap_or(i64::MIN);
-            let segment_max = stats.max.as_i64().unwrap_or(i64::MAX);
-            segment_max >= min_day && segment_min <= max_day
+            let Some(segment_min) = index.min_value.as_ref() else {
+                return true;
+            };
+            let Some(segment_max) = index.max_value.as_ref() else {
+                return true;
+            };
+            segment_max >= &query_min && segment_min <= &query_max
         })
         .count()
 }

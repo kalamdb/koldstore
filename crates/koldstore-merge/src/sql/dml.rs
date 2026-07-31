@@ -154,7 +154,7 @@ pub fn allocate_seq_for_tests() -> Result<SeqId> {
 
 /// Plans `koldstore.hydrate_pk` for a single requested cold PK.
 #[must_use]
-pub fn plan_hydrate_pk(_request: &HydratePkRequest, cold_row_found: bool) -> DmlResult {
+pub fn plan_hydrate_pk(cold_row_found: bool) -> DmlResult {
     DmlResult {
         affected_rows: i64::from(cold_row_found),
         tombstone_written: false,

@@ -10,13 +10,15 @@ use koldstore_catalog::ManagedTableSnapshot;
 use koldstore_common::{ColumnRef, FlushPolicy, QualifiedTableName};
 use koldstore_flush::{
     flush_mirror_fetch_limit, flush_phase, max_rows_per_file_from_policy,
-    plan_apply_flush_row_count_deltas, relative_manifest_path, should_continue_flush_catchup,
-    should_start_catchup_wave, stream_flush_chunks, validate_flush_row_selection,
-    write_flush_segment_with_client, FlushStats, FlushWriteChunk, ResolvedFlushSelection,
-    StreamEncodeInput, TableFlushBatchOutcome, WrittenFlushSegment,
+    plan_apply_flush_row_count_deltas, should_continue_flush_catchup, should_start_catchup_wave,
+    stream_flush_chunks, validate_flush_row_selection, write_flush_segment_with_client, FlushStats,
+    FlushWriteChunk, ResolvedFlushSelection, StreamEncodeInput, TableFlushBatchOutcome,
+    WrittenFlushSegment,
 };
 use koldstore_manifest::write_manifest_with_client;
-use koldstore_storage::open_client_from_catalog_fields;
+use koldstore_storage::{
+    manifest_object_key, open_client_from_catalog_fields, render_regular_table_prefix, PathTemplate,
+};
 
 use super::jobs::{
     ensure_flush_job, flush_cancel_requested, mark_flush_job_cancelled, mark_flush_job_completed,
@@ -36,7 +38,7 @@ pub(super) struct FlushPreparedContext {
     relation: RelationContext,
     storage: FlushStorageContext,
     snapshot: Arc<ManagedTableSnapshot>,
-    catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
+    catalog: Arc<koldstore_migrate::ExistingTableCatalog>,
     indexed_columns: Vec<ColumnRef>,
     max_rows_per_file: usize,
     target_file_size_bytes: Option<u64>,
@@ -113,7 +115,7 @@ fn load_flush_prepared_context(
         relation,
         storage,
         snapshot,
-        catalog_columns: catalog.columns,
+        catalog,
         indexed_columns,
         max_rows_per_file,
         target_file_size_bytes,
@@ -127,7 +129,12 @@ pub(super) fn stream_write_flush_batches(
     client: &koldstore_storage::ObjectStoreClient,
 ) -> Result<TableFlushBatchOutcome, String> {
     let stats = &selection.stats;
-    let manifest_path = relative_manifest_path(&ctx.relation.namespace, &ctx.relation.name);
+    let table_prefix = render_regular_table_prefix(
+        &PathTemplate::new(&ctx.storage.regular_path_tmpl),
+        &ctx.relation.namespace,
+        &ctx.relation.name,
+    )?;
+    let manifest_path = manifest_object_key(&table_prefix);
     let schema_version =
         u32::try_from(ctx.storage.schema_version).map_err(|error| error.to_string())?;
     let mut batch_number = next_flush_batch_number(table_oid)?;
@@ -148,15 +155,25 @@ pub(super) fn stream_write_flush_batches(
             .map(str::to_string)
             .collect(),
         base_column_names: ctx
-            .catalog_columns
+            .catalog
+            .columns
             .iter()
             .map(|column| column.name.clone())
             .collect(),
         parquet_columns: ctx
-            .catalog_columns
+            .catalog
+            .columns
             .iter()
+            // Delete markers retain every PK value but intentionally leave
+            // non-PK payload columns null, even when the source column is
+            // declared NOT NULL. Keeping only PK columns non-null also makes
+            // their footer bounds a required publication invariant.
             .map(|column| {
-                koldstore_parquet::PgColumn::new(column.name.clone(), column.pg_type, true)
+                koldstore_parquet::PgColumn::new(
+                    column.name.clone(),
+                    column.pg_type,
+                    !column.is_primary_key,
+                )
             })
             .collect(),
         indexed_columns: ctx.indexed_columns.clone(),
@@ -170,7 +187,7 @@ pub(super) fn stream_write_flush_batches(
         mirror_ops: selection.mirror_ops.clone(),
         sort_by_order_key: ctx.snapshot.segment_order_column_id.is_some(),
     };
-    let catalog_columns = ctx.catalog_columns.clone();
+    let catalog_columns = &ctx.catalog.columns;
     let fetch_batch_size = encode_input.fetch_batch_size;
     // Failpoint after pending catalog inserts lives in write_streamed_chunk.
 
@@ -179,7 +196,7 @@ pub(super) fn stream_write_flush_batches(
             &encode_input,
             |statement, max_seq, after_seq| {
                 fetch_mirror_batch(
-                    &catalog_columns,
+                    catalog_columns,
                     statement,
                     max_seq,
                     after_seq,
@@ -191,6 +208,7 @@ pub(super) fn stream_write_flush_batches(
                 write_streamed_chunk(
                     client,
                     ctx,
+                    &table_prefix,
                     table_oid,
                     &mut batch_number,
                     &mut total_rows_flushed,
@@ -234,6 +252,7 @@ pub(super) fn stream_write_flush_batches(
 fn write_streamed_chunk(
     client: &koldstore_storage::ObjectStoreClient,
     ctx: &FlushPreparedContext,
+    table_prefix: &str,
     table_oid: pgrx::pg_sys::Oid,
     batch_number: &mut i32,
     total_rows_flushed: &mut i64,
@@ -244,17 +263,9 @@ fn write_streamed_chunk(
 ) -> Result<(), String> {
     crate::failpoints::hit("during_parquet_write")?;
     let chunk_stats = FlushStats::from_write_chunk(&chunk)?;
-    let primary_key_names = ctx
-        .snapshot
-        .primary_key_names()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
     let written = write_flush_segment_with_client(
         client,
-        &ctx.relation.namespace,
-        &ctx.relation.name,
-        &ctx.storage.compression,
-        &primary_key_names,
+        table_prefix,
         ctx.storage.schema_version,
         *batch_number,
         &chunk,
@@ -326,10 +337,9 @@ pub(super) fn finalize_flush(
     write_manifest_with_client(client, &outcome.manifest_path, &outcome.manifest)?;
     crate::failpoints::hit("before_activate")?;
     let expected_generation = manifest_generation(table_oid)?;
-    let _new_generation = activate_flush_segments(
+    activate_flush_segments(
         table_oid,
         expected_generation,
-        &outcome.manifest_path,
         outcome.manifest.segments.len() as i32,
         outcome.manifest.max_seq,
         outcome.manifest.max_commit_seq,

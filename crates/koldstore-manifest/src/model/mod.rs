@@ -2,19 +2,18 @@
 //!
 //! Object-store layout is folder-sharded only: a thin root `manifest.json`
 //! lists [`ManifestShardRef`] entries; segment bodies live in
-//! `{folder}/manifest-shard.json`. The in-memory [`Manifest`] may hold a full
+//! `{folder}/manifest-shard-{sha256}.json`. The in-memory [`Manifest`] may hold a full
 //! `segments` list while assembling from catalog or after a merged load.
 
-use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Root `manifest.json` document version (folder-sharded layout).
-pub const MANIFEST_VERSION: u32 = 1;
-/// Shard document format version under `{folder}/manifest-shard.json`.
-pub const MANIFEST_SHARD_VERSION: u32 = 1;
+pub const MANIFEST_VERSION: u32 = 2;
+/// Shard document format version for content-addressed folder shards.
+pub const MANIFEST_SHARD_VERSION: u32 = 2;
 
 /// Object-store / in-memory manifest.
 ///
@@ -46,7 +45,7 @@ pub struct Manifest {
 pub struct ManifestShardRef {
     /// Zero-padded folder name (`001`).
     pub folder: String,
-    /// Table-relative shard path (`001/manifest-shard.json`).
+    /// Table-relative content-addressed shard path.
     pub path: String,
     /// SHA-256 of the exact shard JSON bytes written before this root.
     pub content_sha256: String,
@@ -90,6 +89,9 @@ pub struct PublishState {
 /// Manifest segment entry (shard document / in-memory).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManifestSegment {
+    /// Catalog segment UUID when assembled from PostgreSQL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<String>,
     pub batch: u32,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,9 +103,18 @@ pub struct ManifestSegment {
     pub row_count: u64,
     pub byte_size: u64,
     pub schema_version: u32,
+    /// Number of positionally aligned Parquet row groups.
+    pub row_group_count: u32,
+    /// Logical row count for each row group.
+    pub row_group_row_counts: Vec<i64>,
+    /// Minimum SeqId for each row group.
+    pub row_group_min_seqs: Vec<i64>,
+    /// Maximum SeqId for each row group.
+    pub row_group_max_seqs: Vec<i64>,
     pub pk_filter: Option<PkFilter>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub column_stats: BTreeMap<String, ManifestColumnStats>,
+    /// Per-column Sort Key V1 bounds mirrored from `cold_segment_index`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_indexes: Vec<ManifestColumnIndex>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bloom_filters: Vec<ManifestBloomFilter>,
     pub status: SegmentStatus,
@@ -131,7 +142,9 @@ impl ManifestSegment {
         let max_seq = *seq_range.end();
         let min_commit_seq = *commit_range.start();
         let max_commit_seq = *commit_range.end();
+        let row_group_rows = i64::try_from(row_count).unwrap_or(i64::MAX);
         Self {
+            segment_id: None,
             batch,
             path: path.into(),
             temp_path: None,
@@ -142,8 +155,12 @@ impl ManifestSegment {
             row_count,
             byte_size,
             schema_version,
+            row_group_count: 1,
+            row_group_row_counts: vec![row_group_rows],
+            row_group_min_seqs: vec![min_seq],
+            row_group_max_seqs: vec![max_seq],
             pk_filter: None,
-            column_stats: BTreeMap::new(),
+            column_indexes: Vec::new(),
             bloom_filters: Vec::new(),
             status: SegmentStatus::Committed,
             checksum: None,
@@ -153,19 +170,20 @@ impl ManifestSegment {
     }
 }
 
-/// Min/max stats for one manifest column.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ManifestColumnStats {
-    pub min: serde_json::Value,
-    pub max: serde_json::Value,
-}
-
-impl ManifestColumnStats {
-    /// Creates manifest min/max stats.
-    #[must_use]
-    pub fn new(min: serde_json::Value, max: serde_json::Value) -> Self {
-        Self { min, max }
-    }
+/// Sort Key V1 segment and row-group bounds for one indexed column.
+///
+/// Hex strings mirror PostgreSQL `bytea` values. Array position is the
+/// zero-based Parquet row-group ID; `None` mirrors a SQL NULL array element.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestColumnIndex {
+    pub column_id: i16,
+    pub type_oid: u32,
+    pub codec_version: i16,
+    pub min_value: Option<String>,
+    pub max_value: Option<String>,
+    pub row_group_min_values: Vec<Option<String>>,
+    pub row_group_max_values: Vec<Option<String>>,
+    pub row_group_null_counts: Vec<Option<i64>>,
 }
 
 /// Segment status in object-store manifest.
@@ -173,6 +191,8 @@ impl ManifestColumnStats {
 #[serde(rename_all = "snake_case")]
 pub enum SegmentStatus {
     Committed,
+    Pending,
+    Active,
     Compacted,
     Deleted,
 }

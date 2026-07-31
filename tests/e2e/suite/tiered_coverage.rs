@@ -17,13 +17,18 @@ async fn active_segment_paths(db: &common::TestDb, relation: &str) -> Result<Vec
     let rows = db
         .client
         .query(
-            r#"
-            SELECT cs.object_path
+            &format!(
+                r#"
+            SELECT {object}
             FROM koldstore.cold_segments cs
+            JOIN pg_class c ON c.oid = cs.table_oid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
             WHERE cs.table_oid = $1::text::regclass::oid
               AND cs.status = 'active'
             ORDER BY cs.batch_number, cs.created_at
             "#,
+                object = common::SQL_DEFAULT_COLD_OBJECT_KEY,
+            ),
             &[&relation],
         )
         .await

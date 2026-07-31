@@ -16,7 +16,7 @@ mod r#loop;
 pub use ensure::ensure_async_mirror_worker_pg;
 #[cfg(feature = "pg")]
 pub(crate) use ensure::{
-    ensure_async_mirror_worker_once_if_needed, ensure_database_worker, mark_worker_not_ensured,
+    ensure_async_mirror_worker, ensure_async_mirror_worker_once_if_needed, mark_worker_not_ensured,
     require_async_mirror_worker,
 };
 #[cfg(feature = "pg")]

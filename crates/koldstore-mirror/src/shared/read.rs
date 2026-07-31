@@ -82,55 +82,52 @@ pub fn plan_mirror_stats(mirror_table: &MirrorRelation) -> MirrorStatement {
         "select mirror stats",
         format!(
             r#"SELECT jsonb_build_object(
-    'row_count', count(*),
-    'min_seq', COALESCE(min("seq"), 0),
-    'max_seq', COALESCE(max("seq"), 0),
-    'min_commit_seq', COALESCE(min("seq"), 0),
-    'max_commit_seq', COALESCE(max("seq"), 0)
+    {stats_fields}
 )::text
 FROM {mirror}"#,
+            stats_fields = MIRROR_SEQ_STATS_JSON_FIELDS,
             mirror = mirror_table.quoted()
         ),
     )
 }
 
-/// Plans aggregate stats over the oldest `limit` mirror rows by `seq`.
+/// Plans all-row and delete-only mirror aggregates in one scan.
 ///
-/// Bind parameters:
-/// - `$1` row limit
-///
-/// # Errors
-///
-/// Returns an error when statement metadata cannot be prepared.
-pub fn plan_mirror_oldest_rows_stats(mirror_table: &MirrorRelation) -> MirrorStatement {
-    MirrorStatement::read_with_params(
-        "select mirror oldest rows stats",
+/// Force flush previously ran [`plan_mirror_stats`] then [`plan_mirror_op_stats`];
+/// this collapses both into a single pass with `FILTER (WHERE op = delete)`.
+#[must_use]
+pub fn plan_mirror_force_flush_stats(
+    mirror_table: &MirrorRelation,
+    delete_op: i16,
+) -> MirrorStatement {
+    MirrorStatement::read(
+        "select mirror force-flush stats",
         format!(
             r#"SELECT jsonb_build_object(
-    'row_count', count(*)::bigint,
-    'min_seq', COALESCE(min("seq"), 0),
-    'max_seq', COALESCE(max("seq"), 0),
-    'min_commit_seq', COALESCE(min("seq"), 0),
-    'max_commit_seq', COALESCE(max("seq"), 0)
+    'all', jsonb_build_object(
+        {stats_fields}
+    ),
+    'delete', jsonb_build_object(
+        'row_count', count(*) FILTER (WHERE "op" = {delete_op})::bigint,
+        'min_seq', COALESCE(min("seq") FILTER (WHERE "op" = {delete_op}), 0),
+        'max_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0),
+        'min_commit_seq', COALESCE(min("seq") FILTER (WHERE "op" = {delete_op}), 0),
+        'max_commit_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0)
+    )
 )::text
-FROM (
-    SELECT "seq"
-    FROM {mirror}
-    ORDER BY "seq" ASC
-    LIMIT $1::bigint
-) oldest"#,
-            mirror = mirror_table.quoted()
+FROM {mirror}"#,
+            stats_fields = MIRROR_SEQ_STATS_JSON_FIELDS,
+            mirror = mirror_table.quoted(),
+            delete_op = delete_op,
         ),
-        [SqlParamType::BigInt],
     )
 }
 
 /// Plans the `max(seq)` among the oldest `limit` mirror rows.
 ///
-/// PERFORMANCE: Prefer this over [`plan_mirror_oldest_rows_stats`] when the
-/// caller already knows `row_count` (for example from manifest counters). A
-/// single index-backed `ORDER BY seq LIMIT N` lookup returns only the cutoff
-/// seq instead of aggregating the page.
+/// PERFORMANCE: Prefer this when the caller already knows `row_count` (for
+/// example from manifest counters). A single index-backed `ORDER BY seq LIMIT N`
+/// lookup returns only the cutoff seq instead of aggregating the page.
 ///
 /// Bind parameters:
 /// - `$1` row limit
@@ -158,19 +155,25 @@ pub fn plan_mirror_op_stats(mirror_table: &MirrorRelation, op: i16) -> MirrorSta
         "select mirror op stats",
         format!(
             r#"SELECT jsonb_build_object(
-    'row_count', count(*)::bigint,
-    'min_seq', COALESCE(min("seq"), 0),
-    'max_seq', COALESCE(max("seq"), 0),
-    'min_commit_seq', COALESCE(min("seq"), 0),
-    'max_commit_seq', COALESCE(max("seq"), 0)
+    {stats_fields}
 )::text
 FROM {mirror}
 WHERE "op" = {op}"#,
+            stats_fields = MIRROR_SEQ_STATS_JSON_FIELDS,
             mirror = mirror_table.quoted(),
             op = op
         ),
     )
 }
+
+/// Shared `jsonb_build_object` fields for mirror seq aggregate stats.
+const MIRROR_SEQ_STATS_JSON_FIELDS: &str = r#"
+    'row_count', count(*)::bigint,
+    'min_seq', COALESCE(min("seq"), 0),
+    'max_seq', COALESCE(max("seq"), 0),
+    'min_commit_seq', COALESCE(min("seq"), 0),
+    'max_commit_seq', COALESCE(max("seq"), 0)
+"#;
 
 fn pk_json_projection(primary_key: &[&str]) -> MirrorResult<String> {
     let quoted = quoted_pk_columns(primary_key)?;

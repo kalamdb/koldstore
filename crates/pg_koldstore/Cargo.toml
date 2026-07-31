@@ -38,6 +38,7 @@ test-failpoints = []
 s3 = ["koldstore-storage/s3"]
 
 [dependencies]
+hex.workspace = true
 koldstore-catalog.workspace = true
 koldstore-common.workspace = true
 koldstore-flush.workspace = true

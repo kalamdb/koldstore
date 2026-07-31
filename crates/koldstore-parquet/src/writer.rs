@@ -14,7 +14,7 @@ use crate::schema::{ColdMetadataColumn, PgColumn};
 use arrow_array::RecordBatch;
 use arrow_schema::SchemaRef;
 use bytes::Bytes;
-use koldstore_common::dedupe_nonblank;
+use koldstore_common::{dedupe_nonblank, join_object_key, segment_relative_object_path};
 use parquet::{
     arrow::ArrowWriter,
     basic::{Compression, ZstdLevel},
@@ -152,12 +152,34 @@ impl StreamingParquetSegmentWriter {
     ///
     /// Returns an error when footer encoding fails or the output lock is poisoned.
     pub fn finish(self) -> Result<Vec<u8>, ParquetError> {
+        Ok(self.finish_with_metadata()?.bytes)
+    }
+
+    /// Closes the writer and returns bytes together with the exact metadata
+    /// produced while finalizing those bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when footer encoding fails or the output lock is poisoned.
+    pub fn finish_with_metadata(self) -> Result<EncodedParquetSegment, ParquetError> {
         let Self { writer, output } = self;
         // `close` consumes the ArrowWriter and drops its SharedWriteBuffer clone,
         // so `into_bytes` can take the Vec without cloning.
-        writer.close()?;
-        output.into_bytes()
+        let metadata = Arc::new(writer.close()?);
+        Ok(EncodedParquetSegment {
+            bytes: output.into_bytes()?,
+            metadata,
+        })
     }
+}
+
+/// Finalized Parquet bytes and the exact in-memory footer metadata describing them.
+#[derive(Debug, Clone)]
+pub struct EncodedParquetSegment {
+    /// Complete Parquet object, including footer.
+    pub bytes: Vec<u8>,
+    /// Metadata returned by [`ArrowWriter::close`].
+    pub metadata: Arc<parquet::file::metadata::ParquetMetaData>,
 }
 
 /// Planned clean-schema cold record.
@@ -235,7 +257,7 @@ pub fn record_batch_from_clean_cold_records(
     columns: &[PgColumn],
     rows: &[CleanColdRecordPlan],
 ) -> Result<RecordBatch, String> {
-    let mut builder = crate::batch_builder::CleanColdRecordBatchBuilder::new(columns, &[])?;
+    let mut builder = crate::batch_builder::CleanColdRecordBatchBuilder::new(columns)?;
     for row in rows {
         builder.push_plan(row)?;
     }
@@ -286,6 +308,37 @@ pub fn encode_parquet_segment_bytes(
 /// Returns an error when the payload is truncated, missing magic, or has an
 /// unreadable footer.
 pub fn validate_parquet_bytes(bytes: &[u8]) -> Result<ParquetValidation, String> {
+    let byte_size = validate_parquet_envelope(bytes)?;
+
+    // PERFORMANCE: parse footer via ranged reads so validation never doubles
+    // peak RSS by copying the entire Parquet buffer.
+    let metadata = ParquetMetaDataReader::new()
+        .with_column_index_policy(PageIndexPolicy::Skip)
+        .with_offset_index_policy(PageIndexPolicy::Skip)
+        .parse_and_finish(&SliceChunkReader(bytes))
+        .map_err(|error| format!("parquet footer: {error}"))?;
+    validation_from_metadata(byte_size, &metadata)
+}
+
+/// Validates finalized bytes using the exact metadata returned by
+/// [`ArrowWriter::close`] without parsing the footer a second time.
+///
+/// This is the flush write-path validator. It checks the Parquet envelope and
+/// validates row counts against the already-finalized metadata.
+///
+/// # Errors
+///
+/// Returns an error when the byte envelope is malformed or metadata reports a
+/// negative row count.
+pub fn validate_finalized_parquet_segment(
+    bytes: &[u8],
+    metadata: &parquet::file::metadata::ParquetMetaData,
+) -> Result<ParquetValidation, String> {
+    let byte_size = validate_parquet_envelope(bytes)?;
+    validation_from_metadata(byte_size, metadata)
+}
+
+fn validate_parquet_envelope(bytes: &[u8]) -> Result<u64, String> {
     const MAGIC: &[u8] = b"PAR1";
     if bytes.len() < 8 {
         return Err(format!(
@@ -310,20 +363,19 @@ pub fn validate_parquet_bytes(bytes: &[u8]) -> Result<ParquetValidation, String>
             bytes.len()
         ));
     }
+    u64::try_from(bytes.len()).map_err(|error| error.to_string())
+}
 
-    // PERFORMANCE: parse footer via ranged reads so validation never doubles
-    // peak RSS by copying the entire Parquet buffer.
-    let metadata = ParquetMetaDataReader::new()
-        .with_column_index_policy(PageIndexPolicy::Skip)
-        .with_offset_index_policy(PageIndexPolicy::Skip)
-        .parse_and_finish(&SliceChunkReader(bytes))
-        .map_err(|error| format!("parquet footer: {error}"))?;
+fn validation_from_metadata(
+    byte_size: u64,
+    metadata: &parquet::file::metadata::ParquetMetaData,
+) -> Result<ParquetValidation, String> {
     let row_count = metadata.file_metadata().num_rows();
     if row_count < 0 {
         return Err("parquet footer reports negative row count".to_string());
     }
     Ok(ParquetValidation {
-        byte_size: u64::try_from(bytes.len()).map_err(|error| error.to_string())?,
+        byte_size,
         row_count: u64::try_from(row_count).map_err(|error| error.to_string())?,
         row_group_count: metadata.num_row_groups(),
     })
@@ -469,71 +521,50 @@ impl ParquetSegmentWriter {
     }
 
     /// Builds a deterministic segment write plan.
+    ///
+    /// `path_token` is the short hex token from the catalog segment id (same
+    /// contract as live flush). Object keys are
+    /// `{prefix}/{folder}/segment-{batch:04}-{token}.parquet`.
     #[must_use]
     pub fn plan_segment(
         &self,
         prefix: &str,
         batch: u32,
-        min_seq: i64,
-        max_seq: i64,
-        min_commit_seq: i64,
-        max_commit_seq: i64,
-    ) -> SegmentWritePlan {
-        let prefix = prefix.trim_matches('/');
-        let folder = (batch.max(1) - 1) / 100 + 1;
-        SegmentWritePlan {
-            object_path: format!("{prefix}/{folder:03}/segment-{batch:04}.parquet"),
-            min_seq,
-            max_seq,
-            min_commit_seq,
-            max_commit_seq,
-            compression: self.options.compression.clone(),
-            row_count: 0,
-            byte_size: 0,
-            column_stats: BTreeMap::new(),
-            pk_filter_kind: None,
-            pk_filter_columns: Vec::new(),
-            statistics_columns: self.options.statistics_columns.clone(),
-            bloom_filter_columns: self.options.bloom_filter_columns.clone(),
-            writes_native_bloom_filters: !self.options.bloom_filter_columns.is_empty(),
-        }
-    }
-
-    /// Builds a deterministic segment write plan with manifest metadata.
-    #[must_use]
-    pub fn plan_segment_with_metadata(
-        &self,
-        prefix: &str,
-        batch: u32,
+        path_token: &str,
         metadata: SegmentMetadataInput,
     ) -> SegmentWritePlan {
-        let mut plan = self.plan_segment(
-            prefix,
-            batch,
-            metadata.min_seq,
-            metadata.max_seq,
-            metadata.min_commit_seq,
-            metadata.max_commit_seq,
-        );
-        plan.row_count = metadata.row_count;
-        plan.byte_size = metadata.byte_size;
-        plan.column_stats = metadata.column_stats.into_iter().collect();
-        plan.pk_filter_kind = (!metadata.pk_columns.is_empty()).then(|| "bloom".to_string());
-        plan.pk_filter_columns = metadata.pk_columns;
-        plan.bloom_filter_columns = dedupe_nonblank(
+        let batch_number = i32::try_from(batch).unwrap_or(i32::MAX);
+        let bloom_filter_columns = dedupe_nonblank(
             metadata
                 .bloom_filter_columns
                 .into_iter()
-                .chain(plan.bloom_filter_columns),
+                .chain(self.options.bloom_filter_columns.iter().cloned()),
         );
-        plan.statistics_columns = dedupe_nonblank(
+        let statistics_columns = dedupe_nonblank(
             metadata
                 .statistics_columns
                 .into_iter()
-                .chain(plan.statistics_columns),
+                .chain(self.options.statistics_columns.iter().cloned()),
         );
-        plan.writes_native_bloom_filters = !plan.bloom_filter_columns.is_empty();
-        plan
+        SegmentWritePlan {
+            object_path: join_object_key(
+                prefix,
+                &segment_relative_object_path(batch_number, path_token),
+            ),
+            min_seq: metadata.min_seq,
+            max_seq: metadata.max_seq,
+            min_commit_seq: metadata.min_commit_seq,
+            max_commit_seq: metadata.max_commit_seq,
+            compression: self.options.compression.clone(),
+            row_count: metadata.row_count,
+            byte_size: metadata.byte_size,
+            column_stats: metadata.column_stats.into_iter().collect(),
+            pk_filter_kind: (!metadata.pk_columns.is_empty()).then(|| "bloom".to_string()),
+            pk_filter_columns: metadata.pk_columns,
+            statistics_columns,
+            writes_native_bloom_filters: !bloom_filter_columns.is_empty(),
+            bloom_filter_columns,
+        }
     }
 
     /// Plans bounded row-group streaming for a segment write.
@@ -554,6 +585,18 @@ impl ParquetSegmentWriter {
     ///
     /// Returns a Parquet error if the schema, writer, or batch write fails.
     pub fn encode_record_batch(&self, batch: &RecordBatch) -> Result<Vec<u8>, ParquetError> {
+        Ok(self.encode_record_batch_with_metadata(batch)?.bytes)
+    }
+
+    /// Encodes one Arrow batch and retains the finalized in-memory footer metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns a Parquet error if the schema, writer, or batch write fails.
+    pub fn encode_record_batch_with_metadata(
+        &self,
+        batch: &RecordBatch,
+    ) -> Result<EncodedParquetSegment, ParquetError> {
         let mut buffer = Vec::with_capacity(estimate_buffer_capacity(batch));
         let metadata =
             self.write_record_batches(&mut buffer, batch.schema(), std::iter::once(batch.clone()))?;
@@ -561,7 +604,10 @@ impl ParquetSegmentWriter {
             metadata.file_metadata().num_rows() as usize,
             batch.num_rows()
         );
-        Ok(buffer)
+        Ok(EncodedParquetSegment {
+            bytes: buffer,
+            metadata,
+        })
     }
 
     /// Writes one Arrow record batch to a native Parquet writer.
@@ -651,6 +697,30 @@ pub struct SegmentMetadataInput {
     pub statistics_columns: Vec<String>,
     /// Column stats used by segment pruning.
     pub column_stats: Vec<(String, ColumnStats)>,
+}
+
+impl SegmentMetadataInput {
+    /// Sequence bounds only; row counts, filters, and stats stay empty.
+    #[must_use]
+    pub fn seq_bounds(
+        min_seq: i64,
+        max_seq: i64,
+        min_commit_seq: i64,
+        max_commit_seq: i64,
+    ) -> Self {
+        Self {
+            min_seq,
+            max_seq,
+            min_commit_seq,
+            max_commit_seq,
+            row_count: 0,
+            byte_size: 0,
+            pk_columns: Vec::new(),
+            bloom_filter_columns: Vec::new(),
+            statistics_columns: Vec::new(),
+            column_stats: Vec::new(),
+        }
+    }
 }
 
 /// Planned segment metadata produced by the writer.

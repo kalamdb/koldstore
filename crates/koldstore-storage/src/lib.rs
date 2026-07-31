@@ -25,16 +25,20 @@ pub use client::{
     StorageResult,
 };
 pub use object::StorageObject;
-pub use path_template::PathTemplate;
+pub use path_template::{
+    join_object_key, manifest_object_key, normalize_table_prefix, render_regular_table_prefix,
+    PathTemplate,
+};
 pub use publish::{
     backend_safe_publish_actions, content_checksum_sha256_hex, publish_immutable_object,
     publish_mutable_object, temp_object_key, unique_temp_file_name, validate_object_size,
     PublishAction, PublishedObject, StorageObjectMeta,
 };
 pub use registration::{
-    alter_storage_credentials_plan, alter_storage_location_plan, AlterStorageCredentialsPlan,
-    AlterStorageLocationPlan, DdlError, DdlResult, StorageRegistration, StorageRegistrationPlan,
-    DEFAULT_REGULAR_PATH_TMPL, DEFAULT_SCOPED_PATH_TMPL, SUPPORTED_STORAGE_TYPES,
+    alter_storage_credentials_plan, alter_storage_location_plan, generate_storage_id,
+    AlterStorageCredentialsPlan, AlterStorageLocationPlan, DdlError, DdlResult,
+    StorageRegistration, StorageRegistrationPlan, DEFAULT_REGULAR_PATH_TMPL,
+    DEFAULT_SCOPED_PATH_TMPL, SUPPORTED_STORAGE_TYPES,
 };
 
 /// Installs the rustls `ring` crypto provider once.

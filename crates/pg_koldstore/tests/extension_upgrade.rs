@@ -1,16 +1,11 @@
-//! Extension packaging version and upgrade-script contract tests.
+//! Extension packaging version contract tests.
+//!
+//! During pre-release development, catalog DDL changes go directly into
+//! `sql/koldstore--0.1.0.sql`. Do not add `koldstore--<from>--<to>.sql` upgrade
+//! edges until a supported upgrade path is intentionally introduced.
 
 use std::fs;
 use std::path::PathBuf;
-
-/// Last packaged SQL baseline that still needs a direct upgrade edge to current.
-///
-/// During pre-release (`*-beta.*`) bumps, keep a single
-/// `sql/koldstore--{PREVIOUS}--{NEW}.sql` edge from this baseline and rename it
-/// to the new Cargo version (do not accumulate beta→beta scripts). When cutting
-/// a non-beta release, add a real edge from the prior Cargo version and update
-/// this constant.
-const PREVIOUS_EXTENSION_SQL_VERSION: &str = "0.1.0";
 
 fn sql_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sql")
@@ -30,17 +25,37 @@ fn control_default_version_tracks_cargo_package_version() {
 }
 
 #[test]
-fn upgrade_sql_exists_from_previous_version_to_cargo_version() {
-    let current = env!("CARGO_PKG_VERSION");
-    let filename = format!("koldstore--{PREVIOUS_EXTENSION_SQL_VERSION}--{current}.sql");
-    let path = sql_dir().join(&filename);
+fn bootstrap_catalog_sql_exists() {
+    let path = sql_dir().join("koldstore--0.1.0.sql");
     assert!(
         path.is_file(),
-        "missing upgrade script {filename} (required for ALTER EXTENSION koldstore UPDATE from {PREVIOUS_EXTENSION_SQL_VERSION} to {current})"
+        "missing bootstrap catalog fragment {}",
+        path.display()
     );
-    let body = fs::read_to_string(&path).expect("read upgrade sql");
+    let body = fs::read_to_string(&path).expect("read bootstrap sql");
     assert!(
         !body.trim().is_empty(),
-        "upgrade script {filename} must not be empty"
+        "bootstrap catalog fragment must not be empty"
+    );
+}
+
+#[test]
+fn no_extension_upgrade_sql_edges_during_development() {
+    let entries = fs::read_dir(sql_dir()).expect("read sql dir");
+    let upgrade_edges: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            // Packaged UPDATE edges look like koldstore--<from>--<to>.sql
+            // (two version separators). The bootstrap file is koldstore--0.1.0.sql.
+            let is_upgrade_edge = name.starts_with("koldstore--")
+                && name.ends_with(".sql")
+                && name.matches("--").count() >= 2;
+            is_upgrade_edge.then_some(name)
+        })
+        .collect();
+    assert!(
+        upgrade_edges.is_empty(),
+        "development builds edit koldstore--0.1.0.sql directly; remove upgrade edges: {upgrade_edges:?}"
     );
 }

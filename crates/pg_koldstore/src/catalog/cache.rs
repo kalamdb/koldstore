@@ -25,9 +25,107 @@ type ManifestScanCacheKey = (u32, Vec<i16>);
 #[cfg(feature = "pg")]
 type ManifestScanCache = OptionalLookupCache<ManifestScanCacheKey, Arc<CachedManifestScanContext>>;
 
+#[cfg(feature = "pg")]
+const PACKED_ROW_GROUP_CACHE_LIMIT: usize = 128;
+#[cfg(feature = "pg")]
+const COLD_COLUMN_BOUNDS_CACHE_LIMIT: usize = 128;
+
+/// Cache identity for aggregate bounds of one indexed cold column.
+#[cfg(feature = "pg")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ColdColumnBoundsCacheKey {
+    table_oid: u32,
+    generation: u64,
+    column_id: i16,
+    type_oid: u32,
+}
+
+#[cfg(feature = "pg")]
+impl ColdColumnBoundsCacheKey {
+    /// Builds a generation-scoped key for one Sort Key V1 index column.
+    #[must_use]
+    pub const fn new(table_oid: u32, generation: u64, column_id: i16, type_oid: u32) -> Self {
+        Self {
+            table_oid,
+            generation,
+            column_id,
+            type_oid,
+        }
+    }
+}
+
+/// Complete aggregate Sort Key V1 bounds across active cold segments.
+#[cfg(feature = "pg")]
+#[derive(Debug, Clone)]
+pub struct CachedColdColumnBounds {
+    /// Lowest segment minimum.
+    pub min_value: Arc<[u8]>,
+    /// Highest segment maximum.
+    pub max_value: Arc<[u8]>,
+}
+
+#[cfg(feature = "pg")]
+type ColdColumnBoundsCache =
+    OptionalLookupCache<ColdColumnBoundsCacheKey, Arc<CachedColdColumnBounds>>;
+
+#[cfg(feature = "pg")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PackedRowGroupCacheKey {
+    table_oid: u32,
+    generation: u64,
+    segment_id: uuid::Uuid,
+    column_id: i16,
+}
+
+#[cfg(feature = "pg")]
+impl PackedRowGroupCacheKey {
+    /// Builds the cache identity for one indexed column in one manifest segment.
+    #[must_use]
+    pub const fn new(
+        table_oid: u32,
+        generation: u64,
+        segment_id: uuid::Uuid,
+        column_id: i16,
+    ) -> Self {
+        Self {
+            table_oid,
+            generation,
+            segment_id,
+            column_id,
+        }
+    }
+}
+
+/// Decoded packed bounds for one segment column.
+#[cfg(feature = "pg")]
+#[derive(Debug, Clone)]
+pub struct CachedPackedRowGroupIndex {
+    /// Number of aligned Parquet row groups represented by every array.
+    pub row_group_count: usize,
+    /// Row count for each zero-based row-group position.
+    pub row_group_row_counts: Arc<[i64]>,
+    /// Sort Key V1 lower bound for each row group, or `None` when unavailable.
+    pub row_group_min_values: Arc<[Option<Vec<u8>>]>,
+    /// Sort Key V1 upper bound for each row group, or `None` when unavailable.
+    pub row_group_max_values: Arc<[Option<Vec<u8>>]>,
+    /// Null count for each row group, or `None` when the statistic is unknown.
+    pub row_group_null_counts: Arc<[Option<i64>]>,
+}
+
+#[cfg(feature = "pg")]
+type PackedRowGroupCache =
+    OptionalLookupCache<PackedRowGroupCacheKey, Arc<CachedPackedRowGroupIndex>>;
+
 /// Counts SPI loads of managed-table snapshots (test / diagnostics).
 #[cfg(feature = "pg")]
 static MANAGED_TABLE_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts packed row-group SPI loads (test / diagnostics).
+#[cfg(feature = "pg")]
+static PACKED_ROW_GROUP_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(feature = "pg")]
+type ManifestPlannerHintCache = OptionalLookupCache<u32, (usize, u64)>;
 
 #[cfg(feature = "pg")]
 thread_local! {
@@ -35,17 +133,23 @@ thread_local! {
         std::cell::RefCell::new(ManagedTableSnapshotCache::default());
     static MANIFEST_SCAN_CACHE: std::cell::RefCell<ManifestScanCache> =
         std::cell::RefCell::new(OptionalLookupCache::default());
+    static MANIFEST_PLANNER_HINT_CACHE: std::cell::RefCell<ManifestPlannerHintCache> =
+        std::cell::RefCell::new(OptionalLookupCache::default());
     static MIGRATION_CATALOG_CACHE: std::cell::RefCell<
         BoundedOidCache<Arc<koldstore_migrate::ExistingTableCatalog>>,
     > = std::cell::RefCell::new(BoundedOidCache::default());
+    static PACKED_ROW_GROUP_CACHE: std::cell::RefCell<PackedRowGroupCache> =
+        std::cell::RefCell::new(OptionalLookupCache::with_limit(PACKED_ROW_GROUP_CACHE_LIMIT));
+    static COLD_COLUMN_BOUNDS_CACHE: std::cell::RefCell<ColdColumnBoundsCache> =
+        std::cell::RefCell::new(OptionalLookupCache::with_limit(COLD_COLUMN_BOUNDS_CACHE_LIMIT));
 }
 
 /// Cached cold-segment listing + storage context for one managed table.
 #[cfg(feature = "pg")]
 #[derive(Debug, Clone)]
 pub struct CachedManifestScanContext {
-    /// Published manifest object path.
-    pub manifest_path: String,
+    /// Rendered table object prefix (trailing slash).
+    pub table_prefix: String,
     /// Manifest generation used as the cache identity.
     pub generation: u64,
     /// Object-store base path.
@@ -58,6 +162,15 @@ pub struct CachedManifestScanContext {
     pub config: serde_json::Value,
     /// Active shared-scope cold segments for merge/index fallback.
     pub segments: Vec<SegmentStatsHint>,
+}
+
+#[cfg(feature = "pg")]
+impl CachedManifestScanContext {
+    /// Published manifest object key derived from [`Self::table_prefix`].
+    #[must_use]
+    pub fn manifest_path(&self) -> String {
+        koldstore_storage::manifest_object_key(&self.table_prefix)
+    }
 }
 
 /// Returns whether `koldstore.schemas` is present (syscache, no SPI).
@@ -126,8 +239,21 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
             .borrow_mut()
             .retain(|(table_oid, _)| *table_oid != key);
     });
+    MANIFEST_PLANNER_HINT_CACHE.with(|cache| {
+        cache.borrow_mut().retain(|table_oid| *table_oid != key);
+    });
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().invalidate(key);
+    });
+    PACKED_ROW_GROUP_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .retain(|cache_key| cache_key.table_oid != key);
+    });
+    COLD_COLUMN_BOUNDS_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .retain(|cache_key| cache_key.table_oid != key);
     });
     // Footers are path-keyed across tables; drop them on any managed-table change.
     koldstore_parquet::parquet_footer_cache::clear();
@@ -142,10 +268,135 @@ pub fn invalidate_all() {
     MANIFEST_SCAN_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
+    MANIFEST_PLANNER_HINT_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
+    PACKED_ROW_GROUP_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
+    COLD_COLUMN_BOUNDS_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
     koldstore_parquet::parquet_footer_cache::clear();
+}
+
+/// Loads complete aggregate bounds for one indexed cold column.
+///
+/// The successful absence is cached when any active segment lacks exact scalar
+/// bounds. Callers must treat that case conservatively and retain the cold scan.
+/// The manifest generation scopes values to immutable published segment state;
+/// relcache invalidation additionally removes entries after publication.
+///
+/// # Errors
+///
+/// Returns an error when SPI execution or catalog decoding fails.
+#[cfg(feature = "pg")]
+pub fn cached_cold_column_bounds(
+    key: ColdColumnBoundsCacheKey,
+) -> Result<Option<Arc<CachedColdColumnBounds>>, String> {
+    if let Some(cached) = COLD_COLUMN_BOUNDS_CACHE.with(|cache| cache.borrow().get(&key)) {
+        return Ok(cached);
+    }
+
+    let loaded = super::owner::with_extension_owner(|| load_cold_column_bounds(&key))??;
+    COLD_COLUMN_BOUNDS_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, loaded.clone());
+    });
+    Ok(loaded)
+}
+
+#[cfg(feature = "pg")]
+fn load_cold_column_bounds(
+    key: &ColdColumnBoundsCacheKey,
+) -> Result<Option<Arc<CachedColdColumnBounds>>, String> {
+    use pgrx::datum::DatumWithOid;
+
+    type AggregateBoundsRow = (i64, i64, i64, Option<Vec<u8>>, Option<Vec<u8>>);
+
+    let statement = koldstore_catalog::queries::plan_cold_column_aggregate_bounds()
+        .map_err(|error| error.to_string())?;
+    require_read_only(&statement).map_err(|error| error.to_string())?;
+    let row: Option<AggregateBoundsRow> = execute_prepared(
+        &statement,
+        &[
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(key.table_oid)),
+            DatumWithOid::from(""),
+            DatumWithOid::from(i32::from(key.column_id)),
+            DatumWithOid::from(pgrx::pg_sys::Oid::from(key.type_oid)),
+            DatumWithOid::from(i32::from(koldstore_sortkey::CODEC_VERSION)),
+        ],
+        |tuples| {
+            if tuples.is_empty() {
+                return Ok(None);
+            }
+            let tuple = tuples.first();
+            Ok(Some((
+                tuple.get::<i64>(1)?.unwrap_or_default(),
+                tuple.get::<i64>(2)?.unwrap_or_default(),
+                tuple.get::<i64>(3)?.unwrap_or_default(),
+                tuple.get::<Vec<u8>>(4)?,
+                tuple.get::<Vec<u8>>(5)?,
+            )))
+        },
+    )
+    .map_err(|error| error.to_string())?;
+
+    let Some((active_count, indexed_count, unknown_count, min_value, max_value)) = row else {
+        return Ok(None);
+    };
+    if active_count <= 0 || indexed_count != active_count || unknown_count != 0 {
+        return Ok(None);
+    }
+    let (Some(min_value), Some(max_value)) = (min_value, max_value) else {
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(CachedColdColumnBounds {
+        min_value: min_value.into(),
+        max_value: max_value.into(),
+    })))
+}
+
+/// Returns a cached packed row-group index.
+///
+/// The outer option distinguishes a cache miss from a cached absent catalog
+/// row. Absent rows stay conservative and defer pruning to the Parquet footer.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn cached_packed_row_group_index(
+    key: &PackedRowGroupCacheKey,
+) -> Option<Option<Arc<CachedPackedRowGroupIndex>>> {
+    PACKED_ROW_GROUP_CACHE.with(|cache| cache.borrow().get(key))
+}
+
+/// Stores a packed row-group index or a confirmed absent catalog row.
+#[cfg(feature = "pg")]
+pub fn cache_packed_row_group_index(
+    key: PackedRowGroupCacheKey,
+    value: Option<Arc<CachedPackedRowGroupIndex>>,
+) {
+    PACKED_ROW_GROUP_CACHE.with(|cache| cache.borrow_mut().insert(key, value));
+}
+
+/// Records one packed row-group SPI batch load.
+#[cfg(feature = "pg")]
+pub fn record_packed_row_group_spi_load() {
+    PACKED_ROW_GROUP_SPI_LOADS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Returns how many packed row-group batches were loaded through SPI.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn packed_row_group_spi_load_count() -> u64 {
+    PACKED_ROW_GROUP_SPI_LOADS.load(Ordering::Relaxed)
+}
+
+/// Resets the packed row-group SPI batch counter.
+#[cfg(feature = "pg")]
+pub fn reset_packed_row_group_spi_load_count() {
+    PACKED_ROW_GROUP_SPI_LOADS.store(0, Ordering::Relaxed);
 }
 
 /// Loads the migration catalog (columns / PK / indexed) from cache or SPI.
@@ -219,6 +470,61 @@ pub fn is_managed_relation(table_oid: pgrx::pg_sys::Oid) -> bool {
         .ok()
         .flatten()
         .is_some_and(|snapshot| snapshot.active)
+}
+
+/// Returns `(active_segment_count, generation)` for merge-scan planning.
+///
+/// PERFORMANCE: Avoids the full segment JSON / credentials load used by
+/// [`cached_manifest_scan_context`]. Planner hot-only prune and cost only need
+/// these scalars.
+///
+/// # Errors
+///
+/// Returns an error when SPI execution fails.
+#[cfg(feature = "pg")]
+pub fn cached_manifest_planner_hint(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<(usize, u64)>, String> {
+    let key = table_oid.to_u32();
+    if let Some(cached) = MANIFEST_PLANNER_HINT_CACHE.with(|cache| cache.borrow().get(&key)) {
+        return Ok(cached);
+    }
+    let hint = load_manifest_planner_hint(table_oid)?;
+    MANIFEST_PLANNER_HINT_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, hint);
+    });
+    Ok(hint)
+}
+
+#[cfg(feature = "pg")]
+fn load_manifest_planner_hint(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<(usize, u64)>, String> {
+    super::owner::with_extension_owner(|| {
+        let statement = koldstore_catalog::queries::plan_published_manifest_planner_hint()
+            .map_err(|error| error.to_string())?;
+        require_read_only(&statement).map_err(|error| error.to_string())?;
+        let row = execute_prepared(
+            &statement,
+            &[pgrx::datum::DatumWithOid::from(table_oid)],
+            |mut tuples| {
+                let Some(tuple) = tuples.next() else {
+                    return Ok(None);
+                };
+                let generation = tuple.get::<i64>(1)?.ok_or_else(|| {
+                    pgrx::spi::SpiError::DatumError(
+                        pgrx::datum::TryFromDatumError::NoSuchAttributeName(
+                            "generation".to_string(),
+                        ),
+                    )
+                })? as u64;
+                let segment_count = tuple.get::<i64>(2)?.unwrap_or(0).max(0) as usize;
+                Ok(Some((segment_count, generation)))
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(row)
+    })?
 }
 
 /// Loads published manifest path, base path, and active segment stats for merge scan.
@@ -329,27 +635,49 @@ fn load_manifest_scan_context_as_owner(
     let value: serde_json::Value =
         serde_json::from_str(&json).map_err(|error| error.to_string())?;
     let context = koldstore_catalog::decode::in_sync_manifest_scan_context(&value)?;
-    Ok(Some(cached_from_context(context)))
+    Ok(Some(cached_from_context(context)?))
 }
 
 #[cfg(feature = "pg")]
-fn cached_from_context(context: InSyncManifestScanContext) -> CachedManifestScanContext {
-    CachedManifestScanContext {
-        manifest_path: context.manifest_path,
+fn cached_from_context(
+    context: InSyncManifestScanContext,
+) -> Result<CachedManifestScanContext, String> {
+    let segments = context
+        .segments
+        .into_iter()
+        .map(|segment| {
+            let object_path =
+                koldstore_storage::join_object_key(&context.table_prefix, &segment.path);
+            let min_seq = koldstore_common::SeqId::new(segment.min_seq).map_err(|error| {
+                format!(
+                    "catalog segment `{object_path}` has invalid min_seq {}: {error}",
+                    segment.min_seq
+                )
+            })?;
+            let max_seq = koldstore_common::SeqId::new(segment.max_seq).map_err(|error| {
+                format!(
+                    "catalog segment `{object_path}` has invalid max_seq {}: {error}",
+                    segment.max_seq
+                )
+            })?;
+            Ok(SegmentStatsHint {
+                object_path,
+                schema_version: segment.schema_version,
+                physical_names: segment.physical_names,
+                byte_size: segment.byte_size,
+                min_seq,
+                max_seq,
+                selected_row_groups: None,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(CachedManifestScanContext {
+        table_prefix: context.table_prefix,
         generation: context.generation,
         base_path: context.base_path,
         storage_type: context.storage_type,
         credentials: context.credentials,
         config: context.config,
-        segments: context
-            .segments
-            .into_iter()
-            .map(|segment| SegmentStatsHint {
-                object_path: segment.object_path,
-                schema_version: segment.schema_version,
-                physical_names: segment.physical_names,
-                byte_size: segment.byte_size,
-            })
-            .collect(),
-    }
+        segments,
+    })
 }

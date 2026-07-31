@@ -2,21 +2,6 @@ use crate::common;
 
 use anyhow::{Context, Result};
 
-#[test]
-fn flush_object_outage_keeps_hot_authoritative_and_records_error_job_state() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    use koldstore_flush::job::{FlushFailurePlan, ManifestSyncState};
-
-    let plan = FlushFailurePlan::object_store_outage("s3 timeout");
-
-    assert_eq!(plan.next_manifest_state, ManifestSyncState::Error);
-    assert!(plan.hot_data_authoritative);
-    assert_eq!(plan.job_state, "error");
-    assert_eq!(plan.last_error.as_deref(), Some("s3 timeout"));
-}
-
 #[tokio::test]
 async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {

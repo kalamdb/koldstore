@@ -3,6 +3,18 @@
 use anyhow::{Context, Result};
 use tokio_postgres::Client;
 
+/// Cold segment object key under the default `{namespace}/{tableName}/` template.
+///
+/// Requires aliases `n` (`pg_namespace`), `c` (`pg_class`), and `cs` (`cold_segments`).
+/// Production flush/scan use `regular_path_tmpl`; e2e fixtures register the default.
+pub const SQL_DEFAULT_COLD_OBJECT_KEY: &str = "format('%s/%s/%s', n.nspname, c.relname, cs.path)";
+
+/// Manifest object key under the default `{namespace}/{tableName}/` template.
+///
+/// Requires aliases `n` and `c`.
+pub const SQL_DEFAULT_MANIFEST_OBJECT_KEY: &str =
+    "format('%s/%s/manifest.json', n.nspname, c.relname)";
+
 /// PostgreSQL relation size snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelationSize {

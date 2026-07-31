@@ -37,9 +37,10 @@ setup vs B-tree) is the main read-path focus.
 2. **Managed mirror DML** — statement-level capture with NEW-only UPDATE,
    direct mirror updates, and adaptive INSERT (`ON CONFLICT` / `MERGE`). Landed;
    index-layout and native-capture follow-ups stay gated.
-3. **Footer-derived catalog segment stats** — stop double-computing min/max on
-   flush (`indexed_bounds` vs writer chunk stats). Catalog still owns
-   prune-before-open; `byte_size` is already single-source from publish.
+3. **Footer-derived packed catalog stats** — implemented. Finalized footer
+   metadata supplies scalar segment bounds and aligned row-group arrays, so
+   flush no longer computes JSON min/max per cell. PostgreSQL performs scalar
+   candidate lookup and Rust refines row groups before object access.
    See [ADR-002](decisions/002-footer-derived-catalog-stats.md).
 4. Segment sizing / page indexes / streaming merge polish — secondary levers
    once (1) lands.

@@ -6,8 +6,6 @@
 
 #[path = "workflow/backfill.rs"]
 pub mod backfill;
-#[path = "sql/capture.rs"]
-pub mod capture;
 #[path = "workflow/drop_table.rs"]
 pub mod drop_table;
 #[path = "catalog/introspection.rs"]
@@ -35,15 +33,11 @@ pub mod validation;
 
 pub use validation::{constraints, manage_table, order};
 
-pub use capture::{
-    async_worker_kick_trigger_name, async_worker_kick_trigger_names, plan_drop_mirror_dml_triggers,
-    plan_mirror_capture, plan_mirror_capture_teardown, MirrorCaptureError, MirrorCapturePlan,
-    MirrorCaptureResult,
-};
 pub use drop_table::{
     plan_drop_table_cleanup, DropTableCleanupError, DropTableCleanupOutcome, DropTableCleanupPlan,
     DropTableCleanupPolicy,
 };
+pub use koldstore_catalog::queries::plan_active_schema_refresh_context_json;
 pub use koldstore_common::{FlushPolicy, ManageTableOptions, QualifiedTableName};
 pub use mirror::{
     mirror_relation_for_source, plan_change_log_mirror, plan_change_log_mirror_from_columns,
@@ -54,8 +48,8 @@ pub use plan::{
     ExistingTableCatalog, ExistingTableMigrationPlan, MigrationTableContext,
 };
 pub use refresh::{
-    plan_active_schema_refresh_context_json, plan_schema_refresh, primary_key_renames,
-    registration_metadata_for_refresh, resolve_scope_column_name, runtime_artifacts_need_sync,
-    ActiveSchemaRefreshContext, SchemaRefreshPlan,
+    plan_schema_refresh, primary_key_renames, registration_metadata_for_refresh,
+    resolve_scope_column_name, runtime_artifacts_need_sync, ActiveSchemaRefreshContext,
+    SchemaRefreshPlan,
 };
 pub use request::{DemigrateTableRequest, MigrateTableRequest, MigrationError, MigrationResult};

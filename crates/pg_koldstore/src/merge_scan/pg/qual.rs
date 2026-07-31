@@ -1,5 +1,6 @@
 //! Planner qual walking for safe prune predicates and post-merge filters.
 
+use std::collections::BTreeSet;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
@@ -9,23 +10,23 @@ use pgrx::pg_sys;
 use super::literals::{list_node_pointers, literal_json_value, typed_literal_sql, unwrap_relabel};
 
 /// One base-relation attribute required by output projection or executor quals.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct ScanProjectionColumn<'a> {
-    pub(super) catalog: &'a koldstore_migrate::order::CatalogColumn,
+#[derive(Debug, Clone)]
+pub(super) struct ScanProjectionColumn {
+    pub(super) catalog: koldstore_migrate::order::CatalogColumn,
     /// Zero-based position in the base relation's scan tuple.
     pub(super) slot_index: usize,
 }
 
 /// Minimal base-relation projection used to build tuples for PostgreSQL `ExecScan`.
-#[derive(Debug)]
-pub(super) struct ScanProjection<'a> {
-    pub(super) columns: Vec<ScanProjectionColumn<'a>>,
+#[derive(Debug, Clone)]
+pub(super) struct ScanProjection {
+    pub(super) columns: Vec<ScanProjectionColumn>,
     pub(super) tuple_width: usize,
 }
 
-impl<'a> ScanProjection<'a> {
-    pub(super) fn catalog_columns(&self) -> Vec<&'a koldstore_migrate::order::CatalogColumn> {
-        self.columns.iter().map(|column| column.catalog).collect()
+impl ScanProjection {
+    pub(super) fn catalog_columns(&self) -> Vec<&koldstore_migrate::order::CatalogColumn> {
+        self.columns.iter().map(|column| &column.catalog).collect()
     }
 }
 
@@ -47,13 +48,12 @@ struct QualCatalog<'a> {
 /// subqueries, so cold enforcement does not depend on KoldStore understanding a
 /// policy's expression shape.
 pub(super) unsafe fn required_scan_projection(
-    _table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
     targetlist: *mut pg_sys::List,
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
     tuple_width: usize,
-) -> Result<ScanProjection<'_>, String> {
+) -> Result<ScanProjection, String> {
     let mut attrs: *mut pg_sys::Bitmapset = std::ptr::null_mut();
     unsafe {
         pg_sys::pull_varattnos(targetlist.cast::<pg_sys::Node>(), scanrelid, &mut attrs);
@@ -117,7 +117,7 @@ pub(super) unsafe fn required_scan_projection(
             ));
         };
         projection.push(ScanProjectionColumn {
-            catalog,
+            catalog: catalog.clone(),
             slot_index,
         });
     }
@@ -129,7 +129,6 @@ pub(super) unsafe fn required_scan_projection(
 }
 
 pub(super) unsafe fn residual_filters(
-    _table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],
@@ -143,8 +142,98 @@ pub(super) unsafe fn residual_filters(
     filters
 }
 
+/// Returns whether equality clauses cover every primary-key attribute.
+///
+/// Only PostgreSQL catalog `=` operators with a base-relation [`pg_sys::Var`]
+/// and a constant or external prepared-statement parameter qualify. Executor
+/// parameters used by parameterized nested-loop paths remain on the
+/// conservative merge path because their value may change across rescans.
+pub(super) unsafe fn quals_cover_primary_key(
+    scanrelid: pg_sys::Index,
+    qual: *mut pg_sys::List,
+    primary_key_attnums: &[i16],
+) -> bool {
+    if primary_key_attnums.is_empty() {
+        return false;
+    }
+    let mut covered = BTreeSet::new();
+    for node in list_node_pointers(qual) {
+        collect_equality_attnums(node.cast::<pg_sys::Expr>(), scanrelid, &mut covered);
+    }
+    primary_key_attnums
+        .iter()
+        .all(|attnum| covered.contains(attnum))
+}
+
+unsafe fn collect_equality_attnums(
+    expr: *mut pg_sys::Expr,
+    scanrelid: pg_sys::Index,
+    covered: &mut BTreeSet<i16>,
+) {
+    if expr.is_null() {
+        return;
+    }
+    match (*expr).type_ {
+        pg_sys::NodeTag::T_OpExpr => {
+            let op_expr = expr.cast::<pg_sys::OpExpr>();
+            if cstr_to_str(pg_sys::get_opname((*op_expr).opno)) != Some("=")
+                || !operator_is_pg_catalog((*op_expr).opno)
+            {
+                return;
+            }
+            let args = list_node_pointers((*op_expr).args);
+            if args.len() != 2 {
+                return;
+            }
+            if let Some(attnum) = point_var_attnum(args[0], args[1], scanrelid)
+                .or_else(|| point_var_attnum(args[1], args[0], scanrelid))
+            {
+                covered.insert(attnum);
+            }
+        }
+        pg_sys::NodeTag::T_BoolExpr => {
+            let bool_expr = expr.cast::<pg_sys::BoolExpr>();
+            if (*bool_expr).boolop != pg_sys::BoolExprType::AND_EXPR {
+                return;
+            }
+            for arg in list_node_pointers((*bool_expr).args) {
+                collect_equality_attnums(arg.cast::<pg_sys::Expr>(), scanrelid, covered);
+            }
+        }
+        _ => {}
+    }
+}
+
+unsafe fn point_var_attnum(
+    variable_expr: *mut std::ffi::c_void,
+    value_expr: *mut std::ffi::c_void,
+    scanrelid: pg_sys::Index,
+) -> Option<i16> {
+    let variable_expr = unwrap_relabel(variable_expr.cast::<pg_sys::Expr>());
+    if variable_expr.is_null() || (*variable_expr).type_ != pg_sys::NodeTag::T_Var {
+        return None;
+    }
+    let var = variable_expr.cast::<pg_sys::Var>();
+    let scanrelid = i32::try_from(scanrelid).ok()?;
+    if (*var).varattno <= 0 || (*var).varlevelsup != 0 || (*var).varno != scanrelid {
+        return None;
+    }
+
+    let value_expr = unwrap_relabel(value_expr.cast::<pg_sys::Expr>());
+    if value_expr.is_null() {
+        return None;
+    }
+    match (*value_expr).type_ {
+        pg_sys::NodeTag::T_Const => Some((*var).varattno),
+        pg_sys::NodeTag::T_Param => {
+            let param = value_expr.cast::<pg_sys::Param>();
+            ((*param).paramkind == pg_sys::ParamKind::PARAM_EXTERN).then_some((*var).varattno)
+        }
+        _ => None,
+    }
+}
+
 pub(super) unsafe fn segment_prune_predicates(
-    _table_oid: pg_sys::Oid,
     scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,
     columns: &[koldstore_migrate::order::CatalogColumn],

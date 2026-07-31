@@ -25,7 +25,10 @@ from [`tests/storage/schema.sql`](../../tests/storage/schema.sql).
 
 Typical published scale: **10,000,000 rows**, `hot_row_limit = 100000`,
 `max_rows_per_file = 1000000`, `--dml-sample 50000` (~9.9M rows flushed, zstd
-Parquet). Published RESULTS use `--all-sides --repetitions 6`: six
+Parquet). The harness sets `koldstore_max_rows_per_flush` to the cold excess
+(override with `KOLDSTORE_STORAGE_MAX_ROWS_PER_FLUSH`) so one `flush_table`
+call can drain to the hot limit — the product default (10k × 64 waves) only
+covers 640k rows per job. Published RESULTS use `--all-sides --repetitions 6`: six
 counterbalanced orders of pg, async, and strict, with every sample alone on a
 fresh pgrx PostgreSQL. They are **not** parallel and do **not** share a live
 server or dual-table I/O during measurement. Each cell reports the median and
@@ -52,13 +55,21 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
   10M rows — that isolates `KoldMergeScan` overhead vs a plain index lookup,
   not “smaller heap wins.” The timed SQL is a repeated point lookup of the
   **newest** PK (`WHERE id = <rows>`), not a scan of the whole table.
-- **Hot+cold queries** (after flush) alternate **newest hot PK** and **oldest
-  cold PK** (50/50 of the lookup loop) so the managed path mixes heap and
-  Parquet work. **Cold-only queries** repeatedly look up only `id = 1`
-  (flushed to Parquet). PostgreSQL-only runs the same SQL against its full
-  heap. Each phase uses `QUERY_LOOPS = 100` for throughput and p99.
-  **`VACUUM (FULL, ANALYZE)`** is also timed after flush, when the managed
-  heap is the hot working set only.
+- **PostgreSQL-only cold-id / hot+cold** also run **before** `VACUUM FULL` on
+  the full heap (same post-DML state as hot-only). Measuring them after a
+  whole-table rewrite would compare a freshly compacted 10M heap to managed
+  Parquet and inflate the gap.
+- **Managed hot+cold / cold-only** run **after flush** (Parquet in play) and
+  **before** hot-heap `VACUUM FULL`. Hot+cold alternates newest hot PK and
+  oldest cold PK (50/50). Cold-only repeatedly looks up only `id = 1`.
+  Each phase uses `QUERY_LOOPS` timed iterations after a short discarded
+  warm-up so EXPLAIN / first segment open do not dominate.
+- **`VACUUM (FULL, ANALYZE)`** is timed after those query phases: full heap on
+  PostgreSQL-only, hot working set only on managed.
+- **Timed INSERT** always seeds an empty table up to `rows` on every side.
+  `hot_row_limit` has not taken effect yet — managed INSERT is **not** faster
+  because “there are fewer hot rows.” Async looking above PostgreSQL-only is
+  machine/order noise (or deferred mirror work), not a smaller-heap win.
 - **p99 latency** rows use nearest-rank over samples from the same phase:
   insert = per 100k-row batch commit; update = per 1k-row update batch;
   hot-query = per pre-flush hot PK lookup; cold-query = per post-flush

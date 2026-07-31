@@ -1,9 +1,8 @@
-use koldstore_common::SqlAccess as SpiAccess;
+use koldstore_common::{SqlAccess as SpiAccess, StorageId};
 use koldstore_storage::registration::{
     alter_storage_credentials_plan, alter_storage_location_plan, StorageRegistration,
     DEFAULT_REGULAR_PATH_TMPL, DEFAULT_SCOPED_PATH_TMPL,
 };
-use uuid::Uuid;
 
 fn example_registration() -> StorageRegistration {
     StorageRegistration {
@@ -84,10 +83,10 @@ fn storage_registration_rejects_invalid_catalog_inputs() {
 fn storage_registration_builds_parameterized_catalog_insert_plan() {
     let registration = example_registration();
     let plan = registration
-        .register_plan_with_id(Uuid::from_u128(42))
+        .register_plan_with_id(StorageId::new("0000002a").unwrap())
         .unwrap();
 
-    assert_eq!(plan.storage_id, Uuid::from_u128(42));
+    assert_eq!(plan.storage_id, StorageId::new("0000002a").unwrap());
     assert_eq!(plan.statement.operation, "register storage");
     assert_eq!(plan.statement.access, SpiAccess::ReadWrite);
     assert!(plan.statement.sql.contains("INSERT INTO koldstore.storage"));

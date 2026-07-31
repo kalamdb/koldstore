@@ -2,10 +2,17 @@
 //!
 //! Schema: [`schema.sql`](schema.sql). Seeds a wide (~50 column) table, measures
 //! DML, then **hot-only PK lookups before flush** (heaps still hold all rows —
-//! fair merge-scan overhead), flushes older rows to zstd Parquet (timing and
-//! peak cluster RSS), then measures **cold-only** and **hot+cold (50/50 mix)**
-//! PK lookups and compares PostgreSQL heap/index sizes versus total hot+cold
-//! footprint.
+//! fair merge-scan overhead). On PostgreSQL-only, **cold-id / hot+cold PK
+//! lookups also run before `VACUUM FULL`** so they are not compared against a
+//! freshly rewritten 10M heap. Managed sides flush older rows to zstd Parquet
+//! (timing + peak RSS), time **cold-only** and **hot+cold (50/50)** after flush
+//! (before hot-heap VACUUM), then VACUUM for the maintenance metric and compare
+//! PostgreSQL heap/index sizes versus total hot+cold footprint.
+//!
+//! Timed INSERT always seeds into an empty table growing to `rows` on every
+//! side — `hot_row_limit` does **not** make managed INSERT faster (flush has
+//! not run yet). Async looking faster than PG is machine/order noise, not a
+//! smaller-hot-set effect.
 //! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
 //!
 //! Published runs isolate each column via `KOLDSTORE_STORAGE_SIDE=pg|async|strict`
@@ -35,8 +42,11 @@ const DEFAULT_INSERT_BATCH_ROWS: i64 = 100_000;
 /// Default when unset: `min(rows, max(1_000_000, 5 * insert_batch_rows))` so
 /// published 10M runs heat the server before measurement.
 const DEFAULT_WARMUP_ROWS_SENTINEL: i64 = -1;
-/// Point-lookup iterations for throughput + p99 (needs enough samples for p99).
-const QUERY_LOOPS: usize = 100;
+/// Point-lookup iterations counted toward throughput + p99.
+const QUERY_LOOPS: usize = 400;
+/// Untimed leading lookups discarded so EXPLAIN / first Parquet open / plan
+/// cache do not dominate the steady-state sample (especially cold paths).
+const QUERY_WARMUP_DISCARD: usize = 40;
 /// Update/delete latency sample size when splitting the DML sample into batches.
 const DEFAULT_DML_LATENCY_BATCH_ROWS: i64 = 1_000;
 
@@ -226,6 +236,15 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         "KOLDSTORE_STORAGE_MAX_ROWS_PER_FILE",
         (rows / 10).max(1_000),
     );
+    // One flush_table job is capped at MAX_CATCHUP_WAVES_PER_JOB (64) ×
+    // max_rows_per_flush. Default product max_rows_per_flush is 10k → 640k
+    // rows/call, which cannot drain a 10M RESULTS run. Size the wave for the
+    // expected cold excess so one call finishes the policy drain (fewer waves
+    // also cuts finalize/manifest overhead — the main flush wall-clock cost).
+    let max_rows_per_flush = env_i64(
+        "KOLDSTORE_STORAGE_MAX_ROWS_PER_FLUSH",
+        rows.saturating_sub(hot_limit).max(max_rows_per_file).max(1),
+    );
 
     let target = common::local_pg_matrix()
         .into_iter()
@@ -245,13 +264,14 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
         .await?;
 
     common::log_always(format!(
-        "storage_cmp: side={} rows={} hot_limit={} dml_sample={} insert_batch_rows={} warmup_rows={}",
+        "storage_cmp: side={} rows={} hot_limit={} dml_sample={} insert_batch_rows={} warmup_rows={} max_rows_per_flush={}",
         side_mode_label(side, &mirror_capture_mode),
         rows,
         hot_limit,
         dml_sample,
         insert_batch_rows,
-        warmup_rows
+        warmup_rows,
+        max_rows_per_flush
     ));
 
     match side {
@@ -290,6 +310,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                     hot_limit,
                     1,
                     max_rows_per_file,
+                    max_rows_per_flush,
                     mode,
                 )
                 .await?;
@@ -313,6 +334,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                 insert_batch_rows,
                 hot_limit,
                 max_rows_per_file,
+                max_rows_per_flush,
             )
             .await?;
             let worker_guc_pinned =
@@ -355,6 +377,7 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
                     hot_limit,
                     1,
                     max_rows_per_file,
+                    max_rows_per_flush,
                     &mirror_capture_mode,
                 )
                 .await?;
@@ -406,6 +429,7 @@ async fn run_pg_only_body(
         insert_batch_rows,
         hot_limit,
         max_rows_per_file,
+        max_rows_per_file,
     )
     .await?;
     common::log_always(format!(
@@ -449,9 +473,20 @@ async fn run_pg_only_body(
 
     let hot_id = rows;
     let cold_id = 1_i64;
+    // All PK phases before VACUUM FULL: cold-id is still on the full heap, same
+    // post-DML state as hot-only. Measuring after FULL vacuum would compare a
+    // freshly rewritten 10M table to managed Parquet and inflate the gap.
     let query_hot_only = {
         let _step = common::log_step_always("storage_cmp: time pg-only hot PK lookups");
         time_point_queries(&db.client, baseline, hot_id).await?
+    };
+    let query_cold_only = {
+        let _step = common::log_step_always("storage_cmp: time pg-only cold-id PK lookups");
+        time_point_queries(&db.client, baseline, cold_id).await?
+    };
+    let query_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time pg-only mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
     };
 
     // No flush on unmanaged heap; still time VACUUM FULL on the full table so
@@ -464,15 +499,6 @@ async fn run_pg_only_body(
         let _step = common::log_step_always("storage_cmp: REINDEX pg-only");
         reindex_relation(&db.client, baseline).await?;
     }
-
-    let query_cold_only = {
-        let _step = common::log_step_always("storage_cmp: time pg-only cold-id PK lookups");
-        time_point_queries(&db.client, baseline, cold_id).await?
-    };
-    let query_hot_cold = {
-        let _step = common::log_step_always("storage_cmp: time pg-only mixed hot+cold PK lookups");
-        time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
-    };
     let sizes = relation_sizes(&db.client, baseline, None).await?;
 
     let metrics = SideMetrics {
@@ -575,9 +601,10 @@ async fn run_managed_only_body(
             &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {hot_id}"),
         )
         .await?;
-        common::assert_kold_merge_scan_explain(&plan_pre_flush)?;
+        common::assert_managed_read_plan(&plan_pre_flush)?;
         anyhow::ensure!(
-            plan_pre_flush.contains("Parquet Segments Opened: 0")
+            !plan_pre_flush.contains("Custom Scan (KoldMergeScan)")
+                || plan_pre_flush.contains("Parquet Segments Opened: 0")
                 || plan_pre_flush.contains("Parquet Segments Planned: 0"),
             "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
         );
@@ -589,10 +616,10 @@ async fn run_managed_only_body(
 
     let flush = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: flush_table (expect ~{} cold rows)",
+            "storage_cmp: flush_table until hot_rows <= {hot_limit} (expect ~{} cold rows)",
             rows.saturating_sub(hot_limit)
         ));
-        flush_table_with_metrics(&db.client, managed, db.target.port).await?
+        flush_until_hot_limit(&db.client, managed, db.target.port, hot_limit).await?
     };
     anyhow::ensure!(
         flush.rows_flushed > 0,
@@ -611,6 +638,12 @@ async fn run_managed_only_body(
         "expected hot rows to remain after policy flush, got {status:?}"
     );
     anyhow::ensure!(
+        status.hot_rows <= hot_limit,
+        "expected hot_rows <= hot_limit after flush (hot_rows={}, hot_limit={hot_limit}, cold={})",
+        status.hot_rows,
+        status.cold_row_count
+    );
+    anyhow::ensure!(
         status.cold_row_count > 0,
         "expected cold rows after flush, got {status:?}"
     );
@@ -618,6 +651,33 @@ async fn run_managed_only_body(
         "storage_cmp: after flush hot={} cold={} mirror={}",
         status.hot_rows, status.cold_row_count, status.mirror_rows
     ));
+
+    {
+        let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
+        let plan_cold = common::explain(
+            &db.client,
+            &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {cold_id}"),
+        )
+        .await?;
+        common::assert_kold_merge_scan_explain(&plan_cold)?;
+        common::assert_kold_merge_scan_cold_reads(&plan_cold, "manifest.json", 1)?;
+        anyhow::ensure!(
+            !plan_cold.contains("Parquet Segments Opened: 0")
+                && !plan_cold.contains("Parquet Segments Planned: 0"),
+            "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
+        );
+    }
+    // Time cold / hot+cold after flush but before hot-heap VACUUM so the PG
+    // baseline (full heap, pre-VACUUM) and managed Parquet path are not mixed
+    // with a post-FULL-vacuum heap rewrite on the unmanaged side.
+    let query_cold_only = {
+        let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
+        time_point_queries(&db.client, managed, cold_id).await?
+    };
+    let query_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
+    };
 
     let vacuum = {
         let _step = common::log_step_always("storage_cmp: VACUUM FULL managed (hot heap)");
@@ -631,30 +691,6 @@ async fn run_managed_only_body(
             reindex_relation(&db.client, &mirror).await?;
         }
     }
-
-    {
-        let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
-        let plan_cold = common::explain(
-            &db.client,
-            &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {cold_id}"),
-        )
-        .await?;
-        common::assert_kold_merge_scan_explain(&plan_cold)?;
-        common::assert_kold_merge_scan_planned_cold_reads(&plan_cold, "manifest.json", 1)?;
-        anyhow::ensure!(
-            !plan_cold.contains("Parquet Segments Opened: 0")
-                && !plan_cold.contains("Parquet Segments Planned: 0"),
-            "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
-        );
-    }
-    let query_cold_only = {
-        let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
-        time_point_queries(&db.client, managed, cold_id).await?
-    };
-    let query_hot_cold = {
-        let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
-        time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
-    };
 
     let sizes = relation_sizes(&db.client, managed, Some(managed)).await?;
     anyhow::ensure!(
@@ -816,9 +852,10 @@ async fn run_storage_comparison_body(
             &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {hot_id}"),
         )
         .await?;
-        common::assert_kold_merge_scan_explain(&plan_pre_flush)?;
+        common::assert_managed_read_plan(&plan_pre_flush)?;
         anyhow::ensure!(
-            plan_pre_flush.contains("Parquet Segments Opened: 0")
+            !plan_pre_flush.contains("Custom Scan (KoldMergeScan)")
+                || plan_pre_flush.contains("Parquet Segments Opened: 0")
                 || plan_pre_flush.contains("Parquet Segments Planned: 0"),
             "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
         );
@@ -837,10 +874,10 @@ async fn run_storage_comparison_body(
 
     let flush = {
         let _step = common::log_step_always(format!(
-            "storage_cmp: flush_table (expect ~{} cold rows)",
+            "storage_cmp: flush_table until hot_rows <= {hot_limit} (expect ~{} cold rows)",
             rows.saturating_sub(hot_limit)
         ));
-        flush_table_with_metrics(&db.client, managed, db.target.port).await?
+        flush_until_hot_limit(&db.client, managed, db.target.port, hot_limit).await?
     };
     anyhow::ensure!(
         flush.rows_flushed > 0,
@@ -859,6 +896,12 @@ async fn run_storage_comparison_body(
         "expected hot rows to remain after policy flush, got {status:?}"
     );
     anyhow::ensure!(
+        status.hot_rows <= hot_limit,
+        "expected hot_rows <= hot_limit after flush (hot_rows={}, hot_limit={hot_limit}, cold={})",
+        status.hot_rows,
+        status.cold_row_count
+    );
+    anyhow::ensure!(
         status.cold_row_count > 0,
         "expected cold rows after flush, got {status:?}"
     );
@@ -866,6 +909,47 @@ async fn run_storage_comparison_body(
         "storage_cmp: after flush hot={} cold={} mirror={}",
         status.hot_rows, status.cold_row_count, status.mirror_rows
     ));
+
+    {
+        let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
+        let plan_cold = common::explain(
+            &db.client,
+            &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {cold_id}"),
+        )
+        .await?;
+        common::assert_kold_merge_scan_explain(&plan_cold)?;
+        common::assert_kold_merge_scan_cold_reads(&plan_cold, "manifest.json", 1)?;
+        anyhow::ensure!(
+            !plan_cold.contains("Parquet Segments Opened: 0")
+                && !plan_cold.contains("Parquet Segments Planned: 0"),
+            "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
+        );
+
+        // Correctness after flush: cold-flushed and still-hot PKs must match baseline.
+        assert_point_row_matches(&db.client, baseline, managed, hot_id).await?;
+        assert_point_row_matches(&db.client, baseline, managed, cold_id).await?;
+        let mid_cold_id = (hot_limit / 2).max(1);
+        assert_point_row_matches(&db.client, baseline, managed, mid_cold_id).await?;
+    }
+
+    // Baseline cold/hot+cold on the full heap before VACUUM FULL; managed on
+    // Parquet after flush before hot-heap VACUUM — same contract as isolated sides.
+    let baseline_cold_only = {
+        let _step = common::log_step_always("storage_cmp: time baseline cold-only PK lookups");
+        time_point_queries(&db.client, baseline, cold_id).await?
+    };
+    let managed_cold_only = {
+        let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
+        time_point_queries(&db.client, managed, cold_id).await?
+    };
+    let baseline_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time baseline mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
+    };
+    let managed_hot_cold = {
+        let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
+        time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
+    };
 
     // After flush the managed heap is smaller; time VACUUM FULL as the
     // maintenance-cost comparison, then REINDEX so size numbers are clean.
@@ -886,45 +970,6 @@ async fn run_storage_comparison_body(
             reindex_relation(&db.client, &mirror).await?;
         }
     }
-
-    {
-        let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
-        let plan_cold = common::explain(
-            &db.client,
-            &format!("SELECT id, account_id, event_type FROM {managed} WHERE id = {cold_id}"),
-        )
-        .await?;
-        common::assert_kold_merge_scan_explain(&plan_cold)?;
-        common::assert_kold_merge_scan_planned_cold_reads(&plan_cold, "manifest.json", 1)?;
-        anyhow::ensure!(
-            !plan_cold.contains("Parquet Segments Opened: 0")
-                && !plan_cold.contains("Parquet Segments Planned: 0"),
-            "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
-        );
-
-        // Correctness after flush: cold-flushed and still-hot PKs must match baseline.
-        assert_point_row_matches(&db.client, baseline, managed, hot_id).await?;
-        assert_point_row_matches(&db.client, baseline, managed, cold_id).await?;
-        let mid_cold_id = (hot_limit / 2).max(1);
-        assert_point_row_matches(&db.client, baseline, managed, mid_cold_id).await?;
-    }
-
-    let baseline_cold_only = {
-        let _step = common::log_step_always("storage_cmp: time baseline cold-only PK lookups");
-        time_point_queries(&db.client, baseline, cold_id).await?
-    };
-    let managed_cold_only = {
-        let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
-        time_point_queries(&db.client, managed, cold_id).await?
-    };
-    let baseline_hot_cold = {
-        let _step = common::log_step_always("storage_cmp: time baseline mixed hot+cold PK lookups");
-        time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
-    };
-    let managed_hot_cold = {
-        let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
-        time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
-    };
 
     let baseline_sizes = relation_sizes(&db.client, baseline, None).await?;
     let managed_sizes = relation_sizes(&db.client, managed, Some(managed)).await?;
@@ -1060,6 +1105,7 @@ async fn warm_up_before_timed_seed(
     insert_batch_rows: i64,
     hot_limit: i64,
     max_rows_per_file: i64,
+    max_rows_per_flush: i64,
 ) -> Result<()> {
     if warmup_rows <= 0 {
         common::log_always(format!(
@@ -1083,6 +1129,7 @@ async fn warm_up_before_timed_seed(
             hot_limit,
             1,
             max_rows_per_file,
+            max_rows_per_flush,
             mode,
         )
         .await?;
@@ -1144,6 +1191,7 @@ async fn apply_schema_sql(client: &Client, schema: &str, table: &str) -> Result<
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn manage_with_hot_limit(
     client: &Client,
     storage: &str,
@@ -1151,6 +1199,7 @@ async fn manage_with_hot_limit(
     hot_row_limit: i64,
     min_flush_rows: i64,
     max_rows_per_file: i64,
+    max_rows_per_flush: i64,
     mirror_capture_mode: &str,
 ) -> Result<()> {
     // auto_flush=false so background DB-worker waves don't steal the timed
@@ -1181,6 +1230,20 @@ async fn manage_with_hot_limit(
         )
         .await
         .with_context(|| format!("manage_table {relation}"))?;
+    // manage_table does not expose max_rows_per_flush; set it after manage so a
+    // single flush_table can drain to hot_row_limit (product default is 10k/wave
+    // × 64 waves = 640k max per call).
+    client
+        .execute(
+            &format!(
+                "ALTER TABLE {relation} SET (koldstore_max_rows_per_flush = {max_rows_per_flush})"
+            ),
+            &[],
+        )
+        .await
+        .with_context(|| {
+            format!("set koldstore_max_rows_per_flush={max_rows_per_flush} on {relation}")
+        })?;
     Ok(())
 }
 
@@ -1405,6 +1468,76 @@ async fn flush_table_with_metrics(
         before_rss_bytes: before.rss_bytes,
         peak_rss_bytes,
         after_rss_bytes: after.rss_bytes,
+    })
+}
+
+/// Calls `flush_table` until the hot heap is within `hot_limit` (or a call makes
+/// no progress). Aggregates duration/rows and keeps the peak RSS across calls.
+///
+/// Needed when a single job still hits the product wave cap; with the harness
+/// `max_rows_per_flush` sized to the cold excess, this usually is one call.
+async fn flush_until_hot_limit(
+    client: &Client,
+    relation: &str,
+    pg_port: u16,
+    hot_limit: i64,
+) -> Result<FlushMetrics> {
+    // Bound retries: product jobs also cap at 64 waves; allow a few extra jobs
+    // if a prior call drained only a prefix.
+    const MAX_FLUSH_JOBS: usize = 8;
+
+    let mut total_rows = 0_i64;
+    let mut total_duration = Duration::ZERO;
+    let mut before_rss_bytes = 0_u64;
+    let mut peak_rss_bytes = 0_u64;
+    let mut after_rss_bytes = 0_u64;
+
+    for job in 1..=MAX_FLUSH_JOBS {
+        let status = common::describe_table(client, relation).await?;
+        if status.hot_rows <= hot_limit {
+            if job == 1 {
+                anyhow::bail!(
+                    "flush requested but hot_rows={} already <= hot_limit={hot_limit}",
+                    status.hot_rows
+                );
+            }
+            break;
+        }
+
+        let wave = flush_table_with_metrics(client, relation, pg_port).await?;
+        if job == 1 {
+            before_rss_bytes = wave.before_rss_bytes;
+        }
+        total_rows = total_rows.saturating_add(wave.rows_flushed);
+        total_duration = total_duration.saturating_add(wave.duration);
+        peak_rss_bytes = peak_rss_bytes.max(wave.peak_rss_bytes);
+        after_rss_bytes = wave.after_rss_bytes;
+
+        common::log_always(format!(
+            "storage_cmp: flush job {job}/{MAX_FLUSH_JOBS} rows_flushed={} elapsed={}",
+            wave.rows_flushed,
+            format_duration(wave.duration),
+        ));
+
+        if wave.rows_flushed <= 0 {
+            break;
+        }
+    }
+
+    let status = common::describe_table(client, relation).await?;
+    anyhow::ensure!(
+        status.hot_rows <= hot_limit,
+        "flush did not drain to hot_limit (hot_rows={}, hot_limit={hot_limit}, cold={}, rows_flushed={total_rows})",
+        status.hot_rows,
+        status.cold_row_count
+    );
+
+    Ok(FlushMetrics {
+        rows_flushed: total_rows,
+        duration: total_duration,
+        before_rss_bytes,
+        peak_rss_bytes,
+        after_rss_bytes,
     })
 }
 
@@ -1811,14 +1944,17 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
     // prune + hot equality pushdown the same way applications with Const quals do.
     // Parameterized `$1` is also supported via ParamListInfo resolution.
     let sql = format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {id}");
+    let total = QUERY_WARMUP_DISCARD + QUERY_LOOPS;
     let mut samples = Vec::with_capacity(QUERY_LOOPS);
-    for _ in 0..QUERY_LOOPS {
+    for i in 0..total {
         let started = Instant::now();
         let _ = client
             .query_one(&sql, &[])
             .await
             .with_context(|| format!("point query {relation} id={id}"))?;
-        samples.push(started.elapsed());
+        if i >= QUERY_WARMUP_DISCARD {
+            samples.push(started.elapsed());
+        }
     }
     let elapsed: Duration = samples.iter().copied().sum();
     Ok(Timing::with_p99(elapsed, QUERY_LOOPS as i64, &samples))
@@ -1835,15 +1971,19 @@ async fn time_mixed_hot_cold_queries(
         format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {hot_id}");
     let cold_sql =
         format!("SELECT id, account_id, event_type, note_5 FROM {relation} WHERE id = {cold_id}");
+    let total = QUERY_WARMUP_DISCARD + QUERY_LOOPS;
     let mut samples = Vec::with_capacity(QUERY_LOOPS);
-    for i in 0..QUERY_LOOPS {
+    for i in 0..total {
+        // Keep 50/50 across the counted window; warmup uses the same cadence.
         let sql = if i % 2 == 0 { &hot_sql } else { &cold_sql };
         let started = Instant::now();
         let _ = client
             .query_one(sql, &[])
             .await
             .with_context(|| format!("mixed hot/cold point query {relation}"))?;
-        samples.push(started.elapsed());
+        if i >= QUERY_WARMUP_DISCARD {
+            samples.push(started.elapsed());
+        }
     }
     let elapsed: Duration = samples.iter().copied().sum();
     Ok(Timing::with_p99(elapsed, QUERY_LOOPS as i64, &samples))
@@ -2196,11 +2336,18 @@ fn build_comparison_report(
             "warm-up: untimed insert of {warmup_rows} rows into a throwaway table (same schema/manage mode), then DROP + CHECKPOINT before the timed seed — rejects cold-start insert skew."
         ));
     }
+    notes.push(format!(
+        "p99: insert = per insert-batch commit; update = per 1k-row update batch; \
+         hot/cold query = per PK lookup ({QUERY_LOOPS} timed loops after \
+         {QUERY_WARMUP_DISCARD} discarded warm-up lookups)."
+    ));
     notes.push(
-        "p99: insert = per insert-batch commit; update = per 1k-row update batch; hot/cold query = per PK lookup (100 loops).".to_string(),
-    );
-    notes.push(
-        "hot+cold query = 50/50 mix of newest hot PK and oldest cold PK after flush; cold-only = cold PK only.".to_string(),
+        "hot-only PK = newest id before flush (full heap both sides). \
+         PG cold-id / hot+cold also run on the full heap before VACUUM FULL. \
+         Managed cold-only / hot+cold run after flush (Parquet) before hot-heap VACUUM. \
+         Timed INSERT seeds an empty table to `rows` on every side — hot_row_limit \
+         does not shrink the insert working set."
+            .to_string(),
     );
     if baseline.is_none() || managed.is_none() {
         notes.push(

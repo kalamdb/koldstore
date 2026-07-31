@@ -1,5 +1,5 @@
 use koldstore_manifest::{
-    FilesState, Manifest, ManifestBloomFilter, ManifestColumnStats, ManifestSegment, ManifestShard,
+    FilesState, Manifest, ManifestBloomFilter, ManifestColumnIndex, ManifestSegment, ManifestShard,
     PkFilter, SegmentStatus, SyncState, MANIFEST_VERSION,
 };
 use serde_json::json;
@@ -62,7 +62,7 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
 }
 
 #[test]
-fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
+fn manifest_v2_round_trip_preserves_packed_row_group_indexes_and_bloom_filters() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
     let mut segment = ManifestSegment::committed(
         1,
@@ -73,10 +73,20 @@ fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
         8192,
         1,
     );
-    segment.column_stats.insert(
-        "created_at".to_string(),
-        ManifestColumnStats::new(json!("2026-01-01T00:00:00Z"), json!("2026-01-31T00:00:00Z")),
-    );
+    segment.row_group_count = 2;
+    segment.row_group_row_counts = vec![5, 6];
+    segment.row_group_min_seqs = vec![20, 26];
+    segment.row_group_max_seqs = vec![25, 30];
+    segment.column_indexes.push(ManifestColumnIndex {
+        column_id: 1,
+        type_oid: 20,
+        codec_version: 1,
+        min_value: Some("01aa".to_string()),
+        max_value: Some("01ff".to_string()),
+        row_group_min_values: vec![Some("01aa".to_string()), None],
+        row_group_max_values: vec![Some("01bb".to_string()), None],
+        row_group_null_counts: vec![Some(0), Some(6)],
+    });
     segment
         .bloom_filters
         .push(ManifestBloomFilter::bloom(vec![1], Some(0.01)));
@@ -85,9 +95,10 @@ fn manifest_round_trip_preserves_indexed_column_stats_and_bloom_filters() {
     let encoded = serde_json::to_string(&manifest).unwrap();
     let decoded: Manifest = serde_json::from_str(&encoded).unwrap();
 
+    assert_eq!(decoded.segments[0].row_group_row_counts, vec![5, 6]);
     assert_eq!(
-        decoded.segments[0].column_stats["created_at"].min,
-        json!("2026-01-01T00:00:00Z")
+        decoded.segments[0].column_indexes[0].row_group_min_values,
+        vec![Some("01aa".to_string()), None]
     );
     assert_eq!(decoded.segments[0].bloom_filters[0].kind, "bloom");
     assert_eq!(decoded.segments[0].bloom_filters[0].column_ids, vec![1]);
@@ -195,9 +206,10 @@ fn golden_folder_sharded_fixtures_remain_compatible() {
     assert_eq!(root.version, MANIFEST_VERSION);
     assert!(root.segments.is_empty());
     assert_eq!(root.shards.len(), 1);
-    assert_eq!(root.shards[0].path, "001/manifest-shard.json");
+    assert!(root.shards[0].path.contains(&root.shards[0].content_sha256));
     assert_eq!(root.shards[0].content_sha256.len(), 64);
     assert_eq!(shard.segments.len(), 1);
+    assert_eq!(shard.segments[0].row_group_row_counts, vec![5, 5]);
     assert_eq!(
         shard.segments[0].pk_filter.as_ref().unwrap().column_ids,
         vec![1]

@@ -51,7 +51,7 @@ run_integrity_sql() {
 -- Missing cold segment objects referenced by active catalog rows.
 SELECT 'duplicate_active_segments' AS check_name, count(*)::bigint AS bad
 FROM (
-  SELECT table_oid, scope_key, object_path, count(*) AS c
+  SELECT table_oid, scope_key, path, count(*) AS c
   FROM koldstore.cold_segments
   WHERE status = 'active'
   GROUP BY 1, 2, 3

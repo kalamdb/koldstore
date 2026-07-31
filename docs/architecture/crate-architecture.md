@@ -26,8 +26,10 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 - **schema** (`koldstore-schema`): `koldstore.schemas` registry — column sets,
   versions, type matrix, initialization state for migrated tables.
 - **catalog** (`koldstore-catalog`): cold bookkeeping — segment visibility,
-  sync-state FSM, managed-table snapshots, flush policy config, catalog
-  query/decode/cache (capped OID maps). Must stay free of `koldstore-storage`.
+  sync-state FSM, managed-table snapshots, flush policy config, shared catalog
+  **reads** (cold prune, row counters, operator backup/validate/export SELECTs,
+  active schema refresh context), decode/cache (capped OID maps). Must stay free
+  of `koldstore-storage`.
 
 **Do not merge schema and catalog.** Schema stays a leaf used by migrate and
 parquet; catalog depends on schema one-way for typed init state. Combining them
@@ -39,7 +41,7 @@ leaf for migrate/merge). Catalog owns cold bookkeeping and may *look up*
 
 **Do not merge manifest and catalog.** Catalog is PostgreSQL cold-metadata
 authority; `koldstore-manifest` owns the derived object-store export
-(`manifest.json` root + folder `manifest-shard.json` files: model, assembly,
+(`manifest.json` root + content-addressed folder shard files: model, assembly,
 paths, I/O) and depends on catalog + storage.
 
 ## Dependency Graph
@@ -47,6 +49,7 @@ paths, I/O) and depends on catalog + storage.
 ```mermaid
 flowchart BT
     common[koldstore-common]
+    sortkey[koldstore-sortkey]
     catalog[koldstore-catalog]
     schema[koldstore-schema]
     storage[koldstore-storage]
@@ -60,8 +63,10 @@ flowchart BT
     migrate[koldstore-migrate]
     pg[pg_koldstore]
 
+    sortkey --> common
     catalog --> common
     catalog --> schema
+    catalog --> sortkey
     schema --> common
     storage --> common
     parquet --> common
@@ -81,11 +86,13 @@ flowchart BT
     flush --> parquet
     flush --> mirror
     flush --> storage
-    flush --> worker
+    flush --> sortkey
     migrate --> common
+    migrate --> catalog
     migrate --> schema
     migrate --> mirror
     migrate --> worker
+    migrate --> sortkey
     pg --> common
     pg --> catalog
     pg --> schema
@@ -98,6 +105,7 @@ flowchart BT
     pg --> setup
     pg --> flush
     pg --> migrate
+    pg --> sortkey
 ```
 
 `koldstore-setup` is a dependency-free SQL classifier (no `koldstore-*` edges).
@@ -105,6 +113,9 @@ flowchart BT
 (DB worker ensure/task/policy). Pure scheduling policy, including the bounded
 immediate-pending retry budget, stays here; `pg_koldstore::database_worker`
 owns latch, signal, SPI-transaction, and GUC integration.
+`koldstore-sortkey` is a foundation leaf (Sort Key V1 encode/decode) with only
+a `koldstore-common` edge.
+
 **Rules:**
 
 1. Arrows point only into lower layers — no crate depends on `pg_koldstore`.
@@ -115,13 +126,15 @@ owns latch, signal, SPI-transaction, and GUC integration.
 
 | Change | Crate |
 |--------|-------|
-| Shared identifier, seq, row model | `koldstore-common` |
+| Shared identifier, seq, row model, object-key join, segment path layout | `koldstore-common` |
+| Sort Key V1 encode/decode | `koldstore-sortkey` |
 | Internal metadata table model | `koldstore-catalog` or `koldstore-schema` |
+| Runtime column catalog (`CatalogColumn`) | `koldstore-schema` |
 | Internal table DDL plan | `koldstore-setup` |
 | Migrated-table schema/version | `koldstore-schema` |
-| Object-store access | `koldstore-storage` |
+| Object-store access + path *templates* | `koldstore-storage` |
 | Parquet read/write | `koldstore-parquet` |
-| Manifest model / assembly / JSON I/O / paths | `koldstore-manifest` |
+| Manifest model / assembly / JSON I/O / default-prefix helpers | `koldstore-manifest` |
 | Manifest sync-state FSM (`koldstore.manifest.sync_state`) | `koldstore-catalog` |
 | Mirror SQL / DML statements / pgoutput decoder / strict capture planners | `koldstore-mirror` (`shared` / `strict` / `async`) |
 | Hot+cold merge logic | `koldstore-merge` |

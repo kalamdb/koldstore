@@ -35,18 +35,20 @@ pub use managed_hook::{
     HOT_DML_MANIFEST_SYNC_STATE,
 };
 pub use quals::{build_pruning_plan, classify_predicates, ClassifiedPredicates, PruningPlan};
-pub use resolver::{resolve_rows, resolve_rows_owned, ResolvedRow, RowSource};
+pub use resolver::{
+    resolve_rows, resolve_rows_owned, NewestFirstWinnerResolver, ResolvedRow, RowSource,
+    SeenKeyLimitExceeded,
+};
 pub use rls::{
     enforce_or_fail_closed, plan_security_quals, unsupported_rls_error, SecurityQualPlan,
 };
 pub use scan::{
     begin_merge_scan, begin_merge_scan_with_plan, build_path_replacement, clear_partial_heap_paths,
-    custom_scan_explain_label, evaluate_after_winner_resolution, execute_merge_scan,
-    execute_merge_scan_with_filters, replace_heap_final_path,
-    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed, ColdAvailability,
-    ColdPruneColumnPolicy, FilterPlan, MergeMetadataAttnums, MergeScanError, MergeScanPlan,
-    MergeScanResult, PathReplacementDecision, PlannerPath, PlannerPathKind, ScanResourceCounters,
-    ScanState, SegmentHint, SegmentPrunePredicate, SegmentStatsHint, CUSTOM_PATH_NAME,
-    HOT_SEQ_SENTINEL,
+    custom_scan_explain_label, execute_merge_scan, execute_merge_scan_with_filters,
+    group_segments_newest_first, retain_pre_merge_cold_prune_predicates,
+    validate_prune_predicates_indexed, ColdAvailability, ColdPruneColumnPolicy, FilterPlan,
+    MergeMetadataAttnums, MergeScanError, MergeScanPlan, MergeScanResult, PathReplacementDecision,
+    PlannerPath, PlannerPathKind, ScanResourceCounters, ScanState, SegmentHint,
+    SegmentPrunePredicate, SegmentStatsHint, CUSTOM_PATH_NAME, HOT_SEQ_SENTINEL,
 };
 pub use tombstone::{tombstone_required, TombstoneDecision};

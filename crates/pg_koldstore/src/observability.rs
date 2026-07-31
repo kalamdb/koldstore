@@ -14,7 +14,6 @@ pub const SPAN_NAMES: &[&str] = &[
     "koldstore.sql_api",
     "koldstore.dml_hook",
     "koldstore.flush",
-    "koldstore.cold_reader_prune",
     "koldstore.merge_execute",
     "koldstore.object_store_io",
 ];
@@ -28,8 +27,6 @@ pub enum KoldstoreSpan<'a> {
     DmlHook { operation: &'a str },
     /// Flush phase.
     FlushPhase { phase: &'a str },
-    /// Cold-reader pruning.
-    ColdReaderPrune { table: &'a str },
     /// Merge-scan execution.
     MergeExecute { table: &'a str },
     /// Object-store I/O.
@@ -44,7 +41,6 @@ impl<'a> KoldstoreSpan<'a> {
             Self::SqlApi { .. } => "koldstore.sql_api",
             Self::DmlHook { .. } => "koldstore.dml_hook",
             Self::FlushPhase { .. } => "koldstore.flush",
-            Self::ColdReaderPrune { .. } => "koldstore.cold_reader_prune",
             Self::MergeExecute { .. } => "koldstore.merge_execute",
             Self::ObjectStoreIo { .. } => "koldstore.object_store_io",
         }
@@ -57,9 +53,7 @@ impl<'a> KoldstoreSpan<'a> {
             Self::SqlApi { function } => vec![("function", function)],
             Self::DmlHook { operation } => vec![("operation", operation)],
             Self::FlushPhase { phase } => vec![("phase", phase)],
-            Self::ColdReaderPrune { table } | Self::MergeExecute { table } => {
-                vec![("table", table)]
-            }
+            Self::MergeExecute { table } => vec![("table", table)],
             Self::ObjectStoreIo { operation } => vec![("operation", operation)],
         }
     }
@@ -75,9 +69,6 @@ impl<'a> KoldstoreSpan<'a> {
                 tracing::info_span!("koldstore.dml_hook", operation = *operation)
             }
             Self::FlushPhase { phase } => tracing::info_span!("koldstore.flush", phase = *phase),
-            Self::ColdReaderPrune { table } => {
-                tracing::info_span!("koldstore.cold_reader_prune", table = *table)
-            }
             Self::MergeExecute { table } => {
                 tracing::info_span!("koldstore.merge_execute", table = *table)
             }

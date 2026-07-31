@@ -211,19 +211,15 @@ async fn merge_scan_preserves_native_hot_plan_and_masks_preflush_deletes() -> Re
         db.manage_shared(&table.relation, "id").await?;
         db.flush_table(&table.relation).await?;
 
-        // Point lookup should keep a native hot child under KoldMergeScan.
-        // After flush the hot heap is empty, so Seq Scan can beat Index Scan;
-        // insert one hot row and re-check that an index child is selectable.
+        // Point lookup that can hit cold must stay under KoldMergeScan with a
+        // native hot child (`Hot Scan` / `Planned Access`). After flush the hot
+        // heap is empty, so Seq Scan can beat Index Scan.
         let planned = common::explain(
             &db.client,
             &format!("SELECT title FROM {} WHERE id = 1", table.relation),
         )
         .await?;
-        common::assert_kold_merge_scan_explain(&planned)?;
-        anyhow::ensure!(
-            planned.contains("Hot Plan:"),
-            "expected Hot Plan in EXPLAIN, got:\n{planned}"
-        );
+        common::assert_kold_merge_scan_hot_planned_access(&planned)?;
         anyhow::ensure!(
             planned.contains("Seq Scan")
                 || planned.contains("Index Scan")
@@ -231,6 +227,10 @@ async fn merge_scan_preserves_native_hot_plan_and_masks_preflush_deletes() -> Re
             "expected native hot child plan in EXPLAIN, got:\n{planned}"
         );
 
+        // Hot PK lookup with seqscan disabled must use an Index Scan. Prefer the
+        // locked cold-proven-empty native plan (no KoldMergeScan). When aggregate
+        // cold bounds are unavailable, KoldMergeScan still wraps that Index Scan
+        // as Planned Access — never regress away from an index child.
         db.client
             .batch_execute(&format!(
                 r#"
@@ -247,9 +247,15 @@ async fn merge_scan_preserves_native_hot_plan_and_masks_preflush_deletes() -> Re
         )
         .await?;
         db.client.batch_execute("SET enable_seqscan = on").await?;
+        let native_hot_only = !planned_hot.contains("Custom Scan (KoldMergeScan)")
+            && planned_hot.contains("Index Scan");
+        let merge_index_child = planned_hot.contains("Custom Scan (KoldMergeScan)")
+            && planned_hot
+                .lines()
+                .any(|line| line.contains("Planned Access:") && line.contains("Index Scan"));
         anyhow::ensure!(
-            planned_hot.contains("Hot Plan:") && planned_hot.contains("Index Scan"),
-            "expected Hot Plan: Index Scan for hot PK lookup, got:\n{planned_hot}"
+            native_hot_only || merge_index_child,
+            "expected native Index Scan or KoldMergeScan Planned Access: Index Scan for hot PK lookup, got:\n{planned_hot}"
         );
 
         // Committed delete of a previously cold PK must be invisible before flush.

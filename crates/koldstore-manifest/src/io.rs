@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use koldstore_storage::{
-    content_checksum_sha256_hex, open_filesystem_client, publish_mutable_object, ObjectStoreClient,
+    content_checksum_sha256_hex, join_object_key, open_filesystem_client, publish_immutable_object,
+    publish_mutable_object, temp_object_key, unique_temp_file_name, ObjectStoreClient,
     StorageClient, StorageClientError,
 };
 
@@ -113,9 +114,15 @@ pub fn write_manifest_with_client(
         if previous_hashes.get(relative_path) == Some(&shard_ref.content_sha256) {
             continue;
         }
-        let shard_key = format!("{prefix}/{}", relative_path.trim_start_matches('/'));
+        let shard_key = join_object_key(&prefix, relative_path);
         let bytes = manifest_shard_to_json_bytes(shard)?;
-        publish_mutable_object(client, &shard_key, &bytes).map_err(|error| error.to_string())?;
+        let temp_key = temp_object_key(
+            &prefix,
+            "manifest-shard",
+            &unique_temp_file_name("manifest-shard.json"),
+        );
+        publish_immutable_object(client, &temp_key, &shard_key, &bytes)
+            .map_err(|error| error.to_string())?;
     }
     let root_bytes = manifest_to_json_bytes(&export.root)?;
     publish_mutable_object(client, object_key, &root_bytes).map_err(|error| error.to_string())?;
@@ -139,7 +146,7 @@ pub fn try_load_manifest_with_client(
     };
     let prefix = table_prefix_from_manifest_key(object_key)?;
     Ok(Some(merge_loaded_root(root, |shard_rel| {
-        let shard_key = format!("{prefix}/{}", shard_rel.trim_start_matches('/'));
+        let shard_key = join_object_key(&prefix, shard_rel);
         client.get(&shard_key).map_err(|error| error.to_string())
     })?))
 }

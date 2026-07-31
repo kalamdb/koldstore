@@ -48,14 +48,6 @@ fn sharded_write_and_load_round_trip() {
     write_manifest_with_client(&client, &root_key, &manifest).unwrap();
 
     assert!(dir.path().join("app/items/manifest.json").is_file());
-    assert!(dir
-        .path()
-        .join("app/items/001/manifest-shard.json")
-        .is_file());
-    assert!(dir
-        .path()
-        .join("app/items/002/manifest-shard.json")
-        .is_file());
 
     let root_json = std::fs::read_to_string(dir.path().join("app/items/manifest.json")).unwrap();
     assert!(!root_json.contains("segment-0001"));
@@ -66,6 +58,15 @@ fn sharded_write_and_load_round_trip() {
             .map(str::len),
         Some(64)
     );
+    for shard in root_value["shards"].as_array().unwrap() {
+        let path = shard["path"].as_str().unwrap();
+        let hash = shard["content_sha256"].as_str().unwrap();
+        assert!(
+            path.contains(hash),
+            "shard path is not content-addressed: {path}"
+        );
+        assert!(dir.path().join("app/items").join(path).is_file());
+    }
 
     let loaded = try_load_manifest_with_client(&client, &root_key)
         .unwrap()
@@ -122,7 +123,7 @@ fn unsupported_root_version_is_rejected() {
     let client = koldstore_storage::ObjectStoreClient::in_memory();
     let root_key = relative_manifest_path("app", "items");
     let mut root = serde_json::to_value(Manifest::new_shared("app", "items", 1)).unwrap();
-    root["version"] = serde_json::json!(2);
+    root["version"] = serde_json::json!(3);
     publish_mutable_object(&client, &root_key, &serde_json::to_vec(&root).unwrap()).unwrap();
 
     let error = try_load_manifest_with_client(&client, &root_key).unwrap_err();
@@ -138,11 +139,12 @@ fn shard_checksum_mismatch_is_rejected() {
     let root_key = relative_manifest_path("app", "items");
     write_manifest_with_client(&client, &root_key, &one_segment_manifest()).unwrap();
 
-    let shard_key = "app/items/001/manifest-shard.json";
+    let root: serde_json::Value = serde_json::from_slice(&client.get(&root_key).unwrap()).unwrap();
+    let shard_key = format!("app/items/{}", root["shards"][0]["path"].as_str().unwrap());
     let mut shard: serde_json::Value =
-        serde_json::from_slice(&client.get(shard_key).unwrap()).unwrap();
+        serde_json::from_slice(&client.get(&shard_key).unwrap()).unwrap();
     shard["folder"] = serde_json::json!("002");
-    publish_mutable_object(&client, shard_key, &serde_json::to_vec(&shard).unwrap()).unwrap();
+    publish_mutable_object(&client, &shard_key, &serde_json::to_vec(&shard).unwrap()).unwrap();
 
     let error = try_load_manifest_with_client(&client, &root_key).unwrap_err();
     assert!(
@@ -157,17 +159,19 @@ fn shard_metadata_mismatch_is_rejected_after_checksum_verification() {
     let root_key = relative_manifest_path("app", "items");
     write_manifest_with_client(&client, &root_key, &one_segment_manifest()).unwrap();
 
-    let shard_key = "app/items/001/manifest-shard.json";
-    let mut shard: serde_json::Value =
-        serde_json::from_slice(&client.get(shard_key).unwrap()).unwrap();
-    shard["folder"] = serde_json::json!("002");
-    let shard_bytes = serde_json::to_vec(&shard).unwrap();
-    publish_mutable_object(&client, shard_key, &shard_bytes).unwrap();
-
     let mut root: serde_json::Value =
         serde_json::from_slice(&client.get(&root_key).unwrap()).unwrap();
-    root["shards"][0]["content_sha256"] =
-        serde_json::json!(content_checksum_sha256_hex(&shard_bytes));
+    let old_shard_key = format!("app/items/{}", root["shards"][0]["path"].as_str().unwrap());
+    let mut shard: serde_json::Value =
+        serde_json::from_slice(&client.get(&old_shard_key).unwrap()).unwrap();
+    shard["folder"] = serde_json::json!("002");
+    let shard_bytes = serde_json::to_vec(&shard).unwrap();
+    let shard_hash = content_checksum_sha256_hex(&shard_bytes);
+    let shard_path = koldstore_manifest::relative_manifest_shard_content_path(1, &shard_hash);
+    publish_mutable_object(&client, &format!("app/items/{shard_path}"), &shard_bytes).unwrap();
+
+    root["shards"][0]["content_sha256"] = serde_json::json!(shard_hash);
+    root["shards"][0]["path"] = serde_json::json!(shard_path);
     publish_mutable_object(&client, &root_key, &serde_json::to_vec(&root).unwrap()).unwrap();
 
     let error = try_load_manifest_with_client(&client, &root_key).unwrap_err();
@@ -197,4 +201,16 @@ fn segment_batch_must_match_its_folder() {
         error.contains("batch 101 belongs in folder 002"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn malformed_packed_manifest_arrays_are_rejected_before_publish() {
+    let client = koldstore_storage::ObjectStoreClient::in_memory();
+    let root_key = relative_manifest_path("app", "items");
+    let mut manifest = one_segment_manifest();
+    manifest.segments[0].row_group_count = 2;
+
+    let error = write_manifest_with_client(&client, &root_key, &manifest).unwrap_err();
+    assert!(error.contains("row-group array cardinality"));
+    assert!(client.get(&root_key).is_err());
 }

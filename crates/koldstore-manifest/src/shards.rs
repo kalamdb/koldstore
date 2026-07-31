@@ -11,7 +11,7 @@ use crate::model::{
     FilesState, Manifest, ManifestShard, ManifestShardRef, MANIFEST_SHARD_VERSION, MANIFEST_VERSION,
 };
 use crate::paths::{
-    folder_from_segment_relative_path, parse_folder_name, relative_manifest_shard_path_for_folder,
+    folder_from_segment_relative_path, parse_folder_name, relative_manifest_shard_content_path,
     segment_folder_number, SEGMENTS_PER_FOLDER,
 };
 
@@ -50,7 +50,6 @@ pub(crate) fn split_manifest_for_export(
         let folder_num = parse_folder_name(&folder)
             .ok_or_else(|| format!("invalid manifest segment folder: {folder}"))?;
         max_folder_num = max_folder_num.max(folder_num);
-        let path = relative_manifest_shard_path_for_folder(folder_num);
         let min_seq = segments.iter().map(|s| s.min_seq).min().unwrap_or(0);
         let max_seq = segments.iter().map(|s| s.max_seq).max().unwrap_or(0);
         let min_commit_seq = segments.iter().map(|s| s.min_commit_seq).min().unwrap_or(0);
@@ -66,10 +65,12 @@ pub(crate) fn split_manifest_for_export(
             segments,
         };
         let shard_bytes = serde_json::to_vec(&shard).map_err(|error| error.to_string())?;
+        let content_sha256 = content_checksum_sha256_hex(&shard_bytes);
+        let path = relative_manifest_shard_content_path(folder_num, &content_sha256);
         shard_refs.push(ManifestShardRef {
             folder: folder.clone(),
             path: path.clone(),
-            content_sha256: content_checksum_sha256_hex(&shard_bytes),
+            content_sha256,
             segment_count,
             min_seq,
             max_seq,
@@ -157,7 +158,8 @@ fn validate_shard(
 ) -> Result<(), String> {
     let folder_number = parse_folder_name(&shard_ref.folder)
         .ok_or_else(|| format!("invalid shard folder: {}", shard_ref.folder))?;
-    let expected_path = relative_manifest_shard_path_for_folder(folder_number);
+    let expected_path =
+        relative_manifest_shard_content_path(folder_number, &shard_ref.content_sha256);
     if shard_ref.path != expected_path {
         return Err(format!(
             "shard path {} does not match folder {}",
@@ -223,6 +225,7 @@ fn validate_shard_segments(
 }
 
 fn validated_segment_folder(segment: &crate::model::ManifestSegment) -> Result<&str, String> {
+    validate_packed_segment_metadata(segment)?;
     let folder = folder_from_segment_relative_path(&segment.path)
         .ok_or_else(|| format!("invalid manifest segment path: {}", segment.path))?;
     let folder_number = parse_folder_name(folder)
@@ -237,6 +240,126 @@ fn validated_segment_folder(segment: &crate::model::ManifestSegment) -> Result<&
         ));
     }
     Ok(folder)
+}
+
+fn validate_packed_segment_metadata(segment: &crate::model::ManifestSegment) -> Result<(), String> {
+    let row_group_count = usize::try_from(segment.row_group_count)
+        .map_err(|error| format!("invalid row-group count: {error}"))?;
+    if row_group_count == 0
+        || segment.row_group_row_counts.len() != row_group_count
+        || segment.row_group_min_seqs.len() != row_group_count
+        || segment.row_group_max_seqs.len() != row_group_count
+    {
+        return Err(format!(
+            "manifest segment {} has row-group array cardinality mismatch",
+            segment.path
+        ));
+    }
+    if segment
+        .row_group_row_counts
+        .iter()
+        .any(|row_count| *row_count <= 0)
+    {
+        return Err(format!(
+            "manifest segment {} has non-positive row-group row count",
+            segment.path
+        ));
+    }
+    let row_count = segment
+        .row_group_row_counts
+        .iter()
+        .try_fold(0_i64, |total, row_count| total.checked_add(*row_count))
+        .ok_or_else(|| {
+            format!(
+                "manifest segment {} row-group row count overflow",
+                segment.path
+            )
+        })?;
+    if u64::try_from(row_count).ok() != Some(segment.row_count) {
+        return Err(format!(
+            "manifest segment {} row-group rows do not match segment row count",
+            segment.path
+        ));
+    }
+    if segment
+        .row_group_min_seqs
+        .iter()
+        .zip(&segment.row_group_max_seqs)
+        .any(|(min_seq, max_seq)| *min_seq <= 0 || min_seq > max_seq)
+    {
+        return Err(format!(
+            "manifest segment {} has invalid row-group SeqId bounds",
+            segment.path
+        ));
+    }
+    for index in &segment.column_indexes {
+        if index.row_group_min_values.len() != row_group_count
+            || index.row_group_max_values.len() != row_group_count
+            || index.row_group_null_counts.len() != row_group_count
+        {
+            return Err(format!(
+                "manifest segment {} column {} has row-group array cardinality mismatch",
+                segment.path, index.column_id
+            ));
+        }
+        if index.min_value.is_some() != index.max_value.is_some() {
+            return Err(format!(
+                "manifest segment {} column {} has unpaired segment bounds",
+                segment.path, index.column_id
+            ));
+        }
+        if let (Some(min), Some(max)) = (&index.min_value, &index.max_value) {
+            validate_hex_bound(min, &segment.path, index.column_id)?;
+            validate_hex_bound(max, &segment.path, index.column_id)?;
+            if min > max {
+                return Err(format!(
+                    "manifest segment {} column {} has reversed segment bounds",
+                    segment.path, index.column_id
+                ));
+            }
+        }
+        for row_group_id in 0..row_group_count {
+            let min = &index.row_group_min_values[row_group_id];
+            let max = &index.row_group_max_values[row_group_id];
+            let null_count = index.row_group_null_counts[row_group_id];
+            let row_count = segment.row_group_row_counts[row_group_id];
+            if min.is_some() != max.is_some() {
+                return Err(format!(
+                    "manifest segment {} column {} row group {} has unpaired bounds",
+                    segment.path, index.column_id, row_group_id
+                ));
+            }
+            if null_count.is_some_and(|count| count < 0 || count > row_count) {
+                return Err(format!(
+                    "manifest segment {} column {} row group {} has invalid null count",
+                    segment.path, index.column_id, row_group_id
+                ));
+            }
+            if let (Some(min), Some(max)) = (min, max) {
+                validate_hex_bound(min, &segment.path, index.column_id)?;
+                validate_hex_bound(max, &segment.path, index.column_id)?;
+                if min > max {
+                    return Err(format!(
+                        "manifest segment {} column {} row group {} has reversed bounds",
+                        segment.path, index.column_id, row_group_id
+                    ));
+                }
+                if null_count == Some(row_count) {
+                    return Err(format!(
+                        "manifest segment {} column {} row group {} has bounds for an all-null column",
+                        segment.path, index.column_id, row_group_id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_hex_bound(value: &str, path: &str, column_id: i16) -> Result<(), String> {
+    hex::decode(value).map(|_| ()).map_err(|error| {
+        format!("manifest segment {path} column {column_id} has invalid hex bound: {error}")
+    })
 }
 
 fn shard_ranges(segments: &[crate::model::ManifestSegment]) -> (i64, i64, i64, i64) {
@@ -296,7 +419,13 @@ mod tests {
         assert!(export.root.segments.is_empty());
         assert_eq!(export.shards.len(), 2);
         assert_eq!(export.root.shards[0].folder, "001");
-        assert_eq!(export.root.shards[0].path, "001/manifest-shard.json");
+        assert!(export.root.shards[0]
+            .path
+            .starts_with("001/manifest-shard-"));
+        assert!(export.root.shards[0].path.ends_with(".json"));
+        assert!(export.root.shards[0]
+            .path
+            .contains(&export.root.shards[0].content_sha256));
         assert_eq!(export.root.shards[0].segment_count, 1);
         assert_eq!(export.root.shards[1].folder, "002");
         assert_eq!(export.root.files.current_subfolder, "002");

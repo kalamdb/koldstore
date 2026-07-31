@@ -21,25 +21,60 @@ fn index_bound(column_id: i16, min: i64, max: i64) -> CatalogSegmentIndexBound {
         column_id,
         type_oid: 20,
         codec_version: CODEC_VERSION,
-        min_value: hex_sort_key(min),
-        max_value: hex_sort_key(max),
+        min_value: Some(hex_sort_key(min)),
+        max_value: Some(hex_sort_key(max)),
+        row_group_min_values: vec![Some(hex_sort_key(min))],
+        row_group_max_values: vec![Some(hex_sort_key(max))],
+        row_group_null_counts: vec![Some(0)],
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn catalog_row(
+    path: &str,
+    batch_number: i32,
+    min_seq: i64,
+    max_seq: i64,
+    row_count: i64,
+    byte_size: i64,
+    schema_version: i32,
+    index_bounds: Vec<CatalogSegmentIndexBound>,
+) -> CatalogManifestSegmentRow {
+    CatalogManifestSegmentRow {
+        segment_id: format!("00000000-0000-0000-0000-{batch_number:012}"),
+        path: path.to_string(),
+        batch_number,
+        min_seq,
+        max_seq,
+        min_commit_seq: min_seq,
+        max_commit_seq: max_seq,
+        row_count,
+        byte_size,
+        schema_version,
+        row_group_count: 1,
+        row_group_row_counts: vec![row_count],
+        row_group_min_seqs: vec![min_seq],
+        row_group_max_seqs: vec![max_seq],
+        status: "active".to_string(),
+        checksum: "a".repeat(64),
+        object_etag: None,
+        created_at: None,
+        index_bounds,
     }
 }
 
 #[test]
 fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
-    let rows = vec![CatalogManifestSegmentRow {
-        object_path: "app/items/001/segment-0001-aaaaaaaa.parquet".to_string(),
-        batch_number: 1,
-        min_seq: 1,
-        max_seq: 10,
-        min_commit_seq: 1,
-        max_commit_seq: 10,
-        row_count: 10,
-        byte_size: 128,
-        schema_version: 2,
-        index_bounds: vec![index_bound(1, 1, 10)],
-    }];
+    let rows = vec![catalog_row(
+        "001/segment-0001-aaaaaaaa.parquet",
+        1,
+        1,
+        10,
+        10,
+        128,
+        2,
+        vec![index_bound(1, 1, 10)],
+    )];
 
     let manifest = manifest_from_catalog_rows(
         "app",
@@ -60,12 +95,12 @@ fn catalog_rows_assemble_shared_manifest_with_pk_filter_and_relative_paths() {
     );
     assert_eq!(manifest.max_seq, 10);
     assert_eq!(
-        manifest.segments[0].column_stats["1"].min,
-        serde_json::json!(1)
+        manifest.segments[0].column_indexes[0].min_value,
+        Some(hex_sort_key(1))
     );
     assert_eq!(
-        manifest.segments[0].column_stats["1"].max,
-        serde_json::json!(10)
+        manifest.segments[0].column_indexes[0].max_value,
+        Some(hex_sort_key(10))
     );
     assert_eq!(
         manifest.segments[0]
@@ -96,21 +131,17 @@ fn manifest_paths_and_sharded_round_trip_io() {
 
     let mut manifest = Manifest::new_shared("app", "notes", 1);
     let segment = build_manifest_segment_from_catalog_row(
-        "app",
-        "notes",
         &[ColumnRef::new(ColumnId::from_attnum(7), "id")],
-        CatalogManifestSegmentRow {
-            object_path: "app/notes/001/segment-0001-aaaaaaaa.parquet".to_string(),
-            batch_number: 1,
-            min_seq: 5,
-            max_seq: 5,
-            min_commit_seq: 5,
-            max_commit_seq: 5,
-            row_count: 1,
-            byte_size: 32,
-            schema_version: 1,
-            index_bounds: vec![],
-        },
+        catalog_row(
+            "001/segment-0001-aaaaaaaa.parquet",
+            1,
+            5,
+            5,
+            1,
+            32,
+            1,
+            vec![],
+        ),
     )
     .unwrap();
     manifest.append_segment(segment);
@@ -138,30 +169,26 @@ fn pending_write_sync_state_matches_hot_dml_constant() {
 #[test]
 fn catalog_reconciliation_preserves_segment_order_and_watermarks() {
     let rows = vec![
-        CatalogManifestSegmentRow {
-            object_path: "app/items/001/segment-0001-aaaaaaaa.parquet".to_string(),
-            batch_number: 1,
-            min_seq: 1,
-            max_seq: 10,
-            min_commit_seq: 1,
-            max_commit_seq: 10,
-            row_count: 10,
-            byte_size: 128,
-            schema_version: 1,
-            index_bounds: vec![],
-        },
-        CatalogManifestSegmentRow {
-            object_path: "app/items/001/segment-0002-bbbbbbbb.parquet".to_string(),
-            batch_number: 2,
-            min_seq: 11,
-            max_seq: 20,
-            min_commit_seq: 11,
-            max_commit_seq: 20,
-            row_count: 10,
-            byte_size: 256,
-            schema_version: 1,
-            index_bounds: vec![],
-        },
+        catalog_row(
+            "001/segment-0001-aaaaaaaa.parquet",
+            1,
+            1,
+            10,
+            10,
+            128,
+            1,
+            vec![],
+        ),
+        catalog_row(
+            "001/segment-0002-bbbbbbbb.parquet",
+            2,
+            11,
+            20,
+            10,
+            256,
+            1,
+            vec![],
+        ),
     ];
     let manifest = manifest_from_catalog_rows(
         "app",

@@ -350,9 +350,9 @@ async fn ensure_koldstore_extension(client: &Client) -> Result<()> {
 
 /// Ensures the installed extension SQL matches the currently built `cargo pgrx install` artifacts.
 ///
-/// `ALTER EXTENSION ... UPDATE` only applies when the extension version changes, so local
-/// iterative development can leave an older SQL catalog behind. When required entities such
-/// as `koldstore.describe_table` are missing, reinstall the extension in-place.
+/// Development builds edit `koldstore--0.1.0.sql` directly and do not ship
+/// `ALTER EXTENSION … UPDATE` edges. When required entities are already present,
+/// keep the install; otherwise drop/recreate the extension in-place.
 async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
     let required_sql_present = client
         .query_one(
@@ -401,19 +401,7 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
         .get::<_, bool>(0);
 
     if required_sql_present {
-        match client
-            .batch_execute("ALTER EXTENSION koldstore UPDATE;")
-            .await
-        {
-            Ok(()) => return Ok(()),
-            Err(error) => {
-                // Beta bumps rename the single 0.1.0→current edge, so a worker
-                // cloned from a prior-beta template has no UPDATE path. Reinstall.
-                if !error_chain_contains(&error, "has no update path") {
-                    return Err(error).context("refresh koldstore extension SQL after install");
-                }
-            }
-        }
+        return Ok(());
     }
 
     // Dropping the extension while leftover managed-table triggers/workers exist
@@ -452,7 +440,7 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
     }
 }
 
-fn error_chain_contains(error: &dyn std::error::Error, needle: &str) -> bool {
+pub fn error_chain_contains(error: &dyn std::error::Error, needle: &str) -> bool {
     let mut current: Option<&dyn std::error::Error> = Some(error);
     while let Some(err) = current {
         if err.to_string().contains(needle) {

@@ -41,7 +41,7 @@ managed app table
 | `_deleted` | `boolean` | Tombstone mask for older cold rows. |
 | `scope_column` | `name` | Required for user tables; app column or `_user_id`. |
 | `flush_policy` | `text` | Optional; no policy means hot-only. |
-| `storage_id` | `uuid` | References `koldstore.storage`. |
+| `storage_id` | `text` | References `koldstore.storage` (8-char hex). |
 | `schema_version` | `int` | Current schema registry version. |
 
 Validation:
@@ -104,7 +104,7 @@ Change feed:
 
 | Column | Type | Notes |
 |--------|------|-------|
-| `id` | `uuid` | PK. |
+| `id` | `text` | PK; 8-character lowercase hex. |
 | `name` | `text` | Unique. |
 | `storage_type` | `text` | `filesystem`, `s3`, `gcs`, `azure`. |
 | `base_path` | `text` | Object-store prefix. |
@@ -129,20 +129,20 @@ Credential rotation changes future access only; existing object paths are not re
 | `indexed_columns` | `jsonb` | Source for cold stats/bloom decisions. |
 | `type_matrix` | `jsonb` | Supported type/coercion metadata. |
 | `options` | `jsonb` | Flush, compression, retention, FK policy. |
-| `storage_id` | `uuid` | References `koldstore.storage`. |
+| `storage_id` | `text` | References `koldstore.storage` (8-char hex). |
 
 `ALTER TABLE` on a managed table increments schema version through event-trigger support.
 
 ## Manifest Cache (`koldstore.manifest`)
 
 Local cache and scheduler state; object-store `manifest.json` remains the cold source of truth.
+Manifest object keys are derived from `storage.regular_path_tmpl` (not stored here).
 
 | Column | Type | Notes |
 |--------|------|-------|
 | `table_oid` | `oid` | Managed table. |
 | `scope_key` | `text` | Null for shared. |
-| `manifest_path` | `text` | Object path. |
-| `etag` / `generation` | `text` | Backend-specific identity. |
+| `etag` / `generation` | `text` / `bigint` | Backend-specific identity; `generation > 0` means published. |
 | `sync_state` | `text` | `in_sync`, `pending_write`, `syncing`, `stale`, `error`. |
 | `segment_count` | `int` | Denormalized. |
 | `max_seq` | `bigint` | Highest segment `_seq`. |
@@ -158,18 +158,16 @@ Normal DML only marks `pending_write`; it does not rewrite object-store manifest
 | `segment_id` | `uuid` | PK. |
 | `table_oid` | `oid` | Managed table. |
 | `scope_key` | `text` | Nullable. |
-| `object_path` | `text` | Final Parquet object path. |
+| `path` | `text` | Table-relative Parquet key (`001/segment-….parquet`). Full object key = rendered path template + `path`. |
 | `batch_number` | `int` | Flush sequence. |
-| `min_seq` / `max_seq` | `bigint` | Segment version bounds. |
+| `min_seq` / `max_seq` | `bigint` | Segment version bounds (authoritative; not duplicated into `column_stats`). |
 | `min_commit_seq` / `max_commit_seq` | `bigint` | Segment commit bounds. |
 | `row_count` | `bigint` | Segment rows. |
 | `byte_size` | `bigint` | Object size. |
 | `schema_version` | `int` | Segment schema. |
-| `column_stats` | `jsonb` | PK, `_seq`, `_commit_seq`, indexed/immutable columns. |
+| `column_stats` | `jsonb` | Indexed/immutable user columns only (mirrors `cold_segment_stats`). |
 | `status` | `text` | `pending`, `active`, `compacted`, `deleted`. |
-| `manifest_etag` | `text` | Manifest identity that published this segment. |
-| `created_xid` | `xid` | PostgreSQL catalog visibility aid. |
-| `created_lsn` | `pg_lsn` | Recovery/debugging. |
+| `checksum` / `object_etag` | `text` | Publish identity. |
 
 KoldstoreMergeScan includes only active segment rows visible to the current snapshot.
 

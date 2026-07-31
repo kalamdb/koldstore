@@ -197,14 +197,7 @@ def render_table(
         # async first so catch-up rows sit under DML rather than at the end
         async_report, pg_report, strict_report, section=section
     ):
-        # Prefer the dedicated pg-side snapshot; fall back to legacy interleaved
-        # JSON that still embeds postgres_only beside a managed column.
         pg = cell(pg_report, section, metric, "postgres_only")
-        if pg == MISSING:
-            for report in (async_report, strict_report):
-                pg = cell(report, section, metric, "postgres_only")
-                if pg != MISSING:
-                    break
         async_val = cell(async_report, section, metric, "koldstore")
         strict_val = cell(strict_report, section, metric, "koldstore")
         lines.append(f"| {metric} | {pg} | {async_val} | {strict_val} |")
@@ -384,7 +377,7 @@ def render(
         "**Cold-only** repeatedly looks up only `id = 1` (Parquet on managed).",
         "**Hot-only** (before flush) repeatedly looks up `id = <rows>`.",
         "p99 insert = per insert-batch; update = per 1k-row batch; queries = per",
-        "PK lookup (`QUERY_LOOPS = 100`). See [README.md](README.md).",
+        "PK lookup (`QUERY_LOOPS = 400` after 40 discarded warm-up lookups). See [README.md](README.md).",
         "",
         "## Detail (throughput and storage)",
         "",
@@ -459,7 +452,17 @@ def main() -> None:
         default=None,
         help="Fallback git SHA when JSON lacks git_commit (default: git rev-parse HEAD)",
     )
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="Write rendered RESULTS.md here (also printed to stdout)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Do not print the rendered markdown to stdout (still writes --out)",
+    )
     args = parser.parse_args()
 
     pg_report = load_report(args.pg_json)
@@ -475,19 +478,19 @@ def main() -> None:
         pg_report, async_report, strict_report, fallback=args.git_commit
     )
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        render(
-            pg_report,
-            async_report,
-            strict_report,
-            git_commit,
-            git_dirty=git_dirty,
-            git_note=git_note,
-        ),
-        encoding="utf-8",
+    markdown = render(
+        pg_report,
+        async_report,
+        strict_report,
+        git_commit,
+        git_dirty=git_dirty,
+        git_note=git_note,
     )
-    print(f"wrote {args.out}")
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(markdown, encoding="utf-8")
+    if not args.quiet:
+        print(markdown, end="" if markdown.endswith("\n") else "\n")
+    print(f"wrote {args.out}", flush=True)
 
 
 if __name__ == "__main__":

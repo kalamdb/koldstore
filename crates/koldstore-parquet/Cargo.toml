@@ -13,6 +13,7 @@ chrono.workspace = true
 futures-util.workspace = true
 koldstore-common.workspace = true
 koldstore-schema.workspace = true
+koldstore-sortkey.workspace = true
 object_store.workspace = true
 parquet.workspace = true
 serde.workspace = true

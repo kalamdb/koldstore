@@ -3,7 +3,8 @@
 use koldstore_common::ColumnId;
 use koldstore_flush::{write_flush_segment_with_client, FlushStats, FlushWriteChunk};
 use koldstore_parquet::{
-    plan_clean_cold_record, record_batch_from_clean_cold_records, ColdRecordBatch, PgColumn, PgType,
+    extract_packed_segment_metadata, plan_clean_cold_record, record_batch_from_clean_cold_records,
+    ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
 };
 use koldstore_storage::{open_filesystem_client, StorageClient, StorageClientError};
 use serde_json::json;
@@ -24,31 +25,26 @@ fn cold_chunk(rows: usize) -> FlushWriteChunk {
             .unwrap()
         })
         .collect();
-    let batch = record_batch_from_clean_cold_records(
-        &[
-            PgColumn::new("id", PgType::Int8, false),
-            PgColumn::new("body", PgType::Text, true),
-        ],
-        &plans,
+    let columns = [
+        PgColumn::new("id", PgType::Int8, false),
+        PgColumn::new("body", PgType::Text, true),
+    ];
+    let batch = record_batch_from_clean_cold_records(&columns, &plans).unwrap();
+    let encoded =
+        ParquetSegmentWriter::new(WriterOptions::default().with_statistics_columns(["id", "seq"]))
+            .encode_record_batch_with_metadata(&batch)
+            .unwrap();
+    let packed = extract_packed_segment_metadata(
+        encoded.metadata.as_ref(),
+        &columns,
+        &[koldstore_common::ColumnRef::new(
+            ColumnId::from_attnum(1),
+            "id",
+        )],
+        &["id".to_string()],
     )
     .unwrap();
-    let mut indexed_bounds = std::collections::BTreeMap::new();
-    indexed_bounds.insert(ColumnId::from_attnum(1), (json!(1), json!(rows)));
-    let cold_batch = ColdRecordBatch {
-        batch,
-        row_count: rows,
-        indexed_bounds,
-        min_seq: 1,
-        max_seq: rows as i64,
-    };
-    let parquet_bytes = koldstore_parquet::encode_parquet_segment_bytes(
-        &cold_batch.batch,
-        &["id".to_string()],
-        &["id".to_string()],
-        "zstd",
-    )
-    .unwrap();
-    FlushWriteChunk::from_encoded_batches(parquet_bytes, &[cold_batch])
+    FlushWriteChunk::from_encoded(encoded, packed)
 }
 
 #[test]
@@ -57,36 +53,24 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     let client = open_filesystem_client(root.path().to_str().unwrap()).unwrap();
     let chunk = cold_chunk(5);
     let stats = FlushStats::from_write_chunk(&chunk).unwrap();
-    let written = write_flush_segment_with_client(
-        &client,
-        "app",
-        "items",
-        "zstd",
-        &["id".to_string()],
-        1,
-        0,
-        &chunk,
-        &stats,
-    )
-    .unwrap();
+    let written =
+        write_flush_segment_with_client(&client, "app/items", 1, 0, &chunk, &stats).unwrap();
 
     assert!(
-        written.object_path.starts_with(&format!(
-            "app/items/001/segment-0000-{}.",
+        written.catalog_row.path.starts_with(&format!(
+            "001/segment-0000-{}.",
             koldstore_manifest::segment_path_token(written.segment_id)
         )),
         "object path should use padded folder/segment + short token, got {}",
-        written.object_path
+        written.catalog_row.path
     );
-    assert!(written.object_path.ends_with(".parquet"));
-    assert!(written.byte_size > 0);
+    assert!(written.catalog_row.path.ends_with(".parquet"));
+    assert!(written.catalog_row.byte_size > 0);
     assert_eq!(written.checksum.len(), 64);
-    assert_eq!(
-        written.indexed_bounds.get(&ColumnId::from_attnum(1)),
-        Some(&(json!(1), json!(5)))
-    );
+    assert_eq!(written.packed_metadata.row_group_count, 1);
+    assert_eq!(written.packed_metadata.row_group_row_counts, vec![5]);
     let bytes = client.get(&written.object_path).unwrap();
-    assert_eq!(bytes.len() as i64, written.byte_size);
+    assert_eq!(bytes.len() as i64, written.catalog_row.byte_size);
     assert_eq!(
         written.checksum,
         koldstore_storage::content_checksum_sha256_hex(&bytes)
@@ -107,7 +91,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     )
     .unwrap();
     assert!(published.reused_existing);
-    assert_eq!(published.byte_size, written.byte_size as u64);
+    assert_eq!(published.byte_size, written.catalog_row.byte_size as u64);
 
     let temps = client.list("app/items/.tmp").unwrap();
     assert!(temps.is_empty(), "leftover temps: {temps:?}");
@@ -122,27 +106,14 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
     // batch_number=1 while concurrent DML changed the next encode payload.
     let orphan = cold_chunk(3);
     let orphan_stats = FlushStats::from_write_chunk(&orphan).unwrap();
-    let first = write_flush_segment_with_client(
-        &client,
-        "app",
-        "items",
-        "zstd",
-        &["id".to_string()],
-        1,
-        1,
-        &orphan,
-        &orphan_stats,
-    )
-    .unwrap();
+    let first = write_flush_segment_with_client(&client, "app/items", 1, 1, &orphan, &orphan_stats)
+        .unwrap();
 
     let retry_chunk = cold_chunk(5);
     let retry_stats = FlushStats::from_write_chunk(&retry_chunk).unwrap();
     let second = write_flush_segment_with_client(
         &client,
-        "app",
-        "items",
-        "zstd",
-        &["id".to_string()],
+        "app/items",
         1,
         1, // same batch_number as the orphaned attempt
         &retry_chunk,
@@ -151,25 +122,25 @@ fn flush_segment_retry_after_orphan_uses_new_object_key() {
     .unwrap();
 
     assert_ne!(
-        first.object_path, second.object_path,
+        first.catalog_row.path, second.catalog_row.path,
         "retry must not collide with orphaned final object"
     );
     assert!(
-        first.object_path.contains("/001/segment-0001-")
-            && second.object_path.contains("/001/segment-0001-"),
+        first.catalog_row.path.contains("001/segment-0001-")
+            && second.catalog_row.path.contains("001/segment-0001-"),
         "retries keep the same padded folder/segment number, got {} vs {}",
-        first.object_path,
-        second.object_path
+        first.catalog_row.path,
+        second.catalog_row.path
     );
     assert_ne!(first.segment_id, second.segment_id);
-    assert_ne!(first.byte_size, second.byte_size);
+    assert_ne!(first.catalog_row.byte_size, second.catalog_row.byte_size);
     assert_eq!(
         client.get(&first.object_path).unwrap().len() as i64,
-        first.byte_size
+        first.catalog_row.byte_size
     );
     assert_eq!(
         client.get(&second.object_path).unwrap().len() as i64,
-        second.byte_size
+        second.catalog_row.byte_size
     );
 }
 

@@ -30,7 +30,7 @@ fn metadata() -> RegistrationMetadata {
     RegistrationMetadata {
         table_oid: 42,
         table_type: "user".to_string(),
-        storage_id: Uuid::from_u128(7),
+        storage_id: "00000007".to_string(),
         scope_column: Some("user_id".to_string()),
         mirror_relation: Some("koldstore.items__cl".to_string()),
         primary_key_shape: Some(pk_shape()),
@@ -306,6 +306,6 @@ fn schema_registry_plan_rejects_incomplete_metadata() {
     assert!(plan_schema_registry_insert_with_id(&invalid, Uuid::from_u128(99)).is_err());
 
     invalid = metadata();
-    invalid.storage_id = Uuid::nil();
+    invalid.storage_id = String::new();
     assert!(plan_schema_registry_insert_with_id(&invalid, Uuid::from_u128(99)).is_err());
 }

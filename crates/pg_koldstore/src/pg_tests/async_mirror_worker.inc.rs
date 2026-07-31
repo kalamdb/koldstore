@@ -75,9 +75,4 @@ fn async_retained_wal_health_status_is_exposed() {
         "status must expose retention.ok; got {}",
         status.0
     );
-    assert!(
-        status.0.get("admission").and_then(|v| v.get("ok")).is_some(),
-        "status must preserve the admission.ok compatibility alias; got {}",
-        status.0
-    );
 }
