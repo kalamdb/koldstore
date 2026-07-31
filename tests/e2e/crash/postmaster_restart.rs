@@ -27,6 +27,14 @@ fn pgrx_data_dir(version: u16) -> String {
     format!("{home}/data-{version}")
 }
 
+fn pgrx_log_file(version: u16) -> String {
+    let home = std::env::var("PGRX_HOME").unwrap_or_else(|_| {
+        let user_home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        format!("{user_home}/.pgrx")
+    });
+    format!("{home}/{version}.log")
+}
+
 fn pg_ctl_bin(version: u16) -> Result<String> {
     if let Ok(pg_config) = std::env::var("PGRX_PG_CONFIG") {
         let bin = std::path::Path::new(&pg_config)
@@ -53,6 +61,28 @@ fn pg_ctl_bin(version: u16) -> Result<String> {
     Ok(bin.to_string_lossy().into_owned())
 }
 
+/// Same runtime conf as `scripts/run-pg-e2e.sh` — `cargo pgrx start` applies these
+/// only via `-c` flags (they are not persisted in postgresql.conf).
+fn pgrx_start_conf_args() -> Vec<String> {
+    let workers = std::env::var("KOLDSTORE_E2E_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .map(|threads| threads.saturating_add(8).max(16))
+        .unwrap_or(16);
+    vec![
+        "--postgresql-conf".into(),
+        "wal_level=logical".into(),
+        "--postgresql-conf".into(),
+        "shared_preload_libraries=koldstore".into(),
+        "--postgresql-conf".into(),
+        format!("max_worker_processes={workers}"),
+        "--postgresql-conf".into(),
+        format!("max_replication_slots={workers}"),
+        "--postgresql-conf".into(),
+        format!("max_wal_senders={workers}"),
+    ]
+}
+
 fn immediate_stop_and_start(version: u16) -> Result<()> {
     let data_dir = pgrx_data_dir(version);
     let pg_ctl = pg_ctl_bin(version)?;
@@ -68,14 +98,33 @@ fn immediate_stop_and_start(version: u16) -> Result<()> {
             .status();
     }
 
-    let start = Command::new("cargo")
-        .args(["pgrx", "start", &feature])
+    let mut start = Command::new("cargo");
+    start.arg("pgrx").arg("start").arg(&feature);
+    for arg in pgrx_start_conf_args() {
+        start.arg(arg);
+    }
+    let start = start
         .output()
         .context("cargo pgrx start after immediate stop")?;
     if !start.status.success() {
+        let log_path = pgrx_log_file(version);
+        let log_tail = std::fs::read_to_string(&log_path)
+            .map(|contents| {
+                contents
+                    .lines()
+                    .rev()
+                    .take(80)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_else(|_| format!("(could not read {log_path})"));
         bail!(
-            "cargo pgrx start failed: {}",
-            String::from_utf8_lossy(&start.stderr)
+            "cargo pgrx start failed: {}\n──── {} ────\n{log_tail}",
+            String::from_utf8_lossy(&start.stderr),
+            log_path
         );
     }
     Ok(())
@@ -150,7 +199,8 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
     sleep(Duration::from_millis(750)).await;
     immediate_stop_and_start(version)?;
     let _ = flush_handle.await;
-    drop(db);
+    // Keep `db` alive until the end: TestDb::drop deletes the filesystem cold
+    // storage root, which recover_segments / retry flush still need.
 
     let reopen = common::PgTarget {
         version,
@@ -158,6 +208,27 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
         dbname,
     };
     let client = common::wait_for_postgres(&reopen).await?;
+    let wal_level: String = client
+        .query_one("SHOW wal_level", &[])
+        .await
+        .context("SHOW wal_level after restart")?
+        .get(0);
+    anyhow::ensure!(
+        wal_level == "logical",
+        "post-restart wal_level must be logical (got {wal_level}); cargo pgrx start must pass --postgresql-conf"
+    );
+    let preload: String = client
+        .query_one("SHOW shared_preload_libraries", &[])
+        .await
+        .context("SHOW shared_preload_libraries after restart")?
+        .get(0);
+    anyhow::ensure!(
+        preload
+            .split(',')
+            .map(str::trim)
+            .any(|entry| entry == "koldstore"),
+        "post-restart shared_preload_libraries must include koldstore (got {preload})"
+    );
     client
         .batch_execute("SET koldstore.failpoint = '';")
         .await
