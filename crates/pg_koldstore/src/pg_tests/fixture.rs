@@ -20,7 +20,8 @@ pub(crate) fn unique_suffix(label: &str) -> String {
 ///
 /// `#[pg_test]` wraps the body in one transaction. Logical-slot creation waits for
 /// concurrent XIDs, so provisioning after `register_storage` / DDL / DML deadlocks
-/// with this backend. Call this first when a test may be the first to need the slot.
+/// with this backend. Prefer calling via [`register_temp_storage`], which invokes
+/// this first; call it explicitly only when a test manages a table without that helper.
 pub(crate) fn preprovision_async_mirror() {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
     crate::async_mirror::provision::provision_infrastructure(database_oid)
@@ -29,6 +30,8 @@ pub(crate) fn preprovision_async_mirror() {
 
 /// Registers filesystem storage under a unique temp directory and returns its name.
 pub(crate) fn register_temp_storage(label: &str) -> String {
+    // Slot must exist before this SPI write assigns an XID on the `#[pg_test]` txn.
+    preprovision_async_mirror();
     let name = unique_suffix(label);
     let root: PathBuf = std::env::temp_dir().join(format!("koldstore-pg-test-{name}"));
     if root.exists() {

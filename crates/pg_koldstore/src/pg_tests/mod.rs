@@ -8,6 +8,10 @@
 //! (created before `manage_table`); joins that need cold non-PK quals use
 //! `WITH … AS MATERIALIZED` so join predicates run on fetched rows.
 //!
+//! Async capture needs a logical slot. `register_temp_storage` pre-provisions it
+//! before any SPI write so `#[pg_test]`'s wrapping transaction does not deadlock
+//! slot creation.
+//!
 //! `#[pgrx::pg_schema]` only accepts inline `mod { ... }` blocks, so test bodies are
 //! `include!`d into the schema module below.
 
