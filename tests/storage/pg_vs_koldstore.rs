@@ -1800,9 +1800,10 @@ struct CheckpointCounters {
 }
 
 async fn checkpoint_counters(client: &Client) -> Result<CheckpointCounters> {
-    // PG16: counters live on pg_stat_bgwriter. PG17+ moved them to
-    // pg_stat_checkpointer — try bgwriter first for this lab's pg16.
-    let row = client
+    // PG16 keeps checkpoint counters on `pg_stat_bgwriter`. PG17+ moved them to
+    // `pg_stat_checkpointer` (renamed columns), so a missing-column error is
+    // expected on newer majors — fall through rather than fail the harness.
+    if let Ok(Some(row)) = client
         .query_opt(
             r#"
             SELECT
@@ -1815,8 +1816,7 @@ async fn checkpoint_counters(client: &Client) -> Result<CheckpointCounters> {
             &[],
         )
         .await
-        .context("pg_stat_bgwriter checkpoint counters")?;
-    if let Some(row) = row {
+    {
         return Ok(CheckpointCounters {
             timed: row.get(0),
             req: row.get(1),
@@ -1868,10 +1868,7 @@ fn log_insert_batch_curve(samples: &[Duration]) {
     if samples.is_empty() {
         return;
     }
-    let mut sorted_ms: Vec<f64> = samples
-        .iter()
-        .map(|d| d.as_secs_f64() * 1000.0)
-        .collect();
+    let mut sorted_ms: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
     let n = sorted_ms.len();
     sorted_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let pct = |p: f64| -> f64 {
@@ -2022,9 +2019,7 @@ async fn pin_wal_retention_for_fair_insert(client: &Client, relation: &str) -> R
         .with_context(|| format!("create WAL-pin publication for {relation}"))?;
     client
         .execute(
-            &format!(
-                "SELECT pg_create_logical_replication_slot('{WAL_PIN_SLOT}', 'pgoutput')"
-            ),
+            &format!("SELECT pg_create_logical_replication_slot('{WAL_PIN_SLOT}', 'pgoutput')"),
             &[],
         )
         .await
@@ -2056,9 +2051,7 @@ async fn unpin_wal_retention_for_fair_insert(client: &Client) -> Result<()> {
             .context("drop WAL-pin logical slot")?;
     }
     client
-        .batch_execute(&format!(
-            "DROP PUBLICATION IF EXISTS {WAL_PIN_PUBLICATION}"
-        ))
+        .batch_execute(&format!("DROP PUBLICATION IF EXISTS {WAL_PIN_PUBLICATION}"))
         .await
         .context("drop WAL-pin publication")?;
     if dropped_slot {
