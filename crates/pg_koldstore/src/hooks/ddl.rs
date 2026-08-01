@@ -201,6 +201,16 @@ mod process_utility {
     }
 
     unsafe fn apply_options(relation: *mut pg_sys::RangeVar, values: HashMap<String, String>) {
+        // Logical-slot creation refuses to run after this backend has written.
+        // Take AccessExclusiveLock / SPI only after the async slot exists —
+        // locking the relation (and later catalog SPI) can assign an XID.
+        let initial_enable = values.get("koldstore_enabled").is_some_and(|value| {
+            matches!(value.to_ascii_lowercase().as_str(), "true" | "on" | "1")
+        });
+        if initial_enable {
+            crate::async_mirror::lifecycle::prepare_capture()
+                .unwrap_or_else(|error| pgrx::error!("KoldStore ALTER TABLE failed: {error}"));
+        }
         let oid = unsafe {
             pg_sys::RangeVarGetRelidExtended(
                 relation,
@@ -450,8 +460,9 @@ fn apply_management_options(
     validate_management_option_conflicts(values)?;
     // Initial ALTER TABLE … SET (koldstore_enabled=true, …) looks up the
     // management catalog via SPI before calling manage_table. SPI assigns an
-    // XID, and logical-slot creation then deadlocks with this backend. Provision
-    // the async mirror first — same constraint as manage_table_pg_impl.
+    // XID, and logical-slot creation then deadlocks with this backend.
+    // `apply_options` provisions the slot before AccessExclusiveLock; keep this
+    // call as a safety net for other entry points (idempotent when ready).
     let initial_enable = option_value(values, "koldstore_enabled")
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "on" | "1"));
     if initial_enable {

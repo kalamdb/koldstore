@@ -112,30 +112,31 @@ SELECT extname FROM pg_extension WHERE extname = 'koldstore';
 SQL
 
 echo "==> ALTER TABLE management syntax works in the release image"
-# Slot provisioning cannot run after this backend has written. Keep register /
-# CREATE in their own statements (autocommit), then manage in a fresh call so
-# the ALTER TABLE path can create the async mirror slot.
+# Slot provisioning cannot run after this backend has written. Use one statement
+# per psql invocation (fresh backend each time) so register / CREATE cannot leave
+# an XID that blocks the first manage ALTER from creating the async slot.
+psql_exec -v ON_ERROR_STOP=1 -c \
+  "SELECT koldstore.register_storage(
+     name         => 'release-smoke',
+     storage_type => 'filesystem',
+     base_path    => '/tmp/koldstore-release-smoke',
+     credentials  => '{}'::jsonb,
+     config       => '{}'::jsonb
+   )"
+psql_exec -v ON_ERROR_STOP=1 -c \
+  "CREATE TABLE release_smoke_messages (
+     id bigint PRIMARY KEY,
+     body text NOT NULL
+   )"
+psql_exec -v ON_ERROR_STOP=1 -c \
+  "ALTER TABLE release_smoke_messages SET (
+     koldstore_enabled = true,
+     koldstore_storage = 'release-smoke',
+     koldstore_hot_row_limit = 1000,
+     koldstore_min_flush_rows = 1,
+     koldstore_max_rows_per_file = 1000
+   )"
 psql_exec -v ON_ERROR_STOP=1 <<'SQL'
-SELECT koldstore.register_storage(
-  name         => 'release-smoke',
-  storage_type => 'filesystem',
-  base_path    => '/tmp/koldstore-release-smoke',
-  credentials  => '{}'::jsonb,
-  config       => '{}'::jsonb
-);
-CREATE TABLE release_smoke_messages (
-  id bigint PRIMARY KEY,
-  body text NOT NULL
-);
-SQL
-psql_exec -v ON_ERROR_STOP=1 <<'SQL'
-ALTER TABLE release_smoke_messages SET (
-  koldstore_enabled = true,
-  koldstore_storage = 'release-smoke',
-  koldstore_hot_row_limit = 1000,
-  koldstore_min_flush_rows = 1,
-  koldstore_max_rows_per_file = 1000
-);
 DO $$
 BEGIN
   IF (
