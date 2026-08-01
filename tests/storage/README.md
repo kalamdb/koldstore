@@ -81,10 +81,11 @@ skewed by leftover WAL/clog from the previous side. Only the version under test
 
 After the timed seed, the harness probes `id ∈ {1, rows/2, rows}`, asserts
 `id = rows+1` is absent, and logs user-heap + index bytes plus WAL bytes written
-during the insert phase. Managed publication should write **more** WAL than
-plain heap for the same SQL — never less. Async looking faster than PostgreSQL
-only with similar heap sizes is machine noise (or deferred mirror work), not a
-product claim; compare catch-up rows for end-to-end mirrored cost.
+during the insert phase. PostgreSQL-only **pins a logical slot** (publication on
+the seed table) for the timed seed so WAL segment recycle matches managed async
+capture; expect foreground insert ≈ identical or managed slightly slower. Mirror
+apply stays on the separate catch-up rows — do not treat foreground-only managed
+ops/s as a product win.
 
 The harness asserts that after flush, PostgreSQL heap and index bytes for the
 managed table — **including** `koldstore.<table>__cl` and its indexes — are

@@ -113,15 +113,17 @@ KoldStore is a **storage lifecycle tool**, not a universal query accelerator. Af
 | └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB    | **99% smaller**      |
 | └ cold Parquet                      | — → 599 MiB          | outside the database |
 | Indexes (hot + `__cl`)              | 415 MiB → 11.5 MiB   | **97% smaller**      |
-| `VACUUM (FULL, ANALYZE)`            | 174.36 s → 3.59 s    | **49× faster**       |
+| `VACUUM (FULL, ANALYZE)`            | 158.7 s → 3.24 s     | **49× faster**       |
 
 
 Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000`,
 `--warmup-rows 1000000`, `max_rows_per_file = 1000000` (local PG16.13
-`release-pg`, 2026-07-31, single pgrx instance). Each side gets a fresh pgrx
-server, an untimed 1M warm-up, then the timed run. Managed PostgreSQL sizes
-include the hot heap **and** `koldstore.<table>__cl` plus its indexes. Full
-tables: [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
+`release-pg`, 2026-08-01, single wiped pgrx instance per side). Each side gets
+a fresh pgrx server, an untimed warm-up, equalized WAL retention for the timed
+seed, then the timed run. Managed PostgreSQL sizes include the hot heap **and**
+`koldstore.<table>__cl` plus its indexes. Full tables:
+[docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md). How to re-run with
+your own `--rows`: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
 ### Latest UPDATE verification
 
@@ -153,25 +155,25 @@ It is a clean-tree single sample (draft publication); release publication still
 prefers six counterbalanced repetitions. KoldStore commits the source heap
 first; a database worker applies committed WAL afterward. Query phases use the
 fair harness order (PG cold lookups before `VACUUM FULL`; managed cold after
-flush).
+flush). Foreground INSERT is equalized for WAL retention so it is not marketed
+as a speedup.
 
 
 | Operation           | PostgreSQL only | KoldStore (WAL) | Trade-off                                          |
 | ------------------- | --------------- | --------------- | -------------------------------------------------- |
-| INSERT              | 60,928 ops/s    | 92,097 ops/s    | noise / order — not a product win (same full-heap seed) |
-| UPDATE              | 68,449 ops/s    | 29,892 ops/s    | single sample; **56% lower**                       |
-| DELETE              | 122,535 ops/s   | 132,737 ops/s   | single-sample — do not claim faster                |
-| Hot-only PK lookup  | 3,894 ops/s     | 2,392 ops/s     | single-sample noise (pre-flush full heap)          |
-| Hot+cold PK lookup  | 4,043 ops/s     | 821 ops/s       | **80% slower** (Parquet vs full-heap baseline)     |
-| Cold-only PK lookup | 4,085 ops/s     | 496 ops/s       | **88% slower** (Parquet vs full-heap baseline)     |
+| INSERT              | 100,809 ops/s   | 100,818 ops/s   | ≈ identical (fair WAL-retention seed)              |
+| UPDATE              | 81,791 ops/s    | 55,164 ops/s    | single sample; **33% lower**                       |
+| DELETE              | 130,331 ops/s   | 145,691 ops/s   | single-sample — do not claim faster                |
+| Hot-only PK lookup  | 3,851 ops/s     | 4,076 ops/s     | ≈ same (pre-flush full heap)                       |
+| Hot+cold PK lookup  | 3,997 ops/s     | 1,055 ops/s     | **74% slower** (Parquet vs full-heap baseline)     |
+| Cold-only PK lookup | 4,032 ops/s     | 662 ops/s       | **84% slower** (Parquet vs full-heap baseline)     |
 
 
-Async mirror catch-up measured 28,758 INSERT, 814 UPDATE, 21,812 DELETE, and
-18,313 restore operations per second in this run. The focused UPDATE catch-up
-result in the verification table above is 49,358 ops/s. Timed INSERT seeds an
-empty table to 10M on every side — `hot_row_limit` does not make managed INSERT
-faster. Full methodology:
-[docs/benchmarks/](docs/benchmarks/README.md).
+Async mirror catch-up measured 32,662 INSERT, 1,689 UPDATE, 28,661 DELETE, and
+25,414 restore operations per second in this run. Timed INSERT seeds an empty
+table to 10M on every side — `hot_row_limit` does not make managed INSERT
+faster. Full methodology and how to run with your own row count:
+[docs/benchmarks/README.md](docs/benchmarks/README.md).
 
 Managed tables use committed-WAL mirror capture only. Foreground DML writes the
 heap; a database worker applies PK-only WAL with a 100 ms polling interval and

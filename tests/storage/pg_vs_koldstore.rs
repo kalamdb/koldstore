@@ -12,9 +12,14 @@
 //! Timed INSERT always seeds into an empty table growing to `rows` on every
 //! side — `hot_row_limit` does **not** make managed INSERT faster (flush has
 //! not run yet). After the timed seed the harness probes PK bounds and logs
-//! WAL bytes + pre-flush heap/index size; managed publication should write
-//! *more* WAL than plain heap. Async looking faster than PG with similar heap
-//! sizes is machine/order noise, not a smaller-hot-set effect.
+//! WAL bytes + pre-flush heap/index size. PostgreSQL-only pins a logical
+//! slot (+ publication on the seed table) during the timed insert so WAL
+//! recycle pressure matches managed async capture; without that pin, plain
+//! PG looks artificially slower from segment recycle, not from less work.
+//! Expect foreground insert ≈ identical or managed slightly slower once both
+//! sides start the timed seed from the same recycled WAL baseline and retain
+//! WAL the same way during seed (pg-only uses a temporary logical pin).
+//! Mirror apply remains a separate catch-up row on managed.
 //! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
 //!
 //! Published runs isolate each column via `KOLDSTORE_STORAGE_SIDE=pg|async`
@@ -405,14 +410,31 @@ async fn run_pg_only_body(
     common::log_always(format!(
         "storage_cmp: seeding {rows} rows on PostgreSQL only (insert_batch_rows={insert_batch_rows})"
     ));
-    checkpoint_before_timing(&db.client, "pg-only inserts").await?;
+    // Equalize with managed: recycle warm-up WAL to the minimum *before* the
+    // retention pin, then pin at tip so both sides start timed insert with the
+    // same low wal_files baseline and the same no-recycle-during-seed shape.
+    prepare_timed_insert_wal_baseline(&db.client, "pg-only", /*drain_async=*/ false).await?;
+    pin_wal_retention_for_fair_insert(&db.client, baseline).await?;
     let insert = {
-        let _step = common::log_step_always(format!(
-            "storage_cmp: batched pg-only inserts ({rows} rows)"
-        ));
-        time_batched_inserts(&db.client, baseline, rows, insert_batch_rows).await?
+        let insert_result = async {
+            checkpoint_before_timing(&db.client, "pg-only inserts").await?;
+            let _step = common::log_step_always(format!(
+                "storage_cmp: batched pg-only inserts ({rows} rows)"
+            ));
+            time_batched_inserts(&db.client, baseline, rows, insert_batch_rows).await
+        }
+        .await;
+        match &insert_result {
+            Ok(_) => {}
+            Err(_) => {
+                let _ = unpin_wal_retention_for_fair_insert(&db.client).await;
+            }
+        }
+        let insert = insert_result?;
+        verify_timed_seed(&db.client, baseline, rows, "pg-only").await?;
+        unpin_wal_retention_for_fair_insert(&db.client).await?;
+        insert
     };
-    verify_timed_seed(&db.client, baseline, rows, "pg-only").await?;
 
     checkpoint_before_timing(&db.client, "pg-only update").await?;
     let update = {
@@ -522,6 +544,9 @@ async fn run_managed_only_body(
     common::log_always(format!(
         "storage_cmp: seeding {rows} rows on managed-only (insert_batch_rows={insert_batch_rows}, hot_row_limit={hot_limit}, max_rows_per_file={max_rows_per_file}, warmup_rows={warmup_rows})"
     ));
+    // Drain warm-up apply to the tip, then recycle to the same low wal_files
+    // baseline as PostgreSQL-only before the timed seed retains WAL again.
+    prepare_timed_insert_wal_baseline(&db.client, "managed-only", /*drain_async=*/ true).await?;
     checkpoint_before_timing(&db.client, "managed-only inserts").await?;
     let insert = {
         let _step = common::log_step_always(format!(
@@ -1718,6 +1743,8 @@ async fn time_batched_inserts(
     // WAL delta makes unfair insert comparisons diagnosable: managed publication
     // should write *more* WAL than plain heap, never less for the same seed SQL.
     let wal_before = current_wal_lsn(client).await?;
+    let ckpt_before = checkpoint_counters(client).await?;
+    let wal_files_before = wal_file_count(client).await?;
     let mut samples = Vec::new();
     let mut start_id = 1_i64;
     while start_id <= rows {
@@ -1730,6 +1757,8 @@ async fn time_batched_inserts(
     let elapsed: Duration = samples.iter().copied().sum();
     let wal_after = current_wal_lsn(client).await?;
     let wal_bytes = wal_lsn_diff_bytes(client, &wal_before, &wal_after).await?;
+    let ckpt_after = checkpoint_counters(client).await?;
+    let wal_files_after = wal_file_count(client).await?;
     let first_batch_ms = samples
         .first()
         .map(|d| d.as_secs_f64() * 1000.0)
@@ -1748,7 +1777,129 @@ async fn time_batched_inserts(
         elapsed.as_secs_f64(),
         rows as f64 / elapsed.as_secs_f64().max(1e-9),
     ));
+    log_insert_batch_curve(&samples);
+    common::log_always(format!(
+        "storage_cmp: insert checkpoints {relation}: timed=+{} req=+{} write_ms=+{} sync_ms=+{} wal_files={}→{} (delta={:+})",
+        ckpt_after.timed.saturating_sub(ckpt_before.timed),
+        ckpt_after.req.saturating_sub(ckpt_before.req),
+        ckpt_after.write_time_ms.saturating_sub(ckpt_before.write_time_ms),
+        ckpt_after.sync_time_ms.saturating_sub(ckpt_before.sync_time_ms),
+        wal_files_before,
+        wal_files_after,
+        wal_files_after as i64 - wal_files_before as i64,
+    ));
     Ok(Timing::with_p99(elapsed, rows, &samples))
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CheckpointCounters {
+    timed: i64,
+    req: i64,
+    write_time_ms: i64,
+    sync_time_ms: i64,
+}
+
+async fn checkpoint_counters(client: &Client) -> Result<CheckpointCounters> {
+    // PG16: counters live on pg_stat_bgwriter. PG17+ moved them to
+    // pg_stat_checkpointer — try bgwriter first for this lab's pg16.
+    let row = client
+        .query_opt(
+            r#"
+            SELECT
+              checkpoints_timed::bigint,
+              checkpoints_req::bigint,
+              checkpoint_write_time::bigint,
+              checkpoint_sync_time::bigint
+            FROM pg_stat_bgwriter
+            "#,
+            &[],
+        )
+        .await
+        .context("pg_stat_bgwriter checkpoint counters")?;
+    if let Some(row) = row {
+        return Ok(CheckpointCounters {
+            timed: row.get(0),
+            req: row.get(1),
+            write_time_ms: row.get(2),
+            sync_time_ms: row.get(3),
+        });
+    }
+    let row = client
+        .query_one(
+            r#"
+            SELECT
+              num_timed::bigint,
+              num_requested::bigint,
+              write_time::bigint,
+              sync_time::bigint
+            FROM pg_stat_checkpointer
+            "#,
+            &[],
+        )
+        .await
+        .context("pg_stat_checkpointer counters")?;
+    Ok(CheckpointCounters {
+        timed: row.get(0),
+        req: row.get(1),
+        write_time_ms: row.get(2),
+        sync_time_ms: row.get(3),
+    })
+}
+
+async fn wal_file_count(client: &Client) -> Result<i64> {
+    let count: i64 = client
+        .query_one(
+            r#"
+            SELECT count(*)::bigint
+            FROM pg_ls_waldir()
+            WHERE name ~ '^[0-9A-F]{24}$'
+            "#,
+            &[],
+        )
+        .await
+        .context("pg_ls_waldir")?
+        .get(0);
+    Ok(count)
+}
+
+/// Logs a compact batch-latency curve so late-run stalls are visible without
+/// dumping every sample. Deciles + every 10th batch (1-based).
+fn log_insert_batch_curve(samples: &[Duration]) {
+    if samples.is_empty() {
+        return;
+    }
+    let mut sorted_ms: Vec<f64> = samples
+        .iter()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .collect();
+    let n = sorted_ms.len();
+    sorted_ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let pct = |p: f64| -> f64 {
+        let idx = ((p * (n as f64 - 1.0)).round() as usize).min(n - 1);
+        sorted_ms[idx]
+    };
+    common::log_always(format!(
+        "storage_cmp: insert batch curve percentiles: p0={:.1}ms p25={:.1}ms p50={:.1}ms p75={:.1}ms p90={:.1}ms p99={:.1}ms p100={:.1}ms",
+        pct(0.0),
+        pct(0.25),
+        pct(0.50),
+        pct(0.75),
+        pct(0.90),
+        pct(0.99),
+        pct(1.0),
+    ));
+
+    let mut parts = Vec::new();
+    for (i, sample) in samples.iter().enumerate() {
+        let batch_no = i + 1;
+        if batch_no == 1 || batch_no == n || batch_no.is_multiple_of(10) {
+            parts.push(format!("{batch_no}={:.0}ms", sample.as_secs_f64() * 1000.0));
+        }
+    }
+    common::log_always(format!(
+        "storage_cmp: insert batch curve samples: {}",
+        parts.join(" ")
+    ));
 }
 
 async fn current_wal_lsn(client: &Client) -> Result<String> {
@@ -1758,6 +1909,165 @@ async fn current_wal_lsn(client: &Client) -> Result<String> {
         .context("pg_current_wal_lsn")?
         .get(0);
     Ok(lsn)
+}
+
+/// Logical slot + publication name used only on the PostgreSQL-only side so
+/// timed INSERT sees the same WAL-retention pressure as managed async capture.
+const WAL_PIN_SLOT: &str = "koldstore_storage_cmp_wal_pin";
+const WAL_PIN_PUBLICATION: &str = "koldstore_storage_cmp_wal_pin_pub";
+
+/// Bring both sides to the same logical-retention starting point before timed INSERT.
+///
+/// Absolute `wal_files` counts stay in the tens after warm-up because PostgreSQL
+/// keeps a recycled segment *pool* near recent write volume (up toward
+/// `max_wal_size`) — that is not the same as slot retention. What we equalize
+/// is: every logical slot's `restart_lsn` is at the tip (lag ≈ 0), then the
+/// timed seed retains newly written WAL the same way on both sides.
+async fn prepare_timed_insert_wal_baseline(
+    client: &Client,
+    side_label: &str,
+    drain_async: bool,
+) -> Result<()> {
+    if drain_async {
+        async_catchup_drain(client).await?;
+    }
+    // Push logical slots to the tip so warm-up segments become recyclable and
+    // both sides enter the timed seed with restart_lsn ≈ current_wal_lsn.
+    advance_logical_slots_to_tip(client).await?;
+    let before = wal_file_count(client).await?;
+    for _ in 0..2 {
+        client
+            .batch_execute("SELECT pg_switch_wal(); CHECKPOINT;")
+            .await
+            .context("switch+checkpoint while recycling WAL baseline")?;
+    }
+    // Advance again in case switch_wal created new records behind a slot.
+    advance_logical_slots_to_tip(client).await?;
+    client
+        .batch_execute("CHECKPOINT;")
+        .await
+        .context("final checkpoint after slot advance")?;
+    let after = wal_file_count(client).await?;
+    let lag_bytes = logical_slot_lag_bytes(client).await?.unwrap_or(0);
+    common::log_always(format!(
+        "storage_cmp: timed-insert WAL baseline {side_label}: wal_files={before}→{after}, logical_slot_lag_bytes={lag_bytes}"
+    ));
+    // restart_lsn often trails the tip by up to one 16MiB segment even after
+    // advance; that is still "at tip" for fair seed retention. Fail only on
+    // multi-segment warm-up lag that would unequally retain old WAL.
+    anyhow::ensure!(
+        lag_bytes <= 32 * 1024 * 1024,
+        "{side_label} logical slot lag {lag_bytes} bytes before timed insert; want ≤1 WAL segment so both sides retain only seed WAL"
+    );
+    Ok(())
+}
+
+/// Advance every logical slot to `pg_current_wal_lsn()` (no-op when already there).
+async fn advance_logical_slots_to_tip(client: &Client) -> Result<()> {
+    client
+        .batch_execute(
+            r#"
+            SELECT pg_replication_slot_advance(slot_name, pg_current_wal_lsn())
+            FROM pg_replication_slots
+            WHERE slot_type = 'logical'
+              AND restart_lsn IS NOT NULL
+              AND restart_lsn < pg_current_wal_lsn();
+            "#,
+        )
+        .await
+        .context("pg_replication_slot_advance to tip")?;
+    Ok(())
+}
+
+/// Bytes of WAL held behind logical slots (`current - restart_lsn`), if any.
+async fn logical_slot_lag_bytes(client: &Client) -> Result<Option<i64>> {
+    let row = client
+        .query_one(
+            r#"
+            SELECT COALESCE(
+              (
+                SELECT max(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn))::bigint
+                FROM pg_replication_slots
+                WHERE slot_type = 'logical'
+                  AND restart_lsn IS NOT NULL
+              ),
+              0
+            )
+            "#,
+            &[],
+        )
+        .await
+        .context("logical slot lag")?;
+    let lag: i64 = row.get(0);
+    Ok(Some(lag.max(0)))
+}
+
+/// Pins WAL during the PostgreSQL-only timed seed.
+///
+/// Managed async keeps a real slot that does not advance until catch-up, so
+/// `max_wal_size` checkpoints cannot recycle segments during seed. Plain PG
+/// without a slot recycles aggressively and late insert batches cliff — that
+/// is not a product win for KoldStore. This pin mirrors retention only; it is
+/// dropped immediately after the timed seed so later VACUUM is unaffected.
+///
+/// Call [`prepare_timed_insert_wal_baseline`] first so both sides start from
+/// the same low `wal_files` count.
+async fn pin_wal_retention_for_fair_insert(client: &Client, relation: &str) -> Result<()> {
+    unpin_wal_retention_for_fair_insert(client).await?;
+    client
+        .batch_execute(&format!(
+            "CREATE PUBLICATION {WAL_PIN_PUBLICATION} FOR TABLE {relation}"
+        ))
+        .await
+        .with_context(|| format!("create WAL-pin publication for {relation}"))?;
+    client
+        .execute(
+            &format!(
+                "SELECT pg_create_logical_replication_slot('{WAL_PIN_SLOT}', 'pgoutput')"
+            ),
+            &[],
+        )
+        .await
+        .context("create WAL-pin logical slot")?;
+    let wal_files = wal_file_count(client).await?;
+    common::log_always(format!(
+        "storage_cmp: WAL pin enabled for fair pg-only insert (slot={WAL_PIN_SLOT}, publication={WAL_PIN_PUBLICATION}, relation={relation}, wal_files={wal_files})"
+    ));
+    Ok(())
+}
+
+async fn unpin_wal_retention_for_fair_insert(client: &Client) -> Result<()> {
+    let dropped_slot: bool = client
+        .query_one(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM pg_replication_slots WHERE slot_name = '{WAL_PIN_SLOT}')"
+            ),
+            &[],
+        )
+        .await?
+        .get(0);
+    if dropped_slot {
+        client
+            .execute(
+                &format!("SELECT pg_drop_replication_slot('{WAL_PIN_SLOT}')"),
+                &[],
+            )
+            .await
+            .context("drop WAL-pin logical slot")?;
+    }
+    client
+        .batch_execute(&format!(
+            "DROP PUBLICATION IF EXISTS {WAL_PIN_PUBLICATION}"
+        ))
+        .await
+        .context("drop WAL-pin publication")?;
+    if dropped_slot {
+        let wal_files = wal_file_count(client).await.unwrap_or(-1);
+        common::log_always(format!(
+            "storage_cmp: WAL pin released after pg-only timed seed (wal_files={wal_files})"
+        ));
+    }
+    Ok(())
 }
 
 async fn wal_lsn_diff_bytes(client: &Client, before: &str, after: &str) -> Result<i64> {

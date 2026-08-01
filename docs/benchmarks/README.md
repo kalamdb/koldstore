@@ -68,8 +68,10 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
   PostgreSQL-only, hot working set only on managed.
 - **Timed INSERT** always seeds an empty table up to `rows` on every side.
   `hot_row_limit` has not taken effect yet — managed INSERT is **not** faster
-  because “there are fewer hot rows.” Async looking above PostgreSQL-only is
-  machine/order noise (or deferred mirror work), not a smaller-heap win.
+  because “there are fewer hot rows.” The PostgreSQL-only side pins a logical
+  slot (+ publication on the seed table) for the timed seed so WAL recycle
+  pressure matches managed async capture; expect foreground insert ≈ identical
+  or managed slightly slower. Mirror apply remains the separate catch-up rows.
 - **p99 latency** rows use nearest-rank over samples from the same phase:
   insert = per 100k-row batch commit; update = per 1k-row update batch;
   hot-query = per pre-flush hot PK lookup; cold-query = per post-flush
@@ -91,13 +93,11 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
   fence. Catch-up rows are therefore part of the result, not optional context.
   Do not publish comparisons from the default 1k-row sample—it is too noisy.
 - **Async foreground insert is not “faster than PostgreSQL.”** Both sides time
-  the same heap `INSERT` path (100k-row commits). Managed capture defers mirror
-  apply to the catch-up rows. When managed foreground ops/s lands above
-  PostgreSQL-only, that is **not** because the sides shared CPU/disk — they run
-  **one after another** on fresh servers. Machine noise can still move results;
-  do not treat it as a product win unless the counterbalanced median and
-  dispersion support the claim. For “row is visible in the mirror” cost,
-  include catch-up or measure backlog with the background worker on.
+  the same heap `INSERT` path (100k-row commits). The harness pins WAL retention
+  on PostgreSQL-only during the timed seed so segment recycle cannot make plain
+  PG look artificially slower than managed (which already holds a real slot).
+  Managed capture still defers mirror apply to the catch-up rows — include those
+  for “row is visible in the mirror” cost.
 - **Published runs use counterbalanced repetitions** (or another multiple of
   the side count): every sample stops PostgreSQL, recreates empty worker DBs,
   and measures one side alone. Orders balance first/second position across pg
@@ -128,24 +128,59 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
 
 ## Reproduce
 
+Pick a row count with `--rows`. Defaults are small (100k) for a fast local
+smoke; published RESULTS use 10M.
+
 ```bash
-# Published RESULTS.md: six counterbalanced samples/side, fresh server each.
+# Smoke (≈ minutes): PostgreSQL-only then managed, fresh wiped pg16 each side.
+scripts/run-storage-comparison.sh --all-sides \
+  --rows 100000 --hot-limit 10000 --dml-sample 1000
+
+# Medium
+scripts/run-storage-comparison.sh --all-sides \
+  --rows 1000000 --hot-limit 50000 --dml-sample 10000
+
+# Published RESULTS scale (long: seed + flush + VACUUM FULL on the full heap)
+scripts/run-storage-comparison.sh --all-sides --repetitions 1 --update-results \
+  --rows 10000000 --hot-limit 100000 --dml-sample 50000
+
+# Release-style publication (clean git tree; six counterbalanced samples/side)
 scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results \
   --rows 10000000 --hot-limit 100000 --dml-sample 50000
-# Or one side at a time:
+```
+
+Useful flags:
+
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--rows N` | Timed seed row count | `100000` |
+| `--hot-limit N` | Rows kept hot after flush | `10000` |
+| `--dml-sample N` | UPDATE/DELETE sample size | `1000` |
+| `--insert-batch-rows N` | Rows per committed insert batch | `100000` |
+| `--warmup-rows N` | Untimed throwaway warm-up (`0` disables) | scale-aware |
+| `--side pg\|async` | One side only | (require `--all-sides` or `--side`) |
+| `--all-sides` | pg then async (or counterbalanced order) | |
+| `--update-results` | Write `docs/benchmarks/RESULTS.md` | |
+| `--pg-version N` | pgrx major (lab uses **16**) | `16` |
+
+Env equivalents: `KOLDSTORE_STORAGE_ROWS`, `KOLDSTORE_STORAGE_HOT_LIMIT`,
+`KOLDSTORE_STORAGE_DML_SAMPLE`, and so on. Draft RESULTS updates on a dirty
+tree: `KOLDSTORE_STORAGE_DRAFT_RESULTS=1`.
+
+Each side force-stops PostgreSQL, **wipes `~/.pgrx/data-<ver>`**, then initdb +
+prepare so leftover WAL cannot skew the next side. Before timed seeding the
+harness runs an untimed warm-up, equalizes logical-slot tip lag, and (on
+PostgreSQL-only) pins a temporary logical slot so WAL retention matches managed
+async capture during the seed — foreground INSERT should be ≈ identical, not a
+marketed speedup. After the timed seed it probes PK bounds and logs WAL bytes +
+pre-flush heap/index size.
+
+One side at a time:
+
+```bash
 scripts/run-storage-comparison.sh --side pg --rows 100000
 scripts/run-storage-comparison.sh --side async --rows 100000
 ```
-
-Each side still uses a **fresh** pgrx PostgreSQL: the wrapper force-stops the
-cluster, **wipes `~/.pgrx/data-<ver>`**, then initdb + prepare so leftover WAL
-cannot skew the next side’s insert timing. Before timed seeding, the harness
-runs an **untimed warm-up** (throwaway table, same schema/manage mode, then
-`DROP` + `CHECKPOINT`) so the first heavy write after install is not the
-measured insert. Override with `--warmup-rows N` (`0` disables). After the timed
-seed it probes PK bounds and logs WAL bytes + pre-flush heap/index size so a
-surprising foreground insert gap can be diagnosed (managed should write more
-WAL than plain heap for the same SQL).
 
 Additional pgbench-oriented suites live under [`benchmarks/`](../../benchmarks/).
 Capture is always WAL-only:
