@@ -18,7 +18,14 @@ pub fn snowflake_id() -> i64 {
 #[must_use]
 #[cfg_attr(feature = "pg", pgrx::pg_extern(name = "koldstore_user_id"))]
 pub fn koldstore_user_id() -> Option<String> {
-    None
+    #[cfg(feature = "pg")]
+    {
+        crate::guc::user_id()
+    }
+    #[cfg(not(feature = "pg"))]
+    {
+        None
+    }
 }
 
 /// Snowflake worker id for this PostgreSQL backend.

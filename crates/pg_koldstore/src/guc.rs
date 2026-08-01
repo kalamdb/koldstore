@@ -11,6 +11,8 @@ use pgrx::guc::{GucContext, GucFlags, GucRegistry, GucSetting};
 #[cfg(feature = "pg")]
 static COLD_READS: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c"auto"));
 #[cfg(feature = "pg")]
+static USER_ID: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c""));
+#[cfg(feature = "pg")]
 static MAX_OPEN_PARQUET_READERS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_MAX_OPEN_PARQUET_READERS);
 #[cfg(feature = "pg")]
@@ -60,6 +62,14 @@ static ASYNC_MIRROR_MAX_RETAINED_BYTES: GucSetting<i32> =
 #[cfg(feature = "pg")]
 pub fn define_gucs() {
     let flags = GucFlags::default();
+    GucRegistry::define_string_guc(
+        c"koldstore.user_id",
+        c"Active user/tenant scope for user-scoped managed tables.",
+        c"Fail-closed session scope for user-typed tables. Must be set before scoped DML, SELECT, and changes_since. Empty means unset.",
+        &USER_ID,
+        GucContext::Userset,
+        flags,
+    );
     GucRegistry::define_string_guc(
         c"koldstore.cold_reads",
         c"Controls KoldStore cold reads.",
@@ -352,6 +362,45 @@ pub const ENABLE_MERGE_SCAN_GUC: &str = "koldstore.enable_merge_scan";
 pub const INTERNAL_SYSTEM_WRITE_GUC: &str = "koldstore.internal_system_write";
 pub const INTERNAL_FLUSH_CLEANUP_GUC: &str = "koldstore.internal_flush_cleanup";
 pub const INTERNAL_ASYNC_MIRROR_WORKER_GUC: &str = "koldstore.internal_async_mirror_worker";
+
+/// Active `koldstore.user_id` when set to a non-empty value.
+#[must_use]
+pub fn user_id() -> Option<String> {
+    #[cfg(feature = "pg")]
+    {
+        let from_setting = USER_ID.get().and_then(|value| {
+            value
+                .to_str()
+                .ok()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        });
+        from_setting.or_else(read_user_id_config_option)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        None
+    }
+}
+
+/// Fallback for placeholder GUCs set before the extension registered the setting.
+#[cfg(feature = "pg")]
+fn read_user_id_config_option() -> Option<String> {
+    let setting = unsafe {
+        let name = c"koldstore.user_id";
+        let value = pgrx::pg_sys::GetConfigOption(name.as_ptr(), true, false);
+        if value.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(value)
+            .to_string_lossy()
+            .into_owned()
+    };
+    let trimmed = setting.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
 
 /// Whether the planner may inject KoldMergeScan paths.
 #[must_use]

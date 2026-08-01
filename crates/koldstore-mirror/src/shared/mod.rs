@@ -16,8 +16,8 @@ pub use columns::MirrorColumn;
 pub use error::{MirrorError, MirrorResult};
 pub use read::{
     plan_mirror_force_flush_stats, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats,
-    plan_mirror_stats, plan_select_mirror_last_rows, plan_select_mirror_rows_after_seq,
-    plan_select_mirror_rows_after_seq_with_params,
+    plan_mirror_stats, plan_select_mirror_last_rows, plan_select_mirror_last_rows_with_params,
+    plan_select_mirror_rows_after_seq, plan_select_mirror_rows_after_seq_with_params,
 };
 pub use relation::{
     mirror_relation_for_source, MirrorRelation, CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,

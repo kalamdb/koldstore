@@ -118,15 +118,34 @@ pub fn changes_last(
 ///
 /// # Errors
 ///
-/// Returns an error when no primary-key columns are supplied or SQL cannot be
-/// represented.
+/// Returns an error when no primary-key columns are supplied, the scope column
+/// is unsafe, or SQL cannot be represented.
 pub fn plan_mirror_changes_last(
     mirror_table: &QualifiedTableName,
     primary_key_columns: &[String],
+    scope_column: Option<&str>,
 ) -> Result<MirrorChangesSincePlan, ChangeFeedError> {
     if primary_key_columns.is_empty() {
         return Err(ChangeFeedError::MissingPrimaryKey);
     }
+
+    let mut additional_predicates = Vec::new();
+    let mut additional_param_types = Vec::new();
+    let scope_parameter_index = match scope_column {
+        Some(scope_column) => {
+            let predicate = scope_predicate_sql("mirror", scope_column, 1)
+                .map_err(|_| ChangeFeedError::InvalidScopeColumn(scope_column.to_string()))?;
+            additional_predicates.push(predicate);
+            additional_param_types.push((1, SqlParamType::Text));
+            Some(1)
+        }
+        None => None,
+    };
+    let limit_param = if scope_parameter_index.is_some() {
+        2
+    } else {
+        1
+    };
 
     let mirror = mirror_table
         .as_table_name()
@@ -134,14 +153,20 @@ pub fn plan_mirror_changes_last(
         .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
     let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
     let statement = mirror_to_sql(
-        koldstore_mirror::plan_select_mirror_last_rows(&mirror, &primary_key, 1)
-            .map_err(|error| ChangeFeedError::Sql(error.to_string()))?,
+        koldstore_mirror::plan_select_mirror_last_rows_with_params(
+            &mirror,
+            &primary_key,
+            limit_param,
+            &additional_predicates,
+            &additional_param_types,
+        )
+        .map_err(|error| ChangeFeedError::Sql(error.to_string()))?,
     )
     .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
 
     Ok(MirrorChangesSincePlan {
         statement,
-        scope_parameter_index: None,
+        scope_parameter_index,
     })
 }
 

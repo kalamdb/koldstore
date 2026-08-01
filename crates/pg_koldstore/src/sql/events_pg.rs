@@ -5,7 +5,8 @@
 
 #[cfg(feature = "pg")]
 use koldstore_common::{
-    ChangeSource, MirrorChange, MirrorOperation, QualifiedTableName, SeqId, SqlParamType,
+    scope::active_scope_for_table, ChangeSource, MirrorChange, MirrorOperation, QualifiedTableName,
+    ScopeKey, SeqId, SqlParamType, TableKind,
 };
 #[cfg(feature = "pg")]
 use koldstore_merge::events::{self, DEFAULT_CHANGE_LIMIT};
@@ -109,6 +110,9 @@ fn changes_since_pg_impl(
         .iter()
         .map(|column| column.name.clone())
         .collect();
+    let scope = resolve_changes_since_scope(&snapshot, &pk_names)?;
+    let scope_key = scope.as_ref().map(|(key, _)| key.clone());
+    let scope_column = scope.as_ref().map(|(_, column)| column.as_str());
 
     let table_oid_u32 = table_oid.to_u32();
 
@@ -116,27 +120,42 @@ fn changes_since_pg_impl(
     let use_last_rows = since_seq == 0 && last_rows.is_some();
     let selected = if use_last_rows {
         let last_rows = last_rows.expect("checked above");
-        let hot = fetch_hot_mirror_last_rows(table_oid_u32, &mirror, &pk_names, last_rows)?;
+        let hot = fetch_hot_mirror_last_rows(
+            table_oid_u32,
+            &mirror,
+            &pk_names,
+            last_rows,
+            scope_column,
+            scope_key.as_ref(),
+        )?;
         let cold_floor = if hot.len() as i32 >= last_rows {
             hot.iter().map(|row| row.seq.get()).min().unwrap_or(1) - 1
         } else {
             0
         };
-        let (cold, _) = fetch_cold_changes(table_oid, &snapshot, cold_floor)?;
+        let (cold, _) = fetch_cold_changes(table_oid, &snapshot, cold_floor, scope_key.as_ref())?;
         let mut combined = hot;
         combined.extend(cold);
-        events::changes_last(&combined, table_oid_u32, None, last_rows)
+        events::changes_last(&combined, table_oid_u32, scope_key.as_ref(), last_rows)
             .map_err(|error| error.to_string())?
     } else {
-        let hot = fetch_hot_mirror_changes(table_oid_u32, &mirror, &pk_names, since_seq)?;
-        let (cold, oldest_cold) = fetch_cold_changes(table_oid, &snapshot, since_seq)?;
+        let hot = fetch_hot_mirror_changes(
+            table_oid_u32,
+            &mirror,
+            &pk_names,
+            since_seq,
+            scope_column,
+            scope_key.as_ref(),
+        )?;
+        let (cold, oldest_cold) =
+            fetch_cold_changes(table_oid, &snapshot, since_seq, scope_key.as_ref())?;
         let mut combined = hot;
         combined.extend(cold);
         let oldest_available = oldest_cold.and_then(|seq| SeqId::new(seq).ok());
         events::changes_since(
             &combined,
             table_oid_u32,
-            None,
+            scope_key.as_ref(),
             since_seq,
             Some(limit),
             oldest_available,
@@ -164,16 +183,44 @@ fn changes_since_pg_impl(
 }
 
 #[cfg(feature = "pg")]
+fn resolve_changes_since_scope(
+    snapshot: &koldstore_catalog::ManagedTableSnapshot,
+    pk_names: &[String],
+) -> Result<Option<(ScopeKey, String)>, String> {
+    let table_kind = if snapshot.scope_column.is_some() {
+        TableKind::User
+    } else {
+        TableKind::Shared
+    };
+    let active = active_scope_for_table(table_kind, crate::guc::user_id().as_deref())
+        .map_err(|error| error.to_string())?;
+    let Some(active) = active else {
+        return Ok(None);
+    };
+    let Some(scope_column) = snapshot.scope_column.as_ref() else {
+        return Ok(None);
+    };
+    // `__cl` stores PK columns only. Scope filtering can push into the mirror
+    // query only when the application scope column is part of the primary key.
+    if !pk_names.iter().any(|name| name == scope_column) {
+        return Err(format!(
+            "changes_since on user-scoped tables requires scope_column `{scope_column}` to be part of the primary key (mirror has PK columns only)"
+        ));
+    }
+    Ok(Some((active, scope_column.clone())))
+}
+
+#[cfg(feature = "pg")]
 fn fetch_hot_mirror_changes(
     table_oid: u32,
     mirror: &QualifiedTableName,
     pk_names: &[String],
     since_seq: i64,
+    scope_column: Option<&str>,
+    scope_key: Option<&ScopeKey>,
 ) -> Result<Vec<MirrorChange>, String> {
-    let plan = events::plan_mirror_changes_since(mirror, pk_names, None)
+    let plan = events::plan_mirror_changes_since(mirror, pk_names, scope_column)
         .map_err(|error| error.to_string())?;
-    // Collect every hot candidate with seq > since_seq; the merge step applies
-    // the caller limit after hot+cold latest-state resolution.
     let mut statement = plan.statement;
     if plan.scope_parameter_index.is_none() && statement.sql.contains("$3::integer") {
         statement.sql = statement.sql.replace("$3::integer", "$2::integer");
@@ -181,11 +228,17 @@ fn fetch_hot_mirror_changes(
     }
 
     let rows = crate::catalog::owner::with_extension_owner(|| {
-        crate::spi::execute_prepared(
-            &statement,
-            &[DatumWithOid::from(since_seq), DatumWithOid::from(i32::MAX)],
-            |tuples| decode_hot_mirror_tuples(table_oid, tuples),
-        )
+        let params: Vec<DatumWithOid<'_>> = match (plan.scope_parameter_index, scope_key) {
+            (Some(_), Some(scope_key)) => vec![
+                DatumWithOid::from(since_seq),
+                DatumWithOid::from(scope_key.as_str()),
+                DatumWithOid::from(i32::MAX),
+            ],
+            _ => vec![DatumWithOid::from(since_seq), DatumWithOid::from(i32::MAX)],
+        };
+        crate::spi::execute_prepared(&statement, &params, |tuples| {
+            decode_hot_mirror_tuples(table_oid, tuples, scope_key)
+        })
         .map_err(|error| error.to_string())
     })??;
     Ok(rows)
@@ -197,15 +250,24 @@ fn fetch_hot_mirror_last_rows(
     mirror: &QualifiedTableName,
     pk_names: &[String],
     last_rows: i32,
+    scope_column: Option<&str>,
+    scope_key: Option<&ScopeKey>,
 ) -> Result<Vec<MirrorChange>, String> {
-    let plan =
-        events::plan_mirror_changes_last(mirror, pk_names).map_err(|error| error.to_string())?;
+    let plan = events::plan_mirror_changes_last(mirror, pk_names, scope_column)
+        .map_err(|error| error.to_string())?;
     let rows = crate::catalog::owner::with_extension_owner(|| {
-        crate::spi::execute_prepared(
-            &plan.statement,
-            &[DatumWithOid::from(last_rows)],
-            |tuples| decode_hot_mirror_tuples(table_oid, tuples),
-        )
+        let params: Vec<DatumWithOid<'_>> = match (plan.scope_parameter_index, scope_key) {
+            (Some(_), Some(scope_key)) => {
+                vec![
+                    DatumWithOid::from(scope_key.as_str()),
+                    DatumWithOid::from(last_rows),
+                ]
+            }
+            _ => vec![DatumWithOid::from(last_rows)],
+        };
+        crate::spi::execute_prepared(&plan.statement, &params, |tuples| {
+            decode_hot_mirror_tuples(table_oid, tuples, scope_key)
+        })
         .map_err(|error| error.to_string())
     })??;
     Ok(rows)
@@ -215,6 +277,7 @@ fn fetch_hot_mirror_last_rows(
 fn decode_hot_mirror_tuples(
     table_oid: u32,
     tuples: pgrx::spi::SpiTupleTable<'_>,
+    scope_key: Option<&ScopeKey>,
 ) -> pgrx::spi::Result<Vec<MirrorChange>> {
     let mut out = Vec::new();
     for tuple in tuples {
@@ -235,7 +298,7 @@ fn decode_hot_mirror_tuples(
         })?;
         out.push(MirrorChange {
             table_oid,
-            scope_key: None,
+            scope_key: scope_key.cloned(),
             pk_json: pk.0,
             operation,
             seq,
@@ -252,6 +315,7 @@ fn fetch_cold_changes(
     table_oid: pgrx::pg_sys::Oid,
     snapshot: &koldstore_catalog::ManagedTableSnapshot,
     since_seq: i64,
+    scope_key: Option<&ScopeKey>,
 ) -> Result<(Vec<MirrorChange>, Option<i64>), String> {
     let Some(manifest) = crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?
     else {
@@ -343,12 +407,20 @@ fn fetch_cold_changes(
             if row.seq <= since_seq {
                 continue;
             }
-            changes.push(cold_row_to_mirror_change(
+            let change = cold_row_to_mirror_change(
                 table_oid.to_u32(),
                 &snapshot.primary_key_columns,
                 &physical_pk_names,
                 row,
-            )?);
+                snapshot.scope_column.as_deref(),
+            )?;
+            if let Some(required) = scope_key {
+                match change.scope_key.as_ref() {
+                    Some(actual) if actual == required => {}
+                    _ => continue,
+                }
+            }
+            changes.push(change);
         }
     }
 
@@ -361,6 +433,7 @@ fn cold_row_to_mirror_change(
     logical_pk: &[koldstore_common::ColumnRef],
     physical_pk_names: &[String],
     mut row: CleanColdRow,
+    scope_column: Option<&str>,
 ) -> Result<MirrorChange, String> {
     // Remap physical PK field names back to logical snapshot names.
     if let serde_json::Value::Object(ref mut map) = row.pk_json {
@@ -380,11 +453,13 @@ fn cold_row_to_mirror_change(
         row.pk_json = serde_json::Value::Object(remapped);
     }
 
+    let scope_key = scope_key_from_pk_json(&row.pk_json, scope_column);
+
     let operation = MirrorOperation::from_code(row.op).map_err(|error| error.to_string())?;
     let seq = SeqId::new(row.seq).map_err(|error| error.to_string())?;
     Ok(MirrorChange {
         table_oid,
-        scope_key: None,
+        scope_key,
         pk_json: row.pk_json,
         operation,
         seq,
@@ -392,6 +467,20 @@ fn cold_row_to_mirror_change(
         row_image_json: (!row.deleted).then_some(row.row_image),
         source: ChangeSource::ColdRecord,
     })
+}
+
+#[cfg(feature = "pg")]
+fn scope_key_from_pk_json(
+    pk_json: &serde_json::Value,
+    scope_column: Option<&str>,
+) -> Option<ScopeKey> {
+    let scope_column = scope_column?;
+    let value = pk_json.get(scope_column)?;
+    let text = match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string().trim_matches('"').to_string(),
+    };
+    ScopeKey::new(text).ok()
 }
 
 #[cfg(feature = "pg")]

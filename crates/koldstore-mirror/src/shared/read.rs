@@ -87,8 +87,36 @@ pub fn plan_select_mirror_last_rows(
     primary_key: &[&str],
     limit_param: usize,
 ) -> MirrorResult<MirrorStatement> {
+    plan_select_mirror_last_rows_with_params(mirror_table, primary_key, limit_param, &[], &[])
+}
+
+/// Plans newest-N mirror rows with optional additional predicates/params.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied.
+pub fn plan_select_mirror_last_rows_with_params(
+    mirror_table: &MirrorRelation,
+    primary_key: &[&str],
+    limit_param: usize,
+    additional_predicates: &[String],
+    additional_param_types: &[(usize, SqlParamType)],
+) -> MirrorResult<MirrorStatement> {
     let pk_json = pk_json_projection(primary_key)?;
-    let mut param_types = vec![SqlParamType::Text; limit_param.max(1)];
+    let where_sql = if additional_predicates.is_empty() {
+        String::new()
+    } else {
+        format!("\nWHERE {}", additional_predicates.join(" AND "))
+    };
+    // Reuse the after-seq helper's slot merger with a dummy since slot of 0 so
+    // only limit + additional params are materialised.
+    let mut param_types = param_types_for_slots(
+        0,
+        SqlParamType::Text,
+        limit_param.max(1),
+        SqlParamType::Integer,
+        additional_param_types,
+    );
     if limit_param > 0 {
         param_types[limit_param - 1] = SqlParamType::Integer;
     }
@@ -101,7 +129,7 @@ pub fn plan_select_mirror_last_rows(
     jsonb_build_object({pk_json}) AS pk,
     (mirror."op" = 3) AS deleted,
     NULL::jsonb AS row_image
-FROM {mirror} AS mirror
+FROM {mirror} AS mirror{where_sql}
 ORDER BY mirror."seq" DESC
 LIMIT ${limit_param}::integer"#,
             mirror = mirror_table.quoted(),

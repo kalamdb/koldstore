@@ -13,7 +13,7 @@ fn snowflake_id_is_monotonic() {
 
 #[pg_test]
 fn koldstore_user_id_guc_roundtrips() {
-    // `koldstore_user_id()` SQL helper is still a stub; validate the GUC itself.
+    // Validate the registered GUC (and the SQL helper that reads it).
     Spi::run("SET koldstore.user_id = '42'").expect("set user_id");
     let value = spi_get_text("SHOW koldstore.user_id");
     assert_eq!(value, "42");
