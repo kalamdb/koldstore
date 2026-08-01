@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{CommitSeq, KoldstoreError, LogicalPk, Result, ScopeKey, SeqId, StablePkHash};
+use crate::{KoldstoreError, LogicalPk, Result, ScopeKey, SeqId, StablePkHash};
 
 /// Operation recorded in a latest-state change-log mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,8 +135,6 @@ pub struct HotRow {
     pub scope_key: Option<ScopeKey>,
     /// Row/effect sequence.
     pub seq: SeqId,
-    /// Commit-order cursor.
-    pub commit_seq: CommitSeq,
     /// Whether this row is a tombstone.
     pub deleted: bool,
     /// Application column payload.
@@ -152,7 +150,6 @@ impl HotRow {
             pk: self.pk,
             scope_key: self.scope_key,
             seq: self.seq,
-            commit_seq: self.commit_seq,
             pk_hash,
         }
     }
@@ -167,8 +164,6 @@ pub struct ColdRow {
     pub scope_key: Option<ScopeKey>,
     /// Row/effect sequence.
     pub seq: SeqId,
-    /// Commit-order cursor.
-    pub commit_seq: CommitSeq,
     /// Whether this cold row is a retained tombstone.
     pub deleted: bool,
     /// Segment schema version.
@@ -186,8 +181,6 @@ pub struct Tombstone {
     pub scope_key: Option<ScopeKey>,
     /// Tombstone sequence.
     pub seq: SeqId,
-    /// Tombstone commit cursor.
-    pub commit_seq: CommitSeq,
     /// Stable PK hash.
     pub pk_hash: StablePkHash,
 }

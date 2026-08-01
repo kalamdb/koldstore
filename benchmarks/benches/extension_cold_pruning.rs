@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use koldstore_common::{CommitSeq, SeqId};
+use koldstore_common::SeqId;
 use koldstore_parquet::{
     ColumnStats, FooterSummary, RowGroupPruner, RowGroupStats, SegmentFooterMetadata,
 };
@@ -18,16 +18,6 @@ fn bench_row_group_pruning(c: &mut Criterion) {
                 black_box(&footer),
                 SeqId::new(10_000).expect("valid seq"),
                 SeqId::new(30_000).expect("valid seq"),
-            )
-        })
-    });
-
-    c.bench_function("row_group_commit_seq_pruning", |b| {
-        b.iter(|| {
-            pruner.prune_commit_seq_range(
-                black_box(&footer),
-                CommitSeq::new(10_000).expect("valid commit seq"),
-                CommitSeq::new(30_000).expect("valid commit seq"),
             )
         })
     });
@@ -85,8 +75,6 @@ fn footer_with_row_groups(count: usize) -> FooterSummary {
                     row_group: idx,
                     min_seq: Some(min),
                     max_seq: Some(min + 999),
-                    min_commit_seq: Some(min),
-                    max_commit_seq: Some(min + 999),
                 }
             })
             .collect(),

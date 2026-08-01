@@ -177,7 +177,6 @@ async fn cold_reads_off_blocks_managed_scans_that_need_parquet_on_pgrx() -> Resu
 
 #[tokio::test]
 async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?.as_str();
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_jobs_contract").await?;
         let table = db
@@ -193,8 +192,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                       table_name     => $1::text::regclass,
                       storage        => $2,
                       hot_row_limit  => NULL,
-                      migration_order_by => 'id',
-                      mirror_capture_mode => $3
+                      migration_order_by => 'id'
                     ) AS id
                 )
                 SELECT
@@ -202,7 +200,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                   id::text AS job_id
                 FROM job
                 "#,
-                &[&table.relation, &db.storage_name, &mode],
+                &[&table.relation, &db.storage_name],
             )
             .await?;
         assert_eq!(migrated.get::<_, String>("return_type"), "uuid");

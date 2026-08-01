@@ -86,7 +86,7 @@ async fn order_column_range_shapes_use_cold_segment_index() -> Result<()> {
                 "#
             ))
             .await?;
-        common::fence_selected_mirror(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         let renamed_row: i64 = db
             .client
             .query_one(
@@ -122,9 +122,6 @@ async fn order_column_range_shapes_use_cold_segment_index() -> Result<()> {
 #[tokio::test]
 async fn async_order_column_retains_mirror_order_key() -> Result<()> {
     common::require_pgrx_server().await?;
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        return Ok(());
-    }
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "order_col_async").await?;
         let relation = db.relation("async_order_events");
@@ -147,7 +144,6 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
                   storage => $2,
                   hot_row_limit => NULL,
                   migration_order_by => 'id',
-                  mirror_capture_mode => 'async',
                   segment_order_column => 'event_time'
                 )
                 "#,
@@ -171,7 +167,7 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
                 "#
             ))
             .await?;
-        common::fence_selected_mirror(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let mirror = format!(
             "koldstore.{}__cl",
@@ -187,7 +183,7 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
         db.client
             .batch_execute(&format!("DELETE FROM {relation} WHERE id = 1;"))
             .await?;
-        common::fence_selected_mirror(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let after: Vec<u8> = db
             .client
@@ -337,7 +333,6 @@ async fn setup_order_table(db: &common::TestDb, table: &str) -> Result<String> {
             "#
         ))
         .await?;
-    let mode = common::selected_mirror_capture_mode()?.as_str();
     db.client
         .execute(
             r#"
@@ -347,11 +342,10 @@ async fn setup_order_table(db: &common::TestDb, table: &str) -> Result<String> {
               hot_row_limit => NULL,
               max_rows_per_file => 200,
               migration_order_by => 'id',
-              mirror_capture_mode => $3,
               segment_order_column => 'event_time'
             )
             "#,
-            &[&relation, &db.storage_name, &mode],
+            &[&relation, &db.storage_name],
         )
         .await?;
     db.client

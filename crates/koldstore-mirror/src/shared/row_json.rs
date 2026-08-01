@@ -11,8 +11,4 @@ pub struct MirrorSeqStats {
     pub min_seq: i64,
     /// Maximum mirror `seq`.
     pub max_seq: i64,
-    /// Minimum commit sequence covered by the mirror.
-    pub min_commit_seq: i64,
-    /// Maximum commit sequence covered by the mirror.
-    pub max_commit_seq: i64,
 }

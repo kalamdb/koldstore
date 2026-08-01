@@ -146,29 +146,12 @@ fn older_than_cutoff(
     Ok(max_seq.map(|seq| (count, seq)))
 }
 
-/// Returns the managed table's mirror capture mode (defaults to strict).
-pub(super) fn active_mirror_capture_mode(
-    table_oid: pgrx::pg_sys::Oid,
-) -> Result<koldstore_common::MirrorCaptureMode, String> {
-    use pgrx::datum::DatumWithOid;
-
-    let statement = koldstore_catalog::queries::plan_active_flush_policy_options()
-        .map_err(|error| error.to_string())?;
-    let options =
-        crate::spi::select_one::<pgrx::JsonB>(&statement, &[DatumWithOid::from(table_oid)])
-            .map_err(|error| error.to_string())?;
-    let Some(options) = options else {
-        return Ok(koldstore_common::MirrorCaptureMode::Strict);
-    };
-    Ok(koldstore_common::ManageTableOptions::from_value(&options.0).mirror_capture_mode())
-}
-
 /// Blocks concurrent source DML for the async prune fence.
 ///
 /// Uses `SHARE ROW EXCLUSIVE` so in-flight writers finish, new writers wait,
 /// and ordinary `SELECT` continues. Sets a local `lock_timeout` so an idle
 /// blocker fails the flush before prune rather than waiting forever.
-pub(super) fn lock_source_table_share_row_exclusive(
+pub(crate) fn lock_source_table_share_row_exclusive(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<(), String> {
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
@@ -307,8 +290,6 @@ pub(super) fn persist_flush_segments_batch(
     let mut batch_numbers = Vec::with_capacity(segments.len());
     let mut min_seqs = Vec::with_capacity(segments.len());
     let mut max_seqs = Vec::with_capacity(segments.len());
-    let mut min_commit_seqs = Vec::with_capacity(segments.len());
-    let mut max_commit_seqs = Vec::with_capacity(segments.len());
     let mut row_counts = Vec::with_capacity(segments.len());
     let mut byte_sizes = Vec::with_capacity(segments.len());
     let mut schema_versions = Vec::with_capacity(segments.len());
@@ -351,8 +332,6 @@ pub(super) fn persist_flush_segments_batch(
         batch_numbers.push(row.batch_number);
         min_seqs.push(row.min_seq);
         max_seqs.push(row.max_seq);
-        min_commit_seqs.push(row.min_commit_seq);
-        max_commit_seqs.push(row.max_commit_seq);
         row_counts.push(row.row_count);
         byte_sizes.push(row.byte_size);
         schema_versions.push(row.schema_version);
@@ -405,8 +384,6 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(batch_numbers),
             DatumWithOid::from(min_seqs),
             DatumWithOid::from(max_seqs),
-            DatumWithOid::from(min_commit_seqs),
-            DatumWithOid::from(max_commit_seqs),
             DatumWithOid::from(row_counts),
             DatumWithOid::from(byte_sizes),
             DatumWithOid::from(schema_versions),
@@ -456,7 +433,6 @@ pub(super) fn activate_flush_segments(
     expected_generation: i64,
     segment_count: i32,
     max_seq: i64,
-    max_commit_seq: i64,
     pending_segment_ids: &[uuid::Uuid],
 ) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
@@ -478,7 +454,6 @@ pub(super) fn activate_flush_segments(
             DatumWithOid::from(new_generation),
             DatumWithOid::from(segment_count),
             DatumWithOid::from(max_seq),
-            DatumWithOid::from(max_commit_seq),
             DatumWithOid::from(segment_ids),
         ],
     )
@@ -505,9 +480,7 @@ pub(super) fn prune_flushed_hot_rows(
     // DELETE instead of materializing every PK into JSON and chunking
     // jsonb_to_recordset deletes.
     let plan = prepare_seq_range_cleanup(table_oid, primary_key_columns, mirror_ops)?;
-    let stamp_replication_origin =
-        active_mirror_capture_mode(table_oid)? == koldstore_common::MirrorCaptureMode::Async;
-    execute_seq_range_cleanup(&plan, max_seq, stamp_replication_origin)
+    execute_seq_range_cleanup(&plan, max_seq)
 }
 
 fn prepare_seq_range_cleanup(
@@ -528,7 +501,6 @@ fn prepare_seq_range_cleanup(
 fn execute_seq_range_cleanup(
     plan: &koldstore_flush::CleanSchemaCleanupPlan,
     max_seq: i64,
-    stamp_replication_origin: bool,
 ) -> Result<(i64, i64), String> {
     use pgrx::datum::DatumWithOid;
 
@@ -538,13 +510,10 @@ fn execute_seq_range_cleanup(
             client
                 .update("SET LOCAL session_replication_role = replica", None, &[])
                 .map_err(|error| error.to_string())?;
-            if stamp_replication_origin {
-                // Keep the database-scoped origin set through COMMIT. pgoutput
-                // emits ORIGIN from the commit record's origin; restoring before
-                // commit leaves PG15 prune DELETEs without an ORIGIN message.
-                // Strict capture has no logical stream and must not acquire one.
-                arm_flush_replication_origin()?;
-            }
+            // Keep the database-scoped origin set through COMMIT. pgoutput
+            // emits ORIGIN from the commit record's origin; restoring before
+            // commit leaves PG15 prune DELETEs without an ORIGIN message.
+            arm_flush_replication_origin()?;
             let tuples = client
                 .update(&plan.statement.sql, None, &cleanup_arg)
                 .map_err(|error| error.to_string())?;

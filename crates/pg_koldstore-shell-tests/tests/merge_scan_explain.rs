@@ -79,7 +79,6 @@ fn merge_scan_plan_serializes_complete_custom_private_payload() {
         primary_key_columns: vec!["id".to_string()],
         merge_metadata_attnums: MergeMetadataAttnums {
             seq: 3,
-            commit_seq: 4,
             deleted: 5,
             scope: Some(6),
         },

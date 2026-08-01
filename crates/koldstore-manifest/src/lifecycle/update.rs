@@ -24,7 +24,6 @@ impl Manifest {
         for segment in segments {
             if segment.status != SegmentStatus::Deleted {
                 self.max_seq = self.max_seq.max(segment.max_seq);
-                self.max_commit_seq = self.max_commit_seq.max(segment.max_commit_seq);
             }
             self.segments.push(segment);
             appended_segments += 1;

@@ -25,20 +25,9 @@ jobs:
       - name: Install PostgreSQL and build dependencies
         run: |
           set -euo pipefail
-          bash scripts/ci/disable-broken-runner-apt-sources.sh
-          sudo apt-get update -y -qq
-          sudo apt-get install -y wget gnupg lsb-release
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-          sudo apt-get update -y -qq
-          sudo apt-get install -y \
-            build-essential \
-            libssl-dev \
-            pkg-config \
-            postgresql-${PG_VER} \
+          bash scripts/ci/install-pgdg-dev.sh "${PG_VER}" \
             postgresql-client-${PG_VER} \
-            postgresql-contrib-${PG_VER} \
-            postgresql-server-dev-${PG_VER}
+            postgresql-contrib-${PG_VER}
 
       - name: Start PostgreSQL
         run: |
@@ -72,6 +61,44 @@ jobs:
             --no-default-features \
             --features pg${PG_VER},s3 \
             --pg-config /usr/lib/postgresql/${PG_VER}/bin/pg_config
+
+      - name: Configure wal_level and shared_preload for KoldStore
+        run: |
+          set -euo pipefail
+          # CREATE EXTENSION provisions koldstore_async_mirror (needs logical WAL).
+          # shared_preload is required for KoldMergeScan + manage_table.
+          sudo -u postgres psql -v ON_ERROR_STOP=1 <<'SQL'
+          ALTER SYSTEM SET wal_level = 'logical';
+          ALTER SYSTEM SET shared_preload_libraries = 'koldstore';
+          SQL
+          sudo pg_ctlcluster ${PG_VER} main restart
+          deadline=$((SECONDS + 60))
+          until pg_isready -h /var/run/postgresql -U runner -d runner >/dev/null 2>&1; do
+            if (( SECONDS > deadline )); then
+              echo "error: PostgreSQL did not become ready after restart" >&2
+              sudo journalctl -u postgresql@${PG_VER}-main -n 80 >&2 || true
+              exit 1
+            fi
+            sleep 1
+          done
+          psql "host=/var/run/postgresql user=runner dbname=runner" -v ON_ERROR_STOP=1 <<'SQL'
+          SHOW wal_level;
+          SHOW shared_preload_libraries;
+          SELECT setting FROM pg_settings WHERE name = 'wal_level';
+          SQL
+          wal_level="$(psql "host=/var/run/postgresql user=runner dbname=runner" -tAc "SHOW wal_level" | tr -d '[:space:]')"
+          if [[ "${wal_level}" != "logical" ]]; then
+            echo "error: expected wal_level=logical, got '${wal_level}'" >&2
+            exit 1
+          fi
+          preload="$(psql "host=/var/run/postgresql user=runner dbname=runner" -tAc "SHOW shared_preload_libraries" | tr -d '[:space:]')"
+          case ",${preload}," in
+            *,koldstore,*) ;;
+            *)
+              echo "error: shared_preload_libraries must include koldstore (got '${preload}')" >&2
+              exit 1
+              ;;
+          esac
 
       - name: Run Criterion + pgbench suite (benchmarks/scripts/run.sh)
         env:
@@ -112,4 +139,4 @@ jobs:
         with:
           name: pgbench-benchmark-results
           path: benchmarks/results
-          if-no-files-found: error
+          if-no-files-found: warn

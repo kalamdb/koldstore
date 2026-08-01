@@ -19,7 +19,7 @@ pub mod scan;
 #[path = "core/tombstone.rs"]
 pub mod tombstone;
 
-pub use changelog::{changes_since, ChangeCursor, ChangeGap};
+pub use changelog::{changes_last, changes_since, ChangeCursor, ChangeGap};
 pub use dml::{
     allocate_seq_for_tests, delete_decision, delete_decision_with_flush_fence, plan_delete_row,
     plan_hydrate_pk, plan_standard_sql_cold_only_update, plan_update_row, stamp_dml_effect,
@@ -27,7 +27,8 @@ pub use dml::{
     HydratePkRequest, ManagedDmlOperation, UpdateRowRequest, COLD_DML_FUNCTIONS,
 };
 pub use events::{
-    plan_mirror_changes_since, ChangeFeedError, MirrorChangesSincePlan, DEFAULT_CHANGE_LIMIT,
+    plan_mirror_changes_last, plan_mirror_changes_since, ChangeFeedError, MirrorChangesSincePlan,
+    DEFAULT_CHANGE_LIMIT,
 };
 pub use managed_hook::{
     extract_simple_pk_delete_predicate, plan_managed_delete_effect, plan_managed_insert_effect,

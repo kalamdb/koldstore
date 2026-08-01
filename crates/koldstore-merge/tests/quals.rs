@@ -57,8 +57,8 @@ fn mutable_app_column_filters_remain_residual_after_winner_resolution() {
         },
         Predicate {
             column_id: ColumnId::from_attnum(4),
-            column: "commit_seq".to_string(),
-            class: ColumnClass::CommitSeq,
+            column: "seq".to_string(),
+            class: ColumnClass::Seq,
             value: PredicateValue::Range { min: 10, max: 20 },
         },
     ];
@@ -66,7 +66,7 @@ fn mutable_app_column_filters_remain_residual_after_winner_resolution() {
     let classified = classify_predicates(&predicates).unwrap();
 
     assert_eq!(classified.safe.len(), 1);
-    assert_eq!(classified.safe[0].column, "commit_seq");
+    assert_eq!(classified.safe[0].column, "seq");
     assert_eq!(classified.residual.len(), 1);
     assert_eq!(classified.residual[0].column, "status");
     assert!(classified.requires_post_merge_filtering());
@@ -85,7 +85,7 @@ fn malformed_ranges_are_rejected_before_pruning() {
 }
 
 #[test]
-fn pruning_plan_extracts_pk_scope_sequence_commit_and_immutable_columns() {
+fn pruning_plan_extracts_pk_scope_sequence_and_immutable_columns() {
     let predicates = vec![
         Predicate {
             column_id: ColumnId::from_attnum(1),
@@ -106,12 +106,6 @@ fn pruning_plan_extracts_pk_scope_sequence_commit_and_immutable_columns() {
             value: PredicateValue::Range { min: 10, max: 20 },
         },
         Predicate {
-            column_id: ColumnId::from_attnum(4),
-            column: "commit_seq".to_string(),
-            class: ColumnClass::CommitSeq,
-            value: PredicateValue::Range { min: 11, max: 21 },
-        },
-        Predicate {
             column_id: ColumnId::from_attnum(5),
             column: "created_at".to_string(),
             class: ColumnClass::Immutable,
@@ -124,7 +118,6 @@ fn pruning_plan_extracts_pk_scope_sequence_commit_and_immutable_columns() {
     assert_eq!(plan.pk_columns, vec![ColumnId::from_attnum(1)]);
     assert_eq!(plan.scope_columns, vec![ColumnId::from_attnum(2)]);
     assert_eq!(plan.seq_range.unwrap().column, "seq");
-    assert_eq!(plan.commit_seq_range.unwrap().column, "commit_seq");
     assert_eq!(plan.immutable_stat_columns, vec![ColumnId::from_attnum(5)]);
     assert!(plan.residual_columns.is_empty());
 }

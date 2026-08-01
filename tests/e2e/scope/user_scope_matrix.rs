@@ -161,7 +161,7 @@ async fn non_owner_rls_is_enforced_for_hot_cold_and_mixed_rows() -> Result<()> {
             .context("hot-only RLS visibility")?;
         db.client.batch_execute("RESET ROLE").await?;
 
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         let flushed = db.flush_table(&table.relation).await?;
         anyhow::ensure!(flushed > 0, "expected a cold flush, flushed {flushed}");
         common::assert_no_active_jobs(&db.client, &table.relation).await?;
@@ -270,7 +270,7 @@ async fn non_owner_rls_is_enforced_for_hot_cold_and_mixed_rows() -> Result<()> {
             moved == 1,
             "expected one scope-changing reinsert, moved {moved}"
         );
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         db.client
             .batch_execute(&format!("SET ROLE {app_role}"))
@@ -308,7 +308,6 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
                 &[&key],
             )
             .await?;
-        let mode = common::selected_mirror_capture_mode()?.as_str().to_string();
         db.client
             .execute(
                 r#"
@@ -318,11 +317,10 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
                   hot_row_limit => NULL,
                   table_type => 'user',
                   scope_column => 'user_id',
-                  migration_order_by => 'migration_seq',
-                  mirror_capture_mode => $3
+                  migration_order_by => 'migration_seq'
                 )
                 "#,
-                &[&relation, &db.storage_name, &mode],
+                &[&relation, &db.storage_name],
             )
             .await?;
         db.client
@@ -334,7 +332,7 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
         db.client
             .batch_execute(&format!("ALTER TABLE {relation} FORCE ROW LEVEL SECURITY"))
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         anyhow::ensure!(
             db.flush_table(&relation).await? > 0,
             "expected text-PK flush"
@@ -348,7 +346,7 @@ async fn text_pk_pushdown_is_safe_with_nonconforming_strings() -> Result<()> {
                 &[&key],
             )
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let app_role = db.ensure_app_role().await?;
         db.client
@@ -448,7 +446,6 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
                  VALUES ('CaseKey', 'user-a', 'cold-a', 1);"
             ))
             .await?;
-        let mode = common::selected_mirror_capture_mode()?.as_str().to_string();
         let error = db
             .client
             .execute(
@@ -459,11 +456,10 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
                   hot_row_limit => NULL,
                   table_type => 'user',
                   scope_column => 'user_id',
-                  migration_order_by => 'migration_seq',
-                  mirror_capture_mode => $3
+                  migration_order_by => 'migration_seq'
                 )
                 "#,
-                &[&relation, &db.storage_name, &mode],
+                &[&relation, &db.storage_name],
             )
             .await
             .expect_err("nondeterministic primary-key collation must fail closed");

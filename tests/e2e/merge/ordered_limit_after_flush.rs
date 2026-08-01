@@ -31,7 +31,7 @@ async fn ordered_limit_after_multi_wave_flush_returns_cold_rows() -> Result<()> 
                 &[&table.relation],
             )
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         for wave in 0..3 {
             if wave > 0 {
@@ -52,7 +52,7 @@ async fn ordered_limit_after_multi_wave_flush_returns_cold_rows() -> Result<()> 
                         relation = table.relation
                     ))
                     .await?;
-                common::fence_async_mirror_if_needed(&db.client).await?;
+                common::fence_async_mirror(&db.client).await?;
             }
             let flushed = db.flush_table(&table.relation).await?;
             anyhow::ensure!(flushed > 0, "wave {wave} flush archived no rows");
@@ -176,7 +176,7 @@ async fn ordered_limit_user_scope_after_flush_uses_merge_scan() -> Result<()> {
                 &[&relation],
             )
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         for _ in 0..2 {
             let flushed = db.flush_table(&relation).await?;
@@ -223,7 +223,7 @@ async fn ordered_limit_during_flush_sees_all_rows() -> Result<()> {
         let db = common::TestDb::start(target, "merge_ordered_midflush").await?;
         let table = db.create_indexed_items_table("midflush_items", 400).await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         // Publish a first cold generation so queries must merge hot+cold.
         assert!(db.flush_table(&table.relation).await? > 0);
@@ -244,7 +244,7 @@ async fn ordered_limit_during_flush_sees_all_rows() -> Result<()> {
                 relation = table.relation
             ))
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let coordinator = connect_peer(&db).await?;
         barrier_lock(&coordinator).await?;

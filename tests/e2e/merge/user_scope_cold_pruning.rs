@@ -86,7 +86,7 @@ async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<(
                 "#
             ))
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         db.client.batch_execute("RESET koldstore.user_id").await?;
         let flushed_a = force_flush(&db, &relation).await?;
         anyhow::ensure!(flushed_a > 0, "user-a flush archived no rows");
@@ -104,7 +104,7 @@ async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<(
                 "#
             ))
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         db.client.batch_execute("RESET koldstore.user_id").await?;
         let flushed_b = force_flush(&db, &relation).await?;
         anyhow::ensure!(flushed_b > 0, "user-b flush archived no rows");
@@ -253,10 +253,7 @@ async fn user_scope_cold_segment_lookup_is_index_backed_on_pgrx() -> Result<()> 
         .await?;
         common::assertions::assert_catalog_index_plan_uses_any(
             &plan,
-            &[
-                "cold_segments_active_scope_seq_idx",
-                "cold_segments_active_commit_idx",
-            ],
+            &["cold_segments_active_scope_seq_idx"],
         )?;
         assert!(plan.contains("scope_key = 'user-a'::text"), "{plan}");
         assert!(plan.contains("min_seq <= 5"), "{plan}");

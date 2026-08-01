@@ -182,7 +182,7 @@ fn mirror_changes_since_scan_keeps_callers_in_control_of_predicates() {
     assert!(scan
         .sql
         .contains("jsonb_build_object('id', mirror.\"id\") AS pk"));
-    assert!(scan.sql.contains("mirror.\"seq\" AS commit_seq"));
+    assert!(scan.sql.contains("mirror.\"seq\" AS seq"));
     assert!(scan.sql.contains("NULL::jsonb AS row_image"));
     assert!(scan.sql.contains("mirror.\"seq\" > $1::bigint"));
     assert!(scan.sql.contains("mirror.\"tenant_id\" = $2"));

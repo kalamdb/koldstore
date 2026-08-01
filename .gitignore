@@ -39,3 +39,5 @@ Thumbs.db
 # Release Docker build staging (created in CI / local experiments)
 docker-artifacts/
 /tmp
+scripts/__pycache__/render-storage-comparison-results.cpython-314.pyc
+/scripts/tests/__pycache__

@@ -182,8 +182,8 @@ WHERE id = $1::uuid
 
 /// Plans a running-progress update for an inline flush job.
 ///
-/// `$3` rows flushed, `$4` batches, `$5`/`$6` checkpoints, `$7` phase,
-/// `$8` progress_total (unchanged estimate).
+/// `$3` rows flushed, `$4` batches, `$5` checkpoint, `$6` phase,
+/// `$7` progress_total (unchanged estimate).
 ///
 /// # Errors
 ///
@@ -194,14 +194,13 @@ pub fn plan_update_inline_flush_job_progress(
         "update inline flush job progress",
         r#"
 UPDATE koldstore.jobs
-SET phase = $7::text,
+SET phase = $6::text,
     rows_processed = $3::bigint,
     rows_flushed = $3::bigint,
     batches_completed = $4::integer,
     checkpoint_seq = $5::bigint,
-    checkpoint_commit_seq = $6::bigint,
     progress_current = $3::bigint,
-    progress_total = GREATEST($8::bigint, $3::bigint),
+    progress_total = GREATEST($7::bigint, $3::bigint),
     progress_unit = 'rows',
     updated_at = now()
 WHERE id = $1::uuid
@@ -215,8 +214,8 @@ WHERE id = $1::uuid
 
 /// Plans completion of an inline flush job.
 ///
-/// `$3` is total rows flushed, `$4`/`$5` are checkpoint seq watermarks, and
-/// `$6` is the number of Parquet segment batches written in this job.
+/// `$3` is total rows flushed, `$4` is the checkpoint seq watermark, and
+/// `$5` is the number of Parquet segment batches written in this job.
 ///
 /// # Errors
 ///
@@ -232,8 +231,7 @@ SET status = 'completed',
     rows_processed = $3::bigint,
     rows_flushed = $3::bigint,
     checkpoint_seq = $4::bigint,
-    checkpoint_commit_seq = $5::bigint,
-    batches_completed = $6::integer,
+    batches_completed = $5::integer,
     progress_current = $3::bigint,
     progress_total = GREATEST(progress_total, $3::bigint),
     progress_unit = 'rows',
@@ -326,7 +324,6 @@ SELECT COALESCE(
                 'progress_total', progress_total,
                 'progress_unit', progress_unit,
                 'checkpoint_seq', checkpoint_seq,
-                'checkpoint_commit_seq', checkpoint_commit_seq,
                 'attempts', attempts,
                 'error_trace', error_trace,
                 'payload', payload,
@@ -627,8 +624,7 @@ SET status = 'completed',
     rows_processed = $3::bigint,
     rows_flushed = $3::bigint,
     checkpoint_seq = $4::bigint,
-    checkpoint_commit_seq = $5::bigint,
-    batches_completed = $6::integer,
+    batches_completed = $5::integer,
     progress_current = $3::bigint,
     progress_total = GREATEST(progress_total, $3::bigint),
     progress_unit = 'rows',
@@ -713,7 +709,7 @@ mod tests {
     fn inline_flush_job_completed_persists_batches_completed() {
         let statement = plan_mark_inline_flush_job_completed().unwrap();
         assert!(
-            statement.sql.contains("batches_completed = $6::integer"),
+            statement.sql.contains("batches_completed = $5::integer"),
             "expected batches_completed bind in {}",
             statement.sql
         );
@@ -723,9 +719,10 @@ mod tests {
     fn inline_flush_job_progress_updates_batches_and_phase_while_running() {
         let statement = plan_update_inline_flush_job_progress().unwrap();
         assert!(statement.sql.contains("batches_completed = $4::integer"));
-        assert!(statement.sql.contains("phase = $7::text"));
+        assert!(statement.sql.contains("phase = $6::text"));
         assert!(statement.sql.contains("progress_current = $3::bigint"));
         assert!(statement.sql.contains("status = 'running'"));
+        assert!(!statement.sql.contains("checkpoint_commit_seq"));
     }
 
     #[test]

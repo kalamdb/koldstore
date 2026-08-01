@@ -46,7 +46,6 @@ async fn flush_failpoint_recovery_preserves_visible_rows() -> Result<()> {
 }
 
 async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?.as_str();
     let db = common::TestDb::start(target, &format!("crash_{failpoint}")).await?;
     let table = db.create_indexed_items_table("crash_items", 36).await?;
     db.client
@@ -62,11 +61,10 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
               min_flush_rows => 1,
               max_rows_per_file => 12,
               migration_order_by => 'id',
-              auto_flush => false,
-              mirror_capture_mode => $3
+              auto_flush => false
             )
             "#,
-            &[&table.relation, &db.storage_name, &mode],
+            &[&table.relation, &db.storage_name],
         )
         .await?;
 
@@ -145,7 +143,7 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
         "failpoint {failpoint}: retry flushed rows_flushed={retried}"
     ));
 
-    common::fence_async_mirror_if_needed(&db.client).await?;
+    common::fence_async_mirror(&db.client).await?;
     common::assert_relations_equal(&db.client, &baseline_rel, &table.relation).await?;
     common::assert_pk_unique(&db.client, &table.relation, &["id"]).await?;
 

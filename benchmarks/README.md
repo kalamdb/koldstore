@@ -89,6 +89,9 @@ export DATABASE_URL="host=127.0.0.1 port=28816 user=$USER dbname=postgres"
 KOLDSTORE_BENCH_START_PGRX=0 ./benchmarks/scripts/run.sh
 ```
 
+That server must have `wal_level=logical` and `shared_preload_libraries` including
+`koldstore` (restart required after changing either).
+
 ## Run Only Criterion
 
 ```bash

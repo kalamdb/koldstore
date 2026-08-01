@@ -1,7 +1,8 @@
 //! PostgreSQL datum boundary for Sort Key V1 encoding.
 //!
-//! Strict mirror triggers call this polymorphic helper after manage-time type
-//! validation. The codec itself remains owned by `koldstore-sortkey`.
+//! Segment-order and scan helpers call this polymorphic SQL function after
+//! manage-time type validation. The codec itself remains owned by
+//! `koldstore-sortkey`.
 
 #[cfg(feature = "pg")]
 use koldstore_sortkey::{encode_sort_key, SortKeyValue};

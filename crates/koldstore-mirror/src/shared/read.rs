@@ -58,7 +58,6 @@ pub fn plan_select_mirror_rows_after_seq_with_params(
         "changes_since from change-log mirror",
         format!(
             r#"SELECT
-    mirror."seq" AS commit_seq,
     mirror."seq" AS seq,
     mirror."op" AS op,
     jsonb_build_object({pk_json}) AS pk,
@@ -72,6 +71,70 @@ LIMIT ${limit_param}::integer"#,
             where_clause = where_clauses.join(" AND ")
         ),
         std::mem::take(&mut param_types),
+    ))
+}
+
+/// Plans the newest-N hot mirror rows for KalamDB-style `last_rows` rewind.
+///
+/// Rows are returned newest-first (`ORDER BY seq DESC`); callers reverse to
+/// chronological order after merge.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied.
+pub fn plan_select_mirror_last_rows(
+    mirror_table: &MirrorRelation,
+    primary_key: &[&str],
+    limit_param: usize,
+) -> MirrorResult<MirrorStatement> {
+    plan_select_mirror_last_rows_with_params(mirror_table, primary_key, limit_param, &[], &[])
+}
+
+/// Plans newest-N mirror rows with optional additional predicates/params.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied.
+pub fn plan_select_mirror_last_rows_with_params(
+    mirror_table: &MirrorRelation,
+    primary_key: &[&str],
+    limit_param: usize,
+    additional_predicates: &[String],
+    additional_param_types: &[(usize, SqlParamType)],
+) -> MirrorResult<MirrorStatement> {
+    let pk_json = pk_json_projection(primary_key)?;
+    let where_sql = if additional_predicates.is_empty() {
+        String::new()
+    } else {
+        format!("\nWHERE {}", additional_predicates.join(" AND "))
+    };
+    // Reuse the after-seq helper's slot merger with a dummy since slot of 0 so
+    // only limit + additional params are materialised.
+    let mut param_types = param_types_for_slots(
+        0,
+        SqlParamType::Text,
+        limit_param.max(1),
+        SqlParamType::Integer,
+        additional_param_types,
+    );
+    if limit_param > 0 {
+        param_types[limit_param - 1] = SqlParamType::Integer;
+    }
+    Ok(MirrorStatement::read_with_params(
+        "changes_last from change-log mirror",
+        format!(
+            r#"SELECT
+    mirror."seq" AS seq,
+    mirror."op" AS op,
+    jsonb_build_object({pk_json}) AS pk,
+    (mirror."op" = 3) AS deleted,
+    NULL::jsonb AS row_image
+FROM {mirror} AS mirror{where_sql}
+ORDER BY mirror."seq" DESC
+LIMIT ${limit_param}::integer"#,
+            mirror = mirror_table.quoted(),
+        ),
+        param_types,
     ))
 }
 
@@ -110,9 +173,7 @@ pub fn plan_mirror_force_flush_stats(
     'delete', jsonb_build_object(
         'row_count', count(*) FILTER (WHERE "op" = {delete_op})::bigint,
         'min_seq', COALESCE(min("seq") FILTER (WHERE "op" = {delete_op}), 0),
-        'max_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0),
-        'min_commit_seq', COALESCE(min("seq") FILTER (WHERE "op" = {delete_op}), 0),
-        'max_commit_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0)
+        'max_seq', COALESCE(max("seq") FILTER (WHERE "op" = {delete_op}), 0)
     )
 )::text
 FROM {mirror}"#,
@@ -170,9 +231,7 @@ WHERE "op" = {op}"#,
 const MIRROR_SEQ_STATS_JSON_FIELDS: &str = r#"
     'row_count', count(*)::bigint,
     'min_seq', COALESCE(min("seq"), 0),
-    'max_seq', COALESCE(max("seq"), 0),
-    'min_commit_seq', COALESCE(min("seq"), 0),
-    'max_commit_seq', COALESCE(max("seq"), 0)
+    'max_seq', COALESCE(max("seq"), 0)
 "#;
 
 fn pk_json_projection(primary_key: &[&str]) -> MirrorResult<String> {

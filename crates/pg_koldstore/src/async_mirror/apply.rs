@@ -229,6 +229,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
         .map_err(|error| format!("wait slot inactive before apply: {error}"))?;
 
     let durable = read_durable_applied_lsn()?;
+    let mut seq_watermark = read_durable_seq_high_watermark()?;
     if request.acknowledge_durable_checkpoint {
         // Only acknowledge a checkpoint written by a previously committed txn.
         acknowledge_committed_apply(&slot, durable.as_ref())?;
@@ -339,6 +340,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                             &new,
                             transaction_lsn,
                             &request,
+                            &mut seq_watermark,
                         )?;
                         applied = applied.saturating_add(1);
                     }
@@ -362,6 +364,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                             &new,
                             transaction_lsn,
                             &request,
+                            &mut seq_watermark,
                         )?;
                         applied = applied.saturating_add(1);
                     }
@@ -383,6 +386,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
                             &old,
                             transaction_lsn,
                             &request,
+                            &mut seq_watermark,
                         )?;
                         applied = applied.saturating_add(1);
                     }
@@ -395,7 +399,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
         }
         if request.acknowledge_durable_checkpoint {
             if let Some(end_lsn) = applied_end_lsn {
-                record_applied_lsn(end_lsn)?;
+                record_applied_lsn(end_lsn, seq_watermark)?;
             } else if applied == 0 && !budget_exhausted {
                 // No publication changes in [confirmed, peek_upto]. Advance the
                 // slot so the next idle wake is an O(1) confirmed_flush check
@@ -611,7 +615,18 @@ fn current_flush_lsn() -> u64 {
     unsafe { pgrx::pg_sys::GetFlushRecPtr(std::ptr::null_mut()) }
 }
 
-fn record_applied_lsn(applied_lsn: u64) -> Result<(), String> {
+fn read_durable_seq_high_watermark() -> Result<i64, String> {
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
+    Ok(pgrx::Spi::get_one_with_args::<i64>(
+        "SELECT (SELECT seq_high_watermark FROM koldstore.async_mirror_state WHERE database_oid = $1)",
+        &[DatumWithOid::from(database_oid)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or(0)
+    .max(0))
+}
+
+fn record_applied_lsn(applied_lsn: u64, seq_high_watermark: i64) -> Result<(), String> {
     // Store the exact last decoded source commit end-LSN. Never advance to
     // `pg_current_wal_insert_lsn()`: concurrent commits can land after the peek
     // boundary but before this write, and claiming them applied would let the
@@ -620,17 +635,24 @@ fn record_applied_lsn(applied_lsn: u64) -> Result<(), String> {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
     let lsn = format_pg_lsn(applied_lsn);
     pgrx::Spi::run_with_args(
-        "INSERT INTO koldstore.async_mirror_state(database_oid, applied_lsn, updated_at) \
-         VALUES ($1, $2::pg_lsn, pg_catalog.clock_timestamp()) \
+        "INSERT INTO koldstore.async_mirror_state(\
+             database_oid, applied_lsn, seq_high_watermark, updated_at\
+         ) \
+         VALUES ($1, $2::pg_lsn, $3, pg_catalog.clock_timestamp()) \
          ON CONFLICT (database_oid) DO UPDATE \
          SET applied_lsn = GREATEST(\
                koldstore.async_mirror_state.applied_lsn, \
                EXCLUDED.applied_lsn\
              ), \
+             seq_high_watermark = GREATEST(\
+               koldstore.async_mirror_state.seq_high_watermark, \
+               EXCLUDED.seq_high_watermark\
+             ), \
              updated_at = EXCLUDED.updated_at",
         &[
             DatumWithOid::from(database_oid),
             DatumWithOid::from(lsn.as_str()),
+            DatumWithOid::from(seq_high_watermark),
         ],
     )
     .map_err(|error| error.to_string())
@@ -647,6 +669,7 @@ fn push_change(
     tuple: &PgOutputTuple,
     transaction_lsn: Option<u64>,
     request: &BoundedApplyRequest,
+    seq_watermark: &mut i64,
 ) -> Result<(), String> {
     if transaction_lsn.is_none() {
         return Err("pgoutput row arrived without BEGIN".to_string());
@@ -677,17 +700,16 @@ fn push_change(
             );
         }
     }
-    // Always allocate seq in Rust (floor path stays strictly above prune watermark).
-    let seq = if let Some((target_oid, floor)) = request.target_prune_floor {
+    // Allocate above the durable high-watermark (and prune floor when fencing).
+    let mut floor = *seq_watermark;
+    if let Some((target_oid, prune_floor)) = request.target_prune_floor {
         if config.table_oid == target_oid {
-            next_id_after(crate::sql::session::snowflake_worker_id(), floor.get())
-                .map_err(|error| error.to_string())?
-        } else {
-            crate::sql::session::snowflake_id()
+            floor = floor.max(prune_floor.get());
         }
-    } else {
-        crate::sql::session::snowflake_id()
-    };
+    }
+    let seq = next_id_after(crate::sql::session::snowflake_worker_id(), floor)
+        .map_err(|error| error.to_string())?;
+    *seq_watermark = seq;
     row.insert("seq".to_string(), Value::from(seq));
     let identity = pk_identity(&row);
     let key = BatchKey {

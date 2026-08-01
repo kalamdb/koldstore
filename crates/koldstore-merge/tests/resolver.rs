@@ -1,6 +1,6 @@
 use koldstore_common::{
-    ChangeSource, ColdRow, CommitSeq, HotRow, LogicalPk, MirrorChange, MirrorOperation, PkColumn,
-    ScopeKey, SeqId,
+    ChangeSource, ColdRow, HotRow, LogicalPk, MirrorChange, MirrorOperation, PkColumn, ScopeKey,
+    SeqId,
 };
 use koldstore_merge::{
     changes_since, resolve_rows, tombstone_required, ChangeCursor, NewestFirstWinnerResolver,
@@ -13,23 +13,21 @@ fn pk(id: i64) -> LogicalPk {
     LogicalPk::from_json_object(&json!({"id": id}), &columns).unwrap()
 }
 
-fn hot(id: i64, seq: i64, commit_seq: i64, deleted: bool, body: &str) -> HotRow {
+fn hot(id: i64, seq: i64, deleted: bool, body: &str) -> HotRow {
     HotRow {
         pk: pk(id),
         scope_key: None,
         seq: SeqId::new(seq).unwrap(),
-        commit_seq: CommitSeq::new(commit_seq).unwrap(),
         deleted,
         row_image: json!({"id": id, "body": body}),
     }
 }
 
-fn cold(id: i64, seq: i64, commit_seq: i64, deleted: bool, body: &str) -> ColdRow {
+fn cold(id: i64, seq: i64, deleted: bool, body: &str) -> ColdRow {
     ColdRow {
         pk: pk(id),
         scope_key: None,
         seq: SeqId::new(seq).unwrap(),
-        commit_seq: CommitSeq::new(commit_seq).unwrap(),
         deleted,
         schema_version: 1,
         row_image: json!({"id": id, "body": body}),
@@ -39,8 +37,8 @@ fn cold(id: i64, seq: i64, commit_seq: i64, deleted: bool, body: &str) -> ColdRo
 #[test]
 fn resolver_selects_newest_row_per_pk_and_hot_wins_exact_tie() {
     let rows = resolve_rows(
-        &[hot(1, 10, 10, false, "hot"), hot(2, 5, 5, false, "hot-2")],
-        &[cold(1, 9, 9, false, "old"), cold(2, 5, 5, false, "cold-2")],
+        &[hot(1, 10, false, "hot"), hot(2, 5, false, "hot-2")],
+        &[cold(1, 9, false, "old"), cold(2, 5, false, "cold-2")],
     );
 
     assert_eq!(rows.len(), 2);
@@ -52,7 +50,6 @@ fn resolver_selects_newest_row_per_pk_and_hot_wins_exact_tie() {
     let row1 = by_id.get(&1).expect("pk 1");
     assert_eq!(row1.source, koldstore_merge::RowSource::Hot);
     assert_eq!(row1.seq.get(), 10);
-    assert_eq!(row1.commit_seq.get(), 10);
     assert_eq!(row1.row_image, json!({"id": 1, "body": "hot"}));
 
     let row2 = by_id.get(&2).expect("pk 2");
@@ -64,11 +61,11 @@ fn resolver_selects_newest_row_per_pk_and_hot_wins_exact_tie() {
 #[test]
 fn resolver_emits_at_most_one_visible_winner_per_pk() {
     let rows = resolve_rows(
-        &[hot(1, 12, 12, false, "hot"), hot(2, 1, 1, false, "hot-2")],
+        &[hot(1, 12, false, "hot"), hot(2, 1, false, "hot-2")],
         &[
-            cold(1, 10, 10, false, "old-1"),
-            cold(1, 11, 11, false, "newer-cold-1"),
-            cold(2, 2, 2, false, "cold-2"),
+            cold(1, 10, false, "old-1"),
+            cold(1, 11, false, "newer-cold-1"),
+            cold(2, 2, false, "cold-2"),
         ],
     );
 
@@ -90,10 +87,7 @@ fn resolver_emits_at_most_one_visible_winner_per_pk() {
 
 #[test]
 fn resolver_masks_deleted_winners() {
-    let rows = resolve_rows(
-        &[hot(1, 11, 11, true, "deleted")],
-        &[cold(1, 10, 10, false, "old")],
-    );
+    let rows = resolve_rows(&[hot(1, 11, true, "deleted")], &[cold(1, 10, false, "old")]);
 
     assert!(rows.is_empty());
 }
@@ -103,17 +97,17 @@ fn streaming_resolver_keeps_newest_winner_across_payload_batches() {
     let mut resolver = NewestFirstWinnerResolver::new([pk(4)]);
 
     let hot_rows = resolver
-        .resolve_hot_batch(vec![hot(1, 30, 30, false, "hot")])
+        .resolve_hot_batch(vec![hot(1, 30, false, "hot")])
         .unwrap();
     assert_eq!(hot_rows.len(), 1);
     assert_eq!(hot_rows[0].row_image["body"], "hot");
 
     let newer_cold = resolver
         .resolve_cold_batch(vec![
-            cold(1, 20, 20, false, "shadowed-by-hot"),
-            cold(2, 20, 20, false, "newer-cold"),
-            cold(3, 19, 19, true, "deleted"),
-            cold(4, 18, 18, false, "masked-by-mirror"),
+            cold(1, 20, false, "shadowed-by-hot"),
+            cold(2, 20, false, "newer-cold"),
+            cold(3, 19, true, "deleted"),
+            cold(4, 18, false, "masked-by-mirror"),
         ])
         .unwrap();
     assert_eq!(newer_cold.len(), 1);
@@ -121,9 +115,9 @@ fn streaming_resolver_keeps_newest_winner_across_payload_batches() {
 
     let older_cold = resolver
         .resolve_cold_batch(vec![
-            cold(2, 10, 10, false, "older-duplicate"),
-            cold(3, 9, 9, false, "older-before-delete"),
-            cold(5, 8, 8, false, "old-only"),
+            cold(2, 10, false, "older-duplicate"),
+            cold(3, 9, false, "older-before-delete"),
+            cold(5, 8, false, "old-only"),
         ])
         .unwrap();
     assert_eq!(older_cold.len(), 1);
@@ -137,10 +131,10 @@ fn streaming_resolver_resolves_duplicates_inside_one_overlapping_batch() {
 
     let rows = resolver
         .resolve_cold_batch(vec![
-            cold(1, 10, 10, false, "old"),
-            cold(1, 20, 20, false, "new"),
-            cold(2, 30, 30, false, "live"),
-            cold(2, 31, 31, true, "deleted"),
+            cold(1, 10, false, "old"),
+            cold(1, 20, false, "new"),
+            cold(2, 30, false, "live"),
+            cold(2, 31, true, "deleted"),
         ])
         .unwrap();
 
@@ -154,11 +148,11 @@ fn streaming_resolver_mirror_mask_applies_after_live_hot_winners() {
     let mut resolver = NewestFirstWinnerResolver::default();
 
     let hot_rows = resolver
-        .resolve_hot_batch(vec![hot(4, 30, 30, false, "live-hot")])
+        .resolve_hot_batch(vec![hot(4, 30, false, "live-hot")])
         .unwrap();
     resolver.mask_older_pks([pk(4)]).unwrap();
     let cold_rows = resolver
-        .resolve_cold_batch(vec![cold(4, 20, 20, false, "stale-cold")])
+        .resolve_cold_batch(vec![cold(4, 20, false, "stale-cold")])
         .unwrap();
 
     assert_eq!(hot_rows.len(), 1);
@@ -171,15 +165,12 @@ fn streaming_resolver_fails_closed_when_seen_key_limit_is_exceeded() {
     let mut resolver = NewestFirstWinnerResolver::default().with_max_seen_keys(Some(2));
 
     let first = resolver
-        .resolve_cold_batch(vec![
-            cold(1, 10, 10, false, "one"),
-            cold(2, 10, 10, false, "two"),
-        ])
+        .resolve_cold_batch(vec![cold(1, 10, false, "one"), cold(2, 10, false, "two")])
         .unwrap();
     assert_eq!(first.len(), 2);
 
     let exceeded = resolver
-        .resolve_cold_batch(vec![cold(3, 9, 9, false, "three")])
+        .resolve_cold_batch(vec![cold(3, 9, false, "three")])
         .expect_err("third distinct key must fail closed");
     assert_eq!(exceeded.limit, 2);
     assert_eq!(exceeded.seen, 2);
@@ -192,16 +183,15 @@ fn cold_delete_marker_masks_older_live_rows_and_newer_hot_reinsert_wins() {
         pk: pk(1),
         scope_key: None,
         seq: SeqId::new(20).unwrap(),
-        commit_seq: CommitSeq::new(20).unwrap(),
         deleted: true,
         schema_version: 1,
         row_image: json!({"id": 1}),
     };
-    let old_live = cold(1, 10, 10, false, "old-cold");
+    let old_live = cold(1, 10, false, "old-cold");
 
     assert!(resolve_rows(&[], &[old_live.clone(), deleted.clone()]).is_empty());
 
-    let rows = resolve_rows(&[hot(1, 30, 30, false, "reinserted")], &[old_live, deleted]);
+    let rows = resolve_rows(&[hot(1, 30, false, "reinserted")], &[old_live, deleted]);
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source, koldstore_merge::RowSource::Hot);

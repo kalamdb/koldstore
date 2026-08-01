@@ -87,10 +87,12 @@ RUN set -eux; \
     # PGDG sample defaults to localhost; Docker port publish needs '*'.
     # koldstore must be preloaded so every backend installs KoldMergeScan
     # planner hooks — otherwise SELECT on managed tables is heap-only.
+    # wal_level=logical is required for manage_table / async mirror capture.
     conf_sample="$(pg_config --sharedir)/postgresql.conf.sample"; \
     printf "\n# pg-koldstore release image defaults\n" >> "${conf_sample}"; \
     printf "listen_addresses = '*'\n" >> "${conf_sample}"; \
-    printf "shared_preload_libraries = 'koldstore'\n" >> "${conf_sample}"
+    printf "shared_preload_libraries = 'koldstore'\n" >> "${conf_sample}"; \
+    printf "wal_level = logical\n" >> "${conf_sample}"
 
 STOPSIGNAL SIGINT
 EXPOSE 5432

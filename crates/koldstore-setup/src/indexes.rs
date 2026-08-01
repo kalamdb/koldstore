@@ -70,10 +70,10 @@ pub const REQUIRED_CATALOG_INDEXES: &[CatalogIndexSpec] = &[
         purpose: "merge scans by table, scope, and sequence range",
     },
     CatalogIndexSpec {
-        name: "cold_segments_active_commit_idx",
+        name: "cold_segments_pending_created_idx",
         table: "koldstore.cold_segments",
         unique: false,
-        purpose: "commit-sequence pruning for active cold data",
+        purpose: "pending cold segment expiry and recovery by created_at",
     },
     CatalogIndexSpec {
         name: "cold_segment_index_min_idx",

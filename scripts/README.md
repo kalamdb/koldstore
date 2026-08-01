@@ -7,13 +7,13 @@ suites live in subfolders so the top level stays scannable.
 
 | Script | Purpose |
 |--------|---------|
-| `run-pg-e2e.sh` | Prepare pgrx cluster + run `tests/e2e` in `--mode strict` or `--mode async` |
+| `run-pg-e2e.sh` | Prepare pgrx cluster + run `tests/e2e` (WAL-only capture) |
 | `run-pgrx-bench.sh` | In-process `#[pg_bench]` timings inside a live backend (`cargo pgrx bench`) |
-| `run-examples.sh` | Real-world example scenarios (`--mode strict|async`) |
+| `run-examples.sh` | Real-world example scenarios |
 | `run-chat-penetration.sh` | Manual chat penetration soak (`tests/stress`, configurable minutes/packs) |
-| `run-storage-comparison.sh` | Heap vs managed storage comparison (`--all-sides` or `--side pg|async|strict`) |
+| `run-storage-comparison.sh` | Heap vs managed storage comparison (`--all-sides` or `--side pg|async`) |
 | `run-sql-regression.sh` | KoldStore SQL regression (`tests/sql/`) |
-| `run-all-tests.sh` | Full local aggregator: unit, `#[pg_test]`, E2E strict+async, examples, storage, SQL, memory, benchmarks |
+| `run-all-tests.sh` | Full local aggregator: unit, `#[pg_test]`, E2E, examples, storage, SQL, memory, benchmarks |
 | `run-pgrx-matrix.sh` | Multi-PG local matrix |
 | `find-rust-duplicates.py` | Exact normalized Rust block duplicates (`--deny` is opt-in) |
 

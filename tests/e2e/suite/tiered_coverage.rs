@@ -81,7 +81,7 @@ async fn multi_generation_missing_one_segment_fails_merge_closed() -> Result<()>
         let db = common::TestDb::start(target, "multi_seg_outage").await?;
         let table = db.create_indexed_items_table("multi_seg_items", 12).await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         // Second generation: new hot rows, then another flush (two active segments).
@@ -93,7 +93,7 @@ async fn multi_generation_missing_one_segment_fails_merge_closed() -> Result<()>
                 table.relation
             ))
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         let paths = active_segment_paths(&db, &table.relation).await?;
@@ -126,7 +126,7 @@ async fn select_during_manifest_publish_window_keeps_pk_unique() -> Result<()> {
             .create_indexed_items_table("publish_window_items", 40)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let (coordinator, flush_handle) =
             pause_flush_at(&db, &table.relation, "wait:after_manifest_publish").await?;
@@ -154,17 +154,13 @@ async fn select_during_manifest_publish_window_keeps_pk_unique() -> Result<()> {
 /// mirror worker is stopped (Timescale: readers must not wait on compression).
 #[tokio::test]
 async fn committed_hot_visible_while_async_mirror_lags() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async lag visibility test in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_lag_read").await?;
         let table = db.create_indexed_items_table("lag_items", 16).await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
         common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 16).await?;
 
@@ -231,7 +227,7 @@ async fn rematerialize_update_and_reflush_keeps_latest_overlay() -> Result<()> {
             .create_indexed_items_table("remat_reflush_items", 16)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
         common::assert_flush_pruned_hot_storage(&db.client, &table.relation, 16).await?;
 
@@ -248,7 +244,7 @@ async fn rematerialize_update_and_reflush_keeps_latest_overlay() -> Result<()> {
                 relation = table.relation
             ))
             .await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         let row = db
@@ -277,7 +273,7 @@ async fn prepared_merge_select_stays_correct_across_flush() -> Result<()> {
             .create_indexed_items_table("prepared_merge_items", 18)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         db.client
             .batch_execute(&format!(

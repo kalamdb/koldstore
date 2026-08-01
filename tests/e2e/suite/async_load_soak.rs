@@ -29,10 +29,6 @@ fn soak_duration() -> Duration {
 /// Concurrent INSERT/UPDATE/DELETE/SELECT + periodic flush on multiple async tables.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn async_mixed_load_soak_keeps_invariants() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async load soak in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -45,7 +41,7 @@ async fn async_mixed_load_soak_keeps_invariants() -> Result<()> {
         for table in &tables {
             db.manage_shared(&table.relation, "id").await?;
         }
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let mut workers: Vec<JoinHandle<Result<()>>> = Vec::new();
@@ -124,7 +120,7 @@ async fn async_mixed_load_soak_keeps_invariants() -> Result<()> {
         }
         flush_worker.await??;
 
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         for table in &tables {
             common::assert_pk_unique(&db.client, &table.relation, &["id"]).await?;
             common::assert_no_active_jobs(&db.client, &table.relation).await?;

@@ -5,7 +5,7 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use koldstore_common::{CommitSeq, Result, SeqId, TableName};
+use koldstore_common::{Result, SeqId, TableName};
 
 static NEXT_SEQ: AtomicI64 = AtomicI64::new(1);
 
@@ -128,8 +128,6 @@ impl ManagedDmlOperation {
 pub struct DmlStamp {
     /// Row/effect sequence.
     pub seq: SeqId,
-    /// Commit-order cursor.
-    pub commit_seq: CommitSeq,
     /// Operation.
     pub operation: ManagedDmlOperation,
     /// Delete marker.
@@ -139,8 +137,8 @@ pub struct DmlStamp {
 impl DmlStamp {
     /// Creates a DML stamp.
     #[must_use]
-    pub const fn new(seq: SeqId, commit_seq: CommitSeq, operation: ManagedDmlOperation) -> Self {
-        stamp_dml_effect(seq, commit_seq, operation)
+    pub const fn new(seq: SeqId, operation: ManagedDmlOperation) -> Self {
+        stamp_dml_effect(seq, operation)
     }
 }
 
@@ -219,14 +217,9 @@ pub const fn plan_delete_row(
 
 /// Builds a managed DML stamp from validated sequence newtypes.
 #[must_use]
-pub const fn stamp_dml_effect(
-    seq: SeqId,
-    commit_seq: CommitSeq,
-    operation: ManagedDmlOperation,
-) -> DmlStamp {
+pub const fn stamp_dml_effect(seq: SeqId, operation: ManagedDmlOperation) -> DmlStamp {
     DmlStamp {
         seq,
-        commit_seq,
         operation,
         deleted: matches!(operation, ManagedDmlOperation::Delete),
     }

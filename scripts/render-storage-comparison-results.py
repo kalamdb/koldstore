@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge isolated pg/async/strict storage-comparison JSON into RESULTS.md."""
+"""Merge isolated pg/async storage-comparison JSON into RESULTS.md."""
 
 from __future__ import annotations
 
@@ -127,12 +127,10 @@ def aggregate_reports(reports: list[dict[str, Any]]) -> dict[str, Any]:
 def validate_comparison_reports(
     pg_report: dict[str, Any] | None,
     async_report: dict[str, Any] | None,
-    strict_report: dict[str, Any] | None,
 ) -> None:
     reports = [
         ("pg", pg_report),
         ("async", async_report),
-        ("strict", strict_report),
     ]
     present = [(expected_mode, report) for expected_mode, report in reports if report]
     for expected_mode, report in present:
@@ -187,20 +185,135 @@ def render_table(
     section: str,
     pg_report: dict[str, Any] | None,
     async_report: dict[str, Any] | None,
-    strict_report: dict[str, Any] | None,
 ) -> str:
     lines = [
-        f"| {label} | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |",
-        "| --- | --- | --- | --- |",
+        f"| {label} | PostgreSQL only | PG + KoldStore |",
+        "| --- | --- | --- |",
     ]
     for metric in ordered_metrics(
-        # async first so catch-up rows sit under DML rather than at the end
-        async_report, pg_report, strict_report, section=section
+        # managed first so catch-up rows sit under DML rather than at the end
+        async_report, pg_report, section=section
     ):
         pg = cell(pg_report, section, metric, "postgres_only")
-        async_val = cell(async_report, section, metric, "koldstore")
-        strict_val = cell(strict_report, section, metric, "koldstore")
-        lines.append(f"| {metric} | {pg} | {async_val} | {strict_val} |")
+        managed = cell(async_report, section, metric, "koldstore")
+        lines.append(f"| {metric} | {pg} | {managed} |")
+    return "\n".join(lines)
+
+
+def _plain_cell(
+    report: dict[str, Any] | None, section: str, metric: str, field: str
+) -> str:
+    """Like cell(), but without sample-dispersion suffixes (for glance math)."""
+    if report is None:
+        return MISSING
+    for row in report.get(section, []):
+        if row.get("metric") == metric:
+            value = row.get(field, MISSING)
+            if value in (None, ""):
+                return MISSING
+            return str(value)
+    return MISSING
+
+
+def _shrink_pct(before: float, after: float) -> str:
+    if before <= 0:
+        return "n/a"
+    pct = (1.0 - (after / before)) * 100.0
+    return f"**{pct:.0f}% smaller**"
+
+
+def _speedup(before_s: float, after_s: float) -> str:
+    if after_s <= 0:
+        return "n/a"
+    return f"**{before_s / after_s:.0f}× faster**"
+
+
+def render_storage_wins_glance(
+    pg_report: dict[str, Any] | None,
+    async_report: dict[str, Any] | None,
+) -> str:
+    """Build the glance table from published main/detail cells."""
+    if pg_report is None or async_report is None:
+        return (
+            "KoldStore is a **storage lifecycle** tool. The durable wins after flush are heap\n"
+            "size, index size, and VACUUM time — not universal DML/query acceleration.\n"
+            "Glance table requires both pg and async JSON samples."
+        )
+
+    total_pg = _plain_cell(
+        pg_report, "main", "total hot+cold storage", "postgres_only"
+    )
+    total_ks = _plain_cell(
+        async_report, "main", "total hot+cold storage", "koldstore"
+    )
+    local_pg = _plain_cell(
+        pg_report, "main", "local PostgreSQL storage", "postgres_only"
+    )
+    local_ks = _plain_cell(
+        async_report, "main", "local PostgreSQL storage", "koldstore"
+    )
+    cold = _plain_cell(async_report, "detail", "└ cold Parquet", "koldstore")
+    idx_pg = _plain_cell(
+        pg_report, "detail", "index storage (hot + __cl)", "postgres_only"
+    )
+    idx_ks = _plain_cell(
+        async_report, "detail", "index storage (hot + __cl)", "koldstore"
+    )
+    vac_pg = _plain_cell(pg_report, "main", "VACUUM duration", "postgres_only")
+    vac_ks = _plain_cell(async_report, "main", "VACUUM duration", "koldstore")
+
+    total_pg_n = numeric_value(total_pg)
+    total_ks_n = numeric_value(total_ks)
+    local_pg_n = numeric_value(local_pg)
+    local_ks_n = numeric_value(local_ks)
+    idx_pg_n = numeric_value(idx_pg)
+    idx_ks_n = numeric_value(idx_ks)
+    vac_pg_n = numeric_value(vac_pg)
+    vac_ks_n = numeric_value(vac_ks)
+
+    total_trade = (
+        _shrink_pct(total_pg_n, total_ks_n)
+        if total_pg_n is not None and total_ks_n is not None
+        else "—"
+    )
+    local_trade = (
+        _shrink_pct(local_pg_n, local_ks_n)
+        if local_pg_n is not None and local_ks_n is not None
+        else "—"
+    )
+    idx_trade = (
+        _shrink_pct(idx_pg_n, idx_ks_n)
+        if idx_pg_n is not None and idx_ks_n is not None
+        else "—"
+    )
+    vac_trade = (
+        _speedup(vac_pg_n, vac_ks_n)
+        if vac_pg_n is not None and vac_ks_n is not None
+        else "—"
+    )
+
+    cold_short = cold.split(" ")[0] + " " + cold.split(" ")[1] if cold.count(" ") >= 1 else cold
+    # Prefer a compact cold label like "599 MiB" from "598.52 MiB"
+    cold_n = numeric_value(cold)
+    if cold_n is not None:
+        cold_mib = cold_n / (1024.0**2)
+        cold_label = f"{cold_mib:.0f} MiB"
+    else:
+        cold_label = cold_short
+
+    lines = [
+        "KoldStore is a **storage lifecycle** tool. The durable wins after flush are heap",
+        "size, index size, and VACUUM time — not universal DML/query acceleration.",
+        "Async column below (vs PostgreSQL-only).",
+        "",
+        "| Result | Before → after flush | Tradeoff |",
+        "| --- | --- | --- |",
+        f"| Total footprint (hot + cold) | {total_pg} → {total_ks} | {total_trade} |",
+        f"| └ hot in PostgreSQL (heap + `__cl`) | {local_pg} → {local_ks} | {local_trade} |",
+        f"| └ cold Parquet | — → {cold_label} | outside the database |",
+        f"| Indexes (hot + `__cl`) | {idx_pg} → {idx_ks} | {idx_trade} |",
+        f"| `VACUUM (FULL, ANALYZE)` | {vac_pg} → {vac_ks} | {vac_trade} |",
+    ]
     return "\n".join(lines)
 
 
@@ -216,13 +329,11 @@ def parse_rfc3339(value: str) -> datetime | None:
 def format_when(
     pg_report: dict[str, Any] | None,
     async_report: dict[str, Any] | None,
-    strict_report: dict[str, Any] | None,
 ) -> str:
     stamps: list[tuple[str, datetime]] = []
     for label, report in (
         ("pg", pg_report),
         ("async", async_report),
-        ("strict", strict_report),
     ):
         if report is None:
             continue
@@ -293,12 +404,11 @@ def short_commit(commit: str) -> str:
 def run_meta(
     pg_report: dict[str, Any] | None,
     async_report: dict[str, Any] | None,
-    strict_report: dict[str, Any] | None,
     git_commit: str,
     git_dirty: bool,
     git_note: str,
 ) -> str:
-    source = pg_report or async_report or strict_report or {}
+    source = pg_report or async_report or {}
     rows = source.get("rows", "?")
     hot = source.get("hot_limit", "?")
     dml = source.get("dml_sample", "?")
@@ -310,12 +420,10 @@ def run_meta(
         modes.append("pg")
     if async_report is not None:
         modes.append("async")
-    if strict_report is not None:
-        modes.append("strict")
     mode_text = " + ".join(modes) if modes else "none"
     sample_counts = [
         int(report.get("sample_count", 1))
-        for report in (pg_report, async_report, strict_report)
+        for report in (pg_report, async_report)
         if report is not None
     ]
     sample_text = (
@@ -323,7 +431,7 @@ def run_meta(
         if sample_counts and len(set(sample_counts)) == 1 and sample_counts[0] > 1
         else " · **single sample per side**"
     )
-    when = format_when(pg_report, async_report, strict_report)
+    when = format_when(pg_report, async_report)
     git_line = f"**Git:** `{short_commit(git_commit)}`"
     if len(git_commit) > 12 and " " not in git_commit:
         git_line += f" (`{git_commit}`)"
@@ -338,7 +446,7 @@ def run_meta(
             f"**Run:** {rows} rows · `hot_row_limit = {hot}` · `max_rows_per_file = {max_rows}` "
             f"· `--dml-sample {dml}` · `insert_batch_rows = {batch}` · "
             f"`warmup_rows = {warmup}` · zstd Parquet · "
-            f"**counterbalanced sequential** isolated fresh server per sample (not parallel) · "
+            f"**counterbalanced sequential** isolated wiped server per sample (not parallel) · "
             f"sides measured: **{mode_text}**{sample_text}",
         ]
     )
@@ -347,7 +455,6 @@ def run_meta(
 def render(
     pg_report: dict[str, Any] | None,
     async_report: dict[str, Any] | None,
-    strict_report: dict[str, Any] | None,
     git_commit: str,
     git_dirty: bool = False,
     git_note: str = "",
@@ -357,20 +464,19 @@ def render(
         "",
         "Published numbers from the most recent storage comparison run(s). Re-run",
         "`scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results` to refresh",
-        "this file. Each column is measured alone on a fresh pgrx PostgreSQL",
-        "(stop → recreate DBs → one side). Methodology: [README.md](README.md).",
+        "this file. Each column is measured alone on a wiped + re-initdb pgrx PostgreSQL",
+        "(stop → wipe `~/.pgrx/data-<ver>` → prepare → one side). Methodology:",
+        "[README.md](README.md).",
         "",
-        run_meta(
-            pg_report, async_report, strict_report, git_commit, git_dirty, git_note
-        ),
+        run_meta(pg_report, async_report, git_commit, git_dirty, git_note),
         "",
         "Managed PostgreSQL sizes include hot heap + `koldstore.<table>__cl` + mirror",
         "indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are",
-        "**PostgreSQL only**, **PG + KoldStore (async)**, and **PG + KoldStore (strict)**.",
+        "**PostgreSQL only** and **PG + KoldStore** (WAL-only capture).",
         "",
         "## Main comparison",
         "",
-        render_table("Metric", "main", pg_report, async_report, strict_report),
+        render_table("Metric", "main", pg_report, async_report),
         "",
         "‡ **Hot+cold query** alternates newest hot PK (`id = <rows>`) and oldest",
         "cold PK (`id = 1`) after flush — **50/50** of the lookup loop.",
@@ -381,32 +487,25 @@ def render(
         "",
         "## Detail (throughput and storage)",
         "",
-        render_table("Operation", "detail", pg_report, async_report, strict_report),
+        render_table("Operation", "detail", pg_report, async_report),
         "",
-        "† Strict DML updates the change-log mirror in the foreground. Async DML",
-        "records heap WAL in the foreground; catch-up rows appear only in the async",
-        "column.",
+        "† Managed DML records heap WAL in the foreground; catch-up rows appear",
+        "separately after `wait_for_async_mirror()`.",
         "",
         "## Storage wins at a glance (this run)",
         "",
-        "KoldStore is a **storage lifecycle** tool. The durable wins after flush are heap",
-        "size, index size, and VACUUM time — not universal DML/query acceleration.",
-        "Recompute the glance table from the Metric / Operation rows above after each",
-        "`--update-results` run. Keep the narrative sections below in sync with the",
-        "numbers (especially DELETE — do not claim it is faster without repeated runs).",
+        render_storage_wins_glance(pg_report, async_report),
         "",
         "### Why was delete reported faster before — and is it?",
         "",
         "Foreground delete is a single `DELETE … WHERE id BETWEEN …` over",
-        "`--dml-sample` rows **before flush**. Async does **not** update the mirror in",
-        "that window (catch-up is a separate row). Strict updates",
-        "`koldstore.<table>__cl` to `op = 3` in the same transaction, so strict being",
-        "slower than plain PostgreSQL is expected.",
+        "`--dml-sample` rows **before flush**. Managed capture does **not** update the",
+        "mirror in that window (catch-up is a separate row).",
         "",
-        "Async can still land below PostgreSQL-only: one-shot bulk DELETE has high",
-        "variance across isolated sides, and the managed table still carries a logical",
-        "publication. Prior “async delete much faster” tables mixed mismatched side",
-        "JSON. Do **not** publish “KoldStore makes DELETE faster” from a single sample.",
+        "Managed delete can still land below PostgreSQL-only: one-shot bulk DELETE has",
+        "high variance across isolated sides, and the managed table still carries a",
+        "logical publication. Do **not** publish “KoldStore makes DELETE faster” from a",
+        "single sample.",
         "",
         "### Segment object-path layout",
         "",
@@ -417,21 +516,15 @@ def render(
         "orphan-retry uniqueness; week/Hive folders are unnecessary while catalog stats",
         "prune reads.",
         "",
-        "### Why does async insert look faster than PostgreSQL only?",
+        "### Why does managed insert look faster than PostgreSQL only?",
         "",
-        "It is **not** a KoldStore acceleration of `INSERT`. Both columns time the same",
-        "kind of work: committed 100k-row batches into the user heap (+ indexes). Async",
-        "does **not** update `koldstore.<table>__cl` in that timed window — that cost is",
-        "the separate **async insert mirror catch-up** row. Strict pays mirror work in",
-        "the foreground, which is why it is slower.",
-        "",
-        "Sides are **not** run in parallel and do **not** share a live server during",
-        "measurement: publication uses six counterbalanced side orders, each sample after",
-        "`cargo pgrx stop` + empty DB recreate. Large foreground gaps can still reflect",
-        "machine variance. Do not treat async > PostgreSQL-only",
-        "insert as a product claim until repeated isolated runs agree. For end-to-end",
-        "“row is mirrored” cost, add catch-up (or run with the background worker and",
-        "measure lag).",
+        "It should not. Both columns time the same heap `INSERT` path. After warm-up",
+        "the harness advances logical slots to the tip, then pins a slot on",
+        "PostgreSQL-only for the timed seed (managed already has its async slot) so",
+        "both retain seed WAL the same way. Absolute `wal_files` after warm-up is a",
+        "segment *pool*, not slot lag — compare tip lag ≈ 0 and seed file growth.",
+        "Expect foreground insert ≈ identical; mirror apply is still the separate",
+        "**async insert mirror catch-up** row.",
         "",
         "Lab note: the storage harness may set `koldstore.async_mirror_max_retained_bytes = 0`",
         "while the worker is off so 10M-row seeding can retain multi-GiB slot WAL until",
@@ -446,7 +539,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pg-json", type=Path, action="append", default=None)
     parser.add_argument("--async-json", type=Path, action="append", default=None)
-    parser.add_argument("--strict-json", type=Path, action="append", default=None)
     parser.add_argument(
         "--git-commit",
         default=None,
@@ -467,21 +559,19 @@ def main() -> None:
 
     pg_report = load_report(args.pg_json)
     async_report = load_report(args.async_json)
-    strict_report = load_report(args.strict_json)
-    if pg_report is None and async_report is None and strict_report is None:
+    if pg_report is None and async_report is None:
         raise SystemExit(
-            "at least one of --pg-json / --async-json / --strict-json must exist"
+            "at least one of --pg-json / --async-json must exist"
         )
-    validate_comparison_reports(pg_report, async_report, strict_report)
+    validate_comparison_reports(pg_report, async_report)
 
     git_commit, git_dirty, git_note = resolve_git_commit(
-        pg_report, async_report, strict_report, fallback=args.git_commit
+        pg_report, async_report, fallback=args.git_commit
     )
 
     markdown = render(
         pg_report,
         async_report,
-        strict_report,
         git_commit,
         git_dirty=git_dirty,
         git_note=git_note,

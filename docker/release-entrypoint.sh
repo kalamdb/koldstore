@@ -4,6 +4,7 @@
 # Force listen_addresses=* so published host ports reach Postgres (PGDG
 # defaults to localhost). Always preload koldstore so KoldMergeScan hooks
 # install in every backend (CREATE EXTENSION alone is not enough).
+# wal_level=logical is required for manage_table / async mirror capture.
 # pg_cron is packaged but not preloaded.
 set -euo pipefail
 
@@ -15,6 +16,7 @@ if [[ "${1:-}" == "postgres" ]]; then
   exec docker-entrypoint.sh postgres \
     -c listen_addresses='*' \
     -c shared_preload_libraries=koldstore \
+    -c wal_level=logical \
     "$@"
 fi
 

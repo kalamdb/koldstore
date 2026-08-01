@@ -5,3 +5,4 @@ mod async_mirror_worker;
 mod change_feed;
 mod change_log_mirror;
 mod cold_dml_matrix;
+mod wal_only_seq_cursor;

@@ -56,7 +56,7 @@ async fn repeated_flush_and_hot_dml_cycles_remain_bounded_on_pgrx() -> Result<()
                     .await?;
             }
 
-            common::fence_async_mirror_if_needed(&db.client).await?;
+            common::fence_async_mirror(&db.client).await?;
             let flushed = db
                 .client
                 .query_one(

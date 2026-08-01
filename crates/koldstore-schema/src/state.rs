@@ -12,8 +12,10 @@ pub enum MirrorInitializationState {
     /// Metadata exists but no complete mirror state is available.
     #[default]
     NotStarted,
-    /// DML capture is active and existing rows may still be scanning.
-    Capturing,
+    /// Snapshot backfill is copying existing heap rows into the mirror.
+    Backfilling,
+    /// Backfill finished; WAL catch-up is applying committed changes above the floor.
+    CatchingUp,
     /// Every pre-existing row has a mirror state unless superseded by newer DML.
     Complete,
     /// Initialization failed and needs retry or rollback.
@@ -26,7 +28,8 @@ impl MirrorInitializationState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::NotStarted => "not_started",
-            Self::Capturing => "capturing",
+            Self::Backfilling => "backfilling",
+            Self::CatchingUp => "catching_up",
             Self::Complete => "complete",
             Self::Failed => "failed",
         }
@@ -37,7 +40,8 @@ impl MirrorInitializationState {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "not_started" => Some(Self::NotStarted),
-            "capturing" => Some(Self::Capturing),
+            "backfilling" => Some(Self::Backfilling),
+            "catching_up" => Some(Self::CatchingUp),
             "complete" => Some(Self::Complete),
             "failed" => Some(Self::Failed),
             _ => None,

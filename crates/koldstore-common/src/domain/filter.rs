@@ -15,8 +15,6 @@ pub enum ColumnClass {
     Scope,
     /// Mirror/cold `seq` metadata column.
     Seq,
-    /// Commit-order cursor used during hot/cold merge.
-    CommitSeq,
     /// Immutable or stats-only column recorded safe by schema metadata.
     Immutable,
     /// Mutable application column.
@@ -84,7 +82,6 @@ impl Predicate {
             ColumnClass::PrimaryKey
             | ColumnClass::Scope
             | ColumnClass::Seq
-            | ColumnClass::CommitSeq
             | ColumnClass::Immutable => PredicateClass::SafePrune,
             ColumnClass::Mutable => PredicateClass::Residual,
             ColumnClass::Security => PredicateClass::Security,

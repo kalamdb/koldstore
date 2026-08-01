@@ -13,8 +13,6 @@ pub struct TableFlushBatchOutcome {
     pub total_rows_flushed: i64,
     /// Last flushed `_seq`.
     pub last_max_seq: i64,
-    /// Last flushed `_commit_seq`.
-    pub last_max_commit_seq: i64,
     /// Mirror operations used to select and later prune this flush.
     pub mirror_ops: Option<Vec<i16>>,
     /// Sequence watermark used for conditional mirror/hot cleanup.

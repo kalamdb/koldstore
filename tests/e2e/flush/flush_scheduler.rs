@@ -8,7 +8,7 @@ const SCHEDULER_DEADLINE: Duration = Duration::from_secs(30);
 const NO_FLUSH_WINDOW: Duration = Duration::from_secs(4);
 
 #[tokio::test]
-async fn strict_auto_flush_worker_flushes_without_manual_tick() -> Result<()> {
+async fn auto_flush_worker_flushes_without_manual_tick() -> Result<()> {
     common::require_pgrx_server().await?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "sched_auto").await?;
@@ -223,8 +223,7 @@ async fn manage_auto_flush(
               hot_row_limit => 5,
               min_flush_rows => 1,
               max_rows_per_file => 1000,
-              auto_flush => $3,
-              mirror_capture_mode => 'strict'
+              auto_flush => $3
             )
             "#,
             &[&relation, &storage, &auto_flush],

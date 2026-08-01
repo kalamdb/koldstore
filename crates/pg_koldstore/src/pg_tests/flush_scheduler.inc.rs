@@ -7,6 +7,13 @@ fn flush_job_records_segment_batches_completed() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    // Seed before manage: #[pg_test] never commits, so post-manage DML is not
+    // WAL-visible to flush. Activation backfill fills __cl from the heap.
+    // 2501 rows with hot_row_limit=1 => flush 2500 rows; max_rows_per_file=1000 => 3 segments.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) SELECT gs, 'b' || gs FROM generate_series(1, 2501) AS gs"
+    ))
+    .expect("insert");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -15,17 +22,12 @@ fn flush_job_records_segment_batches_completed() {
           hot_row_limit => 1,
           min_flush_rows => 1,
           max_rows_per_file => 1000,
+          migration_order_by => 'id',
           auto_flush => false
         )
         "#
     ))
     .expect("manage_table");
-
-    // 2501 rows with hot_row_limit=1 => flush 2500 rows; max_rows_per_file=1000 => 3 segments.
-    Spi::run(&format!(
-        "INSERT INTO {relation} (id, body) SELECT gs, 'b' || gs FROM generate_series(1, 2501) AS gs"
-    ))
-    .expect("insert");
 
     let job_id = spi_get_text(&format!(
         "SELECT koldstore.flush_table('{relation}'::regclass, force => false)::text"
@@ -72,6 +74,10 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
 
     create_messages_table(&schema, table);
     Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) SELECT gs, 'b' || gs FROM generate_series(1, 15001) AS gs"
+    ))
+    .expect("insert");
+    Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
           table_name => '{relation}'::regclass,
@@ -79,16 +85,12 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
           hot_row_limit => 1,
           min_flush_rows => 1,
           max_rows_per_file => 1000,
+          migration_order_by => 'id',
           auto_flush => false
         )
         "#
     ))
     .expect("manage_table");
-
-    Spi::run(&format!(
-        "INSERT INTO {relation} (id, body) SELECT gs, 'b' || gs FROM generate_series(1, 15001) AS gs"
-    ))
-    .expect("insert");
 
     let job_id = spi_get_text(&format!(
         "SELECT koldstore.flush_table('{relation}'::regclass, force => false)::text"
@@ -143,6 +145,12 @@ fn flush_scheduler_skips_table_with_running_flush_job() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    for i in 1..=10 {
+        Spi::run(&format!(
+            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
+        ))
+        .expect("insert");
+    }
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -151,18 +159,12 @@ fn flush_scheduler_skips_table_with_running_flush_job() {
           hot_row_limit => 5,
           min_flush_rows => 1,
           max_rows_per_file => 1000,
+          migration_order_by => 'id',
           auto_flush => true
         )
         "#
     ))
     .expect("manage_table");
-
-    for i in 1..=10 {
-        Spi::run(&format!(
-            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
-        ))
-        .expect("insert");
-    }
 
     Spi::run(&format!(
         r#"
@@ -213,6 +215,12 @@ fn flush_scheduler_tick_enqueues_and_flushes_when_over_hot_limit() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    for i in 1..=10 {
+        Spi::run(&format!(
+            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
+        ))
+        .expect("insert");
+    }
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -221,18 +229,12 @@ fn flush_scheduler_tick_enqueues_and_flushes_when_over_hot_limit() {
           hot_row_limit => 5,
           min_flush_rows => 1,
           max_rows_per_file => 1000,
+          migration_order_by => 'id',
           auto_flush => true
         )
         "#
     ))
     .expect("manage_table");
-
-    for i in 1..=10 {
-        Spi::run(&format!(
-            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
-        ))
-        .expect("insert");
-    }
 
     let ran = Spi::get_one::<bool>("SELECT koldstore.internal_run_flush_scheduler_tick()")
         .expect("scheduler tick")
@@ -263,6 +265,12 @@ fn flush_scheduler_skips_auto_flush_disabled_tables() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    for i in 1..=10 {
+        Spi::run(&format!(
+            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
+        ))
+        .expect("insert");
+    }
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -271,26 +279,21 @@ fn flush_scheduler_skips_auto_flush_disabled_tables() {
           hot_row_limit => 5,
           min_flush_rows => 1,
           max_rows_per_file => 1000,
+          migration_order_by => 'id',
           auto_flush => false
         )
         "#
     ))
     .expect("manage_table");
 
-    for i in 1..=10 {
-        Spi::run(&format!(
-            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
-        ))
-        .expect("insert");
-    }
-
     let ran = Spi::get_one::<bool>("SELECT koldstore.internal_run_flush_scheduler_tick()")
         .expect("scheduler tick")
         .expect("non-null");
     assert!(!ran, "scheduler must skip auto_flush=false tables");
 
-    // Manual flush still works.
-    let _ = flush_table_rows(&relation, false);
+    // Manual flush still works (mirror populated by manage backfill).
+    let flushed = flush_table_rows(&relation, false);
+    assert!(flushed >= 1, "manual flush should publish backfilled rows");
     let completed = spi_get_i64(&format!(
         r#"
         SELECT count(*)::bigint
@@ -342,6 +345,12 @@ fn flush_scheduler_skips_table_with_recent_error_job() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    for i in 1..=10 {
+        Spi::run(&format!(
+            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
+        ))
+        .expect("insert");
+    }
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -350,18 +359,12 @@ fn flush_scheduler_skips_table_with_recent_error_job() {
           hot_row_limit => 5,
           min_flush_rows => 1,
           max_rows_per_file => 1000,
+          migration_order_by => 'id',
           auto_flush => true
         )
         "#
     ))
     .expect("manage_table");
-
-    for i in 1..=10 {
-        Spi::run(&format!(
-            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
-        ))
-        .expect("insert");
-    }
 
     Spi::run(&format!(
         r#"
@@ -406,6 +409,12 @@ fn flush_scheduler_retries_after_error_cooldown() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    for i in 1..=10 {
+        Spi::run(&format!(
+            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
+        ))
+        .expect("insert");
+    }
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -414,18 +423,12 @@ fn flush_scheduler_retries_after_error_cooldown() {
           hot_row_limit => 5,
           min_flush_rows => 1,
           max_rows_per_file => 1000,
+          migration_order_by => 'id',
           auto_flush => true
         )
         "#
     ))
     .expect("manage_table");
-
-    for i in 1..=10 {
-        Spi::run(&format!(
-            "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
-        ))
-        .expect("insert");
-    }
 
     Spi::run(&format!(
         r#"
@@ -473,6 +476,12 @@ fn flush_scheduler_tick_processes_only_one_due_table() {
     create_messages_table(&schema, "b");
 
     for relation in [&a, &b] {
+        for i in 1..=10 {
+            Spi::run(&format!(
+                "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
+            ))
+            .expect("insert");
+        }
         Spi::run(&format!(
             r#"
             SELECT koldstore.manage_table(
@@ -481,17 +490,12 @@ fn flush_scheduler_tick_processes_only_one_due_table() {
               hot_row_limit => 5,
               min_flush_rows => 1,
               max_rows_per_file => 1000,
+              migration_order_by => 'id',
               auto_flush => true
             )
             "#
         ))
         .expect("manage_table");
-        for i in 1..=10 {
-            Spi::run(&format!(
-                "INSERT INTO {relation} (id, body) VALUES ({i}, 'b{i}')"
-            ))
-            .expect("insert");
-        }
     }
 
     let completed_both = || {

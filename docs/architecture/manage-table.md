@@ -25,29 +25,26 @@ flowchart TD
   Plan --> Mirror["plan_change_log_mirror"]
   Mirror --> Rows{Heap has rows?}
 
-  Rows -->|No| CreateE["CREATE mirror + capture triggers"]
+  Rows -->|No| CreateE["CREATE mirror + PK guard"]
   CreateE --> SchemaE["INSERT koldstore.schemas active=complete"]
   SchemaE --> ScopeE["RLS policy if user-scoped"]
   ScopeE --> JobE["INSERT koldstore.jobs completed"]
   JobE --> CountersE["manifest row counters refresh"]
-  CountersE --> CaptureE{"capture mode"}
-  CaptureE -->|strict| DoneE["RETURN job_id"]
-  CaptureE -->|async| SwitchE["Publish PK columns + drop DML triggers"]
-  SwitchE --> DoneE
+  CountersE --> PubE["Publish PK columns + ensure applier"]
+  PubE --> DoneE["RETURN job_id"]
 
   Rows -->|Yes| PlanExist["plan_existing_table_migration"]
-  PlanExist --> CreateP["CREATE mirror + capture triggers"]
-  CreateP --> SchemaP["INSERT schemas active=false capturing"]
+  PlanExist --> CreateP["CREATE mirror + PK guard"]
+  CreateP --> SchemaP["INSERT schemas active=false backfilling"]
   SchemaP --> JobP["INSERT jobs pending"]
-  JobP --> Backfill["Inline mirror backfill batches"]
-  Backfill --> Activate["UPDATE schemas active=true"]
+  JobP --> PubP["Publish under apply lock + activation_lsn"]
+  PubP --> Backfill["Inline mirror backfill batches"]
+  Backfill --> Catchup["WAL catch-up above seq floor"]
+  Catchup --> Activate["UPDATE schemas active=true complete"]
   Activate --> ScopeP["RLS if user-scoped"]
   ScopeP --> JobDoneP["UPDATE jobs completed"]
   JobDoneP --> CountersP["manifest counters refresh"]
-  CountersP --> CaptureP{"capture mode"}
-  CaptureP -->|strict| DoneP["RETURN job_id"]
-  CaptureP -->|async| SwitchP["Publish PK columns + drop DML triggers"]
-  SwitchP --> DoneP
+  CountersP --> DoneP["RETURN job_id"]
 ```
 
 `manage_table` does **not** write Parquet files or object-store `manifest.json`.
@@ -71,7 +68,7 @@ Those happen on the first `koldstore.flush_table` call.
 | `migration_order_by` | null | Explicit ordering for existing-table backfill |
 | `compression` | null | `snappy`, `zstd`, or `uncompressed` |
 | `target_file_size_mb` | null | Optional target Parquet segment size in MiB |
-| `mirror_capture_mode` | `strict` | `strict` transaction triggers or opt-in `async` committed-WAL capture |
+| `auto_flush` | `true` | When `true`, the built-in worker may enqueue flushes |
 
 When `hot_row_limit` is set, the triple `(hot_row_limit, min_flush_rows,
 max_rows_per_file)` is validated and stored in `ManageTableOptions` as a
@@ -81,12 +78,11 @@ max_rows_per_file)` is validated and stored in `ManageTableOptions` as a
 as `ManageTableOptions` (`koldstore-common/src/config.rs`) before catalog
 persistence.
 
-`async` mode requires `wal_level=logical`. `CREATE EXTENSION` creates the empty
-`koldstore_async_mirror` publication, and the first async call creates or reuses
-the deterministic database slot before migration writes. Setup and consistency
-semantics are documented in
-[mirror-capture-modes.md](mirror-capture-modes.md)
-([strict](mirror-capture-strict.md), [async](mirror-capture-async.md)).
+`manage_table` always configures committed-WAL capture and requires
+`wal_level=logical`. `CREATE EXTENSION` creates the empty
+`koldstore_async_mirror` publication; the first managed table creates or reuses
+the deterministic database slot. Setup and consistency semantics are documented
+in [mirror-capture-modes.md](mirror-capture-modes.md).
 
 ---
 
@@ -140,17 +136,14 @@ rejected unless `allow_fk_hot_only = true`.
 
 | Artifact | Name pattern | Contents |
 |----------|--------------|----------|
-| Mirror table | `koldstore.{source_table}__cl` | PK cols + `seq bigint`, `op smallint`, `commit_lsn pg_lsn` |
+| Mirror table | `koldstore.{source_table}__cl` | PK cols + `seq bigint`, `op smallint`, `commit_lsn pg_lsn` (+ optional `order_key`) |
 | Seq index | `{mirror}_seq_idx` | `("seq")` |
 | Tombstone index | `{mirror}_tombstone_seq_idx` | `("seq") WHERE op = 3` |
-| Capture function | `koldstore.{mirror}_capture()` | PL/pgSQL trigger body |
-| Capture triggers | on user heap | INSERT / UPDATE / DELETE AFTER STATEMENT with transition tables |
 | PK guard | on user heap | BEFORE UPDATE OF primary-key columns FOR EACH ROW |
 
-All three mirror indexes are architectural, not optional decoration: the PK
-supports strict/async key updates and conflict fallback, `seq` supports ordered
-flush prefixes, and the partial tombstone index supports delete-only flushes.
-Any index removal must be justified by write, catch-up, and flush benchmarks.
+The PK supports apply upserts and conflict fallback, `seq` supports ordered flush
+prefixes, and the partial tombstone index supports delete-only flushes. Any index
+removal must be justified by write, catch-up, and flush benchmarks.
 
 The user heap is **not** altered. No `_seq`, `_commit_seq`, or `_deleted`
 columns are added (clean-schema contract).
@@ -174,7 +167,7 @@ When `EXISTS (SELECT 1 FROM ONLY table LIMIT 1)` is false:
 1. **Create mirror objects** — `mirror_plan.create_statements()` via SPI:
    - `CREATE TABLE IF NOT EXISTS koldstore.{name}__cl`
    - Indexes
-   - Capture function + three statement triggers + PK guard
+   - PK-update guard only (no DML capture triggers)
 
 2. **Register schema** — `register_schema_version` inserts `koldstore.schemas` v1:
    - `active = true`
@@ -191,11 +184,8 @@ When `EXISTS (SELECT 1 FROM ONLY table LIMIT 1)` is false:
 
 5. **Row counters** — `refresh_managed_table_row_counters` (see Phase 5)
 
-6. **Select capture path**:
-   - `strict`: keep the statement triggers
-   - `async`: add the source's primary-key columns to the shared publication,
-     drop the three DML capture triggers, retain the PK guard, and ensure the
-     always-on database applier is running
+6. **Publish + worker** — add the source's primary-key columns to the shared
+   publication and ensure the always-on database applier is running
 
 7. **Return** job UUID
 
@@ -205,51 +195,48 @@ When `EXISTS (SELECT 1 FROM ONLY table LIMIT 1)` is false:
 
 When the heap already has rows:
 
-1. **Create mirror + triggers** (same as empty path)
+1. **Create mirror + PK guard** (same as empty path)
 
 2. **Register schema (inactive)**:
    - `active = false`
-   - `initialization_state = capturing`
+   - `initialization_state = backfilling`
    - `options.migration_status = mirror_initializing`
 
 3. **Enqueue job** — `enqueue_migration_job`:
    - `status = pending`, `phase = initialize_mirror`
    - `payload` = `MigrationBackfillPayload` (JSON, see serde section)
 
-4. **Inline mirror backfill** — `run_existing_table_mirror_initialization_inline`:
+4. **Publish under apply lock** — add PK columns to `koldstore_async_mirror`,
+   record `activation_lsn`, so concurrent DML lands in WAL during backfill
+
+5. **Inline mirror backfill** — `run_existing_table_mirror_initialization_inline`:
    - Loops `plan_mirror_initialization_batch` until no candidates
    - Each batch: scan hot rows missing mirror rows, `INSERT … ON CONFLICT DO NOTHING`
-   - `op = 1`, `seq = SNOWFLAKE_ID()`, `commit_lsn = pg_current_wal_lsn()`
+   - `op = 1`, `seq` from WAL-apply-safe snowflake allocation, `commit_lsn` sampled
    - `ORDER BY <migration_order_by> ASC, ctid ASC`, `FOR KEY SHARE SKIP LOCKED`
-   - Capture triggers are already live; concurrent DML is captured separately
 
-5. **Activate schema** — `plan_activate_managed_schema`:
+6. **Catch-up** — apply committed WAL above the seq floor until caught up
+
+7. **Activate schema** — `plan_activate_managed_schema`:
    - `active = true`, `initialization_state = complete`
    - `options.migration_status = active`
 
-6. **User scope policy** (if applicable)
+8. **User scope policy** (if applicable)
 
-7. **Complete job** — `status = completed`, `phase = finished`, `rows_processed = count`
+9. **Complete job** — `status = completed`, `phase = finished`, `rows_processed = count`
 
-8. **Row counters**
+10. **Row counters**
 
-9. **Select capture path** — keep strict triggers, or atomically publish the
-   primary-key columns, remove the DML capture triggers, retain the PK guard,
-   and ensure the database applier for async mode
-
-10. **Return** job UUID
+11. **Return** job UUID
 
 **Note:** Backfill runs inline in the caller session today. The `koldstore.jobs`
 row is durable audit/progress; there is no separate worker claim loop in
 `pg_koldstore` yet.
 
-Async activation happens only after this initialization is complete. Strict
-triggers cover writes before activation; publication membership covers commits
-after activation. Both changes occur in the `manage_table` transaction, so the
-handoff has no capture gap.
+Publication membership is established before backfill so concurrent DML cannot
+escape capture. See [mirror-capture-modes.md](mirror-capture-modes.md).
 
 ---
-
 ## Phase 5 — Manifest row counter initialization
 
 `refresh_managed_table_row_counters` (`flush/counters.rs`):
@@ -269,9 +256,8 @@ This creates or updates `koldstore.manifest` for `scope_key = ''`:
 | `cold_row_count` | 0 |
 | `segment_count` | 0 |
 
-After manage, strict triggers or the async applier record counter deltas in
-memory; manifest is updated at transaction pre-commit (see
-[dml-table.md](dml-table.md)).
+After manage, the WAL applier records counter deltas; manifest counters stay
+aligned for flush/describe (see [dml-table.md](dml-table.md)).
 
 ---
 
@@ -295,7 +281,6 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
   "compression": "zstd",
   "backfill_batch_size": 10000,
   "allow_fk_hot_only": true,
-  "mirror_capture_mode": "async",
   "migration_status": "active",
   "scope_column_id": 3,
   "cold_metadata": {
@@ -314,8 +299,8 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
 
 `FlushPolicy` is read back with `FlushPolicy::from_value(&options)` — not a
 separate column. Flat `hot_row_limit` keys are not accepted; only tagged
-`flush_policy` is authoritative. `mirror_capture_mode` is present only for async
-mode; a missing value means the strict default.
+`flush_policy` is authoritative. Capture is always WAL-only; there is no
+`mirror_capture_mode` option.
 
 User-scoped tables also persist `scope_column_id` in `options`. It is the stable
 source attnum used to authorize scope segment pruning; `scope_column` remains
@@ -349,7 +334,7 @@ Serde: `#[serde(rename_all = "snake_case")]` on job phase enums.
 | `primary_key_shape` | `PrimaryKeyShape` JSON |
 | `indexed_columns` | `["created_at"]` |
 | `type_matrix` | `{version, columns:[{name, type_name, supported}]}` |
-| `initialization_state` | string enum: `not_started` / `capturing` / `complete` / `failed` |
+| `initialization_state` | string enum: `not_started` / `backfilling` / `catching_up` / `complete` / `failed` |
 
 ---
 
@@ -361,7 +346,7 @@ Serde: `#[serde(rename_all = "snake_case")]` on job phase enums.
 | `koldstore.jobs` | completed migrate_backfill | pending → completed |
 | `koldstore.manifest` | counters from live counts | same |
 | Mirror table `__cl` | created | created + backfilled |
-| Capture path | strict triggers retained, or async publication membership | same |
+| Capture path | PK-only publication + WAL applier | same |
 | `koldstore.cold_segments` | — | not touched |
 | Object-store Parquet / `manifest.json` | — | not touched |
 

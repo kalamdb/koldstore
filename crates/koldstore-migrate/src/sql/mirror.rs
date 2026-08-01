@@ -1,14 +1,14 @@
 //! Change-log mirror orchestration for clean-schema managed tables.
 //!
-//! Combines [`koldstore_mirror::shared`] DDL with [`koldstore_mirror::strict`]
-//! capture planners into a migrate-facing [`ChangeLogMirrorPlan`]. Storage
-//! errors map into this module's [`MirrorError`], which also covers capture and
-//! statement-metadata failures.
+//! Combines [`koldstore_mirror::shared`] DDL with
+//! [`koldstore_mirror::guard`] PK guards into a migrate-facing
+//! [`ChangeLogMirrorPlan`]. Storage errors map into this module's
+//! [`MirrorError`].
 
 use koldstore_common::{PrimaryKeyColumnShape, PrimaryKeyShape, SqlStatement};
 use koldstore_mirror::{
-    mirror_relation_for_source as storage_mirror_relation_for_source,
-    plan_mirror_schema_with_order_key, statement::mirror_to_sql, MirrorCapturePlan,
+    mirror_relation_for_source as storage_mirror_relation_for_source, plan_mirror_pk_guard,
+    plan_mirror_schema_with_order_key, statement::mirror_to_sql, MirrorPkGuardPlan,
     MirrorStatement,
 };
 
@@ -17,9 +17,6 @@ use crate::QualifiedTableName;
 pub type MirrorResult<T> = Result<T, MirrorError>;
 
 /// Change-log mirror planning error (migrate orchestration layer).
-///
-/// Storage-level variants mirror [`koldstore_mirror::MirrorError`]; `Sql` and
-/// `Capture` wrap statement/trigger planning failures unique to this crate.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum MirrorError {
     /// A source table without a primary key cannot have a latest-state mirror.
@@ -34,9 +31,9 @@ pub enum MirrorError {
     /// SQL statement metadata could not be prepared.
     #[error("{0}")]
     Sql(String),
-    /// DML capture trigger planning failed.
+    /// PK-guard planning failed.
     #[error("{0}")]
-    Capture(String),
+    Guard(String),
 }
 
 impl From<koldstore_mirror::MirrorError> for MirrorError {
@@ -71,8 +68,8 @@ pub struct ChangeLogMirrorPlan {
     pub seq_index: SqlStatement,
     /// Partial index over delete-marker rows for tombstone-only force flush.
     pub tombstone_index: SqlStatement,
-    /// Transactional DML capture function/triggers.
-    pub capture: MirrorCapturePlan,
+    /// Primary-key / order-column mutation guard.
+    pub pk_guard: MirrorPkGuardPlan,
     /// Idempotent mirror drop used by rollback/demigration.
     pub drop_table: SqlStatement,
 }
@@ -82,7 +79,7 @@ impl ChangeLogMirrorPlan {
     #[must_use]
     pub fn create_statements(&self) -> Vec<&SqlStatement> {
         let mut statements = vec![&self.create_table, &self.seq_index, &self.tombstone_index];
-        statements.extend(self.capture.create_statements());
+        statements.extend(self.pk_guard.create_statements());
         statements
     }
 }
@@ -142,13 +139,8 @@ fn plan_change_log_mirror_from_columns_with_order_column(
     let mirror_table = QualifiedTableName::from_table_name(mirror_storage.table_name());
     let schema_plan =
         plan_mirror_schema_with_order_key(&mirror_storage, columns, order_column.is_some())?;
-    let capture = koldstore_mirror::strict::plan_mirror_capture_with_order_column(
-        source_table,
-        &mirror_table,
-        columns,
-        order_column,
-    )
-    .map_err(|error| MirrorError::Capture(error.to_string()))?;
+    let pk_guard = plan_mirror_pk_guard(source_table, &mirror_table, columns, order_column)
+        .map_err(|error| MirrorError::Guard(error.to_string()))?;
 
     Ok(ChangeLogMirrorPlan {
         source_table: source_table.clone(),
@@ -158,7 +150,7 @@ fn plan_change_log_mirror_from_columns_with_order_column(
         seq_index: mirror_sql(schema_plan.seq_index)?,
         tombstone_index: mirror_sql(schema_plan.tombstone_index)?,
         drop_table: mirror_sql(schema_plan.drop_table)?,
-        capture,
+        pk_guard,
     })
 }
 

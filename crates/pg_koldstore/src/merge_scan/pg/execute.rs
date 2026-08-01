@@ -224,7 +224,6 @@ fn hot_row_as_resolved(row: koldstore_common::HotRow) -> ResolvedRow {
         pk_json: row.pk.to_canonical_json(),
         source: RowSource::Hot,
         seq: row.seq,
-        commit_seq: row.commit_seq,
         row_image: row.row_image,
         deleted: row.deleted,
     }

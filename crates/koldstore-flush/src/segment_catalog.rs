@@ -55,21 +55,17 @@ WITH segment_input AS (
         $6::bigint[],
         $7::bigint[],
         $8::bigint[],
-        $9::bigint[],
-        $10::bigint[],
-        $11::integer[],
-        $12::text[],
-        $13::text[],
-        $14::integer[],
-        $15::integer[]
+        $9::integer[],
+        $10::text[],
+        $11::text[],
+        $12::integer[],
+        $13::integer[]
     ) AS u(
         segment_id,
         path,
         batch_number,
         min_seq,
         max_seq,
-        min_commit_seq,
-        max_commit_seq,
         row_count,
         byte_size,
         schema_version,
@@ -88,8 +84,6 @@ inserted_segments AS (
         batch_number,
         min_seq,
         max_seq,
-        min_commit_seq,
-        max_commit_seq,
         row_count,
         byte_size,
         schema_version,
@@ -109,21 +103,19 @@ inserted_segments AS (
         u.batch_number,
         u.min_seq,
         u.max_seq,
-        u.min_commit_seq,
-        u.max_commit_seq,
         u.row_count,
         u.byte_size,
         u.schema_version,
         u.row_group_count,
+        ($14::bigint[])[
+            (u.row_group_offset + 1):
+            (u.row_group_offset + u.row_group_count)
+        ],
+        ($15::bigint[])[
+            (u.row_group_offset + 1):
+            (u.row_group_offset + u.row_group_count)
+        ],
         ($16::bigint[])[
-            (u.row_group_offset + 1):
-            (u.row_group_offset + u.row_group_count)
-        ],
-        ($17::bigint[])[
-            (u.row_group_offset + 1):
-            (u.row_group_offset + u.row_group_count)
-        ],
-        ($18::bigint[])[
             (u.row_group_offset + 1):
             (u.row_group_offset + u.row_group_count)
         ],
@@ -136,14 +128,14 @@ inserted_segments AS (
 index_input AS (
     SELECT *
     FROM unnest(
-        $19::uuid[],
+        $17::uuid[],
+        $18::smallint[],
+        $19::oid[],
         $20::smallint[],
-        $21::oid[],
-        $22::smallint[],
-        $23::bytea[],
-        $24::bytea[],
-        $25::integer[],
-        $26::integer[]
+        $21::bytea[],
+        $22::bytea[],
+        $23::integer[],
+        $24::integer[]
     ) AS i(
         segment_id,
         column_id,
@@ -177,15 +169,15 @@ SELECT
     i.codec_version,
     i.min_value,
     i.max_value,
-    ($27::bytea[])[
+    ($25::bytea[])[
         (i.row_group_offset + 1):
         (i.row_group_offset + i.row_group_count)
     ],
-    ($28::bytea[])[
+    ($26::bytea[])[
         (i.row_group_offset + 1):
         (i.row_group_offset + i.row_group_count)
     ],
-    ($29::bigint[])[
+    ($27::bigint[])[
         (i.row_group_offset + 1):
         (i.row_group_offset + i.row_group_count)
     ]
@@ -215,8 +207,7 @@ DO UPDATE SET
 /// - `$3` new generation (`expected + 1`)
 /// - `$4` segment_count
 /// - `$5` max_seq
-/// - `$6` max_commit_seq
-/// - `$7` pending segment id array
+/// - `$6` pending segment id array
 ///
 /// Returns one row with the new generation when CAS succeeds; zero rows on
 /// generation conflict (caller must fail the job).
@@ -239,7 +230,6 @@ WITH cas AS (
         sync_state,
         segment_count,
         max_seq,
-        max_commit_seq,
         last_error,
         updated_at
     )
@@ -251,7 +241,6 @@ WITH cas AS (
         '{in_sync}',
         $4::integer,
         $5::bigint,
-        $6::bigint,
         NULL,
         now()
     )
@@ -261,7 +250,6 @@ WITH cas AS (
         sync_state = '{in_sync}',
         segment_count = EXCLUDED.segment_count,
         max_seq = EXCLUDED.max_seq,
-        max_commit_seq = EXCLUDED.max_commit_seq,
         last_error = NULL,
         updated_at = now()
     WHERE koldstore.manifest.generation = $2::bigint
@@ -273,7 +261,7 @@ activated AS (
     WHERE table_oid = $1::oid
       AND scope_key = ''
       AND status = 'pending'
-      AND segment_id = ANY($7::uuid[])
+      AND segment_id = ANY($6::uuid[])
       AND EXISTS (SELECT 1 FROM cas)
     RETURNING segment_id
 )
@@ -305,9 +293,9 @@ mod tests {
         assert!(statement.sql.contains("row_group_max_values"));
         assert!(statement.sql.contains("row_group_null_counts"));
         assert!(statement.sql.contains("row_group_offset"));
-        assert!(statement.sql.contains("($16::bigint[])"));
-        assert!(statement.sql.contains("($27::bytea[])"));
-        assert!(statement.sql.contains("($29::bigint[])"));
+        assert!(statement.sql.contains("($14::bigint[])"));
+        assert!(statement.sql.contains("($25::bytea[])"));
+        assert!(statement.sql.contains("($27::bigint[])"));
         assert!(!statement.sql.contains("bytea[][]"));
         assert!(!statement.sql.contains("bigint[][]"));
         assert!(statement
@@ -329,6 +317,7 @@ mod tests {
             .sql
             .contains("WHERE koldstore.manifest.generation = $2::bigint"));
         assert!(statement.sql.contains("SET status = 'active'"));
-        assert!(statement.sql.contains("segment_id = ANY($7::uuid[])"));
+        assert!(statement.sql.contains("segment_id = ANY($6::uuid[])"));
+        assert!(!statement.sql.contains("max_commit_seq"));
     }
 }

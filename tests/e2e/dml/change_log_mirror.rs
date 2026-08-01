@@ -7,13 +7,8 @@ const MIRROR_DEADLINE: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?;
     for target in common::scenario_pg_matrix() {
-        let db = common::TestDb::start(
-            target.clone(),
-            &format!("change_log_mirror_{}", mode.as_str()),
-        )
-        .await?;
+        let db = common::TestDb::start(target.clone(), "change_log_mirror").await?;
         let table_name = format!("{}_messages", db.schema);
         let relation = db.relation(&table_name);
         let mirror = format!("koldstore.{table_name}__cl");
@@ -36,11 +31,10 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
                   storage        => $2,
                   hot_row_limit  => 1000,
                   min_flush_rows => 1,
-                  migration_order_by => 'id',
-                  mirror_capture_mode => $3
+                  migration_order_by => 'id'
                 )
                 "#,
-                &[&relation, &db.storage_name, &mode.as_str()],
+                &[&relation, &db.storage_name],
             )
             .await?;
 
@@ -124,13 +118,8 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
 
 #[tokio::test]
 async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?;
     for target in common::scenario_pg_matrix() {
-        let db = common::TestDb::start(
-            target.clone(),
-            &format!("change_log_mirror_bulk_{}", mode.as_str()),
-        )
-        .await?;
+        let db = common::TestDb::start(target.clone(), "change_log_mirror_bulk").await?;
         let table_name = format!("{}_messages", db.schema);
         let relation = db.relation(&table_name);
         let mirror = format!("koldstore.{table_name}__cl");
@@ -153,11 +142,10 @@ async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
                   storage        => $2,
                   hot_row_limit  => 10000,
                   min_flush_rows => 1,
-                  migration_order_by => 'id',
-                  mirror_capture_mode => $3
+                  migration_order_by => 'id'
                 )
                 "#,
-                &[&relation, &db.storage_name, &mode.as_str()],
+                &[&relation, &db.storage_name],
             )
             .await?;
         db.client
@@ -249,7 +237,7 @@ async fn wait_for_mirror_state(
 ) -> Result<MirrorState> {
     let started = Instant::now();
     loop {
-        let _ = common::fence_async_mirror_if_needed(client).await;
+        let _ = common::fence_async_mirror(client).await;
         if let Ok(state) = mirror_state(client, mirror, id).await {
             if state.op == expected_op {
                 return Ok(state);
@@ -271,7 +259,7 @@ async fn wait_for_op_count(
 ) -> Result<()> {
     let started = Instant::now();
     loop {
-        let _ = common::fence_async_mirror_if_needed(client).await;
+        let _ = common::fence_async_mirror(client).await;
         let count: i64 = client
             .query_one(
                 &format!("SELECT count(*) FROM {mirror} WHERE op = $1"),

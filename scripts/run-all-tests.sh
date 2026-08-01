@@ -27,7 +27,7 @@ Usage:
 
 Runs (in order):
   fmt, clippy, workspace unit tests (nextest), pgrx feature compile/install,
-  #[pg_test] via nextest, E2E (strict + async, nextest), examples (strict + async),
+  #[pg_test] via nextest, E2E (WAL-async, nextest), examples (WAL-async),
   storage comparison, SQL regression, memory checks, short benchmarks.
 
 Options:
@@ -37,7 +37,7 @@ Options:
   --skip-unit          Skip workspace unit tests
   --skip-pgrx          Skip pgrx feature compile/install checks
   --skip-pg-test       Skip in-server #[pg_test] suite (nextest)
-  --skip-e2e           Skip local pgrx-backed E2E (both modes)
+  --skip-e2e           Skip local pgrx-backed E2E
   --skip-examples      Skip real-world example scenarios
   --skip-storage       Skip storage comparison harness
   --skip-sql           Skip KoldStore SQL regression
@@ -188,16 +188,15 @@ run_workspace_unit_tests() {
 
 run_local_pgrx_e2e() {
   local pg="$1"
-  local mode="$2"
   local pg_config
   pg_config="$(configured_pg_config "${pg}")"
   local port="${KOLDSTORE_E2E_PGPORT:-288${pg}}"
 
-  step "local pgrx E2E PostgreSQL ${pg} (--mode ${mode})"
+  step "local pgrx E2E PostgreSQL ${pg}"
   KOLDSTORE_E2E_PGVERSION="${pg}" \
     KOLDSTORE_E2E_PGPORT="${port}" \
     PGRX_PG_CONFIG="${pg_config}" \
-    scripts/run-pg-e2e.sh "${pg}" --mode "${mode}"
+    scripts/run-pg-e2e.sh "${pg}"
 }
 
 run_local_pg_test() {
@@ -226,16 +225,15 @@ run_local_pg_test() {
 
 run_local_examples() {
   local pg="$1"
-  local mode="$2"
 
-  step "example scenarios PostgreSQL ${pg} (--mode ${mode})"
+  step "example scenarios PostgreSQL ${pg}"
   # CI-friendly defaults when the caller has not sized the suite.
   KOLDSTORE_EXAMPLE_PGVERSION="${pg}" \
     KOLDSTORE_EXAMPLE_ROWS="${KOLDSTORE_EXAMPLE_ROWS:-2000}" \
     KOLDSTORE_EXAMPLE_CLIENTS="${KOLDSTORE_EXAMPLE_CLIENTS:-4}" \
     KOLDSTORE_EXAMPLE_SCOPES="${KOLDSTORE_EXAMPLE_SCOPES:-8}" \
     KOLDSTORE_EXAMPLE_TIMEOUT_SECS="${KOLDSTORE_EXAMPLE_TIMEOUT_SECS:-600}" \
-    scripts/run-examples.sh --mode "${mode}"
+    scripts/run-examples.sh
 }
 
 run_local_storage() {
@@ -356,8 +354,7 @@ if [[ "${SKIP_E2E}" -eq 0 ]]; then
     pg="$(echo "${pg}" | xargs)"
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
-      run_local_pgrx_e2e "${pg}" strict
-      run_local_pgrx_e2e "${pg}" async
+      run_local_pgrx_e2e "${pg}"
     fi
   done
 fi
@@ -368,8 +365,7 @@ if [[ "${SKIP_EXAMPLES}" -eq 0 ]]; then
     pg="$(echo "${pg}" | xargs)"
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
-      run_local_examples "${pg}" strict
-      run_local_examples "${pg}" async
+      run_local_examples "${pg}"
     fi
   done
 fi

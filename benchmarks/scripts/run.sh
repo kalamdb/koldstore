@@ -789,6 +789,13 @@ if ! command -v pgbench >/dev/null 2>&1; then
 fi
 
 echo "checking PostgreSQL connection and koldstore extension"
+wal_level="$("$PSQL" "$DATABASE_URL" -tAc "SHOW wal_level" | tr -d '[:space:]')"
+if [[ "${wal_level}" != "logical" ]]; then
+  echo "error: koldstore requires wal_level=logical (got '${wal_level}')." >&2
+  echo "For an external server: ALTER SYSTEM SET wal_level = 'logical'; then restart." >&2
+  echo "pgrx-managed runs already pass --postgresql-conf wal_level=logical." >&2
+  exit 1
+fi
 "$PSQL" "$DATABASE_URL" -v ON_ERROR_STOP=1 -X <<'SQL'
 CREATE EXTENSION IF NOT EXISTS koldstore;
 SELECT koldstore_version();

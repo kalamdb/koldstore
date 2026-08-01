@@ -145,7 +145,7 @@ pub async fn seed_history(
     // Keep soak inserts above the sibling band so PKs never collide.
     ids.set(sibling_base + sibling_seq + 1);
 
-    e2e::fence_selected_mirror(client).await?;
+    e2e::fence_async_mirror(client).await?;
     // Flush all scopes: clear session user so the job is not pinned to one tenant.
     client.batch_execute("RESET koldstore.user_id").await?;
     for relation in schema.managed_relations() {
@@ -607,7 +607,7 @@ pub async fn assert_post_soak(
     schema: &StressSchema,
     config: &StressConfig,
 ) -> Result<()> {
-    e2e::fence_selected_mirror(client).await?;
+    e2e::fence_async_mirror(client).await?;
     for relation in schema.managed_relations() {
         e2e::assert_no_active_jobs(client, relation).await?;
     }

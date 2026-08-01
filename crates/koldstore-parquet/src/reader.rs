@@ -8,9 +8,9 @@
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-use arrow_array::{Array, BooleanArray, Int64Array, RecordBatch, UInt32Array};
+use arrow_array::{Array, BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
 use futures_util::StreamExt;
-use koldstore_common::{ColdRow, CommitSeq, LogicalPk, PkColumn, SeqId};
+use koldstore_common::{ColdRow, LogicalPk, PkColumn, SeqId};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
@@ -28,7 +28,6 @@ pub struct ParquetReadOptions {
     pub columns: Vec<String>,
     pub row_groups: Option<Vec<usize>>,
     pub seq_range: Option<SeqRange>,
-    pub commit_seq_range: Option<CommitSeqRange>,
     pub pk_values: Option<PkValues>,
 }
 
@@ -94,22 +93,6 @@ impl ParquetReadOptions {
         self
     }
 
-    /// Adds commit-sequence range pruning for the given column name.
-    #[must_use]
-    pub fn with_commit_seq_range(
-        mut self,
-        column: impl Into<String>,
-        min: CommitSeq,
-        max: CommitSeq,
-    ) -> Self {
-        self.commit_seq_range = Some(CommitSeqRange {
-            column: column.into(),
-            min,
-            max,
-        });
-        self
-    }
-
     /// Adds PK may-contain values for bloom/exact pruning.
     #[must_use]
     pub fn with_pk_values<I, S>(mut self, column: impl Into<String>, values: I) -> Self
@@ -131,14 +114,6 @@ pub struct SeqRange {
     pub column: String,
     pub min: SeqId,
     pub max: SeqId,
-}
-
-/// Commit sequence range pruning.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommitSeqRange {
-    pub column: String,
-    pub min: CommitSeq,
-    pub max: CommitSeq,
 }
 
 /// PK values for pruning.
@@ -282,9 +257,8 @@ pub struct CleanColdRow {
     pub row_image: serde_json::Value,
     /// KoldStore sequence number.
     pub seq: i64,
-    /// Commit sequence used for winner ordering. Clean segments currently use
-    /// `seq` as the commit ordering value.
-    pub commit_seq: i64,
+    /// Mirror operation code (`1` insert, `2` update, `3` delete).
+    pub op: i16,
     /// Whether this row is a cold delete marker.
     pub deleted: bool,
     /// Schema version used to write the segment.
@@ -449,19 +423,6 @@ pub async fn read_clean_cold_rows_from_object_store_async(
             &seq_range.column,
             seq_range.min.get(),
             seq_range.max.get(),
-        );
-        stats_pruned |= selected_row_groups.len() < before;
-        pruning_applied = true;
-    }
-    if let Some(commit_range) = &options.commit_seq_range {
-        let before = selected_row_groups.len();
-        selected_row_groups = prune_row_groups_by_seq_stats(
-            builder.metadata(),
-            builder.parquet_schema(),
-            &selected_row_groups,
-            &commit_range.column,
-            commit_range.min.get(),
-            commit_range.max.get(),
         );
         stats_pruned |= selected_row_groups.len() < before;
         pruning_applied = true;
@@ -817,7 +778,6 @@ pub fn clean_cold_row_to_common(
         pk,
         scope_key: None,
         seq: SeqId::new(row.seq).map_err(|error| error.to_string())?,
-        commit_seq: CommitSeq::new(row.commit_seq).map_err(|error| error.to_string())?,
         deleted: row.deleted,
         schema_version: row.schema_version,
         row_image: row.row_image,
@@ -832,28 +792,52 @@ fn application_columns_for_read(
     if options.columns.is_empty() {
         return Ok(columns.iter().map(|column| column.name.clone()).collect());
     }
+    let application: Vec<String> = options
+        .columns
+        .iter()
+        .filter(|column| !is_clean_metadata_column(column))
+        .cloned()
+        .collect();
     for pk in primary_key_columns {
-        if !options.columns.iter().any(|column| column == pk) {
+        if !application.iter().any(|column| column == pk) {
             return Err(format!(
                 "parquet read projection is missing required primary-key column `{pk}`"
             ));
         }
     }
-    Ok(options.columns.clone())
+    Ok(application)
 }
 
 fn projection_mask(schema: &SchemaDescriptor, application_columns: &[String]) -> ProjectionMask {
     let mut names = vec![
         ColdMetadataColumn::Seq.name(),
+        ColdMetadataColumn::Op.name(),
         ColdMetadataColumn::Deleted.name(),
         ColdMetadataColumn::SchemaVersion.name(),
     ];
     for column in application_columns {
+        if is_clean_metadata_column(column) {
+            continue;
+        }
         if !names.iter().any(|name| name == column) {
             names.push(column.as_str());
         }
     }
     ProjectionMask::columns(schema, names)
+}
+
+fn is_clean_metadata_column(name: &str) -> bool {
+    matches!(
+        name,
+        "seq"
+            | "op"
+            | "deleted"
+            | "schema_version"
+            | "_seq"
+            | "_op"
+            | "_deleted"
+            | "_schema_version"
+    )
 }
 
 fn clean_rows_from_batch(
@@ -867,6 +851,10 @@ fn clean_rows_from_batch(
         .as_any()
         .downcast_ref::<Int64Array>()
         .ok_or_else(|| "cold seq column has unexpected Arrow type".to_string())?;
+    let op = required_column(batch, ColdMetadataColumn::Op.name())?
+        .as_any()
+        .downcast_ref::<Int16Array>()
+        .ok_or_else(|| "cold op column has unexpected Arrow type".to_string())?;
     let deleted = required_column(batch, ColdMetadataColumn::Deleted.name())?
         .as_any()
         .downcast_ref::<BooleanArray>()
@@ -930,11 +918,17 @@ fn clean_rows_from_batch(
             serde_json::Value::Object(row_image)
         };
         let seq_value = seq.value(row_index);
+        let op_value = op.value(row_index);
+        if !(1..=3).contains(&op_value) {
+            return Err(format!(
+                "cold segment has invalid op {op_value} at seq {seq_value}"
+            ));
+        }
         rows.push(CleanColdRow {
             pk_json: serde_json::Value::Object(pk_json),
             row_image,
             seq: seq_value,
-            commit_seq: seq_value,
+            op: op_value,
             deleted: deleted_value,
             schema_version: schema_version.value(row_index),
         });

@@ -145,7 +145,7 @@ fn populated_table_initialization_does_not_overwrite_newer_dml_state() {
 }
 
 #[test]
-fn mirror_initialization_job_starts_in_capturing_phase_not_system_column_phase() {
+fn mirror_initialization_job_starts_in_initialize_mirror_phase_not_system_column_phase() {
     let request = MigrationBackfillJobRequest::new(
         Uuid::from_u128(1),
         42,

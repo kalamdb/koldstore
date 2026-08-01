@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use koldstore_common::{CommitSeq, SeqId};
+use koldstore_common::SeqId;
 use koldstore_parquet::{FooterSummary, ParquetReadOptions, RowGroupPruner, RowGroupStats};
 use serde_json::json;
 
@@ -10,17 +10,11 @@ fn reader_options_capture_projection_seq_range_and_pk_values() {
         .with_columns(["id", "seq"])
         .with_row_groups([1, 3])
         .with_clean_seq_range(SeqId::new(10).unwrap(), SeqId::new(20).unwrap())
-        .with_commit_seq_range(
-            "commit_seq",
-            CommitSeq::new(11).unwrap(),
-            CommitSeq::new(21).unwrap(),
-        )
         .with_pk_values("id", ["42"]);
 
     assert_eq!(options.columns, vec!["id", "seq"]);
     assert_eq!(options.row_groups.as_ref().unwrap(), &vec![1, 3]);
     assert_eq!(options.seq_range.as_ref().unwrap().min.get(), 10);
-    assert_eq!(options.commit_seq_range.as_ref().unwrap().max.get(), 21);
     assert_eq!(options.pk_values.as_ref().unwrap().values, vec!["42"]);
 }
 
@@ -35,7 +29,6 @@ fn reader_options_capture_clean_schema_metadata_projection_and_seq_cursor() {
         vec!["seq", "op", "deleted", "schema_version"]
     );
     assert_eq!(options.seq_range.as_ref().unwrap().column, "seq");
-    assert!(options.commit_seq_range.is_none());
 }
 
 #[test]
@@ -63,52 +56,17 @@ fn row_group_pruner_skips_non_overlapping_seq_ranges() {
                 row_group: 0,
                 min_seq: Some(1),
                 max_seq: Some(9),
-                min_commit_seq: Some(1),
-                max_commit_seq: Some(9),
             },
             RowGroupStats {
                 row_group: 1,
                 min_seq: Some(10),
                 max_seq: Some(20),
-                min_commit_seq: Some(10),
-                max_commit_seq: Some(20),
             },
         ],
     };
 
     let decision =
         RowGroupPruner.prune_seq_range(&footer, SeqId::new(10).unwrap(), SeqId::new(20).unwrap());
-
-    assert_eq!(decision.selected_row_groups, vec![1]);
-    assert_eq!(decision.skipped_row_groups, 1);
-}
-
-#[test]
-fn row_group_pruner_skips_non_overlapping_commit_seq_ranges() {
-    let footer = FooterSummary {
-        row_groups: vec![
-            RowGroupStats {
-                row_group: 0,
-                min_seq: Some(1),
-                max_seq: Some(9),
-                min_commit_seq: Some(1),
-                max_commit_seq: Some(9),
-            },
-            RowGroupStats {
-                row_group: 1,
-                min_seq: Some(10),
-                max_seq: Some(20),
-                min_commit_seq: Some(10),
-                max_commit_seq: Some(20),
-            },
-        ],
-    };
-
-    let decision = RowGroupPruner.prune_commit_seq_range(
-        &footer,
-        CommitSeq::new(10).unwrap(),
-        CommitSeq::new(20).unwrap(),
-    );
 
     assert_eq!(decision.selected_row_groups, vec![1]);
     assert_eq!(decision.skipped_row_groups, 1);
@@ -122,22 +80,16 @@ fn row_group_pruner_uses_pk_bloom_may_contain_metadata() {
                 row_group: 0,
                 min_seq: Some(1),
                 max_seq: Some(10),
-                min_commit_seq: Some(1),
-                max_commit_seq: Some(10),
             },
             RowGroupStats {
                 row_group: 1,
                 min_seq: Some(11),
                 max_seq: Some(20),
-                min_commit_seq: Some(11),
-                max_commit_seq: Some(20),
             },
             RowGroupStats {
                 row_group: 2,
                 min_seq: Some(21),
                 max_seq: Some(30),
-                min_commit_seq: Some(21),
-                max_commit_seq: Some(30),
             },
         ],
     };
@@ -156,7 +108,7 @@ fn row_group_pruner_uses_pk_bloom_may_contain_metadata() {
 fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
         read_clean_cold_rows_with_options, select_row_groups_for_pk_values, ParquetSegmentWriter,
@@ -171,6 +123,7 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
     ]));
@@ -179,6 +132,7 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
         vec![
             Arc::new(Int64Array::from(ids.clone())),
             Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
             Arc::new(BooleanArray::from(vec![false; ids.len()])),
             Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
         ],
@@ -225,7 +179,7 @@ fn pk_point_lookup_prunes_row_groups_via_stats_and_bloom() {
 fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
         read_clean_cold_rows_from_object_store, ParquetSegmentWriter, PgColumn, PgType,
@@ -237,6 +191,7 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
     ]));
@@ -245,6 +200,7 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
         vec![
             Arc::new(Int64Array::from(ids.clone())),
             Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
             Arc::new(BooleanArray::from(vec![false; ids.len()])),
             Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
         ],
@@ -288,7 +244,7 @@ fn object_store_pk_point_lookup_uses_footer_first_range_reads() {
 fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
         read_clean_cold_rows_from_object_store_with_stats, ObjectStoreReadStats,
@@ -300,6 +256,7 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
     ]));
@@ -308,6 +265,7 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
         vec![
             Arc::new(Int64Array::from(ids.clone())),
             Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
             Arc::new(BooleanArray::from(vec![false; ids.len()])),
             Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
         ],
@@ -367,7 +325,7 @@ fn object_store_pk_point_lookup_reads_less_than_full_file_via_ranges() {
 fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     use std::sync::Arc;
 
-    use arrow_array::{BooleanArray, Int64Array, RecordBatch, UInt32Array};
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
         read_clean_cold_rows_from_object_store_with_size, BloomPruneMode, ParquetSegmentWriter,
@@ -379,6 +337,7 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
         Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
         Field::new("deleted", DataType::Boolean, false),
         Field::new("schema_version", DataType::UInt32, false),
     ]));
@@ -387,6 +346,7 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         vec![
             Arc::new(Int64Array::from(ids.clone())),
             Arc::new(Int64Array::from(ids.clone())),
+            Arc::new(Int16Array::from(vec![1_i16; ids.len()])),
             Arc::new(BooleanArray::from(vec![false; ids.len()])),
             Arc::new(UInt32Array::from(vec![1_u32; ids.len()])),
         ],

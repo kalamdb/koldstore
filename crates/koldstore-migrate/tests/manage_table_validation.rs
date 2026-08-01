@@ -15,7 +15,6 @@ fn valid_context() -> ManageTableValidationContext<'static> {
         scope_column: None,
         segment_order_column: None,
         compression: None,
-        mirror_capture_mode: None,
         policy: ManageTablePolicyInput {
             hot_row_limit: Some(10_000),
             min_flush_rows: 1_000,
@@ -54,25 +53,6 @@ fn scope_column_is_persisted_by_attnum() {
 
     let validated = validate_manage_table(context).unwrap();
     assert_eq!(validated.options.scope_column_id, Some(3));
-}
-
-#[test]
-fn segment_order_column_allowed_with_async_mirror_capture() {
-    let mut context = valid_context();
-    context.mirror_capture_mode = Some("async");
-    context.segment_order_column = Some(SegmentOrderColumnInput {
-        column_id: 4,
-        name: "created_at",
-        type_oid: 1184,
-        nullable: false,
-    });
-
-    let validated = validate_manage_table(context).unwrap();
-    assert_eq!(validated.options.segment_order_column_id, Some(4));
-    assert_eq!(
-        validated.options.mirror_capture_mode(),
-        koldstore_common::MirrorCaptureMode::Async
-    );
 }
 
 #[test]
@@ -209,29 +189,6 @@ fn invalid_compression_is_rejected() {
     assert_eq!(
         validate_manage_table(context).unwrap_err(),
         MigrationConstraintError::UnsupportedCompression("brotli".to_string())
-    );
-}
-
-#[test]
-fn async_mirror_capture_mode_is_persisted() {
-    let mut context = valid_context();
-    context.mirror_capture_mode = Some("async");
-
-    let validated = validate_manage_table(context).unwrap();
-    assert_eq!(
-        validated.options.mirror_capture_mode(),
-        koldstore_common::MirrorCaptureMode::Async
-    );
-}
-
-#[test]
-fn invalid_mirror_capture_mode_is_rejected() {
-    let mut context = valid_context();
-    context.mirror_capture_mode = Some("eventual");
-
-    assert_eq!(
-        validate_manage_table(context).unwrap_err(),
-        MigrationConstraintError::UnsupportedMirrorCaptureMode("eventual".to_string())
     );
 }
 

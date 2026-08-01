@@ -8,6 +8,14 @@
 //! (created before `manage_table`); joins that need cold non-PK quals use
 //! `WITH … AS MATERIALIZED` so join predicates run on fetched rows.
 //!
+//! Async capture needs a logical slot. `register_temp_storage` pre-provisions it
+//! before any SPI write so `#[pg_test]`'s wrapping transaction does not deadlock
+//! slot creation.
+//!
+//! Flush fixtures must seed heap rows **before** `manage_*` so activation backfill
+//! fills `__cl`. Post-manage DML is not WAL-visible until commit, which `#[pg_test]`
+//! never does mid-body.
+//!
 //! `#[pgrx::pg_schema]` only accepts inline `mod { ... }` blocks, so test bodies are
 //! `include!`d into the schema module below.
 
@@ -23,9 +31,9 @@ mod tests {
 
     use super::fixture::{
         assert_finishes_under, create_messages_table, flush_table_rows, jsonb_obj,
-        manage_for_cold_flush, manage_shared, register_temp_storage, setup_cold_typed_join_fixture,
-        spi_get_explain, spi_get_i64, spi_get_text, spi_succeeds, unique_suffix, COLD_FACT_IDS,
-        COLD_QUERY_BUDGET,
+        manage_for_cold_flush, manage_shared, preprovision_async_mirror, register_temp_storage,
+        setup_cold_typed_join_fixture, spi_get_explain, spi_get_i64, spi_get_text, spi_succeeds,
+        unique_suffix, COLD_FACT_IDS, COLD_QUERY_BUDGET,
     };
 
     include!("lifecycle.inc.rs");

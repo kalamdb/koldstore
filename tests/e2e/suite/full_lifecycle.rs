@@ -149,7 +149,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
             "pg{pg_version}: insert second batch of {SECOND_INSERT_ROWS} rows"
         ));
         insert_rows(client, pg_version, INITIAL_ROWS + 1, SECOND_INSERT_ROWS).await?;
-        common::fence_async_mirror_if_needed(client).await?;
+        common::fence_async_mirror(client).await?;
     }
     {
         let _step = common::log_step_always(format!(
@@ -496,7 +496,6 @@ async fn insert_rows(
 }
 
 async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?.as_str();
     client
         .execute(
             r#"
@@ -506,15 +505,13 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
               hot_row_limit  => $3,
               min_flush_rows => 1,
               migration_order_by => 'id',
-              auto_flush => false,
-              mirror_capture_mode => $4
+              auto_flush => false
             )
             "#,
             &[
                 &relation(pg_version),
                 &storage_name(pg_version),
                 &FLUSH_POLICY_ROW_LIMIT,
-                &mode,
             ],
         )
         .await?;

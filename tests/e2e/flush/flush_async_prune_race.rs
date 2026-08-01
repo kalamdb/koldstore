@@ -11,7 +11,6 @@ use crate::flush::harness::{
 
 async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> Result<String> {
     let relation = db.relation(table_name);
-    let mode = common::selected_mirror_capture_mode()?.as_str();
     db.client
         .batch_execute(&format!(
             r#"
@@ -32,11 +31,10 @@ async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> R
               storage => $2,
               hot_row_limit => NULL,
               migration_order_by => $3,
-              auto_flush => false,
-              mirror_capture_mode => $4
+              auto_flush => false
             )
             "#,
-            &[&relation, &db.storage_name, &"id", &mode],
+            &[&relation, &db.storage_name, &"id"],
         )
         .await?;
     common::assert_system_columns_absent(&db.client, &relation).await?;
@@ -51,7 +49,7 @@ async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> R
             "#
         ))
         .await?;
-    common::fence_async_mirror_if_needed(&db.client).await?;
+    common::fence_async_mirror(&db.client).await?;
     Ok(relation)
 }
 
@@ -96,10 +94,6 @@ async fn pause_flush_after_manifest(
 /// newer hot row instead of deleting it with the stale mirror watermark.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn update_during_async_flush_prune_keeps_newer_hot_row() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async flush prune fence race in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -163,10 +157,6 @@ async fn update_during_async_flush_prune_keeps_newer_hot_row() -> Result<()> {
 /// DELETE during the publish→prune window must leave a tombstone that masks cold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delete_during_async_flush_prune_keeps_tombstone() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async prune DELETE race in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -227,10 +217,6 @@ async fn delete_during_async_flush_prune_keeps_tombstone() -> Result<()> {
 /// DELETE then re-INSERT the same PK during the fence window must keep the new row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reinsert_during_async_flush_prune_keeps_new_row() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async prune reinsert race in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -266,10 +252,6 @@ async fn reinsert_during_async_flush_prune_keeps_new_row() -> Result<()> {
 /// High DML during the publish→prune window must not lose newer hot winners.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn firehose_during_async_flush_prune_preserves_hot_winners() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async prune firehose in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {

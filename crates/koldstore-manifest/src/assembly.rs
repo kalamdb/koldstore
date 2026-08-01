@@ -87,7 +87,6 @@ pub fn build_manifest_segment_from_catalog_row(
             .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?,
         row.path,
         row.min_seq..=row.max_seq,
-        row.min_commit_seq..=row.max_commit_seq,
         u64::try_from(row.row_count)
             .map_err(|error| ManifestAssemblyError::InvalidSegment(error.to_string()))?,
         u64::try_from(row.byte_size)

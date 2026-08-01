@@ -18,17 +18,16 @@ pub mod sql;
 // Stable top-level paths used across the workspace.
 pub use config::privileges;
 pub use domain::{
-    column, commit_sequence, filter, object_keys, pk, row, scope, segment_paths, seq, snowflake,
-    storage_id, table_kind, table_name,
+    column, filter, object_keys, pk, row, scope, segment_paths, seq, snowflake, storage_id,
+    table_kind, table_name,
 };
 pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 
 pub use column::{ColumnId, ColumnRef};
-pub use commit_sequence::{CommitSequenceDomain, COMMIT_SEQUENCE_LOCK_NAMESPACE};
 pub use config::{
     flush_enabled_from_options, hot_row_limit_from_options, validate_max_rows_per_file,
-    FlushPolicy, ManageTableOptions, MigrationStatus, MirrorCaptureMode, MoveAfter,
-    ParquetCompression, DEFAULT_MAX_ROWS_PER_FLUSH, DEFAULT_MIN_MAX_ROWS_PER_FILE,
+    FlushPolicy, ManageTableOptions, MigrationStatus, MoveAfter, ParquetCompression,
+    DEFAULT_MAX_ROWS_PER_FLUSH, DEFAULT_MIN_MAX_ROWS_PER_FILE,
 };
 pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};
@@ -53,7 +52,7 @@ pub use segment_paths::{
     segment_folder_number, segment_path_token, segment_relative_object_path, SEGMENTS_PER_FOLDER,
     SEGMENT_PATH_TOKEN_LEN,
 };
-pub use seq::{CommitSeq, ScopeKey, SeqId};
+pub use seq::{ScopeKey, SeqId};
 pub use session::{
     normalize_user_id, primary_key_default_clause, snowflake_default_expression,
     snowflake_id_call_expression, SessionSqlError, SessionSqlResult, SNOWFLAKE_ID_FUNCTION,

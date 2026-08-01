@@ -2,46 +2,47 @@
 
 Published numbers from the most recent storage comparison run(s). Re-run
 `scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results` to refresh
-this file. Each column is measured alone on a fresh pgrx PostgreSQL
-(stop → recreate DBs → one side). Methodology: [README.md](README.md).
+this file. Each column is measured alone on a wiped + re-initdb pgrx PostgreSQL
+(stop → wipe `~/.pgrx/data-<ver>` → prepare → one side). Methodology:
+[README.md](README.md).
 
-**When:** 2026-07-31 UTC (pg 04:42:16Z, async 04:53:46Z, strict 05:04:55Z)
-**Git:** `efb93e2b2d55` (`efb93e2b2d557305721a0d877819bbb1c2760925`)
-**Run:** 10000000 rows · `hot_row_limit = 100000` · `max_rows_per_file = 1000000` · `--dml-sample 50000` · `insert_batch_rows = 100000` · `warmup_rows = 1000000` · zstd Parquet · **counterbalanced sequential** isolated fresh server per sample (not parallel) · sides measured: **pg + async + strict** · **single sample per side**
+**When:** 2026-08-01 UTC (pg 08:49:29Z, async 09:00:17Z)
+**Git:** `328a5c6444b6` (`328a5c6444b60a835285f80e58544255b8b68fcf`)
+**Run:** 10000000 rows · `hot_row_limit = 100000` · `max_rows_per_file = 1000000` · `--dml-sample 50000` · `insert_batch_rows = 100000` · `warmup_rows = 1000000` · zstd Parquet · **counterbalanced sequential** isolated wiped server per sample (not parallel) · sides measured: **pg + async** · **single sample per side**
 
 Managed PostgreSQL sizes include hot heap + `koldstore.<table>__cl` + mirror
 indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
-**PostgreSQL only**, **PG + KoldStore (async)**, and **PG + KoldStore (strict)**.
+**PostgreSQL only** and **PG + KoldStore** (WAL-only capture).
 
 ## Main comparison
 
-| Metric | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |
-| --- | --- | --- | --- |
-| foreground insert throughput | 37926 ops/s | 81771 ops/s | 24819 ops/s |
-| sustainable insert throughput | TODO | TODO | TODO |
-| sustainable update throughput | TODO | TODO | TODO |
-| insert p99 latency | 7068.24 ms | 3785.01 ms | 10483.58 ms |
-| update p99 latency | 208.38 ms | 110.04 ms | 112.61 ms |
-| hot-query p99 latency | 359 µs | 359 µs | 420 µs |
-| cold-query p99 latency | 361 µs | 2.32 ms | 2.08 ms |
-| hot+cold query throughput | 4452 ops/s | 976 ops/s | 901 ops/s |
-| cold-only query throughput | 4393 ops/s | 610 ops/s | 581 ops/s |
-| cold files fetched/query | — | TODO | TODO |
-| cold bytes fetched/query | — | TODO | TODO |
-| peak memory under workload | TODO | TODO | TODO |
-| peak RSS during flush | — | 607.44 MiB (before=339.77 MiB, after=607.44 MiB) | 954.7 MiB (before=180.05 MiB, after=954.70 MiB) |
-| flush duration | — | 139.33 s (71054 rows/s) | 231.99 s (42675 rows/s) |
-| CPU seconds per 1M operations | TODO | TODO | TODO |
-| WAL generated per 1M operations | TODO | TODO | TODO |
-| local bytes written | TODO | TODO | TODO |
-| VACUUM duration | 174.36 s | 3.59 s | 3.67 s |
-| local PostgreSQL storage | 5.85 GiB | 72.23 MiB | 72.23 MiB |
-| total hot+cold storage | 5.85 GiB | 670.75 MiB | 670.78 MiB |
-| peak open file descriptors | TODO | TODO | TODO |
-| combined backup size | TODO | TODO | TODO |
-| full query-ready restore time | TODO | TODO | TODO |
-| mirror backlog after workload | — | TODO | TODO |
-| backlog drain time | — | TODO | TODO |
+| Metric | PostgreSQL only | PG + KoldStore |
+| --- | --- | --- |
+| foreground insert throughput | 100809 ops/s | 100818 ops/s |
+| sustainable insert throughput | TODO | TODO |
+| sustainable update throughput | TODO | TODO |
+| insert p99 latency | 1224.07 ms | 1198.19 ms |
+| update p99 latency | 36.07 ms | 113.36 ms |
+| hot-query p99 latency | 355 µs | 438 µs |
+| cold-query p99 latency | 306 µs | 1.71 ms |
+| hot+cold query throughput | 3997 ops/s | 1055 ops/s |
+| cold-only query throughput | 4032 ops/s | 662 ops/s |
+| cold files fetched/query | — | TODO |
+| cold bytes fetched/query | — | TODO |
+| peak memory under workload | TODO | TODO |
+| peak RSS during flush | — | 821.94 MiB (before=333.20 MiB, after=821.94 MiB) |
+| flush duration | — | 141.53 s (69949 rows/s) |
+| CPU seconds per 1M operations | TODO | TODO |
+| WAL generated per 1M operations | TODO | TODO |
+| local bytes written | TODO | TODO |
+| VACUUM duration | 158.7 s | 3.24 s |
+| local PostgreSQL storage | 5.85 GiB | 72.23 MiB |
+| total hot+cold storage | 5.85 GiB | 670.75 MiB |
+| peak open file descriptors | TODO | TODO |
+| combined backup size | TODO | TODO |
+| full query-ready restore time | TODO | TODO |
+| mirror backlog after workload | — | TODO |
+| backlog drain time | — | TODO |
 
 ‡ **Hot+cold query** alternates newest hot PK (`id = <rows>`) and oldest
 cold PK (`id = 1`) after flush — **50/50** of the lookup loop.
@@ -52,61 +53,57 @@ PK lookup (`QUERY_LOOPS = 400` after 40 discarded warm-up lookups). See [README.
 
 ## Detail (throughput and storage)
 
-| Operation | PostgreSQL only | PG + KoldStore (async) | PG + KoldStore (strict) |
-| --- | --- | --- | --- |
-| insert speed† | 37926 ops/s (26 µs/op) | 81771 ops/s (12 µs/op) | 24819 ops/s (40 µs/op) |
-| update speed† | 63194 ops/s (16 µs/op) | 54640 ops/s (18 µs/op) | 50226 ops/s (20 µs/op) |
-| delete speed† | 36267 ops/s (28 µs/op) | 114842 ops/s (9 µs/op) | 49935 ops/s (20 µs/op) |
-| └ async insert mirror catch-up | — | 30360 ops/s (33 µs/op) | — |
-| └ async update mirror catch-up | — | 1563 ops/s (640 µs/op) | — |
-| └ async delete mirror catch-up | — | 29968 ops/s (33 µs/op) | — |
-| └ async restore mirror catch-up | — | 25272 ops/s (40 µs/op) | — |
-| query hot only (before flush) | 4181 ops/s (239 µs/op) | 3547 ops/s (282 µs/op) | 2975 ops/s (336 µs/op) |
-| query with hot+cold (after flush) | 4452 ops/s (225 µs/op) | 976 ops/s (1024 µs/op) | 901 ops/s (1110 µs/op) |
-| query cold only (after flush) | 4393 ops/s (228 µs/op) | 610 ops/s (1639 µs/op) | 581 ops/s (1722 µs/op) |
-| VACUUM time (after flush) | 174.36 s | 3.59 s | 3.67 s |
-| dead tuples after workload | 99916 (live=10000000) | 99916 (live=10000000) | 99916 (live=10000000) |
-| index storage (hot + __cl) | 414.86 MiB | 11.45 MiB | 11.45 MiB |
-| table storage (hot + __cl) | 5.45 GiB | 60.79 MiB | 60.79 MiB |
-| └ cold Parquet | — | 598.52 MiB | 598.54 MiB |
-| └ hot heap only | 5.45 GiB | 55.81 MiB | 55.81 MiB |
-| └ __cl mirror heap | — | 4.98 MiB | 4.98 MiB |
-| └ __cl mirror indexes | — | 4.32 MiB | 4.32 MiB |
-| PostgreSQL heap + indexes (after flush) | 5.85 GiB | 72.23 MiB | 72.23 MiB |
-| total PG backup size | TODO | TODO | TODO |
-| restore time | TODO | TODO | TODO |
+| Operation | PostgreSQL only | PG + KoldStore |
+| --- | --- | --- |
+| insert speed† | 100809 ops/s (10 µs/op) | 100818 ops/s (10 µs/op) |
+| update speed† | 81791 ops/s (12 µs/op) | 55164 ops/s (18 µs/op) |
+| delete speed† | 130331 ops/s (8 µs/op) | 145691 ops/s (7 µs/op) |
+| └ async insert mirror catch-up | — | 32662 ops/s (31 µs/op) |
+| └ async update mirror catch-up | — | 1689 ops/s (592 µs/op) |
+| └ async delete mirror catch-up | — | 28661 ops/s (35 µs/op) |
+| └ async restore mirror catch-up | — | 25414 ops/s (39 µs/op) |
+| query hot only (before flush) | 3851 ops/s (260 µs/op) | 4076 ops/s (245 µs/op) |
+| query with hot+cold (after flush) | 3997 ops/s (250 µs/op) | 1055 ops/s (948 µs/op) |
+| query cold only (after flush) | 4032 ops/s (248 µs/op) | 662 ops/s (1511 µs/op) |
+| VACUUM time (after flush) | 158.7 s | 3.24 s |
+| dead tuples after workload | 99916 (live=10000000) | 99916 (live=10000000) |
+| index storage (hot + __cl) | 414.86 MiB | 11.45 MiB |
+| table storage (hot + __cl) | 5.45 GiB | 60.79 MiB |
+| └ cold Parquet | — | 598.52 MiB |
+| └ hot heap only | 5.45 GiB | 55.81 MiB |
+| └ __cl mirror heap | — | 4.98 MiB |
+| └ __cl mirror indexes | — | 4.32 MiB |
+| PostgreSQL heap + indexes (after flush) | 5.85 GiB | 72.23 MiB |
+| total PG backup size | TODO | TODO |
+| restore time | TODO | TODO |
 
-† Strict DML updates the change-log mirror in the foreground. Async DML
-records heap WAL in the foreground; catch-up rows appear only in the async
-column.
+† Managed DML records heap WAL in the foreground; catch-up rows appear
+separately after `wait_for_async_mirror()`.
 
 ## Storage wins at a glance (this run)
 
 KoldStore is a **storage lifecycle** tool. The durable wins after flush are heap
 size, index size, and VACUUM time — not universal DML/query acceleration.
-Async column below (vs PostgreSQL-only). Single-sample draft after a clean
-single-pg16 lab (no concurrent pgrx 15/17/18).
+Async column below (vs PostgreSQL-only).
 
 | Result | Before → after flush | Tradeoff |
 | --- | --- | --- |
-| Total footprint (hot + cold) | 5.85 GiB → 671 MiB | **89% smaller** |
-| └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB | **99% smaller** |
+| Total footprint (hot + cold) | 5.85 GiB → 670.75 MiB | **89% smaller** |
+| └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72.23 MiB | **99% smaller** |
 | └ cold Parquet | — → 599 MiB | outside the database |
-| Indexes (hot + `__cl`) | 415 MiB → 11.5 MiB | **97% smaller** |
-| `VACUUM (FULL, ANALYZE)` | 174.36 s → 3.59 s | **49× faster** |
+| Indexes (hot + `__cl`) | 414.86 MiB → 11.45 MiB | **97% smaller** |
+| `VACUUM (FULL, ANALYZE)` | 158.7 s → 3.24 s | **49× faster** |
 
 ### Why was delete reported faster before — and is it?
 
 Foreground delete is a single `DELETE … WHERE id BETWEEN …` over
-`--dml-sample` rows **before flush**. Async does **not** update the mirror in
-that window (catch-up is a separate row). Strict updates
-`koldstore.<table>__cl` to `op = 3` in the same transaction, so strict being
-slower than plain PostgreSQL is expected.
+`--dml-sample` rows **before flush**. Managed capture does **not** update the
+mirror in that window (catch-up is a separate row).
 
-Async can still land below PostgreSQL-only: one-shot bulk DELETE has high
-variance across isolated sides, and the managed table still carries a logical
-publication. Prior “async delete much faster” tables mixed mismatched side
-JSON. Do **not** publish “KoldStore makes DELETE faster” from a single sample.
+Managed delete can still land below PostgreSQL-only: one-shot bulk DELETE has
+high variance across isolated sides, and the managed table still carries a
+logical publication. Do **not** publish “KoldStore makes DELETE faster” from a
+single sample.
 
 ### Segment object-path layout
 
@@ -117,21 +114,32 @@ hygiene vs a flat `batch-*` / full-UUID layout. Keep the short token for
 orphan-retry uniqueness; week/Hive folders are unnecessary while catalog stats
 prune reads.
 
-### Why does async insert look faster than PostgreSQL only?
+### Why does managed insert look faster than PostgreSQL only?
 
-It is **not** a KoldStore acceleration of `INSERT`. Both columns time the same
-kind of work: committed 100k-row batches into the user heap (+ indexes). Async
-does **not** update `koldstore.<table>__cl` in that timed window — that cost is
-the separate **async insert mirror catch-up** row. Strict pays mirror work in
-the foreground, which is why it is slower.
+It should not. Both columns time the same heap `INSERT` path. The harness:
 
-Sides are **not** run in parallel and do **not** share a live server during
-measurement: publication uses six counterbalanced side orders, each sample after
-`cargo pgrx stop` + empty DB recreate. Large foreground gaps can still reflect
-machine variance. Do not treat async > PostgreSQL-only
-insert as a product claim until repeated isolated runs agree. For end-to-end
-“row is mirrored” cost, add catch-up (or run with the background worker and
-measure lag).
+1. Advances logical slots to the tip after warm-up (lag ≤ 1 WAL segment)
+2. Pins a logical slot on PostgreSQL-only for the timed seed (managed already
+   has its real async slot)
+3. So both retain newly written seed WAL the same way
+
+Absolute `wal_files` after warm-up stays in the tens because PostgreSQL keeps a
+recycled segment **pool** near recent write volume — that is not slot lag.
+What must match is tip lag ≈ 0, then similar file growth during the seed.
+
+This run:
+
+| Check | PostgreSQL only (pinned) | PG + KoldStore |
+| --- | --- | --- |
+| Pre-seed wal_files / slot lag | 55 / 0 B | 58 / ~16 MiB (1 segment) |
+| Timed insert | **100809 ops/s** | **100818 ops/s** |
+| WAL written | 9.06 GiB | 9.06 GiB |
+| WAL files during seed | 55 → 581 (+526) | 58 → 582 (+524) |
+| Batch p50 / p99 | 971 / 1224 ms | 972 / 1198 ms |
+| Checkpoint write/sync | 81 s / 1.5 s | 81 s / 1.3 s |
+
+Foreground insert is a wash. Mirror apply is still the separate catch-up row
+(~33k rows/s). Product wins remain storage size and VACUUM, not INSERT speed.
 
 Lab note: the storage harness may set `koldstore.async_mirror_max_retained_bytes = 0`
 while the worker is off so 10M-row seeding can retain multi-GiB slot WAL until

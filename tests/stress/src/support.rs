@@ -29,7 +29,7 @@ pub async fn wait_for_jobs(client: &Client, relation: &str) -> Result<()> {
     for _ in 0..180 {
         let active = e2e::active_job_count(client, relation).await?;
         if active == 0 {
-            e2e::fence_selected_mirror(client).await?;
+            e2e::fence_async_mirror(client).await?;
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -112,7 +112,6 @@ pub async fn manage_user_scoped_with_policy(
     min_flush_rows: i64,
     max_rows_per_file: i64,
 ) -> Result<()> {
-    let mode = e2e::selected_mirror_capture_mode()?.as_str();
     client
         .execute(
             r#"
@@ -124,8 +123,7 @@ pub async fn manage_user_scoped_with_policy(
               max_rows_per_file => $5,
               table_type        => 'user',
               scope_column      => $6,
-              migration_order_by => $7,
-              mirror_capture_mode => $8
+              migration_order_by => $7
             )
             "#,
             &[
@@ -136,7 +134,6 @@ pub async fn manage_user_scoped_with_policy(
                 &max_rows_per_file,
                 &scope_column,
                 &migration_order_by,
-                &mode,
             ],
         )
         .await?;

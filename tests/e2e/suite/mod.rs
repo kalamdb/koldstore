@@ -4,7 +4,6 @@ mod async_load_soak;
 mod endurance;
 mod failure_injection;
 mod full_lifecycle;
-mod harness_mode;
 mod jobs_and_recovery;
 mod memory_leak;
 mod quickstart_matrix;

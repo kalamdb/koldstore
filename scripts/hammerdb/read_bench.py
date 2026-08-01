@@ -68,6 +68,17 @@ def psql_scalar(args: argparse.Namespace, sql: str) -> str:
     return last_data_line(psql(args, sql, tuples_only=True))
 
 
+def parquet_segments_opened(explain_text: str) -> int:
+    """Parse opened cold Parquet count from current or legacy EXPLAIN text."""
+    m = re.search(r"Parquet Segments Opened:\s*(\d+)", explain_text)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"Cold segments: considered=(\d+),.*?opened=(\d+)", explain_text)
+    if m:
+        return int(m.group(2))
+    return 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--arm", required=True)
@@ -105,10 +116,8 @@ def main() -> None:
     Path(args.explain_out).write_text(explain_text, encoding="utf-8")
 
     uses_merge = "Custom Scan (KoldMergeScan)" in explain_hist
-    opened = 0
-    m = re.search(r"Cold segments: considered=(\d+),.*?opened=(\d+)", explain_hist)
-    if m:
-        opened = int(m.group(2))
+    customer_uses_merge = "Custom Scan (KoldMergeScan)" in explain_cust
+    opened = parquet_segments_opened(explain_hist)
     cold_segs = int(psql_scalar(args, "SELECT count(*) FROM koldstore.cold_segments WHERE status='active';") or "0")
 
     if args.expect_merge:
@@ -119,6 +128,11 @@ def main() -> None:
         if opened < 1:
             raise SystemExit(
                 f"error: arm={args.arm} expected opened>=1 cold segment on history PK, plan:\n{explain_hist}"
+            )
+        # Selective-manage contract: unmanaged OLTP tables stay on native plans.
+        if customer_uses_merge:
+            raise SystemExit(
+                f"error: arm={args.arm} customer PK unexpectedly used KoldMergeScan:\n{explain_cust}"
             )
 
     max_ks = int(psql_scalar(args, "SELECT coalesce(max(ks_id), 1) FROM ONLY history;") or "1")
@@ -175,6 +189,16 @@ SELECT hist_ms::text || ' ' || cust_ms::text FROM _ks_bench;
     cold_rows = int(psql_scalar(args, "SELECT coalesce(sum(row_count),0)::bigint FROM koldstore.cold_segments WHERE status='active';") or "0")
     cold_bytes = int(psql_scalar(args, "SELECT coalesce(sum(byte_size),0)::bigint FROM koldstore.cold_segments WHERE status='active';") or "0")
 
+    if args.expect_merge:
+        if cold_segs < 1 or cold_rows < 1:
+            raise SystemExit(
+                f"error: arm={args.arm} expected active cold data after flush "
+                f"(segments={cold_segs}, cold_rows={cold_rows})"
+            )
+        # Do not assert count(*) visibility here: the planner may still pick a
+        # heap-only parallel seq scan for aggregate counts. PK lookup + opened
+        # cold segments are the authoritative hot+cold proof.
+
     result = {
         "arm": args.arm,
         "history_pk_ms": round(hist_ms, 2),
@@ -184,6 +208,7 @@ SELECT hist_ms::text || ' ' || cust_ms::text FROM _ks_bench;
         "iters": args.iters,
         "plan_history_pk_uses_merge_scan": uses_merge,
         "plan_history_pk_cold_segments_opened": opened,
+        "plan_customer_pk_uses_merge_scan": customer_uses_merge,
         "cold_segments": cold_segs,
         "cold_rows": cold_rows,
         "cold_bytes": cold_bytes,

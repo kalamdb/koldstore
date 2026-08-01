@@ -108,7 +108,6 @@ pub(super) struct FlushJobProgressUpdate<'a> {
     pub rows_flushed: i64,
     pub batches_completed: i32,
     pub checkpoint_seq: i64,
-    pub checkpoint_commit_seq: i64,
     pub phase: &'a str,
     pub progress_total: i64,
 }
@@ -130,7 +129,6 @@ pub(super) fn update_flush_job_progress(
             DatumWithOid::from(progress.rows_flushed),
             DatumWithOid::from(progress.batches_completed),
             DatumWithOid::from(progress.checkpoint_seq),
-            DatumWithOid::from(progress.checkpoint_commit_seq),
             DatumWithOid::from(progress.phase),
             DatumWithOid::from(progress.progress_total),
         ],
@@ -144,7 +142,6 @@ pub(super) fn mark_flush_job_completed(
     table_oid: pgrx::pg_sys::Oid,
     rows_flushed: i64,
     checkpoint_seq: i64,
-    checkpoint_commit_seq: i64,
     batches_completed: i32,
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
@@ -157,7 +154,6 @@ pub(super) fn mark_flush_job_completed(
             DatumWithOid::from(table_oid),
             DatumWithOid::from(rows_flushed),
             DatumWithOid::from(checkpoint_seq),
-            DatumWithOid::from(checkpoint_commit_seq),
             DatumWithOid::from(batches_completed),
         ],
     )
@@ -251,7 +247,6 @@ pub(super) fn mark_flush_job_completed_after_cancel(
     table_oid: pgrx::pg_sys::Oid,
     rows_flushed: i64,
     checkpoint_seq: i64,
-    checkpoint_commit_seq: i64,
     batches_completed: i32,
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
@@ -265,7 +260,6 @@ pub(super) fn mark_flush_job_completed_after_cancel(
             DatumWithOid::from(table_oid),
             DatumWithOid::from(rows_flushed),
             DatumWithOid::from(checkpoint_seq),
-            DatumWithOid::from(checkpoint_commit_seq),
             DatumWithOid::from(batches_completed),
         ],
     )

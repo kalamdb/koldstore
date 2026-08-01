@@ -59,7 +59,6 @@ pub async fn barrier_unlock(client: &Client) -> Result<()> {
 ///
 /// Returns an error when fixture setup fails.
 pub async fn seed_managed_items(db: &TestDb, table: &str, rows: i64) -> Result<String> {
-    let mode = crate::common::selected_mirror_capture_mode()?.as_str();
     let managed = db.create_indexed_items_table(table, rows).await?;
     db.client
         .batch_execute("SET koldstore.min_max_rows_per_file = 1;")
@@ -74,11 +73,10 @@ pub async fn seed_managed_items(db: &TestDb, table: &str, rows: i64) -> Result<S
               min_flush_rows => 1,
               max_rows_per_file => 16,
               migration_order_by => 'id',
-              auto_flush => false,
-              mirror_capture_mode => $3
+              auto_flush => false
             )
             "#,
-            &[&managed.relation, &db.storage_name, &mode],
+            &[&managed.relation, &db.storage_name],
         )
         .await?;
     Ok(managed.relation)

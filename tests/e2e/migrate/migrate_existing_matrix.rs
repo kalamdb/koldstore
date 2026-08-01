@@ -99,7 +99,6 @@ async fn run_existing_table_scenario(
     scenario: &ExistingTableScenario,
     pg_version: u16,
 ) -> Result<()> {
-    let mode = common::selected_mirror_capture_mode()?.as_str();
     let relation = format!(
         "{}.{}_pg{}",
         scenario.schema_name, scenario.table_name, pg_version
@@ -124,8 +123,8 @@ async fn run_existing_table_scenario(
 
     client
         .execute(
-            "SELECT koldstore.manage_table(table_name => $1::text::regclass, storage => 'local-minio', hot_row_limit => NULL, migration_order_by => $2, mirror_capture_mode => $3)",
-            &[&relation, &scenario.primary_key, &mode],
+            "SELECT koldstore.manage_table(table_name => $1::text::regclass, storage => 'local-minio', hot_row_limit => NULL, migration_order_by => $2)",
+            &[&relation, &scenario.primary_key],
         )
         .await?;
 

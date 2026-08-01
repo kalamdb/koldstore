@@ -1,5 +1,19 @@
 # HammerDB / TPROC-C with selective KoldStore manage
 
+## Claim wording (use this)
+
+**Allowed:** “KoldStore survived HammerDB TPROC-C with selective `HISTORY`
+manage, and post-run flush/`EXPLAIN` proved `KoldMergeScan` opened cold
+Parquet.”
+
+**Not allowed:** “TPC-C certified”, “passes official HammerDB/TPC”, or
+“production safe”. Weekly CI uses a small warehouse/VU/duration config for
+regression, not a published performance claim.
+
+Weekly path: `scripts/readiness/run-hammerdb.sh` → manage `HISTORY` → timed
+run → flush → fail closed unless HISTORY PK opens ≥1 cold segment and
+`customer` stays on a native plan. Artifact: `target/hammerdb/summary.json`.
+
 ## Important: what HammerDB does (and does not) prove
 
 TPROC-C **mostly inserts** into `HISTORY` during payment transactions. It does
@@ -12,8 +26,8 @@ This harness therefore runs **three arms** and, after each arm, an explicit
 | Arm | Meaning | Expected `HISTORY` PK plan |
 | --- | --- | --- |
 | **baseline** | unmanaged | `Index Scan` on heap PK |
-| **hot_only** | managed, **not flushed** | `KoldMergeScan`, `opened=0` cold segments |
-| **hot_cold** | managed + **flushed** | `KoldMergeScan`, `opened≥1` Parquet segment |
+| **hot_only** | managed, **not flushed** | `KoldMergeScan`, `Parquet Segments Opened: 0` |
+| **hot_cold** | managed + **flushed** | `KoldMergeScan`, `Parquet Segments Opened ≥ 1` |
 
 Unmanaged hot tables (`customer`, …) must keep ordinary index plans in every arm.
 
@@ -93,9 +107,11 @@ Custom Scan (KoldMergeScan) on history
 
 ```text
 Custom Scan (KoldMergeScan) on history
-  Hot Plan: Index Scan
-  Cold segments: considered=12, pruned_catalog_index=11, opened=1
-  Parquet segment: public/history/batch-1.parquet, ... 1 rows
+  Emit Path: cold_native
+  Cold Scan:
+    Parquet Segments Opened: 1
+    Parquet Segments:
+      Object: public/history/.../segment-....parquet
 ```
 
 **customer** (all arms) — unchanged hot path:

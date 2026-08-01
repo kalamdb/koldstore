@@ -14,10 +14,6 @@ use crate::flush::harness::{
 /// authoritative until the writer finishes, then flush can complete.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn async_flush_fence_waits_on_writer_without_pruning_early() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping async fence writer-block in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -26,7 +22,7 @@ async fn async_flush_fence_waits_on_writer_without_pruning_early() -> Result<()>
             .create_indexed_items_table("fence_lock_items", 24)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let blocker = connect_peer(&db).await?;
         blocker.batch_execute("BEGIN").await?;
@@ -76,10 +72,6 @@ async fn async_flush_fence_waits_on_writer_without_pruning_early() -> Result<()>
 /// Continuous DML on a second async table must not corrupt the flushed table.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping multi-table WAL fence test in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -88,7 +80,7 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
         let noise = db.create_indexed_items_table("multi_noise", 10).await?;
         db.manage_shared(&primary.relation, "id").await?;
         db.manage_shared(&noise.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let stop = Arc::new(AtomicBool::new(false));
         let noise_rel = noise.relation.clone();
@@ -135,17 +127,13 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
 /// Apply failpoint during flush phase-0 must leave retryable state and succeed later.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping apply-failpoint-during-flush in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "flush_apply_fp").await?;
         let table = db.create_indexed_items_table("apply_fp_items", 20).await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         // Keep lag in WAL: disable launcher restart for this session + database.
         let dbname: String = db
@@ -225,10 +213,6 @@ async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
 /// Killing the async worker while flush is paused must not leave duplicate mirror rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn worker_kill_during_flush_upload_leaves_consistent_mirror() -> Result<()> {
-    if !common::selected_mirror_capture_mode()?.is_async() {
-        common::log_always("skipping worker-kill-during-flush in strict mode");
-        return Ok(());
-    }
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -237,7 +221,7 @@ async fn worker_kill_during_flush_upload_leaves_consistent_mirror() -> Result<()
             .create_indexed_items_table("kill_worker_items", 30)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
-        common::fence_async_mirror_if_needed(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
         common::wait_for_async_worker(&db.client).await?;
 
         let coordinator = connect_peer(&db).await?;

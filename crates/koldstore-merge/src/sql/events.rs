@@ -9,7 +9,10 @@ use koldstore_mirror::{
 };
 use thiserror::Error;
 
-use crate::{changes_since as merge_changes_since, ChangeCursor, ChangeGap};
+use crate::{
+    changes_last as merge_changes_last, changes_since as merge_changes_since, ChangeCursor,
+    ChangeGap,
+};
 
 /// Default changes_since limit.
 pub const DEFAULT_CHANGE_LIMIT: i32 = 1000;
@@ -17,9 +20,12 @@ pub const DEFAULT_CHANGE_LIMIT: i32 = 1000;
 /// Change-feed helper error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ChangeFeedError {
-    /// `limit_rows` must be greater than zero.
+    /// `limit_rows` / `last_rows` must be greater than zero.
     #[error("limit_rows must be positive")]
     InvalidLimit,
+    /// `last_rows` must be greater than zero.
+    #[error("last_rows must be positive")]
+    InvalidLastRows,
     /// Requested cursor is older than retained changes.
     #[error(transparent)]
     RetentionGap(#[from] ChangeGap),
@@ -78,6 +84,90 @@ pub fn changes_since(
         oldest_available,
     )
     .map_err(Into::into)
+}
+
+/// Returns the newest `last_rows` latest-state changes in ascending seq order.
+///
+/// Matches KalamDB subscribe `last_rows`: newest-N rewind, delivered
+/// oldest→newest, with no older-history pagination.
+///
+/// # Errors
+///
+/// Returns [`ChangeFeedError::InvalidLastRows`] when `last_rows <= 0`.
+pub fn changes_last(
+    changes: &[MirrorChange],
+    table_oid: u32,
+    scope_key: Option<&ScopeKey>,
+    last_rows: i32,
+) -> Result<Vec<MirrorChange>, ChangeFeedError> {
+    if last_rows <= 0 {
+        return Err(ChangeFeedError::InvalidLastRows);
+    }
+
+    let scoped_changes = changes
+        .iter()
+        .filter(|change| change.table_oid == table_oid)
+        .filter(|change| change.scope_key.as_ref() == scope_key)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(merge_changes_last(&scoped_changes, last_rows as usize))
+}
+
+/// Plans the hot mirror half of `koldstore.changes_since` for `last_rows` rewind.
+///
+/// # Errors
+///
+/// Returns an error when no primary-key columns are supplied, the scope column
+/// is unsafe, or SQL cannot be represented.
+pub fn plan_mirror_changes_last(
+    mirror_table: &QualifiedTableName,
+    primary_key_columns: &[String],
+    scope_column: Option<&str>,
+) -> Result<MirrorChangesSincePlan, ChangeFeedError> {
+    if primary_key_columns.is_empty() {
+        return Err(ChangeFeedError::MissingPrimaryKey);
+    }
+
+    let mut additional_predicates = Vec::new();
+    let mut additional_param_types = Vec::new();
+    let scope_parameter_index = match scope_column {
+        Some(scope_column) => {
+            let predicate = scope_predicate_sql("mirror", scope_column, 1)
+                .map_err(|_| ChangeFeedError::InvalidScopeColumn(scope_column.to_string()))?;
+            additional_predicates.push(predicate);
+            additional_param_types.push((1, SqlParamType::Text));
+            Some(1)
+        }
+        None => None,
+    };
+    let limit_param = if scope_parameter_index.is_some() {
+        2
+    } else {
+        1
+    };
+
+    let mirror = mirror_table
+        .as_table_name()
+        .map(MirrorRelation::new)
+        .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
+    let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
+    let statement = mirror_to_sql(
+        koldstore_mirror::plan_select_mirror_last_rows_with_params(
+            &mirror,
+            &primary_key,
+            limit_param,
+            &additional_predicates,
+            &additional_param_types,
+        )
+        .map_err(|error| ChangeFeedError::Sql(error.to_string()))?,
+    )
+    .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
+
+    Ok(MirrorChangesSincePlan {
+        statement,
+        scope_parameter_index,
+    })
 }
 
 /// Plans the hot mirror half of `koldstore.changes_since`.

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
 
-use koldstore_common::{CommitSeq, SeqId};
+use koldstore_common::SeqId;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::basic::Type as ParquetPhysicalType;
 use parquet::bloom_filter::Sbbf;
@@ -52,37 +52,6 @@ impl RowGroupPruner {
             })
             .map(|row_group| row_group.row_group)
             .collect();
-        PruneDecision {
-            skipped_row_groups: footer
-                .row_groups
-                .len()
-                .saturating_sub(selected_row_groups.len()),
-            selected_row_groups,
-        }
-    }
-
-    /// Prunes row groups whose `_commit_seq` range cannot overlap the requested range.
-    #[must_use]
-    pub fn prune_commit_seq_range(
-        &self,
-        footer: &crate::FooterSummary,
-        min: CommitSeq,
-        max: CommitSeq,
-    ) -> PruneDecision {
-        let selected_row_groups: Vec<usize> = footer
-            .row_groups
-            .iter()
-            .filter(
-                |row_group| match (row_group.min_commit_seq, row_group.max_commit_seq) {
-                    (Some(group_min), Some(group_max)) => {
-                        group_max >= min.get() && group_min <= max.get()
-                    }
-                    _ => true,
-                },
-            )
-            .map(|row_group| row_group.row_group)
-            .collect();
-
         PruneDecision {
             skipped_row_groups: footer
                 .row_groups

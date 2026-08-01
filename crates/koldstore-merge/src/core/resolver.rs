@@ -3,7 +3,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
-use koldstore_common::{ColdRow, CommitSeq, HotRow, LogicalPk, LogicalPkValues, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, LogicalPkValues, SeqId};
 
 /// Row source for tie-breaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +18,6 @@ pub struct ResolvedRow {
     pub pk_json: serde_json::Value,
     pub source: RowSource,
     pub seq: SeqId,
-    pub commit_seq: CommitSeq,
     pub row_image: serde_json::Value,
     pub deleted: bool,
 }
@@ -27,15 +26,14 @@ struct Candidate {
     pk_json: Option<serde_json::Value>,
     source: RowSource,
     seq: SeqId,
-    commit_seq: CommitSeq,
     deleted: bool,
     row_image: serde_json::Value,
 }
 
 impl Candidate {
     fn beats(&self, other: &Self) -> bool {
-        (self.seq, self.commit_seq) > (other.seq, other.commit_seq)
-            || ((self.seq, self.commit_seq) == (other.seq, other.commit_seq)
+        self.seq > other.seq
+            || (self.seq == other.seq
                 && self.source == RowSource::Hot
                 && other.source == RowSource::Cold)
     }
@@ -47,7 +45,6 @@ impl Candidate {
                 .expect("resolved candidates require canonical PK JSON"),
             source: self.source,
             seq: self.seq,
-            commit_seq: self.commit_seq,
             row_image: self.row_image,
             deleted: self.deleted,
         }
@@ -72,7 +69,6 @@ pub fn resolve_rows_owned(hot: Vec<HotRow>, cold: Vec<ColdRow>) -> Vec<ResolvedR
             pk_json: None,
             source: RowSource::Cold,
             seq: row.seq,
-            commit_seq: row.commit_seq,
             deleted: row.deleted,
             row_image: row.row_image,
         };
@@ -92,7 +88,6 @@ pub fn resolve_rows_owned(hot: Vec<HotRow>, cold: Vec<ColdRow>) -> Vec<ResolvedR
             pk_json: None,
             source: RowSource::Hot,
             seq: row.seq,
-            commit_seq: row.commit_seq,
             deleted: row.deleted,
             row_image: row.row_image,
         };
@@ -185,7 +180,6 @@ impl NewestFirstWinnerResolver {
                     pk_json: None,
                     source: RowSource::Hot,
                     seq: row.seq,
-                    commit_seq: row.commit_seq,
                     deleted: row.deleted,
                     row_image: row.row_image,
                 },
@@ -208,7 +202,6 @@ impl NewestFirstWinnerResolver {
                     pk_json: None,
                     source: RowSource::Cold,
                     seq: row.seq,
-                    commit_seq: row.commit_seq,
                     deleted: row.deleted,
                     row_image: row.row_image,
                 },

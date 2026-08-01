@@ -113,23 +113,25 @@ KoldStore is a **storage lifecycle tool**, not a universal query accelerator. Af
 | └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72 MiB    | **99% smaller**      |
 | └ cold Parquet                      | — → 599 MiB          | outside the database |
 | Indexes (hot + `__cl`)              | 415 MiB → 11.5 MiB   | **97% smaller**      |
-| `VACUUM (FULL, ANALYZE)`            | 174.36 s → 3.59 s    | **49× faster**       |
+| `VACUUM (FULL, ANALYZE)`            | 158.7 s → 3.24 s     | **49× faster**       |
 
 
 Sample: 10M wide rows, `hot_row_limit = 100000`, `--dml-sample 50000`,
 `--warmup-rows 1000000`, `max_rows_per_file = 1000000` (local PG16.13
-`release-pg`, 2026-07-31, single pgrx instance). Each side gets a fresh pgrx
-server, an untimed 1M warm-up, then the timed run. Managed PostgreSQL sizes
-include the hot heap **and** `koldstore.<table>__cl` plus its indexes. Full
-tables: [docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md).
+`release-pg`, 2026-08-01, single wiped pgrx instance per side). Each side gets
+a fresh pgrx server, an untimed warm-up, equalized WAL retention for the timed
+seed, then the timed run. Managed PostgreSQL sizes include the hot heap **and**
+`koldstore.<table>__cl` plus its indexes. Full tables:
+[docs/benchmarks/RESULTS.md](docs/benchmarks/RESULTS.md). How to re-run with
+your own `--rows`: [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
 ### Latest UPDATE verification
 
-Post-optimization PostgreSQL 16 smoke measurements put async foreground UPDATE
-at heap parity on both tested statement shapes:
+Post-optimization PostgreSQL 16 smoke measurements put WAL-capture foreground
+UPDATE at heap parity on both tested statement shapes:
 
 
-| UPDATE workload                    | PostgreSQL only | KoldStore async | Difference       |
+| UPDATE workload                    | PostgreSQL only | KoldStore (WAL) | Difference       |
 | ---------------------------------- | --------------- | --------------- | ---------------- |
 | Single-row pgbench throughput      | 26,482 ops/s    | 26,152 ops/s    | **1.25% lower**  |
 | Single-row pgbench p95             | 0.211 ms        | 0.213 ms        | **0.95% higher** |
@@ -139,9 +141,7 @@ at heap parity on both tested statement shapes:
 
 The single-row run used 10k seeded rows, four clients, and five seconds with the
 background worker enabled. The batch run used 100k rows and a 50k-row UPDATE
-sample. Mirror and source row counts matched after catch-up. Strict single-row
-UPDATE measured 0.294 ms p95 versus its 0.208 ms heap baseline (**1.41×**),
-inside the separate 2.00× strict consistency gate.
+sample. Mirror and source row counts matched after catch-up.
 
 These are focused single-run verification measurements, not replacement 10M
 publication results. Release publication requires six clean-tree,
@@ -152,48 +152,46 @@ counterbalanced samples plus worker-on backlog and drain metrics. See the
 
 This storage-scale run reports foreground DML separately from mirror catch-up.
 It is a clean-tree single sample (draft publication); release publication still
-prefers six counterbalanced repetitions. Async commits the source heap first;
-strict mode includes mirror maintenance in the application transaction. Query
-phases use the fair harness order (PG cold lookups before `VACUUM FULL`;
-managed cold after flush).
+prefers six counterbalanced repetitions. KoldStore commits the source heap
+first; a database worker applies committed WAL afterward. Query phases use the
+fair harness order (PG cold lookups before `VACUUM FULL`; managed cold after
+flush). Foreground INSERT is equalized for WAL retention so it is not marketed
+as a speedup.
 
 
-| Operation           | PostgreSQL only | KoldStore async | Trade-off                                          |
+| Operation           | PostgreSQL only | KoldStore (WAL) | Trade-off                                          |
 | ------------------- | --------------- | --------------- | -------------------------------------------------- |
-| INSERT              | 60,928 ops/s    | 92,097 ops/s    | noise / order — not a product win (same full-heap seed) |
-| UPDATE              | 68,449 ops/s    | 29,892 ops/s    | single sample; **56% lower**                       |
-| DELETE              | 122,535 ops/s   | 132,737 ops/s   | single-sample — do not claim faster                |
-| Hot-only PK lookup  | 3,894 ops/s     | 2,392 ops/s     | single-sample noise (pre-flush full heap)          |
-| Hot+cold PK lookup  | 4,043 ops/s     | 821 ops/s       | **80% slower** (Parquet vs full-heap baseline)     |
-| Cold-only PK lookup | 4,085 ops/s     | 496 ops/s       | **88% slower** (Parquet vs full-heap baseline)     |
+| INSERT              | 100,809 ops/s   | 100,818 ops/s   | ≈ identical (fair WAL-retention seed)              |
+| UPDATE              | 81,791 ops/s    | 55,164 ops/s    | single sample; **33% lower**                       |
+| DELETE              | 130,331 ops/s   | 145,691 ops/s   | single-sample — do not claim faster                |
+| Hot-only PK lookup  | 3,851 ops/s     | 4,076 ops/s     | ≈ same (pre-flush full heap)                       |
+| Hot+cold PK lookup  | 3,997 ops/s     | 1,055 ops/s     | **74% slower** (Parquet vs full-heap baseline)     |
+| Cold-only PK lookup | 4,032 ops/s     | 662 ops/s       | **84% slower** (Parquet vs full-heap baseline)     |
 
 
-Async mirror catch-up measured 28,758 INSERT, 814 UPDATE, 21,812 DELETE, and
-18,313 restore operations per second in this run. The focused UPDATE catch-up
-result in the verification table above is 49,358 ops/s. Timed INSERT seeds an
-empty table to 10M on every side — `hot_row_limit` does not make managed INSERT
-faster. Full methodology:
-[docs/benchmarks/](docs/benchmarks/README.md).
+Async mirror catch-up measured 32,662 INSERT, 1,689 UPDATE, 28,661 DELETE, and
+25,414 restore operations per second in this run. Timed INSERT seeds an empty
+table to 10M on every side — `hot_row_limit` does not make managed INSERT
+faster. Full methodology and how to run with your own row count:
+[docs/benchmarks/README.md](docs/benchmarks/README.md).
 
-Managed tables support two mirror paths. The default `strict` mode writes the
-latest-state mirror in the heap transaction for immediate consistency. The
-opt-in `async` mode commits the heap first; a database worker applies committed
-PK-only WAL with a 100 ms polling interval and bounded immediate retry bursts,
-while an explicit fence remains available for strong reads. Async UPDATE uses a
-direct set-based update with a conflict-safe insert-missing fallback; application
-DML does not run a worker-kick trigger. This reduces foreground overhead while
-reporting catch-up as separate work. `CREATE EXTENSION` and the first async
-table create the publication and slot automatically; only
-`wal_level=logical` requires administrator setup.
+Managed tables use committed-WAL mirror capture only. Foreground DML writes the
+heap; a database worker applies PK-only WAL with a 100 ms polling interval and
+bounded immediate retry bursts. Call `koldstore.wait_for_async_mirror()` for a
+strong read boundary; `flush_table` fences automatically. Authoritative mirror
+`seq` is allocated only by the serialized applier and is the exclusive
+`changes_since` cursor. `CREATE EXTENSION` and the first managed table create
+the publication and slot automatically; only `wal_level=logical` requires
+administrator setup.
 
 ## How it works
 
-1. KoldStore registers the table and creates a small latest-state change-log mirror (one metadata row per primary key). Choose strict transactional capture or opt-in async committed-WAL capture.
+1. KoldStore registers the table and creates a small latest-state change-log mirror (one metadata row per primary key) fed by committed WAL.
 2. A built-in database worker auto-flushes when hot rows exceed `hot_row_limit` (per-table `auto_flush`, default `true`). You can also call `flush_table` manually.
 3. Flush moves older rows to Parquet and prunes them from the hot heap when safe.
 4. `SELECT` on the original table uses `KoldMergeScan` so the newest visible row wins.
 
-Details: [Architecture](docs/architecture.md) · [Capture modes](docs/architecture/mirror-capture-modes.md) · [Manage](docs/architecture/manage-table.md) · [Flush](docs/architecture/flushing-table.md) · [Scan](docs/architecture/scanning-table.md) · [Scheduling](docs/operations/scheduling.md)
+Details: [Architecture](docs/architecture.md) · [Capture](docs/architecture/mirror-capture-modes.md) · [Manage](docs/architecture/manage-table.md) · [Flush](docs/architecture/flushing-table.md) · [Scan](docs/architecture/scanning-table.md) · [Scheduling](docs/operations/scheduling.md)
 
 ```mermaid
 flowchart TD
@@ -277,8 +275,8 @@ Details: [Quickstart](docs/quickstart.md#0-shared-preload-required) · [SQL API]
 
 ## Try it in five minutes
 
-Published release images ship PostgreSQL 16 with `koldstore` **shared-preloaded**
-and `CREATE EXTENSION` applied on first init:
+Published release images ship PostgreSQL 16 with `koldstore` **shared-preloaded**,
+`wal_level=logical`, and `CREATE EXTENSION` applied on first init:
 
 ```bash
 docker pull jamals86/pg-koldstore:latest
@@ -286,10 +284,11 @@ docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore
 psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
 ```
 
-Confirm preload (required for correct hot+cold reads on every connection):
+Confirm preload and WAL level (required for manage_table / hot+cold reads):
 
 ```sql
 SHOW shared_preload_libraries;       -- must include koldstore
+SHOW wal_level;                      -- must be logical
 SELECT koldstore.preload_status();
 ```
 
@@ -321,15 +320,45 @@ ALTER TABLE messages SET (
 INSERT INTO messages (id, body)
 SELECT gs, 'row ' || gs FROM generate_series(1, 1012) AS gs;
 
+-- Fence so the WAL applier has assigned authoritative mirror seq values.
+SELECT koldstore.wait_for_async_mirror();
+
+-- Change feed: exclusive seq cursor over hot mirror + cold Parquet metadata.
+-- One row per primary key; op is 1=insert, 2=update, 3=delete.
+-- Page with LIMIT and advance since_seq from the highest seq you consumed.
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since(
+  table_name => 'messages'::regclass,
+  since_seq  => 0,
+  limit_rows => 100
+);
+
+-- Or rewind to the newest N changes (KalamDB last_rows); delivered oldest→newest.
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since(
+  table_name => 'messages'::regclass,
+  since_seq  => 0,
+  limit_rows => 1000,
+  last_rows  => 50
+);
+
 -- Optional: run a policy flush now. Otherwise the built-in worker auto-flushes
 -- when hot rows exceed hot_row_limit.
 SELECT koldstore.flush_table(table_name => 'messages'::regclass);
+
+-- After flush, the same cursor still returns flushed latest-state from cold.
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since('messages'::regclass, 0, 100);
 
 SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 SELECT jsonb_pretty(koldstore.describe_table(table_name => 'messages'::regclass));
 ```
 
-Mirror inspection, job UUIDs, `EXPLAIN`, shared/user tables, and storage backends: [docs/quickstart.md](docs/quickstart.md).
+`since_seq = 0` means from the start of retained history. A positive cursor older
+than the retained cold/hot floor raises a retention-gap error. Mirror inspection,
+job UUIDs, `EXPLAIN`, shared/user tables, and storage backends:
+[docs/quickstart.md](docs/quickstart.md) · [SQL API](docs/sql-api.md) ·
+[Change API](docs/roadmap.md#change-api-changes_since).
 
 Auto-flush runs on the built-in database worker (`koldstore.flush_check_interval_seconds`). To control flushes yourself (for example with `pg_cron`), disable it with `SELECT koldstore.set_table_auto_flush('messages'::regclass, false)` and schedule `koldstore.flush_table`: [docs/operations/scheduling.md](docs/operations/scheduling.md).
 
@@ -361,11 +390,12 @@ Full list: [docs/limitations.md](docs/limitations.md).
 Priority after the 0.1 hot/cold baseline:
 
 1. **Scoped storage** — store each `scope_column` value under its own cold folder (`{namespace}/{table}/{scopeId}/…`), so tenant/user data stays physically separated and easier to prune, backup, or delete independently
-2. **Change API** — public `changes_since` / change-cursor SQL for a table (and scope) since a last-seen seq, built for real-time sync and catch-up consumers
-3. **Compaction** — combine small cold segments into larger files to cut object-store chatter and improve scan efficiency
-4. **Backup / export** — first-class dump and restore that understands KoldStore: coordinated PostgreSQL + cold-object backups, and table/scope archive export/import of managed hot+cold data
+2. **FILE datatype** — KalamDB-style column type that stores file payloads in cold storage rather than in the heap (hot rows keep a compact reference; upload/fetch use the table’s cold backend)
+3. **Stream Table Changes** — stream changes to Kalam gateway for Websocket real-time notifications
+4. **Compaction** — combine small cold segments into larger files to cut object-store chatter and improve scan efficiency
+5. **Backup / export** — first-class dump and restore that understands KoldStore: coordinated PostgreSQL + cold-object backups, and table/scope archive export/import of managed hot+cold data
 
-Also planned: faster cold PK lookups, time-based / predicate flush policies, and a storage file datatype.
+Also planned: faster cold PK lookups, and time-based / predicate flush policies.
 
 Tracked in [docs/roadmap.md](docs/roadmap.md).
 
@@ -387,8 +417,7 @@ cargo nextest run --workspace --no-default-features \
   --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests \
   --exclude stress
 cargo pgrx install -p pg_koldstore --no-default-features --features "pg16 s3"
-scripts/run-pg-e2e.sh 16 --mode strict
-scripts/run-pg-e2e.sh 16 --mode async
+scripts/run-pg-e2e.sh 16
 ```
 
 - [Development guide](docs/development.md)

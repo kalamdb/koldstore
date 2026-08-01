@@ -110,44 +110,6 @@ fn application_roles_cannot_set_internal_gucs() {
 }
 
 #[test]
-fn commit_sequence_allocator_is_monotonic_for_test_shell() {
-    use koldstore_common::ScopeKey;
-
-    let first = hooks::xact::allocate_commit_seq_for_tests().unwrap();
-    let second = hooks::xact::allocate_commit_seq_for_tests().unwrap();
-    assert!(second > first);
-
-    let domain = hooks::xact::CommitSequenceDomain::for_table_scope(
-        42,
-        Some(ScopeKey::new("tenant-a").unwrap()),
-    );
-    assert_eq!(domain.name(), "table:42:scope:tenant-a");
-    assert_eq!(
-        domain.advisory_lock_key(),
-        hooks::xact::CommitSequenceDomain::for_table_scope(
-            42,
-            Some(ScopeKey::new("tenant-a").unwrap())
-        )
-        .advisory_lock_key()
-    );
-    assert_ne!(
-        domain.advisory_lock_key(),
-        hooks::xact::CommitSequenceDomain::for_table_scope(
-            42,
-            Some(ScopeKey::new("tenant-b").unwrap())
-        )
-        .advisory_lock_key()
-    );
-
-    let allocator = hooks::xact::CommitSequenceAllocator::new_for_tests();
-    let first_tx = allocator.allocate_for_domain(&domain).unwrap();
-    let second_tx = allocator.allocate_for_domain(&domain).unwrap();
-    assert!(second_tx.commit_seq > first_tx.commit_seq);
-    assert_eq!(first_tx.lock_key, domain.advisory_lock_key());
-    assert_eq!(allocator.domain(), domain.name());
-}
-
-#[test]
 fn hook_shell_exposes_required_hook_names() {
     let hooks = hooks::registered_hook_names();
     assert!(hooks.contains(&"set_rel_pathlist"));

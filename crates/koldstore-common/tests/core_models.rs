@@ -1,8 +1,8 @@
 use koldstore_common::{
-    ColdRow, ColumnClass, ColumnId, CommitSeq, HotRow, LogicalPk, MirrorOperation, MirrorState,
-    PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue, Predicate,
-    PredicateClass, PredicateValue, PrimaryKeyColumnShape, PrimaryKeyShape, QualifiedTableName,
-    SeqId, StablePkHash, TableKind, TableName,
+    ColdRow, ColumnClass, ColumnId, HotRow, LogicalPk, MirrorOperation, MirrorState, PgCollation,
+    PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PkValue, Predicate, PredicateClass,
+    PredicateValue, PrimaryKeyColumnShape, PrimaryKeyShape, QualifiedTableName, SeqId,
+    StablePkHash, TableKind, TableName,
 };
 use serde_json::json;
 
@@ -19,10 +19,6 @@ fn sequence_newtypes_reject_zero_and_negative_values() {
     assert!(SeqId::new(0).is_err());
     assert!(SeqId::new(-1).is_err());
     assert_eq!(SeqId::new(42).unwrap().get(), 42);
-
-    assert!(CommitSeq::new(0).is_err());
-    assert!(CommitSeq::new(-5).is_err());
-    assert_eq!(CommitSeq::new(100).unwrap().get(), 100);
 }
 
 #[test]
@@ -146,7 +142,6 @@ fn hot_tombstone_preserves_pk_scope_and_versions() {
         pk: pk.clone(),
         scope_key: Some("a".parse().unwrap()),
         seq: SeqId::new(11).unwrap(),
-        commit_seq: CommitSeq::new(22).unwrap(),
         deleted: true,
         row_image: json!({"tenant_id": "a", "id": 1}),
     };
@@ -156,7 +151,6 @@ fn hot_tombstone_preserves_pk_scope_and_versions() {
     assert_eq!(tombstone.pk, pk);
     assert_eq!(tombstone.scope_key.unwrap().as_str(), "a");
     assert_eq!(tombstone.seq.get(), 11);
-    assert_eq!(tombstone.commit_seq.get(), 22);
 }
 
 #[test]
@@ -165,7 +159,6 @@ fn cold_row_model_preserves_schema_version_and_delete_marker() {
         pk: pk_from_json(json!({"tenant_id": "a", "id": 1})),
         scope_key: Some("a".parse().unwrap()),
         seq: SeqId::new(1).unwrap(),
-        commit_seq: CommitSeq::new(1).unwrap(),
         deleted: false,
         schema_version: 3,
         row_image: json!({"body": "cold"}),

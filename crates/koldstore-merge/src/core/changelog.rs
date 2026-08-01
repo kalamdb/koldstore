@@ -26,18 +26,40 @@ pub fn changes_since(
     oldest_available: Option<SeqId>,
 ) -> Result<Vec<MirrorChange>, ChangeGap> {
     if let Some(oldest) = oldest_available {
-        if cursor.since_seq < oldest.get() - 1 {
+        // `since_seq = 0` means "from the start of retained history".
+        // Retention gaps apply only when a real cursor has fallen behind the floor.
+        if cursor.since_seq > 0 && cursor.since_seq < oldest.get() - 1 {
             return Err(ChangeGap {
                 oldest_available: oldest.get(),
             });
         }
     }
 
+    let mut selected = latest_state_after(changes, cursor.since_seq);
+    selected.sort_by_key(|change| change.seq);
+    selected.truncate(cursor.limit);
+    Ok(selected)
+}
+
+/// Returns the newest `limit` latest-state changes in ascending seq order.
+///
+/// Matches KalamDB `last_rows`: select by descending seq, then deliver
+/// oldest→newest. Does not paginate into older history.
+pub fn changes_last(changes: &[MirrorChange], limit: usize) -> Vec<MirrorChange> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let mut selected = latest_state_after(changes, 0);
+    selected.sort_by_key(|change| change.seq);
+    if selected.len() > limit {
+        selected = selected.split_off(selected.len() - limit);
+    }
+    selected
+}
+
+fn latest_state_after(changes: &[MirrorChange], since_seq: i64) -> Vec<MirrorChange> {
     let mut latest_by_pk = BTreeMap::<String, MirrorChange>::new();
-    for change in changes
-        .iter()
-        .filter(|change| change.seq.get() > cursor.since_seq)
-    {
+    for change in changes.iter().filter(|change| change.seq.get() > since_seq) {
         let key = format!(
             "{}:{}",
             change.scope_key.as_ref().map_or("", |scope| scope.as_str()),
@@ -50,11 +72,7 @@ pub fn changes_since(
             }
         }
     }
-
-    let mut selected = latest_by_pk.into_values().collect::<Vec<_>>();
-    selected.sort_by_key(|change| change.seq);
-    selected.truncate(cursor.limit);
-    Ok(selected)
+    latest_by_pk.into_values().collect()
 }
 
 fn change_beats(candidate: &MirrorChange, existing: &MirrorChange) -> bool {

@@ -250,7 +250,6 @@ impl TestDb {
     ///
     /// Returns an error when management fails.
     pub async fn manage_shared(&self, relation: &str, migration_order_by: &str) -> Result<()> {
-        let mode = super::selected_mirror_capture_mode()?.as_str();
         self.client
             .execute(
                 r#"
@@ -258,11 +257,10 @@ impl TestDb {
                   table_name     => $1::text::regclass,
                   storage        => $2,
                   hot_row_limit  => NULL,
-                  migration_order_by => $3,
-                  mirror_capture_mode => $4
+                  migration_order_by => $3
                 )
                 "#,
-                &[&relation, &self.storage_name, &migration_order_by, &mode],
+                &[&relation, &self.storage_name, &migration_order_by],
             )
             .await?;
         catalog::assert_system_columns_absent(&self.client, relation).await?;
@@ -284,7 +282,6 @@ impl TestDb {
     ///
     /// Returns an error when management fails.
     pub async fn manage_user_scoped(&self, relation: &str, scope_column: &str) -> Result<()> {
-        let mode = super::selected_mirror_capture_mode()?.as_str();
         self.client
             .execute(
                 r#"
@@ -294,11 +291,10 @@ impl TestDb {
                   hot_row_limit  => NULL,
                   table_type     => 'user',
                   scope_column   => $3,
-                  migration_order_by => 'id',
-                  mirror_capture_mode => $4
+                  migration_order_by => 'id'
                 )
                 "#,
-                &[&relation, &self.storage_name, &scope_column, &mode],
+                &[&relation, &self.storage_name, &scope_column],
             )
             .await?;
         catalog::assert_system_columns_absent(&self.client, relation).await?;

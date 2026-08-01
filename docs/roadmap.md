@@ -7,9 +7,10 @@ until after that baseline is stable.
 ## Priority near-term
 
 1. **Scoped storage** — place each `scope_column` value in its own cold folder
-2. **Change API** — `changes_since` / change-cursor SQL for real-time catch-up
+2. **Change API** — done: `changes_since` / change-cursor SQL for real-time catch-up
 3. **Compaction** — combine small cold segments to reduce object count and scan cost
 4. **Backup / export** — KoldStore-aware dump, restore, and table/scope archives
+5. **FILE datatype** — KalamDB-style files stored in cold storage (heap holds a reference)
 
 ## Scoped storage
 
@@ -41,47 +42,43 @@ it end-to-end.
 
 ## Change API (`changes_since`)
 
-Managing a table already creates a **latest-state change-log mirror**
+Managing a table creates a **latest-state change-log mirror**
 (`koldstore.<table>__cl`): one row per primary key with a monotonic `seq` and
-`op` (`INSERT` / `UPDATE` / `DELETE`). Capture triggers are installed at
-`manage_table` so flush can cut by `seq` and scans know which keys are still
+`op` (`INSERT` / `UPDATE` / `DELETE`). Committed WAL is applied by the async
+mirror worker so flush can cut by `seq` and scans know which keys are still
 hot. The mirror is not an append-only history of every intermediate update (a
 later `UPDATE` overwrites the previous mirror row for that PK).
 
-That mirror is the foundation for incremental sync / real-time catch-up without
-a separate CDC stack. Planned SQL surface:
+Shipped SQL surface (KalamDB subscribe-compatible):
 
 ```sql
-SELECT *
+-- Resume (from / from_seq_id)
+SELECT seq, op, pk, deleted, row_image, source
 FROM koldstore.changes_since(
   table_name => 'app.messages',
   since_seq  => 332882280164896768,
   limit_rows => 1000
 );
+
+-- Newest-N rewind (last_rows); delivered oldest→newest
+SELECT seq, op, pk, deleted, source
+FROM koldstore.changes_since(
+  table_name => 'app.messages',
+  since_seq  => 0,
+  limit_rows => 1000,
+  last_rows  => 100
+);
 ```
 
-For user-scoped tables, the cursor is filtered to the active scope (session
-`koldstore.user_id` / `scope_column` value). That returns the latest state per
-primary key with `seq > since_seq` (including deletes), ordered by `seq`. The
-merge library already implements the cursor logic; the public SQL function is
-not exposed yet.
+Precedence matches KalamDB: when `since_seq > 0`, resume mode wins and
+`last_rows` is ignored. Otherwise `last_rows` rewinds to the newest N retained
+changes. `since_seq = 0` with no `last_rows` means from the start of retained
+history. A positive cursor older than the retained floor raises a retention-gap
+error.
 
-Until then you can inspect the hot mirror directly for keys still in the hot
-working set:
-
-```sql
-SELECT id, seq, op
-FROM koldstore.messages__cl
-WHERE seq > 332882280164896768
-ORDER BY seq
-LIMIT 1000;
-```
-
-Note: today’s `__cl` mirror is **latest-state**, not an append-only WAL.
+Note: today’s feed is **latest-state**, not an append-only WAL.
 `changes_since` targets “catch me up to current state since this cursor,” not
-full temporal audit replay. Cold-flushed keys are represented through
-flush/manifest metadata; the public cursor API will document how hot + cold
-changes are unified.
+full temporal audit replay.
 
 ## Compaction
 
@@ -121,6 +118,13 @@ Today: `koldstore.backup_manifest` and validation helpers exist;
 `EXPORT TABLE` is the intended archive boundary; `IMPORT TABLE` is still
 rejected until those rules land.
 
+## FILE datatype
+
+KalamDB-style column type for binary/file payloads. The heap stores a compact
+reference; the blob lives in the table’s registered cold backend (filesystem or
+object store). Upload and fetch APIs read and write through that backend rather
+than embedding large values in row storage.
+
 ## Other near-term product surface
 
 - **Improve `KoldMergeScan`** — prioritize cold PK point-lookup latency
@@ -130,8 +134,6 @@ rejected until those rules land.
   paged in SPI batches instead of being retained for the full scan. The exact
   PK seen-set remains in RAM (compact, payload-free) until spill lands. See
   [performance](performance.md).
-- **Storage file datatype** — upload and fetch files directly from registered
-  cold storage backends.
 
 Built-in row-limit auto-flush scheduling is available on the database worker
 (`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Time-based

@@ -16,8 +16,22 @@ pub(crate) fn unique_suffix(label: &str) -> String {
     format!("{label}_{id}")
 }
 
+/// Creates the database async slot/publication before any SPI write in a `#[pg_test]`.
+///
+/// `#[pg_test]` wraps the body in one transaction. Logical-slot creation waits for
+/// concurrent XIDs, so provisioning after `register_storage` / DDL / DML deadlocks
+/// with this backend. Prefer calling via [`register_temp_storage`], which invokes
+/// this first; call it explicitly only when a test manages a table without that helper.
+pub(crate) fn preprovision_async_mirror() {
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    crate::async_mirror::provision::provision_infrastructure(database_oid)
+        .expect("pre-provision async slot/publication");
+}
+
 /// Registers filesystem storage under a unique temp directory and returns its name.
 pub(crate) fn register_temp_storage(label: &str) -> String {
+    // Slot must exist before this SPI write assigns an XID on the `#[pg_test]` txn.
+    preprovision_async_mirror();
     let name = unique_suffix(label);
     let root: PathBuf = std::env::temp_dir().join(format!("koldstore-pg-test-{name}"));
     if root.exists() {
@@ -42,6 +56,9 @@ pub(crate) fn create_messages_table(schema: &str, table: &str) {
 }
 
 /// Manages a shared table with flush-friendly settings for small fixtures.
+///
+/// Includes `migration_order_by => 'id'` so seeded (pre-manage) heaps can backfill
+/// under `#[pg_test]` without an identity/serial primary key.
 pub(crate) fn manage_shared(relation: &str, storage: &str) {
     let sql = format!(
         r#"
@@ -50,7 +67,8 @@ pub(crate) fn manage_shared(relation: &str, storage: &str) {
           storage        => '{storage}',
           hot_row_limit  => 1000,
           min_flush_rows => 1,
-          max_rows_per_file => 1000
+          max_rows_per_file => 1000,
+          migration_order_by => 'id'
         )
         "#
     );
@@ -60,6 +78,10 @@ pub(crate) fn manage_shared(relation: &str, storage: &str) {
 /// Manages a table so force-flush prunes nearly all live rows into cold storage.
 ///
 /// `hot_row_limit => 1` keeps at most one hot row after flush (newest by `id`).
+///
+/// For fixtures that need a flushable mirror under `#[pg_test]`, seed heap rows
+/// **before** calling this helper so activation backfill fills `__cl`. Post-manage
+/// DML is invisible to WAL apply until commit, which the test harness never does.
 pub(crate) fn manage_for_cold_flush(relation: &str, storage: &str) {
     let sql = format!(
         r#"

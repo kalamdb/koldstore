@@ -19,7 +19,9 @@ fi
 echo "installing sqlsmith into ${PREFIX}"
 # autoconf-archive supplies AX_CXX_COMPILE_STDCXX_* / AX_BOOST_* / AX_LIB_POSTGRESQL
 # used by sqlsmith's configure.ac; without it, autoreconf leaves raw macros in ./configure.
-sudo apt-get install -y -qq build-essential autoconf automake autoconf-archive libtool \
+bash "${ROOT_DIR}/scripts/ci/configure-apt.sh"
+bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" install -y -qq \
+  build-essential autoconf automake autoconf-archive libtool \
   libpq-dev libpqxx-dev libboost-regex-dev pkg-config >/dev/null
 
 rm -rf "$SRC"

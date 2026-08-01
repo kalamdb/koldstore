@@ -135,3 +135,21 @@ fn mirror_backed_changes_since_plan_reads_mirror_and_not_row_events() {
         ]
     );
 }
+
+#[test]
+fn mirror_backed_changes_last_plan_can_filter_scope() {
+    let mirror = koldstore_migrate::QualifiedTableName::parse("koldstore.items__cl").unwrap();
+    let plan =
+        events::plan_mirror_changes_last(&mirror, &["id".to_string()], Some("tenant_id")).unwrap();
+
+    assert!(plan
+        .statement
+        .sql
+        .contains("\"mirror\".\"tenant_id\"::text = $1::text"));
+    assert!(plan.statement.sql.contains("LIMIT $2::integer"));
+    assert_eq!(plan.scope_parameter_index, Some(1));
+    assert_eq!(
+        plan.statement.param_types,
+        vec![SqlParamType::Text, SqlParamType::Integer]
+    );
+}

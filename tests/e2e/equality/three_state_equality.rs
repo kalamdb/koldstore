@@ -23,7 +23,6 @@ const CURATED_QUERIES: &[&str] = &[
 #[tokio::test]
 async fn three_state_baseline_equality_with_curated_queries() -> Result<()> {
     common::require_pgrx_server().await?;
-    let mode = common::selected_mirror_capture_mode()?.as_str();
 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "eq_3state").await?;
@@ -59,11 +58,10 @@ async fn three_state_baseline_equality_with_curated_queries() -> Result<()> {
                   min_flush_rows => 1,
                   max_rows_per_file => 8,
                   migration_order_by => 'id',
-                  auto_flush => false,
-                  mirror_capture_mode => $3
+                  auto_flush => false
                 )
                 "#,
-                &[&managed, &db.storage_name, &mode],
+                &[&managed, &db.storage_name],
             )
             .await?;
 

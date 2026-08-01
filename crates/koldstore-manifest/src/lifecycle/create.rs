@@ -39,7 +39,6 @@ impl Manifest {
             scope_id,
             schema_version,
             max_seq: 0,
-            max_commit_seq: 0,
             updated_at: Utc::now(),
             publish: None,
             shards: Vec::new(),

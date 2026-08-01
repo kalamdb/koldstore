@@ -11,7 +11,6 @@ fn manifest_serializes_folder_sharded_working_shape() {
         1,
         "001/segment-0001-aaaaaaaa.parquet",
         1..=10,
-        100..=110,
         10,
         4096,
         2,
@@ -24,7 +23,6 @@ fn manifest_serializes_folder_sharded_working_shape() {
     assert_eq!(json["table"], "items");
     assert_eq!(json["scope_id"], serde_json::Value::Null);
     assert_eq!(json["max_seq"], 10);
-    assert_eq!(json["max_commit_seq"], 110);
     assert_eq!(json["segments"][0]["status"], "committed");
     assert_eq!(json["shards"], json!([]));
 }
@@ -38,15 +36,8 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
         max_files_per_subfolder: 100,
         total_files: Some(7),
     };
-    let mut segment = ManifestSegment::committed(
-        1,
-        "001/segment-0001-aaaaaaaa.parquet",
-        20..=30,
-        120..=130,
-        11,
-        8192,
-        1,
-    );
+    let mut segment =
+        ManifestSegment::committed(1, "001/segment-0001-aaaaaaaa.parquet", 20..=30, 11, 8192, 1);
     segment.pk_filter = Some(PkFilter::exact(vec![1, 2]));
     manifest.append_segment(segment);
 
@@ -64,15 +55,8 @@ fn manifest_round_trip_preserves_files_state_and_pk_filter() {
 #[test]
 fn manifest_v2_round_trip_preserves_packed_row_group_indexes_and_bloom_filters() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
-    let mut segment = ManifestSegment::committed(
-        1,
-        "001/segment-0001-aaaaaaaa.parquet",
-        20..=30,
-        120..=130,
-        11,
-        8192,
-        1,
-    );
+    let mut segment =
+        ManifestSegment::committed(1, "001/segment-0001-aaaaaaaa.parquet", 20..=30, 11, 8192, 1);
     segment.row_group_count = 2;
     segment.row_group_row_counts = vec![5, 6];
     segment.row_group_min_seqs = vec![20, 26];
@@ -108,24 +92,8 @@ fn manifest_v2_round_trip_preserves_packed_row_group_indexes_and_bloom_filters()
 fn manifest_batch_append_reserves_once_and_updates_watermarks_once_per_flush() {
     let mut manifest = Manifest::new_shared("app", "items", 1);
     let segments = vec![
-        ManifestSegment::committed(
-            1,
-            "001/segment-0001-aaaaaaaa.parquet",
-            1..=10,
-            11..=20,
-            10,
-            1024,
-            1,
-        ),
-        ManifestSegment::committed(
-            2,
-            "001/segment-0002-bbbbbbbb.parquet",
-            11..=30,
-            21..=40,
-            20,
-            2048,
-            1,
-        ),
+        ManifestSegment::committed(1, "001/segment-0001-aaaaaaaa.parquet", 1..=10, 10, 1024, 1),
+        ManifestSegment::committed(2, "001/segment-0002-bbbbbbbb.parquet", 11..=30, 20, 2048, 1),
     ];
 
     let update = manifest.append_segment_batch(segments);
@@ -134,7 +102,6 @@ fn manifest_batch_append_reserves_once_and_updates_watermarks_once_per_flush() {
     assert_eq!(update.manifest_writes_required, 1);
     assert_eq!(manifest.segments.len(), 2);
     assert_eq!(manifest.max_seq, 30);
-    assert_eq!(manifest.max_commit_seq, 40);
     assert_eq!(manifest.files.total_files, Some(0));
 }
 
@@ -145,7 +112,6 @@ fn manifest_omits_unset_optional_fields_on_serialize() {
         1,
         "001/segment-0001-aaaaaaaa.parquet",
         1..=10,
-        11..=20,
         10,
         4096,
         1,
@@ -184,7 +150,6 @@ fn deleted_manifest_segment_does_not_contribute_to_max_watermarks() {
         1,
         "001/segment-0001-aaaaaaaa.parquet",
         1..=100,
-        1..=100,
         100,
         1024,
         1,
@@ -193,7 +158,6 @@ fn deleted_manifest_segment_does_not_contribute_to_max_watermarks() {
     manifest.append_segment(deleted);
 
     assert_eq!(manifest.max_seq, 0);
-    assert_eq!(manifest.max_commit_seq, 0);
 }
 
 #[test]
