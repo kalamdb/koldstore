@@ -32,3 +32,10 @@
   GHCR publish, set the package visibility to Public under
   [Packages](https://github.com/orgs/kalamdb/packages) if anonymous pulls should
   work without a GitHub token.
+- Confirm Linux release artifacts cover:
+  - PG15 `ubuntu22.04` (amd64/arm64) `.deb` + `.tar.gz`
+  - PG16 `ubuntu24.04` (amd64/arm64) `.deb` + `.tar.gz`
+  - PG17 `debian12` (amd64/arm64) `.deb` + `.tar.gz`
+  - PG18 `ubuntu24.04` (amd64/arm64) `.deb` + `.tar.gz`
+  - PG18 `rocky9` (amd64/arm64) `.rpm` + `.tar.gz`
+  - PG18 macOS arm64 `.tar.gz` and Windows amd64 `.zip`

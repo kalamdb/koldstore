@@ -408,9 +408,12 @@ Folder-sharded layout only (manifest version `2`):
   schema/publish metadata, `files` folder counters, and
   `shards[]` (`folder`, `path`, `content_sha256`, segment/seq ranges). No
   embedded segment bodies.
-- Shard `{folder:03}/manifest-shard-{sha256}.json`: that folder’s `segments[]`
-  with segment identity/path/status/checksum, scalar ranges, row-group arrays,
-  and per-column hex Sort Key V1 segment/row-group bounds mirroring PostgreSQL.
+- Shard `{folder:03}/manifest-shard-{sha256-prefix}.json`: that folder’s
+  `segments[]` with segment identity/path/status/checksum, scalar ranges,
+  row-group arrays, and per-column hex Sort Key V1 segment/row-group bounds
+  mirroring PostgreSQL. The filename retains 128 hash bits; the root stores and
+  readers verify the complete SHA-256. After the new root is published,
+  unreferenced shard versions are removed while segment objects are preserved.
 
 PostgreSQL catalog remains query authority; object manifests are derived export
 only.

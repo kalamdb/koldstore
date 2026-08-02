@@ -4,9 +4,10 @@ use koldstore_merge::scan::exec::{
     ColdAvailability, FilterPlan, ScanResourceCounters,
 };
 use koldstore_merge::scan::plan::{
-    group_segments_newest_first, retain_pre_merge_cold_prune_predicates,
-    validate_prune_predicates_indexed, ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan,
-    SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
+    group_segments_newest_first, group_segments_oldest_first,
+    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
+    ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
+    SegmentStatsHint,
 };
 use serde_json::json;
 
@@ -352,4 +353,53 @@ fn newest_first_segment_groups_reject_reversed_sequence_range() {
 
     assert!(error.to_string().contains("reversed.parquet"));
     assert!(error.to_string().contains("seq"));
+}
+
+#[test]
+fn oldest_first_segment_groups_stream_disjoint_ranges_forward() {
+    let groups = group_segments_oldest_first(vec![
+        versioned_segment("new.parquet", 21, 30),
+        versioned_segment("old.parquet", 1, 10),
+        versioned_segment("middle.parquet", 11, 20),
+    ])
+    .unwrap();
+
+    let paths = groups
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .map(|segment| segment.object_path.as_str())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        paths,
+        vec![
+            vec!["old.parquet"],
+            vec!["middle.parquet"],
+            vec!["new.parquet"]
+        ]
+    );
+}
+
+#[test]
+fn oldest_first_segment_groups_keep_transitive_overlaps_atomic() {
+    let groups = group_segments_oldest_first(vec![
+        versioned_segment("old.parquet", 1, 9),
+        versioned_segment("bridge.parquet", 18, 25),
+        versioned_segment("new.parquet", 20, 30),
+        versioned_segment("middle.parquet", 10, 20),
+    ])
+    .unwrap();
+
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0][0].object_path, "old.parquet");
+    assert_eq!(
+        groups[1]
+            .iter()
+            .map(|segment| segment.object_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["middle.parquet", "bridge.parquet", "new.parquet"]
+    );
 }

@@ -11,6 +11,8 @@ use koldstore_common::{
 #[cfg(feature = "pg")]
 use koldstore_merge::events::{self, DEFAULT_CHANGE_LIMIT};
 #[cfg(feature = "pg")]
+use koldstore_merge::group_segments_oldest_first;
+#[cfg(feature = "pg")]
 use koldstore_parquet::{
     read_clean_cold_rows_from_object_store_with_size, CleanColdRow, ParquetReadOptions, PgColumn,
 };
@@ -48,7 +50,7 @@ use pgrx::prelude::*;
     stable
 )]
 fn changes_since_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     since_seq: default!(i64, 0),
     limit_rows: default!(i32, 1000),
     last_rows: default!(Option<i32>, "NULL"),
@@ -63,7 +65,7 @@ fn changes_since_pg(
         name!(source, String),
     ),
 > {
-    match changes_since_pg_impl(table_name, since_seq, Some(limit_rows), last_rows) {
+    match changes_since_pg_impl(table_name.oid(), since_seq, Some(limit_rows), last_rows) {
         Ok(rows) => TableIterator::new(rows),
         Err(error) => pgrx::error!("changes_since failed: {error}"),
     }
@@ -133,7 +135,14 @@ fn changes_since_pg_impl(
         } else {
             0
         };
-        let (cold, _) = fetch_cold_changes(table_oid, &snapshot, cold_floor, scope_key.as_ref())?;
+        let (cold, _) = fetch_cold_changes(
+            table_oid,
+            &snapshot,
+            cold_floor,
+            scope_key.as_ref(),
+            None,
+            &[],
+        )?;
         let mut combined = hot;
         combined.extend(cold);
         events::changes_last(&combined, table_oid_u32, scope_key.as_ref(), last_rows)
@@ -147,8 +156,14 @@ fn changes_since_pg_impl(
             scope_column,
             scope_key.as_ref(),
         )?;
-        let (cold, oldest_cold) =
-            fetch_cold_changes(table_oid, &snapshot, since_seq, scope_key.as_ref())?;
+        let (cold, oldest_cold) = fetch_cold_changes(
+            table_oid,
+            &snapshot,
+            since_seq,
+            scope_key.as_ref(),
+            Some(limit as usize),
+            &hot,
+        )?;
         let mut combined = hot;
         combined.extend(cold);
         let oldest_available = oldest_cold.and_then(|seq| SeqId::new(seq).ok());
@@ -316,6 +331,8 @@ fn fetch_cold_changes(
     snapshot: &koldstore_catalog::ManagedTableSnapshot,
     since_seq: i64,
     scope_key: Option<&ScopeKey>,
+    page_limit: Option<usize>,
+    hot_changes: &[MirrorChange],
 ) -> Result<(Vec<MirrorChange>, Option<i64>), String> {
     let Some(manifest) = crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?
     else {
@@ -332,6 +349,7 @@ fn fetch_cold_changes(
         .segments
         .iter()
         .filter(|segment| segment.max_seq.get() > since_seq)
+        .cloned()
         .collect();
     if candidates.is_empty() {
         return Ok((Vec::new(), oldest));
@@ -351,76 +369,100 @@ fn fetch_cold_changes(
     .map_err(|error| error.to_string())?;
     let store = client.store();
 
+    let candidate_groups =
+        group_segments_oldest_first(candidates).map_err(|error| error.to_string())?;
     let mut changes = Vec::new();
-    for segment in candidates {
-        let physical_pk_names: Vec<String> = snapshot
-            .primary_key_columns
-            .iter()
-            .map(|column| {
-                physical_name_for_pk(column, segment, snapshot.schema_version).ok_or_else(|| {
-                    format!(
-                        "cold segment `{}` is missing primary-key column `{}`",
-                        segment.object_path, column.name
+    'groups: for group in candidate_groups {
+        for segment in &group {
+            let physical_pk_names: Vec<String> = snapshot
+                .primary_key_columns
+                .iter()
+                .map(|column| {
+                    physical_name_for_pk(column, segment, snapshot.schema_version).ok_or_else(
+                        || {
+                            format!(
+                                "cold segment `{}` is missing primary-key column `{}`",
+                                segment.object_path, column.name
+                            )
+                        },
                     )
                 })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()?;
 
-        let pg_columns: Vec<PgColumn> = snapshot
-            .primary_key_columns
-            .iter()
-            .zip(physical_pk_names.iter())
-            .map(|(column, physical)| {
-                let catalog_column = catalog
-                    .columns
-                    .iter()
-                    .find(|candidate| candidate.column_id == column.column_id)
-                    .ok_or_else(|| {
-                        format!(
-                            "migration catalog is missing primary-key column_id {}",
-                            column.column_id
-                        )
-                    })?;
-                Ok(PgColumn::new(
-                    physical.clone(),
-                    catalog_column.pg_type,
-                    true,
-                ))
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+            let pg_columns: Vec<PgColumn> = snapshot
+                .primary_key_columns
+                .iter()
+                .zip(physical_pk_names.iter())
+                .map(|(column, physical)| {
+                    let catalog_column = catalog
+                        .columns
+                        .iter()
+                        .find(|candidate| candidate.column_id == column.column_id)
+                        .ok_or_else(|| {
+                            format!(
+                                "migration catalog is missing primary-key column_id {}",
+                                column.column_id
+                            )
+                        })?;
+                    Ok(PgColumn::new(
+                        physical.clone(),
+                        catalog_column.pg_type,
+                        true,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
 
-        let mut options = ParquetReadOptions::new().with_columns(physical_pk_names.clone());
-        if let Ok(min_seq) = SeqId::new(since_seq.saturating_add(1).max(1)) {
-            options = options.with_clean_seq_range(min_seq, segment.max_seq);
+            let mut options = ParquetReadOptions::new().with_columns(physical_pk_names.clone());
+            if let Ok(min_seq) = SeqId::new(since_seq.saturating_add(1).max(1)) {
+                options = options.with_clean_seq_range(min_seq, segment.max_seq);
+            }
+
+            let (rows, _) = read_clean_cold_rows_from_object_store_with_size(
+                std::sync::Arc::clone(&store),
+                &segment.object_path,
+                segment.byte_size,
+                &pg_columns,
+                &physical_pk_names,
+                &options,
+            )?;
+
+            for row in rows {
+                if row.seq <= since_seq {
+                    continue;
+                }
+                let change = cold_row_to_mirror_change(
+                    table_oid.to_u32(),
+                    &snapshot.primary_key_columns,
+                    &physical_pk_names,
+                    row,
+                    snapshot.scope_column.as_deref(),
+                )?;
+                if let Some(required) = scope_key {
+                    match change.scope_key.as_ref() {
+                        Some(actual) if actual == required => {}
+                        _ => continue,
+                    }
+                }
+                changes.push(change);
+            }
         }
 
-        let (rows, _) = read_clean_cold_rows_from_object_store_with_size(
-            std::sync::Arc::clone(&store),
-            &segment.object_path,
-            segment.byte_size,
-            &pg_columns,
-            &physical_pk_names,
-            &options,
-        )?;
-
-        for row in rows {
-            if row.seq <= since_seq {
-                continue;
-            }
-            let change = cold_row_to_mirror_change(
+        if let Some(limit) = page_limit {
+            let mut loaded = Vec::with_capacity(hot_changes.len() + changes.len());
+            loaded.extend_from_slice(hot_changes);
+            loaded.extend(changes.iter().cloned());
+            let page = events::changes_since(
+                &loaded,
                 table_oid.to_u32(),
-                &snapshot.primary_key_columns,
-                &physical_pk_names,
-                row,
-                snapshot.scope_column.as_deref(),
-            )?;
-            if let Some(required) = scope_key {
-                match change.scope_key.as_ref() {
-                    Some(actual) if actual == required => {}
-                    _ => continue,
-                }
+                scope_key,
+                since_seq,
+                Some(limit as i32),
+                None,
+            )
+            .map_err(|error| error.to_string())?;
+            if page.len() >= limit {
+                break 'groups;
             }
-            changes.push(change);
         }
     }
 

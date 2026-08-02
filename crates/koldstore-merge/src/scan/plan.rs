@@ -241,6 +241,50 @@ pub fn group_segments_newest_first(
     Ok(groups)
 }
 
+/// Groups catalog segments into exact oldest-first cursor batches.
+///
+/// Disjoint sequence ranges remain separate so a bounded cursor reader can
+/// stop before opening newer Parquet objects. Transitively overlapping ranges
+/// stay together because their rows must be ordered and deduplicated as one
+/// atomic batch.
+///
+/// # Errors
+///
+/// Returns a catalog validation error when a segment has a reversed sequence range.
+pub fn group_segments_oldest_first(
+    segments: Vec<SegmentStatsHint>,
+) -> Result<Vec<Vec<SegmentStatsHint>>> {
+    let mut ranged = segments
+        .into_iter()
+        .map(|segment| {
+            let (min, max) = segment_seq_range(&segment)?;
+            Ok((segment, min, max))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ranged.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.0.object_path.cmp(&right.0.object_path))
+    });
+
+    let mut groups = Vec::new();
+    let mut current = Vec::new();
+    let mut current_max = None::<SeqId>;
+    for (segment, min, max) in ranged {
+        if current_max.is_some_and(|group_max| min > group_max) {
+            groups.push(std::mem::take(&mut current));
+            current_max = None;
+        }
+        current_max = Some(current_max.map_or(max, |group_max| group_max.max(max)));
+        current.push(segment);
+    }
+    if !current.is_empty() {
+        groups.push(current);
+    }
+    Ok(groups)
+}
+
 fn segment_seq_range(segment: &SegmentStatsHint) -> Result<(SeqId, SeqId)> {
     if segment.min_seq > segment.max_seq {
         return Err(KoldstoreError::InvalidColdSegmentMetadata(format!(

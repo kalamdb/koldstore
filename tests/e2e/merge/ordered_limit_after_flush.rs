@@ -72,6 +72,27 @@ async fn ordered_limit_after_multi_wave_flush_returns_cold_rows() -> Result<()> 
             "managed count(*) must see all rows after flush, got {visible}"
         );
 
+        // PostgreSQL's Limit node must be able to stop KoldMergeScan before it
+        // opens every eligible segment. This is the common filtered pagination
+        // shape; ORDER BY is tested separately below because PostgreSQL must
+        // consume the full unordered child before sorting it.
+        let bounded_plan = common::explain_analyze(
+            &db.client,
+            &format!("SELECT id FROM {} WHERE id >= 1 LIMIT 100", table.relation),
+        )
+        .await?;
+        common::assert_kold_merge_scan_explain(&bounded_plan)?;
+        let candidates = explain_counter(&bounded_plan, "Candidate Segments")?;
+        let opened = explain_counter(&bounded_plan, "Parquet Segments Opened")?;
+        anyhow::ensure!(
+            candidates >= 3,
+            "expected all three flushed segments to remain candidates:\n{bounded_plan}"
+        );
+        anyhow::ensure!(
+            opened == 1,
+            "filtered LIMIT should stop after one disjoint segment, opened={opened}:\n{bounded_plan}"
+        );
+
         // Cheap parallel setup so leftover partial IndexScan paths would produce
         // Gather Merge if `partial_pathlist` were not cleared.
         db.client
@@ -341,4 +362,15 @@ fn bare_heap_index_scan_without_merge(plan: &str) -> bool {
         trimmed.starts_with("Index Scan") || trimmed.starts_with("Index Only Scan")
     });
     has_index && !plan.contains("Custom Scan (KoldMergeScan)")
+}
+
+fn explain_counter(plan: &str, label: &str) -> Result<usize> {
+    plan.lines()
+        .find_map(|line| {
+            line.trim_start()
+                .strip_prefix(label)
+                .and_then(|value| value.strip_prefix(':'))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .with_context(|| format!("missing `{label}` counter in EXPLAIN:\n{plan}"))
 }

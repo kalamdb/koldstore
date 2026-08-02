@@ -47,8 +47,10 @@ every candidate Parquet file just to read footer stats would defeat prune-before
    the same writer close. They never upload and download the object to recover
    statistics, and write-path validation does not parse the footer again.
 6. Mirror catalog arrays in Manifest V2 shard entries as hexadecimal Sort Key
-   bytes. Shards are immutable and content-addressed; the thin root is
-   published only after its shards.
+   bytes. Shards are immutable and content-addressed with a 128-bit SHA-256
+   filename prefix; the root retains the complete digest. The thin root is
+   published only after its shards, then obsolete unreferenced shard versions
+   are removed.
 
 ## Alternatives Considered
 

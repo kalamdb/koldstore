@@ -12,14 +12,16 @@ use uuid::Uuid;
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, auto_flush default true, segment_order_column default null)`.
+/// `koldstore.manage_table(table_name regclass, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, auto_flush default true, segment_order_column default null)`.
 ///
+/// `table_name` is PostgreSQL `regclass`, so relation names like `'app.messages'`
+/// cast correctly (plain `oid` would reject that string).
 /// Capture is always committed-WAL / async apply. `wal_level=logical` is required.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
 pub fn manage_table_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     storage: &str,
     hot_row_limit: Option<i64>,
     min_flush_rows: pgrx::default!(i64, 1000),
@@ -32,8 +34,10 @@ pub fn manage_table_pg(
     auto_flush: pgrx::default!(bool, true),
     segment_order_column: pgrx::default!(Option<&str>, "NULL"),
 ) -> pgrx::Uuid {
+    let table_oid = table_name.oid();
+    drop(table_name);
     manage_table_pg_impl(
-        table_name,
+        table_oid,
         table_type,
         storage,
         scope_column,
@@ -50,7 +54,7 @@ pub fn manage_table_pg(
 
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
-fn manage_table_pg_impl(
+pub(crate) fn manage_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     table_type: &str,
     storage_name: &str,
@@ -993,8 +997,8 @@ fn run_existing_table_mirror_initialization_inline(
 /// Manual `flush_table` / `enqueue_flush_job` / cron ignore this flag.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "set_table_auto_flush", schema = "koldstore", security_definer)]
-pub fn set_table_auto_flush_pg(table_name: pgrx::pg_sys::Oid, enabled: bool) -> bool {
-    set_table_auto_flush_pg_impl(table_name, enabled)
+pub fn set_table_auto_flush_pg(table_name: pgrx::PgRelation, enabled: bool) -> bool {
+    set_table_auto_flush_pg_impl(table_name.oid(), enabled)
         .unwrap_or_else(|error| pgrx::error!("set_table_auto_flush failed: {error}"))
 }
 
@@ -1031,17 +1035,19 @@ fn set_table_auto_flush_pg_impl(
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "unmanage_table", schema = "koldstore", security_definer)]
 pub fn unmanage_table_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     rehydrate: pgrx::default!(Option<bool>, "NULL"),
     drop_cold: pgrx::default!(Option<bool>, "NULL"),
 ) -> i64 {
+    let table_oid = table_name.oid();
+    drop(table_name);
     let options = DemigrateTableRequest {
         table_name: String::new(),
         rehydrate,
         drop_cold,
     }
     .options();
-    unmanage_table_pg_impl(table_name, options)
+    unmanage_table_pg_impl(table_oid, options)
         .unwrap_or_else(|error| pgrx::error!("unmanage table failed: {error}"))
 }
 

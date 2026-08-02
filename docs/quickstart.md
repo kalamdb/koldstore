@@ -72,7 +72,7 @@ SELECT koldstore.manage_table(
   storage           => 'local-dev',
   hot_row_limit     => 1000,
   min_flush_rows    => 1,
-  max_rows_per_file => 500,
+  max_rows_per_file => 1000,
   migration_order_by => 'id'
 ) AS manage_job_id;
 ```
@@ -296,6 +296,7 @@ SELECT koldstore.manage_table(
   table_name     => 'app.user_messages',
   storage        => 'local-dev',
   hot_row_limit  => 1000,
+  max_rows_per_file => 1000,
   table_type     => 'user',
   scope_column   => 'user_id',
   migration_order_by => 'id'

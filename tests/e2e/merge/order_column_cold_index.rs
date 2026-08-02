@@ -19,6 +19,24 @@ async fn order_column_range_shapes_use_cold_segment_index() -> Result<()> {
         );
         assert_shape_plan(&db, &relation, &late_only, "lower_bound", 1200).await?;
 
+        let limited_late = format!(
+            "SELECT id FROM {relation} \
+             WHERE event_time >= timestamptz '2024-01-01 00:00:00+00' \
+             LIMIT 100"
+        );
+        let limited_plan = common::explain_analyze(&db.client, &limited_late).await?;
+        common::assertions::assert_kold_merge_scan_explain(&limited_plan)?;
+        let limited_candidates = explain_counter(&limited_plan, "Candidate Segments")?;
+        let limited_opened = explain_counter(&limited_plan, "Parquet Segments Opened")?;
+        anyhow::ensure!(
+            limited_candidates >= 2,
+            "broad date predicate should retain multiple candidate segments:\n{limited_plan}"
+        );
+        anyhow::ensure!(
+            limited_opened == 1,
+            "date-filtered LIMIT should stop after one segment, opened={limited_opened}:\n{limited_plan}"
+        );
+
         let early_only = format!(
             "SELECT count(*) FROM {relation} \
              WHERE event_time <= timestamptz '2024-01-01 12:00:00+00'"

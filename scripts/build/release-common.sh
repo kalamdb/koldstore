@@ -36,9 +36,8 @@ PY
 default_distro_for_pg() {
   case "$1" in
     15) echo "ubuntu22.04" ;;
-    16) echo "ubuntu24.04" ;;
+    16|18) echo "ubuntu24.04" ;;
     17) echo "debian12" ;;
-    18) echo "rocky9" ;;
     *)
       echo "unsupported PostgreSQL major: $1" >&2
       return 1
@@ -46,15 +45,21 @@ default_distro_for_pg() {
   esac
 }
 
-default_formats_for_pg() {
+# Package formats follow the target OS, not the PostgreSQL major.
+# PG18 ships both Ubuntu (.deb) and Rocky (.rpm) artifacts from CI.
+default_formats_for_distro() {
   case "$1" in
-    15|16|17) echo "deb,tar.gz" ;;
-    18) echo "rpm,tar.gz" ;;
+    ubuntu22.04|ubuntu24.04|debian12) echo "deb,tar.gz" ;;
+    rocky9) echo "rpm,tar.gz" ;;
     *)
-      echo "unsupported PostgreSQL major: $1" >&2
+      echo "unsupported distro for package formats: $1" >&2
       return 1
       ;;
   esac
+}
+
+default_formats_for_pg() {
+  default_formats_for_distro "$(default_distro_for_pg "$1")"
 }
 
 artifact_basename() {

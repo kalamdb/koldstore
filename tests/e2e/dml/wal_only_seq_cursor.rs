@@ -944,6 +944,119 @@ async fn changes_since_flush_prune_exposes_retention_floor_not_silent_catchup() 
 }
 
 #[tokio::test]
+async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_changes_bounded").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_bounded", db.schema);
+        let relation = db.relation(&table_name);
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        manage_table(&db.client, &relation, &db.storage_name).await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        for wave in 0..3_i64 {
+            let start = wave * 1000 + 1;
+            let end = start + 999;
+            db.client
+                .batch_execute(&format!(
+                    "INSERT INTO {relation} \
+                     SELECT id, 'row-' || id FROM generate_series({start}, {end}) id"
+                ))
+                .await?;
+            common::wait_for_async_mirror(&db.client).await?;
+            let flushed: String = db
+                .client
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                    &[&relation],
+                )
+                .await?
+                .get(0);
+            assert!(!flushed.is_empty());
+        }
+
+        let cold_segments = db
+            .client
+            .query(
+                &format!(
+                    r#"
+                    SELECT {object}, cs.min_seq, cs.max_seq
+                    FROM koldstore.cold_segments cs
+                    JOIN pg_class c ON c.oid = cs.table_oid
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE cs.table_oid = $1::text::regclass::oid
+                      AND cs.status = 'active'
+                    ORDER BY cs.min_seq
+                    "#,
+                    object = common::SQL_DEFAULT_COLD_OBJECT_KEY,
+                ),
+                &[&relation],
+            )
+            .await?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, String>(0),
+                    row.get::<_, i64>(1),
+                    row.get::<_, i64>(2),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(cold_segments.len(), 3);
+
+        let unneeded = db.storage_root.join(&cold_segments[2].0);
+        let parked = unneeded.with_extension("parquet.parked");
+        std::fs::rename(&unneeded, &parked)?;
+        let first_page = db
+            .client
+            .query(
+                "SELECT (pk->>'id')::bigint AS id \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 25) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await;
+        let cursor = cold_segments[0].2 - 10;
+        let spanning_page = db
+            .client
+            .query(
+                "SELECT seq \
+                 FROM koldstore.changes_since($1::text::regclass, $2, 25) \
+                 ORDER BY seq",
+                &[&relation, &cursor],
+            )
+            .await;
+        std::fs::rename(&parked, &unneeded)?;
+
+        let ids = first_page?
+            .into_iter()
+            .map(|row| row.get::<_, i64>(0))
+            .collect::<Vec<_>>();
+        assert_eq!(ids, (1..=25).collect::<Vec<_>>());
+
+        let spanning_seqs = spanning_page?
+            .into_iter()
+            .map(|row| row.get::<_, i64>(0))
+            .collect::<Vec<_>>();
+        assert_eq!(spanning_seqs.len(), 25);
+        assert!(spanning_seqs.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(spanning_seqs.iter().all(|seq| *seq > cursor));
+        assert!(
+            spanning_seqs.iter().any(|seq| *seq > cold_segments[0].2),
+            "page should continue into the second segment"
+        );
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn changes_since_last_rows_rewinds_newest_n_like_kalamdb() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "wal_changes_last_rows").await?;

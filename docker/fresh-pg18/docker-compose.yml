@@ -1,0 +1,54 @@
+# Fresh Ubuntu 24.04 + PostgreSQL 18, with koldstore installed from the latest
+# GitHub Release (kalamdb/koldstore) on first start.
+#
+# Quick start (from this directory):
+#   docker compose up --build -d
+#   docker compose exec postgres psql -U postgres -d koldstore \
+#     -c "SELECT koldstore.preload_status();"
+#
+# Refresh to a newer GitHub release on a running stack:
+#   docker compose exec postgres install-koldstore.sh --force
+#   docker compose restart postgres
+#   docker compose exec postgres psql -U postgres -d koldstore \
+#     -c "CREATE EXTENSION IF NOT EXISTS koldstore;"
+#
+# Pin a release tag:
+#   KOLDSTORE_RELEASE=v0.1.10-beta.0 docker compose up --build -d
+#
+# Host (already running Ubuntu PG18): copy install-koldstore.sh onto the server,
+# then:
+#   sudo ./install-koldstore.sh --force --restart --create-extension
+
+services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PG_MAJOR: "18"
+    image: koldstore-fresh-pg18:local
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-koldstore}
+      KOLDSTORE_RELEASE: ${KOLDSTORE_RELEASE:-latest}
+      KOLDSTORE_REPO: ${KOLDSTORE_REPO:-kalamdb/koldstore}
+      KOLDSTORE_FORCE_REINSTALL: ${KOLDSTORE_FORCE_REINSTALL:-0}
+      PG_MAJOR: "18"
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} && psql -U $${POSTGRES_USER} -d $${POSTGRES_DB} -tAc \"SELECT 1 FROM pg_extension WHERE extname='koldstore'\" | grep -q 1 && psql -U $${POSTGRES_USER} -d $${POSTGRES_DB} -tAc \"SHOW shared_preload_libraries\" | grep -q koldstore",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 20s
+
+volumes:
+  pgdata:

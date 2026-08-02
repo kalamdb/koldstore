@@ -336,17 +336,17 @@ fn ensure_initial_management(
         .unwrap_or("1000")
         .parse()
         .map_err(|_| "max_rows_per_file must be a positive integer")?;
-    crate::sql::migrate_pg::manage_table_pg(
+    crate::sql::migrate_pg::manage_table_pg_impl(
         table_oid,
+        "shared",
         storage,
+        None,
+        None,
+        None,
+        None,
         hot.or(Some(1)),
         min,
         file,
-        "shared",
-        None,
-        None,
-        None,
-        None,
         true,
         None,
     );
