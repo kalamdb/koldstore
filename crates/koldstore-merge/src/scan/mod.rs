@@ -18,8 +18,9 @@ pub use exec::{
     ScanResourceCounters, ScanState,
 };
 pub use path::{
-    build_path_replacement, clear_partial_heap_paths, custom_scan_explain_label,
-    PathReplacementDecision, PlannerPath, PlannerPathKind, CUSTOM_PATH_NAME,
+    build_path_portfolio, build_path_replacement, clear_partial_heap_paths,
+    custom_scan_explain_label, HotChildCandidate, PathPortfolioDecision, PathReplacementDecision,
+    PlannerPath, PlannerPathKind, PortfolioPathEntry, CUSTOM_PATH_NAME,
 };
 pub use plan::{
     group_segments_newest_first, group_segments_oldest_first,
