@@ -436,7 +436,8 @@ impl MergeRowStream {
         )?;
         if let Some(execution) = execution {
             execution.mirror_rows = execution.mirror_rows.saturating_add(batch.tombstones);
-            accumulate_ms(&mut execution.overlay_ms, started);
+            // Deferred PK probes are the ordered/unordered mirror scan phase.
+            accumulate_ms(&mut execution.mirror_scan_ms, started);
         }
         for pk in batch.masked_pks {
             self.overlay.masked_pks.insert(pk);
