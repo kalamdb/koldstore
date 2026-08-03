@@ -23,12 +23,17 @@ mod hot;
 mod keyset;
 mod literals;
 mod mirror;
+mod path_strategy;
 mod profile;
 mod qual;
 mod spi_query;
 mod tuple;
 
 use cold::{cold_side_proven_empty, planned_cold_read_profile};
+use path_strategy::{
+    find_cheapest_path, install_general_merge_path, path_strategy_tag_from_private,
+    scope_key_from_path_private, STRATEGY_TAG_GENERAL_MERGE,
+};
 use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
 use qual::{required_scan_projection, residual_filters};
 use tuple::{slot_attribute_count, store_materialized_row, MaterializedRow, ScanMemory};
@@ -36,12 +41,8 @@ use tuple::{slot_attribute_count, store_materialized_row, MaterializedRow, ScanM
 const CUSTOM_SCAN_NAME: &[u8] = b"KoldMergeScan\0";
 const PRIVATE_EXACT_PK_INDEX: i32 = 0;
 const PRIVATE_RUNTIME_DELEGATE_SAFE_INDEX: i32 = 1;
-
-/// Catalog lookup + merge overlay overhead added on top of the hot child cost.
-const CATALOG_LOOKUP_COST: f64 = 10.0;
-const MERGE_OVERLAY_COST: f64 = 5.0;
-/// Per active cold segment estimate used at plan time (local catalog only).
-const COLD_SEGMENT_COST: f64 = 25.0;
+const PRIVATE_STRATEGY_TAG_INDEX: i32 = 2;
+const PRIVATE_SCOPE_KEY_INDEX: i32 = 3;
 
 thread_local! {
     static SCAN_STATES: RefCell<HashMap<usize, ScanExecutionState>> = RefCell::new(HashMap::new());
@@ -385,36 +386,14 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     }
 
     let segment_count = known_manifest.map_or(0, |(segment_count, _)| segment_count);
-    let cold_cost = segment_count as f64 * COLD_SEGMENT_COST;
-    let startup_cost = (*hot_child).startup_cost + CATALOG_LOOKUP_COST;
-    let total_cost = (*hot_child).total_cost + CATALOG_LOOKUP_COST + cold_cost + MERGE_OVERLAY_COST;
-
-    let custom_path =
-        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomPath>()) as *mut pg_sys::CustomPath;
-    if custom_path.is_null() {
-        return;
-    }
-
-    (*custom_path).path.type_ = pg_sys::NodeTag::T_CustomPath;
-    (*custom_path).path.pathtype = pg_sys::NodeTag::T_CustomScan;
-    (*custom_path).path.parent = rel;
-    (*custom_path).path.pathtarget = (*rel).reltarget;
-    (*custom_path).path.param_info = (*hot_child).param_info;
-    (*custom_path).path.rows = (*hot_child).rows;
-    (*custom_path).path.startup_cost = startup_cost;
-    (*custom_path).path.total_cost = total_cost;
-    (*custom_path).path.parallel_safe = false;
-    (*custom_path).custom_paths = pg_sys::lappend(std::ptr::null_mut(), hot_child.cast::<c_void>());
-    (*custom_path).methods = &raw const PATH_METHODS;
-
-    // Managed reads must expose only KoldMergeScan as a final path. Clear both
-    // `pathlist` and `partial_pathlist`: PostgreSQL builds Gather / Gather Merge
-    // *after* this hook from leftover partials. Leaving heap IndexScan partials
-    // lets `ORDER BY … LIMIT` prefer a hot-heap-only plan that omits cold rows
-    // after flush (visible as count(*) > 0 but ordered SELECT returning empty).
-    (*rel).pathlist = std::ptr::null_mut();
-    (*rel).partial_pathlist = std::ptr::null_mut();
-    (*rel).pathlist = pg_sys::lappend(std::ptr::null_mut(), (&raw mut (*custom_path).path).cast());
+    // Strategy selection and CustomPath construction live in `path_strategy`
+    // (single GeneralMerge today; ordered portfolio in Task 1.4).
+    install_general_merge_path(
+        rel,
+        hot_child,
+        segment_count,
+        &raw const PATH_METHODS,
+    );
 }
 
 #[pgrx::pg_guard]
@@ -463,7 +442,15 @@ unsafe extern "C-unwind" fn plan_custom_path(
     (*scan).custom_plans = custom_plans;
     // Do not alias `qual` here: Postgres frees `custom_exprs` and `qual` separately.
     (*scan).custom_exprs = std::ptr::null_mut();
-    (*scan).custom_private = serialize_custom_private(exact_pk_lookup, runtime_delegate_safe);
+    let path_private = (*best_path).custom_private;
+    let strategy_tag = path_strategy_tag_from_private(path_private);
+    let scope_key = unsafe { scope_key_from_path_private(path_private) };
+    (*scan).custom_private = serialize_custom_private(
+        exact_pk_lookup,
+        runtime_delegate_safe,
+        strategy_tag,
+        &scope_key,
+    );
     (*scan).custom_scan_tlist = std::ptr::null_mut();
     (*scan).custom_relids = std::ptr::null_mut();
     (*scan).methods = &raw const SCAN_METHODS;
@@ -1246,39 +1233,69 @@ unsafe fn hot_child_explain_label(node: *mut pg_sys::CustomScanState) -> String 
     }
 }
 
-unsafe fn find_cheapest_path(pathlist: *mut pg_sys::List) -> Option<*mut pg_sys::Path> {
-    let len = list_len(pathlist);
-    let mut best: *mut pg_sys::Path = std::ptr::null_mut();
-    let mut best_cost = f64::INFINITY;
-    for idx in 0..len {
-        let path = list_nth_ptr(pathlist, idx) as *mut pg_sys::Path;
-        if path.is_null() {
-            continue;
-        }
-        if (*path).type_ == pg_sys::NodeTag::T_CustomPath {
-            continue;
-        }
-        if (*path).total_cost < best_cost {
-            best_cost = (*path).total_cost;
-            best = path;
-        }
-    }
-    if best.is_null() {
-        None
-    } else {
-        Some(best)
-    }
-}
-
-/// Encodes executor-critical flags as native PostgreSQL nodes.
+/// Encodes executor-critical flags plus strategy identity as native nodes.
+///
+/// Layout: `[exact_pk, runtime_delegate_safe, strategy_tag, scope_key]`.
+/// Older plans without strategy entries remain readable (defaults to general merge).
 unsafe fn serialize_custom_private(
     exact_pk_lookup: bool,
     runtime_delegate_safe: bool,
+    strategy_tag: i32,
+    scope_key: &str,
 ) -> *mut pg_sys::List {
     let exact_pk = pg_sys::makeInteger(i32::from(exact_pk_lookup));
     let runtime_delegate = pg_sys::makeInteger(i32::from(runtime_delegate_safe));
-    let private = pg_sys::lappend(std::ptr::null_mut(), exact_pk.cast::<c_void>());
-    pg_sys::lappend(private, runtime_delegate.cast::<c_void>())
+    let strategy = pg_sys::makeInteger(strategy_tag);
+    let scope = match std::ffi::CString::new(scope_key) {
+        Ok(value) => value,
+        Err(_) => std::ffi::CString::new("").expect("empty scope is valid"),
+    };
+    let scope_node = pg_sys::makeString(scope.as_ptr() as *mut c_char);
+    let mut private = pg_sys::lappend(std::ptr::null_mut(), exact_pk.cast::<c_void>());
+    private = pg_sys::lappend(private, runtime_delegate.cast::<c_void>());
+    private = pg_sys::lappend(private, strategy.cast::<c_void>());
+    pg_sys::lappend(private, scope_node.cast::<c_void>())
+}
+
+/// Returns the path strategy tag from scan private data (default: general merge).
+#[allow(dead_code)] // Used by Task 1.4+ EXPLAIN / executor dispatch.
+unsafe fn custom_private_strategy_tag(plan: *mut pg_sys::Plan) -> i32 {
+    if plan.is_null() {
+        return STRATEGY_TAG_GENERAL_MERGE;
+    }
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
+    let private = (*custom_scan).custom_private;
+    if list_len(private) <= PRIVATE_STRATEGY_TAG_INDEX {
+        return STRATEGY_TAG_GENERAL_MERGE;
+    }
+    let marker = list_nth_ptr(private, PRIVATE_STRATEGY_TAG_INDEX).cast::<pg_sys::Integer>();
+    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
+        return STRATEGY_TAG_GENERAL_MERGE;
+    }
+    (*marker).ival
+}
+
+/// Returns the single-scope key from scan private data (default: `""`).
+#[allow(dead_code)] // Used by Task 1.4+ frontier / EXPLAIN.
+unsafe fn custom_private_scope_key(plan: *mut pg_sys::Plan) -> String {
+    if plan.is_null() {
+        return String::new();
+    }
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
+    let private = (*custom_scan).custom_private;
+    if list_len(private) <= PRIVATE_SCOPE_KEY_INDEX {
+        return String::new();
+    }
+    let string_node = list_nth_ptr(private, PRIVATE_SCOPE_KEY_INDEX).cast::<pg_sys::String>();
+    if string_node.is_null()
+        || (*string_node).type_ != pg_sys::NodeTag::T_String
+        || (*string_node).sval.is_null()
+    {
+        return String::new();
+    }
+    std::ffi::CStr::from_ptr((*string_node).sval)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Reads the executor's exact-PK marker without allocation or JSON parsing.

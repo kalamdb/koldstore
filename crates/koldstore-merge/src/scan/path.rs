@@ -4,7 +4,7 @@
 //! wiring stays in `pg_koldstore`.
 
 use super::strategy::{
-    classify_path_strategy, KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
+    classify_path_strategy, KoldPathStrategy, OrderColumnSupport, StrategyRequest,
 };
 
 /// Custom scan provider name.
@@ -415,11 +415,8 @@ mod tests {
         assert!(ordered.iter().any(|entry| {
             matches!(
                 &entry.strategy,
-                KoldPathStrategy::OrderedProgressive(OrderedPathSpec {
-                    sort_order_id: 7,
-                    leading_column_id: 3,
-                    ..
-                })
+                KoldPathStrategy::OrderedProgressive(spec)
+                    if spec.sort_order_id == 7 && spec.leading_column_id == 3
             )
         }));
     }
