@@ -72,7 +72,7 @@ SELECT koldstore.manage_table(
   storage           => 'local-dev',
   hot_row_limit     => 1000,
   min_flush_rows    => 1,
-  max_rows_per_file => 500,
+  max_rows_per_file => 1000,
   migration_order_by => 'id'
 ) AS manage_job_id;
 ```
@@ -102,10 +102,10 @@ yourself: `CREATE EXTENSION` ensures the empty publication, and the first
 `manage_table` creates the database's slot before changing the table or
 KoldStore catalogs. Provisioning is idempotent.
 
-Source transactions commit before mirror work. A database worker normally
-applies committed primary-key changes within its 100 ms polling interval. Use
-the explicit fence before work that must observe every source commit visible at
-the start of the call:
+Source transactions commit before mirror work. A managed-table commit wakes the
+database worker immediately; concurrent commits coalesce into one drain rather
+than queueing one task per transaction. Use the explicit fence before work that
+must observe every source commit visible at the start of the call:
 
 ```sql
 SELECT koldstore.wait_for_async_mirror();
@@ -120,7 +120,7 @@ SELECT koldstore.disable_async_mirror();
 
 The cleanup function is idempotent and refuses to run while an active managed
 table depends on the infrastructure. A later `manage_table` recreates it
-automatically. See [Mirror capture](architecture/mirror-capture-modes.md)
+automatically. See [Mirror capture](architecture/mirror-capture.md)
 for consistency, WAL-retention, monitoring, and recovery details.
 
 The application table is still the table you created:
@@ -296,6 +296,7 @@ SELECT koldstore.manage_table(
   table_name     => 'app.user_messages',
   storage        => 'local-dev',
   hot_row_limit  => 1000,
+  max_rows_per_file => 1000,
   table_type     => 'user',
   scope_column   => 'user_id',
   migration_order_by => 'id'

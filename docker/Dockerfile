@@ -25,22 +25,23 @@ WORKDIR /build
 COPY . .
 
 ENV CARGO_BUILD_JOBS=1 \
-    CARGO_PROFILE_RELEASE_LTO=false \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+    CARGO_PROFILE_RELEASE_PG_LTO=false \
+    CARGO_PROFILE_RELEASE_PG_CODEGEN_UNITS=16
 
 RUN cargo pgrx init --pg"${PG_MAJOR}" "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config" \
     && cargo pgrx package \
       -p pg_koldstore \
+      --profile release-pg \
       --no-default-features \
       --features "pg${PG_MAJOR} s3" \
       --pg-config "/usr/lib/postgresql/${PG_MAJOR}/bin/pg_config"
 
 RUN mkdir -p /out/lib /out/extension \
-    && SO_FILE="$(find "target/release/koldstore-pg${PG_MAJOR}" -type f -name '*.so' | head -n1)" \
+    && SO_FILE="$(find "target/release-pg/koldstore-pg${PG_MAJOR}" -type f -name '*.so' | head -n1)" \
     && test -n "${SO_FILE}" \
     && cp "${SO_FILE}" /out/lib/koldstore.so \
-    && cp "target/release/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore.control" /out/extension/koldstore.control \
-    && cp target/release/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore--*.sql /out/extension/
+    && cp "target/release-pg/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore.control" /out/extension/koldstore.control \
+    && cp target/release-pg/koldstore-pg${PG_MAJOR}/usr/share/postgresql/${PG_MAJOR}/extension/koldstore--*.sql /out/extension/
 
 FROM postgres:${PG_MAJOR}-bookworm
 

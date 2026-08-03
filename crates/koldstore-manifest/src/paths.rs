@@ -13,6 +13,11 @@ pub use koldstore_common::{
     SEGMENT_PATH_TOKEN_LEN,
 };
 
+/// Hex characters retained from the shard content SHA-256 in object names.
+///
+/// The root manifest keeps the complete digest for integrity verification.
+pub const MANIFEST_SHARD_PATH_HASH_HEX_LEN: usize = 32;
+
 /// Object-store table prefix `{namespace}/{table_name}` (no trailing slash).
 ///
 /// Prefer a rendered `regular_path_tmpl` prefix for production keys; this helper
@@ -30,10 +35,17 @@ pub fn relative_manifest_path(namespace: &str, table_name: &str) -> String {
     )))
 }
 
-/// Immutable content-addressed shard path for a folder and SHA-256 digest.
+/// Immutable shard path using a 128-bit prefix of the content SHA-256 digest.
+///
+/// The complete digest remains in the root manifest and is verified when the
+/// shard is loaded. Immutable publication rejects a rare prefix collision when
+/// an existing object has different bytes.
 #[must_use]
 pub fn relative_manifest_shard_content_path(folder: u32, content_sha256: &str) -> String {
-    format!("{folder:03}/manifest-shard-{content_sha256}.json")
+    let path_token = content_sha256
+        .get(..MANIFEST_SHARD_PATH_HASH_HEX_LEN)
+        .unwrap_or(content_sha256);
+    format!("{folder:03}/manifest-shard-{path_token}.json")
 }
 
 /// First path component of a table-relative segment path (`001/segment-….parquet`).

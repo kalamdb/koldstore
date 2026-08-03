@@ -69,6 +69,10 @@ pub struct BoundedApplyRequest {
     /// When true, advance the slot to the previously committed durable checkpoint
     /// and record a new pending `applied_lsn`. Flush prune fences must use false.
     pub acknowledge_durable_checkpoint: bool,
+    /// When true, an empty publication peek advances `confirmed_flush` through
+    /// non-publication WAL. Wake-driven async-commit retries must use false so
+    /// unrelated WAL cannot move the slot before the watchdog.
+    pub advance_slot_on_empty: bool,
     /// When set, allocate sequences for this table strictly above the floor.
     pub target_prune_floor: Option<(pgrx::pg_sys::Oid, PruneSeqFloor)>,
     /// Optional row budget override. `None` uses the background GUC; `Some(0)`
@@ -87,6 +91,7 @@ impl BoundedApplyRequest {
             upper_bound: None,
             skip_through: None,
             acknowledge_durable_checkpoint: true,
+            advance_slot_on_empty: true,
             target_prune_floor: None,
             max_rows: None,
             max_ms: None,
@@ -100,6 +105,7 @@ impl BoundedApplyRequest {
             upper_bound: None,
             skip_through: None,
             acknowledge_durable_checkpoint: true,
+            advance_slot_on_empty: true,
             target_prune_floor: None,
             max_rows: Some(0),
             max_ms: Some(0),
@@ -400,7 +406,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
         if request.acknowledge_durable_checkpoint {
             if let Some(end_lsn) = applied_end_lsn {
                 record_applied_lsn(end_lsn, seq_watermark)?;
-            } else if applied == 0 && !budget_exhausted {
+            } else if applied == 0 && !budget_exhausted && request.advance_slot_on_empty {
                 // No publication changes in [confirmed, peek_upto]. Advance the
                 // slot so the next idle wake is an O(1) confirmed_flush check
                 // instead of re-decoding the same retained WAL.

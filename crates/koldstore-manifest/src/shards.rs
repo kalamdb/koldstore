@@ -404,7 +404,7 @@ mod tests {
         assert!(export.root.shards[0].path.ends_with(".json"));
         assert!(export.root.shards[0]
             .path
-            .contains(&export.root.shards[0].content_sha256));
+            .contains(&export.root.shards[0].content_sha256[..32]));
         assert_eq!(export.root.shards[0].segment_count, 1);
         assert_eq!(export.root.shards[1].folder, "002");
         assert_eq!(export.root.files.current_subfolder, "002");

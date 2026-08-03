@@ -14,6 +14,8 @@ fn dml_helpers_keep_one_hot_row_per_pk_by_using_upsert_revival() {
     assert!(executor::managed_dml_hook_names().contains(&"INSERT"));
     assert!(executor::managed_dml_hook_names().contains(&"UPDATE"));
     assert!(executor::managed_dml_hook_names().contains(&"DELETE"));
+    assert!(executor::managed_dml_hook_names().contains(&"MERGE"));
+    assert!(executor::managed_dml_hook_names().contains(&"COPY"));
 }
 
 #[test]

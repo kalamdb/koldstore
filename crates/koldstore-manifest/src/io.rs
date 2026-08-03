@@ -4,7 +4,7 @@
 //! helpers remain for tests and callers that already resolved an absolute path.
 //! PostgreSQL SPI stays in `pg_koldstore`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use koldstore_storage::{
@@ -13,7 +13,8 @@ use koldstore_storage::{
     StorageClient, StorageClientError,
 };
 
-use crate::model::{Manifest, ManifestShard, MANIFEST_VERSION};
+use crate::model::{Manifest, ManifestShard, ManifestShardRef, MANIFEST_VERSION};
+use crate::paths::parse_folder_name;
 use crate::shards::{merge_manifest_shards, split_manifest_for_export};
 
 /// Deserializes a root or in-memory manifest from JSON bytes.
@@ -88,10 +89,14 @@ pub fn write_manifest_to_path(path: &Path, manifest: &Manifest) -> Result<(), St
     write_manifest_with_client(&client, &object_key, manifest)
 }
 
-/// Splits `manifest` into folder shards and publishes shards then the thin root.
+/// Splits `manifest` into folder shards, publishes the thin root, then removes
+/// obsolete shard versions.
 ///
 /// Shard puts complete before the root so a crash mid-write never leaves a root
-/// pointing at missing shard bodies. `object_key` is the root `…/manifest.json`.
+/// pointing at missing shard bodies. Cleanup runs after root publication and
+/// never targets segment objects. Readers retry once from the current root when
+/// concurrent cleanup removes a shard referenced by a root they already read.
+/// `object_key` is the root `…/manifest.json`.
 ///
 /// # Errors
 ///
@@ -103,7 +108,11 @@ pub fn write_manifest_with_client(
 ) -> Result<(), String> {
     let export = split_manifest_for_export(manifest)?;
     let prefix = table_prefix_from_manifest_key(object_key)?;
-    let previous_hashes = previous_shard_hashes(client, object_key, &export.root)?;
+    let previous_shards = previous_shard_refs(client, object_key, &export.root)?;
+    let previous_hashes = previous_shards
+        .iter()
+        .map(|shard| (shard.path.clone(), shard.content_sha256.clone()))
+        .collect::<BTreeMap<_, _>>();
     for (relative_path, shard) in &export.shards {
         let shard_ref = export
             .root
@@ -126,10 +135,71 @@ pub fn write_manifest_with_client(
     }
     let root_bytes = manifest_to_json_bytes(&export.root)?;
     publish_mutable_object(client, object_key, &root_bytes).map_err(|error| error.to_string())?;
+    remove_unreferenced_manifest_shards(client, &prefix, &export.root, &previous_shards)?;
     Ok(())
 }
 
+/// Removes content-addressed shard versions not referenced by the published root.
+///
+/// Cleanup runs only after the mutable root points at every newly published shard.
+/// Segment objects and temporary publish objects are outside this filename filter.
+fn remove_unreferenced_manifest_shards(
+    client: &dyn StorageClient,
+    prefix: &str,
+    root: &Manifest,
+    previous_shards: &[ManifestShardRef],
+) -> Result<(), String> {
+    let referenced = root
+        .shards
+        .iter()
+        .map(|shard| join_object_key(prefix, &shard.path))
+        .collect::<BTreeSet<_>>();
+    let folders = root
+        .shards
+        .iter()
+        .chain(previous_shards)
+        .map(|shard| shard.folder.as_str())
+        .filter(|folder| parse_folder_name(folder).is_some())
+        .collect::<BTreeSet<_>>();
+    for folder in folders {
+        // List one bounded segment folder (at most SEGMENTS_PER_FOLDER Parquet
+        // objects) because object-store directory prefixes cannot portably end
+        // in a partial filename.
+        let shard_prefix = join_object_key(prefix, folder);
+        for object in client
+            .list(&shard_prefix)
+            .map_err(|error| error.to_string())?
+        {
+            if is_manifest_shard_key(prefix, &object.key) && !referenced.contains(&object.key) {
+                client
+                    .delete(&object.key)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_manifest_shard_key(prefix: &str, key: &str) -> bool {
+    let Some(relative) = key
+        .strip_prefix(prefix)
+        .and_then(|key| key.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some((folder, file_name)) = relative.split_once('/') else {
+        return false;
+    };
+    !file_name.contains('/')
+        && parse_folder_name(folder).is_some()
+        && file_name.starts_with("manifest-shard-")
+        && file_name.ends_with(".json")
+}
+
 /// Loads a root manifest and merges folder shard segment lists.
+///
+/// A shard failure is retried once from a freshly loaded root to tolerate a
+/// concurrent publish replacing the root and cleaning its obsolete shard.
 ///
 /// # Errors
 ///
@@ -139,16 +209,28 @@ pub fn try_load_manifest_with_client(
     client: &dyn StorageClient,
     object_key: &str,
 ) -> Result<Option<Manifest>, String> {
-    let root = match client.get(object_key) {
-        Ok(bytes) => manifest_from_json_bytes(&bytes)?,
-        Err(StorageClientError::NotFound { .. }) => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
     let prefix = table_prefix_from_manifest_key(object_key)?;
-    Ok(Some(merge_loaded_root(root, |shard_rel| {
-        let shard_key = join_object_key(&prefix, shard_rel);
-        client.get(&shard_key).map_err(|error| error.to_string())
-    })?))
+    let mut first_error = None;
+    for attempt in 0..2 {
+        let root = match client.get(object_key) {
+            Ok(bytes) => manifest_from_json_bytes(&bytes)?,
+            Err(StorageClientError::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        match merge_loaded_root(root, |shard_rel| {
+            let shard_key = join_object_key(&prefix, shard_rel);
+            client.get(&shard_key).map_err(|error| error.to_string())
+        }) {
+            Ok(manifest) => return Ok(Some(manifest)),
+            Err(error) if attempt == 0 => first_error = Some(error),
+            Err(error) => {
+                return Err(first_error
+                    .map(|first| format!("manifest load failed after root refresh: {error} (initial error: {first})"))
+                    .unwrap_or(error));
+            }
+        }
+    }
+    unreachable!("manifest load retry loop returns on every terminal branch")
 }
 
 fn merge_loaded_root(
@@ -170,31 +252,27 @@ fn merge_loaded_root(
     merge_manifest_shards(root, shards)
 }
 
-fn previous_shard_hashes(
+fn previous_shard_refs(
     client: &dyn StorageClient,
     object_key: &str,
     next_root: &Manifest,
-) -> Result<BTreeMap<String, String>, String> {
+) -> Result<Vec<ManifestShardRef>, String> {
     let bytes = match client.get(object_key) {
         Ok(bytes) => bytes,
-        Err(StorageClientError::NotFound { .. }) => return Ok(BTreeMap::new()),
+        Err(StorageClientError::NotFound { .. }) => return Ok(Vec::new()),
         Err(error) => return Err(error.to_string()),
     };
     let Ok(root) = manifest_from_json_bytes(&bytes) else {
-        return Ok(BTreeMap::new());
+        return Ok(Vec::new());
     };
     if root.version != MANIFEST_VERSION
         || !root.segments.is_empty()
         || root.table != next_root.table
         || root.namespace != next_root.namespace
     {
-        return Ok(BTreeMap::new());
+        return Ok(Vec::new());
     }
-    Ok(root
-        .shards
-        .into_iter()
-        .map(|shard| (shard.path, shard.content_sha256))
-        .collect())
+    Ok(root.shards)
 }
 
 fn table_prefix_from_manifest_key(object_key: &str) -> Result<String, String> {

@@ -516,6 +516,7 @@ unsafe extern "C-unwind" fn begin_custom_scan(
     }
 
     let plan = (*node).ss.ps.plan;
+    let mut release_exhausted_hot_child = false;
     if custom_private_exact_pk(plan) {
         initialize_custom_plan_children(node, estate, eflags);
         if let Some(child) = hot_child_planstate(node) {
@@ -531,6 +532,12 @@ unsafe extern "C-unwind" fn begin_custom_scan(
                 store_profiled_hot_hit(node, child_slot, profiler, scan_started);
                 return;
             }
+            // EXPLAIN ANALYZE probed the native child, but its miss means the
+            // cold fallback now owns the real work. Drop the exhausted child
+            // so PostgreSQL does not render it as the only `Plans` entry;
+            // the fallback's diagnostic JSON tree then represents the actual
+            // catalog, Parquet, overlay, and merge pipeline.
+            release_exhausted_hot_child = true;
         }
     }
 
@@ -548,6 +555,9 @@ unsafe extern "C-unwind" fn begin_custom_scan(
         }
     }
 
+    if release_exhausted_hot_child {
+        end_custom_plan_children(node);
+    }
     initialize_fallback_scan(node, estate, eflags, profiler, scan_started);
 }
 
@@ -702,11 +712,11 @@ unsafe fn initialize_fallback_scan(
     }
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} projection failed: {error}"));
     let residual = unsafe { residual_filters(scanrelid, qual, &catalog.columns, params) };
-    // Hot heap is current-state only, so PK + scope equality can be pushed into
-    // the SPI load. Mutable columns stay residual for cold (pre-merge), but may
-    // still appear in hot_equality for post-merge ExecScan. Scope pushdown
-    // matches catalog segment-index prune on the shared manifest until per-scope
-    // manifests land.
+    // Hot heap is current-state only, so PK + scope equality and PK range
+    // predicates can be pushed into the SPI load. Mutable columns stay residual
+    // for cold (pre-merge), but may still appear in hot_equality for post-merge
+    // ExecScan. Scope pushdown matches catalog segment-index prune on the shared
+    // manifest until per-scope manifests land.
     let mut source_equality_columns = snapshot
         .primary_key_columns
         .iter()
@@ -725,6 +735,17 @@ unsafe fn initialize_fallback_scan(
         .hot_equality
         .iter()
         .filter(|filter| source_equality_columns.contains(filter.column.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let primary_key_columns = snapshot
+        .primary_key_columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let pk_range = residual
+        .hot_range
+        .iter()
+        .filter(|filter| primary_key_columns.contains(filter.column.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     let image_columns = scan_projection.catalog_columns();
@@ -747,6 +768,7 @@ unsafe fn initialize_fallback_scan(
         projection: &scan_projection,
         image_columns: &image_columns,
         pk_equality: &pk_equality,
+        pk_range: &pk_range,
         pk_point_lookup,
     };
     let source_execution = if profiler.is_enabled() {
@@ -1092,6 +1114,13 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         // emit paths). Graph clients that walk custom_ps still see nested Plans
         // when the child was initialized for hot-only streaming.
         profile::explain_text(es, "Hot Plan", &hot_label);
+        profile::explain_visual_pipeline(
+            es,
+            &cold_profile,
+            &hot_label,
+            emit_path,
+            execution.as_ref(),
+        );
     }
     if let Some(execution) = execution.as_ref() {
         profile::explain_integer(es, "Mirror Tombstones", None, execution.mirror_rows as i64);

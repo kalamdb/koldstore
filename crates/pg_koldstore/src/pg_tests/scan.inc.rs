@@ -208,7 +208,7 @@ fn explain_analyze_uses_native_hot_child_counters() {
     ));
     for expected in [
         "Emit Path: hot_child",
-        "Access Method: PostgreSQL child plan",
+        "Actual Access: Native PostgreSQL Child",
         "Hot Rows: 3",
         "Rows Scanned: 3",
         "Input Rows: 3",
@@ -277,6 +277,83 @@ fn explain_json_nests_parquet_segment_groups() {
 }
 
 #[pg_test]
+fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
+    let suffix = unique_suffix("explain_json_plan_nodes");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 1);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (10, 'hot')"
+    ))
+    .expect("insert hot row");
+
+    let plan = Spi::connect(|client| {
+        let mut table = client
+            .select(
+                &format!(
+                    "EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, SUMMARY OFF) \
+                     SELECT body FROM {relation} WHERE id >= 2 ORDER BY id"
+                ),
+                None,
+                &[],
+            )
+            .expect("explain select");
+        table
+            .next()
+            .expect("explain row")
+            .get::<pgrx::Json>(1)
+            .expect("explain json column")
+            .expect("explain json")
+            .0
+            .to_string()
+    });
+    for expected in [
+        "\"Plans\"",
+        "\"Node Type\":\"KoldStore Hot Scan\"",
+        "\"Node Type\":\"KoldStore Cold Storage Scan\"",
+        "\"Node Type\":\"KoldStore Segment Catalog Scan\"",
+        "\"Node Type\":\"KoldStore Parquet Scan\"",
+        "\"Parent Relationship\":\"Parquet Segment\"",
+        "\"KoldStore Internal\":true",
+        "\"KoldStore Role\":\"PostgreSQL Hot Access\"",
+        "\"Hot Actual Access\"",
+        "\"Runtime Manifest Read\":false",
+        "\"Cold Segments Query\"",
+        "\"Hot SPI Query\"",
+        "\"Actual Rows\":1",
+    ] {
+        assert!(
+            plan.contains(expected),
+            "expected KoldStore diagnostic plan node `{expected}`: {plan}"
+        );
+    }
+    assert!(
+        !plan.contains("\"Node Type\":\"KoldStore Mirror Overlay\""),
+        "Mirror Overlay must not appear as a visual plan node: {plan}"
+    );
+    // Parquet must nest under catalog, not sit as a sibling under Cold Storage.
+    let catalog_idx = plan
+        .find("\"Node Type\":\"KoldStore Segment Catalog Scan\"")
+        .expect("catalog node");
+    let parquet_idx = plan
+        .find("\"Node Type\":\"KoldStore Parquet Scan\"")
+        .expect("parquet node");
+    assert!(
+        parquet_idx > catalog_idx,
+        "Parquet Scan must appear after Segment Catalog Scan in nested Plans: {plan}"
+    );
+}
+
+#[pg_test]
 fn explain_analyze_shows_prune_summary_after_flush() {
     let suffix = unique_suffix("explain_prune");
     let schema = format!("pgtest_{suffix}");
@@ -307,7 +384,9 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         "Segments Pruned by Catalog Index",
         "Parquet Segments Opened",
         "Bytes Fetched",
-        "Segment Catalog Source",
+        "Runtime Catalog Source",
+        "Published Manifest Path",
+        "Cold Segments Query",
     ] {
         assert!(
             plan.contains(needle),
@@ -374,6 +453,9 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
     }
     for expected in [
         "Emit Path: merge_stream",
+        "Actual Access: SPI JSON Keyset Scan",
+        "Hot SPI Query:",
+        "to_jsonb(proj)",
         "Peak Hot Batch Rows: 1",
         "Seen Keys: 4",
         "Hot Rows: 1",
@@ -388,6 +470,51 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
             "EXPLAIN ANALYZE flow missing exact counter `{expected}`: {plan}"
         );
     }
+}
+
+#[pg_test]
+fn primary_key_range_pushes_hot_candidates_into_merge_stream() {
+    let suffix = unique_suffix("hot_range_pushdown");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 12) AS id"
+    ))
+    .expect("insert cold candidates");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 12);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 1000) AS id"
+    ))
+    .expect("insert hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} WHERE id < 10 ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: merge_stream"),
+        "overlapping cold candidates must use the merge stream: {plan}"
+    );
+    assert!(
+        plan.contains("Hot Rows: 9") && plan.contains("Peak Hot Batch Rows: 9"),
+        "PK range pushdown must scan only hot IDs below 10, not one full page: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id DESC) FROM (\
+             SELECT id, body FROM {relation} WHERE id < 10 ORDER BY id DESC LIMIT 5\
+             ) candidates"
+        )),
+        "hot-9,hot-8,hot-7,hot-6,hot-5",
+        "newer hot candidates must win over their cold versions"
+    );
 }
 
 #[pg_test]
@@ -567,7 +694,7 @@ fn hot_pk_hit_skips_parquet_open_when_cold_segment_index_overlaps() {
         "expected native PostgreSQL hot child for live PK that still overlaps cold stats, got: {plan}"
     );
     assert!(
-        plan.contains("Access Method: PostgreSQL child plan"),
+        plan.contains("Actual Access: Native PostgreSQL Child"),
         "exact hot PK hit must use the already-planned PostgreSQL child: {plan}"
     );
     assert!(

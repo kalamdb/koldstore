@@ -13,7 +13,7 @@ use pgrx::pg_sys;
 
 use super::cold::{prepare_cold_row_stream, ColdRowStream};
 use super::emit::materialize_scan_row_from_image;
-use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader};
+use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader, HotRangeFilter};
 use super::mirror::{filter_cold_rows_with_overlay, load_mirror_tombstone_overlay, MirrorOverlay};
 use super::profile::{
     elapsed_ms, ColdReadProfile, DisabledScanProfiler, EmitPath, ScanExecutionProfile,
@@ -39,6 +39,7 @@ pub(super) struct ScanSourceInputs<'a> {
     pub(super) projection: &'a ScanProjection,
     pub(super) image_columns: &'a [&'a CatalogColumn],
     pub(super) pk_equality: &'a [HotEqualityFilter],
+    pub(super) pk_range: &'a [HotRangeFilter],
     pub(super) pk_point_lookup: bool,
 }
 
@@ -428,10 +429,14 @@ fn prepare_merged_stream<P: ScanProfileSink>(
         inputs.relation,
         inputs.snapshot,
         inputs.pk_equality,
+        inputs.pk_range,
         inputs.image_columns,
         inputs.relation_owner,
     )
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} hot reader setup failed: {error}"));
+    if let Some(sql) = hot.first_page_sql() {
+        profiler.record_hot_spi_query(sql);
+    }
     // Hot pages load during ExecCustomScan; EXPLAIN counters accumulate there.
     profiler.record_hot_buffer(0);
     let stream = MergeRowStream::new(hot, cold_stream, overlay);

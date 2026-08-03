@@ -27,10 +27,10 @@ use koldstore_flush::{enqueue_flush_job_plan, flush_table_request};
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "enqueue_flush_job", schema = "koldstore", security_definer)]
 pub fn enqueue_flush_job_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
 ) -> i64 {
-    enqueue_flush_job_pg_impl(table_name, force)
+    enqueue_flush_job_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("enqueue flush job failed: {error}"))
 }
 
@@ -66,10 +66,10 @@ fn enqueue_flush_job_pg_impl(table_oid: pgrx::pg_sys::Oid, force: bool) -> Resul
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "recover_segments", schema = "koldstore", security_definer)]
 pub fn recover_segments_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     dry_run: pgrx::default!(bool, false),
 ) -> i64 {
-    recover_segments_pg_impl(table_name, dry_run)
+    recover_segments_pg_impl(table_name.oid(), dry_run)
         .unwrap_or_else(|error| pgrx::error!("recover segments failed: {error}"))
 }
 
@@ -203,10 +203,10 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
 pub fn flush_table_pg(
-    table_name: pgrx::pg_sys::Oid,
+    table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
 ) -> pgrx::Uuid {
-    execute::flush_table_pg_impl(table_name, force)
+    execute::flush_table_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
 }
 
@@ -222,11 +222,12 @@ pub fn flush_table_pg(
 pub fn list_jobs_pg(
     statuses: pgrx::default!(Option<pgrx::JsonB>, "NULL"),
     job_types: pgrx::default!(Option<pgrx::JsonB>, "NULL"),
-    table_name: pgrx::default!(Option<pgrx::pg_sys::Oid>, "NULL"),
+    table_name: pgrx::default!(Option<pgrx::PgRelation>, "NULL"),
 ) -> pgrx::JsonB {
     let statuses = statuses.map(|value| value.0);
     let job_types = job_types.map(|value| value.0);
-    jobs::list_jobs_json(statuses, job_types, table_name)
+    let table_oid = table_name.as_ref().map(pgrx::PgRelation::oid);
+    jobs::list_jobs_json(statuses, job_types, table_oid)
         .map(pgrx::JsonB)
         .unwrap_or_else(|error| pgrx::error!("list jobs failed: {error}"))
 }
@@ -249,7 +250,7 @@ pub fn cancel_job_pg(job_id: pgrx::Uuid) -> bool {
 /// (number of jobs signalled or hard-cancelled).
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "cancel_table_jobs", schema = "koldstore", security_definer)]
-pub fn cancel_table_jobs_pg(table_name: pgrx::pg_sys::Oid) -> i64 {
-    jobs::request_cancel_table_jobs(table_name)
+pub fn cancel_table_jobs_pg(table_name: pgrx::PgRelation) -> i64 {
+    jobs::request_cancel_table_jobs(table_name.oid())
         .unwrap_or_else(|error| pgrx::error!("cancel table jobs failed: {error}"))
 }

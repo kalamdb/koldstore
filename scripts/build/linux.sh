@@ -34,6 +34,7 @@ Options:
 
 Examples:
   scripts/build/linux.sh --pg 16 --arch amd64 --install-deps
+  scripts/build/linux.sh -v 18 --arch arm64 --distro ubuntu24.04 --install-deps
   scripts/build/linux.sh -v 18 --arch arm64 --distro rocky9 --install-deps
 EOF
 }
@@ -99,7 +100,7 @@ if [[ -z "${DISTRO}" ]]; then
 fi
 
 if [[ -z "${FORMATS}" ]]; then
-  FORMATS="$(default_formats_for_pg "${PG_VER}")"
+  FORMATS="$(default_formats_for_distro "${DISTRO}")"
 fi
 
 install_ubuntu_deps() {

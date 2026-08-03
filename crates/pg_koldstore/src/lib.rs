@@ -88,6 +88,7 @@ pub extern "C" fn _PG_init() {
     koldstore_storage::ensure_rustls_ring_provider();
     observability::init_tracing();
     guc::define_gucs();
+    database_worker::wake::initialize();
     catalog::cache::register_invalidation_callback();
     hooks::register_hooks();
     row_counter_cache::register_xact_callbacks();

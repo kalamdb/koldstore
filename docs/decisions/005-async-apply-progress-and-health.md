@@ -127,8 +127,7 @@ Trade-offs:
 
 ## References
 
-- [Async mirror capture](../architecture/mirror-capture-async.md)
-- [Mirror capture modes](../architecture/mirror-capture-modes.md)
+- [Current mirror capture](../architecture/mirror-capture.md)
 - [DML workflow](../architecture/dml-table.md)
 - [Performance criteria](../performance.md)
 - [Benchmark methodology](../benchmarks/README.md)

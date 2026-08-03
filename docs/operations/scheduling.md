@@ -46,28 +46,28 @@ Session `SET` only affects the current backend. The built-in worker reads GUCs
 from its own connection (database / system defaults), so use `ALTER DATABASE`
 or `ALTER SYSTEM` when changing scheduler cadence for background flushes.
 
-### Async apply poll interval
+### Async apply commit wakeups and watchdog
 
-The same worker peeks the logical slot on a latch cadence controlled by
-`koldstore.async_apply_poll_interval_ms` (default `100`, clamped to
-`50..=5000`). Each apply tick runs in **one** PostgreSQL transaction: mirror
-batch writes and `async_mirror_state.applied_lsn` commit together (or roll back
-together on ERROR).
+Managed-table commits advance a database-scoped shared generation and set the
+worker latch. Concurrent commits coalesce: the worker drains through the latest
+generation instead of queueing one job per transaction. Each apply tick runs in
+**one** PostgreSQL transaction: mirror batch writes and
+`async_mirror_state.applied_lsn` commit together (or roll back together on
+ERROR).
 
-Idle path: when the cluster insert LSN is still at or behind the slot's
-`confirmed_flush`, the worker skips decode entirely (shared-memory check, no
-SPI). After an empty peek it advances `confirmed_flush` past non-publication
-WAL and backs off the latch up to 5 seconds so retained-WAL gaps cannot burn
-CPU on every checkpoint.
+The worker does not periodically decode on a short poll interval. A safety
+watchdog controlled by `koldstore.async_apply_watchdog_interval_ms` (default
+`30000`, clamped to `1000..=300000`) catches a lost notification or a two-phase
+commit that cannot carry the originating backend's in-memory hint.
 
 ```sql
 -- Per-database (preferred for the bgworker):
-ALTER DATABASE mydb SET koldstore.async_apply_poll_interval_ms = 50;
+ALTER DATABASE mydb SET koldstore.async_apply_watchdog_interval_ms = 30000;
 -- Restart the database worker (or terminate + ensure) so it reconnects with
 -- the new database default. SIGHUP also reloads ALTER SYSTEM values.
 
 -- Or persist cluster-wide:
-ALTER SYSTEM SET koldstore.async_apply_poll_interval_ms = 200;
+ALTER SYSTEM SET koldstore.async_apply_watchdog_interval_ms = 30000;
 SELECT pg_reload_conf();
 ```
 

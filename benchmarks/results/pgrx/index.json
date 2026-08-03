@@ -1,0 +1,12 @@
+[
+  {
+    "pg_version": "16",
+    "archive_key": "2026-08-03T07",
+    "created_at": "2026-08-03T10:38:29.081398+03:00",
+    "hostname": "MacBook-Pro.local",
+    "git_commit": "0ccc1fd31646f238c72cec18266369ea3125e0bc",
+    "status": "ok",
+    "benchmark_count": 21,
+    "report": "pg16/2026-08-03T07/report.html"
+  }
+]

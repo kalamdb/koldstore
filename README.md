@@ -176,13 +176,14 @@ faster. Full methodology and how to run with your own row count:
 [docs/benchmarks/README.md](docs/benchmarks/README.md).
 
 Managed tables use committed-WAL mirror capture only. Foreground DML writes the
-heap; a database worker applies PK-only WAL with a 100 ms polling interval and
-bounded immediate retry bursts. Call `koldstore.wait_for_async_mirror()` for a
-strong read boundary; `flush_table` fences automatically. Authoritative mirror
-`seq` is allocated only by the serialized applier and is the exclusive
-`changes_since` cursor. `CREATE EXTENSION` and the first managed table create
-the publication and slot automatically; only `wal_level=logical` requires
-administrator setup.
+heap; each managed commit coalesces into a database-scoped latch wake for the
+PK-only WAL applier. A low-frequency watchdog recovers missed hints, while
+bounded retries cover asynchronous WAL flushes. Call
+`koldstore.wait_for_async_mirror()` for a strong read boundary; `flush_table`
+fences automatically. Authoritative mirror `seq` is allocated only by the
+serialized applier and is the exclusive `changes_since` cursor. `CREATE
+EXTENSION` and the first managed table create the publication and slot
+automatically; only `wal_level=logical` requires administrator setup.
 
 ## How it works
 

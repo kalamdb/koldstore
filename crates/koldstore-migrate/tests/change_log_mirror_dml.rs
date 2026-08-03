@@ -43,6 +43,14 @@ fn change_log_mirror_installs_pk_guard_only() {
         .sql
         .contains("BEFORE UPDATE OF \"tenant_id\", \"id\""));
     assert!(guard.trigger.sql.contains("FOR EACH ROW"));
+    assert!(
+        !guard.trigger.sql.contains("DROP TRIGGER IF EXISTS"),
+        "create path must avoid NOTICE-emitting DROP TRIGGER IF EXISTS"
+    );
+    assert!(guard.trigger.sql.contains("$koldstore_drop_trigger$"));
+    assert!(guard.trigger.sql.contains(
+        "EXECUTE 'DROP TRIGGER \"messages__cl_pk_update_guard\" ON \"public\".\"messages\"'"
+    ));
 }
 
 #[test]

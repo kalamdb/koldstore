@@ -16,7 +16,10 @@ scripts/run-pgrx-bench.sh 16
 scripts/run-pgrx-bench.sh 16 --list
 ```
 
-Those live in `crates/pg_koldstore/src/pg_benches/` and are separate from this pgbench suite.
+Those live in `crates/pg_koldstore/src/pg_benches/` and are separate from this
+pgbench suite. Normal runs publish one tracked report bucket per UTC date-hour
+under `benchmarks/results/pgrx/`; browse them from
+`benchmarks/results/pgrx/index.html`.
 
 ## Prerequisites
 

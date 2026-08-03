@@ -75,6 +75,37 @@ pub struct ValidatedManageTable {
     pub migration: MigrationValidation,
 }
 
+/// Validates operator-provided policy values without requiring catalog access.
+///
+/// PostgreSQL callers use this before provisioning WAL capture so malformed
+/// requests cannot leave replication infrastructure behind.
+///
+/// # Errors
+///
+/// Returns [`MigrationConstraintError`] when compression or numeric policy
+/// values are invalid.
+pub fn validate_manage_table_preflight(
+    policy: ManageTablePolicyInput,
+    compression: Option<&str>,
+) -> ConstraintResult<()> {
+    parse_compression(compression)?;
+    if let Some(hot_row_limit) = policy.hot_row_limit {
+        positive_value(hot_row_limit, "hot_row_limit")?;
+        positive_value(policy.min_flush_rows, "min_flush_rows")?;
+        let max_rows_per_file = positive_value(policy.max_rows_per_file, "max_rows_per_file")?;
+        if max_rows_per_file < policy.min_max_rows_per_file {
+            return Err(MigrationConstraintError::MaxRowsPerFileBelowFloor {
+                value: max_rows_per_file,
+                minimum: policy.min_max_rows_per_file,
+            });
+        }
+    }
+    if let Some(target_file_size_mb) = policy.target_file_size_mb {
+        positive_value(target_file_size_mb, "target_file_size_mb")?;
+    }
+    Ok(())
+}
+
 /// Validates all catalog and operator inputs for `manage_table`.
 ///
 /// This is the single validation entry point called after PostgreSQL catalog

@@ -74,7 +74,13 @@ async fn run_lifecycle_memory_probe(db: &common::TestDb, use_minio: bool) -> Res
         next_id += batch_rows;
 
         common::fence_async_mirror(&db.client).await?;
-        let flushed = db.flush_table(&table.relation).await?;
+        let flushed = if cycle == warmup {
+            // Exercise the publish/read overlap once without multiplying the
+            // memory suite runtime across every measured cycle.
+            flush_with_five_concurrent_readers(db, &table.relation).await?
+        } else {
+            db.flush_table(&table.relation).await?
+        };
         assert!(
             flushed > 0,
             "cycle {cycle}: expected flush to write newly inserted hot rows"
@@ -167,6 +173,32 @@ async fn run_hot_dml_batch(
         .await
         .with_context(|| format!("hot DML batch starting at {start_id}"))?;
     Ok(())
+}
+
+/// Flushes while five managed readers execute hot/cold merge queries.
+///
+/// This is intentionally used for one bounded lifecycle phase rather than
+/// every cycle: it covers the manifest publish/read overlap while keeping the
+/// CI memory job short.
+///
+/// # Errors
+///
+/// Returns an error when the flush or any concurrent reader fails.
+async fn flush_with_five_concurrent_readers(db: &common::TestDb, relation: &str) -> Result<i64> {
+    let (flushed, reader_a, reader_b, reader_c, reader_d, reader_e) = tokio::join!(
+        db.flush_table(relation),
+        exercise_merge_scan_reads(db, relation),
+        exercise_merge_scan_reads(db, relation),
+        exercise_merge_scan_reads(db, relation),
+        exercise_merge_scan_reads(db, relation),
+        exercise_merge_scan_reads(db, relation),
+    );
+    reader_a?;
+    reader_b?;
+    reader_c?;
+    reader_d?;
+    reader_e?;
+    flushed
 }
 
 async fn exercise_merge_scan_reads(db: &common::TestDb, relation: &str) -> Result<()> {
@@ -359,7 +391,7 @@ async fn run_overhead_comparison(db: &common::TestDb) -> Result<()> {
             &db.client,
             port,
             || async {
-                let flushed = db.flush_table(&managed.relation).await?;
+                let flushed = flush_with_five_concurrent_readers(db, &managed.relation).await?;
                 assert!(flushed > 0);
                 Ok(())
             },

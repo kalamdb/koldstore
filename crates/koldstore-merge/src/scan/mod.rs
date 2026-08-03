@@ -21,7 +21,8 @@ pub use path::{
     PathReplacementDecision, PlannerPath, PlannerPathKind, CUSTOM_PATH_NAME,
 };
 pub use plan::{
-    group_segments_newest_first, retain_pre_merge_cold_prune_predicates,
-    validate_prune_predicates_indexed, ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan,
-    MirrorOverlayStrategy, SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
+    group_segments_newest_first, group_segments_oldest_first,
+    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
+    ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, MirrorOverlayStrategy, SegmentHint,
+    SegmentPrunePredicate, SegmentStatsHint,
 };

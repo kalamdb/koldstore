@@ -161,7 +161,7 @@ async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<(
         .await?;
         common::assertions::assert_kold_merge_scan_explain(&plan)?;
         anyhow::ensure!(
-            plan.contains("Segment Catalog Source: postgres (koldstore.cold_segments)"),
+            plan.contains("Runtime Catalog Source: postgres (koldstore.cold_segments)"),
             "expected DB segment catalog source, got:\n{plan}"
         );
         anyhow::ensure!(

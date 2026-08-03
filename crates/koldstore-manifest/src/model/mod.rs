@@ -2,8 +2,9 @@
 //!
 //! Object-store layout is folder-sharded only: a thin root `manifest.json`
 //! lists [`ManifestShardRef`] entries; segment bodies live in
-//! `{folder}/manifest-shard-{sha256}.json`. The in-memory [`Manifest`] may hold a full
-//! `segments` list while assembling from catalog or after a merged load.
+//! `{folder}/manifest-shard-{sha256-prefix}.json`. The root retains the complete
+//! digest. The in-memory [`Manifest`] may hold a full `segments` list while
+//! assembling from catalog or after a merged load.
 
 use std::ops::RangeInclusive;
 

@@ -77,10 +77,7 @@ pub fn plan_mirror_pk_guard(
     )?;
     let drop_trigger = SqlStatement::write(
         "drop change-log mirror primary-key guard trigger",
-        &format!(
-            "DROP TRIGGER IF EXISTS {} ON {source}",
-            quote_ident(&pk_guard_trigger_name(&mirror_table.name))
-        ),
+        &drop_trigger_if_present_sql(&pk_guard_trigger_name(&mirror_table.name), &source),
     )
     .map_err(|error| MirrorGuardError::Sql(error.to_string()))?;
     let drop_function = SqlStatement::write(
@@ -126,18 +123,12 @@ pub fn plan_mirror_source_teardown(
                 "drop change-log mirror {} capture trigger",
                 operation.capture_trigger_suffix()
             ),
-            &format!(
-                "DROP TRIGGER IF EXISTS {} ON {source}",
-                quote_ident(&trigger_name)
-            ),
+            &drop_trigger_if_present_sql(&trigger_name, &source),
         )?);
     }
     statements.push(SqlStatement::write(
         "drop change-log mirror primary-key guard trigger",
-        &format!(
-            "DROP TRIGGER IF EXISTS {} ON {source}",
-            quote_ident(&pk_guard_trigger_name(&mirror_table.name))
-        ),
+        &drop_trigger_if_present_sql(&pk_guard_trigger_name(&mirror_table.name), &source),
     )?);
     statements.push(SqlStatement::write(
         "drop change-log mirror capture function",
@@ -152,6 +143,23 @@ pub fn plan_mirror_source_teardown(
 
 fn pk_guard_trigger_name(mirror_table_name: &str) -> String {
     format!("{mirror_table_name}_pk_update_guard")
+}
+
+/// Drops a trigger only when it already exists, without PostgreSQL's
+/// `DROP TRIGGER IF EXISTS` NOTICE on a missing name (common on first manage).
+fn drop_trigger_if_present_sql(trigger_name: &str, source_table: &str) -> String {
+    let quoted_trigger = quote_ident(trigger_name);
+    format!(
+        r#"DO $koldstore_drop_trigger$
+BEGIN
+  BEGIN
+    EXECUTE 'DROP TRIGGER {quoted_trigger} ON {source_table}';
+  EXCEPTION WHEN undefined_object THEN
+    NULL;
+  END;
+END
+$koldstore_drop_trigger$;"#
+    )
 }
 
 fn pk_guard_function_sql(
@@ -210,11 +218,12 @@ fn plan_pk_guard_trigger(
         of_columns.push(quote_ident(order_column));
     }
     let of_list = of_columns.join(", ");
+    let drop_sql = drop_trigger_if_present_sql(&trigger_name, source_table);
     SqlStatement::write(
         "create change-log mirror primary-key guard trigger",
         &format!(
             r#"
-DROP TRIGGER IF EXISTS {trigger_name} ON {source_table};
+{drop_sql}
 CREATE TRIGGER {trigger_name}
 BEFORE UPDATE OF {of_list} ON {source_table}
 FOR EACH ROW EXECUTE FUNCTION {function_name}()

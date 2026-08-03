@@ -34,7 +34,7 @@ fresh pgrx PostgreSQL. They are **not** parallel and do **not** share a live
 server or dual-table I/O during measurement. Each cell reports the median and
 range. Inserts use committed 100k-row batches. Numbers vary by machine; re-run
 for your hardware. See
-[Mirror capture modes](../architecture/mirror-capture-modes.md).
+[Mirror capture](../architecture/mirror-capture.md).
 
 **Managed PostgreSQL sizes always include** the hot user heap **plus**
 `koldstore.<table>__cl` (latest-state change-log mirror) **and** that mirror’s

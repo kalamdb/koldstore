@@ -1,6 +1,6 @@
 //! PostgreSQL adapter for [`koldstore_worker`] database-scoped background work.
 //!
-//! Owns `pgrx` background-worker registration, latch polling, and SPI connection.
+//! Owns `pgrx` background-worker registration, latch wakeups, and SPI connection.
 //! Ensure decisions and naming come from the PostgreSQL-free library crate.
 
 #[cfg(feature = "pg")]
@@ -11,6 +11,8 @@ mod flush_task;
 mod launcher;
 #[cfg(feature = "pg")]
 mod r#loop;
+#[cfg(feature = "pg")]
+pub(crate) mod wake;
 
 #[cfg(feature = "pg")]
 pub use ensure::ensure_async_mirror_worker_pg;

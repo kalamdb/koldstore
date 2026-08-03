@@ -21,10 +21,11 @@ boundaries at each step:
 | Workflow | Document |
 |----------|----------|
 | Register a table for hot/cold management | [manage-table](architecture/manage-table.md) |
-| Mirror capture (WAL-only apply) | [mirror-capture-modes](architecture/mirror-capture-modes.md) ([async apply details](architecture/mirror-capture-async.md)) |
+| Mirror capture (WAL apply) | [mirror-capture](architecture/mirror-capture.md) |
 | Move mirror rows to Parquet and prune hot | [flushing-table](architecture/flushing-table.md) |
 | `SELECT` through hot + cold merge | [scanning-table](architecture/scanning-table.md) |
 | `INSERT` / `UPDATE` / `DELETE` capture | [dml-table](architecture/dml-table.md) |
+| Jobs, worker, and automatic flush | [jobs-and-scheduler](architecture/jobs-and-scheduler.md) |
 
 ## Contributor layout
 
@@ -37,7 +38,7 @@ Rust crate layout and dependency graph.
 |-----|--------|
 | [ADR-001](decisions/001-layered-crate-architecture.md) | Layered crate architecture |
 | [ADR-002](decisions/002-footer-derived-catalog-stats.md) | Footer-derived packed segment and row-group stats (implemented) |
-| [ADR-003](decisions/003-optional-async-mirror-capture.md) | Historical dual-mode capture ADR (superseded by WAL-only; see [mirror-capture-modes](architecture/mirror-capture-modes.md)) |
+| [ADR-003](decisions/003-optional-async-mirror-capture.md) | Historical capture ADR (superseded by current [mirror capture](architecture/mirror-capture.md)) |
 | [ADR-004](decisions/004-segment-publication-protocol.md) | Pending-to-active segment publication protocol |
 | [ADR-005](decisions/005-async-apply-progress-and-health.md) | Async UPDATE apply, worker progress, and retained-WAL health |
 
@@ -55,14 +56,13 @@ Design notes for correctness edge cases (proposed or landed):
 
 Managed user tables keep application columns only. Sequence and delete state
 live in `koldstore.{table}__cl` and in cold Parquet metadata (`seq`, `deleted`).
-Strict capture updates the mirror in the source transaction; async capture
-applies committed primary-key-only WAL in a database worker, with an explicit
-consistency fence for strong reads. Async UPDATE uses a direct set-based update
+Committed primary-key-only WAL is applied to the mirror by a database worker,
+with an explicit consistency fence for strong reads. UPDATE uses a direct set-based update
 for existing mirror keys and a conflict-safe insert-missing fallback for keys
 already pruned by flush. The worker drains bounded batches in short retry
 bursts and always yields between bursts.
 See [dml-table](architecture/dml-table.md) and
-[mirror capture modes](architecture/mirror-capture-modes.md).
+[mirror capture](architecture/mirror-capture.md).
 
 ### Custom scan instead of an external query engine
 

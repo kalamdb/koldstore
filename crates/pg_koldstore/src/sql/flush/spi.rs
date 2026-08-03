@@ -608,6 +608,11 @@ fn arm_flush_replication_origin() -> Result<(), String> {
     })
 }
 
+/// Returns whether this transaction's managed-table writes are internal prune WAL.
+pub(crate) fn flush_replication_origin_is_armed() -> bool {
+    FLUSH_ORIGIN_RESTORE.with(|slot| slot.get().is_some())
+}
+
 /// PG16+ path: stamp `DoNotReplicateId` without `replorigin_session_setup`.
 #[cfg(not(feature = "pg15"))]
 fn arm_do_not_replicate_origin(

@@ -56,6 +56,7 @@ mod process_utility {
             let mut has_standard_actions = true;
             let mut drop_oids = Vec::new();
             let mut refresh_oid = None;
+            let mut copy_from_oid = None;
             if !copied.is_null() && !(*copied).utilityStmt.is_null() {
                 match (*(*copied).utilityStmt).type_ {
                     pg_sys::NodeTag::T_AlterTableStmt => {
@@ -72,6 +73,12 @@ mod process_utility {
                     pg_sys::NodeTag::T_DropStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::DropStmt>();
                         drop_oids = drop_table_oids(stmt);
+                    }
+                    pg_sys::NodeTag::T_CopyStmt => {
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::CopyStmt>();
+                        if !stmt.is_null() && (*stmt).is_from {
+                            copy_from_oid = relation_oid_from_range_var((*stmt).relation);
+                        }
                     }
                     _ => {}
                 }
@@ -93,6 +100,12 @@ mod process_utility {
             }
             if let Some((relation, options)) = captured {
                 apply_options(relation, options);
+            }
+            if let Some(table_oid) = copy_from_oid {
+                let copied_rows = qc.is_null() || (*qc).nprocessed > 0;
+                if copied_rows && crate::catalog::cache::is_managed_relation(table_oid) {
+                    crate::database_worker::wake::mark_managed_dml_pending();
+                }
             }
             if let Some(table_oid) = refresh_oid {
                 // shared_preload installs this hook before CREATE EXTENSION, and
@@ -336,17 +349,17 @@ fn ensure_initial_management(
         .unwrap_or("1000")
         .parse()
         .map_err(|_| "max_rows_per_file must be a positive integer")?;
-    crate::sql::migrate_pg::manage_table_pg(
+    crate::sql::migrate_pg::manage_table_pg_impl(
         table_oid,
+        "shared",
         storage,
+        None,
+        None,
+        None,
+        None,
         hot.or(Some(1)),
         min,
         file,
-        "shared",
-        None,
-        None,
-        None,
-        None,
         true,
         None,
     );

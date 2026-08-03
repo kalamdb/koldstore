@@ -69,7 +69,7 @@
 
 **Files:**
 - Modify: `README.md`
-- Modify: `docs/architecture/mirror-capture-modes.md`
+- Modify: `docs/architecture/mirror-capture.md`
 - Modify: `docs/architecture/dml-table.md`
 - Modify: `docs/architecture/manage-table.md`
 - Modify: `docs/decisions/003-optional-async-mirror-capture.md`

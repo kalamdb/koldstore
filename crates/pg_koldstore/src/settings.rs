@@ -53,14 +53,14 @@ pub const MIN_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 1;
 /// Maximum flush-check interval (1 day).
 pub const MAX_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 24 * 3600;
 
-/// Latch poll interval for the async mirror apply loop (milliseconds).
-pub const ASYNC_APPLY_POLL_INTERVAL_MS_GUC: &str = "koldstore.async_apply_poll_interval_ms";
-/// Default apply latch poll cadence (100 ms).
-pub const DEFAULT_ASYNC_APPLY_POLL_INTERVAL_MS: i32 = 100;
-/// Minimum apply poll interval (avoids busy-spin).
-pub const MIN_ASYNC_APPLY_POLL_INTERVAL_MS: i32 = 50;
-/// Maximum apply poll interval (5 seconds).
-pub const MAX_ASYNC_APPLY_POLL_INTERVAL_MS: i32 = 5_000;
+/// Safety watchdog for commit-driven async mirror wakeups (milliseconds).
+pub const ASYNC_APPLY_WATCHDOG_INTERVAL_MS_GUC: &str = "koldstore.async_apply_watchdog_interval_ms";
+/// Default watchdog cadence (30 seconds).
+pub const DEFAULT_ASYNC_APPLY_WATCHDOG_INTERVAL_MS: i32 = 30_000;
+/// Minimum watchdog interval (1 second).
+pub const MIN_ASYNC_APPLY_WATCHDOG_INTERVAL_MS: i32 = 1_000;
+/// Maximum watchdog interval (5 minutes).
+pub const MAX_ASYNC_APPLY_WATCHDOG_INTERVAL_MS: i32 = 300_000;
 
 /// Per-tick row budget for bounded async apply (0 = unlimited within the tick).
 pub const ASYNC_APPLY_MAX_ROWS_PER_TICK_GUC: &str = "koldstore.async_apply_max_rows_per_tick";

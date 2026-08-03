@@ -1,10 +1,92 @@
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Barrier,
+};
+use std::thread;
+
 use koldstore_manifest::{
     relative_manifest_path, try_load_manifest_with_client, write_manifest_with_client, Manifest,
     ManifestSegment, MANIFEST_VERSION,
 };
 use koldstore_storage::{
-    content_checksum_sha256_hex, open_filesystem_client, publish_mutable_object, StorageClient,
+    content_checksum_sha256_hex, open_filesystem_client, publish_mutable_object, ObjectStoreClient,
+    PutOutcome, PutPrecondition, StorageClient, StorageClientError, StorageObject, StorageResult,
 };
+
+struct StaleRootOnceClient {
+    inner: ObjectStoreClient,
+    root_key: String,
+    stale_root: Vec<u8>,
+    served_stale_root: AtomicBool,
+}
+
+struct CoordinatedRootReader {
+    inner: ObjectStoreClient,
+    root_key: String,
+    start_read: Arc<Barrier>,
+    finish_publish: Arc<Barrier>,
+    gated: AtomicBool,
+}
+
+impl StorageClient for CoordinatedRootReader {
+    fn list(&self, prefix: &str) -> StorageResult<Vec<StorageObject>> {
+        self.inner.list(prefix)
+    }
+
+    fn put(&self, key: &str, bytes: &[u8], mode: PutPrecondition) -> StorageResult<PutOutcome> {
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn get(&self, key: &str) -> StorageResult<Vec<u8>> {
+        let bytes = self.inner.get(key)?;
+        if key == self.root_key && !self.gated.swap(true, Ordering::SeqCst) {
+            self.start_read.wait();
+            self.finish_publish.wait();
+        }
+        Ok(bytes)
+    }
+
+    fn head(&self, key: &str) -> StorageResult<StorageObject> {
+        self.inner.head(key)
+    }
+
+    fn delete(&self, key: &str) -> StorageResult<()> {
+        self.inner.delete(key)
+    }
+
+    fn copy_if_absent(&self, from: &str, to: &str) -> StorageResult<()> {
+        self.inner.copy_if_absent(from, to)
+    }
+}
+
+impl StorageClient for StaleRootOnceClient {
+    fn list(&self, prefix: &str) -> StorageResult<Vec<StorageObject>> {
+        self.inner.list(prefix)
+    }
+
+    fn put(&self, key: &str, bytes: &[u8], mode: PutPrecondition) -> StorageResult<PutOutcome> {
+        self.inner.put(key, bytes, mode)
+    }
+
+    fn get(&self, key: &str) -> StorageResult<Vec<u8>> {
+        if key == self.root_key && !self.served_stale_root.swap(true, Ordering::SeqCst) {
+            return Ok(self.stale_root.clone());
+        }
+        self.inner.get(key)
+    }
+
+    fn head(&self, key: &str) -> StorageResult<StorageObject> {
+        self.inner.head(key)
+    }
+
+    fn delete(&self, key: &str) -> StorageResult<()> {
+        self.inner.delete(key)
+    }
+
+    fn copy_if_absent(&self, from: &str, to: &str) -> StorageResult<()> {
+        self.inner.copy_if_absent(from, to)
+    }
+}
 
 fn one_segment_manifest() -> Manifest {
     let mut manifest = Manifest::new_shared("app", "items", 1);
@@ -58,10 +140,13 @@ fn sharded_write_and_load_round_trip() {
     for shard in root_value["shards"].as_array().unwrap() {
         let path = shard["path"].as_str().unwrap();
         let hash = shard["content_sha256"].as_str().unwrap();
-        assert!(
-            path.contains(hash),
-            "shard path is not content-addressed: {path}"
-        );
+        let file_name = path.rsplit('/').next().unwrap();
+        let token = file_name
+            .strip_prefix("manifest-shard-")
+            .and_then(|name| name.strip_suffix(".json"))
+            .expect("content-addressed shard filename");
+        assert_eq!(token.len(), 32, "shard filename token must be 128 bits");
+        assert_eq!(token, &hash[..32]);
         assert!(dir.path().join("app/items").join(path).is_file());
     }
 
@@ -74,6 +159,146 @@ fn sharded_write_and_load_round_trip() {
     assert_eq!(loaded.max_seq, 20);
     assert_eq!(loaded.segments[0].path, "001/segment-0001-aaaaaaaa.parquet");
     assert_eq!(loaded.segments[1].path, "002/segment-0101-bbbbbbbb.parquet");
+}
+
+#[test]
+fn republish_removes_unreferenced_shards_and_keeps_segments() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = open_filesystem_client(dir.path().to_str().unwrap()).unwrap();
+    let root_key = relative_manifest_path("app", "items");
+    let mut manifest = one_segment_manifest();
+
+    write_manifest_with_client(&client, &root_key, &manifest).unwrap();
+    let first_root: serde_json::Value =
+        serde_json::from_slice(&client.get(&root_key).unwrap()).unwrap();
+    let first_shard = format!(
+        "app/items/{}",
+        first_root["shards"][0]["path"].as_str().unwrap()
+    );
+
+    let legacy_shard = format!("app/items/001/manifest-shard-{}.json", "f".repeat(64));
+    client
+        .put(&legacy_shard, b"legacy", PutPrecondition::CreateIfAbsent)
+        .unwrap();
+    let segment_key = "app/items/001/segment-0001-aaaaaaaa.parquet";
+    client
+        .put(segment_key, b"parquet", PutPrecondition::CreateIfAbsent)
+        .unwrap();
+
+    manifest.append_segment(ManifestSegment::committed(
+        2,
+        "001/segment-0002-bbbbbbbb.parquet",
+        11..=20,
+        10,
+        100,
+        1,
+    ));
+    write_manifest_with_client(&client, &root_key, &manifest).unwrap();
+
+    let current_root: serde_json::Value =
+        serde_json::from_slice(&client.get(&root_key).unwrap()).unwrap();
+    let current_shard = format!(
+        "app/items/{}",
+        current_root["shards"][0]["path"].as_str().unwrap()
+    );
+    assert_ne!(first_shard, current_shard);
+    assert!(matches!(
+        client.get(&first_shard),
+        Err(StorageClientError::NotFound { .. })
+    ));
+    assert!(matches!(
+        client.get(&legacy_shard),
+        Err(StorageClientError::NotFound { .. })
+    ));
+    assert!(client.get(&current_shard).is_ok());
+    assert_eq!(client.get(segment_key).unwrap(), b"parquet");
+
+    let shard_keys = client
+        .list("app/items/001")
+        .unwrap()
+        .into_iter()
+        .map(|object| object.key)
+        .filter(|key| key.contains("/manifest-shard-") && key.ends_with(".json"))
+        .collect::<Vec<_>>();
+    assert_eq!(shard_keys, vec![current_shard]);
+}
+
+#[test]
+fn load_retries_when_cleanup_removes_a_shard_from_a_stale_root() {
+    let client = ObjectStoreClient::in_memory();
+    let root_key = relative_manifest_path("app", "items");
+    let mut manifest = one_segment_manifest();
+    write_manifest_with_client(&client, &root_key, &manifest).unwrap();
+    let stale_root = client.get(&root_key).unwrap();
+
+    manifest.append_segment(ManifestSegment::committed(
+        2,
+        "001/segment-0002-bbbbbbbb.parquet",
+        11..=20,
+        10,
+        100,
+        1,
+    ));
+    write_manifest_with_client(&client, &root_key, &manifest).unwrap();
+
+    let racing_client = StaleRootOnceClient {
+        inner: client,
+        root_key: root_key.clone(),
+        stale_root,
+        served_stale_root: AtomicBool::new(false),
+    };
+    let loaded = try_load_manifest_with_client(&racing_client, &root_key)
+        .unwrap()
+        .expect("current manifest should load after retry");
+    assert_eq!(loaded.segments.len(), 2);
+    assert_eq!(loaded.max_seq, 20);
+}
+
+#[test]
+fn five_concurrent_readers_survive_manifest_republish_and_shard_cleanup() {
+    let client = ObjectStoreClient::in_memory();
+    let root_key = relative_manifest_path("app", "items");
+    let mut next_manifest = one_segment_manifest();
+    write_manifest_with_client(&client, &root_key, &next_manifest).unwrap();
+
+    let reader_count = 5;
+    let start_read = Arc::new(Barrier::new(reader_count + 1));
+    let finish_publish = Arc::new(Barrier::new(reader_count + 1));
+    let readers = (0..reader_count)
+        .map(|_| {
+            let reader = CoordinatedRootReader {
+                inner: client.clone(),
+                root_key: root_key.clone(),
+                start_read: Arc::clone(&start_read),
+                finish_publish: Arc::clone(&finish_publish),
+                gated: AtomicBool::new(false),
+            };
+            let root_key = root_key.clone();
+            thread::spawn(move || {
+                try_load_manifest_with_client(&reader, &root_key)
+                    .unwrap()
+                    .expect("manifest should remain readable during republish")
+            })
+        })
+        .collect::<Vec<_>>();
+
+    start_read.wait();
+    next_manifest.append_segment(ManifestSegment::committed(
+        2,
+        "001/segment-0002-bbbbbbbb.parquet",
+        11..=20,
+        10,
+        100,
+        1,
+    ));
+    write_manifest_with_client(&client, &root_key, &next_manifest).unwrap();
+    finish_publish.wait();
+
+    for reader in readers {
+        let loaded = reader.join().expect("reader thread should not panic");
+        assert_eq!(loaded.segments.len(), 2);
+        assert_eq!(loaded.max_seq, 20);
+    }
 }
 
 #[test]

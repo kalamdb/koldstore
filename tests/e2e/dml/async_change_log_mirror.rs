@@ -6,6 +6,166 @@ use std::time::{Duration, Instant};
 const BACKGROUND_APPLY_DEADLINE: Duration = Duration::from_secs(5);
 
 #[tokio::test]
+async fn managed_commit_wakes_sleeping_worker_without_poll_delay() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "async_commit_wake").await?;
+        let table_name = format!("{}_events", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+        let noise = db.relation(&format!("{}_noise", db.schema));
+        let database: String = db
+            .client
+            .query_one("SELECT current_database()::text", &[])
+            .await?
+            .get(0);
+
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{database}\" SET koldstore.async_apply_watchdog_interval_ms = 5000; \
+                 SET koldstore.async_apply_watchdog_interval_ms = 5000"
+            ))
+            .await?;
+
+        let result = async {
+            db.client
+                .batch_execute(&format!(
+                    "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+                ))
+                .await?;
+            db.client
+                .execute(
+                    r#"
+                    SELECT koldstore.manage_table(
+                      table_name => $1::text::regclass,
+                      storage => $2,
+                      hot_row_limit => 1000,
+                      auto_flush => false
+                    )
+                    "#,
+                    &[&relation, &db.storage_name],
+                )
+                .await?;
+            common::wait_for_async_worker(&db.client).await?;
+
+            let watchdog_ms: i32 = db
+                .client
+                .query_one(
+                    "SELECT current_setting('koldstore.async_apply_watchdog_interval_ms')::int",
+                    &[],
+                )
+                .await?
+                .get(0);
+            anyhow::ensure!(
+                watchdog_ms >= 5000,
+                "test session must use a >=5s watchdog; got {watchdog_ms}"
+            );
+
+            // Let the worker enter its five-second safety wait. A commit signal
+            // must interrupt that wait; this assertion deliberately never calls
+            // wait_for_async_mirror(), which would apply WAL in the foreground.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let started = Instant::now();
+            db.client
+                .execute(
+                    &format!("INSERT INTO {relation} (id, body) VALUES (1, 'wake')"),
+                    &[],
+                )
+                .await?;
+            loop {
+                let mirrored: i64 = db
+                    .client
+                    .query_one(&format!("SELECT count(*) FROM {mirror} WHERE id = 1"), &[])
+                    .await?
+                    .get(0);
+                if mirrored == 1 {
+                    break;
+                }
+                anyhow::ensure!(
+                    started.elapsed() < Duration::from_secs(1),
+                    "managed commit did not wake the sleeping worker within one second"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            // PostgreSQL may report an asynchronous commit before WALWriter
+            // makes its commit record decodeable. The bounded empty-wake retry
+            // must bridge that short gap instead of waiting for the watchdog.
+            db.client
+                .batch_execute("SET synchronous_commit = off")
+                .await?;
+            let async_started = Instant::now();
+            db.client
+                .execute(
+                    &format!("INSERT INTO {relation} (id, body) VALUES (2, 'async wake')"),
+                    &[],
+                )
+                .await?;
+            db.client
+                .batch_execute("RESET synchronous_commit")
+                .await?;
+            loop {
+                let mirrored: i64 = db
+                    .client
+                    .query_one(&format!("SELECT count(*) FROM {mirror} WHERE id = 2"), &[])
+                    .await?
+                    .get(0);
+                if mirrored == 1 {
+                    break;
+                }
+                anyhow::ensure!(
+                    async_started.elapsed() < Duration::from_secs(1),
+                    "asynchronous managed commit fell through to the watchdog"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+
+            db.client
+                .batch_execute(&format!(
+                    "CREATE TABLE {noise} (id bigint PRIMARY KEY, body text NOT NULL)"
+                ))
+                .await?;
+            // Drain any WAL from setup, then give the worker time to re-enter its
+            // long latch wait so the noise window is not racing an in-flight tick.
+            let _ = common::wait_for_async_mirror(&db.client).await?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let before_noise = common::async_mirror_progress(&db.client).await?;
+            db.client
+                .execute(
+                    &format!(
+                        "INSERT INTO {noise} SELECT id, 'noise-' || id FROM generate_series(1, 100) id"
+                    ),
+                    &[],
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            let after_noise = common::async_mirror_progress(&db.client).await?;
+            assert_eq!(
+                after_noise.confirmed_flush_lsn,
+                before_noise.confirmed_flush_lsn,
+                "unmanaged WAL must not wake or advance the logical slot before the watchdog"
+            );
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{database}\" RESET koldstore.async_apply_watchdog_interval_ms; \
+                 RESET koldstore.async_apply_watchdog_interval_ms"
+            ))
+            .await?;
+        result?;
+        db.client
+            .query_one(
+                "SELECT koldstore.unmanage_table($1::text::regclass, true, true)",
+                &[&relation],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_change_log_mirror").await?;

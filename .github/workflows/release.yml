@@ -200,6 +200,8 @@ jobs:
           - { pg: 15, arch: arm64, distro: ubuntu22.04, runner: ubuntu-22.04-arm }
           - { pg: 16, arch: amd64, distro: ubuntu24.04, runner: ubuntu-24.04 }
           - { pg: 16, arch: arm64, distro: ubuntu24.04, runner: ubuntu-24.04-arm }
+          - { pg: 18, arch: amd64, distro: ubuntu24.04, runner: ubuntu-24.04 }
+          - { pg: 18, arch: arm64, distro: ubuntu24.04, runner: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
 

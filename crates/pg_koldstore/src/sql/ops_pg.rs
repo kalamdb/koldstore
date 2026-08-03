@@ -12,8 +12,8 @@ use koldstore_common::QualifiedTableName;
 /// merge scan via `koldstore.user_id`, not this operator view.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "describe_table", schema = "koldstore", security_definer)]
-pub fn describe_table_pg(table_name: pgrx::pg_sys::Oid) -> pgrx::JsonB {
-    describe_table_pg_impl(table_name)
+pub fn describe_table_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
+    describe_table_pg_impl(table_name.oid())
         .map(pgrx::JsonB)
         .unwrap_or_else(|error| pgrx::error!("describe table failed: {error}"))
 }

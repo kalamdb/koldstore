@@ -4,7 +4,7 @@ fn clean_schema_records_metadata_in_mirror_not_user_table() {
 
     assert_eq!(
         koldstore::hooks::executor::managed_dml_hook_names(),
-        ["INSERT", "UPDATE", "DELETE", "COPY"]
+        ["INSERT", "UPDATE", "DELETE", "MERGE", "COPY"]
     );
     assert_eq!(ColdMetadataColumn::Seq.name(), "seq");
     assert_eq!(ColdMetadataColumn::Deleted.name(), "deleted");

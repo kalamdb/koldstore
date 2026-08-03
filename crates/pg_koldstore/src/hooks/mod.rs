@@ -11,6 +11,7 @@ pub fn register_hooks() {
     #[cfg(feature = "pg")]
     {
         crate::merge_scan::pg::register_custom_scan_hooks();
+        executor::register_executor_end_hook();
         ddl::register_process_utility_hook();
     }
 }
@@ -20,6 +21,7 @@ pub fn register_hooks() {
 pub const fn registered_hook_names() -> &'static [&'static str] {
     &[
         "set_rel_pathlist",
+        "ExecutorEnd",
         "ProcessUtility",
         "XactCallback",
         "RelcacheCallback",

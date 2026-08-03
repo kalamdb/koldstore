@@ -81,7 +81,7 @@ fn populated_table_initialization_inserts_existing_primary_keys_without_touching
     assert!(plan
         .statement
         .sql
-        .contains("SELECT \"id\", SNOWFLAKE_ID(), 1"));
+        .contains("SELECT \"id\", public.snowflake_id(), 1"));
     assert!(!plan.statement.sql.contains("pg_current_wal_lsn()"));
     assert!(plan
         .statement
@@ -137,7 +137,7 @@ fn populated_table_initialization_does_not_overwrite_newer_dml_state() {
     assert!(plan
         .statement
         .sql
-        .contains("SELECT \"tenant_id\", \"id\", SNOWFLAKE_ID(), 1"));
+        .contains("SELECT \"tenant_id\", \"id\", public.snowflake_id(), 1"));
     assert!(plan
         .statement
         .sql
