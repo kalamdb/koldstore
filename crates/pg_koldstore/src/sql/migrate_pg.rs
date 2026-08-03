@@ -335,6 +335,7 @@ pub(crate) fn manage_table_pg_impl(
             upper_bound: None,
             skip_through: None,
             acknowledge_durable_checkpoint: true,
+            advance_slot_on_empty: true,
             target_prune_floor: Some((
                 table_oid,
                 crate::async_mirror::apply::PruneSeqFloor::new(wal_apply_floor),

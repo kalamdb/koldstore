@@ -16,8 +16,8 @@ use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use koldstore_worker::{
-    flush_check_due, DatabaseWorkerTask, EmptyWakeRetry, PendingDrainBudget, TickResult,
-    WakeCursor, WakeGeneration, MAX_IMMEDIATE_PENDING_TICKS,
+    flush_check_due, EmptyWakeRetry, PendingDrainBudget, TickResult, WakeCursor, WakeGeneration,
+    MAX_IMMEDIATE_PENDING_TICKS,
 };
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
@@ -92,8 +92,15 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                 // bursts would otherwise add routine noise. Scope the
                 // threshold only around decoding; worker warnings and errors
                 // remain visible after the guard restores the session value.
+                //
+                // Wake-driven empty peeks must not advance confirmed_flush:
+                // otherwise unrelated WAL (and empty-wake retries) move the
+                // slot before the watchdog. Watchdog/startup idle ticks still
+                // advance so retained non-publication WAL can be skipped.
+                let advance_slot_on_empty = startup_apply || watchdog_due || !wake_pending;
                 let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
-                let apply_result = worker_transaction_result(|| async_task.tick());
+                let apply_result =
+                    worker_transaction_result(|| async_task.tick_with(advance_slot_on_empty));
                 drop(decoding_log_guard);
                 match apply_result {
                     Ok(result @ TickResult::Continue) => {
@@ -112,7 +119,9 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                         apply_backoff_ms = 0;
                         apply_retry_at = None;
                         startup_apply = false;
-                        if wake_pending {
+                        if wake_pending && async_commit_wal_lag() {
+                            // Insert LSN is still ahead of flush: the wake's
+                            // commit may not be decodeable yet (sync_commit=off).
                             match empty_wake_retry.after_empty(worker_started.elapsed()) {
                                 Some(delay) => {
                                     empty_wake_retry_at = Some(Instant::now() + delay);
@@ -245,6 +254,14 @@ fn millis_until(deadline: Instant) -> u64 {
     )
     .unwrap_or(u64::MAX)
     .max(1)
+}
+
+/// Returns true when WAL has been inserted but not yet flushed far enough to
+/// decode — the `synchronous_commit=off` gap empty-wake retries must bridge.
+fn async_commit_wal_lag() -> bool {
+    let insert = unsafe { pgrx::pg_sys::GetXLogInsertRecPtr() };
+    let flush = unsafe { pgrx::pg_sys::GetFlushRecPtr(std::ptr::null_mut()) };
+    insert > flush
 }
 
 struct WakeRegistration {
