@@ -9,6 +9,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Creates the database async slot/publication before benchmark setup writes.
+///
+/// `#[pg_bench]` runs its setup function inside the same top-level transaction
+/// as the benchmark definition. Logical-slot provisioning must therefore happen
+/// before the setup creates temp tables, registers storage, or creates a table.
+pub(crate) fn preprovision_async_mirror() {
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    crate::async_mirror::provision::provision_infrastructure(database_oid)
+        .expect("pre-provision async slot/publication");
+}
+
 /// Returns a unique SQL identifier suffix for this bench run.
 pub(crate) fn unique_suffix(label: &str) -> String {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -47,6 +58,9 @@ pub(crate) fn ctx(key: &str) -> String {
 
 /// Registers filesystem storage under a unique temp directory and returns its name.
 pub(crate) fn register_temp_storage(label: &str) -> String {
+    // Storage registration is the first SPI write in most benchmark fixtures;
+    // ensure logical decoding infrastructure exists before it assigns an XID.
+    preprovision_async_mirror();
     let name = unique_suffix(label);
     let root: PathBuf = std::env::temp_dir().join(format!("koldstore-pg-bench-{name}"));
     if root.exists() {
@@ -79,7 +93,8 @@ pub(crate) fn manage_shared(relation: &str, storage: &str) {
           storage        => '{storage}',
           hot_row_limit  => 10000,
           min_flush_rows => 100000,
-          max_rows_per_file => 1000
+          max_rows_per_file => 1000,
+          migration_order_by => 'id'
         )
         "#
     );
@@ -95,7 +110,8 @@ pub(crate) fn manage_flushable(relation: &str, storage: &str) {
           storage        => '{storage}',
           hot_row_limit  => 100,
           min_flush_rows => 1,
-          max_rows_per_file => 1000
+          max_rows_per_file => 1000,
+          migration_order_by => 'id'
         )
         "#
     );
@@ -139,12 +155,35 @@ pub(crate) fn prepare_plain_messages(label: &str) -> String {
 
 /// Creates and manages a messages table; stashes `relation` (+ optional `storage`).
 pub(crate) fn prepare_managed_messages(label: &str, flushable: bool) -> String {
+    // This must precede reset_bench_ctx, which creates/truncates a temp table and
+    // would otherwise assign the transaction's XID before manage_table runs.
+    preprovision_async_mirror();
     reset_bench_ctx();
     let suffix = unique_suffix(label);
     let schema = format!("pgbench_{suffix}");
     let relation = format!("{schema}.messages");
     let storage = register_temp_storage(&suffix);
     create_messages_table(&schema, "messages");
+    if flushable {
+        manage_flushable(&relation, &storage);
+    } else {
+        manage_shared(&relation, &storage);
+    }
+    stash("relation", &relation);
+    stash("storage", &storage);
+    relation
+}
+
+/// Creates a seeded managed table so activation backfills the change mirror.
+pub(crate) fn prepare_seeded_managed_messages(label: &str, rows: i64, flushable: bool) -> String {
+    preprovision_async_mirror();
+    reset_bench_ctx();
+    let suffix = unique_suffix(label);
+    let schema = format!("pgbench_{suffix}");
+    let relation = format!("{schema}.messages");
+    let storage = register_temp_storage(&suffix);
+    create_messages_table(&schema, "messages");
+    seed_rows(&relation, rows);
     if flushable {
         manage_flushable(&relation, &storage);
     } else {

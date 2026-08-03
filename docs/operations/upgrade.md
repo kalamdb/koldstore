@@ -67,4 +67,4 @@ Prefer `ALTER DATABASE` / `ALTER SYSTEM` for background-worker GUCs (session
 
 Also alert on `koldstore.async_mirror_status()` (`healthy`, retained bytes,
 `updated_at` age). See [scheduling.md](scheduling.md) and
-[architecture/mirror-capture-async.md](../architecture/mirror-capture-async.md).
+[architecture/mirror-capture.md](../architecture/mirror-capture.md).

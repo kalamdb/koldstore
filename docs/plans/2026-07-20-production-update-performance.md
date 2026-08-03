@@ -70,7 +70,7 @@
 - Modify: `docs/sql-api.md`
 - Modify: `docs/operations/scheduling.md`
 - Modify: `docs/operations/upgrade.md`
-- Modify: `docs/architecture/mirror-capture-async.md`
+- Modify: `docs/architecture/mirror-capture.md`
 
 1. Refuse `--update-results` from a dirty tree so published output is reproducible.
 2. Label the existing UPDATE row with its exact single-sample deltas and distinguish foreground from sustainable throughput.
@@ -91,8 +91,7 @@
 ### Task 7: Synchronize architecture documentation
 
 **Files:**
-- Modify: `docs/architecture/mirror-capture-async.md`
-- Modify: `docs/architecture/mirror-capture-modes.md`
+- Modify: `docs/architecture/mirror-capture.md`
 - Modify: `docs/architecture/dml-table.md`
 - Modify: other architecture index/worker pages only where the audit finds stale behavior
 

@@ -5,7 +5,7 @@
 | Status | Phase-6 prune fence implemented; phase-5.5 pre-lock catch-up, row/WAL caps, and strict seq audit remain deferred |
 | Severity | Correctness — possible loss of a newer hot row under async capture |
 | Modes | Primary race affects `mirror_capture_mode = 'async'`; sequence-ordering prerequisite also requires a strict-mode audit |
-| Related | [flushing-table](../architecture/flushing-table.md), [mirror-capture-modes](../architecture/mirror-capture-modes.md), [ADR-003](../decisions/003-optional-async-mirror-capture.md), [implementation plan](../plans/2026-07-17-async-flush-prune-fence.md) |
+| Related | [flushing-table](../architecture/flushing-table.md), [mirror-capture](../architecture/mirror-capture.md), [ADR-003](../decisions/003-optional-async-mirror-capture.md), [implementation plan](../plans/2026-07-17-async-flush-prune-fence.md) |
 
 ---
 
@@ -1104,7 +1104,7 @@ counter update.
 
 - [ ] Update [flushing-table](../architecture/flushing-table.md) with phase-0,
   phase-5.5, and phase-6 fences plus the total-row cap
-- [ ] Update [mirror-capture-modes](../architecture/mirror-capture-modes.md) from one automatic fence to selection + prune fences
+- [ ] Update [mirror-capture](../architecture/mirror-capture.md) from one automatic fence to selection + prune fences
 - [ ] Update [ADR-003](../decisions/003-optional-async-mirror-capture.md) with exact checkpoint/acknowledgement rules
 - [ ] Document `max_rows_per_flush`, lock timeout, and transaction-lifetime requirements
 - [ ] Land all correctness, rollback, cap, contention, and performance tests above

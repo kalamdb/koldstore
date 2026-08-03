@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DOCKER_DIR="${ROOT_DIR}/docker"
 EXAMPLE_SQL="${DOCKER_DIR}/sql/example.sql"
+REGCLASS_SMOKE_SQL="${DOCKER_DIR}/sql/manage-table-regclass.sql"
 
 PG_MAJOR="${PG_MAJOR:-16}"
 PG_PORT="${PG_PORT:-5432}"
@@ -104,6 +105,11 @@ if [[ ! -f "${EXAMPLE_SQL}" ]]; then
   exit 1
 fi
 
+if [[ ! -f "${REGCLASS_SMOKE_SQL}" ]]; then
+  echo "error: missing ${REGCLASS_SMOKE_SQL}" >&2
+  exit 1
+fi
+
 # Fresh database so CREATE EXTENSION picks up the current SQL from the image.
 echo "==> resetting stack"
 compose down -v >/dev/null 2>&1 || true
@@ -118,6 +124,9 @@ echo "==> starting postgres + minio"
 
 echo "==> ensuring MinIO bucket exists"
 compose run --rm minio-init
+
+echo "==> running qualified regclass management smoke test"
+psql_cmd -f - < "${REGCLASS_SMOKE_SQL}"
 
 echo "==> running example.sql"
 psql_cmd -f - < "${EXAMPLE_SQL}"

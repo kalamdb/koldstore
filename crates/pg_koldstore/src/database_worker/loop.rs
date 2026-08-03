@@ -77,7 +77,15 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                 // One PostgreSQL transaction per apply tick: peek batches,
                 // mirror SPI writes, and applied_lsn commit together. Soft-fail
                 // logs and backs off instead of FATAL.
-                match worker_transaction_result(|| async_task.tick()) {
+                // PostgreSQL emits `LOG` for every logical-decoding context
+                // startup/consistent point. A polling applier would otherwise
+                // flood the server log even when operating normally. Scope the
+                // threshold only around decoding; worker warnings and errors
+                // remain visible after the guard restores the session value.
+                let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
+                let apply_result = worker_transaction_result(|| async_task.tick());
+                drop(decoding_log_guard);
+                match apply_result {
                     Ok(result @ TickResult::Continue) => {
                         apply_backoff_ms = 0;
                         idle_backoff_ms = 0;
@@ -167,6 +175,33 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
         }
         if BackgroundWorker::sighup_received() {
             unsafe { pgrx::pg_sys::ProcessConfigFile(pgrx::pg_sys::GucContext::PGC_SIGHUP) };
+        }
+    }
+}
+
+/// Temporarily hides PostgreSQL's routine logical-decoding `LOG` messages.
+struct DecodingLogGuard {
+    previous: std::os::raw::c_int,
+}
+
+impl DecodingLogGuard {
+    fn suppress_routine_log_messages() -> Self {
+        unsafe {
+            let previous = pgrx::pg_sys::log_min_messages;
+            // PostgreSQL ranks server-only `LOG` specially: WARNING and ERROR
+            // thresholds still emit it. FATAL is the first level that hides
+            // routine decoder LOG records. Caught failures are reported by the
+            // worker after this guard restores the original threshold.
+            pgrx::pg_sys::log_min_messages = pgrx::pg_sys::FATAL as std::os::raw::c_int;
+            Self { previous }
+        }
+    }
+}
+
+impl Drop for DecodingLogGuard {
+    fn drop(&mut self) {
+        unsafe {
+            pgrx::pg_sys::log_min_messages = self.previous;
         }
     }
 }

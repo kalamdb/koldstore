@@ -120,7 +120,7 @@ SELECT koldstore.disable_async_mirror();
 
 The cleanup function is idempotent and refuses to run while an active managed
 table depends on the infrastructure. A later `manage_table` recreates it
-automatically. See [Mirror capture](architecture/mirror-capture-modes.md)
+automatically. See [Mirror capture](architecture/mirror-capture.md)
 for consistency, WAL-retention, monitoring, and recovery details.
 
 The application table is still the table you created:

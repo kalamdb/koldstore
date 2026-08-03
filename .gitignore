@@ -14,6 +14,9 @@ pgdata*/
 coverage/
 criterion/
 benchmarks/results/
+!/benchmarks/results/
+!/benchmarks/results/pgrx/
+!/benchmarks/results/pgrx/**
 docs/benchmarks/.storage-results/
 tests/tmp/
 *.profraw

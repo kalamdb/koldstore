@@ -56,7 +56,7 @@ fn migration_sql_initializes_existing_rows_into_mirror_in_ordered_batches() {
         .statement
         .sql
         .contains("ON CONFLICT (\"id\") DO NOTHING"));
-    assert!(plan.statement.sql.contains("SNOWFLAKE_ID()"));
+    assert!(plan.statement.sql.contains("public.snowflake_id()"));
     assert_eq!(plan.statement.param_types, vec![SqlParamType::BigInt]);
 }
 

@@ -49,11 +49,11 @@ does not recurse into `KoldMergeScan`.
 `flush_table` first calls `async_mirror::apply::apply_bounded` (via
 `apply_available`) and retains the last applied source commit end-LSN (`L0`).
 If the current database has no async logical slot, this is a cheap no-op.
-Otherwise it applies all committed async source changes available before the
+Otherwise it applies all committed source changes available before the
 flush takes its table lock or resolves mirror statistics.
 
 This makes flush selection a strong consistency boundary: committed WAL changes
-are caught up before selection. See [mirror-capture-modes.md](mirror-capture-modes.md).
+are caught up before selection. See [mirror-capture.md](mirror-capture.md).
 The retained-WAL health threshold never rejects this drain path: once retention
 is high, continuing apply is the recovery action. Slot loss/invalidation and
 flush lock/time budgets remain separate fail-closed correctness boundaries.
@@ -339,7 +339,7 @@ SELECT count(removed_mirror), count(deleted_hot)
 - Mirror rows removed first; hot rows removed only for `op IN (1,2)` (insert/update)
 - Delete tombstones (`op = 3`) stay in cold after flush; mirror copy is removed
 
-`koldstore_flush` matters in async mode: pruning hot source rows is KoldStore
+`koldstore_flush` matters during mirror capture: pruning hot source rows is KoldStore
 maintenance, not application DML, and must not be decoded later into fresh
 tombstones. On PG16+ peek uses `origin=none` as defense in depth; on PG15
 (no that filter) apply skips ORIGIN-stamped prune transactions by name.

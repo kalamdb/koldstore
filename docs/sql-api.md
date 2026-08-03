@@ -273,7 +273,7 @@ automatically.
 
 Authoritative mirror `seq` values are allocated only by the serialized WAL
 applier and are the exclusive `changes_since` cursor (`seq > last_seq`). See
-[Mirror capture](architecture/mirror-capture-modes.md).
+[Mirror capture](architecture/mirror-capture.md).
 
 ### `koldstore.set_table_auto_flush`
 

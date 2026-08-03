@@ -4,11 +4,11 @@ This document describes what happens when application SQL mutates a managed heap
 table: `INSERT`, `UPDATE`, and `DELETE`. It covers mirror capture, row counter
 accounting, scope enforcement, and how DML state flows into flush and scan.
 
-**Capture:** committed-WAL logical decoding + database apply worker (plus a
-PK-mutation guard on the source table)
+**Application path:** native PostgreSQL heap DML + PK-mutation guard
+**Capture path:** committed-WAL logical decoding + database apply worker
 
-**Mirror contract:** `crates/koldstore-mirror/` (`shared` / `async` / `guard`)  
-**Async apply / workers:** `crates/pg_koldstore/src/async_mirror/`  
+**Mirror contract:** `crates/koldstore-mirror/`
+**Capture/apply:** `crates/pg_koldstore/src/async_mirror/`
 **Counter cache:** `crates/pg_koldstore/src/row_counter_cache.rs`
 
 ---
@@ -53,12 +53,13 @@ flowchart TD
   FLUSH --> PQ["Parquet + manifest"]
 ```
 
-DML does **not** read Parquet or object storage. The hot path stays heap-native.
-
-Foreground commit returns after the heap write. The mirror becomes current at
-the next fence (`wait_for_async_mirror` or an internal flush fence). See
-[mirror-capture-modes.md](mirror-capture-modes.md) and
-[mirror-capture-async.md](mirror-capture-async.md).
+DML is broader than capture: application statements synchronously mutate the
+hot PostgreSQL heap, the PK guard synchronously protects the mirror identity,
+and flush later performs its own internal cleanup DML. Only propagation from a
+committed heap change into the mirror is deferred. The foreground commit returns
+after the heap write; the mirror becomes current at the next fence
+(`wait_for_async_mirror` or an internal flush fence). See
+[mirror-capture.md](mirror-capture.md).
 
 Primary-key mutation is rejected by a separate
 `BEFORE UPDATE OF <pk...> FOR EACH ROW` guard so ordinary updates never pay for
@@ -92,8 +93,7 @@ That invariant is what lets UPDATE/DELETE modify the mirror directly.
 
 ## Phase 2 — Committed-WAL capture
 
-There is no statement-trigger capture path. Historical trigger capture is
-documented only in [mirror-capture-strict.md](mirror-capture-strict.md).
+There is no statement-trigger capture path.
 
 The source table publishes only its primary-key columns through pgoutput v1. A
 logical slot filters out aborted transactions; therefore rollback correctness
@@ -132,9 +132,9 @@ produce new mirror tombstones.
 When a configured row/time budget ends with WAL still pending, the database
 worker runs up to four more ticks immediately. The fifth pending result yields
 through the latch before a new burst, balancing catch-up latency with CPU and
-flush-scheduler fairness. Capture is not a transparent read-your-writes mode;
+flush-scheduler fairness. Capture does not provide transparent read-your-writes;
 strong reads still use the fence. Full operational semantics are in
-[mirror-capture-modes.md](mirror-capture-modes.md).
+[mirror-capture.md](mirror-capture.md).
 
 ### Encoding at mirror boundary
 
@@ -213,7 +213,7 @@ O(1) mirror pending count so an in-transaction async fence cannot miss rows.
 | DELETE | Physical row removed | `op = 3` tombstone | Depends on cold state* |
 
 \*If the PK existed in cold before delete, merge scan may still show the old
-cold live row until async capture has been fenced (when applicable) and the
+cold live row until mirror capture has been fenced and the
 tombstone is flushed to Parquet with `deleted = true`. See
 [scanning-table.md](scanning-table.md).
 
@@ -368,8 +368,9 @@ sequenceDiagram
 | DML effect planning (future) | `koldstore-merge/src/sql/dml.rs` |
 
 Related docs: [manage-table.md](manage-table.md),
-[mirror-capture-modes.md](mirror-capture-modes.md),
-[flushing-table.md](flushing-table.md), and
+[mirror-capture.md](mirror-capture.md),
+[flushing-table.md](flushing-table.md),
+[jobs-and-scheduler.md](jobs-and-scheduler.md), and
 [scanning-table.md](scanning-table.md). See
 [ADR-005](../decisions/005-async-apply-progress-and-health.md) for apply
 progress and retained-WAL health decisions.

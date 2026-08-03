@@ -6,8 +6,8 @@ implementation: user heap tables keep application columns only; KoldStore state
 lives in a change-log mirror (`koldstore.{table}__cl`), catalog tables, and
 (once flushed) cold Parquet segments.
 
-**SQL entrypoint:** `koldstore.manage_table(table_name regclass, storage text, …) → uuid`  
-**Orchestrator:** `crates/pg_koldstore/src/sql/migrate_pg.rs`  
+**SQL entrypoint:** `koldstore.manage_table(table_name regclass, storage text, …) → uuid`
+**Orchestrator:** `crates/pg_koldstore/src/sql/migrate_pg.rs`
 **Planning:** `crates/koldstore-migrate/`
 
 Prerequisite: register object storage first with `koldstore.register_storage`.
@@ -82,7 +82,7 @@ persistence.
 `wal_level=logical`. `CREATE EXTENSION` creates the empty
 `koldstore_async_mirror` publication; the first managed table creates or reuses
 the deterministic database slot. Setup and consistency semantics are documented
-in [mirror-capture-modes.md](mirror-capture-modes.md).
+in [mirror-capture.md](mirror-capture.md).
 
 ---
 
@@ -234,7 +234,7 @@ row is durable audit/progress; there is no separate worker claim loop in
 `pg_koldstore` yet.
 
 Publication membership is established before backfill so concurrent DML cannot
-escape capture. See [mirror-capture-modes.md](mirror-capture-modes.md).
+escape capture. See [mirror-capture.md](mirror-capture.md).
 
 ---
 ## Phase 5 — Manifest row counter initialization

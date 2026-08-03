@@ -1,4 +1,40 @@
 #[pg_test]
+fn manage_populated_table_is_independent_of_caller_search_path() {
+    let suffix = unique_suffix("manage_search_path");
+    let schema = format!("pgtest_{suffix}");
+    let table = format!("messages_{suffix}");
+    let relation = format!("{schema}.{table}");
+    let mirror = format!("koldstore.{table}__cl");
+    let storage = register_temp_storage(&suffix);
+    create_messages_table(&schema, &table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'alpha'), (2, 'beta')"
+    ))
+    .expect("seed populated table");
+    Spi::run("SET LOCAL search_path = pg_catalog").expect("restrict caller search path");
+
+    Spi::run(&format!(
+        r#"
+        SELECT koldstore.manage_table(
+          table_name => '{relation}',
+          storage => '{storage}',
+          hot_row_limit => 1000,
+          min_flush_rows => 1,
+          max_rows_per_file => 1000,
+          migration_order_by => 'id'
+        )
+        "#
+    ))
+    .expect("manage populated table with restricted search path");
+
+    assert_eq!(
+        spi_get_i64(&format!("SELECT count(*) FROM {mirror}")),
+        2,
+        "activation backfill should initialize every existing row"
+    );
+}
+
+#[pg_test]
 fn alter_table_manages_and_replaces_flush_policy() {
     // register_temp_storage pre-provisions the async slot. ALTER TABLE now also
     // calls prepare_capture before SPI, but #[pg_test] is one transaction so

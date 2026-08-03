@@ -140,7 +140,7 @@ Trade-offs:
 
 ## References
 
-- [Mirror capture modes](../architecture/mirror-capture-modes.md)
+- [Current mirror capture](../architecture/mirror-capture.md)
 - [DML workflow](../architecture/dml-table.md)
 - [10M-row benchmark](../benchmarks/README.md)
 - [Case: async flush prune race](../cases/async-flush-prune-race.md) (proposed

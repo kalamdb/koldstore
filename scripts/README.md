@@ -8,7 +8,7 @@ suites live in subfolders so the top level stays scannable.
 | Script | Purpose |
 |--------|---------|
 | `run-pg-e2e.sh` | Prepare pgrx cluster + run `tests/e2e` (WAL-only capture) |
-| `run-pgrx-bench.sh` | In-process `#[pg_bench]` timings inside a live backend (`cargo pgrx bench`) |
+| `run-pgrx-bench.sh` | One-command in-process `#[pg_bench]` suite with JSON, log, and HTML artifacts |
 | `run-examples.sh` | Real-world example scenarios |
 | `run-chat-penetration.sh` | Manual chat penetration soak (`tests/stress`, configurable minutes/packs) |
 | `run-storage-comparison.sh` | Heap vs managed storage comparison (`--all-sides` or `--side pg|async`) |
@@ -39,6 +39,27 @@ then run a focused E2E binary; SQLsmith and HammerDB skip when tools are missing
 | `run-upstream-pg-regress.sh` | External PG `installcheck` signal |
 | `run-readiness-report.sh` | JSON/Markdown readiness report |
 | `run-test-with-cron.sh` | Manual `pg_cron` flush smoke |
+
+### In-process benchmarks
+
+Run the complete suite and open the generated report:
+
+```bash
+scripts/run-pgrx-bench.sh 16
+open target/bench-results/run-*/report.html
+```
+
+Select a benchmark family or a single benchmark with the optional second
+argument, for example `scripts/run-pgrx-bench.sh 16 changes_since` or
+`scripts/run-pgrx-bench.sh 16 managed_hot_pk_lookup`. Use
+`--output-dir /path/to/results` when collecting artifacts in CI. Each normal
+run also updates the tracked archive at
+`benchmarks/results/pgrx/pg<version>/<UTC-date>T<hour>/`; rerunning within the
+same UTC hour replaces that bucket. Open
+`benchmarks/results/pgrx/index.html` to browse archived reports. The report
+includes the run environment, p50/p90/p99 sample percentiles, matched
+plain-PostgreSQL versus KoldStore comparisons, and the previous three run
+columns from the archived results.
 
 ## `scripts/sqlsmith/` / `scripts/differential/` / `scripts/hammerdb/`
 

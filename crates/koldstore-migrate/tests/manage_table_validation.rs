@@ -3,8 +3,8 @@ use koldstore_migrate::constraints::{
     MigrationValidationInput, UniqueConstraintShape,
 };
 use koldstore_migrate::manage_table::{
-    validate_manage_table, ManageTablePolicyInput, ManageTableValidationContext, ScopeColumnInput,
-    SegmentOrderColumnInput,
+    validate_manage_table, validate_manage_table_preflight, ManageTablePolicyInput,
+    ManageTableValidationContext, ScopeColumnInput, SegmentOrderColumnInput,
 };
 
 fn valid_context() -> ManageTableValidationContext<'static> {
@@ -179,6 +179,20 @@ fn max_rows_per_file_respects_the_runtime_floor() {
             minimum: 1_000
         })
     ));
+}
+
+#[test]
+fn preflight_rejects_file_row_limit_before_catalog_validation() {
+    let mut context = valid_context();
+    context.policy.max_rows_per_file = 500;
+
+    assert_eq!(
+        validate_manage_table_preflight(context.policy, context.compression).unwrap_err(),
+        MigrationConstraintError::MaxRowsPerFileBelowFloor {
+            value: 500,
+            minimum: 1_000,
+        }
+    );
 }
 
 #[test]

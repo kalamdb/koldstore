@@ -9,6 +9,7 @@
 //! - managed hot DML + scan (insert / count / PK / update / delete / ORDER BY LIMIT)
 //! - session + catalog (version, snowflake, GUC, describe_table, EXPLAIN)
 //! - lifecycle (`lifecycle_manage_table`, `lifecycle_unmanage_table`, `lifecycle_flush_table_force`)
+//! - change feed (`changes_since_hot_mirror`, cold first-page and cursor-page reads)
 //!
 //! Not covered here (use other suites): multi-client load (`benchmarks/`),
 //! storage/size/RSS (`tests/storage`), correctness (`tests/e2e`, `#[pg_test]`).
@@ -29,12 +30,13 @@ mod benches {
 
     use super::fixture::{
         create_messages_table, ctx, flush_table_rows, manage_shared, prepare_managed_messages,
-        prepare_plain_messages, register_temp_storage, seed_rows, spi_get_explain, spi_get_i64,
-        spi_get_text, unique_suffix,
+        prepare_plain_messages, prepare_seeded_managed_messages, register_temp_storage, seed_rows,
+        spi_get_explain, spi_get_i64, spi_get_text, stash, unique_suffix,
     };
 
     include!("plain_heap.inc.rs");
     include!("managed_hot.inc.rs");
     include!("catalog_session.inc.rs");
     include!("lifecycle.inc.rs");
+    include!("changes_since.inc.rs");
 }

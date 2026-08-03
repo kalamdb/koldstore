@@ -9,6 +9,38 @@ use koldstore_migrate::{introspection, DemigrateTableRequest, MigrateTableReques
 #[cfg(feature = "pg")]
 use uuid::Uuid;
 
+/// A SQL `regclass` argument decoded without opening or locking the relation.
+///
+/// `PgRelation` eagerly opens its relation during argument conversion. Table
+/// management must provision logical capture before opening the source table,
+/// so retaining only the resolved OID preserves that ordering.
+#[cfg(feature = "pg")]
+pub struct RegClassOid(pgrx::pg_sys::Oid);
+
+#[cfg(feature = "pg")]
+unsafe impl<'fcx> pgrx::callconv::ArgAbi<'fcx> for RegClassOid {
+    unsafe fn unbox_arg_unchecked(arg: pgrx::callconv::Arg<'_, 'fcx>) -> Self {
+        Self(unsafe { <pgrx::pg_sys::Oid as pgrx::callconv::ArgAbi>::unbox_arg_unchecked(arg) })
+    }
+}
+
+#[cfg(feature = "pg")]
+impl pgrx::FromDatum for RegClassOid {
+    unsafe fn from_polymorphic_datum(
+        datum: pgrx::pg_sys::Datum,
+        is_null: bool,
+        typoid: pgrx::pg_sys::Oid,
+    ) -> Option<Self> {
+        unsafe {
+            <pgrx::pg_sys::Oid as pgrx::FromDatum>::from_polymorphic_datum(datum, is_null, typoid)
+        }
+        .map(Self)
+    }
+}
+
+#[cfg(feature = "pg")]
+pgrx::impl_sql_translatable!(RegClassOid, arg_only = "regclass");
+
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
@@ -21,7 +53,7 @@ use uuid::Uuid;
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "manage_table", schema = "koldstore", security_definer)]
 pub fn manage_table_pg(
-    table_name: pgrx::PgRelation,
+    table_name: RegClassOid,
     storage: &str,
     hot_row_limit: Option<i64>,
     min_flush_rows: pgrx::default!(i64, 1000),
@@ -34,10 +66,8 @@ pub fn manage_table_pg(
     auto_flush: pgrx::default!(bool, true),
     segment_order_column: pgrx::default!(Option<&str>, "NULL"),
 ) -> pgrx::Uuid {
-    let table_oid = table_name.oid();
-    drop(table_name);
     manage_table_pg_impl(
-        table_oid,
+        table_name.0,
         table_type,
         storage,
         scope_column,
@@ -69,6 +99,20 @@ pub(crate) fn manage_table_pg_impl(
     segment_order_column: Option<&str>,
 ) -> pgrx::Uuid {
     crate::preload::require_shared_preload();
+    let min_max_rows_per_file = u64::try_from(crate::guc::min_max_rows_per_file())
+        .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
+    koldstore_migrate::manage_table::validate_manage_table_preflight(
+        koldstore_migrate::manage_table::ManageTablePolicyInput {
+            hot_row_limit,
+            min_flush_rows,
+            max_rows_per_file,
+            target_file_size_mb,
+            min_max_rows_per_file,
+            auto_flush,
+        },
+        compression,
+    )
+    .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     // Validate logical decoding before taking the transaction-scoped job lock.
     crate::async_mirror::lifecycle::prepare_capture()
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
