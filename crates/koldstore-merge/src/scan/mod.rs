@@ -6,6 +6,7 @@
 pub mod exec;
 pub mod path;
 pub mod plan;
+pub mod strategy;
 
 /// Hot heap rows use a sentinel sequence during winner resolution so any live
 /// hot row beats every cold candidate for the same primary key.
@@ -25,4 +26,7 @@ pub use plan::{
     retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed,
     ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, MirrorOverlayStrategy, SegmentHint,
     SegmentPrunePredicate, SegmentStatsHint,
+};
+pub use strategy::{
+    classify_path_strategy, KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
 };
