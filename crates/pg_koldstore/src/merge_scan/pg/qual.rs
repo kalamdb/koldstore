@@ -30,10 +30,11 @@ impl ScanProjection {
     }
 }
 
-/// Canonical equality predicates safe for primary-key source pruning.
+/// Canonical predicates eligible for primary-key source pruning.
 #[derive(Debug, Default)]
 pub(super) struct ResidualFilters {
     pub(super) hot_equality: Vec<super::hot::HotEqualityFilter>,
+    pub(super) hot_range: Vec<super::hot::HotRangeFilter>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -356,6 +357,9 @@ unsafe fn collect_residual_filters(
                     sql_literal,
                 });
             }
+            if let Some(range) = op_expr_range_filter(expr, catalog, params) {
+                filters.hot_range.push(range);
+            }
         }
         pg_sys::NodeTag::T_BoolExpr => {
             let bool_expr = expr.cast::<pg_sys::BoolExpr>();
@@ -384,18 +388,68 @@ unsafe fn op_expr_equality_filter(
     if args.len() != 2 {
         return None;
     }
-    let (column, literal) = equality_var_and_literal(args[0], args[1], catalog, params)?;
+    let (column, literal) = hot_var_and_literal(args[0], args[1], catalog, params)?;
     Some((column.name.clone(), literal))
 }
 
-unsafe fn equality_var_and_literal(
+unsafe fn op_expr_range_filter(
+    expr: *mut pg_sys::Expr,
+    catalog: QualCatalog<'_>,
+    params: pg_sys::ParamListInfo,
+) -> Option<super::hot::HotRangeFilter> {
+    let op_expr = expr.cast::<pg_sys::OpExpr>();
+    let operator = match cstr_to_str(pg_sys::get_opname((*op_expr).opno))? {
+        "<" => super::hot::HotRangeOperator::LessThan,
+        "<=" => super::hot::HotRangeOperator::LessThanOrEqual,
+        ">" => super::hot::HotRangeOperator::GreaterThan,
+        ">=" => super::hot::HotRangeOperator::GreaterThanOrEqual,
+        _ => return None,
+    };
+    if !operator_is_pg_catalog((*op_expr).opno) {
+        return None;
+    }
+    let args = list_node_pointers((*op_expr).args);
+    if args.len() != 2 {
+        return None;
+    }
+    if let Some((column, sql_literal)) = hot_var_and_literal(args[0], args[1], catalog, params) {
+        return Some(super::hot::HotRangeFilter {
+            column: column.name.clone(),
+            operator,
+            sql_literal,
+        });
+    }
+    let (column, sql_literal) = hot_var_and_literal(args[1], args[0], catalog, params)?;
+    Some(super::hot::HotRangeFilter {
+        column: column.name.clone(),
+        operator: reverse_range_operator(operator),
+        sql_literal,
+    })
+}
+
+const fn reverse_range_operator(
+    operator: super::hot::HotRangeOperator,
+) -> super::hot::HotRangeOperator {
+    match operator {
+        super::hot::HotRangeOperator::LessThan => super::hot::HotRangeOperator::GreaterThan,
+        super::hot::HotRangeOperator::LessThanOrEqual => {
+            super::hot::HotRangeOperator::GreaterThanOrEqual
+        }
+        super::hot::HotRangeOperator::GreaterThan => super::hot::HotRangeOperator::LessThan,
+        super::hot::HotRangeOperator::GreaterThanOrEqual => {
+            super::hot::HotRangeOperator::LessThanOrEqual
+        }
+    }
+}
+
+unsafe fn hot_var_and_literal(
     left: *mut std::ffi::c_void,
     right: *mut std::ffi::c_void,
     catalog: QualCatalog<'_>,
     params: pg_sys::ParamListInfo,
 ) -> Option<(&koldstore_migrate::order::CatalogColumn, String)> {
     if let Some(column) = var_column(left.cast::<pg_sys::Expr>(), catalog) {
-        if hot_equality_operand_types_compatible(
+        if hot_filter_operand_types_compatible(
             column,
             pg_sys::exprType(right.cast::<pg_sys::Node>()),
         ) {
@@ -405,7 +459,7 @@ unsafe fn equality_var_and_literal(
         }
     }
     if let Some(column) = var_column(right.cast::<pg_sys::Expr>(), catalog) {
-        if hot_equality_operand_types_compatible(
+        if hot_filter_operand_types_compatible(
             column,
             pg_sys::exprType(left.cast::<pg_sys::Node>()),
         ) {
@@ -418,13 +472,13 @@ unsafe fn equality_var_and_literal(
 }
 
 /// Returns true when a Const/Param OID can be reconstructed as a hot SPI
-/// equality against `column`.
+/// predicate against `column`.
 ///
 /// Exact matches are always allowed. Integer width promotions (`int2`/`int4`
 /// literal against a wider integer column) are allowed so untyped numeric
 /// literals behave like an explicit cast. Float and other cross-types stay
 /// rejected because Datum layouts are not interchangeable for SPI literals.
-fn hot_equality_operand_types_compatible(
+fn hot_filter_operand_types_compatible(
     column: &koldstore_migrate::order::CatalogColumn,
     literal_oid: pg_sys::Oid,
 ) -> bool {

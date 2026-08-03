@@ -63,7 +63,11 @@ Prefer `ALTER DATABASE` / `ALTER SYSTEM` for background-worker GUCs (session
 | `wal_level` | `logical` | Required for async mirror |
 | `koldstore.async_mirror_max_retained_bytes` | `1073741824` (default) | Retained-WAL health threshold; exceeding it alerts but never stops apply. Use PostgreSQL disk/slot safeguards independently; `0` disables this threshold. |
 | `koldstore.flush_check_interval_seconds` | `30` (default) or tuned | Built-in auto-flush cadence |
-| `koldstore.async_apply_poll_interval_ms` | `100` (default) or tuned | Apply latch poll |
+| `koldstore.async_apply_watchdog_interval_ms` | `30000` (default) | Safety recovery for missed commit wakeups |
+
+`koldstore.async_apply_poll_interval_ms` was removed. Managed commits wake the
+worker directly; keep only the watchdog GUC above and drop any leftover
+`async_apply_poll_interval_ms` lines from `postgresql.conf` / `ALTER DATABASE`.
 
 Also alert on `koldstore.async_mirror_status()` (`healthy`, retained bytes,
 `updated_at` age). See [scheduling.md](scheduling.md) and

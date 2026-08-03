@@ -40,8 +40,8 @@ static PENDING_SEGMENT_TTL_SECONDS: GucSetting<i32> =
 static FLUSH_CHECK_INTERVAL_SECONDS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS);
 #[cfg(feature = "pg")]
-static ASYNC_APPLY_POLL_INTERVAL_MS: GucSetting<i32> =
-    GucSetting::<i32>::new(settings::DEFAULT_ASYNC_APPLY_POLL_INTERVAL_MS);
+static ASYNC_APPLY_WATCHDOG_INTERVAL_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_ASYNC_APPLY_WATCHDOG_INTERVAL_MS);
 #[cfg(feature = "pg")]
 static ASYNC_APPLY_MAX_ROWS_PER_TICK: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_ASYNC_APPLY_MAX_ROWS_PER_TICK);
@@ -178,12 +178,12 @@ pub fn define_gucs() {
         flags,
     );
     GucRegistry::define_int_guc(
-        c"koldstore.async_apply_poll_interval_ms",
-        c"Async mirror latch poll interval in milliseconds.",
-        c"Database worker latch wait between apply wakes. Clamped to 50..=5000. Prefer ALTER DATABASE / ALTER SYSTEM + reload; session SET does not affect the bgworker. Workers pick up changes on SIGHUP.",
-        &ASYNC_APPLY_POLL_INTERVAL_MS,
-        settings::MIN_ASYNC_APPLY_POLL_INTERVAL_MS,
-        settings::MAX_ASYNC_APPLY_POLL_INTERVAL_MS,
+        c"koldstore.async_apply_watchdog_interval_ms",
+        c"Safety watchdog for commit-driven async mirror wakeups.",
+        c"Managed commits normally wake the database worker immediately. This timeout recovers missed notifications without periodic short-interval decoding. Clamped to 1000..=300000 milliseconds.",
+        &ASYNC_APPLY_WATCHDOG_INTERVAL_MS,
+        settings::MIN_ASYNC_APPLY_WATCHDOG_INTERVAL_MS,
+        settings::MAX_ASYNC_APPLY_WATCHDOG_INTERVAL_MS,
         GucContext::Userset,
         flags,
     );
@@ -324,9 +324,9 @@ pub const fn definitions() -> &'static [GucDefinition] {
             default_value: "30",
         },
         GucDefinition {
-            name: settings::ASYNC_APPLY_POLL_INTERVAL_MS_GUC,
+            name: settings::ASYNC_APPLY_WATCHDOG_INTERVAL_MS_GUC,
             internal: false,
-            default_value: "100",
+            default_value: "30000",
         },
         GucDefinition {
             name: settings::ASYNC_APPLY_MAX_ROWS_PER_TICK_GUC,
@@ -546,24 +546,24 @@ pub fn flush_check_interval_seconds() -> i64 {
     }
 }
 
-/// Latch poll interval for the async mirror apply loop, in milliseconds.
+/// Safety watchdog interval for commit-driven async mirror wakeups.
 #[must_use]
-pub fn async_apply_poll_interval_ms() -> u64 {
+pub fn async_apply_watchdog_interval_ms() -> u64 {
     #[cfg(feature = "pg")]
     {
-        let value = ASYNC_APPLY_POLL_INTERVAL_MS.get();
+        let value = ASYNC_APPLY_WATCHDOG_INTERVAL_MS.get();
         u64::try_from(value.clamp(
-            settings::MIN_ASYNC_APPLY_POLL_INTERVAL_MS,
-            settings::MAX_ASYNC_APPLY_POLL_INTERVAL_MS,
+            settings::MIN_ASYNC_APPLY_WATCHDOG_INTERVAL_MS,
+            settings::MAX_ASYNC_APPLY_WATCHDOG_INTERVAL_MS,
         ))
         .unwrap_or(u64::from(
-            settings::DEFAULT_ASYNC_APPLY_POLL_INTERVAL_MS as u32,
+            settings::DEFAULT_ASYNC_APPLY_WATCHDOG_INTERVAL_MS as u32,
         ))
     }
 
     #[cfg(not(feature = "pg"))]
     {
-        u64::try_from(settings::DEFAULT_ASYNC_APPLY_POLL_INTERVAL_MS).unwrap_or(100)
+        u64::try_from(settings::DEFAULT_ASYNC_APPLY_WATCHDOG_INTERVAL_MS).unwrap_or(30_000)
     }
 }
 

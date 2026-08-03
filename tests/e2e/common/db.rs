@@ -95,9 +95,11 @@ impl TestDb {
                 "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
                  ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
                  ALTER DATABASE \"{dbname}\" RESET koldstore.flush_check_interval_seconds; \
+                 ALTER DATABASE \"{dbname}\" RESET koldstore.async_apply_watchdog_interval_ms; \
                  RESET koldstore.failpoint; \
                  RESET koldstore.internal_async_mirror_worker; \
                  RESET koldstore.flush_check_interval_seconds; \
+                 RESET koldstore.async_apply_watchdog_interval_ms; \
                  UPDATE koldstore.schemas \
                    SET active = false \
                  WHERE active"

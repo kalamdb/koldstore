@@ -66,6 +66,32 @@ At plan time the cheapest native hot path becomes the custom scan's child. The
 custom scan is not parallel-safe, so it owns the final scan path whenever cold
 is possible. There is no DSM/parallel custom-scan implementation today.
 
+### JSON visual plan
+
+`EXPLAIN (ANALYZE, FORMAT JSON)` exposes KoldStore-owned work through the
+root `Custom Scan (KoldMergeScan)` node's standard `Plans` array, so plan
+visualizers can render the read pipeline:
+
+    KoldMergeScan
+    |- KoldStore Hot Scan
+    |  `- KoldStore PostgreSQL Hot Access
+    |- KoldStore Cold Storage Scan
+    |  |- KoldStore Segment Catalog Scan
+    |  `- KoldStore Parquet Scan (one per selected segment)
+    `- KoldStore Mirror Overlay
+
+Every added node has `"KoldStore Internal": true`; it is a diagnostic
+representation of work performed inside the custom executor, not a separate
+PostgreSQL executor node. The catalog node reports the manifest path but reads
+the local `koldstore.cold_segments` catalog rather than opening a manifest
+object. The PostgreSQL-hot-access node reports the planner access choice plus
+hot-source-only actual rows, loops, and time; it does not execute a second
+`EXPLAIN` query solely for presentation. A real native hot child remains a
+normal PostgreSQL child plan when it is the active execution path. If an
+instrumented PK probe misses and execution falls through to cold storage, the
+exhausted hot child is omitted so the graph shows the catalog, Parquet, overlay,
+and merge work that actually ran.
+
 ## Executor fast paths
 
 BeginCustomScan keeps two common paths out of the expensive merge setup:

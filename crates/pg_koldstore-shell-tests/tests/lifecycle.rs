@@ -43,11 +43,11 @@ fn guc_definitions_include_public_and_internal_settings() {
         .any(|guc| guc.name == "koldstore.flush_check_interval_seconds"
             && !guc.internal
             && guc.default_value == "30"));
-    assert!(gucs
-        .iter()
-        .any(|guc| guc.name == "koldstore.async_apply_poll_interval_ms"
+    assert!(gucs.iter().any(
+        |guc| guc.name == "koldstore.async_apply_watchdog_interval_ms"
             && !guc.internal
-            && guc.default_value == "100"));
+            && guc.default_value == "30000"
+    ));
     assert!(gucs
         .iter()
         .any(|guc| guc.name == "koldstore.async_apply_max_rows_per_tick"
@@ -113,6 +113,7 @@ fn application_roles_cannot_set_internal_gucs() {
 fn hook_shell_exposes_required_hook_names() {
     let hooks = hooks::registered_hook_names();
     assert!(hooks.contains(&"set_rel_pathlist"));
+    assert!(hooks.contains(&"ExecutorEnd"));
     assert!(hooks.contains(&"ProcessUtility"));
     assert!(hooks.contains(&"XactCallback"));
     assert!(hooks.contains(&"RelcacheCallback"));

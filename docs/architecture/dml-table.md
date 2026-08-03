@@ -99,9 +99,12 @@ The source table publishes only its primary-key columns through pgoutput v1. A
 logical slot filters out aborted transactions; therefore rollback correctness
 does not require speculative mirror writes or compensating deletes.
 
-The database worker normally peeks committed changes every 100 ms and applies
-them in bounded batches of 8,192. `koldstore.wait_for_async_mirror()` uses the
-same path when the caller needs an explicit consistency boundary:
+Managed commits wake the database worker through a coalescing shared generation
+and latch. The worker applies committed changes in bounded batches of 8,192; a
+low-frequency watchdog recovers missed notifications. Asynchronous commits that
+are not yet decodeable retry for at most one second (10–200 ms).
+`koldstore.wait_for_async_mirror()` uses the same path when the caller needs an
+explicit consistency boundary:
 
 | Source operation | Mirror apply |
 | --- | --- |

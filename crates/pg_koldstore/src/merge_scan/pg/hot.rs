@@ -27,6 +27,38 @@ pub(super) struct HotEqualityFilter {
     pub sql_literal: String,
 }
 
+/// Inequality predicates on immutable primary-key columns that may be pushed
+/// into the hot JSON merge reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct HotRangeFilter {
+    /// Column name on the hot relation.
+    pub(super) column: String,
+    /// PostgreSQL comparison operator reconstructed from the query qual.
+    pub(super) operator: HotRangeOperator,
+    /// SQL literal already typed for the column (for example `10`).
+    pub(super) sql_literal: String,
+}
+
+/// A comparison direction supported by the hot merge reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HotRangeOperator {
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+}
+
+impl HotRangeOperator {
+    const fn sql(self) -> &'static str {
+        match self {
+            Self::LessThan => "<",
+            Self::LessThanOrEqual => "<=",
+            Self::GreaterThan => ">",
+            Self::GreaterThanOrEqual => ">=",
+        }
+    }
+}
+
 /// Returns true when equality filters cover every primary-key column.
 pub(super) fn equality_covers_primary_key(
     filters: &[HotEqualityFilter],
@@ -80,6 +112,7 @@ impl HotMergeBatchReader {
         relation: &str,
         snapshot: &koldstore_catalog::ManagedTableSnapshot,
         equality_filters: &[HotEqualityFilter],
+        range_filters: &[HotRangeFilter],
         projected_columns: &[&koldstore_migrate::order::CatalogColumn],
         relation_owner: pg_sys::Oid,
     ) -> Result<Self, String> {
@@ -114,7 +147,7 @@ impl HotMergeBatchReader {
                 .iter()
                 .map(|column| column.name.as_str()),
         );
-        let where_clause = where_clause_sql(equality_filters);
+        let where_clause = where_clause_sql(equality_filters, range_filters);
         let ordered_sql = format!(
             r#"
 SELECT
@@ -204,7 +237,7 @@ pub(super) fn load_hot_rows_native(
     memory: &mut ScanMemory,
 ) -> Result<Vec<MaterializedRow>, String> {
     let table = QualifiedTableName::parse(relation).map_err(|error| error.to_string())?;
-    let where_clause = where_clause_sql(equality_filters);
+    let where_clause = where_clause_sql(equality_filters, &[]);
     if projected_columns.is_empty() {
         let sql = format!(
             "SELECT 1 FROM ONLY {table} AS hot {where_clause}",
@@ -225,11 +258,14 @@ pub(super) fn load_hot_rows_native(
     with_hook_disabled(|| unsafe { execute_hot_rows_native(&sql, scan_projection, memory) })
 }
 
-fn where_clause_sql(equality_filters: &[HotEqualityFilter]) -> String {
-    if equality_filters.is_empty() {
+fn where_clause_sql(
+    equality_filters: &[HotEqualityFilter],
+    range_filters: &[HotRangeFilter],
+) -> String {
+    if equality_filters.is_empty() && range_filters.is_empty() {
         return String::new();
     }
-    let predicates = equality_filters
+    let mut predicates = equality_filters
         .iter()
         .map(|filter| {
             format!(
@@ -238,9 +274,16 @@ fn where_clause_sql(equality_filters: &[HotEqualityFilter]) -> String {
                 literal = filter.sql_literal
             )
         })
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    format!("WHERE {predicates}")
+        .collect::<Vec<_>>();
+    predicates.extend(range_filters.iter().map(|filter| {
+        format!(
+            "hot.{column} {operator} {literal}",
+            column = quote_ident(&filter.column),
+            operator = filter.operator.sql(),
+            literal = filter.sql_literal
+        )
+    }));
+    format!("WHERE {}", predicates.join(" AND "))
 }
 
 unsafe fn execute_hot_rows_query(

@@ -80,7 +80,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
 | `koldstore.flush_check_interval_seconds` | int | `30` | How often the database worker evaluates `auto_flush` tables and runs at most one needed flush. Clamped to `1..=86400`. |
-| `koldstore.async_apply_poll_interval_ms` | int | `100` | Latch poll interval for the async mirror apply loop. Clamped to `50..=5000`. Prefer `ALTER DATABASE` / `ALTER SYSTEM` + reload for the bgworker (session `SET` does not affect it). |
+| `koldstore.async_apply_watchdog_interval_ms` | int | `30000` | Safety watchdog for missed commit wakeups. Managed commits normally set the database worker latch immediately. Clamped to `1000..=300000`. |
 | `koldstore.async_apply_max_rows_per_tick` | int | `0` | Max source row changes per apply tick (`0` = unlimited / drain available WAL). |
 | `koldstore.async_apply_max_ms_per_tick` | int | `0` | Max wall-clock ms per apply tick (`0` = unlimited). When exhausted, commit `applied_lsn` and continue next wake. |
 | `koldstore.flush_prelock_max_passes` | int | `3` | Max phase-5.5 pre-lock async apply passes during flush before failing closed. |

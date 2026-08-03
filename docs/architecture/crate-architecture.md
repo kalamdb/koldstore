@@ -138,7 +138,7 @@ a `koldstore-common` edge.
 | Manifest sync-state FSM (`koldstore.manifest.sync_state`) | `koldstore-catalog` |
 | Mirror SQL / DML statements / pgoutput decoder / PK update guard | `koldstore-mirror` |
 | Hot+cold merge logic | `koldstore-merge` |
-| Database worker ensure / task / poll policy / pending retry fairness / flush-check cadence | `koldstore-worker` |
+| Database worker ensure / task / commit-wake policy / pending retry fairness / flush-check cadence | `koldstore-worker` |
 | Flush workflow (selection, encode, segment write, catalog SQL plans, cleanup) | `koldstore-flush` |
 | Migration workflow | `koldstore-migrate` |
 | Shared privilege / LSN helpers | `koldstore-common` |

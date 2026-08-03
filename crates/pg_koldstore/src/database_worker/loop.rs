@@ -1,24 +1,23 @@
-//! Latch poll loop and signal handling for the shared database worker.
+//! Commit-wakeup latch loop and signal handling for the shared database worker.
 //!
-//! Each wake: apply async mirror when WAL advanced past the slot's
-//! `confirmed_flush` (if a slot exists), then on
+//! Managed commits advance a shared generation and set this worker's latch.
+//! Each wake drains all generations observed before the apply pass, then on
 //! `koldstore.flush_check_interval_seconds` evaluate auto-flush tables.
 //!
-//! Apply wakes use `koldstore.async_apply_poll_interval_ms` (default 100), with
-//! exponential idle backoff after empty peeks (capped at 5s). The auto-flush
-//! catalog probe is not run on every latch wake — only when a flush check is
-//! due (or when deciding whether a slot-less worker should exit).
+//! A timeout remains as a correctness watchdog for missed notifications. The
+//! auto-flush catalog probe is not run on every latch wake — only when a flush
+//! check is due (or when deciding whether a slot-less worker should exit).
 //!
 //! Apply failures soft-fail with exponential backoff instead of FATAL so a
 //! transient SPI error does not permanently stop catch-up.
 
 use std::ffi::CString;
 use std::panic::AssertUnwindSafe;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use koldstore_worker::{
-    flush_check_due, next_idle_backoff_ms, DatabaseWorkerTask, PendingPollBudget, TickResult,
-    MAX_IMMEDIATE_PENDING_TICKS,
+    flush_check_due, DatabaseWorkerTask, EmptyWakeRetry, PendingDrainBudget, TickResult,
+    WakeCursor, WakeGeneration, MAX_IMMEDIATE_PENDING_TICKS,
 };
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
@@ -30,6 +29,9 @@ use super::flush_task::{database_has_auto_flush_tables, run_flush_scheduler_tick
 
 const SOFT_FAIL_BACKOFF_MIN_MS: u64 = 100;
 const SOFT_FAIL_BACKOFF_MAX_MS: u64 = 30_000;
+const EMPTY_WAKE_RETRY_MIN_MS: u64 = 10;
+const EMPTY_WAKE_RETRY_MAX_MS: u64 = 200;
+const EMPTY_WAKE_RETRY_WINDOW_MS: u64 = 1_000;
 
 /// Runs the persistent database worker until neither async nor auto-flush work remains.
 pub(crate) fn run_async_mirror_applier(database_oid: u32) {
@@ -42,44 +44,52 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     let async_task = AsyncMirrorTask::new(database_oid);
     let slot = crate::async_mirror::lifecycle::slot_name(database_oid);
     let slot_c = CString::new(slot.as_str()).expect("deterministic slot name contains no NUL");
+    let registered_generation =
+        super::wake::register_worker(database_oid).unwrap_or_else(|| WakeGeneration::new(0));
+    let _wake_registration = WakeRegistration { database_oid };
+    let mut wake_cursor = WakeCursor::new(registered_generation);
 
-    let mut last_checked_wal = None;
     let mut last_flush_check_secs: Option<i64> = None;
     // Cached so the latch path does not open an SPI transaction every wake.
     let mut auto_flush_cached = true;
     let mut apply_backoff_ms = 0_u64;
-    let mut idle_backoff_ms = 0_u64;
-    let mut pending_poll_budget = PendingPollBudget::new(MAX_IMMEDIATE_PENDING_TICKS);
+    let mut apply_retry_at = None::<Instant>;
+    let mut startup_apply = true;
+    let mut last_watchdog = Instant::now();
+    let mut pending_drain_budget = PendingDrainBudget::new(MAX_IMMEDIATE_PENDING_TICKS);
+    let worker_started = Instant::now();
+    let mut empty_wake_retry = EmptyWakeRetry::new(
+        Duration::from_millis(EMPTY_WAKE_RETRY_MIN_MS),
+        Duration::from_millis(EMPTY_WAKE_RETRY_MAX_MS),
+        Duration::from_millis(EMPTY_WAKE_RETRY_WINDOW_MS),
+    );
+    let mut empty_wake_retry_at = None::<Instant>;
 
     loop {
         let mut should_wait = true;
-        let poll_ms = crate::guc::async_apply_poll_interval_ms()
-            .max(apply_backoff_ms)
-            .max(idle_backoff_ms);
-        let poll = Duration::from_millis(poll_ms);
+        let watchdog = Duration::from_millis(crate::guc::async_apply_watchdog_interval_ms());
         let slot_exists = crate::async_mirror::lifecycle::native_slot_exists_cstr(&slot_c);
         let now_secs = unix_now_secs();
         let interval = crate::guc::flush_check_interval_seconds();
         let flush_due = flush_check_due(last_flush_check_secs, now_secs, interval);
 
         if slot_exists {
-            let current_wal = current_wal_position();
-            let confirmed =
-                crate::async_mirror::lifecycle::native_slot_confirmed_flush_cstr(&slot_c);
-            // O(1) idle skip: nothing to decode when insert LSN has not moved
-            // past the slot's confirmed_flush (shared-memory read, no SPI).
-            let wal_ahead_of_slot = confirmed
-                .map(|confirmed_lsn| current_wal > confirmed_lsn)
-                .unwrap_or(true);
-            let needs_apply = apply_backoff_ms > 0
-                || (wal_ahead_of_slot && last_checked_wal != Some(current_wal));
+            let generation = super::wake::generation(database_oid);
+            let now = Instant::now();
+            let watchdog_due = last_watchdog.elapsed() >= watchdog;
+            let wake_pending = wake_cursor.is_pending(generation);
+            let wake_retry_due = empty_wake_retry_at.is_none_or(|deadline| now >= deadline);
+            let error_retry_due = apply_retry_at.is_some_and(|deadline| now >= deadline);
+            let needs_apply = startup_apply
+                || error_retry_due
+                || (apply_retry_at.is_none() && (watchdog_due || (wake_pending && wake_retry_due)));
             if needs_apply {
                 // One PostgreSQL transaction per apply tick: peek batches,
                 // mirror SPI writes, and applied_lsn commit together. Soft-fail
                 // logs and backs off instead of FATAL.
                 // PostgreSQL emits `LOG` for every logical-decoding context
-                // startup/consistent point. A polling applier would otherwise
-                // flood the server log even when operating normally. Scope the
+                // startup/consistent point. Reconnects, watchdogs, and commit
+                // bursts would otherwise add routine noise. Scope the
                 // threshold only around decoding; worker warnings and errors
                 // remain visible after the guard restores the session value.
                 let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
@@ -88,32 +98,57 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                 match apply_result {
                     Ok(result @ TickResult::Continue) => {
                         apply_backoff_ms = 0;
-                        idle_backoff_ms = 0;
-                        last_checked_wal = Some(current_wal_position());
-                        should_wait = pending_poll_budget.should_wait(result);
+                        apply_retry_at = None;
+                        startup_apply = false;
+                        wake_cursor.observe(generation);
+                        empty_wake_retry.reset();
+                        empty_wake_retry_at = None;
+                        last_watchdog = Instant::now();
+                        should_wait = pending_drain_budget.should_wait(result);
                     }
                     Ok(result @ TickResult::ContinueIdle) => {
                         apply_backoff_ms = 0;
-                        idle_backoff_ms = next_idle_backoff_ms(
-                            idle_backoff_ms,
-                            crate::guc::async_apply_poll_interval_ms(),
-                        );
-                        last_checked_wal = Some(current_wal_position());
-                        should_wait = pending_poll_budget.should_wait(result);
+                        apply_retry_at = None;
+                        startup_apply = false;
+                        if wake_pending {
+                            match empty_wake_retry.after_empty(worker_started.elapsed()) {
+                                Some(delay) => {
+                                    empty_wake_retry_at = Some(Instant::now() + delay);
+                                }
+                                None => {
+                                    wake_cursor.observe(generation);
+                                    empty_wake_retry.reset();
+                                    empty_wake_retry_at = None;
+                                }
+                            }
+                        } else {
+                            wake_cursor.observe(generation);
+                            empty_wake_retry.reset();
+                            empty_wake_retry_at = None;
+                        }
+                        last_watchdog = Instant::now();
+                        should_wait = pending_drain_budget.should_wait(result);
                     }
                     Ok(result @ TickResult::ContinuePending) => {
                         apply_backoff_ms = 0;
-                        idle_backoff_ms = 0;
-                        last_checked_wal = None;
-                        should_wait = pending_poll_budget.should_wait(result);
+                        apply_retry_at = None;
+                        startup_apply = false;
+                        empty_wake_retry.reset();
+                        empty_wake_retry_at = None;
+                        should_wait = pending_drain_budget.should_wait(result);
                     }
                     Ok(result @ TickResult::Stop) => {
                         apply_backoff_ms = 0;
-                        idle_backoff_ms = 0;
-                        should_wait = pending_poll_budget.should_wait(result);
+                        apply_retry_at = None;
+                        startup_apply = false;
+                        wake_cursor.observe(generation);
+                        empty_wake_retry.reset();
+                        empty_wake_retry_at = None;
+                        last_watchdog = Instant::now();
+                        should_wait = pending_drain_budget.should_wait(result);
                     }
                     Err(error) => {
-                        pending_poll_budget.reset();
+                        pending_drain_budget.reset();
                         crate::observability::record_async_apply_error();
                         pgrx::log!(
                             "koldstore async mirror apply soft-failed (will retry): {error}"
@@ -125,14 +160,18 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                                 .saturating_mul(2)
                                 .clamp(SOFT_FAIL_BACKOFF_MIN_MS, SOFT_FAIL_BACKOFF_MAX_MS)
                         };
-                        idle_backoff_ms = 0;
-                        last_checked_wal = None;
+                        apply_retry_at =
+                            Some(Instant::now() + Duration::from_millis(apply_backoff_ms));
                     }
                 }
             }
         } else {
-            pending_poll_budget.reset();
-            idle_backoff_ms = 0;
+            pending_drain_budget.reset();
+            startup_apply = true;
+            apply_backoff_ms = 0;
+            apply_retry_at = None;
+            empty_wake_retry.reset();
+            empty_wake_retry_at = None;
         }
 
         if flush_due {
@@ -170,12 +209,49 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
         if !slot_exists && !auto_flush_cached {
             break;
         }
-        if should_wait && !BackgroundWorker::wait_latch(Some(poll)) {
+        let watchdog_wait_ms =
+            u64::try_from(watchdog.saturating_sub(last_watchdog.elapsed()).as_millis())
+                .unwrap_or(u64::MAX)
+                .max(1);
+        let flush_wait_ms = millis_until_flush_check(
+            last_flush_check_secs,
+            unix_now_secs(),
+            crate::guc::flush_check_interval_seconds(),
+        );
+        let mut wait_ms = watchdog_wait_ms.min(flush_wait_ms);
+        if let Some(deadline) = apply_retry_at {
+            wait_ms = wait_ms.min(millis_until(deadline));
+        }
+        if let Some(deadline) = empty_wake_retry_at {
+            wait_ms = wait_ms.min(millis_until(deadline));
+        }
+        let wait = Duration::from_millis(wait_ms);
+        if should_wait && !BackgroundWorker::wait_latch(Some(wait)) {
             break;
         }
         if BackgroundWorker::sighup_received() {
             unsafe { pgrx::pg_sys::ProcessConfigFile(pgrx::pg_sys::GucContext::PGC_SIGHUP) };
         }
+    }
+}
+
+fn millis_until(deadline: Instant) -> u64 {
+    u64::try_from(
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+    .max(1)
+}
+
+struct WakeRegistration {
+    database_oid: u32,
+}
+
+impl Drop for WakeRegistration {
+    fn drop(&mut self) {
+        super::wake::unregister_worker(self.database_oid);
     }
 }
 
@@ -298,13 +374,28 @@ fn format_caught_error(context: &str, error: CaughtError) -> String {
     }
 }
 
-fn current_wal_position() -> u64 {
-    unsafe { pgrx::pg_sys::GetXLogInsertRecPtr() }
-}
-
 fn unix_now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
+}
+
+fn millis_until_flush_check(
+    last_check_secs: Option<i64>,
+    now_secs: i64,
+    interval_secs: i64,
+) -> u64 {
+    let interval_secs = interval_secs.max(1);
+    let Some(last_check_secs) = last_check_secs else {
+        return 1;
+    };
+    let elapsed_secs = now_secs.saturating_sub(last_check_secs);
+    if elapsed_secs >= interval_secs {
+        return 1;
+    }
+    u64::try_from(interval_secs.saturating_sub(elapsed_secs))
+        .unwrap_or(1)
+        .saturating_mul(1_000)
+        .max(1)
 }

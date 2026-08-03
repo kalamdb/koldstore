@@ -238,9 +238,9 @@ pub(crate) fn activate_table(
         reconcile_publication_columns(source, primary_key, order_column)?;
     }
 
-    // No per-DML kick: the WAL applier is started here, auto-restarted by
-    // postmaster on crash, and re-ensured after postmaster restart by the
-    // shared_preload launcher / first backend transaction.
+    // Ensure the WAL applier once here. Managed commits wake it through the
+    // shared generation/latch path; postmaster and the shared_preload launcher
+    // re-ensure it after crashes or restart.
     crate::database_worker::require_async_mirror_worker()?;
     Ok(())
 }

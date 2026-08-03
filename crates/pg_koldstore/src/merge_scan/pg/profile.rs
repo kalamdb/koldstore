@@ -5,7 +5,9 @@
 //! YAML / XML stay consistent with native plan nodes. TEXT section headers
 //! mirror JIT (`Label:\n` + indent) because `ExplainOpenGroup` is a no-op for
 //! TEXT. Graph clients that parse structured formats get nested Scan Sources,
-//! Merge, Timing, and Parquet Segments groups.
+//! Merge, Timing, and Parquet Segments groups. JSON additionally exposes a
+//! clearly marked diagnostic `Plans` subtree when the executor owns the
+//! hot/cold pipeline, so plan visualizers can render its read stages.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -375,6 +377,217 @@ pub(super) fn explain_scan_profile(
 
     explain_merge(es, emit_path, execution);
     explain_timing_group(es, show_timing, profile, execution);
+}
+
+/// Renders KoldStore-owned read stages as plan-shaped JSON objects.
+///
+/// PostgreSQL renders only executor plan nodes beneath `Plans`. On merge paths,
+/// the cold reader, catalog lookup, and mirror overlay execute inside one
+/// `KoldMergeScan`, so they otherwise have no visual representation. These
+/// nodes are explicitly marked as internal diagnostics and are only emitted
+/// when there is no native child plan for PostgreSQL to render itself.
+pub(super) fn explain_visual_pipeline(
+    es: *mut pg_sys::ExplainState,
+    profile: &ColdReadProfile,
+    hot_plan_label: &str,
+    emit_path: EmitPath,
+    execution: Option<&ScanExecutionProfile>,
+) {
+    if !explain_is_json(es) {
+        return;
+    }
+
+    let analyze = explain_is_analyze(es);
+    let show_timing = explain_wants_timing(es);
+    explain_open_group(es, "Plans", Some("Plans"), false);
+
+    explain_visual_node_open(es, "KoldStore Hot Scan", "Hot Source");
+    if !hot_plan_label.is_empty() {
+        explain_text(es, "Planned Access", hot_plan_label);
+    }
+    match execution {
+        Some(execution) => {
+            explain_text(es, "Access Method", hot_access_method(emit_path));
+            explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
+            if show_timing {
+                if let Some(ms) = execution.hot_scan_ms {
+                    explain_float(es, "Read Time", "ms", ms, 3);
+                }
+            }
+        }
+        None => explain_text(es, "Status", "planned"),
+    }
+    explain_open_group(es, "Plans", Some("Plans"), false);
+    explain_visual_postgres_hot_access(es, hot_plan_label, emit_path, execution, show_timing);
+    explain_close_group(es, "Plans", Some("Plans"), false);
+    explain_visual_node_close(es, "KoldStore Hot Scan");
+
+    explain_visual_node_open(es, "KoldStore Cold Storage Scan", "Cold Source");
+    let cold_accessed = profile.manifest_read_ms.is_some();
+    explain_text(
+        es,
+        "Status",
+        if analyze {
+            if cold_accessed {
+                "executed"
+            } else {
+                "not executed"
+            }
+        } else {
+            "planned"
+        },
+    );
+    if let Some(execution) = execution {
+        explain_integer(es, "Rows Scanned", None, execution.cold_rows as i64);
+    }
+    explain_integer(
+        es,
+        "Candidate Segments",
+        None,
+        profile.segments_considered as i64,
+    );
+    explain_integer(
+        es,
+        "Parquet Segments Opened",
+        None,
+        profile.segments_opened as i64,
+    );
+    explain_open_group(es, "Plans", Some("Plans"), false);
+    explain_visual_catalog_node(es, profile, analyze, show_timing);
+    for segment in &profile.segments {
+        explain_visual_node_open(es, "KoldStore Parquet Scan", "Cold Source");
+        explain_segment(es, segment, show_timing, analyze);
+        explain_visual_node_close(es, "KoldStore Parquet Scan");
+    }
+    explain_close_group(es, "Plans", Some("Plans"), false);
+    explain_visual_node_close(es, "KoldStore Cold Storage Scan");
+
+    explain_visual_node_open(es, "KoldStore Mirror Overlay", "Overlay");
+    match execution {
+        Some(execution) => {
+            explain_text(
+                es,
+                "Status",
+                if execution.cold_rows > 0 {
+                    "executed"
+                } else {
+                    "not executed"
+                },
+            );
+            explain_integer(es, "Rows Scanned", None, execution.mirror_rows as i64);
+            explain_integer(
+                es,
+                "Rows Removed by Overlay",
+                None,
+                execution.overlay_rows_removed as i64,
+            );
+            if show_timing {
+                if let Some(ms) = execution.mirror_scan_ms {
+                    explain_float(es, "Read Time", "ms", ms, 3);
+                }
+            }
+        }
+        None => explain_text(es, "Status", "planned"),
+    }
+    explain_visual_node_close(es, "KoldStore Mirror Overlay");
+
+    explain_close_group(es, "Plans", Some("Plans"), false);
+}
+
+fn explain_visual_catalog_node(
+    es: *mut pg_sys::ExplainState,
+    profile: &ColdReadProfile,
+    analyze: bool,
+    show_timing: bool,
+) {
+    explain_visual_node_open(es, "KoldStore Segment Catalog Scan", "Catalog Lookup");
+    explain_text(
+        es,
+        "Status",
+        if analyze {
+            if profile.manifest_read_ms.is_some() {
+                "executed"
+            } else {
+                "not executed"
+            }
+        } else {
+            "planned"
+        },
+    );
+    explain_text(es, "Catalog Source", "postgres (koldstore.cold_segments)");
+    if profile.manifest_path != "(none)" {
+        explain_text(es, "Manifest Path", &profile.manifest_path);
+    }
+    explain_integer(
+        es,
+        "Segments Pruned by Catalog Index",
+        None,
+        profile.segments_pruned_catalog_index as i64,
+    );
+    if let Some(candidates) = profile.segment_index_candidate_segments {
+        explain_integer(
+            es,
+            "Segments Returned by Segment Index",
+            None,
+            candidates as i64,
+        );
+    }
+    if show_timing {
+        if let Some(ms) = profile.manifest_read_ms {
+            explain_float(es, "Read Time", "ms", ms, 3);
+        }
+        if let Some(ms) = profile.segment_index_lookup_ms {
+            explain_float(es, "Segment Index Lookup Time", "ms", ms, 3);
+        }
+    }
+    explain_visual_node_close(es, "KoldStore Segment Catalog Scan");
+}
+
+fn explain_visual_postgres_hot_access(
+    es: *mut pg_sys::ExplainState,
+    hot_plan_label: &str,
+    emit_path: EmitPath,
+    execution: Option<&ScanExecutionProfile>,
+    show_timing: bool,
+) {
+    explain_visual_node_open(
+        es,
+        "KoldStore PostgreSQL Hot Access",
+        "PostgreSQL Hot Access",
+    );
+    explain_text(es, "KoldStore Role", "PostgreSQL Hot Access");
+    explain_text(es, "Execution Mode", hot_access_method(emit_path));
+    if !hot_plan_label.is_empty() {
+        explain_text(es, "Planned Access", hot_plan_label);
+    }
+    match execution {
+        Some(execution) => {
+            explain_integer(es, "Actual Rows", None, execution.hot_rows as i64);
+            explain_integer(es, "Actual Loops", None, 1);
+            if show_timing {
+                if let Some(ms) = execution.hot_scan_ms {
+                    explain_float(es, "Actual Total Time", "ms", ms, 3);
+                }
+            }
+        }
+        None => explain_text(es, "Status", "planned"),
+    }
+    explain_visual_node_close(es, "KoldStore PostgreSQL Hot Access");
+}
+
+fn explain_visual_node_open(
+    es: *mut pg_sys::ExplainState,
+    node_type: &str,
+    parent_relationship: &str,
+) {
+    explain_open_group(es, node_type, None, true);
+    explain_text(es, "Node Type", node_type);
+    explain_text(es, "Parent Relationship", parent_relationship);
+    explain_bool(es, "KoldStore Internal", true);
+}
+
+fn explain_visual_node_close(es: *mut pg_sys::ExplainState, node_type: &str) {
+    explain_close_group(es, node_type, None, true);
 }
 
 fn explain_hot_scan(
@@ -833,6 +1046,13 @@ fn explain_is_analyze(es: *mut pg_sys::ExplainState) -> bool {
         return false;
     }
     unsafe { (*es).analyze }
+}
+
+fn explain_is_json(es: *mut pg_sys::ExplainState) -> bool {
+    if es.is_null() {
+        return false;
+    }
+    unsafe { (*es).format == pg_sys::ExplainFormat::EXPLAIN_FORMAT_JSON }
 }
 
 fn explain_wants_timing(es: *mut pg_sys::ExplainState) -> bool {

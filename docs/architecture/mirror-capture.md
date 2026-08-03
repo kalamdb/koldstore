@@ -46,6 +46,12 @@ and merge; `SET id = id` is allowed. There are no DML capture triggers.
 
 ## Apply and recovery
 
+Managed-table commits mark the transaction dirty; only a successful top-level
+commit advances a database-scoped generation and sets the worker latch.
+Concurrent commits coalesce into one drain. A 30-second watchdog recovers
+missed in-memory hints and two-phase commits that cannot carry the originating
+backend's dirty bit.
+
 The worker reads bounded pgoutput batches, groups them by relation and
 operation, and applies typed PK arrays with set-based SQL. Inserts and deletes
 are idempotent `ON CONFLICT` writes; updates use a keyed update plus an

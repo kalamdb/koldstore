@@ -58,16 +58,17 @@ it can acquire that table's job lock, which proves no live owner holds it.
 
 ## Worker loop
 
-The worker uses the async-apply poll interval (default 100 ms) for latch wakes.
-Each wake checks the database slot and applies a bounded WAL batch when data is
-available. Empty results back off exponentially; a row or time budget that
+Managed commits advance a shared database generation and set the worker latch.
+Concurrent commits therefore coalesce into one bounded WAL drain. If an
+asynchronous commit is not decodeable on the first wake, the worker retries with
+a 10–200 ms exponential delay for at most one second. A row or time budget that
 leaves work pending gets a bounded number of immediate retries before yielding
 to the latch. Errors soft-fail with backoff rather than permanently ending the
-applier.
+applier; a 30-second watchdog recovers missed in-memory hints.
 
 The flush check is independent of the apply wake and runs only when
 `koldstore.flush_check_interval_seconds` is due. This avoids catalog scans on
-every WAL poll. The worker evaluates at most one table and runs at most one
+every commit wake. The worker evaluates at most one table and runs at most one
 flush per check.
 
 ## Automatic flush selection
@@ -93,7 +94,7 @@ and diagnostics. Production scheduling comes from the database worker.
 
 | Setting | Effect |
 | --- | --- |
-| `koldstore.async_apply_poll_interval_ms` | Latch-wake cadence for WAL apply. |
+| `koldstore.async_apply_watchdog_interval_ms` | Safety recovery cadence for a missed commit wakeup. |
 | `koldstore.async_apply_max_rows_per_tick` / `...max_ms_per_tick` | Bound one apply transaction. |
 | `koldstore.flush_check_interval_seconds` | Automatic-flush evaluation cadence. |
 | `auto_flush` table option | Enables or opts a table out of background flushes. |

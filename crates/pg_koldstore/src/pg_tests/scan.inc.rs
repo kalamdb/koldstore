@@ -277,6 +277,64 @@ fn explain_json_nests_parquet_segment_groups() {
 }
 
 #[pg_test]
+fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
+    let suffix = unique_suffix("explain_json_plan_nodes");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'a'), (2, 'b'), (3, 'c')"
+    ))
+    .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 1);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (10, 'hot')"
+    ))
+    .expect("insert hot row");
+
+    let plan = Spi::connect(|client| {
+        let mut table = client
+            .select(
+                &format!(
+                    "EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, SUMMARY OFF) \
+                     SELECT body FROM {relation} WHERE id >= 2 ORDER BY id"
+                ),
+                None,
+                &[],
+            )
+            .expect("explain select");
+        table
+            .next()
+            .expect("explain row")
+            .get::<pgrx::Json>(1)
+            .expect("explain json column")
+            .expect("explain json")
+            .0
+            .to_string()
+    });
+    for expected in [
+        "\"Plans\"",
+        "\"Node Type\":\"KoldStore Hot Scan\"",
+        "\"Node Type\":\"KoldStore Cold Storage Scan\"",
+        "\"Node Type\":\"KoldStore Segment Catalog Scan\"",
+        "\"Node Type\":\"KoldStore Parquet Scan\"",
+        "\"Node Type\":\"KoldStore Mirror Overlay\"",
+        "\"KoldStore Internal\":true",
+        "\"KoldStore Role\":\"PostgreSQL Hot Access\"",
+        "\"Actual Rows\":1",
+    ] {
+        assert!(
+            plan.contains(expected),
+            "expected KoldStore diagnostic plan node `{expected}`: {plan}"
+        );
+    }
+}
+
+#[pg_test]
 fn explain_analyze_shows_prune_summary_after_flush() {
     let suffix = unique_suffix("explain_prune");
     let schema = format!("pgtest_{suffix}");
@@ -388,6 +446,51 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
             "EXPLAIN ANALYZE flow missing exact counter `{expected}`: {plan}"
         );
     }
+}
+
+#[pg_test]
+fn primary_key_range_pushes_hot_candidates_into_merge_stream() {
+    let suffix = unique_suffix("hot_range_pushdown");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 12) AS id"
+    ))
+    .expect("insert cold candidates");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 12);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 1000) AS id"
+    ))
+    .expect("insert hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} WHERE id < 10 ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: merge_stream"),
+        "overlapping cold candidates must use the merge stream: {plan}"
+    );
+    assert!(
+        plan.contains("Hot Rows: 9") && plan.contains("Peak Hot Batch Rows: 9"),
+        "PK range pushdown must scan only hot IDs below 10, not one full page: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id DESC) FROM (\
+             SELECT id, body FROM {relation} WHERE id < 10 ORDER BY id DESC LIMIT 5\
+             ) candidates"
+        )),
+        "hot-9,hot-8,hot-7,hot-6,hot-5",
+        "newer hot candidates must win over their cold versions"
+    );
 }
 
 #[pg_test]
