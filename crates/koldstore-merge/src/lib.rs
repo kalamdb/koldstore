@@ -45,13 +45,14 @@ pub use rls::{
 };
 pub use scan::{
     begin_merge_scan, begin_merge_scan_with_plan, build_path_portfolio, build_path_replacement,
-    classify_path_strategy, clear_partial_heap_paths, custom_scan_explain_label, execute_merge_scan,
-    execute_merge_scan_with_filters, group_segments_newest_first, group_segments_oldest_first,
-    retain_pre_merge_cold_prune_predicates, validate_prune_predicates_indexed, ColdAvailability,
-    ColdPruneColumnPolicy, FilterPlan, HotChildCandidate, KoldPathStrategy, MergeMetadataAttnums,
-    MergeScanError, MergeScanPlan, MergeScanResult, OrderColumnSupport, OrderedPathSpec,
-    PathPortfolioDecision, PathReplacementDecision, PlannerPath, PlannerPathKind,
-    PortfolioPathEntry, ScanResourceCounters, ScanState, SegmentHint, SegmentPrunePredicate,
-    SegmentStatsHint, StrategyRequest, CUSTOM_PATH_NAME, HOT_SEQ_SENTINEL,
+    classify_path_strategy, clear_partial_heap_paths, custom_scan_explain_label,
+    execute_merge_scan, execute_merge_scan_with_filters, group_segments_newest_first,
+    group_segments_oldest_first, retain_pre_merge_cold_prune_predicates,
+    validate_prune_predicates_indexed, ColdAvailability, ColdPruneColumnPolicy, FilterPlan,
+    HotChildCandidate, KoldPathStrategy, MergeMetadataAttnums, MergeScanError, MergeScanPlan,
+    MergeScanResult, OrderColumnSupport, OrderedPathSpec, PathPortfolioDecision,
+    PathReplacementDecision, PlannerPath, PlannerPathKind, PortfolioPathEntry,
+    ScanResourceCounters, ScanState, SegmentHint, SegmentPrunePredicate, SegmentStatsHint,
+    StrategyRequest, CUSTOM_PATH_NAME, HOT_SEQ_SENTINEL,
 };
 pub use tombstone::{tombstone_required, TombstoneDecision};

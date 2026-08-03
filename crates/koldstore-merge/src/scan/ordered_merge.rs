@@ -81,8 +81,16 @@ mod tests {
 
     #[test]
     fn desc_skips_row_groups_below_hot_key() {
-        let mins = [Some(b"a".to_vec()), Some(b"m".to_vec()), Some(b"x".to_vec())];
-        let maxs = [Some(b"c".to_vec()), Some(b"p".to_vec()), Some(b"z".to_vec())];
+        let mins = [
+            Some(b"a".to_vec()),
+            Some(b"m".to_vec()),
+            Some(b"x".to_vec()),
+        ];
+        let maxs = [
+            Some(b"c".to_vec()),
+            Some(b"p".to_vec()),
+            Some(b"z".to_vec()),
+        ];
         assert_eq!(
             select_competitive_row_groups(OrderDirection::Desc, Some(b"q"), &mins, &maxs),
             vec![2]
@@ -91,8 +99,16 @@ mod tests {
 
     #[test]
     fn asc_skips_row_groups_above_hot_key() {
-        let mins = [Some(b"a".to_vec()), Some(b"m".to_vec()), Some(b"x".to_vec())];
-        let maxs = [Some(b"c".to_vec()), Some(b"p".to_vec()), Some(b"z".to_vec())];
+        let mins = [
+            Some(b"a".to_vec()),
+            Some(b"m".to_vec()),
+            Some(b"x".to_vec()),
+        ];
+        let maxs = [
+            Some(b"c".to_vec()),
+            Some(b"p".to_vec()),
+            Some(b"z".to_vec()),
+        ];
         assert_eq!(
             select_competitive_row_groups(OrderDirection::Asc, Some(b"d"), &mins, &maxs),
             vec![0]

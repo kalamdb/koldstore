@@ -123,9 +123,7 @@ impl PathPortfolioDecision {
     pub fn final_paths(&self) -> Vec<PlannerPath> {
         self.entries
             .iter()
-            .map(|entry| {
-                PlannerPath::custom_scan(entry.hot_child.cost + entry.startup_bias)
-            })
+            .map(|entry| PlannerPath::custom_scan(entry.hot_child.cost + entry.startup_bias))
             .collect()
     }
 }
@@ -407,10 +405,12 @@ mod tests {
             .filter(|entry| entry.advertises_order)
             .collect();
         assert_eq!(ordered.len(), 2);
-        assert!(ordered.iter().all(|entry| {
-            matches!(entry.strategy, KoldPathStrategy::OrderedProgressive(_))
-        }));
-        assert!(ordered.iter().any(|entry| entry.hot_child.name == "created_at_desc"));
+        assert!(ordered
+            .iter()
+            .all(|entry| { matches!(entry.strategy, KoldPathStrategy::OrderedProgressive(_)) }));
+        assert!(ordered
+            .iter()
+            .any(|entry| entry.hot_child.name == "created_at_desc"));
         assert!(ordered.iter().any(|entry| entry.hot_child.name == "pk"));
         assert!(ordered.iter().any(|entry| {
             matches!(

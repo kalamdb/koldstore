@@ -46,11 +46,7 @@ pub struct OrderedPathSpec {
 impl OrderedPathSpec {
     /// Builds a spec with default empty `scope_key`.
     #[must_use]
-    pub fn new(
-        sort_order_id: i32,
-        leading_column_id: i16,
-        primary_key_columns: Vec<i16>,
-    ) -> Self {
+    pub fn new(sort_order_id: i32, leading_column_id: i16, primary_key_columns: Vec<i16>) -> Self {
         Self {
             sort_order_id,
             leading_column_id,
@@ -172,13 +168,8 @@ mod tests {
 
     #[test]
     fn supported_segment_order_plus_pk_yields_ordered_progressive() {
-        let request = StrategyRequest::new(
-            false,
-            Some(OrderColumnSupport::SegmentOrder),
-            7,
-            3,
-            vec![1],
-        );
+        let request =
+            StrategyRequest::new(false, Some(OrderColumnSupport::SegmentOrder), 7, 3, vec![1]);
         let strategy = classify_path_strategy(&request);
         assert_eq!(
             strategy,
@@ -188,13 +179,8 @@ mod tests {
 
     #[test]
     fn supported_primary_key_order_yields_ordered_progressive() {
-        let request = StrategyRequest::new(
-            false,
-            Some(OrderColumnSupport::PrimaryKey),
-            1,
-            1,
-            vec![1],
-        );
+        let request =
+            StrategyRequest::new(false, Some(OrderColumnSupport::PrimaryKey), 1, 1, vec![1]);
         match classify_path_strategy(&request) {
             KoldPathStrategy::OrderedProgressive(spec) => {
                 assert_eq!(spec.leading_column_id, 1);
@@ -222,13 +208,8 @@ mod tests {
 
     #[test]
     fn exact_full_pk_equality_yields_exact_primary_key() {
-        let request = StrategyRequest::new(
-            true,
-            Some(OrderColumnSupport::SegmentOrder),
-            7,
-            3,
-            vec![1],
-        );
+        let request =
+            StrategyRequest::new(true, Some(OrderColumnSupport::SegmentOrder), 7, 3, vec![1]);
         assert_eq!(
             classify_path_strategy(&request),
             KoldPathStrategy::ExactPrimaryKey

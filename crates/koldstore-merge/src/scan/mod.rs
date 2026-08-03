@@ -19,6 +19,8 @@ pub use exec::{
     execute_merge_scan_with_filters, ColdAvailability, FilterPlan, MergeScanError, MergeScanResult,
     ScanResourceCounters, ScanState,
 };
+pub use ordered_frontier::{compare_hot_to_cold_bound, FrontierDecision, OrderDirection};
+pub use ordered_merge::{hot_keys_dominate_bound, select_competitive_row_groups};
 pub use path::{
     build_path_portfolio, build_path_replacement, clear_partial_heap_paths,
     custom_scan_explain_label, HotChildCandidate, PathPortfolioDecision, PathReplacementDecision,
@@ -30,8 +32,6 @@ pub use plan::{
     ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, MirrorOverlayStrategy, SegmentHint,
     SegmentPrunePredicate, SegmentStatsHint,
 };
-pub use ordered_frontier::{compare_hot_to_cold_bound, FrontierDecision, OrderDirection};
-pub use ordered_merge::{hot_keys_dominate_bound, select_competitive_row_groups};
 pub use strategy::{
     classify_path_strategy, KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
 };
