@@ -21,7 +21,8 @@ async fn managed_commit_wakes_sleeping_worker_without_poll_delay() -> Result<()>
 
         db.client
             .batch_execute(&format!(
-                "ALTER DATABASE \"{database}\" SET koldstore.async_apply_watchdog_interval_ms = 5000"
+                "ALTER DATABASE \"{database}\" SET koldstore.async_apply_watchdog_interval_ms = 5000; \
+                 SET koldstore.async_apply_watchdog_interval_ms = 5000"
             ))
             .await?;
 
@@ -45,6 +46,19 @@ async fn managed_commit_wakes_sleeping_worker_without_poll_delay() -> Result<()>
                 )
                 .await?;
             common::wait_for_async_worker(&db.client).await?;
+
+            let watchdog_ms: i32 = db
+                .client
+                .query_one(
+                    "SELECT current_setting('koldstore.async_apply_watchdog_interval_ms')::int",
+                    &[],
+                )
+                .await?
+                .get(0);
+            anyhow::ensure!(
+                watchdog_ms >= 5000,
+                "test session must use a >=5s watchdog; got {watchdog_ms}"
+            );
 
             // Let the worker enter its five-second safety wait. A commit signal
             // must interrupt that wait; this assertion deliberately never calls
@@ -110,7 +124,10 @@ async fn managed_commit_wakes_sleeping_worker_without_poll_delay() -> Result<()>
                     "CREATE TABLE {noise} (id bigint PRIMARY KEY, body text NOT NULL)"
                 ))
                 .await?;
+            // Drain any WAL from setup, then give the worker time to re-enter its
+            // long latch wait so the noise window is not racing an in-flight tick.
             let _ = common::wait_for_async_mirror(&db.client).await?;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             let before_noise = common::async_mirror_progress(&db.client).await?;
             db.client
                 .execute(
@@ -133,7 +150,8 @@ async fn managed_commit_wakes_sleeping_worker_without_poll_delay() -> Result<()>
 
         db.client
             .batch_execute(&format!(
-                "ALTER DATABASE \"{database}\" RESET koldstore.async_apply_watchdog_interval_ms"
+                "ALTER DATABASE \"{database}\" RESET koldstore.async_apply_watchdog_interval_ms; \
+                 RESET koldstore.async_apply_watchdog_interval_ms"
             ))
             .await?;
         result?;

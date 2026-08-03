@@ -36,6 +36,13 @@ pub(crate) fn initialize() {
 
 /// Marks the current transaction as containing managed-table source DML.
 pub(crate) fn mark_managed_dml_pending() {
+    // The applier commits SPI mirror/catalog writes in a background worker
+    // transaction. Those must never publish a self-wake or the worker would
+    // keep draining on every empty peek (advancing confirmed_flush through
+    // unrelated WAL) until the next observe.
+    if is_current_backend_background_worker() {
+        return;
+    }
     if crate::sql::flush::spi::flush_replication_origin_is_armed() {
         return;
     }
@@ -85,6 +92,10 @@ fn clear_pending() {
 }
 
 fn publish_pending_commit() {
+    if is_current_backend_background_worker() {
+        clear_pending();
+        return;
+    }
     let pending = MANAGED_DML_PENDING.with(|pending| pending.borrow_mut().take());
     if !pending {
         return;
@@ -123,10 +134,25 @@ fn wake_worker(database_oid: u32, worker_pid: WorkerPid) {
         if process.is_null()
             || (*process).pid != worker_pid.get()
             || (*process).databaseId.to_u32() != database_oid
-            || !(*process).isBackgroundWorker
+            || !is_background_worker(process)
         {
             return;
         }
         pgrx::pg_sys::SetLatch(&raw mut (*process).procLatch);
     }
+}
+
+/// PostgreSQL 18 renamed `isBackgroundWorker` to `isRegularBackend` (inverted).
+#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+unsafe fn is_background_worker(process: *mut pgrx::pg_sys::PGPROC) -> bool {
+    unsafe { (*process).isBackgroundWorker }
+}
+
+#[cfg(feature = "pg18")]
+unsafe fn is_background_worker(process: *mut pgrx::pg_sys::PGPROC) -> bool {
+    unsafe { !(*process).isRegularBackend }
+}
+
+fn is_current_backend_background_worker() -> bool {
+    unsafe { !pgrx::pg_sys::MyBgworkerEntry.is_null() }
 }
