@@ -14,14 +14,19 @@ use pgrx::pg_sys;
 use super::cold::{prepare_cold_row_stream, ColdRowStream};
 use super::emit::materialize_scan_row_from_image;
 use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader, HotRangeFilter};
+use super::hot_cursor::{HotMergeSource, NativeHotCursor};
 use super::mirror::{filter_cold_rows_with_overlay, load_mirror_tombstone_overlay, MirrorOverlay};
+use super::path_strategy::STRATEGY_TAG_ORDERED_PROGRESSIVE;
 use super::profile::{
     elapsed_ms, ColdReadProfile, DisabledScanProfiler, EmitPath, ScanExecutionProfile,
     ScanProfileSink, ScanProfiler,
 };
 use super::qual::ScanProjection;
 use super::tuple::{MaterializedRow, ScanMemory};
-use super::{hot_child_planstate, initialize_custom_plan_children, ScanEmitMode, CUSTOM_PATH_NAME};
+use super::{
+    custom_private_strategy_tag, hot_child_planstate, initialize_custom_plan_children,
+    ScanEmitMode, CUSTOM_PATH_NAME,
+};
 
 /// Inputs prepared by `BeginCustomScan` for source execution.
 pub(super) struct ScanSourceInputs<'a> {
@@ -59,7 +64,7 @@ pub(super) struct ScanSourceExecution {
 /// remain in the resolver for the full scan.
 #[derive(Debug)]
 pub(super) struct MergeRowStream {
-    hot: HotMergeBatchReader,
+    hot: HotMergeSource,
     cold: ColdRowStream,
     overlay: MirrorOverlay,
     resolver: NewestFirstWinnerResolver,
@@ -73,7 +78,7 @@ pub(super) struct MergeRowStream {
 }
 
 impl MergeRowStream {
-    fn new(hot: HotMergeBatchReader, cold: ColdRowStream, overlay: MirrorOverlay) -> Self {
+    fn new(hot: HotMergeSource, cold: ColdRowStream, overlay: MirrorOverlay) -> Self {
         let max_seen = crate::guc::max_merge_seen_keys() as usize;
         Self {
             hot,
@@ -407,7 +412,7 @@ fn prepare_cold_point_stream<P: ScanProfileSink>(
     let overlay = load_overlay(inputs, profiler);
     profiler.record_hot_buffer(0);
     let stream = MergeRowStream::new(
-        HotMergeBatchReader::empty(inputs.relation_owner),
+        HotMergeSource::empty(inputs.relation_owner),
         cold_stream,
         overlay,
     );
@@ -423,6 +428,12 @@ fn prepare_merged_stream<P: ScanProfileSink>(
     inputs: &ScanSourceInputs<'_>,
     profiler: &mut P,
 ) -> (ScanEmitMode, EmitPath, usize) {
+    let plan = unsafe { (*inputs.node).ss.ps.plan };
+    let strategy_tag = unsafe { custom_private_strategy_tag(plan) };
+    if strategy_tag == STRATEGY_TAG_ORDERED_PROGRESSIVE {
+        return prepare_ordered_merged_stream(cold_stream, inputs, profiler);
+    }
+
     let overlay = load_overlay(inputs, profiler);
 
     let hot = HotMergeBatchReader::open(
@@ -434,6 +445,7 @@ fn prepare_merged_stream<P: ScanProfileSink>(
         inputs.relation_owner,
     )
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} hot reader setup failed: {error}"));
+    let hot = HotMergeSource::SpiJson(hot);
     if let Some(sql) = hot.first_page_sql() {
         profiler.record_hot_spi_query(sql);
     }
@@ -443,6 +455,42 @@ fn prepare_merged_stream<P: ScanProfileSink>(
     (
         ScanEmitMode::stream(stream, inputs.projection.clone()),
         EmitPath::MergeStream,
+        0,
+    )
+}
+
+fn prepare_ordered_merged_stream<P: ScanProfileSink>(
+    cold_stream: ColdRowStream,
+    inputs: &ScanSourceInputs<'_>,
+    profiler: &mut P,
+) -> (ScanEmitMode, EmitPath, usize) {
+    unsafe {
+        initialize_custom_plan_children(inputs.node, inputs.estate, inputs.eflags);
+    }
+    let child = unsafe { hot_child_planstate(inputs.node) }.unwrap_or_else(|| {
+        pgrx::error!("{CUSTOM_PATH_NAME} ordered progressive path missing native hot child")
+    });
+    let pk_columns = inputs
+        .snapshot
+        .primary_key_columns
+        .iter()
+        .map(|column| {
+            koldstore_common::PkColumn::new(&column.name)
+                .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} invalid PK: {error}"))
+        })
+        .collect::<Vec<_>>();
+    let catalog_columns = inputs.catalog.columns.clone();
+    let hot = unsafe {
+        NativeHotCursor::open(child, inputs.relation_owner, pk_columns, catalog_columns)
+    }
+    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} native hot cursor failed: {error}"));
+
+    let overlay = load_overlay(inputs, profiler);
+    profiler.record_hot_buffer(0);
+    let stream = MergeRowStream::new(HotMergeSource::NativeChild(hot), cold_stream, overlay);
+    (
+        ScanEmitMode::stream(stream, inputs.projection.clone()),
+        EmitPath::OrderedMergeNative,
         0,
     )
 }

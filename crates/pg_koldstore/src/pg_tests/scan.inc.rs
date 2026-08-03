@@ -423,7 +423,7 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
 
     let plan = spi_get_explain(&format!(
         "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) \
-         SELECT body FROM {relation} WHERE id IN (1, 4) ORDER BY id"
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
     ));
     for needle in [
         "Scan Sources",
@@ -452,24 +452,25 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
         );
     }
     for expected in [
-        "Emit Path: merge_stream",
-        "Actual Access: SPI JSON Keyset Scan",
-        "Hot SPI Query:",
-        "to_jsonb(proj)",
-        "Peak Hot Batch Rows: 1",
+        "Emit Path: ordered_merge_native",
+        "Actual Access: Native PostgreSQL Child",
+        "Strategy: Ordered Progressive",
         "Seen Keys: 4",
         "Hot Rows: 1",
         "Rows Scanned: 3",
         "Input Rows: 4",
         "Output Rows: 4",
         "Rows Removed by Merge: 0",
-        "Rows Removed by Filter: 2",
     ] {
         assert!(
             plan.contains(expected),
             "EXPLAIN ANALYZE flow missing exact counter `{expected}`: {plan}"
         );
     }
+    assert!(
+        !plan.contains("SPI JSON Keyset Scan") && !plan.contains("to_jsonb(proj)"),
+        "Ordered Progressive must not use SPI JSON keyset hot paging: {plan}"
+    );
 }
 
 #[pg_test]
@@ -499,8 +500,9 @@ fn primary_key_range_pushes_hot_candidates_into_merge_stream() {
          SELECT body FROM {relation} WHERE id < 10 ORDER BY id DESC LIMIT 5"
     ));
     assert!(
-        plan.contains("Emit Path: merge_stream"),
-        "overlapping cold candidates must use the merge stream: {plan}"
+        plan.contains("Emit Path: ordered_merge_native")
+            || plan.contains("Emit Path: merge_stream"),
+        "overlapping cold candidates must use a merge emit path: {plan}"
     );
     assert!(
         plan.contains("Hot Rows: 9") && plan.contains("Peak Hot Batch Rows: 9"),

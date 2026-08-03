@@ -35,6 +35,23 @@ fn cold(id: i64, seq: i64, deleted: bool, body: &str) -> ColdRow {
 }
 
 #[test]
+fn streaming_resolver_preserves_hot_batch_encounter_order() {
+    let winners = NewestFirstWinnerResolver::default()
+        .resolve_hot_batch(vec![
+            hot(9, 30, false, "hot-9"),
+            hot(8, 30, false, "hot-8"),
+            hot(7, 30, false, "hot-7"),
+            hot(1, 30, false, "hot-1"),
+        ])
+        .expect("hot batch");
+    let bodies = winners
+        .iter()
+        .map(|row| row.row_image["body"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(bodies, vec!["hot-9", "hot-8", "hot-7", "hot-1"]);
+}
+
+#[test]
 fn resolver_selects_newest_row_per_pk_and_hot_wins_exact_tie() {
     let rows = resolve_rows(
         &[hot(1, 10, false, "hot"), hot(2, 5, false, "hot-2")],

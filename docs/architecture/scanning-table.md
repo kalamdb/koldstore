@@ -98,11 +98,19 @@ Hot labels distinguish planner shape from runtime:
 - `Hot Planned Access` / `Planned Access` — cheapest native child shape
   retained from planning (for example `Index Scan`).
 - `Hot Actual Access` / `Actual Access` — what actually ran
-  (`Native PostgreSQL Child` for `hot_child`, `SPI JSON Keyset Scan` for
-  mixed `merge_stream`, and SPI native labels for hot-only/cold-native
-  fallbacks).
+  (`Native PostgreSQL Child` for `hot_child` and for
+  `OrderedProgressive` / `ordered_merge_native`; `SPI JSON Keyset Scan` for
+  unordered `GeneralMerge` / `merge_stream`; SPI native labels for
+  hot-only/cold-native fallbacks).
 - `Hot SPI Query` — first-page SPI text for `merge_stream` JSON keyset
   paging (absent when the native child ran).
+- `Strategy` — portfolio identity (`Ordered Progressive`, `General Merge`, …).
+
+`OrderedProgressive` widens the native hot child to a physical relation
+target list so merge can read PK and full row images from `ExecProcNode`
+slots under the relation-owner merge identity, then projects to the query
+target list after winner resolution. SPI JSON keyset paging remains the hot
+source only for non-ordered general merge.
 
 The catalog node reports the published object-store manifest path as
 diagnostic metadata only. Runtime selection queries
@@ -145,11 +153,15 @@ allowed to surface:
 | delete | masked | no row |
 | no mirror row | eligible | newest cold winner may surface |
 
-Hot rows are read in bounded keyset pages. Cold data is decoded one segment
-group at a time. The resolver retains exact PK identities so the newest row
-wins across hot, mirror, and cold sources; koldstore.max_merge_seen_keys caps
+Hot rows are read either from the native ordered child (`OrderedProgressive`)
+or in bounded SPI JSON keyset pages (`GeneralMerge`). Cold data is decoded one
+segment group at a time. The resolver retains exact PK identities so the newest
+row wins across hot, mirror, and cold sources, and preserves batch encounter
+order so ordered progressive paths can honor pathkeys without an external
+`Sort` when the top-N is covered by hot. `koldstore.max_merge_seen_keys` caps
 this set and fails closed when exceeded (0 disables the cap). Parent LIMIT can
-stop before older cold groups are opened.
+stop before older cold groups are opened. Bound-gated progressive cold (open
+Parquet only when competitive) lands in later work.
 
 The regular hot+cold path materializes resolved rows into the base relation's
 slot layout and lets PostgreSQL evaluate compiled user quals after winner

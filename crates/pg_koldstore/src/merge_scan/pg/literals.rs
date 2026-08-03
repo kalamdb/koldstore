@@ -32,7 +32,7 @@ pub(super) unsafe fn literal_json_value(
     if isnull {
         return None;
     }
-    datum_json_value(datum, column)
+    datum_to_json_value(datum, column)
 }
 
 unsafe fn const_or_param_datum(
@@ -125,6 +125,14 @@ unsafe fn quote_sql_literal(value: &str) -> Option<String> {
     Some(literal)
 }
 
+/// Converts a non-null Datum to JSON for merge-candidate / prune helpers.
+pub(super) unsafe fn datum_to_json_value(
+    datum: pg_sys::Datum,
+    column: &koldstore_migrate::order::CatalogColumn,
+) -> Option<serde_json::Value> {
+    datum_json_value(datum, column).or_else(|| datum_json_value_via_output(datum, column))
+}
+
 unsafe fn datum_json_value(
     datum: pg_sys::Datum,
     column: &koldstore_migrate::order::CatalogColumn,
@@ -154,6 +162,25 @@ unsafe fn datum_json_value(
         // unit Sort Key V1 persists for timestamptz bounds.
         PgType::Timestamptz => Some(serde_json::json!(datum.value() as i64)),
         _ => None,
+    }
+}
+
+unsafe fn datum_json_value_via_output(
+    datum: pg_sys::Datum,
+    column: &koldstore_migrate::order::CatalogColumn,
+) -> Option<serde_json::Value> {
+    let mut typoutput = pg_sys::InvalidOid;
+    let mut typisvarlena = false;
+    let oid = column_type_oid(column.pg_type);
+    pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
+    let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
+    let text = cstr_owned_pfree(out)?;
+    match column.pg_type {
+        PgType::Float4 | PgType::Float8 | PgType::Numeric => text
+            .parse::<f64>()
+            .ok()
+            .map(|number| serde_json::json!(number)),
+        _ => Some(serde_json::Value::String(text)),
     }
 }
 

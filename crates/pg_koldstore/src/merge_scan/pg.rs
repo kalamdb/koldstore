@@ -20,6 +20,7 @@ mod cold;
 mod emit;
 mod execute;
 mod hot;
+mod hot_cursor;
 mod keyset;
 mod literals;
 mod mirror;
@@ -456,6 +457,21 @@ unsafe extern "C-unwind" fn plan_custom_path(
         && qual::quals_cover_primary_key(scanrelid, actual_clauses, &primary_key_attnums);
     let runtime_delegate_safe = (*best_path).path.param_info.is_null();
 
+    let path_private = (*best_path).custom_private;
+    let strategy_tag = path_strategy_tag_from_private(path_private);
+    let scope_key = unsafe { scope_key_from_path_private(path_private) };
+    let sort_order_id = unsafe { sort_order_id_from_path_private(path_private) };
+    let leading_column_id = unsafe { leading_column_id_from_path_private(path_private) };
+
+    // Ordered progressive merge reads hot winners from the native child, so the
+    // child must project a full physical row (PK + all attrs) even when the
+    // query SELECT list is a narrow projection. Final projection stays on the
+    // CustomScan targetlist via merge materialization + ExecScan.
+    let mut planned_children = custom_plans;
+    if strategy_tag == STRATEGY_TAG_ORDERED_PROGRESSIVE && !root.is_null() && !rel.is_null() {
+        planned_children = widen_ordered_hot_children(root, rel, custom_plans);
+    }
+
     (*scan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
     (*scan).scan.plan.startup_cost = (*best_path).path.startup_cost;
     (*scan).scan.plan.total_cost = (*best_path).path.total_cost;
@@ -464,14 +480,9 @@ unsafe extern "C-unwind" fn plan_custom_path(
     (*scan).scan.plan.qual = actual_clauses;
     (*scan).scan.scanrelid = scanrelid;
     (*scan).flags = (*best_path).flags;
-    (*scan).custom_plans = custom_plans;
+    (*scan).custom_plans = planned_children;
     // Do not alias `qual` here: Postgres frees `custom_exprs` and `qual` separately.
     (*scan).custom_exprs = std::ptr::null_mut();
-    let path_private = (*best_path).custom_private;
-    let strategy_tag = path_strategy_tag_from_private(path_private);
-    let scope_key = unsafe { scope_key_from_path_private(path_private) };
-    let sort_order_id = unsafe { sort_order_id_from_path_private(path_private) };
-    let leading_column_id = unsafe { leading_column_id_from_path_private(path_private) };
     (*scan).custom_private = serialize_custom_private(
         exact_pk_lookup,
         runtime_delegate_safe,
@@ -485,6 +496,41 @@ unsafe extern "C-unwind" fn plan_custom_path(
     (*scan).methods = &raw const SCAN_METHODS;
 
     scan.cast::<pg_sys::Plan>()
+}
+
+/// Widens each ordered-progressive hot child to a physical relation tlist.
+///
+/// Native hot merge needs PK (and full row images) from `ExecProcNode`; a
+/// query-shaped projection like `SELECT body` would omit those attributes.
+unsafe fn widen_ordered_hot_children(
+    root: *mut pg_sys::PlannerInfo,
+    rel: *mut pg_sys::RelOptInfo,
+    custom_plans: *mut pg_sys::List,
+) -> *mut pg_sys::List {
+    if custom_plans.is_null() {
+        return custom_plans;
+    }
+    let physical = pg_sys::build_physical_tlist(root, rel);
+    if physical.is_null() {
+        return custom_plans;
+    }
+    let len = list_len(custom_plans);
+    let mut widened_list: *mut pg_sys::List = std::ptr::null_mut();
+    for idx in 0..len {
+        let child = list_nth_ptr(custom_plans, idx).cast::<pg_sys::Plan>();
+        if child.is_null() {
+            continue;
+        }
+        let parallel_safe = (*child).parallel_safe;
+        let widened = pg_sys::change_plan_targetlist(child, physical, parallel_safe);
+        let node = if widened.is_null() { child } else { widened };
+        widened_list = pg_sys::lappend(widened_list, node.cast::<c_void>());
+    }
+    if widened_list.is_null() {
+        custom_plans
+    } else {
+        widened_list
+    }
 }
 
 #[pgrx::pg_guard]
@@ -1173,7 +1219,7 @@ unsafe fn list_nth_ptr(list: *mut pg_sys::List, index: i32) -> *mut c_void {
     (*(*list).elements.add(index as usize)).ptr_value
 }
 
-unsafe fn exec_proc_node(node: *mut pg_sys::PlanState) -> *mut pg_sys::TupleTableSlot {
+pub(super) unsafe fn exec_proc_node(node: *mut pg_sys::PlanState) -> *mut pg_sys::TupleTableSlot {
     let Some(exec) = (*node).ExecProcNode else {
         return std::ptr::null_mut();
     };
@@ -1219,12 +1265,12 @@ unsafe fn exec_hot_child_slot(
     result_slot
 }
 
-unsafe fn tuple_slot_is_empty(slot: *mut pg_sys::TupleTableSlot) -> bool {
+pub(super) unsafe fn tuple_slot_is_empty(slot: *mut pg_sys::TupleTableSlot) -> bool {
     slot.is_null()
         || ((*slot).tts_nvalid == 0 && ((*slot).tts_flags & pg_sys::TTS_FLAG_EMPTY as u16) != 0)
 }
 
-unsafe fn hot_child_planstate(
+pub(super) unsafe fn hot_child_planstate(
     node: *mut pg_sys::CustomScanState,
 ) -> Option<*mut pg_sys::PlanState> {
     let list = (*node).custom_ps;
@@ -1307,8 +1353,7 @@ unsafe fn serialize_custom_private(
 }
 
 /// Returns the path strategy tag from scan private data (default: general merge).
-#[allow(dead_code)] // Used by Task 1.4+ EXPLAIN / executor dispatch.
-unsafe fn custom_private_strategy_tag(plan: *mut pg_sys::Plan) -> i32 {
+pub(super) unsafe fn custom_private_strategy_tag(plan: *mut pg_sys::Plan) -> i32 {
     if plan.is_null() {
         return STRATEGY_TAG_GENERAL_MERGE;
     }

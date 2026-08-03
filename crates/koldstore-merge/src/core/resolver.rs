@@ -167,12 +167,18 @@ impl NewestFirstWinnerResolver {
     }
 
     /// Resolves a hot batch before any cold batches are supplied.
+    ///
+    /// Winners are returned in input encounter order so ordered progressive
+    /// paths can stream Index Scan / pathkey order without an external Sort.
     pub fn resolve_hot_batch(
         &mut self,
         rows: Vec<HotRow>,
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
         let mut winners = HashMap::with_capacity(rows.len());
+        let mut order = Vec::with_capacity(rows.len());
         for row in rows {
+            let identity = row.pk.clone().into_values();
+            let is_new = !winners.contains_key(&identity);
             insert_candidate(
                 &mut winners,
                 row.pk,
@@ -184,17 +190,25 @@ impl NewestFirstWinnerResolver {
                     row_image: row.row_image,
                 },
             );
+            if is_new {
+                order.push(identity);
+            }
         }
-        self.take_unseen(winners)
+        self.take_unseen_ordered(winners, order)
     }
 
     /// Resolves one cold batch older than every previously supplied batch.
+    ///
+    /// Winners preserve batch encounter order (segment decode order).
     pub fn resolve_cold_batch(
         &mut self,
         rows: Vec<ColdRow>,
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
         let mut winners = HashMap::with_capacity(rows.len());
+        let mut order = Vec::with_capacity(rows.len());
         for row in rows {
+            let identity = row.pk.clone().into_values();
+            let is_new = !winners.contains_key(&identity);
             insert_candidate(
                 &mut winners,
                 row.pk,
@@ -206,8 +220,11 @@ impl NewestFirstWinnerResolver {
                     row_image: row.row_image,
                 },
             );
+            if is_new {
+                order.push(identity);
+            }
         }
-        self.take_unseen(winners)
+        self.take_unseen_ordered(winners, order)
     }
 
     /// Masks keys only for batches supplied after this call.
@@ -240,12 +257,16 @@ impl NewestFirstWinnerResolver {
         self.seen.clone_from(&self.masked);
     }
 
-    fn take_unseen(
+    fn take_unseen_ordered(
         &mut self,
-        winners: HashMap<LogicalPkValues, Candidate>,
+        mut winners: HashMap<LogicalPkValues, Candidate>,
+        order: Vec<LogicalPkValues>,
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
-        let mut resolved = Vec::with_capacity(winners.len());
-        for (identity, winner) in winners {
+        let mut resolved = Vec::with_capacity(order.len());
+        for identity in order {
+            let Some(winner) = winners.remove(&identity) else {
+                continue;
+            };
             if winner.deleted {
                 self.insert_seen(identity)?;
                 continue;

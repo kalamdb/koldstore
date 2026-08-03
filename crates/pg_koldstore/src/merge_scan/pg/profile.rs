@@ -173,6 +173,8 @@ pub(super) enum EmitPath {
     ColdNative,
     /// Hot+cold winners emitted from newest-first cold segment groups.
     MergeStream,
+    /// Ordered progressive merge using native child hot cursor + cold stream.
+    OrderedMergeNative,
 }
 
 impl EmitPath {
@@ -182,6 +184,7 @@ impl EmitPath {
             Self::HotNative => "hot_native",
             Self::ColdNative => "cold_native",
             Self::MergeStream => "merge_stream",
+            Self::OrderedMergeNative => "ordered_merge_native",
         }
     }
 }
@@ -625,7 +628,10 @@ fn explain_hot_scan(
                 explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
             }
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
-            if matches!(emit_path, EmitPath::MergeStream) {
+            if matches!(
+                emit_path,
+                EmitPath::MergeStream | EmitPath::OrderedMergeNative
+            ) {
                 explain_integer(
                     es,
                     "Peak Hot Batch Rows",
@@ -646,6 +652,7 @@ fn hot_actual_access(emit_path: EmitPath) -> &'static str {
         EmitPath::HotNative => "SPI Native Tuple Scan",
         EmitPath::ColdNative => "SPI Native Point Probe",
         EmitPath::MergeStream => "SPI JSON Keyset Scan",
+        EmitPath::OrderedMergeNative => "Native PostgreSQL Child",
     }
 }
 
@@ -882,7 +889,10 @@ fn explain_merge(
                 None,
                 execution.overlay_rows_removed as i64,
             );
-            if matches!(emit_path, EmitPath::MergeStream | EmitPath::ColdNative) {
+            if matches!(
+                emit_path,
+                EmitPath::MergeStream | EmitPath::OrderedMergeNative | EmitPath::ColdNative
+            ) {
                 explain_integer(es, "Seen Keys", None, execution.seen_key_count as i64);
                 explain_integer(
                     es,
