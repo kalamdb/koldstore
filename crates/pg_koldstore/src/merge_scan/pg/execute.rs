@@ -193,13 +193,10 @@ impl MergeRowStream {
             if let Some(ctrl) = self.ordered.as_mut() {
                 if let OrderedEmitMode::SortedBuffer(queue) = &mut ctrl.mode {
                     return match queue.pop_front() {
-                        Some(row) => materialize_owned_row(
-                            row,
-                            projection,
-                            memory,
-                            execution.as_deref_mut(),
-                        )
-                        .map(Some),
+                        Some(row) => {
+                            materialize_owned_row(row, projection, memory, execution.as_deref_mut())
+                                .map(Some)
+                        }
                         None => Ok(None),
                     };
                 }
@@ -806,10 +803,11 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
         })
         .collect::<Vec<_>>();
     let catalog_columns = inputs.catalog.columns.clone();
-    let hot = unsafe {
-        NativeHotCursor::open(child, inputs.relation_owner, pk_columns, catalog_columns)
-    }
-    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} native hot cursor failed: {error}"));
+    let hot =
+        unsafe { NativeHotCursor::open(child, inputs.relation_owner, pk_columns, catalog_columns) }
+            .unwrap_or_else(|error| {
+                pgrx::error!("{CUSTOM_PATH_NAME} native hot cursor failed: {error}")
+            });
 
     let plan = unsafe { (*inputs.node).ss.ps.plan };
     let sort_order_id = unsafe { super::custom_private_leading_column_id(plan) };

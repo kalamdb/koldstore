@@ -33,10 +33,10 @@ mod tuple;
 
 use cold::{cold_side_proven_empty, planned_cold_read_profile};
 use path_strategy::{
-    install_path_portfolio, leading_column_id_from_path_private, order_descending_from_path_private,
-    path_strategy_tag_from_private, scope_key_from_path_private, sort_order_id_from_path_private,
-    strategy_explain_label, PortfolioInstallArgs, STRATEGY_TAG_GENERAL_MERGE,
-    STRATEGY_TAG_ORDERED_PROGRESSIVE,
+    install_path_portfolio, leading_column_id_from_path_private,
+    order_descending_from_path_private, path_strategy_tag_from_private,
+    scope_key_from_path_private, sort_order_id_from_path_private, strategy_explain_label,
+    PortfolioInstallArgs, STRATEGY_TAG_GENERAL_MERGE, STRATEGY_TAG_ORDERED_PROGRESSIVE,
 };
 use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
 use qual::{required_scan_projection, residual_filters};
@@ -1414,8 +1414,7 @@ unsafe fn custom_private_leading_column_id(plan: *mut pg_sys::Plan) -> i16 {
     if list_len(private) <= PRIVATE_LEADING_COLUMN_ID_INDEX {
         return 0;
     }
-    let marker =
-        list_nth_ptr(private, PRIVATE_LEADING_COLUMN_ID_INDEX).cast::<pg_sys::Integer>();
+    let marker = list_nth_ptr(private, PRIVATE_LEADING_COLUMN_ID_INDEX).cast::<pg_sys::Integer>();
     if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
         return 0;
     }
@@ -1432,8 +1431,7 @@ pub(super) unsafe fn custom_private_order_descending(plan: *mut pg_sys::Plan) ->
     if list_len(private) <= PRIVATE_ORDER_DESCENDING_INDEX {
         return true;
     }
-    let marker =
-        list_nth_ptr(private, PRIVATE_ORDER_DESCENDING_INDEX).cast::<pg_sys::Integer>();
+    let marker = list_nth_ptr(private, PRIVATE_ORDER_DESCENDING_INDEX).cast::<pg_sys::Integer>();
     if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
         return true;
     }

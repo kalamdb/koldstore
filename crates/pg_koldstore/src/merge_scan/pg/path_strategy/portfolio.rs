@@ -15,8 +15,7 @@ use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 
 use koldstore_merge::scan::{
-    KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
-    classify_path_strategy,
+    classify_path_strategy, KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
 };
 use pgrx::pg_sys;
 
@@ -87,8 +86,7 @@ pub(crate) fn path_strategy_tag_from_private(private: *mut pg_sys::List) -> i32 
         if list_len(private) <= PATH_PRIVATE_STRATEGY_INDEX {
             return STRATEGY_TAG_GENERAL_MERGE;
         }
-        let marker =
-            list_nth_ptr(private, PATH_PRIVATE_STRATEGY_INDEX).cast::<pg_sys::Integer>();
+        let marker = list_nth_ptr(private, PATH_PRIVATE_STRATEGY_INDEX).cast::<pg_sys::Integer>();
         if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
             return STRATEGY_TAG_GENERAL_MERGE;
         }
@@ -130,8 +128,7 @@ pub(crate) unsafe fn scope_key_from_path_private(private: *mut pg_sys::List) -> 
     if list_len(private) <= PATH_PRIVATE_SCOPE_KEY_INDEX {
         return String::new();
     }
-    let string_node =
-        list_nth_ptr(private, PATH_PRIVATE_SCOPE_KEY_INDEX).cast::<pg_sys::String>();
+    let string_node = list_nth_ptr(private, PATH_PRIVATE_SCOPE_KEY_INDEX).cast::<pg_sys::String>();
     if string_node.is_null()
         || (*string_node).type_ != pg_sys::NodeTag::T_String
         || (*string_node).sval.is_null()
@@ -163,8 +160,7 @@ pub(crate) unsafe fn sort_order_id_from_path_private(private: *mut pg_sys::List)
     if list_len(private) <= PATH_PRIVATE_SORT_ORDER_ID_INDEX {
         return 0;
     }
-    let marker =
-        list_nth_ptr(private, PATH_PRIVATE_SORT_ORDER_ID_INDEX).cast::<pg_sys::Integer>();
+    let marker = list_nth_ptr(private, PATH_PRIVATE_SORT_ORDER_ID_INDEX).cast::<pg_sys::Integer>();
     if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
         return 0;
     }
@@ -196,9 +192,7 @@ pub(crate) unsafe fn install_path_portfolio(
     let cheapest = natives
         .iter()
         .copied()
-        .min_by(|left, right| unsafe {
-            (**left).total_cost.total_cmp(&(**right).total_cost)
-        })
+        .min_by(|left, right| unsafe { (**left).total_cost.total_cmp(&(**right).total_cost) })
         .expect("natives non-empty");
 
     // Drop bare heap finals before add_path so only KoldMergeScan remains.
@@ -223,9 +217,9 @@ pub(crate) unsafe fn install_path_portfolio(
         };
         let leading = match order_support {
             OrderColumnSupport::PrimaryKey => args.primary_key_attnums[0],
-            OrderColumnSupport::SegmentOrder => args
-                .segment_order_attnum
-                .expect("segment order matched"),
+            OrderColumnSupport::SegmentOrder => {
+                args.segment_order_attnum.expect("segment order matched")
+            }
             OrderColumnSupport::MutableOrUnsupported => continue,
         };
         let strategy = KoldPathStrategy::OrderedProgressive(OrderedPathSpec::with_scope_key(
@@ -391,9 +385,7 @@ pub(crate) unsafe fn order_descending_from_path_private(private: *mut pg_sys::Li
 }
 
 /// Returns all non-custom paths from a relation pathlist.
-pub(crate) unsafe fn collect_native_paths(
-    pathlist: *mut pg_sys::List,
-) -> Vec<*mut pg_sys::Path> {
+pub(crate) unsafe fn collect_native_paths(pathlist: *mut pg_sys::List) -> Vec<*mut pg_sys::Path> {
     let len = list_len(pathlist);
     let mut out = Vec::with_capacity(len as usize);
     for idx in 0..len {
@@ -408,9 +400,7 @@ pub(crate) unsafe fn collect_native_paths(
 
 /// Returns the cheapest non-custom path from a relation pathlist.
 #[allow(dead_code)] // Handy for tests / future ExactPrimaryKey hot-child picks.
-pub(crate) unsafe fn find_cheapest_path(
-    pathlist: *mut pg_sys::List,
-) -> Option<*mut pg_sys::Path> {
+pub(crate) unsafe fn find_cheapest_path(pathlist: *mut pg_sys::List) -> Option<*mut pg_sys::Path> {
     collect_native_paths(pathlist)
         .into_iter()
         .min_by(|left, right| unsafe { (**left).total_cost.total_cmp(&(**right).total_cost) })

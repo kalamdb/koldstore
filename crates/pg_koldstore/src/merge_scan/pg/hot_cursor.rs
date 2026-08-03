@@ -118,11 +118,12 @@ impl NativeHotCursor {
         let pk_columns = self.pk_columns.clone();
         let catalog_columns = self.catalog_columns.clone();
         let batch_size = self.batch_size;
-        let rows = crate::catalog::owner::with_relation_owner_for_merge(self.relation_owner, || {
-            with_hook_disabled(|| unsafe {
-                pull_hot_rows_from_child(child, &pk_columns, &catalog_columns, batch_size)
-            })
-        })?;
+        let rows =
+            crate::catalog::owner::with_relation_owner_for_merge(self.relation_owner, || {
+                with_hook_disabled(|| unsafe {
+                    pull_hot_rows_from_child(child, &pk_columns, &catalog_columns, batch_size)
+                })
+            })?;
         if rows.len() < batch_size {
             self.exhausted = true;
         } else if self.batch_size < NATIVE_HOT_BATCH_ROWS {
@@ -212,7 +213,8 @@ unsafe fn hot_row_from_slot(
     }
 
     let pk_json = serde_json::Value::Object(pk_object);
-    let pk = LogicalPk::from_json_object(&pk_json, pk_columns).map_err(|error| error.to_string())?;
+    let pk =
+        LogicalPk::from_json_object(&pk_json, pk_columns).map_err(|error| error.to_string())?;
     let seq = SeqId::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
     Ok(HotRow {
         pk,

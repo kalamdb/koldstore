@@ -640,9 +640,7 @@ fn explain_hot_scan(
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
             if matches!(
                 emit_path,
-                EmitPath::MergeStream
-                    | EmitPath::OrderedMergeNative
-                    | EmitPath::UnorderedHotFirst
+                EmitPath::MergeStream | EmitPath::OrderedMergeNative | EmitPath::UnorderedHotFirst
             ) {
                 explain_integer(
                     es,
