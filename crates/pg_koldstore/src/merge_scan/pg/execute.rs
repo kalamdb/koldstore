@@ -16,7 +16,10 @@ use super::cold_frontier;
 use super::emit::materialize_scan_row_from_image;
 use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader, HotRangeFilter};
 use super::hot_cursor::{HotMergeSource, NativeHotCursor};
-use super::mirror::{filter_cold_rows_with_overlay, load_mirror_tombstone_overlay, MirrorOverlay};
+use super::mirror::{
+    filter_cold_rows_with_overlay, load_mirror_tombstone_overlay, load_mirror_tombstones_for_pks,
+    MirrorOverlay,
+};
 use super::path_strategy::{STRATEGY_TAG_ORDERED_PROGRESSIVE, STRATEGY_TAG_UNORDERED_HOT_FIRST};
 use super::profile::{
     elapsed_ms, ColdReadProfile, DisabledScanProfiler, EmitPath, ScanExecutionProfile,
@@ -184,6 +187,11 @@ impl MergeRowStream {
                 execution.peak_cold_batch_rows = execution.peak_cold_batch_rows.max(decoded_rows);
             }
 
+            // Batched tombstone probe for this cold page only (deferred overlay).
+            if self.deferred_overlay.is_some() {
+                self.probe_overlay_for_cold_batch(&cold_rows, execution.as_deref_mut())?;
+            }
+
             let overlay_input = cold_rows.len();
             let overlay_started = execution.as_ref().map(|_| Instant::now());
             let cold_rows = filter_cold_rows_with_overlay(cold_rows, &self.overlay);
@@ -214,20 +222,45 @@ impl MergeRowStream {
         &mut self,
         execution: Option<&mut ScanExecutionProfile>,
     ) -> Result<(), String> {
-        let Some(deferred) = self.deferred_overlay.take() else {
+        // Deferred overlays probe per cold batch; only eager-load when not deferred.
+        if self.deferred_overlay.is_some() {
+            return Ok(());
+        }
+        let _ = execution;
+        Ok(())
+    }
+
+    fn probe_overlay_for_cold_batch(
+        &mut self,
+        cold_rows: &[koldstore_common::ColdRow],
+        execution: Option<&mut ScanExecutionProfile>,
+    ) -> Result<(), String> {
+        let Some(deferred) = self.deferred_overlay.as_ref() else {
             return Ok(());
         };
+        let mut unseen = Vec::new();
+        for row in cold_rows {
+            if !self.overlay.masked_pks.contains(&row.pk) {
+                unseen.push(row.pk.clone());
+            }
+        }
+        if unseen.is_empty() {
+            return Ok(());
+        }
         let started = execution.as_ref().map(|_| Instant::now());
-        let overlay = load_mirror_tombstone_overlay(
+        let batch = load_mirror_tombstones_for_pks(
             &deferred.mirror_relation,
             &deferred.primary_key_columns,
-            &[],
+            &unseen,
         )?;
         if let Some(execution) = execution {
-            execution.mirror_rows = overlay.tombstones;
+            execution.mirror_rows = execution.mirror_rows.saturating_add(batch.tombstones);
             accumulate_ms(&mut execution.overlay_ms, started);
         }
-        self.overlay = overlay;
+        for pk in batch.masked_pks {
+            self.overlay.masked_pks.insert(pk);
+            self.overlay.tombstones = self.overlay.masked_pks.len();
+        }
         Ok(())
     }
 

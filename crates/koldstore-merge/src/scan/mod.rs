@@ -31,7 +31,7 @@ pub use plan::{
     SegmentPrunePredicate, SegmentStatsHint,
 };
 pub use ordered_frontier::{compare_hot_to_cold_bound, FrontierDecision, OrderDirection};
-pub use ordered_merge::hot_keys_dominate_bound;
+pub use ordered_merge::{hot_keys_dominate_bound, select_competitive_row_groups};
 pub use strategy::{
     classify_path_strategy, KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
 };

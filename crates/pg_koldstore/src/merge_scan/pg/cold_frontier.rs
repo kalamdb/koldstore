@@ -2,6 +2,7 @@
 //!
 //! Loads competitive composite bounds from `koldstore.cold_segment_order_index`
 //! for progressive ordered merge. Preparing the frontier does not open objects.
+//! Row-group competitiveness uses [`koldstore_merge::scan::select_competitive_row_groups`].
 
 use koldstore_merge::scan::OrderDirection;
 use pgrx::datum::DatumWithOid;
