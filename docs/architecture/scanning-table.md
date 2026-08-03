@@ -75,22 +75,37 @@ visualizers can render the read pipeline:
     KoldMergeScan
     |- KoldStore Hot Scan
     |  `- KoldStore PostgreSQL Hot Access
-    |- KoldStore Cold Storage Scan
-    |  |- KoldStore Segment Catalog Scan
-    |  `- KoldStore Parquet Scan (one per selected segment)
-    `- KoldStore Mirror Overlay
+    `- KoldStore Cold Storage Scan
+       `- KoldStore Segment Catalog Scan
+          `- KoldStore Parquet Scan (one per selected segment)
 
 Every added node has `"KoldStore Internal": true`; it is a diagnostic
 representation of work performed inside the custom executor, not a separate
-PostgreSQL executor node. The catalog node reports the manifest path but reads
-the local `koldstore.cold_segments` catalog rather than opening a manifest
-object. The PostgreSQL-hot-access node reports the planner access choice plus
-hot-source-only actual rows, loops, and time; it does not execute a second
-`EXPLAIN` query solely for presentation. A real native hot child remains a
-normal PostgreSQL child plan when it is the active execution path. If an
-instrumented PK probe misses and execution falls through to cold storage, the
-exhausted hot child is omitted so the graph shows the catalog, Parquet, overlay,
-and merge work that actually ran.
+PostgreSQL executor node.
+
+Hot labels distinguish planner shape from runtime:
+
+- `Hot Planned Access` / `Planned Access` — cheapest native child shape
+  retained from planning (for example `Index Scan`).
+- `Hot Actual Access` / `Actual Access` — what actually ran
+  (`Native PostgreSQL Child` for `hot_child`, `SPI JSON Keyset Scan` for
+  mixed `merge_stream`, and SPI native labels for hot-only/cold-native
+  fallbacks).
+- `Hot SPI Query` — first-page SPI text for `merge_stream` JSON keyset
+  paging (absent when the native child ran).
+
+The catalog node reports the published object-store manifest path as
+diagnostic metadata only. Runtime selection queries
+`koldstore.cold_segments` and (when bounds apply) `koldstore.cold_segment_index`;
+those SPI texts appear as `Cold Segments Query` / `Segment Index Query`.
+`Runtime Manifest Read` is always false for this path. Parquet segment nodes
+are nested under the catalog node to show that catalog prune decides which
+files open. Mirror tombstone counters remain under the text `Mirror Scan`
+group; they are not duplicated as a visual plan node. A real native hot child
+remains a normal PostgreSQL child plan when it is the active execution path.
+If an instrumented PK probe misses and execution falls through to cold
+storage, the exhausted hot child is omitted so the graph shows the catalog,
+Parquet, and merge work that actually ran.
 
 ## Executor fast paths
 

@@ -304,6 +304,7 @@ fn plan_cold_segments(
         column_id: index_column_id,
         column_name: index_column_name,
         plan: segment_index_plan,
+        query: segment_index_query,
     } = resolved;
     let segment_index_lookup_ms = indexed_candidates
         .as_ref()
@@ -318,6 +319,9 @@ fn plan_cold_segments(
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
     let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
+    let cold_segments_query = koldstore_catalog::queries::plan_in_sync_manifest_scan_context()
+        .ok()
+        .map(|statement| statement.sql);
     let profile = ColdReadProfile {
         manifest_path: manifest_stats.manifest_path(),
         storage_type: manifest_stats.storage_type.clone(),
@@ -332,6 +336,8 @@ fn plan_cold_segments(
         segment_index_plan,
         segment_index_lookup_ms,
         segment_index_candidate_segments,
+        cold_segments_query,
+        segment_index_query,
         pk_probe: pk_probe
             .as_ref()
             .map(|(column, values)| (column.name.clone(), values.clone())),
@@ -357,6 +363,8 @@ struct SegmentIndexCandidateResolution {
     column_id: Option<i16>,
     column_name: Option<String>,
     plan: Option<String>,
+    /// SPI SQL text for the cold_segment_index lookup, when one ran.
+    query: Option<String>,
 }
 
 /// Result of one SPI segment-index candidate lookup for a fixed column.
@@ -364,6 +372,8 @@ struct SegmentIndexCandidateLoad {
     candidates: Option<Vec<SegmentStatsHint>>,
     shape: SegmentIndexLookupShape,
     plan: Option<String>,
+    /// SPI SQL text executed for this lookup.
+    query: Option<String>,
 }
 
 /// Builds the pre-merge prune policy for one catalog column.
@@ -430,6 +440,7 @@ fn resolve_segment_index_candidates(
             column_id: segment_order_column_id.map(ColumnId::get),
             column_name: order_name,
             plan: None,
+            query: None,
         });
     };
     let loaded =
@@ -440,6 +451,7 @@ fn resolve_segment_index_candidates(
         column_id: Some(column.column_id.get()),
         column_name: Some(column.name.clone()),
         plan: loaded.plan,
+        query: loaded.query,
     })
 }
 
@@ -475,10 +487,12 @@ fn load_segment_index_candidates(
                 candidates: None,
                 shape: SegmentIndexLookupShape::AllActive,
                 plan: None,
+                query: None,
             })
         }
     };
     let statement = statement.map_err(|error| error.to_string())?;
+    let query = Some(statement.sql.clone());
     let mut args = vec![
         DatumWithOid::from(table_oid),
         DatumWithOid::from(""),
@@ -618,6 +632,7 @@ fn load_segment_index_candidates(
         candidates: Some(candidates),
         shape,
         plan,
+        query,
     })
 }
 
@@ -872,6 +887,10 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             segment_index_plan: None,
             segment_index_lookup_ms: None,
             segment_index_candidate_segments: None,
+            cold_segments_query: koldstore_catalog::queries::plan_in_sync_manifest_scan_context()
+                .ok()
+                .map(|statement| statement.sql),
+            segment_index_query: None,
             pk_probe: None,
             projected_columns: Vec::new(),
             segments: manifest_stats

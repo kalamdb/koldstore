@@ -434,6 +434,9 @@ fn prepare_merged_stream<P: ScanProfileSink>(
         inputs.relation_owner,
     )
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} hot reader setup failed: {error}"));
+    if let Some(sql) = hot.first_page_sql() {
+        profiler.record_hot_spi_query(sql);
+    }
     // Hot pages load during ExecCustomScan; EXPLAIN counters accumulate there.
     profiler.record_hot_buffer(0);
     let stream = MergeRowStream::new(hot, cold_stream, overlay);

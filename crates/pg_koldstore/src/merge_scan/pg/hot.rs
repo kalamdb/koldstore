@@ -220,6 +220,26 @@ FROM (
         self.after_pk = None;
         self.exhausted = self.ordered_sql.is_empty();
     }
+
+    /// First-page SPI SQL used by merge_stream hot paging (for EXPLAIN).
+    #[must_use]
+    pub(super) fn first_page_sql(&self) -> Option<String> {
+        if self.ordered_sql.is_empty() {
+            return None;
+        }
+        let order_by = self
+            .pk_columns
+            .iter()
+            .map(|column| format!("proj.{}", quote_ident(column.as_str())))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "{base} ORDER BY {order_by} LIMIT {limit}",
+            base = self.ordered_sql.trim(),
+            order_by = order_by,
+            limit = self.batch_size,
+        ))
+    }
 }
 
 /// Loads projected hot columns as native Datums when cold storage is fully pruned.

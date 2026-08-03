@@ -60,6 +60,7 @@ pub(super) trait ScanProfileSink {
     fn start_timer(&self) -> Option<Instant>;
     fn record_hot_scan(&mut self, started: Option<Instant>);
     fn record_hot_buffer(&mut self, row_count: usize);
+    fn record_hot_spi_query(&mut self, sql: String);
     fn record_mirror_scan(&mut self, row_count: usize, started: Option<Instant>);
 }
 
@@ -77,6 +78,9 @@ impl ScanProfileSink for DisabledScanProfiler {
 
     #[inline(always)]
     fn record_hot_buffer(&mut self, _row_count: usize) {}
+
+    #[inline(always)]
+    fn record_hot_spi_query(&mut self, _sql: String) {}
 
     #[inline(always)]
     fn record_mirror_scan(&mut self, _row_count: usize, _started: Option<Instant>) {}
@@ -143,6 +147,12 @@ impl ScanProfileSink for ScanProfiler {
         }
     }
 
+    fn record_hot_spi_query(&mut self, sql: String) {
+        if let Some(execution) = self.execution.as_mut() {
+            execution.hot_spi_query = Some(sql);
+        }
+    }
+
     fn record_mirror_scan(&mut self, row_count: usize, started: Option<Instant>) {
         if let Some(execution) = self.execution.as_mut() {
             execution.mirror_rows = row_count;
@@ -183,6 +193,8 @@ pub(super) struct ScanExecutionProfile {
     pub(super) hot_rows: usize,
     /// Maximum hot JSON rows retained in one MergeStream SPI page.
     pub(super) peak_hot_batch_rows: usize,
+    /// First-page SPI SQL for merge_stream hot JSON paging (diagnostic).
+    pub(super) hot_spi_query: Option<String>,
     /// Exact PK identities retained by newest-first resolution.
     pub(super) seen_key_count: usize,
     /// Rows decoded from selected Parquet row groups.
@@ -263,6 +275,10 @@ pub(super) struct SegmentReadProfile {
 
 #[derive(Debug, Clone)]
 pub(super) struct ColdReadProfile {
+    /// Published object-store manifest path for the table (diagnostic metadata).
+    ///
+    /// Runtime cold selection reads `koldstore.cold_segments` /
+    /// `koldstore.cold_segment_index`; this path is not opened by the scan.
     pub(super) manifest_path: String,
     pub(super) storage_type: String,
     pub(super) base_path: String,
@@ -286,6 +302,10 @@ pub(super) struct ColdReadProfile {
     pub(super) segment_index_lookup_ms: Option<f64>,
     /// Candidate segments returned by cold_segment_index before Parquet open.
     pub(super) segment_index_candidate_segments: Option<usize>,
+    /// SPI SQL text that listed active cold segments (when catalog was consulted).
+    pub(super) cold_segments_query: Option<String>,
+    /// SPI SQL text used for cold_segment_index candidate prune (when executed).
+    pub(super) segment_index_query: Option<String>,
     /// PK equality probe pushed into Parquet row-group prune, when present.
     pub(super) pk_probe: Option<(String, Vec<String>)>,
     pub(super) projected_columns: Vec<String>,
@@ -308,6 +328,8 @@ impl ColdReadProfile {
             segment_index_plan: None,
             segment_index_lookup_ms: None,
             segment_index_candidate_segments: None,
+            cold_segments_query: None,
+            segment_index_query: None,
             pk_probe: None,
             projected_columns: Vec::new(),
             segments: vec![],
@@ -382,10 +404,10 @@ pub(super) fn explain_scan_profile(
 /// Renders KoldStore-owned read stages as plan-shaped JSON objects.
 ///
 /// PostgreSQL renders only executor plan nodes beneath `Plans`. On merge paths,
-/// the cold reader, catalog lookup, and mirror overlay execute inside one
-/// `KoldMergeScan`, so they otherwise have no visual representation. These
-/// nodes are explicitly marked as internal diagnostics and are only emitted
-/// when there is no native child plan for PostgreSQL to render itself.
+/// the cold reader and catalog lookup execute inside one `KoldMergeScan`, so
+/// they otherwise have no visual representation. These nodes are explicitly
+/// marked as internal diagnostics and are only emitted when there is no native
+/// child plan for PostgreSQL to render itself.
 pub(super) fn explain_visual_pipeline(
     es: *mut pg_sys::ExplainState,
     profile: &ColdReadProfile,
@@ -403,11 +425,14 @@ pub(super) fn explain_visual_pipeline(
 
     explain_visual_node_open(es, "KoldStore Hot Scan", "Hot Source");
     if !hot_plan_label.is_empty() {
-        explain_text(es, "Planned Access", hot_plan_label);
+        explain_text(es, "Hot Planned Access", hot_plan_label);
     }
     match execution {
         Some(execution) => {
-            explain_text(es, "Access Method", hot_access_method(emit_path));
+            explain_text(es, "Hot Actual Access", hot_actual_access(emit_path));
+            if let Some(sql) = execution.hot_spi_query.as_deref() {
+                explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
+            }
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
             if show_timing {
                 if let Some(ms) = execution.hot_scan_ms {
@@ -452,44 +477,12 @@ pub(super) fn explain_visual_pipeline(
         None,
         profile.segments_opened as i64,
     );
+    // Catalog lookup determines which Parquet segments open — nest Parquet
+    // under the catalog node so visualizers show the real dependency.
     explain_open_group(es, "Plans", Some("Plans"), false);
     explain_visual_catalog_node(es, profile, analyze, show_timing);
-    for segment in &profile.segments {
-        explain_visual_node_open(es, "KoldStore Parquet Scan", "Cold Source");
-        explain_segment(es, segment, show_timing, analyze);
-        explain_visual_node_close(es, "KoldStore Parquet Scan");
-    }
     explain_close_group(es, "Plans", Some("Plans"), false);
     explain_visual_node_close(es, "KoldStore Cold Storage Scan");
-
-    explain_visual_node_open(es, "KoldStore Mirror Overlay", "Overlay");
-    match execution {
-        Some(execution) => {
-            explain_text(
-                es,
-                "Status",
-                if execution.cold_rows > 0 {
-                    "executed"
-                } else {
-                    "not executed"
-                },
-            );
-            explain_integer(es, "Rows Scanned", None, execution.mirror_rows as i64);
-            explain_integer(
-                es,
-                "Rows Removed by Overlay",
-                None,
-                execution.overlay_rows_removed as i64,
-            );
-            if show_timing {
-                if let Some(ms) = execution.mirror_scan_ms {
-                    explain_float(es, "Read Time", "ms", ms, 3);
-                }
-            }
-        }
-        None => explain_text(es, "Status", "planned"),
-    }
-    explain_visual_node_close(es, "KoldStore Mirror Overlay");
 
     explain_close_group(es, "Plans", Some("Plans"), false);
 }
@@ -514,10 +507,21 @@ fn explain_visual_catalog_node(
             "planned"
         },
     );
-    explain_text(es, "Catalog Source", "postgres (koldstore.cold_segments)");
+    explain_text(
+        es,
+        "Runtime Catalog Source",
+        "postgres (koldstore.cold_segments)",
+    );
+    explain_bool(es, "Runtime Manifest Read", false);
     if profile.manifest_path != "(none)" {
-        explain_text(es, "Manifest Path", &profile.manifest_path);
+        explain_text(es, "Published Manifest Path", &profile.manifest_path);
     }
+    explain_integer(
+        es,
+        "Candidate Segments",
+        None,
+        profile.segments_considered as i64,
+    );
     explain_integer(
         es,
         "Segments Pruned by Catalog Index",
@@ -532,14 +536,28 @@ fn explain_visual_catalog_node(
             candidates as i64,
         );
     }
+    if let Some(query) = profile.cold_segments_query.as_deref() {
+        explain_text(es, "Cold Segments Query", &compact_sql_for_explain(query));
+    }
+    if let Some(query) = profile.segment_index_query.as_deref() {
+        explain_text(es, "Segment Index Query", &compact_sql_for_explain(query));
+    }
     if show_timing {
         if let Some(ms) = profile.manifest_read_ms {
-            explain_float(es, "Read Time", "ms", ms, 3);
+            explain_float(es, "Segment Catalog Lookup Time", "ms", ms, 3);
         }
         if let Some(ms) = profile.segment_index_lookup_ms {
             explain_float(es, "Segment Index Lookup Time", "ms", ms, 3);
         }
     }
+    // Parquet opens are children of catalog selection.
+    explain_open_group(es, "Plans", Some("Plans"), false);
+    for segment in &profile.segments {
+        explain_visual_node_open(es, "KoldStore Parquet Scan", "Parquet Segment");
+        explain_segment(es, segment, show_timing, analyze);
+        explain_visual_node_close(es, "KoldStore Parquet Scan");
+    }
+    explain_close_group(es, "Plans", Some("Plans"), false);
     explain_visual_node_close(es, "KoldStore Segment Catalog Scan");
 }
 
@@ -556,10 +574,10 @@ fn explain_visual_postgres_hot_access(
         "PostgreSQL Hot Access",
     );
     explain_text(es, "KoldStore Role", "PostgreSQL Hot Access");
-    explain_text(es, "Execution Mode", hot_access_method(emit_path));
     if !hot_plan_label.is_empty() {
-        explain_text(es, "Planned Access", hot_plan_label);
+        explain_text(es, "Hot Planned Access", hot_plan_label);
     }
+    explain_text(es, "Hot Actual Access", hot_actual_access(emit_path));
     match execution {
         Some(execution) => {
             explain_integer(es, "Actual Rows", None, execution.hot_rows as i64);
@@ -602,7 +620,10 @@ fn explain_hot_scan(
     }
     match execution {
         Some(execution) => {
-            explain_text(es, "Access Method", hot_access_method(emit_path));
+            explain_text(es, "Actual Access", hot_actual_access(emit_path));
+            if let Some(sql) = execution.hot_spi_query.as_deref() {
+                explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
+            }
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
             if matches!(emit_path, EmitPath::MergeStream) {
                 explain_integer(
@@ -618,13 +639,19 @@ fn explain_hot_scan(
     explain_close_group(es, "Hot Scan", Some("Hot Scan"), true);
 }
 
-fn hot_access_method(emit_path: EmitPath) -> &'static str {
+/// Honest runtime hot access label — distinct from the planner's child shape.
+fn hot_actual_access(emit_path: EmitPath) -> &'static str {
     match emit_path {
-        EmitPath::HotChild => "PostgreSQL child plan",
-        EmitPath::HotNative => "SPI native tuples",
-        EmitPath::ColdNative => "SPI native point probe",
-        EmitPath::MergeStream => "SPI JSON projection + segment stream",
+        EmitPath::HotChild => "Native PostgreSQL Child",
+        EmitPath::HotNative => "SPI Native Tuple Scan",
+        EmitPath::ColdNative => "SPI Native Point Probe",
+        EmitPath::MergeStream => "SPI JSON Keyset Scan",
     }
+}
+
+/// Collapses SQL whitespace so EXPLAIN TEXT stays on one readable property line.
+fn compact_sql_for_explain(sql: &str) -> String {
+    sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn explain_cold_scan(
@@ -755,12 +782,19 @@ fn explain_cold_scan(
 
     if profile.manifest_path != "(none)" {
         // Catalog listing — never opens object-store manifest.json.
-        explain_text(es, "Segment Catalog Path", &profile.manifest_path);
+        explain_text(es, "Published Manifest Path", &profile.manifest_path);
         explain_text(
             es,
-            "Segment Catalog Source",
+            "Runtime Catalog Source",
             "postgres (koldstore.cold_segments)",
         );
+        explain_bool(es, "Runtime Manifest Read", false);
+    }
+    if let Some(query) = profile.cold_segments_query.as_deref() {
+        explain_text(es, "Cold Segments Query", &compact_sql_for_explain(query));
+    }
+    if let Some(query) = profile.segment_index_query.as_deref() {
+        explain_text(es, "Segment Index Query", &compact_sql_for_explain(query));
     }
 
     if !profile.storage_type.is_empty() {

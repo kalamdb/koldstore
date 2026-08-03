@@ -51,6 +51,8 @@
   tests, EXPLAIN formatting, or unrelated scan features.
 - Prefer updating tests/docs to the current contract:
   - cold-capable predicates: `KoldMergeScan` with `Hot Scan` + `Planned Access`
+    + `Actual Access` (`SPI JSON Keyset Scan` for mixed merge; `Native
+    PostgreSQL Child` only when `ExecProcNode` runs the child)
   - cold-proven-empty hot PK lookups: native Index/Seq/Bitmap Scan with **no**
     `KoldMergeScan` wrapper
 - Any intentional change requires an explicit user request, a clear

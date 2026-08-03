@@ -89,7 +89,8 @@ pub fn assert_managed_read_plan(plan: &str) -> Result<()> {
 /// Asserts merge-scan EXPLAIN exposes the native hot child under `Hot Scan`.
 ///
 /// Locks the hot-path EXPLAIN contract (`Hot Scan` + `Planned Access`) so
-/// regressions cannot silently rename the label without updating callers.
+/// regressions cannot silently rename labels without updating callers.
+/// `Actual Access` is ANALYZE-only — plain EXPLAIN has not chosen an emit path.
 pub fn assert_kold_merge_scan_hot_planned_access(plan: &str) -> Result<()> {
     assert_kold_merge_scan_explain(plan)?;
     anyhow::ensure!(
@@ -113,7 +114,11 @@ pub fn assert_kold_merge_scan_cold_reads(
 ) -> Result<()> {
     assert_kold_merge_scan_explain(plan)?;
     anyhow::ensure!(
-        plan.lines().any(|line| line.contains("Segment Catalog")),
+        plan.lines().any(|line| {
+            line.contains("Runtime Catalog Source")
+                || line.contains("Published Manifest Path")
+                || line.contains("Cold Segments Query")
+        }),
         "expected segment catalog details in plan, got:\n{plan}"
     );
     anyhow::ensure!(
@@ -167,10 +172,20 @@ pub fn assert_kold_merge_scan_executed_cold_reads(
     );
     anyhow::ensure!(
         plan.lines().any(|line| {
-            line.contains("Segment Catalog Source")
+            line.contains("Runtime Catalog Source")
                 && line.contains("postgres (koldstore.cold_segments)")
         }),
         "expected postgres cold_segments catalog source in analyzed plan, got:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.lines()
+            .any(|line| line.contains("Runtime Manifest Read") && line.contains("false")),
+        "expected Runtime Manifest Read: false in analyzed plan, got:\n{plan}"
+    );
+    anyhow::ensure!(
+        plan.lines()
+            .any(|line| line.trim_start().starts_with("Actual Access:")),
+        "expected Actual Access under Hot Scan in analyzed plan, got:\n{plan}"
     );
     Ok(())
 }

@@ -208,7 +208,7 @@ fn explain_analyze_uses_native_hot_child_counters() {
     ));
     for expected in [
         "Emit Path: hot_child",
-        "Access Method: PostgreSQL child plan",
+        "Actual Access: Native PostgreSQL Child",
         "Hot Rows: 3",
         "Rows Scanned: 3",
         "Input Rows: 3",
@@ -322,9 +322,13 @@ fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
         "\"Node Type\":\"KoldStore Cold Storage Scan\"",
         "\"Node Type\":\"KoldStore Segment Catalog Scan\"",
         "\"Node Type\":\"KoldStore Parquet Scan\"",
-        "\"Node Type\":\"KoldStore Mirror Overlay\"",
+        "\"Parent Relationship\":\"Parquet Segment\"",
         "\"KoldStore Internal\":true",
         "\"KoldStore Role\":\"PostgreSQL Hot Access\"",
+        "\"Hot Actual Access\"",
+        "\"Runtime Manifest Read\":false",
+        "\"Cold Segments Query\"",
+        "\"Hot SPI Query\"",
         "\"Actual Rows\":1",
     ] {
         assert!(
@@ -332,6 +336,21 @@ fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
             "expected KoldStore diagnostic plan node `{expected}`: {plan}"
         );
     }
+    assert!(
+        !plan.contains("\"Node Type\":\"KoldStore Mirror Overlay\""),
+        "Mirror Overlay must not appear as a visual plan node: {plan}"
+    );
+    // Parquet must nest under catalog, not sit as a sibling under Cold Storage.
+    let catalog_idx = plan
+        .find("\"Node Type\":\"KoldStore Segment Catalog Scan\"")
+        .expect("catalog node");
+    let parquet_idx = plan
+        .find("\"Node Type\":\"KoldStore Parquet Scan\"")
+        .expect("parquet node");
+    assert!(
+        parquet_idx > catalog_idx,
+        "Parquet Scan must appear after Segment Catalog Scan in nested Plans: {plan}"
+    );
 }
 
 #[pg_test]
@@ -365,7 +384,9 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         "Segments Pruned by Catalog Index",
         "Parquet Segments Opened",
         "Bytes Fetched",
-        "Segment Catalog Source",
+        "Runtime Catalog Source",
+        "Published Manifest Path",
+        "Cold Segments Query",
     ] {
         assert!(
             plan.contains(needle),
@@ -432,6 +453,9 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
     }
     for expected in [
         "Emit Path: merge_stream",
+        "Actual Access: SPI JSON Keyset Scan",
+        "Hot SPI Query:",
+        "to_jsonb(proj)",
         "Peak Hot Batch Rows: 1",
         "Seen Keys: 4",
         "Hot Rows: 1",
@@ -670,7 +694,7 @@ fn hot_pk_hit_skips_parquet_open_when_cold_segment_index_overlaps() {
         "expected native PostgreSQL hot child for live PK that still overlaps cold stats, got: {plan}"
     );
     assert!(
-        plan.contains("Access Method: PostgreSQL child plan"),
+        plan.contains("Actual Access: Native PostgreSQL Child"),
         "exact hot PK hit must use the already-planned PostgreSQL child: {plan}"
     );
     assert!(
