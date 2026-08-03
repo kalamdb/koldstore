@@ -17,7 +17,9 @@ use super::hot::HotMergeBatchReader;
 use super::literals::datum_to_json_value;
 use super::{exec_proc_node, tuple_slot_is_empty, with_hook_disabled};
 
-/// Default adaptive page for native ordered hot merge (smaller than SPI 1024).
+/// First adaptive page for native ordered hot merge under parent `Limit`.
+pub(super) const NATIVE_HOT_FIRST_BATCH_ROWS: usize = 8;
+/// Steady-state adaptive page after the first full native hot fetch.
 pub(super) const NATIVE_HOT_BATCH_ROWS: usize = 64;
 
 /// Hot merge source used by [`super::execute::MergeRowStream`].
@@ -98,12 +100,16 @@ impl NativeHotCursor {
             relation_owner,
             pk_columns,
             catalog_columns,
-            batch_size: NATIVE_HOT_BATCH_ROWS,
+            batch_size: NATIVE_HOT_FIRST_BATCH_ROWS,
             exhausted: false,
         })
     }
 
     /// Fetches up to one adaptive page of hot rows under the merge identity.
+    ///
+    /// The first page is small so parent `Limit` can stop after a handful of
+    /// `ExecProcNode` pulls; subsequent pages grow toward
+    /// [`NATIVE_HOT_BATCH_ROWS`].
     pub(super) fn next_batch(&mut self) -> Result<Option<Vec<HotRow>>, String> {
         if self.exhausted {
             return Ok(None);
@@ -117,8 +123,10 @@ impl NativeHotCursor {
                 pull_hot_rows_from_child(child, &pk_columns, &catalog_columns, batch_size)
             })
         })?;
-        if rows.len() < self.batch_size {
+        if rows.len() < batch_size {
             self.exhausted = true;
+        } else if self.batch_size < NATIVE_HOT_BATCH_ROWS {
+            self.batch_size = NATIVE_HOT_BATCH_ROWS;
         }
         if rows.is_empty() {
             Ok(None)
@@ -129,6 +137,7 @@ impl NativeHotCursor {
 
     pub(super) fn reset(&mut self) {
         self.exhausted = false;
+        self.batch_size = NATIVE_HOT_FIRST_BATCH_ROWS;
     }
 }
 

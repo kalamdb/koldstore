@@ -505,8 +505,8 @@ fn primary_key_range_pushes_hot_candidates_into_merge_stream() {
         "overlapping cold candidates must use a merge emit path: {plan}"
     );
     assert!(
-        plan.contains("Hot Rows: 9") && plan.contains("Peak Hot Batch Rows: 9"),
-        "PK range pushdown must scan only hot IDs below 10, not one full page: {plan}"
+        plan.contains("Hot Rows: 8") && plan.contains("Peak Hot Batch Rows: 8"),
+        "PK range + LIMIT must use index pushdown and stop after the first adaptive hot page: {plan}"
     );
     assert_eq!(
         spi_get_text(&format!(
@@ -1165,6 +1165,52 @@ fn ordered_pk_limit_uses_kold_merge_scan_without_external_sort() {
     assert!(
         !native_plan.contains("KoldMergeScan") && !native_plan.contains("Custom Scan"),
         "empty cold must keep native plans: {native_plan}"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_does_not_drain_full_hot_heap() {
+    let suffix = unique_suffix("ordered_limit_lazy");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 20) AS id"
+    ))
+    .expect("insert cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 20);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 500) AS id"
+    ))
+    .expect("insert large hot heap");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive"),
+        "ordered LIMIT must use native ordered progressive merge: {plan}"
+    );
+    assert!(
+        plan.contains("Hot Rows: 8") && plan.contains("Peak Hot Batch Rows: 8"),
+        "parent LIMIT must stop after the first adaptive hot page, not drain 500 hot rows: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id DESC) FROM (\
+             SELECT id, body FROM {relation} ORDER BY id DESC LIMIT 5\
+             ) topn"
+        )),
+        "hot-500,hot-499,hot-498,hot-497,hot-496",
+        "ordered LIMIT must still return the newest hot winners"
     );
 }
 
