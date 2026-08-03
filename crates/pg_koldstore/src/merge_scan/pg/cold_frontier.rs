@@ -8,6 +8,11 @@ use koldstore_merge::scan::{select_competitive_row_groups, OrderDirection};
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys;
 
+/// One Sort Key V1 composite bound per Parquet row group (`NULL` = unknown).
+type RowGroupCompositeBounds = Vec<Option<Vec<u8>>>;
+/// Min/max composite bound arrays from `cold_segment_order_index`.
+type OrderIndexRowGroupBounds = (RowGroupCompositeBounds, RowGroupCompositeBounds);
+
 /// Best unopened cold composite bound for `direction`, if any row exists.
 pub(super) fn load_cold_best_bound(
     table_oid: pg_sys::Oid,
@@ -85,7 +90,7 @@ pub(super) fn competitive_row_groups_for_path(
         DatumWithOid::from(sort_order_id),
         DatumWithOid::from(object_path.to_string()),
     ];
-    let decoded: Option<(Vec<Option<Vec<u8>>>, Vec<Option<Vec<u8>>>)> =
+    let decoded: Option<OrderIndexRowGroupBounds> =
         crate::spi::execute_prepared(&statement, &args, |tuples| {
             let Some(tuple) = tuples.into_iter().next() else {
                 return Ok(None);

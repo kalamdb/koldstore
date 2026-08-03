@@ -200,16 +200,16 @@ pub(crate) unsafe fn install_path_portfolio(
     (*rel).partial_pathlist = std::ptr::null_mut();
 
     let fallback_strategy = fallback_strategy_for_cheapest(args);
-    add_custom_wrapper(
+    add_custom_wrapper(CustomWrapperArgs {
         rel,
-        cheapest,
-        &fallback_strategy,
-        &args.scope_key,
-        args.segment_count,
-        false,
-        false,
+        hot_child: cheapest,
+        strategy: &fallback_strategy,
+        scope_key: &args.scope_key,
+        segment_count: args.segment_count,
+        copy_pathkeys: false,
+        order_descending: false,
         methods,
-    );
+    });
 
     for hot_child in natives {
         let Some(order_support) = leading_order_support(hot_child, args.scanrelid, args) else {
@@ -228,29 +228,42 @@ pub(crate) unsafe fn install_path_portfolio(
             args.primary_key_attnums.clone(),
             args.scope_key.clone(),
         ));
-        add_custom_wrapper(
+        add_custom_wrapper(CustomWrapperArgs {
             rel,
             hot_child,
-            &strategy,
-            &args.scope_key,
-            args.segment_count,
-            true,
-            path_leading_descending(hot_child),
+            strategy: &strategy,
+            scope_key: &args.scope_key,
+            segment_count: args.segment_count,
+            copy_pathkeys: true,
+            order_descending: path_leading_descending(hot_child),
             methods,
-        );
+        });
     }
 }
 
-unsafe fn add_custom_wrapper(
+/// Bundled inputs for installing one KoldMergeScan `CustomPath`.
+struct CustomWrapperArgs<'a> {
     rel: *mut pg_sys::RelOptInfo,
     hot_child: *mut pg_sys::Path,
-    strategy: &KoldPathStrategy,
-    scope_key: &str,
+    strategy: &'a KoldPathStrategy,
+    scope_key: &'a str,
     segment_count: usize,
     copy_pathkeys: bool,
     order_descending: bool,
     methods: *const pg_sys::CustomPathMethods,
-) {
+}
+
+unsafe fn add_custom_wrapper(args: CustomWrapperArgs<'_>) {
+    let CustomWrapperArgs {
+        rel,
+        hot_child,
+        strategy,
+        scope_key,
+        segment_count,
+        copy_pathkeys,
+        order_descending,
+        methods,
+    } = args;
     let custom_path =
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomPath>()) as *mut pg_sys::CustomPath;
     if custom_path.is_null() {
