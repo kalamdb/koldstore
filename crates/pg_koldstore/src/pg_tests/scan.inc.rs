@@ -1238,3 +1238,52 @@ fn ordered_limit_does_not_drain_full_hot_heap() {
     );
 }
 
+#[pg_test]
+fn unordered_limit_uses_hot_first_and_defers_cold() {
+    let suffix = unique_suffix("unordered_limit");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 20) AS id"
+    ))
+    .expect("insert cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 20);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(100, 200) AS id"
+    ))
+    .expect("insert hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Strategy: Unordered Hot First")
+            && plan.contains("Emit Path: unordered_hot_first"),
+        "LIMIT without ORDER BY must use Unordered Hot First: {plan}"
+    );
+    assert!(
+        !plan.contains("Sort"),
+        "unordered LIMIT must not invent pathkeys/Sort: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened: 0"),
+        "LIMIT satisfied from hot must defer cold Parquet: {plan}"
+    );
+    let bodies = spi_get_text(&format!(
+        "SELECT string_agg(body, ',') FROM (SELECT body FROM {relation} LIMIT 5) t"
+    ));
+    assert_eq!(bodies.split(',').count(), 5, "LIMIT 5 must return 5 rows: {bodies}");
+    assert!(
+        bodies.split(',').all(|b| b.starts_with("hot-")),
+        "hot-first LIMIT should return hot bodies before opening cold: {bodies}"
+    );
+}
+

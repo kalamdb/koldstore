@@ -175,6 +175,8 @@ pub(super) enum EmitPath {
     MergeStream,
     /// Ordered progressive merge using native child hot cursor + cold stream.
     OrderedMergeNative,
+    /// Unordered LIMIT: hot-first SPI pages, cold deferred until hot exhausts.
+    UnorderedHotFirst,
 }
 
 impl EmitPath {
@@ -185,6 +187,7 @@ impl EmitPath {
             Self::ColdNative => "cold_native",
             Self::MergeStream => "merge_stream",
             Self::OrderedMergeNative => "ordered_merge_native",
+            Self::UnorderedHotFirst => "unordered_hot_first",
         }
     }
 }
@@ -637,7 +640,9 @@ fn explain_hot_scan(
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
             if matches!(
                 emit_path,
-                EmitPath::MergeStream | EmitPath::OrderedMergeNative
+                EmitPath::MergeStream
+                    | EmitPath::OrderedMergeNative
+                    | EmitPath::UnorderedHotFirst
             ) {
                 explain_integer(
                     es,
@@ -660,6 +665,7 @@ fn hot_actual_access(emit_path: EmitPath) -> &'static str {
         EmitPath::ColdNative => "SPI Native Point Probe",
         EmitPath::MergeStream => "SPI JSON Keyset Scan",
         EmitPath::OrderedMergeNative => "Native PostgreSQL Child",
+        EmitPath::UnorderedHotFirst => "SPI JSON Keyset Scan",
     }
 }
 
@@ -905,7 +911,10 @@ fn explain_merge(
             );
             if matches!(
                 emit_path,
-                EmitPath::MergeStream | EmitPath::OrderedMergeNative | EmitPath::ColdNative
+                EmitPath::MergeStream
+                    | EmitPath::OrderedMergeNative
+                    | EmitPath::UnorderedHotFirst
+                    | EmitPath::ColdNative
             ) {
                 explain_integer(es, "Seen Keys", None, execution.seen_key_count as i64);
                 explain_integer(

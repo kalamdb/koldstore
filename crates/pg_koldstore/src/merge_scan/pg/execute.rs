@@ -17,7 +17,7 @@ use super::emit::materialize_scan_row_from_image;
 use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader, HotRangeFilter};
 use super::hot_cursor::{HotMergeSource, NativeHotCursor};
 use super::mirror::{filter_cold_rows_with_overlay, load_mirror_tombstone_overlay, MirrorOverlay};
-use super::path_strategy::STRATEGY_TAG_ORDERED_PROGRESSIVE;
+use super::path_strategy::{STRATEGY_TAG_ORDERED_PROGRESSIVE, STRATEGY_TAG_UNORDERED_HOT_FIRST};
 use super::profile::{
     elapsed_ms, ColdReadProfile, DisabledScanProfiler, EmitPath, ScanExecutionProfile,
     ScanProfileSink, ScanProfiler,
@@ -503,6 +503,9 @@ fn prepare_merged_stream<P: ScanProfileSink>(
     if strategy_tag == STRATEGY_TAG_ORDERED_PROGRESSIVE {
         return prepare_ordered_merged_stream(cold_stream, inputs, profiler);
     }
+    if strategy_tag == STRATEGY_TAG_UNORDERED_HOT_FIRST {
+        return prepare_unordered_hot_first_stream(cold_stream, inputs, profiler);
+    }
 
     let overlay = load_overlay(inputs, profiler);
 
@@ -525,6 +528,39 @@ fn prepare_merged_stream<P: ScanProfileSink>(
     (
         ScanEmitMode::stream(stream, inputs.projection.clone()),
         EmitPath::MergeStream,
+        0,
+    )
+}
+
+fn prepare_unordered_hot_first_stream<P: ScanProfileSink>(
+    cold_stream: ColdRowStream,
+    inputs: &ScanSourceInputs<'_>,
+    profiler: &mut P,
+) -> (ScanEmitMode, EmitPath, usize) {
+    let hot = HotMergeBatchReader::open(
+        inputs.relation,
+        inputs.snapshot,
+        inputs.pk_equality,
+        inputs.pk_range,
+        inputs.image_columns,
+        inputs.relation_owner,
+    )
+    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} hot reader setup failed: {error}"));
+    let hot = HotMergeSource::SpiJson(hot);
+    if let Some(sql) = hot.first_page_sql() {
+        profiler.record_hot_spi_query(sql);
+    }
+    profiler.record_hot_buffer(0);
+    // Defer mirror/cold until hot is exhausted under parent LIMIT.
+    let stream = MergeRowStream::new_ordered_deferred_overlay(
+        hot,
+        cold_stream,
+        inputs.snapshot.mirror_relation.clone(),
+        inputs.snapshot.primary_key_columns.clone(),
+    );
+    (
+        ScanEmitMode::stream(stream, inputs.projection.clone()),
+        EmitPath::UnorderedHotFirst,
         0,
     )
 }

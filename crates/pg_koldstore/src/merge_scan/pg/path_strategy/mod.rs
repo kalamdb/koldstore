@@ -14,4 +14,5 @@ pub(super) use portfolio::{
     install_path_portfolio, leading_column_id_from_path_private, path_strategy_tag_from_private,
     scope_key_from_path_private, sort_order_id_from_path_private, strategy_explain_label,
     PortfolioInstallArgs, STRATEGY_TAG_GENERAL_MERGE, STRATEGY_TAG_ORDERED_PROGRESSIVE,
+    STRATEGY_TAG_UNORDERED_HOT_FIRST,
 };
