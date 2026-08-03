@@ -87,6 +87,18 @@ pub const REQUIRED_CATALOG_INDEXES: &[CatalogIndexSpec] = &[
         unique: false,
         purpose: "lower-bound candidate lookup over Sort Key V1 maxima",
     },
+    CatalogIndexSpec {
+        name: "cold_segment_order_index_min_idx",
+        table: "koldstore.cold_segment_order_index",
+        unique: false,
+        purpose: "upper-bound ordered frontier lookup over composite minima",
+    },
+    CatalogIndexSpec {
+        name: "cold_segment_order_index_max_idx",
+        table: "koldstore.cold_segment_order_index",
+        unique: false,
+        purpose: "lower-bound ordered frontier lookup over composite maxima",
+    },
 ];
 
 /// Returns required catalog indexes missing from a parsed bootstrap plan.

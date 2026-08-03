@@ -52,6 +52,34 @@ fn cold_segment_index_uses_sort_key_v1_bounds_and_mirrored_indexes() {
 }
 
 #[test]
+fn cold_segment_order_index_uses_composite_bounds_and_mirrored_indexes() {
+    let table_start = INSTALL_SQL
+        .find("CREATE TABLE IF NOT EXISTS koldstore.cold_segment_order_index")
+        .unwrap();
+    let table_sql = &INSTALL_SQL[table_start..];
+    let table_end = table_sql.find(");").unwrap();
+    let table_sql = &table_sql[..table_end];
+
+    assert!(table_sql.contains("sort_order_id integer NOT NULL"));
+    assert!(table_sql.contains("codec_version smallint NOT NULL"));
+    assert!(table_sql.contains("min_composite_key bytea"));
+    assert!(table_sql.contains("max_composite_key bytea"));
+    assert!(table_sql.contains("row_group_min_composite_keys bytea[] NOT NULL"));
+    assert!(table_sql.contains("row_group_max_composite_keys bytea[] NOT NULL"));
+    assert!(table_sql.contains("physically_sorted boolean NOT NULL"));
+    assert!(table_sql.contains("bounds_exact boolean NOT NULL"));
+    assert!(table_sql.contains("PRIMARY KEY (segment_id, sort_order_id)"));
+    assert!(table_sql.contains("scope_key text NOT NULL DEFAULT ''"));
+
+    assert!(INSTALL_SQL.contains(
+        "ON koldstore.cold_segment_order_index (\n    table_oid, scope_key, sort_order_id, codec_version, min_composite_key\n) INCLUDE (max_composite_key, segment_id)"
+    ));
+    assert!(INSTALL_SQL.contains(
+        "ON koldstore.cold_segment_order_index (\n    table_oid, scope_key, sort_order_id, codec_version, max_composite_key\n) INCLUDE (min_composite_key, segment_id)"
+    ));
+}
+
+#[test]
 fn cold_segments_store_aligned_row_group_arrays() {
     let table_start = INSTALL_SQL
         .find("CREATE TABLE IF NOT EXISTS koldstore.cold_segments")

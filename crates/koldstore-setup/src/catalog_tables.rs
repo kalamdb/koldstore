@@ -45,6 +45,10 @@ pub const REQUIRED_CATALOG_TABLES: &[CatalogTableSpec] = &[
         name: "koldstore.cold_segment_index",
         purpose: "Sort Key V1 segment bounds keyed by stable column ID",
     },
+    CatalogTableSpec {
+        name: "koldstore.cold_segment_order_index",
+        purpose: "composite order bounds for progressive ordered frontiers",
+    },
 ];
 
 /// Returns required catalog tables that are missing from a parsed bootstrap plan.

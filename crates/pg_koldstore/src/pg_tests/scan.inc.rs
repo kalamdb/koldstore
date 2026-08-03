@@ -899,8 +899,16 @@ fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
            AND bool_and(cardinality(csi.row_group_max_values) = cs.row_group_count)
            AND bool_and(cardinality(csi.row_group_null_counts) = cs.row_group_count)
            AND bool_and(csi.min_value IS NOT NULL AND csi.max_value IS NOT NULL)
+           AND bool_and(csoi.sort_order_id = csi.column_id)
+           AND bool_and(cardinality(csoi.row_group_min_composite_keys) = cs.row_group_count)
+           AND bool_and(cardinality(csoi.row_group_max_composite_keys) = cs.row_group_count)
+           AND bool_and(csoi.min_composite_key IS NOT NULL AND csoi.max_composite_key IS NOT NULL)
+           AND bool_and(csoi.bounds_exact)
         FROM koldstore.cold_segments cs
         JOIN koldstore.cold_segment_index csi USING (segment_id)
+        JOIN koldstore.cold_segment_order_index csoi
+          ON csoi.segment_id = cs.segment_id
+         AND csoi.sort_order_id = csi.column_id
         WHERE cs.table_oid = '{relation}'::regclass
           AND csi.column_id = (
             SELECT attnum
@@ -913,7 +921,10 @@ fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
     ))
     .expect("inspect packed catalog arrays")
     .expect("packed catalog array assertion");
-    assert!(arrays_aligned, "expected aligned, exact PK row-group metadata");
+    assert!(
+        arrays_aligned,
+        "expected aligned PK row-group metadata and order-index bounds"
+    );
 
     // 1500 is inside the segment-level [1, 3023] range, but falls in the gap
     // between row-group ranges [1, 1024] and [2000, 3023].
