@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use koldstore_merge::scan::{hot_keys_dominate_bound, OrderDirection};
 use koldstore_merge::{NewestFirstWinnerResolver, ResolvedRow, RowSource};
 use koldstore_migrate::{order::CatalogColumn, ExistingTableCatalog};
 use pgrx::pg_sys;
@@ -83,6 +84,8 @@ pub(super) struct MergeRowStream {
     replay_hot: bool,
     /// Ordered progressive: never opened a Parquet batch this scan.
     cold_parquet_touched: bool,
+    /// Bound-gated ordered progressive control; `None` for unordered merge.
+    ordered: Option<OrderedProgressiveCtrl>,
 }
 
 #[derive(Debug)]
@@ -91,9 +94,30 @@ struct DeferredOverlayLoad {
     primary_key_columns: Vec<koldstore_common::ColumnRef>,
 }
 
+/// Runtime control for `OrderedProgressive` emit ordering.
+#[derive(Debug)]
+struct OrderedProgressiveCtrl {
+    direction: OrderDirection,
+    cold_bound: Option<Vec<u8>>,
+    leading_column: String,
+    leading_type_oid: u32,
+    table_oid: pg_sys::Oid,
+    scope_key: String,
+    sort_order_id: i32,
+    mode: OrderedEmitMode,
+}
+
+#[derive(Debug)]
+enum OrderedEmitMode {
+    /// Still deciding per hot page whether cold can win/tie.
+    Streaming,
+    /// Drain remaining hot+cold, resolve, sort by leading Sort Key, emit.
+    SortedBuffer(VecDeque<ResolvedRow>),
+}
+
 impl MergeRowStream {
     fn new(hot: HotMergeSource, cold: ColdRowStream, overlay: MirrorOverlay) -> Self {
-        Self::new_inner(hot, cold, overlay, None)
+        Self::new_inner(hot, cold, overlay, None, None)
     }
 
     fn new_ordered_deferred_overlay(
@@ -110,6 +134,26 @@ impl MergeRowStream {
                 mirror_relation,
                 primary_key_columns,
             }),
+            None,
+        )
+    }
+
+    fn new_ordered_progressive(
+        hot: HotMergeSource,
+        cold: ColdRowStream,
+        mirror_relation: koldstore_common::TableName,
+        primary_key_columns: Vec<koldstore_common::ColumnRef>,
+        ordered: OrderedProgressiveCtrl,
+    ) -> Self {
+        Self::new_inner(
+            hot,
+            cold,
+            MirrorOverlay::default(),
+            Some(DeferredOverlayLoad {
+                mirror_relation,
+                primary_key_columns,
+            }),
+            Some(ordered),
         )
     }
 
@@ -118,6 +162,7 @@ impl MergeRowStream {
         cold: ColdRowStream,
         overlay: MirrorOverlay,
         deferred_overlay: Option<DeferredOverlayLoad>,
+        ordered: Option<OrderedProgressiveCtrl>,
     ) -> Self {
         let max_seen = crate::guc::max_merge_seen_keys() as usize;
         Self {
@@ -131,6 +176,7 @@ impl MergeRowStream {
             hot_phase_done: false,
             replay_hot: false,
             cold_parquet_touched: false,
+            ordered,
         }
     }
 
@@ -144,6 +190,21 @@ impl MergeRowStream {
         mut execution: Option<&mut ScanExecutionProfile>,
     ) -> Result<Option<MaterializedRow>, String> {
         loop {
+            if let Some(ctrl) = self.ordered.as_mut() {
+                if let OrderedEmitMode::SortedBuffer(queue) = &mut ctrl.mode {
+                    return match queue.pop_front() {
+                        Some(row) => materialize_owned_row(
+                            row,
+                            projection,
+                            memory,
+                            execution.as_deref_mut(),
+                        )
+                        .map(Some),
+                        None => Ok(None),
+                    };
+                }
+            }
+
             if let Some(row) = self.hot_winners.pop_front() {
                 return materialize_owned_row(row, projection, memory, execution.as_deref_mut())
                     .map(Some);
@@ -151,9 +212,22 @@ impl MergeRowStream {
             if !self.hot_phase_done {
                 self.load_next_hot_page(execution.as_deref_mut())?;
                 if !self.hot_winners.is_empty() {
+                    if self.ordered.is_some() {
+                        self.maybe_enter_ordered_buffer(execution.as_deref_mut(), cold_profile)?;
+                    }
                     continue;
                 }
                 // Hot exhausted for this pass.
+                if self.ordered.is_some() && !self.replay_hot {
+                    // Empty or exhausted hot with a cold frontier: sort remaining cold.
+                    self.maybe_enter_ordered_buffer(execution.as_deref_mut(), cold_profile)?;
+                    if matches!(
+                        self.ordered.as_ref().map(|o| &o.mode),
+                        Some(OrderedEmitMode::SortedBuffer(_))
+                    ) {
+                        continue;
+                    }
+                }
                 if !self.replay_hot {
                     self.ensure_overlay(execution.as_deref_mut())?;
                     self.resolver
@@ -216,6 +290,116 @@ impl MergeRowStream {
             }
             self.cold_winners = VecDeque::from(winners);
         }
+    }
+
+    /// When the loaded hot page cannot strictly dominate cold, drain + sort.
+    fn maybe_enter_ordered_buffer(
+        &mut self,
+        mut execution: Option<&mut ScanExecutionProfile>,
+        cold_profile: &mut ColdReadProfile,
+    ) -> Result<(), String> {
+        let Some(ctrl) = self.ordered.as_ref() else {
+            return Ok(());
+        };
+        if matches!(ctrl.mode, OrderedEmitMode::SortedBuffer(_)) {
+            return Ok(());
+        }
+        let keys = self
+            .hot_winners
+            .iter()
+            .map(|row| encode_leading_key(row, &ctrl.leading_column, ctrl.leading_type_oid))
+            .collect::<Vec<_>>();
+        let dominates = if keys.is_empty() {
+            // No hot winners left: cold must be ordered alone when a bound exists.
+            ctrl.cold_bound.is_none()
+        } else {
+            hot_keys_dominate_bound(ctrl.direction, &keys, ctrl.cold_bound.as_deref())
+        };
+        if dominates {
+            return Ok(());
+        }
+
+        // Competitive RG prune before opening Parquet. Full buffer sort needs
+        // every group that can appear in the remaining result; pass no hot tip.
+        let table_oid = ctrl.table_oid;
+        let scope_key = ctrl.scope_key.clone();
+        let sort_order_id = ctrl.sort_order_id;
+        let direction = ctrl.direction;
+        self.cold.apply_competitive_row_groups(
+            table_oid,
+            &scope_key,
+            sort_order_id,
+            direction,
+            None,
+        )?;
+
+        let mut buffered = Vec::new();
+        buffered.extend(self.hot_winners.drain(..));
+        while !self.hot_phase_done {
+            self.load_next_hot_page(execution.as_deref_mut())?;
+            if self.hot_winners.is_empty() {
+                if !self.replay_hot {
+                    self.resolver.checkpoint();
+                }
+                self.hot_phase_done = true;
+                break;
+            }
+            buffered.extend(self.hot_winners.drain(..));
+        }
+
+        loop {
+            let collect_profile = execution.is_some();
+            let Some((cold_rows, segment_profiles)) = self.cold.next_batch(collect_profile)? else {
+                break;
+            };
+            self.cold_parquet_touched = true;
+            let decoded_rows = cold_rows.len();
+            if let Some(execution) = execution.as_deref_mut() {
+                cold_profile.segments_opened += segment_profiles.len();
+                cold_profile.segments.extend(segment_profiles);
+                execution.cold_rows += decoded_rows;
+                execution.peak_cold_batch_rows = execution.peak_cold_batch_rows.max(decoded_rows);
+            }
+            if self.deferred_overlay.is_some() {
+                self.probe_overlay_for_cold_batch(&cold_rows, execution.as_deref_mut())?;
+            }
+            let overlay_input = cold_rows.len();
+            let cold_rows = filter_cold_rows_with_overlay(cold_rows, &self.overlay);
+            let overlay_removed = overlay_input.saturating_sub(cold_rows.len());
+            let winners = self
+                .resolver
+                .resolve_cold_batch(cold_rows)
+                .map_err(seen_key_limit_error)?;
+            if let Some(execution) = execution.as_deref_mut() {
+                execution.overlay_rows_removed += overlay_removed;
+                execution.merge_executed = true;
+                execution.merge_input_rows += overlay_input.saturating_sub(overlay_removed);
+                execution.merge_output_rows += winners.len();
+                execution.seen_key_count = self.resolver.seen_key_count();
+            }
+            buffered.extend(winners);
+        }
+
+        let ctrl = self
+            .ordered
+            .as_ref()
+            .expect("ordered ctrl present when entering buffer");
+        let direction = ctrl.direction;
+        let leading_column = ctrl.leading_column.clone();
+        let leading_type_oid = ctrl.leading_type_oid;
+        buffered.sort_by(|left, right| {
+            let left_key = encode_leading_key(left, &leading_column, leading_type_oid);
+            let right_key = encode_leading_key(right, &leading_column, leading_type_oid);
+            match direction {
+                OrderDirection::Asc => left_key.cmp(&right_key),
+                OrderDirection::Desc => right_key.cmp(&left_key),
+            }
+        });
+        if let Some(ctrl) = self.ordered.as_mut() {
+            ctrl.mode = OrderedEmitMode::SortedBuffer(VecDeque::from(buffered));
+        }
+        self.cold_winners.clear();
+        Ok(())
     }
 
     fn ensure_overlay(
@@ -306,6 +490,9 @@ impl MergeRowStream {
         self.cold_winners.clear();
         self.hot_phase_done = false;
         self.cold_parquet_touched = false;
+        if let Some(ctrl) = self.ordered.as_mut() {
+            ctrl.mode = OrderedEmitMode::Streaming;
+        }
         // Checkpoint already holds first-pass hot + tombstone identities, so
         // rescan reloads hot payloads for emit only.
         self.replay_hot = true;
@@ -624,27 +811,60 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
     }
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} native hot cursor failed: {error}"));
 
-    // Defer mirror until a cold Parquet batch is required (hot-dominant LIMIT).
     let plan = unsafe { (*inputs.node).ss.ps.plan };
     let sort_order_id = unsafe { super::custom_private_leading_column_id(plan) };
-    let _frontier = cold_frontier::load_cold_best_bound(
+    let direction = if unsafe { super::custom_private_order_descending(plan) } {
+        OrderDirection::Desc
+    } else {
+        OrderDirection::Asc
+    };
+    let leading_column_id = sort_order_id;
+    let (leading_column, leading_type_oid) = inputs
+        .catalog
+        .columns
+        .iter()
+        .find(|column| column.column_id.get() == leading_column_id)
+        .map(|column| (column.name.clone(), column.pg_type.type_oid()))
+        .unwrap_or_else(|| ("id".to_string(), u32::from(pg_sys::INT8OID)));
+    let cold_bound = cold_frontier::load_cold_best_bound(
         inputs.table_oid,
         "",
         i32::from(sort_order_id),
-        koldstore_merge::scan::OrderDirection::Desc,
-    );
+        direction,
+    )
+    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} cold frontier failed: {error}"));
     profiler.record_hot_buffer(0);
-    let stream = MergeRowStream::new_ordered_deferred_overlay(
+    let stream = MergeRowStream::new_ordered_progressive(
         HotMergeSource::NativeChild(hot),
         cold_stream,
         inputs.snapshot.mirror_relation.clone(),
         inputs.snapshot.primary_key_columns.clone(),
+        OrderedProgressiveCtrl {
+            direction,
+            cold_bound,
+            leading_column,
+            leading_type_oid,
+            table_oid: inputs.table_oid,
+            scope_key: String::new(),
+            sort_order_id: i32::from(sort_order_id),
+            mode: OrderedEmitMode::Streaming,
+        },
     );
     (
         ScanEmitMode::stream(stream, inputs.projection.clone()),
         EmitPath::OrderedMergeNative,
         0,
     )
+}
+
+fn encode_leading_key(
+    row: &ResolvedRow,
+    leading_column: &str,
+    leading_type_oid: u32,
+) -> Option<Vec<u8>> {
+    let sort_type = koldstore_sortkey::SortKeyType::from_type_oid(leading_type_oid)?;
+    let value = row.row_image.get(leading_column)?;
+    koldstore_sortkey::encode_sort_key_json(sort_type, value).ok()
 }
 
 fn load_overlay<P: ScanProfileSink>(

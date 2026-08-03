@@ -158,6 +158,43 @@ impl ColdRowStream {
     pub(super) fn reset(&mut self) {
         self.next_group = 0;
     }
+
+    /// Intersects planned row groups with order-frontier competitive groups.
+    ///
+    /// Missing order-index rows leave the hint unchanged. An empty competitive
+    /// set marks the segment with `selected_row_groups = Some([])` so open is skipped.
+    pub(super) fn apply_competitive_row_groups(
+        &mut self,
+        table_oid: pg_sys::Oid,
+        scope_key: &str,
+        sort_order_id: i32,
+        direction: koldstore_merge::scan::OrderDirection,
+        hot_key: Option<&[u8]>,
+    ) -> Result<(), String> {
+        for group in &mut self.segment_groups {
+            for hint in group {
+                let Some(selected) = super::cold_frontier::competitive_row_groups_for_path(
+                    table_oid,
+                    scope_key,
+                    sort_order_id,
+                    &hint.object_path,
+                    direction,
+                    hot_key,
+                )?
+                else {
+                    continue;
+                };
+                hint.selected_row_groups = Some(match hint.selected_row_groups.take() {
+                    Some(existing) => existing
+                        .into_iter()
+                        .filter(|rg| selected.contains(rg))
+                        .collect(),
+                    None => selected,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Prepares a cold stream without opening or decoding a Parquet file.

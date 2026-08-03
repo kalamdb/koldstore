@@ -33,9 +33,10 @@ mod tuple;
 
 use cold::{cold_side_proven_empty, planned_cold_read_profile};
 use path_strategy::{
-    install_path_portfolio, leading_column_id_from_path_private, path_strategy_tag_from_private,
-    scope_key_from_path_private, sort_order_id_from_path_private, strategy_explain_label,
-    PortfolioInstallArgs, STRATEGY_TAG_GENERAL_MERGE, STRATEGY_TAG_ORDERED_PROGRESSIVE,
+    install_path_portfolio, leading_column_id_from_path_private, order_descending_from_path_private,
+    path_strategy_tag_from_private, scope_key_from_path_private, sort_order_id_from_path_private,
+    strategy_explain_label, PortfolioInstallArgs, STRATEGY_TAG_GENERAL_MERGE,
+    STRATEGY_TAG_ORDERED_PROGRESSIVE,
 };
 use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
 use qual::{required_scan_projection, residual_filters};
@@ -49,6 +50,7 @@ const PRIVATE_SCOPE_KEY_INDEX: i32 = 3;
 #[allow(dead_code)]
 const PRIVATE_SORT_ORDER_ID_INDEX: i32 = 4;
 const PRIVATE_LEADING_COLUMN_ID_INDEX: i32 = 5;
+const PRIVATE_ORDER_DESCENDING_INDEX: i32 = 6;
 
 thread_local! {
     static SCAN_STATES: RefCell<HashMap<usize, ScanExecutionState>> = RefCell::new(HashMap::new());
@@ -463,6 +465,7 @@ unsafe extern "C-unwind" fn plan_custom_path(
     let scope_key = unsafe { scope_key_from_path_private(path_private) };
     let sort_order_id = unsafe { sort_order_id_from_path_private(path_private) };
     let leading_column_id = unsafe { leading_column_id_from_path_private(path_private) };
+    let order_descending = unsafe { order_descending_from_path_private(path_private) };
 
     // Ordered progressive merge reads hot winners from the native child, so the
     // child must project a full physical row (PK + all attrs) even when the
@@ -491,6 +494,7 @@ unsafe extern "C-unwind" fn plan_custom_path(
         &scope_key,
         sort_order_id,
         leading_column_id,
+        order_descending,
     );
     (*scan).custom_scan_tlist = std::ptr::null_mut();
     (*scan).custom_relids = std::ptr::null_mut();
@@ -1331,7 +1335,7 @@ unsafe fn hot_child_explain_label(node: *mut pg_sys::CustomScanState) -> String 
 /// Encodes executor-critical flags plus strategy identity as native nodes.
 ///
 /// Layout: `[exact_pk, runtime_delegate_safe, strategy_tag, scope_key,
-/// sort_order_id, leading_column_id]`.
+/// sort_order_id, leading_column_id, order_descending]`.
 unsafe fn serialize_custom_private(
     exact_pk_lookup: bool,
     runtime_delegate_safe: bool,
@@ -1339,6 +1343,7 @@ unsafe fn serialize_custom_private(
     scope_key: &str,
     sort_order_id: i32,
     leading_column_id: i16,
+    order_descending: bool,
 ) -> *mut pg_sys::List {
     let exact_pk = pg_sys::makeInteger(i32::from(exact_pk_lookup));
     let runtime_delegate = pg_sys::makeInteger(i32::from(runtime_delegate_safe));
@@ -1350,12 +1355,14 @@ unsafe fn serialize_custom_private(
     let scope_node = pg_sys::makeString(scope.as_ptr() as *mut c_char);
     let sort_order = pg_sys::makeInteger(sort_order_id);
     let leading = pg_sys::makeInteger(i32::from(leading_column_id));
+    let descending = pg_sys::makeInteger(i32::from(order_descending));
     let mut private = pg_sys::lappend(std::ptr::null_mut(), exact_pk.cast::<c_void>());
     private = pg_sys::lappend(private, runtime_delegate.cast::<c_void>());
     private = pg_sys::lappend(private, strategy.cast::<c_void>());
     private = pg_sys::lappend(private, scope_node.cast::<c_void>());
     private = pg_sys::lappend(private, sort_order.cast::<c_void>());
-    pg_sys::lappend(private, leading.cast::<c_void>())
+    private = pg_sys::lappend(private, leading.cast::<c_void>());
+    pg_sys::lappend(private, descending.cast::<c_void>())
 }
 
 /// Returns the path strategy tag from scan private data (default: general merge).
@@ -1413,6 +1420,24 @@ unsafe fn custom_private_leading_column_id(plan: *mut pg_sys::Plan) -> i16 {
         return 0;
     }
     (*marker).ival as i16
+}
+
+/// Returns true when ordered progressive private data advertises DESC order.
+pub(super) unsafe fn custom_private_order_descending(plan: *mut pg_sys::Plan) -> bool {
+    if plan.is_null() {
+        return true;
+    }
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
+    let private = (*custom_scan).custom_private;
+    if list_len(private) <= PRIVATE_ORDER_DESCENDING_INDEX {
+        return true;
+    }
+    let marker =
+        list_nth_ptr(private, PRIVATE_ORDER_DESCENDING_INDEX).cast::<pg_sys::Integer>();
+    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
+        return true;
+    }
+    (*marker).ival != 0
 }
 
 /// Reads the executor's exact-PK marker without allocation or JSON parsing.

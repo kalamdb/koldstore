@@ -260,11 +260,11 @@ cargo pgrx test -p pg_koldstore pg15
 
 ### Checkpoint B — after Phase 3
 
-- [ ] Hot-dominant top-N: no Sort, 0 Parquet, 0 mirror, small hot fetch
-- [ ] Mixed top-N still correct when cold wins
-- [ ] Exact-PK non-regression
-- [ ] `scanning-table.md` describes progressive path
-- [ ] SPI JSON not used for ordered progressive
+- [x] Hot-dominant top-N: no Sort, 0 Parquet, 0 mirror, small hot fetch
+- [x] Mixed top-N still correct when cold wins
+- [x] Exact-PK non-regression
+- [x] `scanning-table.md` describes progressive path
+- [x] SPI JSON not used for ordered progressive
 
 ---
 

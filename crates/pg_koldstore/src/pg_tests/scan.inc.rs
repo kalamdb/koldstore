@@ -1239,6 +1239,53 @@ fn ordered_limit_does_not_drain_full_hot_heap() {
 }
 
 #[pg_test]
+fn ordered_limit_cold_wins_returns_cold_first() {
+    let suffix = unique_suffix("ordered_cold_wins");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1000, 1010) AS id"
+    ))
+    .expect("insert high-id cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 11);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 10) AS id"
+    ))
+    .expect("insert low-id hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive"),
+        "cold-wins ordered LIMIT must use ordered progressive merge: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened:")
+            && !plan.contains("Parquet Segments Opened: 0"),
+        "cold-wins ordered LIMIT must open competitive Parquet: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id DESC) FROM (\
+             SELECT id, body FROM {relation} ORDER BY id DESC LIMIT 5\
+             ) topn"
+        )),
+        "cold-1010,cold-1009,cold-1008,cold-1007,cold-1006",
+        "ordered LIMIT must emit cold winners when they outrank hot"
+    );
+}
+
+#[pg_test]
 fn unordered_limit_uses_hot_first_and_defers_cold() {
     let suffix = unique_suffix("unordered_limit");
     let schema = format!("pgtest_{suffix}");

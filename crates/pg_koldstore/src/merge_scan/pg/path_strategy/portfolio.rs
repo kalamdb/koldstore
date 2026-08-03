@@ -37,6 +37,7 @@ const PATH_PRIVATE_STRATEGY_INDEX: i32 = 0;
 const PATH_PRIVATE_SCOPE_KEY_INDEX: i32 = 1;
 const PATH_PRIVATE_SORT_ORDER_ID_INDEX: i32 = 2;
 const PATH_PRIVATE_LEADING_COLUMN_ID_INDEX: i32 = 3;
+const PATH_PRIVATE_ORDER_DESCENDING_INDEX: i32 = 4;
 
 /// Inputs for building the cold-capable path portfolio.
 #[derive(Debug, Clone)]
@@ -99,6 +100,7 @@ pub(crate) fn path_strategy_tag_from_private(private: *mut pg_sys::List) -> i32 
 pub(crate) unsafe fn serialize_path_strategy_private(
     strategy: &KoldPathStrategy,
     scope_key: &str,
+    order_descending: bool,
 ) -> *mut pg_sys::List {
     let (sort_order_id, leading_column_id) = match strategy {
         KoldPathStrategy::OrderedProgressive(spec) => {
@@ -114,10 +116,12 @@ pub(crate) unsafe fn serialize_path_strategy_private(
     let scope_node = pg_sys::makeString(scope.as_ptr() as *mut c_char);
     let sort_order = pg_sys::makeInteger(sort_order_id);
     let leading = pg_sys::makeInteger(leading_column_id);
+    let descending = pg_sys::makeInteger(i32::from(order_descending));
     let mut private = pg_sys::lappend(std::ptr::null_mut(), tag.cast::<c_void>());
     private = pg_sys::lappend(private, scope_node.cast::<c_void>());
     private = pg_sys::lappend(private, sort_order.cast::<c_void>());
-    pg_sys::lappend(private, leading.cast::<c_void>())
+    private = pg_sys::lappend(private, leading.cast::<c_void>());
+    pg_sys::lappend(private, descending.cast::<c_void>())
 }
 
 /// Reads the scope key from path private data; missing/invalid → `""`.
@@ -209,6 +213,7 @@ pub(crate) unsafe fn install_path_portfolio(
         &args.scope_key,
         args.segment_count,
         false,
+        false,
         methods,
     );
 
@@ -236,6 +241,7 @@ pub(crate) unsafe fn install_path_portfolio(
             &args.scope_key,
             args.segment_count,
             true,
+            path_leading_descending(hot_child),
             methods,
         );
     }
@@ -248,6 +254,7 @@ unsafe fn add_custom_wrapper(
     scope_key: &str,
     segment_count: usize,
     copy_pathkeys: bool,
+    order_descending: bool,
     methods: *const pg_sys::CustomPathMethods,
 ) {
     let custom_path =
@@ -274,7 +281,8 @@ unsafe fn add_custom_wrapper(
         (*custom_path).path.pathkeys = std::ptr::null_mut();
     }
     (*custom_path).custom_paths = pg_sys::lappend(std::ptr::null_mut(), hot_child.cast::<c_void>());
-    (*custom_path).custom_private = serialize_path_strategy_private(strategy, scope_key);
+    (*custom_path).custom_private =
+        serialize_path_strategy_private(strategy, scope_key, order_descending);
     (*custom_path).methods = methods;
 
     pg_sys::add_path(rel, (&raw mut (*custom_path).path).cast());
@@ -351,6 +359,35 @@ unsafe fn path_leads_with_attnum(
         }
     }
     false
+}
+
+/// True when the leading pathkey uses a greater-than btree strategy (DESC).
+unsafe fn path_leading_descending(path: *mut pg_sys::Path) -> bool {
+    if path.is_null() || (*path).pathkeys.is_null() {
+        return true;
+    }
+    if list_len((*path).pathkeys) < 1 {
+        return true;
+    }
+    let pathkey = list_nth_ptr((*path).pathkeys, 0).cast::<pg_sys::PathKey>();
+    if pathkey.is_null() {
+        return true;
+    }
+    ((*pathkey).pk_strategy as u32) == pg_sys::BTGreaterStrategyNumber
+}
+
+/// Reads ordered ASC/DESC marker from path private (`true` = DESC).
+#[must_use]
+pub(crate) unsafe fn order_descending_from_path_private(private: *mut pg_sys::List) -> bool {
+    if list_len(private) <= PATH_PRIVATE_ORDER_DESCENDING_INDEX {
+        return true;
+    }
+    let marker =
+        list_nth_ptr(private, PATH_PRIVATE_ORDER_DESCENDING_INDEX).cast::<pg_sys::Integer>();
+    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
+        return true;
+    }
+    (*marker).ival != 0
 }
 
 /// Returns all non-custom paths from a relation pathlist.

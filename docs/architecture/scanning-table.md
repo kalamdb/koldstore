@@ -160,8 +160,15 @@ row wins across hot, mirror, and cold sources, and preserves batch encounter
 order so ordered progressive paths can honor pathkeys without an external
 `Sort` when the top-N is covered by hot. `koldstore.max_merge_seen_keys` caps
 this set and fails closed when exceeded (0 disables the cap). Parent LIMIT can
-stop before older cold groups are opened. Bound-gated progressive cold (open
-Parquet only when competitive) lands in later work.
+stop before older cold groups are opened.
+
+`OrderedProgressive` loads catalog composite bounds from
+`koldstore.cold_segment_order_index` without opening Parquet. After each hot
+page it compares actual leading Sort Key encodings to the cold frontier: when
+hot strictly dominates, cold and the deferred mirror stay unread (typical
+hot-dominant `ORDER BY … LIMIT`). When cold may win or tie, remaining hot and
+competitive cold row groups are resolved and sorted by the leading Sort Key so
+mixed top-N results stay correct without SPI JSON paging.
 
 The regular hot+cold path materializes resolved rows into the base relation's
 slot layout and lets PostgreSQL evaluate compiled user quals after winner
