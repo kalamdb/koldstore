@@ -37,6 +37,7 @@ use path_strategy::{
     order_descending_from_path_private, path_strategy_tag_from_private,
     scope_key_from_path_private, sort_order_id_from_path_private, strategy_explain_label,
     PortfolioInstallArgs, STRATEGY_TAG_GENERAL_MERGE, STRATEGY_TAG_ORDERED_PROGRESSIVE,
+    STRATEGY_TAG_UNORDERED_HOT_FIRST,
 };
 use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
 use qual::{required_scan_projection, residual_filters};
@@ -466,13 +467,16 @@ unsafe extern "C-unwind" fn plan_custom_path(
     let leading_column_id = unsafe { leading_column_id_from_path_private(path_private) };
     let order_descending = unsafe { order_descending_from_path_private(path_private) };
 
-    // Ordered progressive merge reads hot winners from the native child, so the
-    // child must project a full physical row (PK + all attrs) even when the
-    // query SELECT list is a narrow projection. Final projection stays on the
-    // CustomScan targetlist via merge materialization + ExecScan.
+    // Native hot merge (ordered + unordered hot-first) needs PK and full row
+    // images from ExecProcNode even when the query SELECT list is narrow.
     let mut planned_children = custom_plans;
-    if strategy_tag == STRATEGY_TAG_ORDERED_PROGRESSIVE && !root.is_null() && !rel.is_null() {
-        planned_children = widen_ordered_hot_children(root, rel, custom_plans);
+    if matches!(
+        strategy_tag,
+        STRATEGY_TAG_ORDERED_PROGRESSIVE | STRATEGY_TAG_UNORDERED_HOT_FIRST
+    ) && !root.is_null()
+        && !rel.is_null()
+    {
+        planned_children = widen_native_hot_children(root, rel, custom_plans);
     }
 
     (*scan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
@@ -502,11 +506,11 @@ unsafe extern "C-unwind" fn plan_custom_path(
     scan.cast::<pg_sys::Plan>()
 }
 
-/// Widens each ordered-progressive hot child to a physical relation tlist.
+/// Widens each native-hot-merge child to a physical relation tlist.
 ///
 /// Native hot merge needs PK (and full row images) from `ExecProcNode`; a
 /// query-shaped projection like `SELECT body` would omit those attributes.
-unsafe fn widen_ordered_hot_children(
+unsafe fn widen_native_hot_children(
     root: *mut pg_sys::PlannerInfo,
     rel: *mut pg_sys::RelOptInfo,
     custom_plans: *mut pg_sys::List,

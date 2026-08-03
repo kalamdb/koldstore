@@ -23,8 +23,6 @@ use super::cost::{catalog_startup_bias, general_merge_total_cost};
 
 /// Private-list tag for [`KoldPathStrategy::ExactPrimaryKey`].
 pub(crate) const STRATEGY_TAG_EXACT_PRIMARY_KEY: i32 = 1;
-/// Private-list tag for [`KoldPathStrategy::ProvenHotOnly`].
-pub(crate) const STRATEGY_TAG_PROVEN_HOT_ONLY: i32 = 2;
 /// Private-list tag for [`KoldPathStrategy::UnorderedHotFirst`].
 pub(crate) const STRATEGY_TAG_UNORDERED_HOT_FIRST: i32 = 3;
 /// Private-list tag for [`KoldPathStrategy::OrderedProgressive`].
@@ -60,7 +58,6 @@ pub(crate) struct PortfolioInstallArgs {
 pub(crate) fn path_strategy_tag(strategy: &KoldPathStrategy) -> i32 {
     match strategy {
         KoldPathStrategy::ExactPrimaryKey => STRATEGY_TAG_EXACT_PRIMARY_KEY,
-        KoldPathStrategy::ProvenHotOnly => STRATEGY_TAG_PROVEN_HOT_ONLY,
         KoldPathStrategy::UnorderedHotFirst => STRATEGY_TAG_UNORDERED_HOT_FIRST,
         KoldPathStrategy::OrderedProgressive(_) => STRATEGY_TAG_ORDERED_PROGRESSIVE,
         KoldPathStrategy::GeneralMerge => STRATEGY_TAG_GENERAL_MERGE,
@@ -72,7 +69,6 @@ pub(crate) fn path_strategy_tag(strategy: &KoldPathStrategy) -> i32 {
 pub(crate) fn strategy_explain_label(tag: i32) -> &'static str {
     match tag {
         STRATEGY_TAG_EXACT_PRIMARY_KEY => "Exact Primary Key",
-        STRATEGY_TAG_PROVEN_HOT_ONLY => "Proven Hot Only",
         STRATEGY_TAG_UNORDERED_HOT_FIRST => "Unordered Hot First",
         STRATEGY_TAG_ORDERED_PROGRESSIVE => "Ordered Progressive",
         _ => "General Merge",

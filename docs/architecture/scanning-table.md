@@ -46,6 +46,9 @@ execution; it is not a request to silently read only the heap.
      those `pathkeys` copied onto the custom path so PostgreSQL can avoid an
      external `Sort` for supported `ORDER BY` / `LIMIT`
 
+Cold-proven-empty predicates keep native Index/Seq/Bitmap paths with no
+`KoldMergeScan` wrapper (plan-time early return; not a CustomPath strategy).
+
 Unsafe unwrapped heap paths and leftover `partial_pathlist` entries are
 cleared so Gather / Gather Merge cannot omit cold rows. Strategy identity and
 an empty default `scope_key` are stored in custom private data (forward-compat
@@ -98,19 +101,19 @@ Hot labels distinguish planner shape from runtime:
 - `Hot Planned Access` / `Planned Access` — cheapest native child shape
   retained from planning (for example `Index Scan`).
 - `Hot Actual Access` / `Actual Access` — what actually ran
-  (`Native PostgreSQL Child` for `hot_child` and for
-  `OrderedProgressive` / `ordered_merge_native`; `SPI JSON Keyset Scan` for
-  unordered `GeneralMerge` / `merge_stream`; SPI native labels for
-  hot-only/cold-native fallbacks).
+  (`Native PostgreSQL Child` for `hot_child`, `OrderedProgressive` /
+  `ordered_merge_native`, and `UnorderedHotFirst` / `unordered_hot_first`;
+  `SPI JSON Keyset Scan` only for unordered `GeneralMerge` / `merge_stream`;
+  SPI native labels for hot-only/cold-native fallbacks).
 - `Hot SPI Query` — first-page SPI text for `merge_stream` JSON keyset
   paging (absent when the native child ran).
 - `Strategy` — portfolio identity (`Ordered Progressive`, `General Merge`, …).
 
-`OrderedProgressive` widens the native hot child to a physical relation
-target list so merge can read PK and full row images from `ExecProcNode`
-slots under the relation-owner merge identity, then projects to the query
-target list after winner resolution. SPI JSON keyset paging remains the hot
-source only for non-ordered general merge.
+`OrderedProgressive` and `UnorderedHotFirst` widen the native hot child to a
+physical relation target list so merge can read PK and full row images from
+`ExecProcNode` slots under the relation-owner merge identity, then project to
+the query target list after winner resolution. SPI JSON keyset paging remains
+the hot source only for non-ordered general merge.
 
 The catalog node reports the published object-store manifest path as
 diagnostic metadata only. Runtime selection queries
@@ -153,14 +156,14 @@ allowed to surface:
 | delete | masked | no row |
 | no mirror row | eligible | newest cold winner may surface |
 
-Hot rows are read either from the native ordered child (`OrderedProgressive`)
-or in bounded SPI JSON keyset pages (`GeneralMerge`). Cold data is decoded one
-segment group at a time. The resolver retains exact PK identities so the newest
-row wins across hot, mirror, and cold sources, and preserves batch encounter
-order so ordered progressive paths can honor pathkeys without an external
-`Sort` when the top-N is covered by hot. `koldstore.max_merge_seen_keys` caps
-this set and fails closed when exceeded (0 disables the cap). Parent LIMIT can
-stop before older cold groups are opened.
+Hot rows are read either from the native child (`OrderedProgressive` and
+`UnorderedHotFirst`) or in bounded SPI JSON keyset pages (`GeneralMerge`).
+Cold data is decoded one segment group at a time. The resolver retains exact PK
+identities so the newest row wins across hot, mirror, and cold sources, and
+preserves batch encounter order so ordered progressive paths can honor pathkeys
+without an external `Sort` when the top-N is covered by hot.
+`koldstore.max_merge_seen_keys` caps this set and fails closed when exceeded
+(0 disables the cap). Parent LIMIT can stop before older cold groups are opened.
 
 `OrderedProgressive` loads catalog composite bounds from
 `koldstore.cold_segment_order_index` without opening Parquet. After each hot

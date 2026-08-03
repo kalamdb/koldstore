@@ -77,7 +77,6 @@ cargo test -p koldstore-merge strategy --lib
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KoldPathStrategy {
     ExactPrimaryKey,
-    ProvenHotOnly,
     UnorderedHotFirst,
     OrderedProgressive(OrderedPathSpec),
     GeneralMerge,

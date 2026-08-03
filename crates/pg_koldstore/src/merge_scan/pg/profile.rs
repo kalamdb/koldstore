@@ -662,8 +662,7 @@ fn hot_actual_access(emit_path: EmitPath) -> &'static str {
         EmitPath::HotNative => "SPI Native Tuple Scan",
         EmitPath::ColdNative => "SPI Native Point Probe",
         EmitPath::MergeStream => "SPI JSON Keyset Scan",
-        EmitPath::OrderedMergeNative => "Native PostgreSQL Child",
-        EmitPath::UnorderedHotFirst => "SPI JSON Keyset Scan",
+        EmitPath::OrderedMergeNative | EmitPath::UnorderedHotFirst => "Native PostgreSQL Child",
     }
 }
 

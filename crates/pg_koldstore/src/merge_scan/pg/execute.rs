@@ -729,23 +729,16 @@ fn prepare_unordered_hot_first_stream<P: ScanProfileSink>(
     inputs: &ScanSourceInputs<'_>,
     profiler: &mut P,
 ) -> (ScanEmitMode, EmitPath, usize) {
-    let hot = HotMergeBatchReader::open(
-        inputs.relation,
-        inputs.snapshot,
-        inputs.pk_equality,
-        inputs.pk_range,
-        inputs.image_columns,
-        inputs.relation_owner,
-    )
-    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} hot reader setup failed: {error}"));
-    let hot = HotMergeSource::SpiJson(hot);
-    if let Some(sql) = hot.first_page_sql() {
-        profiler.record_hot_spi_query(sql);
+    unsafe {
+        initialize_custom_plan_children(inputs.node, inputs.estate, inputs.eflags);
     }
+    let hot = open_native_hot_cursor(inputs).unwrap_or_else(|error| {
+        pgrx::error!("{CUSTOM_PATH_NAME} unordered hot-first native cursor failed: {error}")
+    });
     profiler.record_hot_buffer(0);
     // Defer mirror/cold until hot is exhausted under parent LIMIT.
     let stream = MergeRowStream::new_ordered_deferred_overlay(
-        hot,
+        HotMergeSource::NativeChild(hot),
         cold_stream,
         inputs.snapshot.mirror_relation.clone(),
         inputs.snapshot.primary_key_columns.clone(),
@@ -765,24 +758,9 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
     unsafe {
         initialize_custom_plan_children(inputs.node, inputs.estate, inputs.eflags);
     }
-    let child = unsafe { hot_child_planstate(inputs.node) }.unwrap_or_else(|| {
-        pgrx::error!("{CUSTOM_PATH_NAME} ordered progressive path missing native hot child")
+    let hot = open_native_hot_cursor(inputs).unwrap_or_else(|error| {
+        pgrx::error!("{CUSTOM_PATH_NAME} native hot cursor failed: {error}")
     });
-    let pk_columns = inputs
-        .snapshot
-        .primary_key_columns
-        .iter()
-        .map(|column| {
-            koldstore_common::PkColumn::new(&column.name)
-                .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} invalid PK: {error}"))
-        })
-        .collect::<Vec<_>>();
-    let catalog_columns = inputs.catalog.columns.clone();
-    let hot =
-        unsafe { NativeHotCursor::open(child, inputs.relation_owner, pk_columns, catalog_columns) }
-            .unwrap_or_else(|error| {
-                pgrx::error!("{CUSTOM_PATH_NAME} native hot cursor failed: {error}")
-            });
 
     let plan = unsafe { (*inputs.node).ss.ps.plan };
     let sort_order_id = unsafe { super::custom_private_sort_order_id(plan) };
@@ -827,6 +805,21 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
         EmitPath::OrderedMergeNative,
         0,
     )
+}
+
+fn open_native_hot_cursor(inputs: &ScanSourceInputs<'_>) -> Result<NativeHotCursor, String> {
+    let child = unsafe { hot_child_planstate(inputs.node) }.ok_or_else(|| {
+        format!("{CUSTOM_PATH_NAME} native hot path missing initialized hot child")
+    })?;
+    let pk_columns = inputs
+        .snapshot
+        .primary_key_columns
+        .iter()
+        .map(|column| koldstore_common::PkColumn::new(&column.name))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let catalog_columns = inputs.catalog.columns.clone();
+    unsafe { NativeHotCursor::open(child, inputs.relation_owner, pk_columns, catalog_columns) }
 }
 
 fn encode_leading_key(

@@ -13,8 +13,6 @@
 pub enum KoldPathStrategy {
     /// Exact full-primary-key equality lookup (`WHERE id = ?`).
     ExactPrimaryKey,
-    /// Predicates prove published cold cannot contribute; never initialize cold.
-    ProvenHotOnly,
     /// `LIMIT` without a supported order: emit visible hot first, defer cold.
     UnorderedHotFirst,
     /// Supported immutable `ORDER BY` (± `LIMIT`): bound-gated progressive merge.

@@ -54,11 +54,16 @@ are retained.
 | Strategy | Intended shape | Cold behavior |
 | --- | --- | --- |
 | `ExactPrimaryKey` | `WHERE id = ?` | Probe hot first; bounds/Bloom only after miss |
-| `ProvenHotOnly` | Predicates prove no cold match | Never initialize cold (native paths today) |
 | `UnorderedHotFirst` | `LIMIT N` without ordering | Emit visible hot first; defer cold |
 | `OrderedProgressive` | Supported immutable `ORDER BY` ± `LIMIT` | Bound-gated frontier expansion |
 | `GeneralMerge` | Unsupported order/expr/metadata | Conservative full logical merge |
 | Aggregate (later) | Safe metadata/partial aggregates | Separate upper-path work |
+
+**Not a CustomPath strategy:** when predicates or an empty manifest prove cold
+cannot contribute, the planner keeps **native** Index/Seq/Bitmap paths and
+installs no `KoldMergeScan` (locked hot-only early return). That behavior was
+sometimes labeled `ProvenHotOnly` in drafts; it is not a portfolio tag and must
+not wrap the heap in a custom scan.
 
 Each offered KoldStore path is a complete logical-table path. Unwrapped
 heap-only paths must not remain selectable after cold publication. Distinctions
@@ -231,7 +236,7 @@ Not every query avoids cold I/O.
 | Shape | Path |
 | --- | --- |
 | Exact PK | ExactPrimaryKey |
-| Cold proven empty | Native / ProvenHotOnly |
+| Cold proven empty | Native plan-time early return (no KoldMergeScan) |
 | `LIMIT` no order | UnorderedHotFirst |
 | Supported `ORDER BY` ± `LIMIT`/`OFFSET` | OrderedProgressive (parent Limit consumes) |
 | Mutable/expression order | GeneralMerge + PostgreSQL Sort |

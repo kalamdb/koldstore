@@ -482,13 +482,17 @@ fn primary_key_range_pushes_hot_candidates_into_merge_stream() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    // Cold max must sit strictly below the first DESC hot page (ids 9..2) so
+    // ordered progressive stays hot-dominant and parent LIMIT can stop after
+    // the adaptive first page. Higher cold ids (e.g. 1..12) correctly force a
+    // sorted-buffer drain — covered by ordered_limit_cold_wins_returns_cold_first.
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) \
-         SELECT id, 'cold-' || id::text FROM generate_series(1, 12) AS id"
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 1) AS id"
     ))
     .expect("insert cold candidates");
     manage_for_cold_flush(&relation, &storage);
-    assert!(flush_table_rows(&relation, true) >= 12);
+    assert!(flush_table_rows(&relation, true) >= 1);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) \
          SELECT id, 'hot-' || id::text FROM generate_series(1, 1000) AS id"
@@ -1315,6 +1319,14 @@ fn unordered_limit_uses_hot_first_and_defers_cold() {
         plan.contains("Strategy: Unordered Hot First")
             && plan.contains("Emit Path: unordered_hot_first"),
         "LIMIT without ORDER BY must use Unordered Hot First: {plan}"
+    );
+    assert!(
+        plan.contains("Actual Access: Native PostgreSQL Child"),
+        "unordered hot-first must use the native hot child, not SPI JSON: {plan}"
+    );
+    assert!(
+        !plan.contains("SPI JSON Keyset Scan") && !plan.contains("to_jsonb(proj)"),
+        "unordered hot-first must not use SPI JSON keyset paging: {plan}"
     );
     assert!(
         !plan.contains("Sort"),
