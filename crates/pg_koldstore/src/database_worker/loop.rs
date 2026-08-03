@@ -107,9 +107,10 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                         apply_backoff_ms = 0;
                         apply_retry_at = None;
                         startup_apply = false;
-                        // Observe the latest generation after the tick so commits
-                        // that arrived while we held the apply lock are not lost.
-                        wake_cursor.observe(super::wake::generation(database_oid));
+                        // This tick can only cover the generation sampled before
+                        // it began. A commit published during the tick may land
+                        // after its decode boundary and must remain pending.
+                        wake_cursor.observe(generation);
                         empty_wake_retry.reset();
                         empty_wake_retry_at = None;
                         last_watchdog = Instant::now();
@@ -130,13 +131,13 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                                     empty_wake_retry_at = Some(Instant::now() + delay);
                                 }
                                 None => {
-                                    wake_cursor.observe(super::wake::generation(database_oid));
+                                    wake_cursor.observe(generation);
                                     empty_wake_retry.reset();
                                     empty_wake_retry_at = None;
                                 }
                             }
                         } else {
-                            wake_cursor.observe(super::wake::generation(database_oid));
+                            wake_cursor.observe(generation);
                             empty_wake_retry.reset();
                             empty_wake_retry_at = None;
                         }
@@ -155,7 +156,7 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                         apply_backoff_ms = 0;
                         apply_retry_at = None;
                         startup_apply = false;
-                        wake_cursor.observe(super::wake::generation(database_oid));
+                        wake_cursor.observe(generation);
                         empty_wake_retry.reset();
                         empty_wake_retry_at = None;
                         last_watchdog = Instant::now();
