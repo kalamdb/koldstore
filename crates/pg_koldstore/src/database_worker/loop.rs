@@ -119,9 +119,12 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                         apply_backoff_ms = 0;
                         apply_retry_at = None;
                         startup_apply = false;
-                        if wake_pending && async_commit_wal_lag() {
-                            // Insert LSN is still ahead of flush: the wake's
-                            // commit may not be decodeable yet (sync_commit=off).
+                        if wake_pending {
+                            // Retry briefly: sync_commit=off can make the first
+                            // peek empty even after flush has caught up, and the
+                            // insert>flush lag check races with WALWriter.
+                            // advance_slot_on_empty=false keeps these retries
+                            // from moving confirmed_flush through unrelated WAL.
                             match empty_wake_retry.after_empty(worker_started.elapsed()) {
                                 Some(delay) => {
                                     empty_wake_retry_at = Some(Instant::now() + delay);
@@ -254,14 +257,6 @@ fn millis_until(deadline: Instant) -> u64 {
     )
     .unwrap_or(u64::MAX)
     .max(1)
-}
-
-/// Returns true when WAL has been inserted but not yet flushed far enough to
-/// decode — the `synchronous_commit=off` gap empty-wake retries must bridge.
-fn async_commit_wal_lag() -> bool {
-    let insert = unsafe { pgrx::pg_sys::GetXLogInsertRecPtr() };
-    let flush = unsafe { pgrx::pg_sys::GetFlushRecPtr(std::ptr::null_mut()) };
-    insert > flush
 }
 
 struct WakeRegistration {

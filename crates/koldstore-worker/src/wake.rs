@@ -50,11 +50,10 @@ impl TransactionDirty {
 
 /// Bounded backoff for a commit wake whose WAL is not decodeable yet.
 ///
-/// This covers asynchronous PostgreSQL commits (`insert LSN > flush LSN`)
-/// without restoring a permanent polling loop. Callers should only invoke
-/// [`Self::after_empty`] while that lag remains; once flush has caught up and
-/// the peek is still empty, the wake should be observed instead. Once the
-/// bounded window expires, the caller can acknowledge a false-positive wake
+/// This covers asynchronous PostgreSQL commits without restoring a permanent
+/// polling loop. Callers should keep `confirmed_flush` unchanged across these
+/// retries so unrelated WAL cannot advance the slot before the watchdog. Once
+/// the bounded window expires, the caller can acknowledge a false-positive wake
 /// and rely on the low-frequency correctness watchdog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyWakeRetry {
