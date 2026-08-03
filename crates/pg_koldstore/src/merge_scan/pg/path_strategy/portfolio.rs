@@ -411,14 +411,6 @@ pub(crate) unsafe fn collect_native_paths(pathlist: *mut pg_sys::List) -> Vec<*m
     out
 }
 
-/// Returns the cheapest non-custom path from a relation pathlist.
-#[allow(dead_code)] // Handy for tests / future ExactPrimaryKey hot-child picks.
-pub(crate) unsafe fn find_cheapest_path(pathlist: *mut pg_sys::List) -> Option<*mut pg_sys::Path> {
-    collect_native_paths(pathlist)
-        .into_iter()
-        .min_by(|left, right| unsafe { (**left).total_cost.total_cmp(&(**right).total_cost) })
-}
-
 unsafe fn list_len(list: *mut pg_sys::List) -> i32 {
     if list.is_null() {
         0

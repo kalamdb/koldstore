@@ -82,8 +82,6 @@ pub(super) struct MergeRowStream {
     hot_phase_done: bool,
     /// Rescan reloads hot payloads for emit without re-inserting identities.
     replay_hot: bool,
-    /// Ordered progressive: never opened a Parquet batch this scan.
-    cold_parquet_touched: bool,
     /// Bound-gated ordered progressive control; `None` for unordered merge.
     ordered: Option<OrderedProgressiveCtrl>,
 }
@@ -175,7 +173,6 @@ impl MergeRowStream {
             cold_winners: VecDeque::new(),
             hot_phase_done: false,
             replay_hot: false,
-            cold_parquet_touched: false,
             ordered,
         }
     }
@@ -226,7 +223,6 @@ impl MergeRowStream {
                     }
                 }
                 if !self.replay_hot {
-                    self.ensure_overlay(execution.as_deref_mut())?;
                     self.resolver
                         .mask_older_pks(self.overlay.masked_pks.iter().cloned())
                         .map_err(seen_key_limit_error)?;
@@ -244,12 +240,10 @@ impl MergeRowStream {
                     .map(Some);
             }
 
-            self.ensure_overlay(execution.as_deref_mut())?;
             let collect_profile = execution.is_some();
             let Some((cold_rows, segment_profiles)) = self.cold.next_batch(collect_profile)? else {
                 return Ok(None);
             };
-            self.cold_parquet_touched = true;
             let decoded_rows = cold_rows.len();
             if let Some(execution) = execution.as_deref_mut() {
                 cold_profile.segments_opened += segment_profiles.len();
@@ -349,7 +343,6 @@ impl MergeRowStream {
             let Some((cold_rows, segment_profiles)) = self.cold.next_batch(collect_profile)? else {
                 break;
             };
-            self.cold_parquet_touched = true;
             let decoded_rows = cold_rows.len();
             if let Some(execution) = execution.as_deref_mut() {
                 cold_profile.segments_opened += segment_profiles.len();
@@ -396,18 +389,6 @@ impl MergeRowStream {
             ctrl.mode = OrderedEmitMode::SortedBuffer(VecDeque::from(buffered));
         }
         self.cold_winners.clear();
-        Ok(())
-    }
-
-    fn ensure_overlay(
-        &mut self,
-        execution: Option<&mut ScanExecutionProfile>,
-    ) -> Result<(), String> {
-        // Deferred overlays probe per cold batch; only eager-load when not deferred.
-        if self.deferred_overlay.is_some() {
-            return Ok(());
-        }
-        let _ = execution;
         Ok(())
     }
 
@@ -487,19 +468,12 @@ impl MergeRowStream {
         self.hot_winners.clear();
         self.cold_winners.clear();
         self.hot_phase_done = false;
-        self.cold_parquet_touched = false;
         if let Some(ctrl) = self.ordered.as_mut() {
             ctrl.mode = OrderedEmitMode::Streaming;
         }
         // Checkpoint already holds first-pass hot + tombstone identities, so
         // rescan reloads hot payloads for emit only.
         self.replay_hot = true;
-    }
-
-    #[allow(dead_code)] // Reserved for EXPLAIN / progressive expand follow-ups.
-    #[must_use]
-    pub(super) fn cold_parquet_touched(&self) -> bool {
-        self.cold_parquet_touched
     }
 }
 
@@ -811,13 +785,14 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
             });
 
     let plan = unsafe { (*inputs.node).ss.ps.plan };
-    let sort_order_id = unsafe { super::custom_private_leading_column_id(plan) };
+    let sort_order_id = unsafe { super::custom_private_sort_order_id(plan) };
+    let leading_column_id = unsafe { super::custom_private_leading_column_id(plan) };
+    let scope_key = unsafe { super::custom_private_scope_key(plan) };
     let direction = if unsafe { super::custom_private_order_descending(plan) } {
         OrderDirection::Desc
     } else {
         OrderDirection::Asc
     };
-    let leading_column_id = sort_order_id;
     let (leading_column, leading_type_oid) = inputs
         .catalog
         .columns
@@ -825,13 +800,11 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
         .find(|column| column.column_id.get() == leading_column_id)
         .map(|column| (column.name.clone(), column.pg_type.type_oid()))
         .unwrap_or_else(|| ("id".to_string(), u32::from(pg_sys::INT8OID)));
-    let cold_bound = cold_frontier::load_cold_best_bound(
-        inputs.table_oid,
-        "",
-        i32::from(sort_order_id),
-        direction,
-    )
-    .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} cold frontier failed: {error}"));
+    let cold_bound =
+        cold_frontier::load_cold_best_bound(inputs.table_oid, &scope_key, sort_order_id, direction)
+            .unwrap_or_else(|error| {
+                pgrx::error!("{CUSTOM_PATH_NAME} cold frontier failed: {error}")
+            });
     profiler.record_hot_buffer(0);
     let stream = MergeRowStream::new_ordered_progressive(
         HotMergeSource::NativeChild(hot),
@@ -844,8 +817,8 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
             leading_column,
             leading_type_oid,
             table_oid: inputs.table_oid,
-            scope_key: String::new(),
-            sort_order_id: i32::from(sort_order_id),
+            scope_key,
+            sort_order_id,
             mode: OrderedEmitMode::Streaming,
         },
     );

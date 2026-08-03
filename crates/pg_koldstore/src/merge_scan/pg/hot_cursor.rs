@@ -56,11 +56,6 @@ impl HotMergeSource {
             Self::NativeChild(_) => None,
         }
     }
-
-    #[allow(dead_code)] // Useful for EXPLAIN / adaptive paging follow-ups.
-    pub(super) fn is_native_child(&self) -> bool {
-        matches!(self, Self::NativeChild(_))
-    }
 }
 
 /// Pulls ordered hot candidates from a live child `PlanState`.

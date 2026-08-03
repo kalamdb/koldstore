@@ -47,7 +47,6 @@ const PRIVATE_EXACT_PK_INDEX: i32 = 0;
 const PRIVATE_RUNTIME_DELEGATE_SAFE_INDEX: i32 = 1;
 const PRIVATE_STRATEGY_TAG_INDEX: i32 = 2;
 const PRIVATE_SCOPE_KEY_INDEX: i32 = 3;
-#[allow(dead_code)]
 const PRIVATE_SORT_ORDER_ID_INDEX: i32 = 4;
 const PRIVATE_LEADING_COLUMN_ID_INDEX: i32 = 5;
 const PRIVATE_ORDER_DESCENDING_INDEX: i32 = 6;
@@ -1383,8 +1382,7 @@ pub(super) unsafe fn custom_private_strategy_tag(plan: *mut pg_sys::Plan) -> i32
 }
 
 /// Returns the single-scope key from scan private data (default: `""`).
-#[allow(dead_code)] // Used by Task 1.4+ frontier / EXPLAIN.
-unsafe fn custom_private_scope_key(plan: *mut pg_sys::Plan) -> String {
+pub(super) unsafe fn custom_private_scope_key(plan: *mut pg_sys::Plan) -> String {
     if plan.is_null() {
         return String::new();
     }
@@ -1403,6 +1401,23 @@ unsafe fn custom_private_scope_key(plan: *mut pg_sys::Plan) -> String {
     std::ffi::CStr::from_ptr((*string_node).sval)
         .to_string_lossy()
         .into_owned()
+}
+
+/// Returns the catalog sort-order id from scan private data (0 if absent).
+pub(super) unsafe fn custom_private_sort_order_id(plan: *mut pg_sys::Plan) -> i32 {
+    if plan.is_null() {
+        return 0;
+    }
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
+    let private = (*custom_scan).custom_private;
+    if list_len(private) <= PRIVATE_SORT_ORDER_ID_INDEX {
+        return 0;
+    }
+    let marker = list_nth_ptr(private, PRIVATE_SORT_ORDER_ID_INDEX).cast::<pg_sys::Integer>();
+    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
+        return 0;
+    }
+    (*marker).ival
 }
 
 unsafe fn custom_private_leading_column_id(plan: *mut pg_sys::Plan) -> i16 {
