@@ -4,6 +4,7 @@
 //! resolution helpers. PostgreSQL CustomScan FFI stays in `pg_koldstore`.
 
 pub mod exec;
+pub mod ordered_frontier;
 pub mod path;
 pub mod plan;
 pub mod strategy;
@@ -28,6 +29,7 @@ pub use plan::{
     ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, MirrorOverlayStrategy, SegmentHint,
     SegmentPrunePredicate, SegmentStatsHint,
 };
+pub use ordered_frontier::{compare_hot_to_cold_bound, FrontierDecision, OrderDirection};
 pub use strategy::{
     classify_path_strategy, KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
 };
