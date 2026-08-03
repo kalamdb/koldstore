@@ -480,6 +480,13 @@ pub(super) fn explain_visual_pipeline(
         None,
         profile.segments_opened as i64,
     );
+    if profile.segments_opened == 0 && analyze {
+        explain_text(
+            es,
+            "Cold Skip Reason",
+            "hot satisfied parent Limit without cold expansion",
+        );
+    }
     // Catalog lookup determines which Parquet segments open — nest Parquet
     // under the catalog node so visualizers show the real dependency.
     explain_open_group(es, "Plans", Some("Plans"), false);
@@ -734,6 +741,13 @@ fn explain_cold_scan(
             None,
             profile.segments_opened as i64,
         );
+        if profile.segments_opened == 0 {
+            explain_text(
+                es,
+                "Cold Skip Reason",
+                "hot satisfied parent Limit without cold expansion",
+            );
+        }
     } else {
         explain_integer(
             es,

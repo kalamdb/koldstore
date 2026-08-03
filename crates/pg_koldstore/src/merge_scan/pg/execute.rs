@@ -12,6 +12,7 @@ use koldstore_migrate::{order::CatalogColumn, ExistingTableCatalog};
 use pgrx::pg_sys;
 
 use super::cold::{prepare_cold_row_stream, ColdRowStream};
+use super::cold_frontier;
 use super::emit::materialize_scan_row_from_image;
 use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader, HotRangeFilter};
 use super::hot_cursor::{HotMergeSource, NativeHotCursor};
@@ -67,6 +68,8 @@ pub(super) struct MergeRowStream {
     hot: HotMergeSource,
     cold: ColdRowStream,
     overlay: MirrorOverlay,
+    /// When set, tombstones load on first cold batch (ordered progressive).
+    deferred_overlay: Option<DeferredOverlayLoad>,
     resolver: NewestFirstWinnerResolver,
     hot_winners: VecDeque<ResolvedRow>,
     cold_winners: VecDeque<ResolvedRow>,
@@ -75,20 +78,56 @@ pub(super) struct MergeRowStream {
     hot_phase_done: bool,
     /// Rescan reloads hot payloads for emit without re-inserting identities.
     replay_hot: bool,
+    /// Ordered progressive: never opened a Parquet batch this scan.
+    cold_parquet_touched: bool,
+}
+
+#[derive(Debug)]
+struct DeferredOverlayLoad {
+    mirror_relation: koldstore_common::TableName,
+    primary_key_columns: Vec<koldstore_common::ColumnRef>,
 }
 
 impl MergeRowStream {
     fn new(hot: HotMergeSource, cold: ColdRowStream, overlay: MirrorOverlay) -> Self {
+        Self::new_inner(hot, cold, overlay, None)
+    }
+
+    fn new_ordered_deferred_overlay(
+        hot: HotMergeSource,
+        cold: ColdRowStream,
+        mirror_relation: koldstore_common::TableName,
+        primary_key_columns: Vec<koldstore_common::ColumnRef>,
+    ) -> Self {
+        Self::new_inner(
+            hot,
+            cold,
+            MirrorOverlay::default(),
+            Some(DeferredOverlayLoad {
+                mirror_relation,
+                primary_key_columns,
+            }),
+        )
+    }
+
+    fn new_inner(
+        hot: HotMergeSource,
+        cold: ColdRowStream,
+        overlay: MirrorOverlay,
+        deferred_overlay: Option<DeferredOverlayLoad>,
+    ) -> Self {
         let max_seen = crate::guc::max_merge_seen_keys() as usize;
         Self {
             hot,
             cold,
             overlay,
+            deferred_overlay,
             resolver: NewestFirstWinnerResolver::default().with_max_seen_keys(Some(max_seen)),
             hot_winners: VecDeque::new(),
             cold_winners: VecDeque::new(),
             hot_phase_done: false,
             replay_hot: false,
+            cold_parquet_touched: false,
         }
     }
 
@@ -113,6 +152,7 @@ impl MergeRowStream {
                 }
                 // Hot exhausted for this pass.
                 if !self.replay_hot {
+                    self.ensure_overlay(execution.as_deref_mut())?;
                     self.resolver
                         .mask_older_pks(self.overlay.masked_pks.iter().cloned())
                         .map_err(seen_key_limit_error)?;
@@ -130,10 +170,12 @@ impl MergeRowStream {
                     .map(Some);
             }
 
+            self.ensure_overlay(execution.as_deref_mut())?;
             let collect_profile = execution.is_some();
             let Some((cold_rows, segment_profiles)) = self.cold.next_batch(collect_profile)? else {
                 return Ok(None);
             };
+            self.cold_parquet_touched = true;
             let decoded_rows = cold_rows.len();
             if let Some(execution) = execution.as_deref_mut() {
                 cold_profile.segments_opened += segment_profiles.len();
@@ -166,6 +208,27 @@ impl MergeRowStream {
             }
             self.cold_winners = VecDeque::from(winners);
         }
+    }
+
+    fn ensure_overlay(
+        &mut self,
+        execution: Option<&mut ScanExecutionProfile>,
+    ) -> Result<(), String> {
+        let Some(deferred) = self.deferred_overlay.take() else {
+            return Ok(());
+        };
+        let started = execution.as_ref().map(|_| Instant::now());
+        let overlay = load_mirror_tombstone_overlay(
+            &deferred.mirror_relation,
+            &deferred.primary_key_columns,
+            &[],
+        )?;
+        if let Some(execution) = execution {
+            execution.mirror_rows = overlay.tombstones;
+            accumulate_ms(&mut execution.overlay_ms, started);
+        }
+        self.overlay = overlay;
+        Ok(())
     }
 
     fn load_next_hot_page(
@@ -209,9 +272,16 @@ impl MergeRowStream {
         self.hot_winners.clear();
         self.cold_winners.clear();
         self.hot_phase_done = false;
+        self.cold_parquet_touched = false;
         // Checkpoint already holds first-pass hot + tombstone identities, so
         // rescan reloads hot payloads for emit only.
         self.replay_hot = true;
+    }
+
+    #[allow(dead_code)] // Reserved for EXPLAIN / progressive expand follow-ups.
+    #[must_use]
+    pub(super) fn cold_parquet_touched(&self) -> bool {
+        self.cold_parquet_touched
     }
 }
 
@@ -485,9 +555,22 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
     }
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} native hot cursor failed: {error}"));
 
-    let overlay = load_overlay(inputs, profiler);
+    // Defer mirror until a cold Parquet batch is required (hot-dominant LIMIT).
+    let plan = unsafe { (*inputs.node).ss.ps.plan };
+    let sort_order_id = unsafe { super::custom_private_leading_column_id(plan) };
+    let _frontier = cold_frontier::load_cold_best_bound(
+        inputs.table_oid,
+        "",
+        i32::from(sort_order_id),
+        koldstore_merge::scan::OrderDirection::Desc,
+    );
     profiler.record_hot_buffer(0);
-    let stream = MergeRowStream::new(HotMergeSource::NativeChild(hot), cold_stream, overlay);
+    let stream = MergeRowStream::new_ordered_deferred_overlay(
+        HotMergeSource::NativeChild(hot),
+        cold_stream,
+        inputs.snapshot.mirror_relation.clone(),
+        inputs.snapshot.primary_key_columns.clone(),
+    );
     (
         ScanEmitMode::stream(stream, inputs.projection.clone()),
         EmitPath::OrderedMergeNative,

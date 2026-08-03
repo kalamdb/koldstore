@@ -17,6 +17,7 @@ use koldstore_merge::scan::CUSTOM_PATH_NAME;
 use pgrx::pg_sys;
 
 mod cold;
+mod cold_frontier;
 mod emit;
 mod execute;
 mod hot;
@@ -1126,6 +1127,11 @@ unsafe extern "C-unwind" fn explain_custom_scan(
                 &format!("column_id {leading} (with primary-key tie-break)"),
             );
         }
+        profile::explain_text(
+            es,
+            "Cold Frontier Source",
+            "koldstore.cold_segment_order_index",
+        );
     }
 
     let execution_meta = if (*es).analyze {

@@ -5,6 +5,7 @@
 
 pub mod exec;
 pub mod ordered_frontier;
+pub mod ordered_merge;
 pub mod path;
 pub mod plan;
 pub mod strategy;
@@ -30,6 +31,7 @@ pub use plan::{
     SegmentPrunePredicate, SegmentStatsHint,
 };
 pub use ordered_frontier::{compare_hot_to_cold_bound, FrontierDecision, OrderDirection};
+pub use ordered_merge::hot_keys_dominate_bound;
 pub use strategy::{
     classify_path_strategy, KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
 };

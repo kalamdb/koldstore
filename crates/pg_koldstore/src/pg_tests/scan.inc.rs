@@ -1214,6 +1214,19 @@ fn ordered_limit_does_not_drain_full_hot_heap() {
         plan.contains("Hot Rows: 8") && plan.contains("Peak Hot Batch Rows: 8"),
         "parent LIMIT must stop after the first adaptive hot page, not drain 500 hot rows: {plan}"
     );
+    assert!(
+        plan.contains("Parquet Segments Opened: 0"),
+        "hot-dominant ordered LIMIT must not open Parquet: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Skip Reason:")
+            || plan.contains("hot satisfied parent Limit without cold expansion"),
+        "EXPLAIN should report why cold was skipped: {plan}"
+    );
+    assert!(
+        !plan.contains("Mirror Tombstones:") || plan.contains("Mirror Tombstones: 0") || plan.contains("Rows Scanned: 0"),
+        "deferred mirror must stay unread when cold never expands: {plan}"
+    );
     assert_eq!(
         spi_get_text(&format!(
             "SELECT string_agg(body, ',' ORDER BY id DESC) FROM (\
