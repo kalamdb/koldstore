@@ -31,8 +31,9 @@ mod tuple;
 
 use cold::{cold_side_proven_empty, planned_cold_read_profile};
 use path_strategy::{
-    find_cheapest_path, install_general_merge_path, path_strategy_tag_from_private,
-    scope_key_from_path_private, STRATEGY_TAG_GENERAL_MERGE,
+    install_path_portfolio, leading_column_id_from_path_private, path_strategy_tag_from_private,
+    scope_key_from_path_private, sort_order_id_from_path_private, strategy_explain_label,
+    PortfolioInstallArgs, STRATEGY_TAG_GENERAL_MERGE, STRATEGY_TAG_ORDERED_PROGRESSIVE,
 };
 use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
 use qual::{required_scan_projection, residual_filters};
@@ -43,6 +44,9 @@ const PRIVATE_EXACT_PK_INDEX: i32 = 0;
 const PRIVATE_RUNTIME_DELEGATE_SAFE_INDEX: i32 = 1;
 const PRIVATE_STRATEGY_TAG_INDEX: i32 = 2;
 const PRIVATE_SCOPE_KEY_INDEX: i32 = 3;
+#[allow(dead_code)]
+const PRIVATE_SORT_ORDER_ID_INDEX: i32 = 4;
+const PRIVATE_LEADING_COLUMN_ID_INDEX: i32 = 5;
 
 thread_local! {
     static SCAN_STATES: RefCell<HashMap<usize, ScanExecutionState>> = RefCell::new(HashMap::new());
@@ -338,10 +342,6 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
         return;
     }
 
-    let Some(hot_child) = find_cheapest_path((*rel).pathlist) else {
-        return;
-    };
-
     let known_manifest = with_hook_disabled(|| {
         match crate::catalog::cache::cached_manifest_planner_hint(table_oid) {
             Ok(Some(hint)) => Some(hint),
@@ -358,11 +358,15 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
         return;
     }
 
+    let snapshot = with_hook_disabled(|| {
+        crate::catalog::cache::managed_table_snapshot(table_oid)
+            .ok()
+            .flatten()
+    });
+
     if let Some((_, generation)) = known_manifest {
         let cold_side_empty = with_hook_disabled(|| {
-            let Some(snapshot) = crate::catalog::cache::managed_table_snapshot(table_oid)
-                .map_err(|error| error.to_string())?
-            else {
+            let Some(snapshot) = snapshot.as_ref() else {
                 return Ok(false);
             };
             let catalog = crate::catalog::cache::cached_migration_catalog(table_oid)?;
@@ -371,7 +375,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
                 cold_side_proven_empty(
                     table_oid,
                     rti,
-                    &snapshot,
+                    snapshot,
                     &catalog,
                     actual_clauses,
                     generation,
@@ -386,12 +390,33 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     }
 
     let segment_count = known_manifest.map_or(0, |(segment_count, _)| segment_count);
-    // Strategy selection and CustomPath construction live in `path_strategy`
-    // (single GeneralMerge today; ordered portfolio in Task 1.4).
-    install_general_merge_path(
+    let primary_key_attnums = snapshot
+        .as_ref()
+        .map(|snap| {
+            snap.primary_key_columns
+                .iter()
+                .map(|column| column.column_id.get())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let segment_order_attnum = snapshot
+        .as_ref()
+        .and_then(|snap| snap.segment_order_column_id.map(|id| id.get()));
+    let actual_clauses = pg_sys::extract_actual_clauses((*rel).baserestrictinfo, false);
+    let exact_full_primary_key_equality =
+        qual::quals_cover_primary_key(rti, actual_clauses, &primary_key_attnums);
+
+    // Strategy selection and CustomPath portfolio live in `path_strategy`.
+    install_path_portfolio(
         rel,
-        hot_child,
-        segment_count,
+        &PortfolioInstallArgs {
+            scanrelid: rti,
+            primary_key_attnums,
+            segment_order_attnum,
+            exact_full_primary_key_equality,
+            segment_count,
+            scope_key: String::new(),
+        },
         &raw const PATH_METHODS,
     );
 }
@@ -445,11 +470,15 @@ unsafe extern "C-unwind" fn plan_custom_path(
     let path_private = (*best_path).custom_private;
     let strategy_tag = path_strategy_tag_from_private(path_private);
     let scope_key = unsafe { scope_key_from_path_private(path_private) };
+    let sort_order_id = unsafe { sort_order_id_from_path_private(path_private) };
+    let leading_column_id = unsafe { leading_column_id_from_path_private(path_private) };
     (*scan).custom_private = serialize_custom_private(
         exact_pk_lookup,
         runtime_delegate_safe,
         strategy_tag,
         &scope_key,
+        sort_order_id,
+        leading_column_id,
     );
     (*scan).custom_scan_tlist = std::ptr::null_mut();
     (*scan).custom_relids = std::ptr::null_mut();
@@ -1039,6 +1068,20 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         return;
     }
 
+    let plan = (*node).ss.ps.plan;
+    let strategy_tag = custom_private_strategy_tag(plan);
+    profile::explain_text(es, "Strategy", strategy_explain_label(strategy_tag));
+    if strategy_tag == STRATEGY_TAG_ORDERED_PROGRESSIVE {
+        let leading = custom_private_leading_column_id(plan);
+        if leading > 0 {
+            profile::explain_text(
+                es,
+                "Output Order",
+                &format!("column_id {leading} (with primary-key tie-break)"),
+            );
+        }
+    }
+
     let execution_meta = if (*es).analyze {
         let active = SCAN_STATES.with(|states| {
             states.borrow().get(&(node as usize)).map(|scan| {
@@ -1235,13 +1278,15 @@ unsafe fn hot_child_explain_label(node: *mut pg_sys::CustomScanState) -> String 
 
 /// Encodes executor-critical flags plus strategy identity as native nodes.
 ///
-/// Layout: `[exact_pk, runtime_delegate_safe, strategy_tag, scope_key]`.
-/// Older plans without strategy entries remain readable (defaults to general merge).
+/// Layout: `[exact_pk, runtime_delegate_safe, strategy_tag, scope_key,
+/// sort_order_id, leading_column_id]`.
 unsafe fn serialize_custom_private(
     exact_pk_lookup: bool,
     runtime_delegate_safe: bool,
     strategy_tag: i32,
     scope_key: &str,
+    sort_order_id: i32,
+    leading_column_id: i16,
 ) -> *mut pg_sys::List {
     let exact_pk = pg_sys::makeInteger(i32::from(exact_pk_lookup));
     let runtime_delegate = pg_sys::makeInteger(i32::from(runtime_delegate_safe));
@@ -1251,10 +1296,14 @@ unsafe fn serialize_custom_private(
         Err(_) => std::ffi::CString::new("").expect("empty scope is valid"),
     };
     let scope_node = pg_sys::makeString(scope.as_ptr() as *mut c_char);
+    let sort_order = pg_sys::makeInteger(sort_order_id);
+    let leading = pg_sys::makeInteger(i32::from(leading_column_id));
     let mut private = pg_sys::lappend(std::ptr::null_mut(), exact_pk.cast::<c_void>());
     private = pg_sys::lappend(private, runtime_delegate.cast::<c_void>());
     private = pg_sys::lappend(private, strategy.cast::<c_void>());
-    pg_sys::lappend(private, scope_node.cast::<c_void>())
+    private = pg_sys::lappend(private, scope_node.cast::<c_void>());
+    private = pg_sys::lappend(private, sort_order.cast::<c_void>());
+    pg_sys::lappend(private, leading.cast::<c_void>())
 }
 
 /// Returns the path strategy tag from scan private data (default: general merge).
@@ -1296,6 +1345,23 @@ unsafe fn custom_private_scope_key(plan: *mut pg_sys::Plan) -> String {
     std::ffi::CStr::from_ptr((*string_node).sval)
         .to_string_lossy()
         .into_owned()
+}
+
+unsafe fn custom_private_leading_column_id(plan: *mut pg_sys::Plan) -> i16 {
+    if plan.is_null() {
+        return 0;
+    }
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
+    let private = (*custom_scan).custom_private;
+    if list_len(private) <= PRIVATE_LEADING_COLUMN_ID_INDEX {
+        return 0;
+    }
+    let marker =
+        list_nth_ptr(private, PRIVATE_LEADING_COLUMN_ID_INDEX).cast::<pg_sys::Integer>();
+    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
+        return 0;
+    }
+    (*marker).ival as i16
 }
 
 /// Reads the executor's exact-PK marker without allocation or JSON parsing.

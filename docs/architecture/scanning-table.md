@@ -38,8 +38,18 @@ execution; it is not a request to silently read only the heap.
    native paths: the heap is complete.
 3. Do constant predicates and complete aggregate Sort Key bounds prove no cold
    segment can match? If so, retain native paths.
-4. Otherwise install KoldMergeScan with the cheapest native path as its hot
-   child.
+4. Otherwise install a **portfolio** of `KoldMergeScan` paths via `add_path`:
+   - a non-ordering fallback around the cheapest native hot child
+     (`GeneralMerge`, `ExactPrimaryKey`, or `UnorderedHotFirst`)
+   - an `OrderedProgressive` wrapper for each native path whose leading
+     pathkeys match the primary key or configured segment-order column, with
+     those `pathkeys` copied onto the custom path so PostgreSQL can avoid an
+     external `Sort` for supported `ORDER BY` / `LIMIT`
+
+Unsafe unwrapped heap paths and leftover `partial_pathlist` entries are
+cleared so Gather / Gather Merge cannot omit cold rows. Strategy identity and
+an empty default `scope_key` are stored in custom private data (forward-compat
+for single-scope partitions).
 
 The planner stores both present and absent managed-table lookups in a bounded
 backend cache. For a managed table it reads only compact catalog hints:

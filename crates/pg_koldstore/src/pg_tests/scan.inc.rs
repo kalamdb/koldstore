@@ -1107,3 +1107,62 @@ fn merge_scan_fails_closed_when_seen_key_limit_is_exceeded() {
     .expect("seen-key limit must fail closed with a clear error");
     Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
 }
+
+#[pg_test]
+fn ordered_pk_limit_uses_kold_merge_scan_without_external_sort() {
+    let suffix = unique_suffix("ordered_pk_pathkeys");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES
+         (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e'), (6, 'f')"
+    ))
+    .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+    // Keep a few hot rows newer than the flush cutoff so the query is mixed.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (100, 'hot-100'), (101, 'hot-101')"
+    ))
+    .expect("insert hot");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) \
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("KoldMergeScan") || plan.contains("Custom Scan"),
+        "cold-capable ordered limit must use KoldMergeScan: {plan}"
+    );
+    assert!(
+        plan.contains("Strategy") && plan.contains("Ordered Progressive"),
+        "ordered portfolio path should advertise Ordered Progressive strategy: {plan}"
+    );
+    assert!(
+        !plan.contains("Sort"),
+        "ordered KoldMergeScan pathkeys should avoid an external Sort: {plan}"
+    );
+
+    // Locked empty-cold native plan still applies when no cold is published.
+    let native_schema = format!("pgtest_{suffix}_native");
+    let native_relation = format!("{native_schema}.{table}");
+    create_messages_table(&native_schema, table);
+    manage_shared(&native_relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {native_relation} (id, body) VALUES (1, 'only-hot')"
+    ))
+    .expect("insert native");
+    let native_plan = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) SELECT body FROM {native_relation} WHERE id = 1"
+    ));
+    assert!(
+        !native_plan.contains("KoldMergeScan") && !native_plan.contains("Custom Scan"),
+        "empty cold must keep native plans: {native_plan}"
+    );
+}
+

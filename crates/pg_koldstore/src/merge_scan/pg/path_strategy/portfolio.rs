@@ -1,15 +1,23 @@
 //! Installs KoldMergeScan `CustomPath` nodes onto a `RelOptInfo`.
 //!
-//! Task 1.3 behavior: still emits a single [`KoldPathStrategy::GeneralMerge`]
-//! wrapper around the cheapest hot child. Multi-path ordered portfolio lands
-//! in Task 1.4. `scope_key` is plumbed as `""` for forward compatibility.
+//! Owns strategy selection and `add_path` portfolio installation. Locked
+//! plan-time early returns (empty manifest, `cold_side_proven_empty`) stay in
+//! `set_rel_pathlist` before this module runs.
+//!
+//! `scope_key` is plumbed as `""` for forward compatibility (one query → one
+//! scope later). Ordered paths copy the hot child's `pathkeys` so PostgreSQL
+//! can avoid an external `Sort` when it picks them; progressive ordered emit
+//! lands in later tasks.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use std::ffi::CString;
 use std::os::raw::{c_char, c_void};
 
-use koldstore_merge::scan::KoldPathStrategy;
+use koldstore_merge::scan::{
+    KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
+    classify_path_strategy,
+};
 use pgrx::pg_sys;
 
 use super::cost::{catalog_startup_bias, general_merge_total_cost};
@@ -27,10 +35,27 @@ pub(crate) const STRATEGY_TAG_GENERAL_MERGE: i32 = 5;
 
 const PATH_PRIVATE_STRATEGY_INDEX: i32 = 0;
 const PATH_PRIVATE_SCOPE_KEY_INDEX: i32 = 1;
+const PATH_PRIVATE_SORT_ORDER_ID_INDEX: i32 = 2;
+const PATH_PRIVATE_LEADING_COLUMN_ID_INDEX: i32 = 3;
+
+/// Inputs for building the cold-capable path portfolio.
+#[derive(Debug, Clone)]
+pub(crate) struct PortfolioInstallArgs {
+    /// Scan RTE index (`varno`) for pathkey Var matching.
+    pub scanrelid: pg_sys::Index,
+    /// Primary-key attnums (column ids).
+    pub primary_key_attnums: Vec<i16>,
+    /// Configured immutable segment-order column, if any.
+    pub segment_order_attnum: Option<i16>,
+    /// True when baserestrict quals are exact equality on every PK column.
+    pub exact_full_primary_key_equality: bool,
+    /// Published cold segment count for costing.
+    pub segment_count: usize,
+    /// Single-scope key; default `""`.
+    pub scope_key: String,
+}
 
 /// Maps a strategy discriminant to the integer stored in `custom_private`.
-///
-/// Ordered specs are not fully serialized yet; Task 1.4 extends private data.
 #[must_use]
 pub(crate) fn path_strategy_tag(strategy: &KoldPathStrategy) -> i32 {
     match strategy {
@@ -42,7 +67,19 @@ pub(crate) fn path_strategy_tag(strategy: &KoldPathStrategy) -> i32 {
     }
 }
 
-/// Reconstructs a coarse strategy from path private data (ordered details TBD).
+/// Human-readable strategy label for EXPLAIN.
+#[must_use]
+pub(crate) fn strategy_explain_label(tag: i32) -> &'static str {
+    match tag {
+        STRATEGY_TAG_EXACT_PRIMARY_KEY => "Exact Primary Key",
+        STRATEGY_TAG_PROVEN_HOT_ONLY => "Proven Hot Only",
+        STRATEGY_TAG_UNORDERED_HOT_FIRST => "Unordered Hot First",
+        STRATEGY_TAG_ORDERED_PROGRESSIVE => "Ordered Progressive",
+        _ => "General Merge",
+    }
+}
+
+/// Reconstructs a coarse strategy tag from path private data.
 #[must_use]
 pub(crate) fn path_strategy_tag_from_private(private: *mut pg_sys::List) -> i32 {
     unsafe {
@@ -58,22 +95,29 @@ pub(crate) fn path_strategy_tag_from_private(private: *mut pg_sys::List) -> i32 
     }
 }
 
-/// Encodes strategy identity and single-scope key for a CustomPath.
-///
-/// `scope_key` defaults to `""` today; one query binds one scope later.
+/// Encodes strategy identity, scope, and ordered-spec fields for a CustomPath.
 pub(crate) unsafe fn serialize_path_strategy_private(
     strategy: &KoldPathStrategy,
     scope_key: &str,
 ) -> *mut pg_sys::List {
+    let (sort_order_id, leading_column_id) = match strategy {
+        KoldPathStrategy::OrderedProgressive(spec) => {
+            (spec.sort_order_id, i32::from(spec.leading_column_id))
+        }
+        _ => (0, 0),
+    };
     let tag = pg_sys::makeInteger(path_strategy_tag(strategy));
     let scope = match CString::new(scope_key) {
         Ok(value) => value,
         Err(_) => CString::new("").expect("empty scope is valid"),
     };
-    // makeString copies into PostgreSQL memory.
     let scope_node = pg_sys::makeString(scope.as_ptr() as *mut c_char);
-    let private = pg_sys::lappend(std::ptr::null_mut(), tag.cast::<c_void>());
-    pg_sys::lappend(private, scope_node.cast::<c_void>())
+    let sort_order = pg_sys::makeInteger(sort_order_id);
+    let leading = pg_sys::makeInteger(leading_column_id);
+    let mut private = pg_sys::lappend(std::ptr::null_mut(), tag.cast::<c_void>());
+    private = pg_sys::lappend(private, scope_node.cast::<c_void>());
+    private = pg_sys::lappend(private, sort_order.cast::<c_void>());
+    pg_sys::lappend(private, leading.cast::<c_void>())
 }
 
 /// Reads the scope key from path private data; missing/invalid → `""`.
@@ -95,29 +139,125 @@ pub(crate) unsafe fn scope_key_from_path_private(private: *mut pg_sys::List) -> 
         .into_owned()
 }
 
-/// Installs a single general-merge KoldMergeScan path and clears heap finals.
+/// Reads ordered leading column id from path private data (0 if absent).
+#[must_use]
+pub(crate) unsafe fn leading_column_id_from_path_private(private: *mut pg_sys::List) -> i16 {
+    if list_len(private) <= PATH_PRIVATE_LEADING_COLUMN_ID_INDEX {
+        return 0;
+    }
+    let marker =
+        list_nth_ptr(private, PATH_PRIVATE_LEADING_COLUMN_ID_INDEX).cast::<pg_sys::Integer>();
+    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
+        return 0;
+    }
+    (*marker).ival as i16
+}
+
+/// Reads sort_order_id from path private data (0 if absent).
+#[must_use]
+pub(crate) unsafe fn sort_order_id_from_path_private(private: *mut pg_sys::List) -> i32 {
+    if list_len(private) <= PATH_PRIVATE_SORT_ORDER_ID_INDEX {
+        return 0;
+    }
+    let marker =
+        list_nth_ptr(private, PATH_PRIVATE_SORT_ORDER_ID_INDEX).cast::<pg_sys::Integer>();
+    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
+        return 0;
+    }
+    (*marker).ival
+}
+
+/// Installs the KoldMergeScan path portfolio and clears bare heap finals.
+///
+/// Always offers a non-ordering fallback around the cheapest hot child, plus
+/// an ordered progressive wrapper for each native path whose leading pathkey
+/// matches the primary key or configured segment-order column.
 ///
 /// # Safety
-/// `rel` and `hot_child` must be live planner pointers; `methods` must outlive
-/// the path (static `PATH_METHODS`).
-pub(crate) unsafe fn install_general_merge_path(
+/// `rel` must be a live planner relation; `methods` must outlive installed paths.
+pub(crate) unsafe fn install_path_portfolio(
     rel: *mut pg_sys::RelOptInfo,
-    hot_child: *mut pg_sys::Path,
-    segment_count: usize,
+    args: &PortfolioInstallArgs,
     methods: *const pg_sys::CustomPathMethods,
 ) {
-    if rel.is_null() || hot_child.is_null() || methods.is_null() {
+    if rel.is_null() || methods.is_null() {
         return;
     }
 
-    let startup_cost = (*hot_child).startup_cost + catalog_startup_bias();
-    let total_cost = general_merge_total_cost((*hot_child).total_cost, segment_count);
+    let natives = collect_native_paths((*rel).pathlist);
+    if natives.is_empty() {
+        return;
+    }
 
+    let cheapest = natives
+        .iter()
+        .copied()
+        .min_by(|left, right| unsafe {
+            (**left).total_cost.total_cmp(&(**right).total_cost)
+        })
+        .expect("natives non-empty");
+
+    // Drop bare heap finals before add_path so only KoldMergeScan remains.
+    (*rel).pathlist = std::ptr::null_mut();
+    (*rel).partial_pathlist = std::ptr::null_mut();
+
+    let fallback_strategy = fallback_strategy_for_cheapest(args);
+    add_custom_wrapper(
+        rel,
+        cheapest,
+        &fallback_strategy,
+        &args.scope_key,
+        args.segment_count,
+        false,
+        methods,
+    );
+
+    for hot_child in natives {
+        let Some(order_support) = leading_order_support(hot_child, args.scanrelid, args) else {
+            continue;
+        };
+        let leading = match order_support {
+            OrderColumnSupport::PrimaryKey => args.primary_key_attnums[0],
+            OrderColumnSupport::SegmentOrder => args
+                .segment_order_attnum
+                .expect("segment order matched"),
+            OrderColumnSupport::MutableOrUnsupported => continue,
+        };
+        let strategy = KoldPathStrategy::OrderedProgressive(OrderedPathSpec::with_scope_key(
+            i32::from(leading),
+            leading,
+            args.primary_key_attnums.clone(),
+            args.scope_key.clone(),
+        ));
+        add_custom_wrapper(
+            rel,
+            hot_child,
+            &strategy,
+            &args.scope_key,
+            args.segment_count,
+            true,
+            methods,
+        );
+    }
+}
+
+unsafe fn add_custom_wrapper(
+    rel: *mut pg_sys::RelOptInfo,
+    hot_child: *mut pg_sys::Path,
+    strategy: &KoldPathStrategy,
+    scope_key: &str,
+    segment_count: usize,
+    copy_pathkeys: bool,
+    methods: *const pg_sys::CustomPathMethods,
+) {
     let custom_path =
         pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomPath>()) as *mut pg_sys::CustomPath;
     if custom_path.is_null() {
         return;
     }
+
+    let startup_cost = (*hot_child).startup_cost + catalog_startup_bias();
+    let total_cost = general_merge_total_cost((*hot_child).total_cost, segment_count);
 
     (*custom_path).path.type_ = pg_sys::NodeTag::T_CustomPath;
     (*custom_path).path.pathtype = pg_sys::NodeTag::T_CustomScan;
@@ -128,44 +268,115 @@ pub(crate) unsafe fn install_general_merge_path(
     (*custom_path).path.startup_cost = startup_cost;
     (*custom_path).path.total_cost = total_cost;
     (*custom_path).path.parallel_safe = false;
+    if copy_pathkeys {
+        (*custom_path).path.pathkeys = (*hot_child).pathkeys;
+    } else {
+        (*custom_path).path.pathkeys = std::ptr::null_mut();
+    }
     (*custom_path).custom_paths = pg_sys::lappend(std::ptr::null_mut(), hot_child.cast::<c_void>());
-    (*custom_path).custom_private =
-        serialize_path_strategy_private(&KoldPathStrategy::GeneralMerge, "");
+    (*custom_path).custom_private = serialize_path_strategy_private(strategy, scope_key);
     (*custom_path).methods = methods;
 
-    // Managed reads must expose only KoldMergeScan as a final path. Clear both
-    // `pathlist` and `partial_pathlist`: PostgreSQL builds Gather / Gather Merge
-    // *after* this hook from leftover partials.
-    (*rel).pathlist = std::ptr::null_mut();
-    (*rel).partial_pathlist = std::ptr::null_mut();
-    (*rel).pathlist = pg_sys::lappend(std::ptr::null_mut(), (&raw mut (*custom_path).path).cast());
+    pg_sys::add_path(rel, (&raw mut (*custom_path).path).cast());
+}
+
+fn fallback_strategy_for_cheapest(args: &PortfolioInstallArgs) -> KoldPathStrategy {
+    let request = StrategyRequest::new(
+        args.exact_full_primary_key_equality,
+        None,
+        0,
+        0,
+        args.primary_key_attnums.clone(),
+    );
+    match classify_path_strategy(&request) {
+        KoldPathStrategy::OrderedProgressive(_) => KoldPathStrategy::GeneralMerge,
+        other => other,
+    }
+}
+
+unsafe fn leading_order_support(
+    path: *mut pg_sys::Path,
+    scanrelid: pg_sys::Index,
+    args: &PortfolioInstallArgs,
+) -> Option<OrderColumnSupport> {
+    if path.is_null() || (*path).pathkeys.is_null() {
+        return None;
+    }
+    if !args.primary_key_attnums.is_empty()
+        && path_leads_with_attnum(path, scanrelid, args.primary_key_attnums[0])
+    {
+        return Some(OrderColumnSupport::PrimaryKey);
+    }
+    if let Some(attnum) = args.segment_order_attnum {
+        if path_leads_with_attnum(path, scanrelid, attnum) {
+            return Some(OrderColumnSupport::SegmentOrder);
+        }
+    }
+    None
+}
+
+/// True when the path's leading pathkey equivalence class contains `relid.attnum`.
+unsafe fn path_leads_with_attnum(
+    path: *mut pg_sys::Path,
+    relid: pg_sys::Index,
+    attnum: i16,
+) -> bool {
+    let pathkeys = (*path).pathkeys;
+    if list_len(pathkeys) < 1 {
+        return false;
+    }
+    let pathkey = list_nth_ptr(pathkeys, 0).cast::<pg_sys::PathKey>();
+    if pathkey.is_null() {
+        return false;
+    }
+    let eclass = (*pathkey).pk_eclass;
+    if eclass.is_null() {
+        return false;
+    }
+    let members = (*eclass).ec_members;
+    let len = list_len(members);
+    for idx in 0..len {
+        let member = list_nth_ptr(members, idx).cast::<pg_sys::EquivalenceMember>();
+        if member.is_null() {
+            continue;
+        }
+        let expr = (*member).em_expr.cast::<pg_sys::Node>();
+        if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Var {
+            continue;
+        }
+        let var = expr.cast::<pg_sys::Var>();
+        let scanrelid = i32::try_from(relid).unwrap_or(i32::MAX);
+        if (*var).varno == scanrelid && (*var).varattno == attnum && (*var).varlevelsup == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// Returns all non-custom paths from a relation pathlist.
+pub(crate) unsafe fn collect_native_paths(
+    pathlist: *mut pg_sys::List,
+) -> Vec<*mut pg_sys::Path> {
+    let len = list_len(pathlist);
+    let mut out = Vec::with_capacity(len as usize);
+    for idx in 0..len {
+        let path = list_nth_ptr(pathlist, idx).cast::<pg_sys::Path>();
+        if path.is_null() || (*path).type_ == pg_sys::NodeTag::T_CustomPath {
+            continue;
+        }
+        out.push(path);
+    }
+    out
 }
 
 /// Returns the cheapest non-custom path from a relation pathlist.
+#[allow(dead_code)] // Handy for tests / future ExactPrimaryKey hot-child picks.
 pub(crate) unsafe fn find_cheapest_path(
     pathlist: *mut pg_sys::List,
 ) -> Option<*mut pg_sys::Path> {
-    let len = list_len(pathlist);
-    let mut best: *mut pg_sys::Path = std::ptr::null_mut();
-    let mut best_cost = f64::INFINITY;
-    for idx in 0..len {
-        let path = list_nth_ptr(pathlist, idx) as *mut pg_sys::Path;
-        if path.is_null() {
-            continue;
-        }
-        if (*path).type_ == pg_sys::NodeTag::T_CustomPath {
-            continue;
-        }
-        if (*path).total_cost < best_cost {
-            best_cost = (*path).total_cost;
-            best = path;
-        }
-    }
-    if best.is_null() {
-        None
-    } else {
-        Some(best)
-    }
+    collect_native_paths(pathlist)
+        .into_iter()
+        .min_by(|left, right| unsafe { (**left).total_cost.total_cmp(&(**right).total_cost) })
 }
 
 unsafe fn list_len(list: *mut pg_sys::List) -> i32 {
