@@ -341,7 +341,6 @@ See the full [roadmap](docs/roadmap.md).
 KoldStore is early enough that real workloads and negative results can still change the architecture.
 
 Useful contributions include:
-
 - Reproducing the benchmarks
 - Sharing PostgreSQL plans that access too much cold data
 - Testing real application-history tables
@@ -349,9 +348,9 @@ Useful contributions include:
 - Adding concurrency and recovery tests
 - Challenging assumptions in the design documents
 
-- [Development guide](docs/development.md)
-- [Crate architecture](docs/architecture/crate-architecture.md)
-- [Code of conduct](CODE_OF_CONDUCT.md)
+[Development guide](docs/development.md)
+[Crate architecture](docs/architecture/crate-architecture.md)
+[Code of conduct](CODE_OF_CONDUCT.md)
 
 ⭐ **Star the repository to follow new experiments, benchmark results, architectural decisions, and release progress.**
 
