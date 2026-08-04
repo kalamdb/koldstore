@@ -823,7 +823,11 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
         .iter()
         .find(|column| column.column_id.get() == leading_column_id)
         .map(|column| (column.name.clone(), column.pg_type.type_oid()))
-        .unwrap_or_else(|| ("id".to_string(), u32::from(pg_sys::INT8OID)));
+        .unwrap_or_else(|| {
+            pgrx::error!(
+                "{CUSTOM_PATH_NAME} ordered merge missing leading column_id {leading_column_id} in catalog"
+            )
+        });
     let cold_bound =
         cold_frontier::load_cold_best_bound(inputs.table_oid, &scope_key, sort_order_id, direction)
             .unwrap_or_else(|error| {
