@@ -1428,7 +1428,7 @@ unsafe fn hot_child_matches_scan_tupdesc(
     if scan_desc.is_null() || child_desc.is_null() {
         return false;
     }
-    (*scan_desc).natts == (*child_desc).natts
+    scan_desc == child_desc
 }
 
 pub(super) unsafe fn tuple_slot_is_empty(slot: *mut pg_sys::TupleTableSlot) -> bool {
