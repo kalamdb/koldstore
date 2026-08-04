@@ -175,13 +175,13 @@ unsafe fn datum_json_value_via_output(
     pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
     let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
     let text = cstr_owned_pfree(out)?;
-    match column.pg_type {
-        PgType::Float4 | PgType::Float8 | PgType::Numeric => text
-            .parse::<f64>()
-            .ok()
-            .map(|number| serde_json::json!(number)),
-        _ => Some(serde_json::Value::String(text)),
-    }
+match column.pg_type {
+    PgType::Float4 | PgType::Float8 => text
+        .parse::<f64>()
+        .ok()
+        .map(|number| serde_json::json!(number)),
+    PgType::Numeric => Some(serde_json::Value::String(text)),
+    _ => Some(serde_json::Value::String(text)),
 }
 
 /// Copies a PostgreSQL C string into a Rust `String`, then always `pfree`s it.
