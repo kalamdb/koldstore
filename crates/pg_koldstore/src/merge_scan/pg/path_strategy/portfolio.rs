@@ -355,7 +355,15 @@ unsafe fn path_leading_descending(path: *mut pg_sys::Path) -> bool {
     if pathkey.is_null() {
         return false;
     }
-    ((*pathkey).pk_strategy as u32) == pg_sys::BTGreaterStrategyNumber
+    // PG18 replaced pk_strategy (btree strategy) with pk_cmptype (COMPARE_LT/GT).
+    #[cfg(feature = "pg18")]
+    {
+        (*pathkey).pk_cmptype == pg_sys::CompareType::COMPARE_GT
+    }
+    #[cfg(not(feature = "pg18"))]
+    {
+        ((*pathkey).pk_strategy as u32) == pg_sys::BTGreaterStrategyNumber
+    }
 }
 
 /// Reads ordered ASC/DESC marker from path private (`true` = DESC).
