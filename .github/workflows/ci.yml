@@ -33,7 +33,7 @@ jobs:
     name: fmt / clippy / unit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
         with:
           components: rustfmt, clippy
@@ -55,7 +55,7 @@ jobs:
           comment_mode: failures
       - name: Upload JUnit
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-unit
           path: target/nextest/ci/junit.xml
@@ -72,7 +72,7 @@ jobs:
       PG_VER: ${{ matrix.pg }}
       PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
 
@@ -129,7 +129,7 @@ jobs:
           comment_mode: failures
       - name: Upload JUnit
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-pg-test-pg${{ matrix.pg }}
           path: target/nextest/ci/junit.xml
@@ -154,7 +154,7 @@ jobs:
       KOLDSTORE_E2E_NEXTEST_PROFILE: ci
       PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -192,7 +192,7 @@ jobs:
           comment_mode: failures
       - name: Upload JUnit
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: junit-e2e-pg${{ matrix.pg }}
           path: target/nextest/ci/junit.xml
@@ -223,7 +223,7 @@ jobs:
       KOLDSTORE_STORAGE_ROWS: "10000"
       KOLDSTORE_STORAGE_HOT_LIMIT: "2000"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -272,7 +272,7 @@ jobs:
       KOLDSTORE_MEMORY_PG_VERSION: "16"
       PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2

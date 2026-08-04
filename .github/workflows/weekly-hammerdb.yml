@@ -28,7 +28,7 @@ jobs:
       KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
       PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
 
@@ -56,7 +56,7 @@ jobs:
         run: bash scripts/readiness/run-hammerdb.sh 16
 
       - name: Upload HammerDB logs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: hammerdb-logs

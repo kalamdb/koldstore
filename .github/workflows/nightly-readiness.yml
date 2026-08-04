@@ -26,7 +26,7 @@ jobs:
       KOLDSTORE_PGRX_INSTALL_SUDO: "1"
       PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -107,7 +107,7 @@ jobs:
           bash scripts/readiness/run-readiness-report.sh 16
 
       - name: Upload readiness artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: nightly-readiness-report
