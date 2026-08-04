@@ -7,7 +7,11 @@ Keep active rows in PostgreSQL. Move historical rows to compressed Parquet on ob
 ⭐ **Star the repository to follow the experiments, benchmarks, and progress toward a production-ready release.**
 
 <p align="center">
-  <a href="https://github.com/kalamdb/koldstore/releases"><img src="https://img.shields.io/github/v/release/kalamdb/koldstore?display_name=tag&label=release" alt="Release" /></a>
+  <!-- <a href="https://github.com/kalamdb/koldstore/releases"><img src="https://img.shields.io/github/v/release/kalamdb/koldstore?display_name=tag&label=release" alt="Release" /></a> -->
+  <img
+    src="https://img.shields.io/badge/status-research%20preview-orange"
+    alt="Status: Research Preview"
+  />
   <a href="https://hub.docker.com/r/jamals86/pg-koldstore"><img src="https://img.shields.io/docker/pulls/jamals86/pg-koldstore" alt="Docker Pulls" /></a>
   <a href="https://github.com/kalamdb/koldstore/actions/workflows/ci-tests.yml"><img src="https://github.com/kalamdb/koldstore/actions/workflows/ci-tests.yml/badge.svg" alt="CI Tests" /></a>
   <img src="https://img.shields.io/badge/PostgreSQL-15%E2%80%9318-336791" alt="PostgreSQL 15-18" />
@@ -58,7 +62,7 @@ KoldStore is testing six main hypotheses:
 | **Keep PostgreSQL as the application interface** | Working experimental implementation |
 | **Minimize overhead for hot-row workloads** | Promising results; still active research |
 | **Preserve DML semantics across tiers** | Working baseline using WAL, mirror state, and tombstones |
-| **Support multi-tenant storage by design** | Architecture defined; implementation continuing |
+| **Enable tenant-aware scaling, sharding, and simpler cluster operations** | Scoped-storage architecture defined; routing, rebalancing, and distributed consistency remain research areas |
 | **Improve backup and restore efficiency** | Research target; coordinated tooling not yet complete |
 | **Explore versioned data branches over tiered storage** | Research concept; branch metadata and isolation model not yet implemented |
 
@@ -145,23 +149,24 @@ Future background compaction
 
 The current implementation supports the baseline semantics. Long-term compaction and cleanup of obsolete cold versions are still being developed.
 
-### Multi-tenant tiered storage
+### Tenant-aware scaling, sharding, and cluster management
 
-KoldStore is being designed to organize cold data by tenant or user scope:
+**Research objective:** Investigate whether separating the active PostgreSQL working set from historical storage can make multi-tenant PostgreSQL deployments easier to shard, rebalance, replicate, and operate as clusters.
+
+KoldStore aims to keep each PostgreSQL node focused on active tenant data while historical rows remain in shared or tenant-scoped object storage.
 
 ```text
-{namespace}/{table}/{scopeId}/...
+PostgreSQL node
+├── Active tenant rows
+├── Small hot indexes
+├── Latest-state mirror
+└── References to historical Parquet segments
+
+Object storage
+├── tenant-a/...
+├── tenant-b/...
+└── tenant-c/...
 ```
-
-The goal is to support efficient:
-
-- Tenant pruning
-- Independent retention policies
-- Tenant export and deletion
-- Regional storage placement
-- Scope-level backup and restore
-
-The architecture supports scoped storage concepts, but complete tenant lifecycle tooling remains in progress.
 
 ### Versioned branches over tiered storage
 
