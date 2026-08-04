@@ -1,8 +1,8 @@
 # Progressive Hot–Cold Query Architecture
 
 Date: 2026-08-03  
-Status: approved for implementation planning  
-Branch context: `feature/wal-only-capture-71` and successors
+Status: Phases 0–5 implemented on `feature/progressive-hot-cold-query` (Phase 6+ open; late materialization design: [2026-08-03-late-materialization-design.md](2026-08-03-late-materialization-design.md))  
+Branch context: `feature/progressive-hot-cold-query` (from `wal-only-capture-71` lineage)
 
 ## Purpose
 

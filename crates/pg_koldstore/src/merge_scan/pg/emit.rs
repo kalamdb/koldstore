@@ -74,8 +74,18 @@ unsafe fn json_value_to_datum(
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
-        | PgType::Bytea
-        | PgType::Timestamptz => input_datum_from_text(&json_input_text(value, pg_type)?, pg_type),
+        | PgType::Bytea => input_datum_from_text(&json_input_text(value, pg_type)?, pg_type),
+        // Native hot decode stores TimestampTzADT microseconds as JSON numbers;
+        // ISO strings still come from SPI `to_jsonb`.
+        PgType::Timestamptz => {
+            if let Some(micros) = value.as_i64() {
+                Ok(pg_sys::Datum::from(micros))
+            } else if let Some(micros) = value.as_u64().and_then(|n| i64::try_from(n).ok()) {
+                Ok(pg_sys::Datum::from(micros))
+            } else {
+                input_datum_from_text(&json_input_text(value, pg_type)?, pg_type)
+            }
+        }
     }
 }
 

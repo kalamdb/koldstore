@@ -165,7 +165,7 @@ impl HotChildCandidate {
             leading_column_id,
             primary_key_columns,
             exact_full_primary_key_equality,
-            scope_key: String::new(),
+            scope_key: koldstore_common::DEFAULT_SCOPE_KEY.to_string(),
         }
     }
 
@@ -179,30 +179,6 @@ impl HotChildCandidate {
         );
         request.scope_key = self.scope_key.clone();
         request
-    }
-}
-
-/// Planned path replacement for a managed-table read (legacy single-wrapper shape).
-///
-/// Prefer [`build_path_portfolio`] for multi-strategy planning. This type remains
-/// for callers that model one cheapest-child wrap.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PathReplacementDecision {
-    /// User-visible final paths for the managed relation.
-    pub final_paths: Vec<PlannerPath>,
-    /// Hot heap paths retained inside the custom path.
-    pub custom_child_paths: Vec<PlannerPath>,
-    /// Number of heap paths removed from final path choices.
-    pub removed_heap_final_paths: usize,
-}
-
-impl PathReplacementDecision {
-    /// Returns whether a heap-only path remains user-selectable as final scan.
-    #[must_use]
-    pub fn heap_only_final_path_available(&self) -> bool {
-        self.final_paths
-            .iter()
-            .any(|path| path.kind != PlannerPathKind::CustomScan)
     }
 }
 
@@ -283,40 +259,6 @@ pub fn build_path_portfolio(
     })
 }
 
-/// Builds the pure path replacement decision for a relation.
-///
-/// Managed relations expose only the KoldMergeScan final path; the best
-/// hot heap path remains available as the custom child. Callers that model
-/// PostgreSQL's planner must also drop parallel partial heap paths: Gather /
-/// Gather Merge are built after `set_rel_pathlist` and would otherwise leak
-/// hot-heap-only ordered scans after flush.
-///
-/// This is the legacy single-wrapper API. New planning should use
-/// [`build_path_portfolio`].
-#[must_use]
-pub fn build_path_replacement(
-    is_managed: bool,
-    hot_heap_paths: Vec<PlannerPath>,
-) -> Option<PathReplacementDecision> {
-    if !is_managed {
-        return Some(PathReplacementDecision {
-            final_paths: hot_heap_paths,
-            custom_child_paths: Vec::new(),
-            removed_heap_final_paths: 0,
-        });
-    }
-
-    let best_child = hot_heap_paths
-        .iter()
-        .min_by(|left, right| left.cost.total_cmp(&right.cost))
-        .cloned()?;
-    Some(PathReplacementDecision {
-        final_paths: vec![PlannerPath::custom_scan(best_child.cost)],
-        custom_child_paths: vec![best_child],
-        removed_heap_final_paths: hot_heap_paths.len(),
-    })
-}
-
 /// Returns whether parallel partial heap paths must be cleared for a managed
 /// relation (same contract as clearing `RelOptInfo.partial_pathlist`).
 #[must_use]
@@ -335,21 +277,37 @@ mod tests {
     }
 
     #[test]
-    fn managed_path_replacement_drops_heap_finals() {
-        let decision = build_path_replacement(
+    fn managed_portfolio_wraps_cheapest_child_without_order() {
+        let decision = build_path_portfolio(
             true,
             vec![
-                PlannerPath::seq_scan("heap", 100.0),
-                PlannerPath::index_scan("pk", 40.0),
+                HotChildCandidate::new(
+                    PlannerPath::seq_scan("heap", 100.0),
+                    None,
+                    0,
+                    0,
+                    vec![1],
+                    false,
+                ),
+                HotChildCandidate::new(
+                    PlannerPath::index_scan("pk", 40.0),
+                    None,
+                    0,
+                    0,
+                    vec![1],
+                    false,
+                ),
             ],
+            0.0,
         )
         .expect("managed relation with heap paths");
-        assert_eq!(decision.final_paths.len(), 1);
-        assert_eq!(decision.final_paths[0].kind, PlannerPathKind::CustomScan);
-        assert_eq!(decision.custom_child_paths.len(), 1);
-        assert_eq!(decision.custom_child_paths[0].cost, 40.0);
+        assert_eq!(decision.entries.len(), 1);
+        assert_eq!(decision.entries[0].hot_child.name, "pk");
+        assert_eq!(decision.entries[0].hot_child.cost, 40.0);
+        assert!(!decision.entries[0].advertises_order);
         assert_eq!(decision.removed_heap_final_paths, 2);
         assert!(clear_partial_heap_paths(true));
+        assert!(!decision.heap_only_final_path_available());
     }
 
     #[test]

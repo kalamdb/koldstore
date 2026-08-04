@@ -43,6 +43,37 @@ struct QualCatalog<'a> {
     columns: &'a [koldstore_migrate::order::CatalogColumn],
 }
 
+/// Full physical base-relation projection for `custom_scan_tlist` scans.
+///
+/// When PlanCustomPath sets `custom_scan_tlist`, setrefs rewrites plan
+/// targetlist/qual Vars to `INDEX_VAR`. [`required_scan_projection`] then sees
+/// no `scanrelid` Vars; materialize every user column so ExecScan can project.
+pub(super) fn physical_scan_projection(
+    columns: &[koldstore_migrate::order::CatalogColumn],
+    tuple_width: usize,
+) -> Result<ScanProjection, String> {
+    let mut projection = Vec::with_capacity(tuple_width);
+    for slot_index in 0..tuple_width {
+        let attnum =
+            pg_sys::AttrNumber::try_from(slot_index + 1).map_err(|error| error.to_string())?;
+        let Some(catalog) = columns
+            .iter()
+            .find(|column| column.column_id.get() == attnum)
+        else {
+            // Dropped attributes stay NULL in the physical slot.
+            continue;
+        };
+        projection.push(ScanProjectionColumn {
+            catalog: catalog.clone(),
+            slot_index,
+        });
+    }
+    Ok(ScanProjection {
+        columns: projection,
+        tuple_width,
+    })
+}
+
 /// Collects every base-table attribute referenced by the target list or quals.
 ///
 /// PostgreSQL's generic Var walker covers arbitrary RLS expressions and planned

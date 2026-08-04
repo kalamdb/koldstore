@@ -159,6 +159,12 @@ impl ColdRowStream {
         self.next_group = 0;
     }
 
+    /// True when catalog still has unopened segment groups for this scan.
+    #[must_use]
+    pub(super) fn has_pending_segments(&self) -> bool {
+        self.next_group < self.segment_groups.len()
+    }
+
     /// Intersects planned row groups with order-frontier competitive groups.
     ///
     /// Missing order-index rows leave the hint unchanged. An empty competitive
@@ -1125,15 +1131,12 @@ fn physical_name_for_segment(
     hint: &SegmentStatsHint,
     current_schema_version: i32,
 ) -> Result<Option<String>, String> {
-    if let Some(name) = hint.physical_names.get(&column.column_id.get()) {
-        return Ok(Some(name.clone()));
-    }
-    if hint.schema_version == current_schema_version {
-        return Ok(Some(column.name.clone()));
-    }
-    // Additive columns (and drop+add with a new attnum) are absent from older
-    // segment schemas; callers materialize NULL for the current logical name.
-    Ok(None)
+    Ok(koldstore_merge::scan::physical_name_for_segment_column(
+        column.column_id.get(),
+        &column.name,
+        hint,
+        current_schema_version,
+    ))
 }
 
 fn remap_row_to_logical_names(

@@ -4,6 +4,10 @@
 //! for progressive ordered merge. Preparing the frontier does not open objects.
 //! Row-group competitiveness uses [`koldstore_merge::scan::select_competitive_row_groups`].
 
+use koldstore_catalog::queries::{
+    plan_cold_order_frontier_best_bound_asc, plan_cold_order_frontier_best_bound_desc,
+    plan_cold_order_frontier_row_groups_by_path,
+};
 use koldstore_merge::scan::{select_competitive_row_groups, OrderDirection};
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys;
@@ -20,29 +24,10 @@ pub(super) fn load_cold_best_bound(
     sort_order_id: i32,
     direction: OrderDirection,
 ) -> Result<Option<Vec<u8>>, String> {
-    let sql = match direction {
-        OrderDirection::Asc => {
-            "SELECT min_composite_key FROM koldstore.cold_segment_order_index \
-             WHERE table_oid = $1::oid AND scope_key = $2::text AND sort_order_id = $3::integer \
-               AND min_composite_key IS NOT NULL \
-             ORDER BY min_composite_key ASC NULLS LAST LIMIT 1"
-        }
-        OrderDirection::Desc => {
-            "SELECT max_composite_key FROM koldstore.cold_segment_order_index \
-             WHERE table_oid = $1::oid AND scope_key = $2::text AND sort_order_id = $3::integer \
-               AND max_composite_key IS NOT NULL \
-             ORDER BY max_composite_key DESC NULLS LAST LIMIT 1"
-        }
-    };
-    let statement = koldstore_common::SqlStatement::read_with_params(
-        "cold order frontier bound",
-        sql,
-        [
-            koldstore_common::SqlParamType::Oid,
-            koldstore_common::SqlParamType::Text,
-            koldstore_common::SqlParamType::Integer,
-        ],
-    )
+    let statement = match direction {
+        OrderDirection::Asc => plan_cold_order_frontier_best_bound_asc(),
+        OrderDirection::Desc => plan_cold_order_frontier_best_bound_desc(),
+    }
     .map_err(|e| e.to_string())?;
     crate::spi::select_one::<Vec<u8>>(
         &statement,
@@ -67,23 +52,7 @@ pub(super) fn competitive_row_groups_for_path(
     direction: OrderDirection,
     hot_key: Option<&[u8]>,
 ) -> Result<Option<Vec<usize>>, String> {
-    let sql = "SELECT csoi.row_group_min_composite_keys, csoi.row_group_max_composite_keys \
-               FROM koldstore.cold_segment_order_index csoi \
-               JOIN koldstore.cold_segments cs ON cs.segment_id = csoi.segment_id \
-               WHERE cs.table_oid = $1::oid AND cs.scope_key = $2::text \
-                 AND csoi.sort_order_id = $3::integer AND cs.path = $4::text \
-               LIMIT 1";
-    let statement = koldstore_common::SqlStatement::read_with_params(
-        "cold order frontier row groups by path",
-        sql,
-        [
-            koldstore_common::SqlParamType::Oid,
-            koldstore_common::SqlParamType::Text,
-            koldstore_common::SqlParamType::Integer,
-            koldstore_common::SqlParamType::Text,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+    let statement = plan_cold_order_frontier_row_groups_by_path().map_err(|e| e.to_string())?;
     let args = [
         DatumWithOid::from(table_oid),
         DatumWithOid::from(scope_key.to_string()),

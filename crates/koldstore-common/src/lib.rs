@@ -46,7 +46,7 @@ pub use row::{
 };
 pub use scope::{
     active_scope_for_table, enforce_row_scope, normalize_scope, require_user_scope, scope_matches,
-    scope_predicate_sql, ScopeError, ScopeSqlError,
+    scope_predicate_sql, ScopeError, ScopeSqlError, DEFAULT_SCOPE_KEY,
 };
 pub use segment_paths::{
     segment_folder_number, segment_path_token, segment_relative_object_path, SEGMENTS_PER_FOLDER,

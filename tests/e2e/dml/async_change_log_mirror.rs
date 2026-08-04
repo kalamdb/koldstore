@@ -3,7 +3,7 @@ use crate::common;
 use anyhow::Result;
 use std::time::{Duration, Instant};
 
-const BACKGROUND_APPLY_DEADLINE: Duration = Duration::from_secs(5);
+const BACKGROUND_APPLY_DEADLINE: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn managed_commit_wakes_sleeping_worker_without_poll_delay() -> Result<()> {

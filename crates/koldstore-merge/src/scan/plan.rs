@@ -54,6 +54,28 @@ pub struct SegmentStatsHint {
     pub selected_row_groups: Option<Vec<usize>>,
 }
 
+/// Resolves the Parquet field name for a logical column in one segment schema.
+///
+/// Returns `None` when the column was added after the segment was written
+/// (callers materialize NULL). Prefer this over falling back to the logical
+/// name on historical schemas — renames keep the same `column_id` with a
+/// different physical name.
+#[must_use]
+pub fn physical_name_for_segment_column(
+    column_id: i16,
+    logical_name: &str,
+    hint: &SegmentStatsHint,
+    current_schema_version: i32,
+) -> Option<String> {
+    if let Some(name) = hint.physical_names.get(&column_id) {
+        return Some(name.clone());
+    }
+    if hint.schema_version == current_schema_version {
+        return Some(logical_name.to_string());
+    }
+    None
+}
+
 /// Min/max predicate proven safe for segment-level candidate pruning.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SegmentPrunePredicate {

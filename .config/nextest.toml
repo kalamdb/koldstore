@@ -9,3 +9,22 @@ success-output = "immediate"
 # Stress soaks are intentionally long; allow up to ~3h wall before terminate.
 slow-timeout = { period = "300s", terminate-after = 36, grace-period = "30s" }
 
+# CI profile: JUnit XML for GitHub Actions test-result publishing.
+[profile.ci]
+retries = 0
+
+[[profile.ci.overrides]]
+filter = 'test(full_lifecycle_wide_table_migrates_flushes_in_batches_and_queries_all_rows)'
+success-output = "immediate"
+
+[[profile.ci.overrides]]
+filter = 'package(stress)'
+success-output = "immediate"
+slow-timeout = { period = "300s", terminate-after = 36, grace-period = "30s" }
+
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "koldstore-ci"
+store-failure-output = true
+store-success-output = false
+

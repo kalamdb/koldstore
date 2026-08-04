@@ -316,40 +316,34 @@ fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
             .0
             .to_string()
     });
+    // Native hot child owns `Plans` under KoldMergeScan. Cold/hot diagnostics
+    // live in Scan Sources property groups (visual KoldStore Internal nodes
+    // are only emitted when no native child is present).
     for expected in [
-        "\"Plans\"",
-        "\"Node Type\":\"KoldStore Hot Scan\"",
-        "\"Node Type\":\"KoldStore Cold Storage Scan\"",
-        "\"Node Type\":\"KoldStore Segment Catalog Scan\"",
-        "\"Node Type\":\"KoldStore Parquet Scan\"",
-        "\"Parent Relationship\":\"Parquet Segment\"",
-        "\"KoldStore Internal\":true",
-        "\"KoldStore Role\":\"PostgreSQL Hot Access\"",
-        "\"Hot Actual Access\"",
+        "\"Custom Plan Provider\":\"KoldMergeScan\"",
+        "\"Scan Sources\"",
+        "\"Hot Scan\"",
+        "\"Planned Access\"",
+        "\"Actual Access\":\"Native PostgreSQL Child\"",
+        "\"Cold Scan\"",
         "\"Runtime Manifest Read\":false",
         "\"Cold Segments Query\"",
-        "\"Hot SPI Query\"",
+        "\"Parquet Segments\"",
+        "\"Mirror Scan\"",
         "\"Actual Rows\":1",
     ] {
         assert!(
             plan.contains(expected),
-            "expected KoldStore diagnostic plan node `{expected}`: {plan}"
+            "expected KoldStore explain contract `{expected}`: {plan}"
         );
     }
     assert!(
+        !plan.contains("\"Hot SPI Query\""),
+        "native hot child must not advertise SPI keyset text: {plan}"
+    );
+    assert!(
         !plan.contains("\"Node Type\":\"KoldStore Mirror Overlay\""),
         "Mirror Overlay must not appear as a visual plan node: {plan}"
-    );
-    // Parquet must nest under catalog, not sit as a sibling under Cold Storage.
-    let catalog_idx = plan
-        .find("\"Node Type\":\"KoldStore Segment Catalog Scan\"")
-        .expect("catalog node");
-    let parquet_idx = plan
-        .find("\"Node Type\":\"KoldStore Parquet Scan\"")
-        .expect("parquet node");
-    assert!(
-        parquet_idx > catalog_idx,
-        "Parquet Scan must appear after Segment Catalog Scan in nested Plans: {plan}"
     );
 }
 
@@ -1286,6 +1280,55 @@ fn ordered_limit_cold_wins_returns_cold_first() {
         )),
         "cold-1010,cold-1009,cold-1008,cold-1007,cold-1006",
         "ordered LIMIT must emit cold winners when they outrank hot"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_asc_cold_wins_after_hot_prune() {
+    let suffix = unique_suffix("ordered_asc_cold_wins");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    // Low ids go cold first; later high-id hot inserts must not win ASC top-N.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 11) AS id"
+    ))
+    .expect("insert low-id cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 11);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1000, 1010) AS id"
+    ))
+    .expect("insert high-id hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT id, body FROM {relation} ORDER BY id ASC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive")
+            && plan.contains("Order Direction: ASC"),
+        "ASC cold-wins must advertise ascending ordered progressive: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened:")
+            && !plan.contains("Parquet Segments Opened: 0"),
+        "ASC LIMIT after hot prune must open cold for lower ids: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id) FROM (\
+             SELECT id, body FROM {relation} ORDER BY id ASC LIMIT 5\
+             ) topn"
+        )),
+        "cold-1,cold-2,cold-3,cold-4,cold-5",
+        "ORDER BY id ASC LIMIT 5 must emit cold winners when they outrank hot"
     );
 }
 

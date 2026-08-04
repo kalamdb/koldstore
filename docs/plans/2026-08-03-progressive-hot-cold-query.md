@@ -2,51 +2,31 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+**Status:** Phases 0–5 complete on `feature/progressive-hot-cold-query` (PR #74). Phase 6+ deferred.  
+**Design:** [2026-08-03-progressive-hot-cold-query-design.md](2026-08-03-progressive-hot-cold-query-design.md)  
+**Baseline:** [2026-08-03-progressive-hot-cold-baseline.md](2026-08-03-progressive-hot-cold-baseline.md)
+
 **Goal:** Land a maintainable path portfolio with real pathkeys and costing, then progressively replace mixed SPI JSON merge with native hot cursors and bound-gated cold access — without regressing locked hot-only / exact-PK paths.
 
 **Architecture:** PostgreSQL chooses among KoldStore `CustomPath` strategies (`KoldPathStrategy`). Pure comparison/frontier logic lives in `koldstore-merge`; PG glue lives under `pg_koldstore::merge_scan::pg::path_strategy` and related modules. Hot access prefers the native child; SPI JSON is retired as each shape is covered. APIs take `scope_key` for forward compatibility; product scoping is out of scope.
 
 **Tech Stack:** Rust, pgrx CustomPath/CustomScan, PostgreSQL planner hooks, existing `koldstore.cold_segment_index` / catalogs, later `cold_segment_order_index`.
 
-**Design:** [2026-08-03-progressive-hot-cold-query-design.md](2026-08-03-progressive-hot-cold-query-design.md)
-
 **Skills:** @cargo-pgrx for `cargo pgrx test` / pg_test boundaries; do not weaken e2e assertions to hide scan bugs.
-
-**Constraint:** Uncommitted WIP on `feature/wal-only-capture-71` (EXPLAIN/scan docs) may overlap. Either finish/commit that WIP on this branch before Phase 1, or stash/carry it onto the implementation branch — do not strand it.
 
 ---
 
 ## Phase 0: Prep and baseline
 
-### Task 0.1: Capture baseline plans and tests
+### Task 0.1: Capture baseline plans and tests — **done**
 
-**Files:**
-- Read: `docs/architecture/scanning-table.md`
-- Read: `crates/pg_koldstore/src/merge_scan/pg.rs` (`set_rel_pathlist`)
-- Read: `tests/e2e/merge/user_scope_cold_pruning.rs`
-- Read: `crates/pg_koldstore/src/pg_tests/scan.inc.rs`
-
-**Step 1:** Note current contracts to preserve:
-- Empty manifest / cold-proven-empty → native paths, no `KoldMergeScan`
-- Exact-PK hot hit → no Parquet / mirror init
-- Cold-capable → `KoldMergeScan` (today unordered)
-
-**Step 2:** Run focused baseline (adjust if local pgrx port differs):
-
-```bash
-cargo test -p koldstore-merge --lib
-cargo pgrx test -p pg_koldstore pg15 -- --test scan
-```
-
-Expected: current suite green (or known WIP failures documented).
-
-**Step 3:** Commit only if user requests; otherwise leave baseline notes in the PR description.
+See [2026-08-03-progressive-hot-cold-baseline.md](2026-08-03-progressive-hot-cold-baseline.md).
 
 ---
 
 ## Phase 1: Strategy module + path portfolio + pathkeys
 
-### Task 1.1: Add `KoldPathStrategy` in `koldstore-merge` (PG-free)
+### Task 1.1: Add `KoldPathStrategy` in `koldstore-merge` (PG-free) — **done**
 
 **Files:**
 - Create: `crates/koldstore-merge/src/scan/strategy.rs`
@@ -102,7 +82,7 @@ Document invariants on the enum and struct with `///`.
 
 ---
 
-### Task 1.2: Evolve path replacement API for a portfolio
+### Task 1.2: Evolve path replacement API for a portfolio — **done**
 
 **Files:**
 - Modify: `crates/koldstore-merge/src/scan/path.rs`
@@ -118,7 +98,7 @@ Document invariants on the enum and struct with `///`.
 
 ---
 
-### Task 1.3: Create `path_strategy` module shell in `pg_koldstore`
+### Task 1.3: Create `path_strategy` module shell in `pg_koldstore` — **done**
 
 **Files:**
 - Create: `crates/pg_koldstore/src/merge_scan/pg/path_strategy/mod.rs`
@@ -142,7 +122,7 @@ Expected: same plans as before (unordered `KoldMergeScan`).
 
 ---
 
-### Task 1.4: Offer ordered path + copy pathkeys from matching hot child
+### Task 1.4: Offer ordered path + copy pathkeys from matching hot child — **done**
 
 **Files:**
 - Modify: `path_strategy/portfolio.rs`, `cost.rs`
@@ -179,17 +159,17 @@ cargo pgrx test -p pg_koldstore pg15
 
 ### Checkpoint A — after Phase 1
 
-- [ ] Strategy types live in one PG-free module + one PG portfolio module
-- [ ] Planner can choose an ordered custom path (no false orders)
-- [ ] Hot-only / exact-PK / empty-manifest contracts green
-- [ ] Docs + `///` on new modules
-- [ ] No SPI JSON changes required yet (executor may still be general merge)
+- [x] Strategy types live in one PG-free module + one PG portfolio module
+- [x] Planner can choose an ordered custom path (no false orders)
+- [x] Hot-only / exact-PK / empty-manifest contracts green
+- [x] Docs + `///` on new modules
+- [x] No SPI JSON required for ordered progressive (executor uses native child)
 
 ---
 
 ## Phase 2: Native ordered hot cursor (retire SPI JSON for ordered path)
 
-### Task 2.1: Hot cursor trait + native child adapter
+### Task 2.1: Hot cursor trait + native child adapter — **done**
 
 **Files:**
 - Create: `crates/pg_koldstore/src/merge_scan/pg/hot_cursor.rs`
@@ -200,13 +180,13 @@ cargo pgrx test -p pg_koldstore pg15
 
 **Tests:** e2e ordered query no longer requires `to_jsonb` in EXPLAIN; correctness vs heap+cold unchanged.
 
-**Cleanup:** remove dead JSON paging code paths only when no strategy references them; update `scan.inc.rs` assertions that require SPI JSON for mixed merge.
+**Cleanup:** remove dead JSON paging code paths only when no strategy references them; update `scan.inc.rs` assertions that require SPI JSON for mixed merge. SPI JSON remains for `GeneralMerge` only.
 
 **Commit:** `feat: native hot cursor for ordered progressive merge`
 
 ---
 
-### Task 2.2: Adaptive page / lazy production under parent Limit
+### Task 2.2: Adaptive page / lazy production under parent Limit — **done**
 
 **Files:** `hot_cursor.rs`, `execute.rs`, e2e top-N
 
@@ -218,7 +198,7 @@ cargo pgrx test -p pg_koldstore pg15
 
 ## Phase 3: Ordered cold frontier + hot-dominance proof
 
-### Task 3.1: Catalog DDL for `cold_segment_order_index`
+### Task 3.1: Catalog DDL for `cold_segment_order_index` — **done**
 
 **Files:**
 - Modify: `crates/pg_koldstore/sql/koldstore--0.1.0.sql`
@@ -231,7 +211,7 @@ cargo pgrx test -p pg_koldstore pg15
 
 ---
 
-### Task 3.2: PG-free frontier comparison
+### Task 3.2: PG-free frontier comparison — **done**
 
 **Files:**
 - Create: `crates/koldstore-merge/src/scan/ordered_frontier.rs`
@@ -241,7 +221,7 @@ cargo pgrx test -p pg_koldstore pg15
 
 ---
 
-### Task 3.3: Catalog frontier + progressive merge glue
+### Task 3.3: Catalog frontier + progressive merge glue — **done**
 
 **Files:**
 - Create: `crates/pg_koldstore/src/merge_scan/pg/cold_frontier.rs`
@@ -269,13 +249,15 @@ cargo pgrx test -p pg_koldstore pg15
 
 ## Phase 4: Row-group expansion + deferred overlay
 
-### Task 4.1: Expand segment → row groups → metadata → payload
+### Task 4.1: Expand segment → row groups → metadata → payload — **done (lean)**
 
 **Files:** `cold_frontier.rs`, parquet reader projection, profile counters
 
 **Acceptance:** only competitive row groups open; payload columns late where possible.
 
-### Task 4.2: Batched mirror + hot PK probes for cold candidates
+**Landed:** `select_competitive_row_groups` + path-based order-index RG refine on ordered expand. Full late-materialization (order/PK/seq before body) remains Phase 6+.
+
+### Task 4.2: Batched mirror + hot PK probes for cold candidates — **done**
 
 **Files:** `mirror.rs`, ordered merge resolve path
 
@@ -287,11 +269,13 @@ cargo pgrx test -p pg_koldstore pg15
 
 ## Phase 5: Unordered hot-first LIMIT
 
-### Task 5.1: `UnorderedHotFirst` strategy
+### Task 5.1: `UnorderedHotFirst` strategy — **done**
 
 **Files:** `path_strategy/`, `execute.rs`, e2e `LIMIT` without `ORDER BY`
 
 **Behavior:** emit hot winners first; initialize cold only when hot exhausted under parent Limit. Prefer native child. No false pathkeys.
+
+**Landed:** native `NativeHotCursor` (same widen path as ordered); SPI JSON only for `GeneralMerge`.
 
 **Commit:** `feat: unordered hot-first path for LIMIT without ORDER BY`
 
@@ -300,9 +284,25 @@ cargo pgrx test -p pg_koldstore pg15
 ## Phase 6+: Later (track only)
 
 - Parquet page index / Bloom on PK miss
+- Late materialization (order key + PK + seq before body payload) —
+  **design:** [2026-08-03-late-materialization-design.md](2026-08-03-late-materialization-design.md)
+- True mid-stream ordered interleave (vs cold-wins sorted buffer when ranges overlap)
 - Partial aggregate upper paths
 - Join / runtime filter optimizations
 - Per-user scope product (manifests per `scope_key`; queries remain single-scope)
+
+---
+
+## Status summary (2026-08-03)
+
+| Doc | Role |
+| --- | --- |
+| [baseline](2026-08-03-progressive-hot-cold-baseline.md) | Phase 0 contracts + green tests before portfolio |
+| [design](2026-08-03-progressive-hot-cold-query-design.md) | Architecture source of truth |
+| This plan | Phases 0–5 **complete**; Phase 6+ deferred (late-mat design ready) |
+| [late materialization](2026-08-03-late-materialization-design.md) | First Phase 6+ cut: compete-then-body Parquet opens |
+
+Cold-proven-empty is **not** a `KoldPathStrategy` tag: it remains the locked plan-time native early return (`cold_side_proven_empty` / empty manifest).
 
 ---
 
@@ -316,7 +316,7 @@ cargo pgrx test -p pg_koldstore pg15
 | WIP EXPLAIN conflicts | Finish or stash current branch WIP before portfolio edits |
 | Scope feature creep | Plumb `scope_key` only; no partition product in Phases 1–5 |
 
-## Open questions (resolve during Phase 1 if blocking)
+## Open questions (resolved in Phases 1–5)
 
-- Exact private-data encoding for strategy on `CustomScan` (bytea vs integer tag + side table).
-- First ordered column set: PK only vs PK + configured segment-order in the same milestone (prefer both if flush already maintains segment-order stats).
+- Private-data encoding: integer strategy tag + side fields (`scope_key`, sort order id, ASC/DESC) on CustomScan private.
+- First ordered column set: order index covers PK + configured segment-order; progressive path uses advertised pathkeys from the hot child.

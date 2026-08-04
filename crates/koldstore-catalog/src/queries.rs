@@ -1037,16 +1037,111 @@ WHERE table_oid = $1::oid
     )
 }
 
+/// Best ascending cold composite bound from `cold_segment_order_index`.
+///
+/// Parameters: table OID, scope key, sort_order_id.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_order_frontier_best_bound_asc() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "cold order frontier bound ascending",
+        r#"
+SELECT min_composite_key
+FROM koldstore.cold_segment_order_index
+WHERE table_oid = $1::oid
+  AND scope_key = $2::text
+  AND sort_order_id = $3::integer
+  AND min_composite_key IS NOT NULL
+ORDER BY min_composite_key ASC NULLS LAST
+LIMIT 1
+"#,
+        [SqlParamType::Oid, SqlParamType::Text, SqlParamType::Integer],
+    )
+}
+
+/// Best descending cold composite bound from `cold_segment_order_index`.
+///
+/// Parameters: table OID, scope key, sort_order_id.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_order_frontier_best_bound_desc() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "cold order frontier bound descending",
+        r#"
+SELECT max_composite_key
+FROM koldstore.cold_segment_order_index
+WHERE table_oid = $1::oid
+  AND scope_key = $2::text
+  AND sort_order_id = $3::integer
+  AND max_composite_key IS NOT NULL
+ORDER BY max_composite_key DESC NULLS LAST
+LIMIT 1
+"#,
+        [SqlParamType::Oid, SqlParamType::Text, SqlParamType::Integer],
+    )
+}
+
+/// Row-group composite min/max arrays for one segment object path.
+///
+/// Parameters: table OID, scope key, sort_order_id, object path.
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_cold_order_frontier_row_groups_by_path() -> SqlResult<SqlStatement> {
+    SqlStatement::read_with_params(
+        "cold order frontier row groups by path",
+        r#"
+SELECT csoi.row_group_min_composite_keys, csoi.row_group_max_composite_keys
+FROM koldstore.cold_segment_order_index csoi
+JOIN koldstore.cold_segments cs
+  ON cs.segment_id = csoi.segment_id
+WHERE cs.table_oid = $1::oid
+  AND cs.scope_key = $2::text
+  AND csoi.sort_order_id = $3::integer
+  AND cs.path = $4::text
+LIMIT 1
+"#,
+        [
+            SqlParamType::Oid,
+            SqlParamType::Text,
+            SqlParamType::Integer,
+            SqlParamType::Text,
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         plan_async_managed_relation_by_oid, plan_cold_column_aggregate_bounds,
-        plan_cold_segment_candidate_row_group_indexes, plan_cold_segment_candidates_closed_range,
-        plan_cold_segment_candidates_lower_bound, plan_cold_segment_candidates_upper_bound,
-        plan_in_sync_manifest_scan_context, plan_publishable_cold_segments_for_manifest_json,
-        plan_published_manifest_planner_hint,
+        plan_cold_order_frontier_best_bound_asc, plan_cold_order_frontier_best_bound_desc,
+        plan_cold_order_frontier_row_groups_by_path, plan_cold_segment_candidate_row_group_indexes,
+        plan_cold_segment_candidates_closed_range, plan_cold_segment_candidates_lower_bound,
+        plan_cold_segment_candidates_upper_bound, plan_in_sync_manifest_scan_context,
+        plan_publishable_cold_segments_for_manifest_json, plan_published_manifest_planner_hint,
     };
     use koldstore_common::SqlParamType;
+
+    #[test]
+    fn cold_order_frontier_plans_target_order_index() {
+        let asc = plan_cold_order_frontier_best_bound_asc().unwrap();
+        let desc = plan_cold_order_frontier_best_bound_desc().unwrap();
+        let by_path = plan_cold_order_frontier_row_groups_by_path().unwrap();
+        assert!(asc.sql.contains("min_composite_key"));
+        assert!(desc.sql.contains("max_composite_key"));
+        assert!(by_path.sql.contains("row_group_min_composite_keys"));
+        assert!(by_path.sql.contains("cold_segment_order_index"));
+        assert_eq!(
+            asc.param_types,
+            vec![SqlParamType::Oid, SqlParamType::Text, SqlParamType::Integer]
+        );
+        assert_eq!(by_path.param_types.len(), 4);
+    }
 
     #[test]
     fn merge_scan_context_omits_binary_index_bounds() {

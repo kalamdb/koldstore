@@ -2,11 +2,16 @@
 
 Captured: 2026-08-03  
 Branch: `feature/progressive-hot-cold-query`  
-Worktree: `.worktrees/progressive-hot-cold-query`  
+Worktree: `.worktrees/progressive-hot-cold-query` (later folded into main checkout)  
 HEAD at capture: `bc49147edde6950d1a6c7ea692e72f5186480541`
 
 Phase 0 baseline before `KoldPathStrategy`. No production code changes in this
 task — only these notes.
+
+**Follow-up:** Phases 1–5 of
+[2026-08-03-progressive-hot-cold-query.md](2026-08-03-progressive-hot-cold-query.md)
+are complete on this branch. Treat this file as the pre-portfolio contract
+snapshot; live behavior is in `docs/architecture/scanning-table.md`.
 
 ## Contracts preserved (must stay green)
 
@@ -22,7 +27,7 @@ expectations; not executed in this baseline).
 | Cold-proven-empty (plan-time) | Aggregate Sort Key / constant predicates prove no cold match → native paths, no wrapper. |
 | Cold-proven-empty (exec-time) | Parameterized / runtime prove-empty → `HotChild` / native child delegation without merge setup. |
 | Exact-PK hot hit while cold may exist | `KoldMergeScan` may be planned when cold can contribute, but BeginCustomScan returns the native child slot **without** catalog lookup, Parquet open, mirror load, or merge-state init (`Emit Path: hot_child`, `Parquet Segments Opened: 0`). |
-| Cold-capable predicate | Install single `KoldMergeScan` (clears `pathlist` + `partial_pathlist`); today unordered / SPI JSON keyset merge for mixed hot+cold. |
+| Cold-capable predicate | Install `KoldMergeScan` portfolio (clears bare heap/`partial_pathlist`); strategies include `OrderedProgressive`, `UnorderedHotFirst`, `ExactPrimaryKey`, `GeneralMerge`. Baseline era was a single unordered SPI JSON merge. |
 | Relcache invalidation | First published cold segment (or expanded bounds) rebuilds prepared native plans into cold-capable `KoldMergeScan`. |
 
 Locked hot-only emit / plan-time prune paths must not be casually rewritten in

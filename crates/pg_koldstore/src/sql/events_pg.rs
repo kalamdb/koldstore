@@ -531,20 +531,12 @@ fn physical_name_for_pk(
     segment: &koldstore_merge::scan::SegmentStatsHint,
     current_schema_version: i32,
 ) -> Option<String> {
-    if segment.schema_version == current_schema_version {
-        return Some(
-            segment
-                .physical_names
-                .get(&column.column_id.get())
-                .cloned()
-                .unwrap_or_else(|| column.name.clone()),
-        );
-    }
-    segment
-        .physical_names
-        .get(&column.column_id.get())
-        .cloned()
-        .or_else(|| Some(column.name.clone()))
+    koldstore_merge::scan::physical_name_for_segment_column(
+        column.column_id.get(),
+        &column.name,
+        segment,
+        current_schema_version,
+    )
 }
 
 #[cfg(feature = "pg")]

@@ -4,21 +4,23 @@
 //! plan-time early returns (empty manifest, `cold_side_proven_empty`) stay in
 //! `set_rel_pathlist` before this module runs.
 //!
-//! `scope_key` is plumbed as `""` for forward compatibility (one query → one
-//! scope later). Ordered paths copy the hot child's `pathkeys` so PostgreSQL
-//! can avoid an external `Sort` when it picks them; progressive ordered emit
-//! lands in later tasks.
+//! `scope_key` defaults to [`koldstore_common::DEFAULT_SCOPE_KEY`] (`""`) for
+//! single-scope shared tables. Ordered paths copy the hot child's `pathkeys`
+//! so PostgreSQL can avoid an external `Sort`; emit uses ordered progressive
+//! merge in `execute`.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use std::ffi::CString;
-use std::os::raw::{c_char, c_void};
+use std::os::raw::c_void;
 
 use koldstore_merge::scan::{
     classify_path_strategy, KoldPathStrategy, OrderColumnSupport, OrderedPathSpec, StrategyRequest,
 };
 use pgrx::pg_sys;
 
+use super::super::pg_list::{
+    list_cstring_at, list_integer_at, list_len, list_nth_ptr, make_pg_string, order_descending_flag,
+};
 use super::cost::{catalog_startup_bias, general_merge_total_cost};
 
 /// Private-list tag for [`KoldPathStrategy::ExactPrimaryKey`].
@@ -79,14 +81,7 @@ pub(crate) fn strategy_explain_label(tag: i32) -> &'static str {
 #[must_use]
 pub(crate) fn path_strategy_tag_from_private(private: *mut pg_sys::List) -> i32 {
     unsafe {
-        if list_len(private) <= PATH_PRIVATE_STRATEGY_INDEX {
-            return STRATEGY_TAG_GENERAL_MERGE;
-        }
-        let marker = list_nth_ptr(private, PATH_PRIVATE_STRATEGY_INDEX).cast::<pg_sys::Integer>();
-        if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
-            return STRATEGY_TAG_GENERAL_MERGE;
-        }
-        (*marker).ival
+        list_integer_at(private, PATH_PRIVATE_STRATEGY_INDEX).unwrap_or(STRATEGY_TAG_GENERAL_MERGE)
     }
 }
 
@@ -103,11 +98,7 @@ pub(crate) unsafe fn serialize_path_strategy_private(
         _ => (0, 0),
     };
     let tag = pg_sys::makeInteger(path_strategy_tag(strategy));
-    let scope = match CString::new(scope_key) {
-        Ok(value) => value,
-        Err(_) => CString::new("").expect("empty scope is valid"),
-    };
-    let scope_node = pg_sys::makeString(scope.as_ptr() as *mut c_char);
+    let scope_node = make_pg_string(scope_key);
     let sort_order = pg_sys::makeInteger(sort_order_id);
     let leading = pg_sys::makeInteger(leading_column_id);
     let descending = pg_sys::makeInteger(i32::from(order_descending));
@@ -121,46 +112,19 @@ pub(crate) unsafe fn serialize_path_strategy_private(
 /// Reads the scope key from path private data; missing/invalid → `""`.
 #[must_use]
 pub(crate) unsafe fn scope_key_from_path_private(private: *mut pg_sys::List) -> String {
-    if list_len(private) <= PATH_PRIVATE_SCOPE_KEY_INDEX {
-        return String::new();
-    }
-    let string_node = list_nth_ptr(private, PATH_PRIVATE_SCOPE_KEY_INDEX).cast::<pg_sys::String>();
-    if string_node.is_null()
-        || (*string_node).type_ != pg_sys::NodeTag::T_String
-        || (*string_node).sval.is_null()
-    {
-        return String::new();
-    }
-    std::ffi::CStr::from_ptr((*string_node).sval)
-        .to_string_lossy()
-        .into_owned()
+    list_cstring_at(private, PATH_PRIVATE_SCOPE_KEY_INDEX).unwrap_or_default()
 }
 
 /// Reads ordered leading column id from path private data (0 if absent).
 #[must_use]
 pub(crate) unsafe fn leading_column_id_from_path_private(private: *mut pg_sys::List) -> i16 {
-    if list_len(private) <= PATH_PRIVATE_LEADING_COLUMN_ID_INDEX {
-        return 0;
-    }
-    let marker =
-        list_nth_ptr(private, PATH_PRIVATE_LEADING_COLUMN_ID_INDEX).cast::<pg_sys::Integer>();
-    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
-        return 0;
-    }
-    (*marker).ival as i16
+    list_integer_at(private, PATH_PRIVATE_LEADING_COLUMN_ID_INDEX).unwrap_or(0) as i16
 }
 
 /// Reads sort_order_id from path private data (0 if absent).
 #[must_use]
 pub(crate) unsafe fn sort_order_id_from_path_private(private: *mut pg_sys::List) -> i32 {
-    if list_len(private) <= PATH_PRIVATE_SORT_ORDER_ID_INDEX {
-        return 0;
-    }
-    let marker = list_nth_ptr(private, PATH_PRIVATE_SORT_ORDER_ID_INDEX).cast::<pg_sys::Integer>();
-    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
-        return 0;
-    }
-    (*marker).ival
+    list_integer_at(private, PATH_PRIVATE_SORT_ORDER_ID_INDEX).unwrap_or(0)
 }
 
 /// Installs the KoldMergeScan path portfolio and clears bare heap finals.
@@ -364,33 +328,45 @@ unsafe fn path_leads_with_attnum(
     false
 }
 
-/// True when the leading pathkey uses a greater-than btree strategy (DESC).
+/// True when the hot child produces DESC order for its leading pathkey.
+///
+/// Prefer [`IndexPath::indexscandir`] when the child is an index path: that is
+/// the direction PostgreSQL will actually scan. Fall back to the leading
+/// pathkey's btree strategy. Missing metadata defaults to ASC — fail-open to
+/// DESC incorrectly skips lower cold keys on `ORDER BY … ASC LIMIT`.
 unsafe fn path_leading_descending(path: *mut pg_sys::Path) -> bool {
-    if path.is_null() || (*path).pathkeys.is_null() {
-        return true;
+    if path.is_null() {
+        return false;
     }
-    if list_len((*path).pathkeys) < 1 {
-        return true;
+    if (*path).type_ == pg_sys::NodeTag::T_IndexPath {
+        let index_path = path.cast::<pg_sys::IndexPath>();
+        if !index_path.is_null() {
+            match (*index_path).indexscandir {
+                pg_sys::ScanDirection::BackwardScanDirection => return true,
+                pg_sys::ScanDirection::ForwardScanDirection => return false,
+                _ => {}
+            }
+        }
+    }
+    if (*path).pathkeys.is_null() || list_len((*path).pathkeys) < 1 {
+        return false;
     }
     let pathkey = list_nth_ptr((*path).pathkeys, 0).cast::<pg_sys::PathKey>();
     if pathkey.is_null() {
-        return true;
+        return false;
     }
     ((*pathkey).pk_strategy as u32) == pg_sys::BTGreaterStrategyNumber
 }
 
 /// Reads ordered ASC/DESC marker from path private (`true` = DESC).
+///
+/// Missing/invalid private data defaults to ASC (see [`path_leading_descending`]).
 #[must_use]
 pub(crate) unsafe fn order_descending_from_path_private(private: *mut pg_sys::List) -> bool {
-    if list_len(private) <= PATH_PRIVATE_ORDER_DESCENDING_INDEX {
-        return true;
-    }
-    let marker =
-        list_nth_ptr(private, PATH_PRIVATE_ORDER_DESCENDING_INDEX).cast::<pg_sys::Integer>();
-    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
-        return true;
-    }
-    (*marker).ival != 0
+    order_descending_flag(list_integer_at(
+        private,
+        PATH_PRIVATE_ORDER_DESCENDING_INDEX,
+    ))
 }
 
 /// Returns all non-custom paths from a relation pathlist.
@@ -405,20 +381,4 @@ pub(crate) unsafe fn collect_native_paths(pathlist: *mut pg_sys::List) -> Vec<*m
         out.push(path);
     }
     out
-}
-
-unsafe fn list_len(list: *mut pg_sys::List) -> i32 {
-    if list.is_null() {
-        0
-    } else {
-        (*list).length
-    }
-}
-
-unsafe fn list_nth_ptr(list: *mut pg_sys::List, index: i32) -> *mut c_void {
-    if list.is_null() || index < 0 || index >= (*list).length {
-        return std::ptr::null_mut();
-    }
-    let elements = (*list).elements;
-    (*elements.offset(index as isize)).ptr_value
 }

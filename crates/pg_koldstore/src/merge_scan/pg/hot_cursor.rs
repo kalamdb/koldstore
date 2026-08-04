@@ -1,10 +1,15 @@
 //! Typed hot cursor over the native PostgreSQL child plan.
 //!
-//! For ordered progressive paths, hot candidates come from `ExecProcNode` on
-//! the ordered index/seq child instead of SPI `to_jsonb` keyset paging. Reads
-//! run under the relation-owner merge identity so RLS cannot hide a newer hot
-//! winner before cold versions are masked; user `WHERE` / RLS still apply later
-//! via `ExecScan`.
+//! For ordered progressive / unordered hot-first paths, hot candidates come
+//! from `ExecProcNode` on the native child instead of SPI `to_jsonb` keyset
+//! paging. Reads run under the relation-owner merge identity so RLS cannot
+//! hide a newer hot winner before cold versions are masked; user `WHERE` /
+//! RLS still apply later via `ExecScan`.
+//!
+//! Projected IndexScan slots renumber TupleDesc attnums to `1..n` and often
+//! leave `attname` empty, so decode maps slot indexes from the child's plan
+//! `targetlist` Vars (`varattno` / `resname`). When the child tlist omits the
+//! primary key (e.g. `count(*)`), open fails and callers fall back to SPI.
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -15,6 +20,7 @@ use pgrx::pg_sys;
 
 use super::hot::HotMergeBatchReader;
 use super::literals::datum_to_json_value;
+use super::pg_list::{list_len, list_nth_ptr};
 use super::{exec_proc_node, tuple_slot_is_empty, with_hook_disabled};
 
 /// First adaptive page for native ordered hot merge under parent `Limit`.
@@ -25,13 +31,14 @@ pub(super) const NATIVE_HOT_BATCH_ROWS: usize = 64;
 /// Hot merge source used by [`super::execute::MergeRowStream`].
 #[derive(Debug)]
 pub(super) enum HotMergeSource {
-    /// Legacy mixed merge: SPI JSON keyset pages ordered by primary key.
+    /// GeneralMerge / native-open fallback: SPI JSON keyset pages.
     SpiJson(HotMergeBatchReader),
-    /// Ordered progressive: native child slots under trusted merge identity.
+    /// Ordered/unordered progressive: native child slots under merge identity.
     NativeChild(NativeHotCursor),
 }
 
 impl HotMergeSource {
+    /// Empty hot source (cold-only point path); not a live SPI query.
     pub(super) fn empty(relation_owner: pg_sys::Oid) -> Self {
         Self::SpiJson(HotMergeBatchReader::empty(relation_owner))
     }
@@ -64,8 +71,9 @@ pub(super) struct NativeHotCursor {
     child: *mut pg_sys::PlanState,
     relation_owner: pg_sys::Oid,
     pk_columns: Vec<PkColumn>,
-    /// Catalog columns used to decode slot attributes into a row image.
     catalog_columns: Vec<CatalogColumn>,
+    /// Slot index → relation attnum from the child plan tlist.
+    slot_attnums: Vec<i16>,
     batch_size: usize,
     exhausted: bool,
 }
@@ -75,9 +83,15 @@ impl NativeHotCursor {
     ///
     /// # Safety
     /// `child` must remain valid for the CustomScan lifetime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the child targetlist does not cover every primary
+    /// key column (callers should fall back to SPI JSON).
     pub(super) unsafe fn open(
         child: *mut pg_sys::PlanState,
         relation_owner: pg_sys::Oid,
+        _table_oid: pg_sys::Oid,
         pk_columns: Vec<PkColumn>,
         catalog_columns: Vec<CatalogColumn>,
     ) -> Result<Self, String> {
@@ -90,21 +104,25 @@ impl NativeHotCursor {
         if pk_columns.is_empty() {
             return Err("ordered hot cursor requires primary-key columns".to_string());
         }
+        let slot_attnums = child_slot_attnums(child, &catalog_columns)?;
+        if !pk_columns_covered(&pk_columns, &catalog_columns, &slot_attnums) {
+            return Err("native hot cursor child targetlist omits primary-key columns".to_string());
+        }
+        // Also require every catalog column that appears in the child tlist to
+        // be decodable; callers that need additional projection columns (RLS
+        // scope, SELECT list) fall back to SPI when the child omits them.
         Ok(Self {
             child,
             relation_owner,
             pk_columns,
             catalog_columns,
+            slot_attnums,
             batch_size: NATIVE_HOT_FIRST_BATCH_ROWS,
             exhausted: false,
         })
     }
 
     /// Fetches up to one adaptive page of hot rows under the merge identity.
-    ///
-    /// The first page is small so parent `Limit` can stop after a handful of
-    /// `ExecProcNode` pulls; subsequent pages grow toward
-    /// [`NATIVE_HOT_BATCH_ROWS`].
     pub(super) fn next_batch(&mut self) -> Result<Option<Vec<HotRow>>, String> {
         if self.exhausted {
             return Ok(None);
@@ -112,11 +130,18 @@ impl NativeHotCursor {
         let child = self.child;
         let pk_columns = self.pk_columns.clone();
         let catalog_columns = self.catalog_columns.clone();
+        let slot_attnums = self.slot_attnums.clone();
         let batch_size = self.batch_size;
         let rows =
             crate::catalog::owner::with_relation_owner_for_merge(self.relation_owner, || {
                 with_hook_disabled(|| unsafe {
-                    pull_hot_rows_from_child(child, &pk_columns, &catalog_columns, batch_size)
+                    pull_hot_rows_from_child(
+                        child,
+                        &pk_columns,
+                        &catalog_columns,
+                        &slot_attnums,
+                        batch_size,
+                    )
                 })
             })?;
         if rows.len() < batch_size {
@@ -135,12 +160,32 @@ impl NativeHotCursor {
         self.exhausted = false;
         self.batch_size = NATIVE_HOT_FIRST_BATCH_ROWS;
     }
+
+    /// True when the child tlist includes relation `attnum`.
+    #[must_use]
+    pub(super) fn covers_attnum(&self, attnum: i16) -> bool {
+        attnum > 0 && self.slot_attnums.contains(&attnum)
+    }
+}
+
+fn pk_columns_covered(
+    pk_columns: &[PkColumn],
+    catalog_columns: &[CatalogColumn],
+    slot_attnums: &[i16],
+) -> bool {
+    pk_columns.iter().all(|pk| {
+        catalog_columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(pk.as_str()))
+            .is_some_and(|column| slot_attnums.contains(&column.column_id.get()))
+    })
 }
 
 unsafe fn pull_hot_rows_from_child(
     child: *mut pg_sys::PlanState,
     pk_columns: &[PkColumn],
     catalog_columns: &[CatalogColumn],
+    slot_attnums: &[i16],
     batch_size: usize,
 ) -> Result<Vec<HotRow>, String> {
     let mut rows = Vec::with_capacity(batch_size);
@@ -149,7 +194,12 @@ unsafe fn pull_hot_rows_from_child(
         if tuple_slot_is_empty(slot) {
             break;
         }
-        rows.push(hot_row_from_slot(slot, pk_columns, catalog_columns)?);
+        rows.push(hot_row_from_slot(
+            slot,
+            pk_columns,
+            catalog_columns,
+            slot_attnums,
+        )?);
     }
     Ok(rows)
 }
@@ -158,16 +208,15 @@ unsafe fn hot_row_from_slot(
     slot: *mut pg_sys::TupleTableSlot,
     pk_columns: &[PkColumn],
     catalog_columns: &[CatalogColumn],
+    slot_attnums: &[i16],
 ) -> Result<HotRow, String> {
-    let max_attnum = catalog_columns
-        .iter()
-        .map(|column| column.column_id.get())
-        .filter(|attnum| *attnum > 0)
-        .max()
-        .unwrap_or(0);
-    if max_attnum > 0 {
-        ensure_slot_attrs(slot, max_attnum);
+    if slot.is_null() {
+        return Err("native hot cursor received a null tuple slot".to_string());
     }
+
+    let need = i16::try_from(slot_attnums.len()).unwrap_or(i16::MAX);
+    ensure_slot_attrs(slot, need);
+    let nvalid = (*slot).tts_nvalid.max(0) as usize;
 
     let mut row_image = serde_json::Map::new();
     let mut pk_object = serde_json::Map::new();
@@ -177,8 +226,10 @@ unsafe fn hot_row_from_slot(
         if attnum <= 0 {
             continue;
         }
-        let index = (attnum - 1) as usize;
-        if index >= (*slot).tts_nvalid as usize {
+        let Some(index) = slot_attnums.iter().position(|mapped| *mapped == attnum) else {
+            continue;
+        };
+        if index >= nvalid {
             continue;
         }
         let is_null = *(*slot).tts_isnull.add(index);
@@ -202,8 +253,9 @@ unsafe fn hot_row_from_slot(
             continue;
         }
         return Err(format!(
-            "native hot cursor slot omitted primary-key column `{}`",
-            pk.as_str()
+            "native hot cursor slot omitted primary-key column `{}` (slot attnums: {:?})",
+            pk.as_str(),
+            slot_attnums
         ));
     }
 
@@ -220,15 +272,73 @@ unsafe fn hot_row_from_slot(
     })
 }
 
+/// Builds slot-index → relation-attnum from the child plan targetlist.
+unsafe fn child_slot_attnums(
+    child: *mut pg_sys::PlanState,
+    catalog_columns: &[CatalogColumn],
+) -> Result<Vec<i16>, String> {
+    if child.is_null() || (*child).plan.is_null() {
+        return Err("ordered hot cursor child plan is null".to_string());
+    }
+    let tlist = (*(*child).plan).targetlist;
+    let len = list_len(tlist);
+    let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    for index in 0..len {
+        let entry = list_nth_ptr(tlist, index).cast::<pg_sys::TargetEntry>();
+        if entry.is_null() {
+            out.push(0);
+            continue;
+        }
+        if let Some(attnum) = var_attnum((*entry).expr.cast()) {
+            out.push(attnum);
+            continue;
+        }
+        let resname = if (*entry).resname.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr((*entry).resname)
+                .to_string_lossy()
+                .into_owned()
+        };
+        let attnum = catalog_columns
+            .iter()
+            .find(|column| column.name.eq_ignore_ascii_case(&resname))
+            .map(|column| column.column_id.get())
+            .unwrap_or(0);
+        out.push(attnum);
+    }
+    Ok(out)
+}
+
+unsafe fn var_attnum(expr: *mut pg_sys::Expr) -> Option<i16> {
+    let expr = unwrap_relabel(expr);
+    if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Var {
+        return None;
+    }
+    let var = expr.cast::<pg_sys::Var>();
+    let attnum = (*var).varattno;
+    (attnum > 0).then_some(attnum)
+}
+
+unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {
+    if expr.is_null() {
+        return expr;
+    }
+    if (*expr).type_ == pg_sys::NodeTag::T_RelabelType {
+        let relabel = expr.cast::<pg_sys::RelabelType>();
+        (*relabel).arg.cast::<pg_sys::Expr>()
+    } else {
+        expr
+    }
+}
+
 unsafe fn ensure_slot_attrs(slot: *mut pg_sys::TupleTableSlot, attnum: i16) {
     if slot.is_null() || attnum <= 0 {
         return;
     }
-    // Already deformed / virtual projection already filled Datum arrays.
     if (*slot).tts_nvalid >= attnum {
         return;
     }
-    // VirtualTTSOps::getsomeattrs elog(ERROR) if called; leave as-is.
     if (*slot).tts_ops == std::ptr::addr_of!(pg_sys::TTSOpsVirtual) {
         return;
     }

@@ -1,4 +1,4 @@
-name: CI Tests
+name: CI
 
 on:
   push:
@@ -22,6 +22,12 @@ env:
   CARGO_TERM_COLOR: always
   PGRX_VERSION: "0.19.1"
 
+# Needed so EnricoMi can publish check runs + PR comments from JUnit.
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 jobs:
   rust:
     name: fmt / clippy / unit
@@ -35,7 +41,25 @@ jobs:
       - run: cargo install cargo-nextest --locked
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
-      - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests --exclude stress
+      - name: Unit tests (nextest)
+        run: |
+          cargo nextest run --profile ci --workspace --no-default-features \
+            --exclude e2e --exclude examples --exclude storage-comparison \
+            --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests --exclude stress
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: (!cancelled())
+        with:
+          check_name: Unit tests
+          files: target/nextest/ci/junit.xml
+          comment_mode: failures
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-unit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   pgrx-test:
     name: "pg_test (PG ${{ matrix.pg }})"
@@ -89,12 +113,27 @@ jobs:
             PGRX_NO_SCHEMA=false \
             PGRX_MANIFEST_PATH="${manifest}" \
             cargo nextest run \
+              --profile ci \
               --manifest-path "${manifest}" \
               --features "${features}" \
               --no-default-features \
               --test-threads 1
         env:
           RUST_BACKTRACE: "1"
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: (!cancelled())
+        with:
+          check_name: "pg_test (PG ${{ matrix.pg }})"
+          files: target/nextest/ci/junit.xml
+          comment_mode: failures
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-pg-test-pg${{ matrix.pg }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   e2e:
     name: E2E (PG ${{ matrix.pg }})
@@ -112,6 +151,7 @@ jobs:
       KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
       KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
       KOLDSTORE_E2E_THREADS: "4"
+      KOLDSTORE_E2E_NEXTEST_PROFILE: ci
       PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
     steps:
       - uses: actions/checkout@v4
@@ -143,6 +183,20 @@ jobs:
           KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
           KOLDSTORE_MINIO_SECRET_KEY: minioadmin
           KOLDSTORE_MINIO_BUCKET: koldstore-test
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: (!cancelled())
+        with:
+          check_name: "E2E (PG ${{ matrix.pg }})"
+          files: target/nextest/ci/junit.xml
+          comment_mode: failures
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-e2e-pg${{ matrix.pg }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
 
   pgrx-integration:
     name: Examples + storage + SQL (PG ${{ matrix.pg }})

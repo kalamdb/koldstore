@@ -175,7 +175,7 @@ pub(super) enum EmitPath {
     MergeStream,
     /// Ordered progressive merge using native child hot cursor + cold stream.
     OrderedMergeNative,
-    /// Unordered LIMIT: hot-first SPI pages, cold deferred until hot exhausts.
+    /// Unordered LIMIT: native hot-first, cold deferred until hot exhausts.
     UnorderedHotFirst,
 }
 
@@ -435,7 +435,12 @@ pub(super) fn explain_visual_pipeline(
     }
     match execution {
         Some(execution) => {
-            explain_text(es, "Hot Actual Access", hot_actual_access(emit_path));
+            let used_spi = execution.hot_spi_query.is_some();
+            explain_text(
+                es,
+                "Hot Actual Access",
+                hot_actual_access(emit_path, used_spi),
+            );
             if let Some(sql) = execution.hot_spi_query.as_deref() {
                 explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
             }
@@ -590,7 +595,14 @@ fn explain_visual_postgres_hot_access(
     if !hot_plan_label.is_empty() {
         explain_text(es, "Hot Planned Access", hot_plan_label);
     }
-    explain_text(es, "Hot Actual Access", hot_actual_access(emit_path));
+    let used_spi = execution
+        .and_then(|execution| execution.hot_spi_query.as_ref())
+        .is_some();
+    explain_text(
+        es,
+        "Hot Actual Access",
+        hot_actual_access(emit_path, used_spi),
+    );
     match execution {
         Some(execution) => {
             explain_integer(es, "Actual Rows", None, execution.hot_rows as i64);
@@ -633,7 +645,8 @@ fn explain_hot_scan(
     }
     match execution {
         Some(execution) => {
-            explain_text(es, "Actual Access", hot_actual_access(emit_path));
+            let used_spi = execution.hot_spi_query.is_some();
+            explain_text(es, "Actual Access", hot_actual_access(emit_path, used_spi));
             if let Some(sql) = execution.hot_spi_query.as_deref() {
                 explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
             }
@@ -656,7 +669,13 @@ fn explain_hot_scan(
 }
 
 /// Honest runtime hot access label — distinct from the planner's child shape.
-fn hot_actual_access(emit_path: EmitPath) -> &'static str {
+///
+/// When ordered/unordered native open falls back to SPI JSON (narrow child
+/// tlist / `count(*)`), `used_spi` is true and the label must not claim native.
+fn hot_actual_access(emit_path: EmitPath, used_spi: bool) -> &'static str {
+    if used_spi {
+        return "SPI JSON Keyset Scan";
+    }
     match emit_path {
         EmitPath::HotChild => "Native PostgreSQL Child",
         EmitPath::HotNative => "SPI Native Tuple Scan",

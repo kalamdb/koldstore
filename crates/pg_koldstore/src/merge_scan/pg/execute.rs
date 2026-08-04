@@ -300,9 +300,14 @@ impl MergeRowStream {
             .iter()
             .map(|row| encode_leading_key(row, &ctrl.leading_column, ctrl.leading_type_oid))
             .collect::<Vec<_>>();
-        let dominates = if keys.is_empty() {
-            // No hot winners left: cold must be ordered alone when a bound exists.
-            ctrl.cold_bound.is_none()
+        // Missing catalog bound must not imply "skip cold" while segments remain:
+        // that regresses ORDER BY ASC LIMIT after hot prune (lower keys live in
+        // Parquet). Only dominate when the frontier is empty or every hot key
+        // strictly outranks the bound.
+        let dominates = if ctrl.cold_bound.is_none() {
+            !self.cold.has_pending_segments()
+        } else if keys.is_empty() {
+            false
         } else {
             hot_keys_dominate_bound(ctrl.direction, &keys, ctrl.cold_bound.as_deref())
         };
@@ -370,10 +375,11 @@ impl MergeRowStream {
             buffered.extend(winners);
         }
 
-        let ctrl = self
-            .ordered
-            .as_ref()
-            .expect("ordered ctrl present when entering buffer");
+        let Some(ctrl) = self.ordered.as_ref() else {
+            return Err(
+                "ordered progressive control missing when entering sort buffer".to_string(),
+            );
+        };
         let direction = ctrl.direction;
         let leading_column = ctrl.leading_column.clone();
         let leading_type_oid = ctrl.leading_type_oid;
@@ -732,13 +738,31 @@ fn prepare_unordered_hot_first_stream<P: ScanProfileSink>(
     unsafe {
         initialize_custom_plan_children(inputs.node, inputs.estate, inputs.eflags);
     }
-    let hot = open_native_hot_cursor(inputs).unwrap_or_else(|error| {
-        pgrx::error!("{CUSTOM_PATH_NAME} unordered hot-first native cursor failed: {error}")
-    });
+    let hot = match open_native_hot_cursor(inputs) {
+        Ok(cursor) => HotMergeSource::NativeChild(cursor),
+        Err(_) => {
+            // Empty/`count(*)` child tlists omit PK Vars; SPI keyset still works.
+            let reader = HotMergeBatchReader::open(
+                inputs.relation,
+                inputs.snapshot,
+                inputs.pk_equality,
+                inputs.pk_range,
+                inputs.image_columns,
+                inputs.relation_owner,
+            )
+            .unwrap_or_else(|error| {
+                pgrx::error!("{CUSTOM_PATH_NAME} unordered hot-first SPI fallback failed: {error}")
+            });
+            if let Some(sql) = reader.first_page_sql() {
+                profiler.record_hot_spi_query(sql);
+            }
+            HotMergeSource::SpiJson(reader)
+        }
+    };
     profiler.record_hot_buffer(0);
     // Defer mirror/cold until hot is exhausted under parent LIMIT.
     let stream = MergeRowStream::new_ordered_deferred_overlay(
-        HotMergeSource::NativeChild(hot),
+        hot,
         cold_stream,
         inputs.snapshot.mirror_relation.clone(),
         inputs.snapshot.primary_key_columns.clone(),
@@ -758,13 +782,35 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
     unsafe {
         initialize_custom_plan_children(inputs.node, inputs.estate, inputs.eflags);
     }
-    let hot = open_native_hot_cursor(inputs).unwrap_or_else(|error| {
-        pgrx::error!("{CUSTOM_PATH_NAME} native hot cursor failed: {error}")
-    });
+    let hot = match open_native_hot_cursor(inputs) {
+        Ok(cursor) => HotMergeSource::NativeChild(cursor),
+        Err(_) => {
+            let reader = HotMergeBatchReader::open(
+                inputs.relation,
+                inputs.snapshot,
+                inputs.pk_equality,
+                inputs.pk_range,
+                inputs.image_columns,
+                inputs.relation_owner,
+            )
+            .unwrap_or_else(|error| {
+                pgrx::error!("{CUSTOM_PATH_NAME} ordered SPI fallback failed: {error}")
+            });
+            if let Some(sql) = reader.first_page_sql() {
+                profiler.record_hot_spi_query(sql);
+            }
+            HotMergeSource::SpiJson(reader)
+        }
+    };
 
     let plan = unsafe { (*inputs.node).ss.ps.plan };
-    let sort_order_id = unsafe { super::custom_private_sort_order_id(plan) };
+    let mut sort_order_id = unsafe { super::custom_private_sort_order_id(plan) };
     let leading_column_id = unsafe { super::custom_private_leading_column_id(plan) };
+    // sort_order_id mirrors the leading order column_id in the catalog; recover
+    // when private data omitted the sort-order field but still carried leading.
+    if sort_order_id == 0 && leading_column_id > 0 {
+        sort_order_id = i32::from(leading_column_id);
+    }
     let scope_key = unsafe { super::custom_private_scope_key(plan) };
     let direction = if unsafe { super::custom_private_order_descending(plan) } {
         OrderDirection::Desc
@@ -785,7 +831,7 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
             });
     profiler.record_hot_buffer(0);
     let stream = MergeRowStream::new_ordered_progressive(
-        HotMergeSource::NativeChild(hot),
+        hot,
         cold_stream,
         inputs.snapshot.mirror_relation.clone(),
         inputs.snapshot.primary_key_columns.clone(),
@@ -819,7 +865,25 @@ fn open_native_hot_cursor(inputs: &ScanSourceInputs<'_>) -> Result<NativeHotCurs
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     let catalog_columns = inputs.catalog.columns.clone();
-    unsafe { NativeHotCursor::open(child, inputs.relation_owner, pk_columns, catalog_columns) }
+    let cursor = unsafe {
+        NativeHotCursor::open(
+            child,
+            inputs.relation_owner,
+            inputs.table_oid,
+            pk_columns,
+            catalog_columns,
+        )
+    }?;
+    for projected in &inputs.projection.columns {
+        let attnum = projected.catalog.column_id.get();
+        if !cursor.covers_attnum(attnum) {
+            return Err(format!(
+                "native hot cursor child targetlist omits projected column `{}`",
+                projected.catalog.name
+            ));
+        }
+    }
+    Ok(cursor)
 }
 
 fn encode_leading_key(
