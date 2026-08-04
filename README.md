@@ -1,4 +1,4 @@
-# KoldStore
+# KoldStore - A research project
 
 > **Keep hot data in PostgreSQL. Move historical rows to Parquet. Shrink the PostgreSQL heap and indexes. Query one table.**
 
