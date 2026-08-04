@@ -68,10 +68,8 @@ pub(super) unsafe fn list_cstring_at(list: *mut pg_sys::List, index: i32) -> Opt
 /// drop cannot leave a dangling `sval`.
 #[must_use]
 pub(super) unsafe fn make_pg_string(value: &str) -> *mut pg_sys::String {
-    let c_value = match CString::new(value) {
-        Ok(value) => value,
-        Err(_) => CString::new("").expect("empty string has no interior NUL"),
-    };
+    let c_value = CString::new(value)
+        .unwrap_or_else(|_| pgrx::error!("make_pg_string value contains an interior NUL byte"));
     pg_sys::makeString(pg_sys::pstrdup(c_value.as_ptr()))
 }
 
