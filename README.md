@@ -489,12 +489,7 @@ Links:
 
 ⭐ **Star the repository to follow experiments, benchmarks, architectural decisions, and progress toward a production-ready implementation.**
 
-## Suggested GitHub description
-
-> Open research project exploring tiered storage for PostgreSQL application tables—keep active rows in Postgres, move history to Parquet, and query both through the original table.
-
 ## License
 
 Apache License 2.0.
-
 Copyright 2026 KalamDB.
