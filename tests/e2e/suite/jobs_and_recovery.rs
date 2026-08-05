@@ -29,8 +29,10 @@ async fn jobs_are_durable_idempotent_and_use_active_indexes_on_pgrx() -> Result<
 
         let first_insert = db.insert_pending_flush_job(&table.relation).await?;
         let duplicate_insert = db.insert_pending_flush_job(&table.relation).await?;
-        assert_eq!(first_insert, 1);
-        assert_eq!(duplicate_insert, 0);
+        assert_eq!(
+            first_insert, duplicate_insert,
+            "duplicate enqueue must return the same active job UUID"
+        );
         assert_eq!(
             common::active_job_count(&db.client, &table.relation).await?,
             1

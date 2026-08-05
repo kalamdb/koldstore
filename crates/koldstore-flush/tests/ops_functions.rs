@@ -145,8 +145,28 @@ fn flush_sql_requests_capture_table_scope_and_enqueue_metadata() {
     assert_eq!(enqueue.seq_upper_bound.unwrap().get(), 1_000);
     assert!(enqueue.statement.sql.contains("flush_seq_upper_bound"));
     assert!(enqueue.statement.sql.contains("ON CONFLICT"));
+    assert!(enqueue.statement.sql.contains("force_upgrade"));
+    assert!(enqueue.statement.sql.contains("SELECT COALESCE"));
     assert!(enqueue
         .statement
         .sql
         .contains("WHERE job_type = 'flush' AND status IN ('pending', 'running')"));
+
+    let lookup = koldstore_flush::ops::plan_enqueue_or_lookup_flush_job(
+        koldstore_flush::ops::flush_table_request(
+            TableName::parse("app.items").unwrap(),
+            None,
+            false,
+        ),
+        None,
+    )
+    .unwrap();
+    assert_eq!(lookup.statement.operation, "enqueue or lookup flush job");
+
+    let pending = koldstore_flush::ops::plan_select_pending_flush_candidate().unwrap();
+    assert!(pending.sql.contains("status = 'pending'"));
+    assert!(pending.sql.contains("'force'"));
+
+    let count = koldstore_flush::ops::plan_count_pending_flush_jobs().unwrap();
+    assert!(count.sql.contains("count(*)::bigint"));
 }

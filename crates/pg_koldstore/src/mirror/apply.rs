@@ -201,6 +201,10 @@ pub fn apply_available() -> Result<i64, String> {
 
 /// Applies committed WAL under an explicit fence request.
 ///
+/// Acquires the database slot lock for the current transaction, then applies.
+/// Flush finalize should prefer [`try_lock_slot`] + [`apply_bounded_locked`] so
+/// encode/upload never wait on a blocked slot lock.
+///
 /// # Errors
 ///
 /// Returns an error for malformed protocol data, stale relation metadata,
@@ -212,7 +216,17 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
     if !is_background_worker() {
         crate::worker::ensure_async_mirror_worker_once_if_needed();
     }
-    super::lifecycle::lock_apply(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())?;
+    super::lifecycle::lock_slot(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())?;
+    apply_bounded_locked(request)
+}
+
+/// Applies committed WAL while the caller already holds the slot lock.
+///
+/// # Errors
+///
+/// Returns an error for malformed protocol data, stale relation metadata,
+/// missing primary-key values, or an SPI/apply failure.
+pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome, String> {
     let slot = current_slot_name();
     let exists = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)",

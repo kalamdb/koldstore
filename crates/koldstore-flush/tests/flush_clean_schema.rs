@@ -126,7 +126,7 @@ fn batched_flush_selection_can_filter_mirror_ops() {
     assert!(plan.statement.sql.contains("mirror.\"op\" = 3"));
     assert!(
         !plan.statement.sql.contains("LEFT JOIN ONLY"),
-        "delete-only waves must not join hot payloads"
+        "delete-only passes must not join hot payloads"
     );
     assert!(plan.statement.sql.contains("NULL AS \"body\""));
 }

@@ -13,7 +13,7 @@ mod task;
 mod wake;
 
 pub use ensure::{ensure_action, EnsureAction};
-pub use identity::{async_mirror_worker_type, DatabaseOid};
+pub use identity::{async_mirror_worker_type, flush_executor_worker_type, DatabaseOid};
 pub use policy::{
     next_soft_fail_backoff_ms, LAUNCHER_POLL_INTERVAL_MS, LIBRARY_NAME,
     MAX_IMMEDIATE_PENDING_TICKS, WAKE_REGISTRY_CAPACITY,

@@ -519,14 +519,14 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
 }
 
 async fn enqueue_flush_job(client: &Client, pg_version: u16) -> Result<()> {
-    let inserted = client
+    let job_id = client
         .query_one(
-            "SELECT koldstore.enqueue_flush_job(table_name => $1::text::regclass, force => true)",
+            "SELECT koldstore.enqueue_flush_job(table_name => $1::text::regclass, force => true)::text",
             &[&relation(pg_version)],
         )
         .await?
-        .get::<_, i64>(0);
-    assert_eq!(inserted, 1, "expected a new pending flush job");
+        .get::<_, String>(0);
+    assert!(!job_id.is_empty(), "expected a flush job UUID");
     Ok(())
 }
 

@@ -6,6 +6,7 @@
 
 pub mod cleanup;
 pub mod encode;
+pub mod failpoints;
 pub mod jobs_sql;
 pub mod ops;
 pub mod policy;
@@ -19,12 +20,15 @@ pub mod table_flush;
 pub mod table_jobs;
 pub mod write;
 
+pub use failpoints::{FailpointAction, FlushFailpoint, FAILPOINT_NAMES};
+
 pub use cleanup::{plan_seq_range_cleanup, CleanSchemaCleanupPlan};
 pub use encode::{stream_flush_chunks, StreamEncodeInput, StreamEncodeOutcome};
 pub use ops::{
     classify_command, describe_table_plan, enqueue_flush_job_plan, flush_table_request,
-    plan_koldstore_exec, plan_mirror_flush_selection_batch, FlushJobEnqueuePlan, FlushRequest,
-    KoldstoreExecPlan, MirrorFlushSelectionPlan, OpsCommand, OpsError,
+    plan_count_pending_flush_jobs, plan_enqueue_or_lookup_flush_job, plan_koldstore_exec,
+    plan_mirror_flush_selection_batch, plan_select_pending_flush_candidate, FlushJobEnqueuePlan,
+    FlushRequest, KoldstoreExecPlan, MirrorFlushSelectionPlan, OpsCommand, OpsError,
 };
 pub use policy::policy_flush_row_count;
 pub use scheduler::{
@@ -39,9 +43,9 @@ pub use segment_write::{
     flush_segment_relative_path, write_flush_segment_with_client, WrittenFlushSegment,
 };
 pub use stats::{
-    apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
-    should_continue_flush_catchup, should_start_catchup_wave, validate_flush_row_selection,
-    FlushStats, ResolvedFlushSelection, FORCE_FLUSH_WAVE_ROW_CAP, FORCE_TOMBSTONE_ONLY_CAP,
+    apply_force_flush_pass_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
+    should_continue_flush_catchup, should_start_catchup_pass, validate_flush_row_selection,
+    FlushStats, ResolvedFlushSelection, FORCE_FLUSH_PASS_ROW_CAP, FORCE_TOMBSTONE_ONLY_CAP,
 };
 pub use table_counters::{
     flush_mirror_fetch_limit, plan_apply_flush_row_count_deltas, plan_bump_table_row_counts,
@@ -49,12 +53,12 @@ pub use table_counters::{
 };
 pub use table_flush::{max_rows_per_file_from_policy, TableFlushBatchOutcome};
 pub use table_jobs::{
-    flush_phase, plan_abandon_running_flush_jobs, plan_cancel_jobs_for_drop,
-    plan_clear_table_cancel_request, plan_flush_cancel_requested, plan_insert_inline_flush_job,
-    plan_list_jobs, plan_list_running_flush_table_oids, plan_lookup_active_inline_flush_job,
-    plan_mark_inline_flush_job_cancelled, plan_mark_inline_flush_job_completed,
-    plan_mark_inline_flush_job_completed_after_cancel, plan_mark_inline_flush_job_failed,
-    plan_mark_inline_flush_job_running, plan_request_cancel_job, plan_request_cancel_table_jobs,
-    plan_update_inline_flush_job_progress, TableFlushJobError,
+    flush_phase, plan_cancel_jobs_for_drop, plan_clear_table_cancel_request,
+    plan_flush_cancel_requested, plan_insert_flush_job, plan_list_jobs,
+    plan_list_running_flush_table_oids, plan_lookup_active_flush_job,
+    plan_mark_flush_job_cancelled, plan_mark_flush_job_completed,
+    plan_mark_flush_job_completed_after_cancel, plan_mark_flush_job_failed,
+    plan_mark_flush_job_running, plan_reclaim_running_flush_jobs, plan_request_cancel_job,
+    plan_request_cancel_table_jobs, plan_update_flush_job_progress, TableFlushJobError,
 };
 pub use write::FlushWriteChunk;

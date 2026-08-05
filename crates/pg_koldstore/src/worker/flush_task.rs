@@ -1,30 +1,27 @@
 //! Flush scheduler for the shared database worker loop.
 //!
-//! Hot path: one catalog scan that stops at the first due table, then
-//! `flush_table` (which ensures/claims the job). No separate enqueue SPI.
-//!
-//! Concurrent ticks never wait on an in-flight flush: if the table job lock is
-//! held (or a durable `running` flush job exists), the tick is skipped.
+//! Hot path: reclaim orphans, enqueue at most one due auto-flush job, then spawn
+//! one-shot flush executors up to `koldstore.max_parallel_flush_jobs`. The
+//! coordinator never runs Parquet encode/upload itself.
 
 use koldstore_common::ManageTableOptions;
 use koldstore_flush::{
     plan_database_has_auto_flush_tables, plan_select_auto_flush_candidate_tables,
     scheduler_should_flush_parsed,
 };
-use pgrx::datum::DatumWithOid;
 
 /// Outcome of one built-in flush-scheduler evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushTickResult {
     /// True when a due auto-flush table was selected (worker should stay alive).
     pub had_due_table: bool,
-    /// True when the flush job finished as `completed`.
+    /// True when a flush job finished as `completed` in this tick (inline only).
     pub completed: bool,
 }
 
 /// Selects the first due auto-flush table, if any.
 ///
-/// Stops scanning as soon as one candidate passes policy (at most one flush
+/// Stops scanning as soon as one candidate passes policy (at most one enqueue
 /// per tick). Skips tables with an active `running` flush job and cools down
 /// recent `error` jobs for 60 seconds.
 fn select_first_due_auto_flush_table() -> Result<Option<u32>, String> {
@@ -63,18 +60,6 @@ fn select_first_due_auto_flush_table() -> Result<Option<u32>, String> {
     })
 }
 
-fn flush_job_completed(job_id: pgrx::Uuid) -> Result<bool, String> {
-    pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (\
-           SELECT 1 FROM koldstore.jobs \
-           WHERE id = $1::uuid AND status = 'completed'\
-         )",
-        &[DatumWithOid::from(job_id)],
-    )
-    .map_err(|error| error.to_string())
-    .map(|value| value.unwrap_or(false))
-}
-
 /// Returns whether this database still needs a database worker for auto-flush.
 pub(crate) fn database_has_auto_flush_tables() -> Result<bool, String> {
     let statement = plan_database_has_auto_flush_tables().map_err(|error| error.to_string())?;
@@ -86,7 +71,7 @@ pub(crate) fn database_has_auto_flush_tables() -> Result<bool, String> {
 /// Runs one flush-scheduler tick in the current backend (tests / diagnostics).
 ///
 /// SQL contract: `koldstore.internal_run_flush_scheduler_tick() → boolean`
-/// (`true` when a flush job completed).
+/// (`true` when a flush job completed inline; normally `false` in queue mode).
 #[pgrx::pg_extern(
     name = "internal_run_flush_scheduler_tick",
     schema = "koldstore",
@@ -98,41 +83,74 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
         .unwrap_or_else(|error| pgrx::error!("flush scheduler tick failed: {error}"))
 }
 
-/// Evaluates auto-flush eligibility and runs at most one `flush_table`.
+/// Evaluates auto-flush eligibility, enqueues at most one job, and runs or spawns work.
 ///
-/// If another backend already holds the table flush lock, this tick is skipped
-/// immediately (no wait, no second concurrent flush).
+/// Production (`flush_execution=queue`): enqueue + spawn one-shot executors.
+/// Test/SPI (`flush_execution=inline`): enqueue then run flush in this backend.
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     // Clear durable `running` rows left without an owner so auto-flush is not
-    // permanently blocked (Phase D crash hygiene; no lease claimer).
-    let abandoned = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()?;
-    if abandoned > 0 {
-        pgrx::log!("koldstore flush scheduler: abandoned {abandoned} stuck running flush job(s)");
+    // permanently blocked; reclaim resumes the same durable job as pending.
+    let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()?;
+    if reclaimed > 0 {
+        pgrx::log!("koldstore flush scheduler: reclaimed {reclaimed} stuck running flush job(s)");
     }
 
-    let Some(table_oid) = select_first_due_auto_flush_table()? else {
-        return Ok(FlushTickResult {
-            had_due_table: false,
-            completed: false,
-        });
-    };
-    let oid = pgrx::pg_sys::Oid::from(table_oid);
-    // Non-blocking: a mid-flight flush (worker or manual) owns the lock.
-    if !crate::sql::job_lock::try_lock_table_job(oid)? {
+    let mut had_due_table = false;
+    let mut completed = false;
+
+    if let Some(table_oid) = select_first_due_auto_flush_table()? {
+        had_due_table = true;
+        let oid = pgrx::pg_sys::Oid::from(table_oid);
+        let job_id = crate::sql::flush::jobs::enqueue_or_lookup_flush_job(oid, false)
+            .map_err(|error| error.to_string())?;
         pgrx::log!(
-            "koldstore flush scheduler: skipping table_oid={} (flush already running)",
-            table_oid
+            "koldstore flush scheduler: enqueued table_oid={} job={}",
+            table_oid,
+            crate::spi::uuid_from_pgrx(job_id)
         );
-        return Ok(FlushTickResult {
-            had_due_table: true,
-            completed: false,
-        });
+
+        if crate::guc::flush_execution_mode() == crate::settings::FlushExecutionMode::Inline {
+            // Non-blocking: a mid-flight flush owns the lock.
+            let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(oid)? else {
+                pgrx::log!(
+                    "koldstore flush scheduler: skipping table_oid={} (flush already running)",
+                    table_oid
+                );
+                return Ok(FlushTickResult {
+                    had_due_table: true,
+                    completed: false,
+                });
+            };
+            let job_id =
+                crate::sql::flush::execute::flush_table_with_session_lock(oid, false, guard)?;
+            completed = flush_job_completed(job_id)?;
+        }
     }
-    // `flush_table` re-acquires the same xact lock (reentrant) and ensures/claims
-    // the job; no separate enqueue SPI.
-    let job_id = crate::sql::flush::execute::flush_table_pg_impl(oid, false)?;
+
+    if crate::guc::flush_execution_mode() == crate::settings::FlushExecutionMode::Queue {
+        let spawned = super::spawn_flush_executors_for_pending_work()?;
+        if spawned > 0 {
+            pgrx::log!("koldstore flush scheduler: spawned {spawned} flush executor(s)");
+            had_due_table = true;
+        }
+    }
+
     Ok(FlushTickResult {
-        had_due_table: true,
-        completed: flush_job_completed(job_id)?,
+        had_due_table,
+        completed,
     })
+}
+
+fn flush_job_completed(job_id: pgrx::Uuid) -> Result<bool, String> {
+    use pgrx::datum::DatumWithOid;
+
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (\
+           SELECT 1 FROM koldstore.jobs \
+           WHERE id = $1::uuid AND status = 'completed'\
+         )",
+        &[DatumWithOid::from(job_id)],
+    )
+    .map_err(|error| error.to_string())
+    .map(|value| value.unwrap_or(false))
 }

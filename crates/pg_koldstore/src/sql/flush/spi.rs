@@ -19,19 +19,19 @@ pub(crate) fn resolve_flush_stats(
     force: bool,
 ) -> Result<ResolvedFlushSelection, String> {
     use koldstore_flush::{
-        apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
-        FORCE_FLUSH_WAVE_ROW_CAP,
+        apply_force_flush_pass_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
+        FORCE_FLUSH_PASS_ROW_CAP,
     };
 
     if force {
         let (all, delete_stats) = mirror_force_flush_stats(table_oid)?;
         let selection = resolve_force_flush_selection(all, delete_stats);
-        // Cap large force mirrors into waves so encode/publish peak stays bounded.
-        if selection.mirror_ops.is_none() && selection.stats.row_count > FORCE_FLUSH_WAVE_ROW_CAP {
-            let cutoff = mirror_oldest_rows_cutoff(table_oid, FORCE_FLUSH_WAVE_ROW_CAP)?;
-            return Ok(apply_force_flush_wave_cap(
+        // Cap large force mirrors into passes so encode/publish peak stays bounded.
+        if selection.mirror_ops.is_none() && selection.stats.row_count > FORCE_FLUSH_PASS_ROW_CAP {
+            let cutoff = mirror_oldest_rows_cutoff(table_oid, FORCE_FLUSH_PASS_ROW_CAP)?;
+            return Ok(apply_force_flush_pass_cap(
                 selection,
-                FORCE_FLUSH_WAVE_ROW_CAP,
+                FORCE_FLUSH_PASS_ROW_CAP,
                 Some(cutoff),
             ));
         }
@@ -264,6 +264,18 @@ pub(super) fn manifest_generation(table_oid: pgrx::pg_sys::Oid) -> Result<i64, S
     )
 }
 
+/// Catalog identity for a flush writer attempt/pass.
+///
+/// UUIDs identify job / attempt / pass. Per-segment ordinals remain `i32` in
+/// the batch insert path (catalog column `segment_ordinal`) until a shared
+/// ordinal newtype exists.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FlushSegmentWriterIdentity {
+    pub job_id: uuid::Uuid,
+    pub attempt_token: uuid::Uuid,
+    pub pass_id: uuid::Uuid,
+}
+
 /// Catalogs every segment written by one `flush_table` call.
 ///
 /// Segment rows + packed `cold_segment_index` bounds go in one SPI insert.
@@ -276,6 +288,7 @@ pub(super) fn manifest_generation(table_oid: pgrx::pg_sys::Oid) -> Result<i64, S
 /// execution fails.
 pub(super) fn persist_flush_segments_batch(
     table_oid: pgrx::pg_sys::Oid,
+    writer: FlushSegmentWriterIdentity,
     segments: &[WrittenFlushSegment],
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
@@ -404,6 +417,9 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(row_group_min_values),
             DatumWithOid::from(row_group_max_values),
             DatumWithOid::from(row_group_null_counts),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.job_id)),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.attempt_token)),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.pass_id)),
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -415,9 +431,10 @@ pub(super) fn persist_flush_segments_batch(
 /// Prefer this during streaming flush so catalog work tracks Parquet publish.
 pub(super) fn persist_flush_segment(
     table_oid: pgrx::pg_sys::Oid,
+    writer: FlushSegmentWriterIdentity,
     segment: &WrittenFlushSegment,
 ) -> Result<(), String> {
-    persist_flush_segments_batch(table_oid, std::slice::from_ref(segment))
+    persist_flush_segments_batch(table_oid, writer, std::slice::from_ref(segment))
 }
 
 /// Activates pending flush segments and CAS-bumps `manifest.generation`.
@@ -809,7 +826,7 @@ fn mirror_force_flush_stats(
     Ok((all.into(), delete_stats.into()))
 }
 
-/// Mirror `max(seq)` at flush-job start, used to pin multi-wave catch-up.
+/// Mirror `max(seq)` at flush-job start, used to pin multi-pass catch-up.
 pub(super) fn mirror_catchup_watermark(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<Option<i64>, String> {

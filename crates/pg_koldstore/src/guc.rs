@@ -43,6 +43,12 @@ static PENDING_SEGMENT_TTL_SECONDS: GucSetting<i32> =
 static FLUSH_CHECK_INTERVAL_SECONDS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS);
 #[cfg(feature = "pg")]
+static MAX_PARALLEL_FLUSH_JOBS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_MAX_PARALLEL_FLUSH_JOBS);
+#[cfg(feature = "pg")]
+static FLUSH_EXECUTION: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"queue"));
+#[cfg(feature = "pg")]
 static ASYNC_APPLY_WATCHDOG_INTERVAL_MS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_ASYNC_APPLY_WATCHDOG_INTERVAL_MS);
 #[cfg(feature = "pg")]
@@ -183,10 +189,28 @@ pub fn define_gucs() {
     GucRegistry::define_int_guc(
         c"koldstore.flush_check_interval_seconds",
         c"Interval between built-in auto-flush eligibility checks.",
-        c"Database worker wakes on this cadence to evaluate auto_flush managed tables, enqueue flush jobs when needed, and run one flush. SET / ALTER SYSTEM + reload; workers pick up changes on SIGHUP.",
+        c"Database worker wakes on this cadence to evaluate auto_flush managed tables, enqueue flush jobs when needed, and spawn flush executors. SET / ALTER SYSTEM + reload; workers pick up changes on SIGHUP.",
         &FLUSH_CHECK_INTERVAL_SECONDS,
         settings::MIN_FLUSH_CHECK_INTERVAL_SECONDS,
         settings::MAX_FLUSH_CHECK_INTERVAL_SECONDS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.max_parallel_flush_jobs",
+        c"Maximum concurrent one-shot flush executor workers per database.",
+        c"Caps how many koldstore flush executor background workers may run at once. Default stays at 2 until broader failure-sweep coverage lands. Clamped to 1..=16.",
+        &MAX_PARALLEL_FLUSH_JOBS,
+        settings::MIN_MAX_PARALLEL_FLUSH_JOBS,
+        settings::MAX_MAX_PARALLEL_FLUSH_JOBS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_string_guc(
+        c"koldstore.flush_execution",
+        c"How flush_table runs after enqueueing a durable job.",
+        c"queue (default): enqueue UUID and spawn a one-shot flush executor. inline: enqueue then run flush in the calling backend (required for pg_test SPI transactions).",
+        &FLUSH_EXECUTION,
         GucContext::Userset,
         flags,
     );
@@ -340,6 +364,16 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::FLUSH_CHECK_INTERVAL_SECONDS_GUC,
             internal: false,
             default_value: "30",
+        },
+        GucDefinition {
+            name: settings::MAX_PARALLEL_FLUSH_JOBS_GUC,
+            internal: false,
+            default_value: "2",
+        },
+        GucDefinition {
+            name: settings::FLUSH_EXECUTION_GUC,
+            internal: false,
+            default_value: settings::DEFAULT_FLUSH_EXECUTION,
         },
         GucDefinition {
             name: settings::ASYNC_APPLY_WATCHDOG_INTERVAL_MS_GUC,
@@ -585,6 +619,38 @@ pub fn flush_check_interval_seconds() -> i64 {
     #[cfg(not(feature = "pg"))]
     {
         i64::from(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS)
+    }
+}
+
+/// Maximum concurrent one-shot flush executor workers for this database.
+#[must_use]
+pub fn max_parallel_flush_jobs() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_max_parallel_flush_jobs(MAX_PARALLEL_FLUSH_JOBS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_MAX_PARALLEL_FLUSH_JOBS
+    }
+}
+
+/// Whether `flush_table` should run inline or enqueue for background executors.
+#[must_use]
+pub fn flush_execution_mode() -> settings::FlushExecutionMode {
+    #[cfg(feature = "pg")]
+    {
+        let value = FLUSH_EXECUTION
+            .get()
+            .and_then(|value| value.to_str().ok().map(str::to_string))
+            .unwrap_or_else(|| settings::DEFAULT_FLUSH_EXECUTION.to_string());
+        settings::FlushExecutionMode::parse(&value).unwrap_or(settings::FlushExecutionMode::Queue)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::FlushExecutionMode::Queue
     }
 }
 

@@ -12,6 +12,8 @@
 
 pub mod backend;
 pub mod client;
+pub mod fault;
+pub mod model;
 pub mod object;
 pub mod path_template;
 pub mod publish;
@@ -27,6 +29,11 @@ pub use client::{
     ObjectStoreClient, PutOutcome, PutPrecondition, StorageClient, StorageClientError,
     StorageResult,
 };
+pub use fault::{
+    FaultInjectingObjectStore, FaultOpType, FaultPolicy, FaultTraceEntry, FaultTraceResult,
+    DEFAULT_MAX_TRACE_ENTRIES,
+};
+pub use model::{ModelObject, ModelObjectStore, ModelSnapshot};
 pub use object::StorageObject;
 pub use path_template::{
     join_object_key, manifest_object_key, normalize_table_prefix, render_regular_table_prefix,

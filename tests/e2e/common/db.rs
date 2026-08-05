@@ -376,12 +376,12 @@ impl TestDb {
         })
     }
 
-    /// Inserts one pending flush job for a relation.
+    /// Enqueues a flush job (or returns the existing active job UUID as text).
     ///
     /// # Errors
     ///
-    /// Returns an error when the insert fails.
-    pub async fn insert_pending_flush_job(&self, relation: &str) -> Result<i64> {
+    /// Returns an error when the enqueue fails.
+    pub async fn insert_pending_flush_job(&self, relation: &str) -> Result<String> {
         let row = self
             .client
             .query_one(
@@ -389,7 +389,7 @@ impl TestDb {
                 SELECT koldstore.enqueue_flush_job(
                   table_name => $1::text::regclass,
                   force      => false
-                )
+                )::text
                 "#,
                 &[&relation],
             )

@@ -178,6 +178,16 @@ pub const fn flush_table_request(
 
 /// Plans enqueueing a flush job for a table/scope and optional `_seq` watermark.
 ///
+/// Inserts a pending flush job when none is active. On conflict with an existing
+/// pending/running flush job, returns that job's id. When `force = true`, upgrades
+/// an existing **pending** job's payload force intent.
+///
+/// Bind parameters:
+/// - `$1` table oid (`regclass::oid`)
+/// - `$2` scope key text (NULL → `''`)
+/// - `$3` optional `flush_seq_upper_bound`
+/// - `$4` force boolean
+///
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
@@ -185,34 +195,77 @@ pub fn enqueue_flush_job_plan(
     request: FlushRequest,
     seq_upper_bound: Option<SeqId>,
 ) -> Result<FlushJobEnqueuePlan, OpsError> {
+    plan_enqueue_or_lookup_flush_job(request, seq_upper_bound)
+}
+
+/// Plans INSERT … ON CONFLICT DO NOTHING then lookup of the active flush job id.
+///
+/// Same contract as [`enqueue_flush_job_plan`]; preferred name for callers that
+/// emphasize the coalesce-with-existing-active-job behavior.
+///
+/// # Errors
+///
+/// Returns an error when SPI statement metadata cannot be prepared.
+pub fn plan_enqueue_or_lookup_flush_job(
+    request: FlushRequest,
+    seq_upper_bound: Option<SeqId>,
+) -> Result<FlushJobEnqueuePlan, OpsError> {
     let statement = SqlStatement::write(
-        "enqueue flush job",
+        "enqueue or lookup flush job",
         &format!(
             r#"
-INSERT INTO koldstore.jobs (
-    id,
-    table_oid,
-    scope_key,
-    job_type,
-    status,
-    phase,
-    flush_seq_upper_bound,
-    payload
+WITH inserted AS (
+    INSERT INTO koldstore.jobs (
+        id,
+        table_oid,
+        scope_key,
+        job_type,
+        status,
+        phase,
+        flush_seq_upper_bound,
+        payload
+    )
+    VALUES (
+        gen_random_uuid(),
+        $1::regclass::oid,
+        COALESCE($2::text, ''),
+        'flush',
+        'pending',
+        'pending',
+        $3::bigint,
+        jsonb_build_object('force', $4::boolean)
+    )
+    ON CONFLICT (table_oid, scope_key)
+    WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
+    DO NOTHING
+    RETURNING id
+),
+force_upgrade AS (
+    UPDATE koldstore.jobs j
+    SET payload = j.payload || jsonb_build_object('force', true),
+        updated_at = now()
+    WHERE $4::boolean
+      AND NOT EXISTS (SELECT 1 FROM inserted)
+      AND j.table_oid = $1::regclass::oid
+      AND j.scope_key = COALESCE($2::text, '')
+      AND j.job_type = 'flush'
+      AND j.status = 'pending'
+      AND COALESCE((j.payload->>'force')::boolean, false) IS DISTINCT FROM true
+    RETURNING j.id
 )
-VALUES (
-    gen_random_uuid(),
-    $1::regclass::oid,
-    COALESCE($2::text, ''),
-    'flush',
-    'pending',
-    'pending',
-    $3::bigint,
-    jsonb_build_object('force', $4::boolean)
+SELECT COALESCE(
+    (SELECT id FROM inserted LIMIT 1),
+    (SELECT id FROM force_upgrade LIMIT 1),
+    (
+        SELECT id
+        FROM koldstore.jobs
+        WHERE table_oid = $1::regclass::oid
+          AND scope_key = COALESCE($2::text, '')
+          AND {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
+        ORDER BY updated_at, id
+        LIMIT 1
+    )
 )
-ON CONFLICT (table_oid, scope_key)
-WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
-DO NOTHING
-RETURNING id
 "#
         ),
     )
@@ -223,6 +276,54 @@ RETURNING id
         seq_upper_bound,
         statement,
     })
+}
+
+/// Plans selection of one due pending flush job for a one-shot executor.
+///
+/// Returns JSON `{"table_oid":…,"force":…}` or empty string when the queue is
+/// empty. Does not lock the jobs row; session table ownership serializes claim.
+///
+/// # Errors
+///
+/// Returns an error when SPI statement metadata cannot be prepared.
+pub fn plan_select_pending_flush_candidate() -> Result<SqlStatement, OpsError> {
+    SqlStatement::read(
+        "select pending flush candidate",
+        r#"
+SELECT COALESCE((
+    SELECT jsonb_build_object(
+        'table_oid', table_oid::bigint,
+        'force', COALESCE((payload->>'force')::boolean, false)
+    )::text
+    FROM koldstore.jobs
+    WHERE job_type = 'flush'
+      AND status = 'pending'
+      AND available_at <= now()
+    ORDER BY available_at, updated_at, id
+    LIMIT 1
+), '')
+"#,
+    )
+    .map_err(|error| OpsError::Sql(error.to_string()))
+}
+
+/// Plans a count of due pending flush jobs (for executor spawn budget).
+///
+/// # Errors
+///
+/// Returns an error when SPI statement metadata cannot be prepared.
+pub fn plan_count_pending_flush_jobs() -> Result<SqlStatement, OpsError> {
+    SqlStatement::read(
+        "count pending flush jobs",
+        r#"
+SELECT count(*)::bigint
+FROM koldstore.jobs
+WHERE job_type = 'flush'
+  AND status = 'pending'
+  AND available_at <= now()
+"#,
+    )
+    .map_err(|error| OpsError::Sql(error.to_string()))
 }
 
 /// Plans one keyset-batched page of mirror-backed flush rows.
@@ -304,7 +405,7 @@ fn plan_mirror_flush_selection_inner(
         .iter()
         .map(|column| validate_identifier(column))
         .collect::<Result<Vec<_>, _>>()?;
-    // Tombstone-only waves only need PK + seq/op from the mirror; joining hot
+    // Tombstone-only passes only need PK + seq/op from the mirror; joining hot
     // would pull TOAST payloads that parquet nulls for deletes anyway.
     let delete_only = mirror_ops.is_some_and(|ops| ops == [3]);
     let mut select_columns = base_columns
@@ -580,7 +681,7 @@ pub fn validate_cold_storage_plan(
 
 /// Builds a recovery request plan for library callers / contract tests.
 ///
-/// Live execution is inline in the extension (`LIST` orphans, expire pending
+/// Live recovery is executed by extension SPI (`LIST` orphans, expire pending
 /// catalog rows, quarantine/delete objects). This helper does not enqueue jobs.
 ///
 /// # Errors

@@ -11,12 +11,12 @@ use crate::policy::policy_flush_row_count;
 /// Cap for force-flush tombstone-only selection.
 pub const FORCE_TOMBSTONE_ONLY_CAP: i64 = 4_096;
 
-/// Cap for one force-flush wave when draining a large mirror backlog.
+/// Cap for one force-flush pass when draining a large mirror backlog.
 ///
 /// Matches [`koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH`] so force and policy
-/// waves share the same memory ceiling; `flush_prepared_table` keeps draining
-/// through the start-of-job seq watermark (or the catch-up wave budget).
-pub const FORCE_FLUSH_WAVE_ROW_CAP: i64 = koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH as i64;
+/// passes share the same memory ceiling; `flush_prepared_table` keeps draining
+/// through the start-of-job seq watermark (or the catch-up pass budget).
+pub const FORCE_FLUSH_PASS_ROW_CAP: i64 = koldstore_common::DEFAULT_MAX_ROWS_PER_FLUSH as i64;
 
 /// Aggregated mirror sequence bounds selected for one flush attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,13 +134,13 @@ pub fn resolve_force_flush_selection(
     ResolvedFlushSelection::new(all)
 }
 
-/// Whether a catch-up wave should run for `selection` under a start-of-job watermark.
+/// Whether a catch-up pass should run for `selection` under a start-of-job watermark.
 ///
-/// `catchup_upto_seq` is the mirror `max(seq)` observed when the job began. Waves
+/// `catchup_upto_seq` is the mirror `max(seq)` observed when the job began. Passes
 /// must not chase rows applied from concurrent WAL during flush fences — those
 /// always receive higher seq values and wait for a later job.
 #[must_use]
-pub fn should_start_catchup_wave(
+pub fn should_start_catchup_pass(
     catchup_upto_seq: Option<i64>,
     selection_row_count: i64,
     selection_min_seq: i64,
@@ -150,13 +150,13 @@ pub fn should_start_catchup_wave(
     }
     match catchup_upto_seq {
         // No snapshot (empty mirror at claim): allow this selection, but the
-        // caller must not loop after the wave.
+        // caller must not loop after the pass.
         None => true,
         Some(upto) => selection_min_seq <= upto,
     }
 }
 
-/// Whether another catch-up wave is needed after flushing through `flushed_max_seq`.
+/// Whether another catch-up pass is needed after flushing through `flushed_max_seq`.
 #[must_use]
 pub fn should_continue_flush_catchup(catchup_upto_seq: Option<i64>, flushed_max_seq: i64) -> bool {
     match catchup_upto_seq {
@@ -165,16 +165,16 @@ pub fn should_continue_flush_catchup(catchup_upto_seq: Option<i64>, flushed_max_
     }
 }
 
-/// Caps a full-mirror force selection to one wave when a cutoff is available.
+/// Caps a full-mirror force selection to one pass when a cutoff is available.
 ///
 /// Tombstone-only selections and already-small mirrors are returned unchanged.
 #[must_use]
-pub fn apply_force_flush_wave_cap(
+pub fn apply_force_flush_pass_cap(
     selection: ResolvedFlushSelection,
-    wave_cap: i64,
+    pass_cap: i64,
     cutoff: Option<(i64, i64)>,
 ) -> ResolvedFlushSelection {
-    if selection.mirror_ops.is_some() || selection.stats.row_count <= wave_cap.max(0) {
+    if selection.mirror_ops.is_some() || selection.stats.row_count <= pass_cap.max(0) {
         return selection;
     }
     let Some((selected_count, max_seq)) = cutoff else {

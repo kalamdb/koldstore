@@ -63,7 +63,7 @@ fn flush_job_records_segment_batches_completed() {
 
 #[pg_test]
 fn flush_table_drains_multiple_policy_waves_in_one_job() {
-    // Policy waves are capped at max_rows_per_flush (default 10k). A single
+    // Policy passes are capped at max_rows_per_flush (default 10k). A single
     // flush_table call must keep draining until under hot_row_limit so catch-up
     // does not wait for many scheduler ticks / job rows.
     let suffix = unique_suffix("flush_multiwave");
@@ -117,11 +117,11 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
     assert_eq!(jobs, 1, "expected one completed catch-up job, got {jobs}");
     assert!(
         rows >= 15000,
-        "expected one job to drain past the 10k wave cap, got rows_flushed={rows}"
+        "expected one job to drain past the 10k pass cap, got rows_flushed={rows}"
     );
     assert!(
         batches >= 15,
-        "expected many segment batches from multi-wave catch-up, got {batches}"
+        "expected many segment batches from multi-pass catch-up, got {batches}"
     );
     assert!(
         hot <= 1,

@@ -56,8 +56,8 @@ fn force_selection_falls_back_to_full_mirror_when_tombstones_exceed_cap() {
 }
 
 #[test]
-fn force_wave_cap_limits_full_mirror_selection() {
-    use koldstore_flush::{apply_force_flush_wave_cap, FORCE_FLUSH_WAVE_ROW_CAP};
+fn force_pass_cap_limits_full_mirror_selection() {
+    use koldstore_flush::{apply_force_flush_pass_cap, FORCE_FLUSH_PASS_ROW_CAP};
 
     let selection = resolve_force_flush_selection(
         FlushStats {
@@ -67,25 +67,25 @@ fn force_wave_cap_limits_full_mirror_selection() {
         },
         FlushStats::empty(),
     );
-    let capped = apply_force_flush_wave_cap(
+    let capped = apply_force_flush_pass_cap(
         selection,
-        FORCE_FLUSH_WAVE_ROW_CAP,
-        Some((FORCE_FLUSH_WAVE_ROW_CAP, FORCE_FLUSH_WAVE_ROW_CAP)),
+        FORCE_FLUSH_PASS_ROW_CAP,
+        Some((FORCE_FLUSH_PASS_ROW_CAP, FORCE_FLUSH_PASS_ROW_CAP)),
     );
-    assert_eq!(capped.stats.row_count, FORCE_FLUSH_WAVE_ROW_CAP);
+    assert_eq!(capped.stats.row_count, FORCE_FLUSH_PASS_ROW_CAP);
 }
 
 #[test]
-fn catchup_wave_stops_before_post_watermark_rows() {
-    use koldstore_flush::{should_continue_flush_catchup, should_start_catchup_wave};
+fn catchup_pass_stops_before_post_watermark_rows() {
+    use koldstore_flush::{should_continue_flush_catchup, should_start_catchup_pass};
 
     let upto = Some(10_000);
-    assert!(should_start_catchup_wave(upto, 10_000, 1));
+    assert!(should_start_catchup_pass(upto, 10_000, 1));
     assert!(should_continue_flush_catchup(upto, 5_000));
     assert!(!should_continue_flush_catchup(upto, 10_000));
     // Concurrent fence-applied rows always receive higher seq values.
-    assert!(!should_start_catchup_wave(upto, 50, 10_001));
-    // Empty start snapshot: allow one wave, then stop looping.
-    assert!(should_start_catchup_wave(None, 10, 1));
+    assert!(!should_start_catchup_pass(upto, 50, 10_001));
+    // Empty start snapshot: allow one pass, then stop looping.
+    assert!(should_start_catchup_pass(None, 10, 1));
     assert!(!should_continue_flush_catchup(None, 10));
 }

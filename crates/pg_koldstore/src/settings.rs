@@ -61,6 +61,20 @@ pub const MIN_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 1;
 /// Maximum flush-check interval (1 day).
 pub const MAX_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 24 * 3600;
 
+/// Cap on concurrent one-shot flush executor background workers per database.
+pub const MAX_PARALLEL_FLUSH_JOBS_GUC: &str = "koldstore.max_parallel_flush_jobs";
+/// Default parallel flush executors (keep at 2 until failure-sweep coverage lands).
+pub const DEFAULT_MAX_PARALLEL_FLUSH_JOBS: i32 = 2;
+/// Minimum parallel flush executors.
+pub const MIN_MAX_PARALLEL_FLUSH_JOBS: i32 = 1;
+/// Hard cap on parallel flush executors.
+pub const MAX_MAX_PARALLEL_FLUSH_JOBS: i32 = 16;
+
+/// Whether `flush_table` runs in the calling backend or enqueues for executors.
+pub const FLUSH_EXECUTION_GUC: &str = "koldstore.flush_execution";
+/// Production default: enqueue and return UUID; one-shot executors run the work.
+pub const DEFAULT_FLUSH_EXECUTION: &str = "queue";
+
 /// Safety watchdog for commit-driven async mirror wakeups (milliseconds).
 pub const ASYNC_APPLY_WATCHDOG_INTERVAL_MS_GUC: &str = "koldstore.async_apply_watchdog_interval_ms";
 /// Default watchdog cadence (30 seconds).
@@ -123,6 +137,53 @@ pub const MAX_MIN_MAX_ROWS_PER_FILE: i32 = 1_000_000;
 /// Kept in sync with [`koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE`].
 pub const DEFAULT_MIN_MAX_ROWS_PER_FILE_SETTING: i32 =
     koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE as i32;
+
+/// How `koldstore.flush_table` executes after enqueueing a durable job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushExecutionMode {
+    /// Enqueue (or reuse) a pending/running job and return its UUID immediately.
+    ///
+    /// One-shot flush executors claim and run the work.
+    Queue,
+    /// Enqueue then run flush in the calling backend (SPI tests).
+    ///
+    /// Required for `#[pg_test]` SPI transactions that cannot commit for
+    /// cross-backend job visibility. Not a legacy product API.
+    Inline,
+}
+
+impl FlushExecutionMode {
+    /// Parses flush execution mode from GUC text.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "queue" => Some(Self::Queue),
+            "inline" => Some(Self::Inline),
+            _ => None,
+        }
+    }
+
+    /// Returns the canonical GUC text.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Inline => "inline",
+        }
+    }
+}
+
+/// Validates and clamps `koldstore.max_parallel_flush_jobs`.
+#[must_use]
+pub const fn bounded_max_parallel_flush_jobs(value: i32) -> i32 {
+    if value < MIN_MAX_PARALLEL_FLUSH_JOBS {
+        MIN_MAX_PARALLEL_FLUSH_JOBS
+    } else if value > MAX_MAX_PARALLEL_FLUSH_JOBS {
+        MAX_MAX_PARALLEL_FLUSH_JOBS
+    } else {
+        value
+    }
+}
 
 /// Runtime mode for cold reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

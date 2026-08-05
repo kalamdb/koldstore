@@ -7,13 +7,12 @@ use std::sync::Arc;
 
 use koldstore_catalog::decode::{FlushStorageContext, RelationContext};
 use koldstore_catalog::ManagedTableSnapshot;
-use koldstore_common::{ColumnRef, FlushPolicy, QualifiedTableName};
+use koldstore_common::{ColumnRef, FlushPolicy, QualifiedTableName, SeqId};
 use koldstore_flush::{
     flush_mirror_fetch_limit, flush_phase, max_rows_per_file_from_policy,
-    plan_apply_flush_row_count_deltas, should_continue_flush_catchup, should_start_catchup_wave,
+    plan_apply_flush_row_count_deltas, should_continue_flush_catchup, should_start_catchup_pass,
     stream_flush_chunks, validate_flush_row_selection, write_flush_segment_with_client, FlushStats,
     FlushWriteChunk, ResolvedFlushSelection, StreamEncodeInput, TableFlushBatchOutcome,
-    WrittenFlushSegment,
 };
 use koldstore_manifest::write_manifest_with_client;
 use koldstore_storage::{manifest_object_key, render_regular_table_prefix, PathTemplate};
@@ -32,6 +31,7 @@ use super::spi::{
 
 pub(super) struct FlushPreparedContext {
     job_id: uuid::Uuid,
+    attempt_token: uuid::Uuid,
     force: bool,
     relation: RelationContext,
     storage: FlushStorageContext,
@@ -42,49 +42,45 @@ pub(super) struct FlushPreparedContext {
     target_file_size_bytes: Option<u64>,
 }
 
-/// Acquires table-job + database apply locks without waiting.
+/// Acquires the session table-job lock without waiting.
 ///
-/// Manual `flush_table` must not block behind auto-flush or a long WAL apply
-/// tick after restart — those can hold locks for minutes with no client-visible
-/// progress. Scheduler ticks already skip via try-lock; SQL callers get a clear
-/// error instead.
-fn require_flush_entry_locks(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
+/// Manual `flush_table` must not block behind auto-flush — those can hold the
+/// table lock for a long time with no client-visible progress. Scheduler ticks
+/// already skip via try-lock; SQL callers get a clear error instead.
+fn try_acquire_flush_table_lock(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<crate::sql::job_lock::TableJobLockGuard, String> {
     let table = crate::catalog::resolve::qualified_relation_name(table_oid)
         .unwrap_or_else(|_| format!("oid={}", table_oid.to_u32()));
-    if !crate::sql::job_lock::try_lock_table_job(table_oid)? {
-        return Err(format!(
+    crate::sql::job_lock::TableJobLockGuard::try_lock(table_oid)?.ok_or_else(|| {
+        format!(
             "flush already in progress for {table}; retry after it completes \
              (background auto-flush may run right after server start)"
-        ));
-    }
-    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    if !crate::mirror::lifecycle::try_lock_apply(database_oid)? {
-        return Err(format!(
-            "flush unavailable for {table}: async mirror apply or another flush \
-             holds the database apply lock; retry shortly"
-        ));
-    }
-    Ok(())
+        )
+    })
 }
 
 fn claim_flush_job(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
-) -> Result<(uuid::Uuid, bool, i64), String> {
-    // Re-entrant: [`require_flush_entry_locks`] already took the try-lock.
-    crate::sql::job_lock::lock_table_job(table_oid)?;
+) -> Result<(uuid::Uuid, uuid::Uuid, bool, i64, Option<SeqId>), String> {
+    // Caller already holds the session table-job lock — do not re-lock (that
+    // would bump the session lock count and require a matching extra unlock).
     let (job_id, force) = ensure_flush_job(table_oid, force)?;
-    // Estimate total rows for the progress bar from the current mirror backlog.
+    // Fixed watermark + progress estimate at claim (newer rows stay hot).
     let progress_total = super::spi::mirror_catchup_row_estimate(table_oid)?;
-    mark_flush_job_running(job_id, table_oid, progress_total)?;
-    crate::failpoints::hit("after_claim")?;
-    Ok((job_id, force, progress_total))
+    let target_seq = super::spi::mirror_catchup_watermark(table_oid)?
+        .and_then(|seq| SeqId::new(seq).ok());
+    let attempt_token = mark_flush_job_running(job_id, table_oid, progress_total, target_seq)?;
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterClaim)?;
+    Ok((job_id, attempt_token, force, progress_total, target_seq))
 }
 
 fn load_flush_prepared_context(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
     job_id: uuid::Uuid,
+    attempt_token: uuid::Uuid,
 ) -> Result<FlushPreparedContext, String> {
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
@@ -135,6 +131,7 @@ fn load_flush_prepared_context(
         .transpose()?;
     Ok(FlushPreparedContext {
         job_id,
+        attempt_token,
         force,
         relation,
         storage,
@@ -146,7 +143,17 @@ fn load_flush_prepared_context(
     })
 }
 
-pub(super) fn stream_write_flush_batches(
+/// Lightweight pending-segment identity retained after catalog insert.
+///
+/// Avoids holding full [`koldstore_flush::WrittenFlushSegment`] (packed metadata
+/// + catalog row) across the rest of the pass.
+#[derive(Debug, Clone, Copy)]
+struct PendingFlushSegmentRef {
+    segment_id: uuid::Uuid,
+    byte_size: i64,
+}
+
+fn stream_write_flush_batches(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
     selection: &ResolvedFlushSelection,
@@ -162,9 +169,10 @@ pub(super) fn stream_write_flush_batches(
     let schema_version =
         u32::try_from(ctx.storage.schema_version).map_err(|error| error.to_string())?;
     let mut batch_number = next_flush_batch_number(table_oid)?;
+    let pass_id = uuid::Uuid::new_v4();
     let mut total_rows_flushed = 0_i64;
     let mut last_max_seq = 0_i64;
-    let mut written_segments: Vec<WrittenFlushSegment> = Vec::new();
+    let mut pending_segments: Vec<PendingFlushSegmentRef> = Vec::new();
 
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
     let table = QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
@@ -231,12 +239,13 @@ pub(super) fn stream_write_flush_batches(
                 write_streamed_chunk(
                     client,
                     ctx,
+                    pass_id,
                     &table_prefix,
                     table_oid,
                     &mut batch_number,
                     &mut total_rows_flushed,
                     &mut last_max_seq,
-                    &mut written_segments,
+                    &mut pending_segments,
                     chunk,
                 )
             },
@@ -244,17 +253,17 @@ pub(super) fn stream_write_flush_batches(
     })?;
 
     validate_flush_row_selection(stats.row_count, stream_outcome.rows_written)?;
-    let pending_segment_ids: Vec<uuid::Uuid> = written_segments
+    let pending_segment_ids: Vec<uuid::Uuid> = pending_segments
         .iter()
-        .map(|written| written.segment_id)
+        .map(|pending| pending.segment_id)
         .collect();
-    let bytes_written = written_segments
+    let bytes_written = pending_segments
         .iter()
-        .map(|written| written.catalog_row.byte_size)
+        .map(|pending| pending.byte_size)
         .fold(0_i64, i64::saturating_add);
     // PERFORMANCE: catalog is the source of truth for publishable segments.
     // Build the derived manifest once after pending inserts — skip object-store
-    // reload + in-memory append that duplicated large JSON each wave.
+    // reload + in-memory append that duplicated large JSON each pass.
     let manifest = manifest_from_publishable_cold_segments(
         table_oid,
         &ctx.relation,
@@ -278,15 +287,16 @@ pub(super) fn stream_write_flush_batches(
 fn write_streamed_chunk(
     client: &koldstore_storage::ObjectStoreClient,
     ctx: &FlushPreparedContext,
+    pass_id: uuid::Uuid,
     table_prefix: &str,
     table_oid: pgrx::pg_sys::Oid,
     batch_number: &mut i32,
     total_rows_flushed: &mut i64,
     last_max_seq: &mut i64,
-    written_segments: &mut Vec<WrittenFlushSegment>,
+    pending_segments: &mut Vec<PendingFlushSegmentRef>,
     chunk: FlushWriteChunk,
 ) -> Result<(), String> {
-    crate::failpoints::hit("during_parquet_write")?;
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::DuringParquetWrite)?;
     let chunk_stats = FlushStats::from_write_chunk(&chunk)?;
     let written = write_flush_segment_with_client(
         client,
@@ -298,21 +308,36 @@ fn write_streamed_chunk(
     )?;
     // Free compressed Parquet bytes before catalog SPI / next segment encode.
     drop(chunk);
-    crate::failpoints::hit("after_temp_object")?;
-    crate::failpoints::hit("after_checksum_metadata")?;
-    persist_flush_segment(table_oid, &written)?;
-    crate::failpoints::hit("after_pending_segment")?;
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterTempObject)?;
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterChecksumMetadata)?;
+    let byte_size = written.catalog_row.byte_size;
+    let segment_id = written.segment_id;
+    persist_flush_segment(
+        table_oid,
+        super::spi::FlushSegmentWriterIdentity {
+            job_id: ctx.job_id,
+            attempt_token: ctx.attempt_token,
+            pass_id,
+        },
+        &written,
+    )?;
+    // Drop packed metadata + catalog row; retain only ids + byte sum.
+    drop(written);
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterPendingSegment)?;
     *total_rows_flushed = total_rows_flushed.saturating_add(chunk_stats.row_count);
     *last_max_seq = chunk_stats.max_seq;
     pgrx::log!(
         "koldstore flush: wrote+cataloged segment batch={} rows={} bytes={} total_rows={}",
         *batch_number,
         chunk_stats.row_count,
-        written.catalog_row.byte_size,
+        byte_size,
         *total_rows_flushed
     );
     *batch_number = batch_number.saturating_add(1);
-    written_segments.push(written);
+    pending_segments.push(PendingFlushSegmentRef {
+        segment_id,
+        byte_size,
+    });
     Ok(())
 }
 
@@ -345,70 +370,96 @@ pub(super) fn finalize_flush(
     client: &koldstore_storage::ObjectStoreClient,
     phase0_applied: Option<crate::mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
-    // Phase 5.5: finite catch-up after upload, before catalog publication and
-    // before SHARE ROW EXCLUSIVE. The transaction-scoped apply lock from phase 0
-    // is still held (releasing it mid-flush deadlocks with worker peeks waiting
-    // on this open XID); this pass drains accumulated WAL so the relation-lock
-    // window covers only (Lp, F1].
-    let skip_through = run_async_prelock_catchup(table_oid, outcome.prune_max_seq, phase0_applied)?;
+    // One critical section under try-lock slot ownership: prelock catch-up,
+    // manifest write, activate, source fence, prune. Encode/upload already
+    // finished without the slot lock.
+    with_slot_lock_retry(|| {
+        let skip_through =
+            run_async_prelock_catchup(table_oid, outcome.prune_max_seq, phase0_applied)?;
 
-    crate::failpoints::hit("before_manifest_publish")?;
-    pgrx::log!(
-        "koldstore flush: writing manifest path={} segments={} rows={}",
-        outcome.manifest_path,
-        outcome.manifest.segments.len(),
-        outcome.total_rows_flushed
-    );
-    write_manifest_with_client(client, &outcome.manifest_path, &outcome.manifest)?;
-    crate::failpoints::hit("before_activate")?;
-    let expected_generation = manifest_generation(table_oid)?;
-    activate_flush_segments(
-        table_oid,
-        expected_generation,
-        outcome.manifest.segments.len() as i32,
-        outcome.manifest.max_seq,
-        &outcome.pending_segment_ids,
-    )?;
-    crate::failpoints::hit("after_manifest_publish")?;
-    run_async_prune_fence(table_oid, outcome.prune_max_seq, skip_through)?;
-    crate::failpoints::hit("before_hot_cleanup")?;
-    pgrx::log!(
-        "koldstore flush: pruning hot/mirror rows through seq={}",
-        outcome.prune_max_seq
-    );
-    crate::failpoints::hit("during_hot_cleanup")?;
-    let primary_key_names = ctx
-        .snapshot
-        .primary_key_names()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let (mirror_pruned, hot_pruned) = prune_flushed_hot_rows(
-        table_oid,
-        &primary_key_names,
-        outcome.prune_max_seq,
-        outcome.mirror_ops.as_deref(),
-    )?;
-    pgrx::log!(
-        "koldstore flush: pruned mirror_rows={} hot_rows={}",
-        mirror_pruned,
-        hot_pruned
-    );
-    apply_flush_row_count_deltas(
-        table_oid,
-        mirror_pruned,
-        hot_pruned,
-        outcome.total_rows_flushed,
-    )?;
-    crate::failpoints::hit("after_cleanup_before_job_complete")?;
-    // Job completion is owned by `flush_prepared_table` so one job can drain
-    // multiple policy waves and report cumulative `batches_completed`.
-    crate::failpoints::hit("after_job_complete_before_temp_cleanup")?;
-    Ok(())
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeManifestPublish)?;
+        pgrx::log!(
+            "koldstore flush: writing manifest path={} segments={} rows={}",
+            outcome.manifest_path,
+            outcome.manifest.segments.len(),
+            outcome.total_rows_flushed
+        );
+        write_manifest_with_client(client, &outcome.manifest_path, &outcome.manifest)?;
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeActivate)?;
+        let expected_generation = manifest_generation(table_oid)?;
+        activate_flush_segments(
+            table_oid,
+            expected_generation,
+            outcome.manifest.segments.len() as i32,
+            outcome.manifest.max_seq,
+            &outcome.pending_segment_ids,
+        )?;
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterManifestPublish)?;
+        run_async_prune_fence(table_oid, outcome.prune_max_seq, skip_through)?;
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeHotCleanup)?;
+        pgrx::log!(
+            "koldstore flush: pruning hot/mirror rows through seq={}",
+            outcome.prune_max_seq
+        );
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::DuringHotCleanup)?;
+        let primary_key_names = ctx
+            .snapshot
+            .primary_key_names()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let (mirror_pruned, hot_pruned) = prune_flushed_hot_rows(
+            table_oid,
+            &primary_key_names,
+            outcome.prune_max_seq,
+            outcome.mirror_ops.as_deref(),
+        )?;
+        pgrx::log!(
+            "koldstore flush: pruned mirror_rows={} hot_rows={}",
+            mirror_pruned,
+            hot_pruned
+        );
+        apply_flush_row_count_deltas(
+            table_oid,
+            mirror_pruned,
+            hot_pruned,
+            outcome.total_rows_flushed,
+        )?;
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterCleanupBeforeJobComplete)?;
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterJobCompleteBeforeTempCleanup)?;
+        Ok(())
+    })
+}
+
+/// Tries the slot lock with bounded backoff; never blocks indefinitely.
+///
+/// Callers run finalize fence work while the lock is held. Nested apply uses
+/// [`apply_bounded_locked`] so we do not depend on re-entrant blocking lock.
+fn with_slot_lock_retry<T>(body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    use crate::mirror::lifecycle::try_lock_apply;
+
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    const MAX_ATTEMPTS: u32 = 32;
+    const SLEEP_MS: u64 = 25;
+    for attempt in 1..=MAX_ATTEMPTS {
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeSlotLock)?;
+        if try_lock_apply(database_oid)? {
+            crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterSlotLock)?;
+            return body();
+        }
+        if attempt == MAX_ATTEMPTS {
+            break;
+        }
+        pgrx::log!(
+            "koldstore flush: slot lock busy (attempt {attempt}/{MAX_ATTEMPTS}); retrying"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(SLEEP_MS));
+    }
+    Err("flush finalize could not acquire slot lock before deadline".to_string())
 }
 
 /// Drops flush-scoped caches and asks the allocator to return free pages.
 ///
-/// Call after each wave and again when the job finishes so large Parquet /
+/// Call after each pass and again when the job finishes so large Parquet /
 /// manifest allocations do not stay pinned in the backend RSS.
 pub(crate) fn release_flush_memory(table_oid: pgrx::pg_sys::Oid) {
     crate::catalog::cache::invalidate_table_globally(table_oid);
@@ -418,13 +469,14 @@ pub(crate) fn release_flush_memory(table_oid: pgrx::pg_sys::Oid) {
 
 /// Phase-5.5: finite pre-lock catch-up after object upload.
 ///
-/// Returns the skip boundary (`Lp`) for phase 6.
+/// Caller must hold the slot lock (see [`with_slot_lock_retry`]). Returns the
+/// skip boundary for phase 6.
 fn run_async_prelock_catchup(
     table_oid: pgrx::pg_sys::Oid,
     prune_max_seq: i64,
     phase0_applied: Option<crate::mirror::apply::AppliedWalBoundary>,
 ) -> Result<Option<crate::mirror::apply::AppliedWalBoundary>, String> {
-    use crate::mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
+    use crate::mirror::apply::{apply_bounded_locked, BoundedApplyRequest, PruneSeqFloor};
 
     if prune_max_seq <= 0 {
         return Ok(phase0_applied);
@@ -449,7 +501,7 @@ fn run_async_prelock_catchup(
             skip_through.map(|lsn| koldstore_common::format_pg_lsn(lsn.get())),
             prune_max_seq
         );
-        let outcome = apply_bounded(BoundedApplyRequest {
+        let outcome = apply_bounded_locked(BoundedApplyRequest {
             upper_bound: Some(fence),
             skip_through,
             acknowledge_durable_checkpoint: false,
@@ -476,20 +528,23 @@ fn run_async_prelock_catchup(
     Ok(skip_through)
 }
 
-/// Phase-6 async prune fence: block source writers, catch mirror up through a
-/// durable WAL upper bound, then allow `prune_flushed_hot_rows` to run safely.
+/// Phase-6 async prune fence: slot lock already held; take short source lock,
+/// catch mirror up through a durable WAL upper bound, then prune safely.
 fn run_async_prune_fence(
     table_oid: pgrx::pg_sys::Oid,
     prune_max_seq: i64,
     skip_through: Option<crate::mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
-    use crate::mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
+    use crate::mirror::apply::{apply_bounded_locked, BoundedApplyRequest, PruneSeqFloor};
 
     if prune_max_seq <= 0 {
         return Ok(());
     }
 
+    // Lock order: session table job (held) → slot (held by caller) → source table.
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeSourceLock)?;
     lock_source_table_share_row_exclusive(table_oid)?;
+    crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterSourceLock)?;
     let fence = capture_durable_wal_fence()?;
     pgrx::log!(
         "koldstore flush: async prune fence upto_lsn={} skip_through={:?} floor={}",
@@ -497,7 +552,7 @@ fn run_async_prune_fence(
         skip_through.map(|lsn| koldstore_common::format_pg_lsn(lsn.get())),
         prune_max_seq
     );
-    let outcome = apply_bounded(BoundedApplyRequest {
+    let outcome = apply_bounded_locked(BoundedApplyRequest {
         upper_bound: Some(fence),
         skip_through,
         acknowledge_durable_checkpoint: false,
@@ -520,41 +575,116 @@ pub(crate) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<pgrx::Uuid, String> {
-    // Fail fast before any WAL peek: auto-flush / apply can hold these locks for
-    // a long time after restart, which previously made SQL callers appear hung.
-    require_flush_entry_locks(table_oid)?;
-    // Flush selects authoritative latest-state rows, so WAL capture must be
-    // fenced before row selection. Retain L0 for the post-publish prune fence.
-    // Apply lock is already held (re-entrant inside apply_bounded).
-    let phase0 = crate::mirror::apply::apply_bounded(
-        crate::mirror::apply::BoundedApplyRequest::available_unlimited(),
-    )?;
-    let (job_id, force, progress_total) = claim_flush_job(table_oid, force)?;
-    let job_uuid = crate::spi::uuid_to_pgrx(job_id);
-    let started = std::time::Instant::now();
+    // Durable queue first: return the active job UUID even when an executor is
+    // already running (or when queue mode only spawns work).
+    let job_uuid = crate::sql::flush::jobs::enqueue_or_lookup_flush_job(table_oid, force)
+        .map_err(|error| error.to_string())?;
+
+    match crate::guc::flush_execution_mode() {
+        crate::settings::FlushExecutionMode::Inline => {
+            let table_lock = try_acquire_flush_table_lock(table_oid)?;
+            flush_table_with_session_lock(table_oid, force, table_lock)?;
+        }
+        crate::settings::FlushExecutionMode::Queue => {
+            // Best-effort: executor connects after this transaction commits.
+            if let Err(error) = crate::worker::spawn_flush_executor_if_needed() {
+                pgrx::warning!("koldstore flush_table: could not spawn flush executor: {error}");
+            }
+        }
+    }
+    Ok(job_uuid)
+}
+
+/// Runs flush while already holding the session table-job lock (executor / inline).
+///
+/// Does **not** hold the slot/apply lock during Parquet encode or object upload.
+/// Slot lock is acquired only inside finalize fence paths via try-lock + retry.
+pub(crate) fn flush_table_with_session_lock(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+    table_lock: crate::sql::job_lock::TableJobLockGuard,
+) -> Result<pgrx::Uuid, String> {
+    let _table_lock = table_lock;
     let table = crate::catalog::resolve::qualified_relation_name(table_oid)
         .unwrap_or_else(|_| format!("oid={}", table_oid.to_u32()));
+    let claimed = claim_flush_job_for_executor(table_oid, force)?;
+    run_flush_after_claim(table_oid, &table, claimed)
+}
+
+/// Claimed flush job identity returned by [`claim_flush_job`].
+pub(crate) struct ClaimedFlushJob {
+    pub job_id: uuid::Uuid,
+    pub attempt_token: uuid::Uuid,
+    pub force: bool,
+    pub progress_total: i64,
+    /// Fixed job watermark; `None` when unset (no mirror rows at claim).
+    pub target_seq: Option<SeqId>,
+}
+
+/// Claims (or resumes) the durable flush job under an already-held session lock.
+pub(crate) fn claim_flush_job_for_executor(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+) -> Result<ClaimedFlushJob, String> {
+    let (job_id, attempt_token, force, progress_total, target_seq) =
+        claim_flush_job(table_oid, force)?;
+    Ok(ClaimedFlushJob {
+        job_id,
+        attempt_token,
+        force,
+        progress_total,
+        target_seq,
+    })
+}
+
+/// Continues a previously claimed flush (separate transaction from claim).
+pub(crate) fn run_claimed_flush_with_session_lock(
+    table_oid: pgrx::pg_sys::Oid,
+    table_lock: crate::sql::job_lock::TableJobLockGuard,
+    claimed: ClaimedFlushJob,
+) -> Result<pgrx::Uuid, String> {
+    let _table_lock = table_lock;
+    let table = crate::catalog::resolve::qualified_relation_name(table_oid)
+        .unwrap_or_else(|_| format!("oid={}", table_oid.to_u32()));
+    run_flush_after_claim(table_oid, &table, claimed)
+}
+
+fn run_flush_after_claim(
+    table_oid: pgrx::pg_sys::Oid,
+    table: &str,
+    claimed: ClaimedFlushJob,
+) -> Result<pgrx::Uuid, String> {
+    let ClaimedFlushJob {
+        job_id,
+        attempt_token,
+        force,
+        progress_total,
+        target_seq,
+    } = claimed;
+    let job_uuid = crate::spi::uuid_to_pgrx(job_id);
+    let started = std::time::Instant::now();
     pgrx::log!(
-        "koldstore flush: started table={table} job={job_id} force={force} estimated_rows={progress_total}"
+        "koldstore flush: started table={table} job={job_id} attempt={attempt_token} force={force} estimated_rows={progress_total} target_seq={:?}",
+        target_seq.map(SeqId::get)
     );
     match flush_after_claim(
         table_oid,
         force,
         job_id,
+        attempt_token,
         progress_total,
-        phase0.last_applied,
+        target_seq,
+        None, // no phase-0 apply; finalize fences under try_lock_slot
         started,
-        &table,
+        table,
     ) {
         Ok(()) => Ok(job_uuid),
         Err(error) => {
             pgrx::log!(
-                "koldstore flush: failed table={table} job={job_id} duration={} error={error}",
+                "koldstore flush: failed table={table} job={job_id} attempt={attempt_token} duration={} error={error}",
                 format_flush_duration(started)
             );
-            mark_flush_job_failed(job_id, table_oid, &error)?;
-            // Segments/manifest/hot cleanup may already have committed work in
-            // this transaction; drop stale merge-scan caches even on failure.
+            mark_flush_job_failed(job_id, table_oid, attempt_token, &error)?;
             crate::catalog::cache::invalidate_table_globally(table_oid);
             Ok(job_uuid)
         }
@@ -565,15 +695,17 @@ fn flush_after_claim(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
     job_id: uuid::Uuid,
+    attempt_token: uuid::Uuid,
     progress_total: i64,
+    target_seq: Option<SeqId>,
     phase0_applied: Option<crate::mirror::apply::AppliedWalBoundary>,
     started: std::time::Instant,
     table: &str,
 ) -> Result<(), String> {
-    let mut ctx = load_flush_prepared_context(table_oid, force, job_id)?;
+    let mut ctx = load_flush_prepared_context(table_oid, force, job_id, attempt_token)?;
     match crate::sql::migrate::refresh_active_schema_if_changed(table_oid) {
         Ok(true) => {
-            ctx = load_flush_prepared_context(table_oid, force, job_id)?;
+            ctx = load_flush_prepared_context(table_oid, force, job_id, attempt_token)?;
         }
         Ok(false) => {}
         Err(error) => return Err(error),
@@ -582,17 +714,18 @@ fn flush_after_claim(
         table_oid,
         &ctx,
         progress_total,
+        target_seq,
         phase0_applied,
         started,
         table,
     )
 }
 
-/// Cap catch-up waves inside one flush job (each wave ≤ `max_rows_per_flush`).
+/// Cap catch-up passes inside one flush job (each pass ≤ `max_rows_per_flush`).
 ///
 /// 64 × 10_000 default rows covers a 640k hot backlog in a single scheduler tick
 /// / `flush_table` call without leaving hundreds of tiny completed job rows.
-const MAX_CATCHUP_WAVES_PER_JOB: u32 = 64;
+const MAX_CATCHUP_PASSES_PER_JOB: u32 = 64;
 
 fn format_flush_duration(started: std::time::Instant) -> String {
     let elapsed = started.elapsed();
@@ -624,6 +757,7 @@ fn flush_prepared_table(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
     progress_total: i64,
+    target_seq: Option<SeqId>,
     phase0_applied: Option<crate::mirror::apply::AppliedWalBoundary>,
     started: std::time::Instant,
     table: &str,
@@ -631,15 +765,16 @@ fn flush_prepared_table(
     let mut total_rows_flushed = 0_i64;
     let mut total_batches = 0_i32;
     let mut total_bytes_written = 0_i64;
-    let mut last_max_seq = 0_i64;
+    let mut last_max_seq: Option<SeqId> = None;
     let mut skip_through = phase0_applied;
-    let mut waves = 0_u32;
-    // Pin the backlog visible at job start. Async fence apply can insert newer
-    // mirror rows while this transaction runs; chasing them turns one flush into
-    // an unbounded multi-wave hang under concurrent writers.
-    let catchup_upto_seq = mirror_catchup_watermark(table_oid)?;
+    let mut passes = 0_u32;
+    // Fixed watermark from claim — newer rows remain hot for a later job.
+    let catchup_upto_seq = match target_seq {
+        Some(seq) => Some(seq.get()),
+        None => mirror_catchup_watermark(table_oid)?,
+    };
 
-    // One client per job: reused across waves for segment publish + manifest write.
+    // One client per job: reused across passes for segment publish + manifest write.
     let client = crate::object_store::open_managed_object_store_client(
         &ctx.storage.storage_type,
         &ctx.storage.base_path,
@@ -651,12 +786,13 @@ fn flush_prepared_table(
     let report_progress = |phase: &str,
                            rows_flushed: i64,
                            batches_completed: i32,
-                           checkpoint_seq: i64|
+                           checkpoint_seq: Option<SeqId>|
      -> Result<(), String> {
         update_flush_job_progress(
             ctx.job_id,
             table_oid,
             FlushJobProgressUpdate {
+                attempt_token: ctx.attempt_token,
                 rows_flushed,
                 batches_completed,
                 checkpoint_seq,
@@ -671,6 +807,7 @@ fn flush_prepared_table(
         if flush_cancel_requested(ctx.job_id, table_oid)? {
             return finish_flush_after_cancel(
                 ctx.job_id,
+                ctx.attempt_token,
                 table_oid,
                 table,
                 started,
@@ -678,7 +815,7 @@ fn flush_prepared_table(
                 total_batches,
                 total_bytes_written,
                 last_max_seq,
-                waves,
+                passes,
             );
         }
         report_progress(
@@ -688,13 +825,14 @@ fn flush_prepared_table(
             last_max_seq,
         )?;
         let selection = resolve_flush_stats(table_oid, ctx.force)?;
-        crate::failpoints::hit("after_select_rows")?;
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterSelectRows)?;
         // Re-check after the select barrier so peer cancel/DROP can stop work
         // before object writes begin.
         if flush_cancel_requested(ctx.job_id, table_oid)? {
             release_flush_memory(table_oid);
             return finish_flush_after_cancel(
                 ctx.job_id,
+                ctx.attempt_token,
                 table_oid,
                 table,
                 started,
@@ -702,19 +840,19 @@ fn flush_prepared_table(
                 total_batches,
                 total_bytes_written,
                 last_max_seq,
-                waves,
+                passes,
             );
         }
-        if !should_start_catchup_wave(
+        if !should_start_catchup_pass(
             catchup_upto_seq,
             selection.stats.row_count,
             selection.stats.min_seq,
         ) {
             break;
         }
-        waves = waves.saturating_add(1);
+        passes = passes.saturating_add(1);
         pgrx::log!(
-            "koldstore flush: starting table={table} wave={waves} rows={} max_seq={} force={} catchup_upto={:?}",
+            "koldstore flush: starting table={table} pass={passes} rows={} max_seq={} force={} catchup_upto={:?}",
             selection.stats.row_count,
             selection.stats.max_seq,
             ctx.force,
@@ -727,14 +865,15 @@ fn flush_prepared_table(
             last_max_seq,
         )?;
         let outcome = stream_write_flush_batches(table_oid, ctx, &selection, &client)?;
-        let wave_batches =
+        let pass_batches =
             i32::try_from(outcome.pending_segment_ids.len()).map_err(|error| error.to_string())?;
-        // Cooperative cancel before publish: do not activate this wave.
+        // Cooperative cancel before publish: do not activate this pass.
         if flush_cancel_requested(ctx.job_id, table_oid)? {
             drop(outcome);
             release_flush_memory(table_oid);
             return finish_flush_after_cancel(
                 ctx.job_id,
+                ctx.attempt_token,
                 table_oid,
                 table,
                 started,
@@ -742,7 +881,7 @@ fn flush_prepared_table(
                 total_batches,
                 total_bytes_written,
                 last_max_seq,
-                waves,
+                passes,
             );
         }
         report_progress(
@@ -752,15 +891,15 @@ fn flush_prepared_table(
             last_max_seq,
         )?;
         finalize_flush(table_oid, ctx, &outcome, &client, skip_through)?;
-        // Later waves have no async phase-0 boundary to skip through.
+        // Later passes have no async phase-0 boundary to skip through.
         skip_through = None;
 
         total_rows_flushed = total_rows_flushed.saturating_add(outcome.total_rows_flushed);
-        total_batches = total_batches.saturating_add(wave_batches);
+        total_batches = total_batches.saturating_add(pass_batches);
         total_bytes_written = total_bytes_written.saturating_add(outcome.bytes_written);
-        last_max_seq = outcome.last_max_seq;
+        last_max_seq = SeqId::new(outcome.last_max_seq).ok().or(last_max_seq);
 
-        // Drop wave-owned buffers before the next selection / encode pass.
+        // Drop pass-owned buffers before the next selection / encode pass.
         drop(outcome);
         release_flush_memory(table_oid);
 
@@ -771,32 +910,37 @@ fn flush_prepared_table(
             last_max_seq,
         )?;
 
-        // Policy and force waves are both row-capped; keep draining the pinned
+        // Policy and force passes are both row-capped; keep draining the pinned
         // start-of-job watermark (not rows applied during this flush).
-        let more_waves = waves < MAX_CATCHUP_WAVES_PER_JOB
-            && should_continue_flush_catchup(catchup_upto_seq, last_max_seq);
-        if !more_waves {
+        let more_passes = passes < MAX_CATCHUP_PASSES_PER_JOB
+            && should_continue_flush_catchup(
+                catchup_upto_seq,
+                last_max_seq.map(SeqId::get).unwrap_or(0),
+            );
+        if !more_passes {
             break;
         }
-        crate::failpoints::hit("after_wave_progress")?;
+        crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterPassProgress)?;
     }
 
     mark_flush_job_completed(
         ctx.job_id,
         table_oid,
+        ctx.attempt_token,
         total_rows_flushed,
         last_max_seq,
         total_batches,
     )?;
     pgrx::log!(
-        "koldstore flush: completed table={table} job={} duration={} rows={} segments={} bytes={} waves={} max_seq={} force={}",
+        "koldstore flush: completed table={table} job={} attempt={} duration={} rows={} segments={} bytes={} pass={} max_seq={} force={}",
         ctx.job_id,
+        ctx.attempt_token,
         format_flush_duration(started),
         total_rows_flushed,
         total_batches,
         format_flush_bytes(total_bytes_written),
-        waves,
-        last_max_seq,
+        passes,
+        last_max_seq.map(SeqId::get).unwrap_or(0),
         ctx.force
     );
     release_flush_memory(table_oid);
@@ -806,38 +950,40 @@ fn flush_prepared_table(
 #[allow(clippy::too_many_arguments)]
 fn finish_flush_after_cancel(
     job_id: uuid::Uuid,
+    attempt_token: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
     table: &str,
     started: std::time::Instant,
     total_rows_flushed: i64,
     total_batches: i32,
     total_bytes_written: i64,
-    last_max_seq: i64,
-    waves: u32,
+    last_max_seq: Option<SeqId>,
+    passes: u32,
 ) -> Result<(), String> {
     if total_rows_flushed > 0 {
-        // Publish already committed in an earlier wave of this statement: do not
+        // Publish already committed in an earlier pass of this statement: do not
         // pretend cold data was unpublished.
         mark_flush_job_completed_after_cancel(
             job_id,
             table_oid,
+            attempt_token,
             total_rows_flushed,
             last_max_seq,
             total_batches,
         )?;
         pgrx::log!(
-            "koldstore flush: cancelled-after-progress table={table} job={job_id} duration={} rows={} segments={} bytes={} waves={} max_seq={}",
+            "koldstore flush: cancelled-after-progress table={table} job={job_id} attempt={attempt_token} duration={} rows={} segments={} bytes={} pass={} max_seq={}",
             format_flush_duration(started),
             total_rows_flushed,
             total_batches,
             format_flush_bytes(total_bytes_written),
-            waves,
-            last_max_seq
+            passes,
+            last_max_seq.map(SeqId::get).unwrap_or(0)
         );
     } else {
-        mark_flush_job_cancelled(job_id, table_oid)?;
+        mark_flush_job_cancelled(job_id, table_oid, attempt_token)?;
         pgrx::log!(
-            "koldstore flush: cancelled table={table} job={job_id} duration={}",
+            "koldstore flush: cancelled table={table} job={job_id} attempt={attempt_token} duration={}",
             format_flush_duration(started)
         );
     }

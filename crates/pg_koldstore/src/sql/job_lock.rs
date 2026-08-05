@@ -1,8 +1,9 @@
 //! PostgreSQL advisory locks for table-scoped job execution.
 //!
-//! The durable jobs catalog prevents duplicate active rows. These transaction
-//! locks add an early, low-cost guard around inline SQL entrypoints before they
-//! perform setup work.
+//! The durable jobs catalog prevents duplicate active rows. These **session-level**
+//! locks are the primary ownership signal for flush executors: they survive
+//! short commits between batches and are released on explicit unlock, backend
+//! exit, or crash.
 //!
 //! Keys use the single-argument `bigint` advisory-lock form so every table OID
 //! maps 1:1. The two-`integer` form forced a signed `i32` cast that obscures
@@ -17,11 +18,85 @@ pub(crate) const fn table_job_advisory_lock_key(table_oid: u32) -> i64 {
     (TABLE_JOB_LOCK_NAMESPACE << 32) | (table_oid as i64)
 }
 
-/// Takes a transaction-scoped lock for flush/migration work on one table.
+/// Session-level table job ownership guard.
+///
+/// Unlocks on drop so manage/flush/drop paths cannot leak the lock across
+/// statement boundaries when using session advisory locks.
+pub struct TableJobLockGuard {
+    table_oid: pgrx::pg_sys::Oid,
+    held: bool,
+}
+
+impl TableJobLockGuard {
+    /// Blocks until the session lock is acquired.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when PostgreSQL cannot evaluate the advisory lock query.
+    pub fn lock(table_oid: pgrx::pg_sys::Oid) -> Result<Self, String> {
+        lock_table_job(table_oid)?;
+        Ok(Self {
+            table_oid,
+            held: true,
+        })
+    }
+
+    /// Attempts a non-blocking acquire.
+    ///
+    /// Returns `Ok(None)` when another backend holds the lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when PostgreSQL cannot evaluate the advisory lock query.
+    pub fn try_lock(table_oid: pgrx::pg_sys::Oid) -> Result<Option<Self>, String> {
+        if try_lock_table_job(table_oid)? {
+            Ok(Some(Self {
+                table_oid,
+                held: true,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Table OID this guard owns.
+    #[must_use]
+    pub fn table_oid(&self) -> pgrx::pg_sys::Oid {
+        self.table_oid
+    }
+
+    /// Releases ownership without waiting for `Drop`.
+    pub fn unlock(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        if !self.held {
+            return;
+        }
+        self.held = false;
+        if let Err(error) = unlock_table_job(self.table_oid) {
+            pgrx::warning!(
+                "koldstore: failed to release table job lock oid={}: {error}",
+                self.table_oid.to_u32()
+            );
+        }
+    }
+}
+
+impl Drop for TableJobLockGuard {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// Takes a session-scoped lock for flush/migration work on one table.
 ///
 /// Blocks until the lock is available. Used by `manage_table` / DROP cleanup
-/// and by `flush_table` after a successful try-lock (re-entrant). Manual
-/// `flush_table` fail-fasts via [`try_lock_table_job`] instead of waiting here.
+/// and by flush after a successful try-lock (re-entrant). Manual `flush_table`
+/// fail-fasts via [`try_lock_table_job`] instead of waiting here.
+///
+/// Prefer [`TableJobLockGuard`] so unlock cannot be skipped on error paths.
 ///
 /// # Errors
 ///
@@ -29,18 +104,18 @@ pub(crate) const fn table_job_advisory_lock_key(table_oid: u32) -> i64 {
 pub fn lock_table_job(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
     let key = table_job_advisory_lock_key(table_oid.to_u32());
     pgrx::Spi::run_with_args(
-        "SELECT pg_advisory_xact_lock($1::bigint)",
+        "SELECT pg_advisory_lock($1::bigint)",
         &[pgrx::datum::DatumWithOid::from(key)],
     )
     .map_err(|error| error.to_string())?;
     Ok(())
 }
 
-/// Attempts a non-blocking table job lock.
+/// Attempts a non-blocking session table job lock.
 ///
-/// Returns `true` when this transaction now holds the lock (including when the
-/// same backend already held it). Returns `false` when another backend is
-/// mid-flush/migration so the caller can skip instead of waiting.
+/// Returns `true` when this backend now holds the lock (including when the
+/// same backend already held it — PostgreSQL increments the lock count).
+/// Returns `false` when another backend owns the table.
 ///
 /// # Errors
 ///
@@ -48,12 +123,34 @@ pub fn lock_table_job(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
 pub fn try_lock_table_job(table_oid: pgrx::pg_sys::Oid) -> Result<bool, String> {
     let key = table_job_advisory_lock_key(table_oid.to_u32());
     let acquired = pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT pg_try_advisory_xact_lock($1::bigint)",
+        "SELECT pg_try_advisory_lock($1::bigint)",
         &[pgrx::datum::DatumWithOid::from(key)],
     )
     .map_err(|error| error.to_string())?
     .unwrap_or(false);
     Ok(acquired)
+}
+
+/// Releases one level of session table job lock ownership.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot evaluate the unlock query.
+pub fn unlock_table_job(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
+    let key = table_job_advisory_lock_key(table_oid.to_u32());
+    let released = pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT pg_advisory_unlock($1::bigint)",
+        &[pgrx::datum::DatumWithOid::from(key)],
+    )
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false);
+    if !released {
+        return Err(format!(
+            "table job lock was not held for oid={}",
+            table_oid.to_u32()
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

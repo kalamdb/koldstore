@@ -15,6 +15,9 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// as the benchmark definition. Logical-slot provisioning must therefore happen
 /// before the setup creates temp tables, registers storage, or creates a table.
 pub(crate) fn preprovision_async_mirror() {
+    // Queue-mode flush returns before completion and cannot be observed by a
+    // peer executor inside an uncommitted `#[pg_bench]` transaction.
+    Spi::run("SET koldstore.flush_execution = 'inline'").expect("set flush_execution=inline");
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
     crate::mirror::provision::provision_infrastructure(database_oid)
         .expect("pre-provision async slot/publication");

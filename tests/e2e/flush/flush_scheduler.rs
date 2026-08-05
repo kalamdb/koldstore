@@ -59,15 +59,15 @@ async fn auto_flush_false_skips_scheduler_manual_flush_still_works() -> Result<(
             "auto_flush=false must not background-flush"
         );
 
-        let inserted = db
+        let job_id = db
             .client
             .query_one(
-                "SELECT koldstore.enqueue_flush_job(table_name => $1::text::regclass)",
+                "SELECT koldstore.enqueue_flush_job(table_name => $1::text::regclass)::text",
                 &[&relation],
             )
             .await?
-            .get::<_, i64>(0);
-        anyhow::ensure!(inserted == 1, "enqueue must ignore auto_flush opt-out");
+            .get::<_, String>(0);
+        anyhow::ensure!(!job_id.is_empty(), "enqueue must ignore auto_flush opt-out");
 
         let flushed = db.flush_table(&relation).await?;
         anyhow::ensure!(flushed > 0, "manual flush_table must still work");

@@ -300,27 +300,34 @@ fn validate_slot(slot: &str) -> Result<(), String> {
     }
 }
 
-/// Serializes logical decoding and explicit cleanup for one database.
+/// Serializes logical decoding and explicit cleanup for one database (slot lock).
 ///
-/// Uses a transaction-scoped advisory lock. Releasing during Parquet upload
-/// requires ending the flush transaction first (session locks deadlock with
-/// logical decoding waiting on the flush XID); that multi-txn redesign is
-/// deferred. Phase-5.5 still drains WAL before the relation lock.
+/// Transaction-scoped advisory lock. Flush must not hold this during Parquet
+/// encode/upload — only during claim-time watermark reads (optional) and the
+/// finalize fence. Prefer [`try_lock_slot`] from flush finalize paths.
 pub(crate) fn lock_apply(database_oid: u32) -> Result<(), String> {
+    lock_slot(database_oid)
+}
+
+/// Alias for [`lock_apply`] matching the worker-flush-job-queue lock contract.
+pub(crate) fn lock_slot(database_oid: u32) -> Result<(), String> {
     lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 
-/// Non-blocking variant of [`lock_apply`] for fail-fast callers such as
-/// `flush_table`.
+/// Non-blocking variant of [`lock_slot`] for fail-fast flush finalize.
 ///
 /// Returns `true` when this transaction now holds the lock (including when the
-/// same backend already held it). Returns `false` when another backend holds
-/// it (background apply tick, auto-flush, or another fence).
+/// same backend already held it). Returns `false` when another backend holds it.
 ///
 /// # Errors
 ///
 /// Returns an error when PostgreSQL cannot evaluate the advisory lock query.
 pub(crate) fn try_lock_apply(database_oid: u32) -> Result<bool, String> {
+    try_lock_slot(database_oid)
+}
+
+/// Alias for [`try_lock_apply`] matching the worker-flush-job-queue lock contract.
+pub(crate) fn try_lock_slot(database_oid: u32) -> Result<bool, String> {
     try_lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 

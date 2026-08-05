@@ -11,15 +11,14 @@ mod mirror_fetch;
 #[cfg(feature = "pg")]
 pub(crate) mod spi;
 
-#[cfg(feature = "pg")]
-use koldstore_common::TableName;
-#[cfg(feature = "pg")]
-use koldstore_flush::{enqueue_flush_job_plan, flush_table_request};
-
-/// Enqueues a flush job through the SQL API.
+/// Enqueues a flush job through the SQL API and returns its UUID.
 ///
 /// SQL contract:
-/// `koldstore.enqueue_flush_job(table_name regclass, force boolean default false)`.
+/// `koldstore.enqueue_flush_job(table_name regclass, force boolean default false) → uuid`.
+///
+/// Same durable-queue contract as [`flush_table_pg`]: inserts a pending job or
+/// returns the existing active job id, upgrading pending force intent when
+/// requested. Does not spawn executors (use `flush_table` for that).
 ///
 /// Flush jobs are table-wide (`scope_key = ''`), matching `flush_table`. Per-user
 /// partitioning for user-scoped tables is owned by manage-time `scope_column` /
@@ -29,31 +28,17 @@ use koldstore_flush::{enqueue_flush_job_plan, flush_table_request};
 pub fn enqueue_flush_job_pg(
     table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
-) -> i64 {
+) -> pgrx::Uuid {
     enqueue_flush_job_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("enqueue flush job failed: {error}"))
 }
 
 #[cfg(feature = "pg")]
-fn enqueue_flush_job_pg_impl(table_oid: pgrx::pg_sys::Oid, force: bool) -> Result<i64, String> {
-    use pgrx::datum::DatumWithOid;
-
-    let table_name = crate::catalog::resolve::qualified_relation_name(table_oid)?;
-    let table_name = TableName::parse(&table_name).map_err(|error| error.to_string())?;
-    let plan = enqueue_flush_job_plan(flush_table_request(table_name, None, force), None)
-        .map_err(|error| error.to_string())?;
-
-    let inserted = crate::spi::update_one::<pgrx::Uuid>(
-        &plan.statement,
-        &[
-            DatumWithOid::from(table_oid),
-            DatumWithOid::from(Option::<&str>::None),
-            DatumWithOid::from(Option::<i64>::None),
-            DatumWithOid::from(force),
-        ],
-    )
-    .map_err(|error| error.to_string())?;
-    Ok(if inserted.is_some() { 1 } else { 0 })
+fn enqueue_flush_job_pg_impl(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+) -> Result<pgrx::Uuid, String> {
+    jobs::enqueue_or_lookup_flush_job(table_oid, force).map_err(|error| error.to_string())
 }
 
 /// Discovers and recovers orphaned segment objects through the SQL API.
@@ -199,13 +184,15 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 /// Flushes one managed table scope from SQL.
 ///
 /// SQL contract:
-/// `koldstore.flush_table(table_name regclass, force boolean default false)`.
+/// `koldstore.flush_table(table_name regclass, force boolean default false) → uuid`.
 ///
-/// Fails immediately when another backend holds this table's flush lock or the
-/// database apply lock (including background auto-flush after restart), instead
-/// of waiting. Emits PostgreSQL `LOG` lines when the job starts and when it
-/// finishes (duration, rows, segments, bytes, waves), including auto-flush
-/// ticks.
+/// Enqueues (or reuses) a durable flush job and returns its UUID immediately.
+/// With `koldstore.flush_execution = 'queue'` (default), a one-shot executor is
+/// spawned best-effort. With `'inline'`, the calling backend runs the flush
+/// after enqueue (required for `#[pg_test]` SPI transactions).
+///
+/// Fails immediately in inline mode when another backend holds this table's
+/// flush lock or the database apply lock.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
 pub fn flush_table_pg(

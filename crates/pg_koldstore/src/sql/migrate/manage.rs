@@ -52,7 +52,7 @@ pub(crate) fn manage_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let table_oid_u32 = table_oid.to_u32();
     let table_oid = pgrx::pg_sys::Oid::from(table_oid_u32);
-    crate::sql::job_lock::lock_table_job(table_oid)
+    let _table_lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
@@ -480,7 +480,7 @@ pub(super) fn set_table_auto_flush_pg_impl(
 ) -> Result<bool, String> {
     use pgrx::datum::DatumWithOid;
 
-    crate::sql::job_lock::lock_table_job(table_oid)?;
+    let _table_lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)?;
     let statement = koldstore_migrate::register::plan_set_table_auto_flush()
         .map_err(|error| error.to_string())?;
     let updated = pgrx::Spi::get_one_with_args::<bool>(

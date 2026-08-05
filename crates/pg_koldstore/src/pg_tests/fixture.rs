@@ -23,6 +23,9 @@ pub(crate) fn unique_suffix(label: &str) -> String {
 /// with this backend. Prefer calling via [`register_temp_storage`], which invokes
 /// this first; call it explicitly only when a test manages a table without that helper.
 pub(crate) fn preprovision_async_mirror() {
+    // Queue-mode flush returns before completion and cannot be observed by a
+    // peer executor inside an uncommitted `#[pg_test]` transaction.
+    Spi::run("SET koldstore.flush_execution = 'inline'").expect("set flush_execution=inline");
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
     crate::mirror::provision::provision_infrastructure(database_oid)
         .expect("pre-provision async slot/publication");
@@ -103,12 +106,7 @@ pub(crate) fn flush_table_rows_completed(relation: &str, min_rows: i64) -> i64 {
     let job_id = spi_get_text(&format!(
         "SELECT koldstore.flush_table('{relation}'::regclass, force => true)::text"
     ));
-    let status = spi_get_text(&format!(
-        "SELECT status::text FROM koldstore.jobs WHERE id = '{job_id}'::uuid"
-    ));
-    let rows = spi_get_i64(&format!(
-        "SELECT COALESCE(rows_flushed, 0) FROM koldstore.jobs WHERE id = '{job_id}'::uuid"
-    ));
+    let (status, rows) = wait_for_flush_job(&job_id);
     if status != "completed" || rows < min_rows {
         let err = Spi::get_one::<String>(&format!(
             "SELECT COALESCE(error_trace, '') FROM koldstore.jobs WHERE id = '{job_id}'::uuid"
@@ -163,9 +161,31 @@ pub(crate) fn flush_table_rows(relation: &str, force: bool) -> i64 {
     let job_id = spi_get_text(&format!(
         "SELECT koldstore.flush_table('{relation}'::regclass, force => {force_sql})::text"
     ));
-    spi_get_i64(&format!(
-        "SELECT rows_flushed FROM koldstore.jobs WHERE id = '{job_id}'::uuid"
-    ))
+    let (_status, rows) = wait_for_flush_job(&job_id);
+    rows
+}
+
+/// Polls briefly while a flush job is still `pending`/`running`.
+///
+/// Inline mode normally finishes before return; this is belt-and-suspenders for
+/// any residual queue-mode races inside fixtures.
+fn wait_for_flush_job(job_id: &str) -> (String, i64) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = spi_get_text(&format!(
+            "SELECT status::text FROM koldstore.jobs WHERE id = '{job_id}'::uuid"
+        ));
+        let rows = spi_get_i64(&format!(
+            "SELECT COALESCE(rows_flushed, 0) FROM koldstore.jobs WHERE id = '{job_id}'::uuid"
+        ));
+        if status != "pending" && status != "running" {
+            return (status, rows);
+        }
+        if Instant::now() >= deadline {
+            return (status, rows);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Runs `body` and asserts it finishes within `budget` (crash/stuck/slow guard).

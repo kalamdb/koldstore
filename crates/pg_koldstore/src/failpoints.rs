@@ -1,36 +1,20 @@
-//! Test-only failpoints for crash-recovery and isolation suites.
+//! SPI/GUC adapter for flush failpoints.
 //!
-//! Armed via GUC `koldstore.failpoint` (empty default). Release builds are inert
-//! unless an operator explicitly sets the GUC. Supported values:
+//! Typed names and action-prefix parsing live in [`koldstore_flush::failpoints`].
+//! This module arms via GUC `koldstore.failpoint` and runs wait barriers over SPI.
+//!
+//! Supported GUC values:
 //!
 //! - `<name>` or `error:<name>` — abort with an error at that phase
 //! - `wait:<name>` — block on the advisory barrier lock until another session unlocks
 //!
-//! Failpoint names include the flush crash points used by E2E recovery
-//! tests plus `async_mirror_apply` for async WAL applier crash injection.
+//! Prefer [`hit_typed`] with [`FlushFailpoint`] at call sites. [`hit`] remains for
+//! string-compatible callers (mirror apply constants, older tests).
+
+pub use koldstore_flush::{FailpointAction, FlushFailpoint, FAILPOINT_NAMES};
 
 /// Advisory lock key shared with E2E isolation/crash harnesses (`"KOLD"`).
 pub const FAILPOINT_BARRIER_KEY: i64 = 0x4B4F_4C44;
-
-/// Canonical failpoint names (flush crash points + async apply).
-pub const FAILPOINT_NAMES: &[&str] = &[
-    "after_claim",
-    "after_select_rows",
-    "after_pending_segment",
-    "during_parquet_write",
-    "after_temp_object",
-    "after_checksum_metadata",
-    "before_manifest_publish",
-    "before_activate",
-    "after_manifest_publish",
-    "before_hot_cleanup",
-    "during_hot_cleanup",
-    "after_cleanup_before_job_complete",
-    "after_job_complete_before_temp_cleanup",
-    "after_wave_progress",
-    "async_mirror_apply",
-    "async_mirror_apply_after_batch",
-];
 
 /// Hits a named failpoint if the session GUC arms it.
 ///
@@ -44,30 +28,47 @@ pub fn hit(name: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    let (mode, target) = parse_armed(&armed);
+    let (action, target) = FailpointAction::parse_prefix(&armed);
     if target != name {
         return Ok(());
     }
 
-    match mode {
-        FailMode::Error => Err(format!("koldstore failpoint hit: {name}")),
-        FailMode::Wait => wait_barrier(name),
-    }
+    dispatch_action(action, name)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FailMode {
-    Error,
-    Wait,
+/// Hits a typed failpoint if the session GUC arms it.
+///
+/// # Errors
+///
+/// Returns an error when the failpoint is armed for abort, or when the wait
+/// barrier / SPI call fails.
+pub fn hit_typed(point: FlushFailpoint) -> Result<(), String> {
+    hit(point.as_str())
 }
 
-fn parse_armed(armed: &str) -> (FailMode, &str) {
-    if let Some(rest) = armed.strip_prefix("wait:") {
-        (FailMode::Wait, rest)
-    } else if let Some(rest) = armed.strip_prefix("error:") {
-        (FailMode::Error, rest)
-    } else {
-        (FailMode::Error, armed)
+fn dispatch_action(action: FailpointAction, name: &str) -> Result<(), String> {
+    match action {
+        FailpointAction::Error => Err(format!("koldstore failpoint hit: {name}")),
+        FailpointAction::Wait => wait_barrier(name),
+        #[cfg(feature = "test-failpoints")]
+        FailpointAction::Panic => {
+            // Stub: SIGKILL / panic harness lands with the process-kill work.
+            Err(format!(
+                "koldstore failpoint panic stub (not implemented): {name}"
+            ))
+        }
+        #[cfg(feature = "test-failpoints")]
+        FailpointAction::Sleep => {
+            // Stub: timed sleep harness lands with destructive action wiring.
+            Err(format!(
+                "koldstore failpoint sleep stub (not implemented): {name}"
+            ))
+        }
+        #[cfg(not(feature = "test-failpoints"))]
+        FailpointAction::Panic | FailpointAction::Sleep => {
+            // Production builds ignore destructive prefixes; treat as error abort.
+            Err(format!("koldstore failpoint hit: {name}"))
+        }
     }
 }
 
