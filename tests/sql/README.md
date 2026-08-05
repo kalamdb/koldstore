@@ -20,7 +20,7 @@ external signal). They cover managed-table behavior only:
 |---|---|
 | `*.sql` | Behavior cases (run with `ON_ERROR_STOP`) |
 | `expected/*.out` | Normalized expected `psql` output |
-| `setup.sql` | Shared fixture: storage + schemas + test GUCs (same psql session as each case) |
+| `setup.sql` | Shared fixture: storage + schemas + test GUCs + `sqlreg.flush_table` apply-lock retry (same psql session as each case) |
 
 ## Normalization rules
 
