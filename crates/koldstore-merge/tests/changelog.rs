@@ -6,7 +6,7 @@ use serde_json::json;
 fn changelog_orders_by_mirror_seq_and_reports_retention_gap() {
     let columns = vec![PkColumn::new("id").unwrap()];
     let change = |seq| MirrorChange {
-        table_oid: 1,
+        table_oid: koldstore_common::TableOid::from_raw(1),
         scope_key: None,
         pk_json: LogicalPk::from_json_object(&json!({"id": seq}), &columns)
             .unwrap()
@@ -62,7 +62,7 @@ fn changelog_returns_latest_state_per_primary_key() {
     let columns = vec![PkColumn::new("id").unwrap()];
     let pk = LogicalPk::from_json_object(&json!({"id": 1}), &columns).unwrap();
     let change = |seq, operation, source| MirrorChange {
-        table_oid: 1,
+        table_oid: koldstore_common::TableOid::from_raw(1),
         scope_key: None,
         pk_json: pk.to_canonical_json(),
         operation,
@@ -98,7 +98,7 @@ fn changelog_returns_latest_state_per_primary_key() {
 fn changelog_last_rows_returns_newest_n_in_ascending_order() {
     let columns = vec![PkColumn::new("id").unwrap()];
     let change = |id, seq| MirrorChange {
-        table_oid: 1,
+        table_oid: koldstore_common::TableOid::from_raw(1),
         scope_key: None,
         pk_json: LogicalPk::from_json_object(&json!({"id": id}), &columns)
             .unwrap()

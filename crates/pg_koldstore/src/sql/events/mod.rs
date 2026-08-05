@@ -1,12 +1,13 @@
 //! Public change-feed SQL entrypoint (`koldstore.changes_since`).
 //!
-//! Merges latest-state rows from the hot `__cl` mirror and flushed cold Parquet
-//! metadata, ordered by exclusive mirror `seq` cursor.
+//! Domain adapter for hot+cold change merge. Merges latest-state rows from the
+//! hot `__cl` mirror and flushed cold Parquet metadata, ordered by exclusive
+//! mirror `seq` cursor. Planning helpers belong in `koldstore-merge`.
 
 #[cfg(feature = "pg")]
 use koldstore_common::{
     scope::active_scope_for_table, ChangeSource, MirrorChange, MirrorOperation, QualifiedTableName,
-    ScopeKey, SeqId, SqlParamType, TableKind,
+    ScopeKey, SeqId, SqlParamType, TableKind, TableOid,
 };
 #[cfg(feature = "pg")]
 use koldstore_merge::events::{self, DEFAULT_CHANGE_LIMIT};
@@ -312,7 +313,7 @@ fn decode_hot_mirror_tuples(
             ))
         })?;
         out.push(MirrorChange {
-            table_oid,
+            table_oid: TableOid::from_raw(table_oid),
             scope_key: scope_key.cloned(),
             pk_json: pk.0,
             operation,
@@ -500,13 +501,13 @@ fn cold_row_to_mirror_change(
     let operation = MirrorOperation::from_code(row.op).map_err(|error| error.to_string())?;
     let seq = SeqId::new(row.seq).map_err(|error| error.to_string())?;
     Ok(MirrorChange {
-        table_oid,
+        table_oid: TableOid::from_raw(table_oid),
         scope_key,
         pk_json: row.pk_json,
         operation,
         seq,
         deleted: row.deleted,
-        row_image_json: (!row.deleted).then_some(row.row_image),
+        row_image_json: (!row.deleted).then(|| row.row_image.to_json()),
         source: ChangeSource::ColdRecord,
     })
 }

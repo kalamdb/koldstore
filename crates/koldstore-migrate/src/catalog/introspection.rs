@@ -361,13 +361,13 @@ pub fn decode_existing_table_catalog(
     let indexed_columns = serde_json::from_str::<Vec<ColumnRef>>(indexed_columns_json)
         .map_err(|error| IntrospectionError::IndexedColumnDecode(error.to_string()))?;
 
-    Ok(ExistingTableCatalog {
-        primary_key: CatalogPrimaryKey {
+    Ok(ExistingTableCatalog::new(
+        CatalogPrimaryKey {
             columns: primary_key,
         },
         columns,
         indexed_columns,
-    })
+    ))
 }
 
 impl From<IntrospectionError> for crate::MigrationError {

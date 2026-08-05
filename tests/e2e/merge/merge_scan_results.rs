@@ -4,7 +4,7 @@ use anyhow::Result;
 use koldstore::merge_scan::exec::{
     execute_merge_scan, execute_merge_scan_with_filters, FilterPlan,
 };
-use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, SeqId};
+use koldstore_common::{RowImage, ColdRow, HotRow, LogicalPk, PkColumn, SeqId};
 use serde_json::json;
 
 fn pk(id: i64) -> LogicalPk {
@@ -18,7 +18,7 @@ fn hot(id: i64, seq: i64, deleted: bool, body: &str) -> HotRow {
         scope_key: None,
         seq: SeqId::new(seq).unwrap(),
         deleted,
-        row_image: json!({"id": id, "body": body}),
+        row_image: RowImage::from_json_value(json!({"id": id, "body": body})),
     }
 }
 
@@ -29,7 +29,7 @@ fn cold(id: i64, seq: i64, body: &str) -> ColdRow {
         seq: SeqId::new(seq).unwrap(),
         deleted: false,
         schema_version: 1,
-        row_image: json!({"id": id, "body": body}),
+        row_image: RowImage::from_json_value(json!({"id": id, "body": body})),
     }
 }
 
@@ -40,7 +40,7 @@ fn cold_deleted(id: i64, seq: i64) -> ColdRow {
         seq: SeqId::new(seq).unwrap(),
         deleted: true,
         schema_version: 1,
-        row_image: json!({"id": id}),
+        row_image: RowImage::from_json_value(json!({"id": id})),
     }
 }
 
@@ -57,7 +57,7 @@ fn merge_scan_results_resolve_hot_winner_and_tombstone_masking() {
 
     assert_eq!(result.rows.len(), 1);
     assert_eq!(
-        result.rows[0].row_image,
+        result.rows[0].row_image.to_json(),
         json!({"id": 1, "body": "hot-winner"})
     );
     assert_eq!(result.hot_rows_seen, 2);
@@ -80,7 +80,7 @@ fn merge_scan_results_apply_residual_filters_after_winner_resolution() {
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.filtered_rows, 1);
     assert_eq!(
-        result.rows[0].row_image,
+        result.rows[0].row_image.to_json(),
         json!({"id": 1, "body": "hot-winner"})
     );
 }
@@ -102,7 +102,7 @@ fn merge_scan_results_apply_cold_delete_markers_and_newer_reinserts() {
     .unwrap();
     assert_eq!(reinserted.rows.len(), 1);
     assert_eq!(
-        reinserted.rows[0].row_image,
+        reinserted.rows[0].row_image.to_json(),
         json!({"id": 1, "body": "reinserted"})
     );
 }

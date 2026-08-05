@@ -1491,6 +1491,7 @@ dependencies = [
  "koldstore-migrate",
  "koldstore-mirror",
  "koldstore-parquet",
+ "koldstore-sortkey",
  "serde",
  "serde_json",
  "thiserror",

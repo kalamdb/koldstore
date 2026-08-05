@@ -13,13 +13,13 @@
 
 #![allow(unsafe_op_in_unsafe_fn)]
 
-use koldstore_common::{HotRow, LogicalPk, PkColumn, SeqId};
+use koldstore_common::{CellValue, HotRow, LogicalPk, PkColumn, PkValue, RowImage, SeqId};
 use koldstore_merge::scan::HOT_SEQ_SENTINEL;
 use koldstore_migrate::order::CatalogColumn;
 use pgrx::pg_sys;
 
 use super::hot::HotMergeBatchReader;
-use super::literals::datum_to_json_value;
+use super::literals::datum_to_cell_value;
 use super::pg_list::{list_len, list_nth_ptr};
 use super::{exec_proc_node, tuple_slot_is_empty, with_hook_disabled};
 
@@ -218,8 +218,8 @@ unsafe fn hot_row_from_slot(
     ensure_slot_attrs(slot, need);
     let nvalid = (*slot).tts_nvalid.max(0) as usize;
 
-    let mut row_image = serde_json::Map::new();
-    let mut pk_object = serde_json::Map::new();
+    let mut row_image = RowImage::with_capacity(catalog_columns.len());
+    let mut pk_pairs = Vec::with_capacity(pk_columns.len());
 
     for column in catalog_columns {
         let attnum = column.column_id.get();
@@ -234,22 +234,34 @@ unsafe fn hot_row_from_slot(
         }
         let is_null = *(*slot).tts_isnull.add(index);
         let value = if is_null {
-            serde_json::Value::Null
+            CellValue::Null
         } else {
             let datum = *(*slot).tts_values.add(index);
-            datum_to_json_value(datum, column).unwrap_or(serde_json::Value::Null)
+            datum_to_cell_value(datum, column).unwrap_or(CellValue::Null)
         };
-        if pk_columns
+        if let Some(pk) = pk_columns
             .iter()
-            .any(|pk| pk.as_str().eq_ignore_ascii_case(&column.name))
+            .find(|pk| pk.as_str().eq_ignore_ascii_case(&column.name))
         {
-            pk_object.insert(column.name.clone(), value.clone());
+            if value.is_null() {
+                return Err(format!(
+                    "native hot cursor primary-key column `{}` is null",
+                    pk.as_str()
+                ));
+            }
+            pk_pairs.push((
+                pk.clone(),
+                PkValue::new(value.to_json()).map_err(|error| error.to_string())?,
+            ));
         }
         row_image.insert(column.name.clone(), value);
     }
 
     for pk in pk_columns {
-        if pk_object.contains_key(pk.as_str()) {
+        if pk_pairs
+            .iter()
+            .any(|(column, _)| column.as_str() == pk.as_str())
+        {
             continue;
         }
         return Err(format!(
@@ -259,16 +271,14 @@ unsafe fn hot_row_from_slot(
         ));
     }
 
-    let pk_json = serde_json::Value::Object(pk_object);
-    let pk =
-        LogicalPk::from_json_object(&pk_json, pk_columns).map_err(|error| error.to_string())?;
+    let pk = LogicalPk::new(pk_pairs).map_err(|error| error.to_string())?;
     let seq = SeqId::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
     Ok(HotRow {
         pk,
         scope_key: None,
         seq,
         deleted: false,
-        row_image: serde_json::Value::Object(row_image),
+        row_image,
     })
 }
 

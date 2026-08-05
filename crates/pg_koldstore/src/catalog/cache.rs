@@ -297,7 +297,7 @@ pub fn invalidate_all() {
 pub fn cached_cold_column_bounds(
     key: ColdColumnBoundsCacheKey,
 ) -> Result<Option<Arc<CachedColdColumnBounds>>, String> {
-    if let Some(cached) = COLD_COLUMN_BOUNDS_CACHE.with(|cache| cache.borrow().get(&key)) {
+    if let Some(cached) = COLD_COLUMN_BOUNDS_CACHE.with(|cache| cache.borrow_mut().get(&key)) {
         return Ok(cached);
     }
 
@@ -368,7 +368,7 @@ fn load_cold_column_bounds(
 pub fn cached_packed_row_group_index(
     key: &PackedRowGroupCacheKey,
 ) -> Option<Option<Arc<CachedPackedRowGroupIndex>>> {
-    PACKED_ROW_GROUP_CACHE.with(|cache| cache.borrow().get(key))
+    PACKED_ROW_GROUP_CACHE.with(|cache| cache.borrow_mut().get(key))
 }
 
 /// Stores a packed row-group index or a confirmed absent catalog row.
@@ -412,10 +412,10 @@ pub fn cached_migration_catalog(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<Arc<koldstore_migrate::ExistingTableCatalog>, String> {
     let key = table_oid.to_u32();
-    if let Some(cached) = MIGRATION_CATALOG_CACHE.with(|cache| cache.borrow().get(key).cloned()) {
+    if let Some(cached) = MIGRATION_CATALOG_CACHE.with(|cache| cache.borrow_mut().get(key)) {
         return Ok(cached);
     }
-    let catalog = crate::sql::migrate_pg::load_migration_catalog(key)?;
+    let catalog = crate::sql::migrate::load_migration_catalog(key)?;
     let shared = Arc::new(catalog);
     MIGRATION_CATALOG_CACHE.with(|cache| {
         cache.borrow_mut().insert(key, Arc::clone(&shared));
@@ -440,7 +440,7 @@ pub fn managed_table_snapshot(
         return Ok(None);
     }
     let key = table_oid.to_u32();
-    if let Some(cached) = MANAGED_TABLE_CACHE.with(|cache| cache.borrow().get(key)) {
+    if let Some(cached) = MANAGED_TABLE_CACHE.with(|cache| cache.borrow_mut().get(key)) {
         return Ok(cached);
     }
 
@@ -486,7 +486,7 @@ pub fn cached_manifest_planner_hint(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<Option<(usize, u64)>, String> {
     let key = table_oid.to_u32();
-    if let Some(cached) = MANIFEST_PLANNER_HINT_CACHE.with(|cache| cache.borrow().get(&key)) {
+    if let Some(cached) = MANIFEST_PLANNER_HINT_CACHE.with(|cache| cache.borrow_mut().get(&key)) {
         return Ok(cached);
     }
     let hint = load_manifest_planner_hint(table_oid)?;
@@ -551,7 +551,7 @@ pub fn cached_manifest_scan_context(
         .map(|column| (column.column_id.get(), column))
         .collect::<std::collections::BTreeMap<_, _>>();
     let cache_key = (key, columns.keys().copied().collect());
-    if let Some(cached) = MANIFEST_SCAN_CACHE.with(|cache| cache.borrow().get(&cache_key)) {
+    if let Some(cached) = MANIFEST_SCAN_CACHE.with(|cache| cache.borrow_mut().get(&cache_key)) {
         return Ok(cached);
     }
 

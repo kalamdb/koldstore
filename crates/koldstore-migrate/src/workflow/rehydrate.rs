@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use koldstore_mirror::{plan_drop_mirror_table, MirrorRelation};
 
-use koldstore_common::SqlStatement;
+use koldstore_common::{SqlStatement, TableOid};
 
 use crate::lock::{plan_migration_operation_lock, LockError, MigrationOperationLockPlan};
 use crate::QualifiedTableName;
@@ -36,7 +36,7 @@ pub struct DemigrationContext {
     /// Target managed heap table.
     pub table: QualifiedTableName,
     /// PostgreSQL table oid.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Cold object prefix for this table/scope.
     pub cold_object_prefix: String,
     /// Logical reader used for current hot+cold state.
@@ -135,7 +135,7 @@ pub fn default_logical_rehydrate_reader(table: &QualifiedTableName) -> String {
 #[must_use]
 pub fn demigration_context(
     table: QualifiedTableName,
-    table_oid: u32,
+    table_oid: TableOid,
     mirror_table: Option<QualifiedTableName>,
 ) -> DemigrationContext {
     DemigrationContext {
@@ -247,7 +247,8 @@ pub fn plan_clean_schema_artifact_cleanup(
         .as_table_name()
         .map(MirrorRelation::new)
         .map_err(|error| DemigrationError::Spi(error.to_string()))?;
-    let drop_mirror = plan_drop_mirror_table(&mirror);
+    let drop_mirror = plan_drop_mirror_table(&mirror)
+        .map_err(|error| DemigrationError::Spi(error.to_string()))?;
     statements.push(
         SqlStatement::write("demigrate drop change-log mirror", &drop_mirror.sql)
             .map_err(|error| DemigrationError::Spi(error.to_string()))?,
@@ -261,7 +262,7 @@ pub fn plan_clean_schema_artifact_cleanup(
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
-pub fn plan_catalog_deactivation_count(table_oid: u32) -> Result<SqlStatement, DemigrationError> {
+pub fn plan_catalog_deactivation_count(table_oid: TableOid) -> Result<SqlStatement, DemigrationError> {
     let _ = table_oid;
     SqlStatement::write(
         "demigrate deactivate catalog metadata",
@@ -283,7 +284,7 @@ SELECT count(*)::bigint FROM deactivated
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
-pub fn plan_catalog_deactivation(table_oid: u32) -> Result<SqlStatement, DemigrationError> {
+pub fn plan_catalog_deactivation(table_oid: TableOid) -> Result<SqlStatement, DemigrationError> {
     let _ = table_oid;
     SqlStatement::write(
         "demigrate deactivate catalog metadata",
@@ -297,7 +298,7 @@ pub fn plan_catalog_deactivation(table_oid: u32) -> Result<SqlStatement, Demigra
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
-pub fn plan_flush_deactivation(table_oid: u32) -> Result<SqlStatement, DemigrationError> {
+pub fn plan_flush_deactivation(table_oid: TableOid) -> Result<SqlStatement, DemigrationError> {
     let _ = table_oid;
     SqlStatement::write(
         "demigrate cancel flush jobs",

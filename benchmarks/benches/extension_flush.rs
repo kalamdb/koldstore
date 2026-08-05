@@ -5,18 +5,17 @@ use koldstore::spi::prepared_plan_key;
 use koldstore_common::TableName;
 use koldstore_merge::events::plan_mirror_changes_since;
 use koldstore_migrate::QualifiedTableName;
-use koldstore_mirror::{mirror_relation_for_source, mirror_to_sql, plan_mirror_stats};
+use koldstore_mirror::{mirror_relation_for_source, plan_mirror_stats};
 
 fn bench_spi_plan_cache_shapes(c: &mut Criterion) {
     let source = TableName::parse("app.items").expect("valid table name");
     let mirror = mirror_relation_for_source(&source).expect("valid mirror relation");
-    let cached_flush_stats = mirror_to_sql(plan_mirror_stats(&mirror)).expect("valid statement");
+    let cached_flush_stats = plan_mirror_stats(&mirror).expect("valid statement");
     let cached_flush_key = prepared_plan_key(&cached_flush_stats);
 
     c.bench_function("one_shot_flush_stats_statement_key", |b| {
         b.iter(|| {
-            let statement =
-                mirror_to_sql(plan_mirror_stats(black_box(&mirror))).expect("valid statement");
+            let statement = plan_mirror_stats(black_box(&mirror)).expect("valid statement");
             prepared_plan_key(black_box(&statement))
         })
     });

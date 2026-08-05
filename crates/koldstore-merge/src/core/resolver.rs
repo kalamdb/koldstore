@@ -3,7 +3,7 @@
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
-use koldstore_common::{ColdRow, HotRow, LogicalPk, LogicalPkValues, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, LogicalPkValues, RowImage, SeqId};
 
 /// Row source for tie-breaking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,7 +18,7 @@ pub struct ResolvedRow {
     pub pk_json: serde_json::Value,
     pub source: RowSource,
     pub seq: SeqId,
-    pub row_image: serde_json::Value,
+    pub row_image: RowImage,
     pub deleted: bool,
 }
 
@@ -27,7 +27,7 @@ struct Candidate {
     source: RowSource,
     seq: SeqId,
     deleted: bool,
-    row_image: serde_json::Value,
+    row_image: RowImage,
 }
 
 impl Candidate {

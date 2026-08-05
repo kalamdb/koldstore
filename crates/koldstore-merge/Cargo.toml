@@ -10,6 +10,7 @@ koldstore-common.workspace = true
 koldstore-catalog.workspace = true
 koldstore-mirror.workspace = true
 koldstore-parquet.workspace = true
+koldstore-sortkey.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -18,6 +19,7 @@ thiserror.workspace = true
 koldstore-common.workspace = true
 koldstore-migrate.workspace = true
 koldstore-parquet.workspace = true
+koldstore-sortkey.workspace = true
 serde_json.workspace = true
 
 [lints]

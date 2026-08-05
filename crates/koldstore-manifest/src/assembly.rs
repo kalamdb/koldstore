@@ -9,7 +9,7 @@ use koldstore_common::ColumnRef;
 use thiserror::Error;
 
 use crate::model::{
-    Manifest, ManifestBloomFilter, ManifestColumnIndex, ManifestSegment, PkFilter, SegmentStatus,
+    Manifest, ManifestBloomFilter, ManifestSegment, PkFilter, SegmentStatus,
 };
 
 /// Manifest assembly error.
@@ -100,20 +100,7 @@ pub fn build_manifest_segment_from_catalog_row(
     segment.row_group_row_counts = row.row_group_row_counts;
     segment.row_group_min_seqs = row.row_group_min_seqs;
     segment.row_group_max_seqs = row.row_group_max_seqs;
-    segment.column_indexes = row
-        .index_bounds
-        .into_iter()
-        .map(|index| ManifestColumnIndex {
-            column_id: index.column_id,
-            type_oid: index.type_oid,
-            codec_version: index.codec_version,
-            min_value: index.min_value,
-            max_value: index.max_value,
-            row_group_min_values: index.row_group_min_values,
-            row_group_max_values: index.row_group_max_values,
-            row_group_null_counts: index.row_group_null_counts,
-        })
-        .collect();
+    segment.column_indexes = row.index_bounds;
     segment.status = match row.status.as_str() {
         "pending" => SegmentStatus::Pending,
         "active" => SegmentStatus::Active,

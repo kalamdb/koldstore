@@ -2,7 +2,7 @@
 
 use koldstore_worker::{DatabaseWorkerTask, TickResult};
 
-use crate::async_mirror::apply::{apply_bounded, BoundedApplyRequest};
+use crate::mirror::apply::{apply_bounded, BoundedApplyRequest};
 
 /// SPI-backed async mirror apply task for the shared database worker loop.
 pub(crate) struct AsyncMirrorTask {

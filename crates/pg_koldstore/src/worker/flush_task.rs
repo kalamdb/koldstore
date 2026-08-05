@@ -12,7 +12,6 @@ use koldstore_flush::{
     scheduler_should_flush_parsed,
 };
 use pgrx::datum::DatumWithOid;
-use serde_json::Value;
 
 /// Outcome of one built-in flush-scheduler evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,9 +48,7 @@ fn select_first_due_auto_flush_table() -> Result<Option<u32>, String> {
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "missing options".to_string())?;
             let catalog_pending: i64 = row.get(3).map_err(|error| error.to_string())?.unwrap_or(0);
-            let options: Value = serde_json::from_str(&options_text)
-                .unwrap_or_else(|_| Value::Object(Default::default()));
-            let parsed = ManageTableOptions::from_value(&options);
+            let parsed = ManageTableOptions::from_json_str(&options_text);
             let (_, mirror_delta) = crate::row_counter_cache::pending_deltas(oid);
             let pending = catalog_pending.saturating_add(mirror_delta).max(0);
             let due = match parsed.flush_policy() {
@@ -125,7 +122,7 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     };
     let oid = pgrx::pg_sys::Oid::from(table_oid);
     // Non-blocking: a mid-flight flush (worker or manual) owns the lock.
-    if !crate::sql::job_lock_pg::try_lock_table_job(oid)? {
+    if !crate::sql::job_lock::try_lock_table_job(oid)? {
         pgrx::log!(
             "koldstore flush scheduler: skipping table_oid={} (flush already running)",
             table_oid

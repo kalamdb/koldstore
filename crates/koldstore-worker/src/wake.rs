@@ -77,6 +77,16 @@ impl EmptyWakeRetry {
         }
     }
 
+    /// Production empty-wake policy (10–200 ms within a 1 s window).
+    #[must_use]
+    pub const fn default_policy() -> Self {
+        Self::new(
+            Duration::from_millis(crate::policy::EMPTY_WAKE_RETRY_MIN_MS),
+            Duration::from_millis(crate::policy::EMPTY_WAKE_RETRY_MAX_MS),
+            Duration::from_millis(crate::policy::EMPTY_WAKE_RETRY_WINDOW_MS),
+        )
+    }
+
     /// Returns the next delay, or `None` after the bounded retry window.
     pub fn after_empty(&mut self, now: Duration) -> Option<Duration> {
         let started_at = *self.started_at.get_or_insert(now);
@@ -317,11 +327,7 @@ mod tests {
 
     #[test]
     fn empty_wake_retry_backs_off_and_stops_at_its_window() {
-        let mut retry = EmptyWakeRetry::new(
-            Duration::from_millis(10),
-            Duration::from_millis(200),
-            Duration::from_secs(1),
-        );
+        let mut retry = EmptyWakeRetry::default_policy();
 
         assert_eq!(
             retry.after_empty(Duration::ZERO),
@@ -344,11 +350,7 @@ mod tests {
 
     #[test]
     fn empty_wake_retry_reset_starts_a_fresh_window() {
-        let mut retry = EmptyWakeRetry::new(
-            Duration::from_millis(10),
-            Duration::from_millis(200),
-            Duration::from_secs(1),
-        );
+        let mut retry = EmptyWakeRetry::default_policy();
 
         let _ = retry.after_empty(Duration::ZERO);
         let _ = retry.after_empty(Duration::from_millis(10));

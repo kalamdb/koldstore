@@ -2,7 +2,7 @@
 //!
 //! Owns the PostgreSQL-free binary decoder used by async mirror apply. Malformed
 //! logical-decoding output is rejected here before SPI or mirror mutation code.
-//! Execution and slot lifecycle stay in `pg_koldstore::async_mirror`.
+//! Execution and slot lifecycle stay in `pg_koldstore::mirror`.
 
 use thiserror::Error;
 

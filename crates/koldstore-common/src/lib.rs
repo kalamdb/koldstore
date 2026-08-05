@@ -18,11 +18,12 @@ pub mod sql;
 // Stable top-level paths used across the workspace.
 pub use config::privileges;
 pub use domain::{
-    column, filter, object_keys, pk, row, scope, segment_paths, seq, snowflake, storage_id,
-    table_kind, table_name,
+    cell, column, filter, object_keys, pk, row, scope, segment_paths, seq, snowflake, storage_id,
+    table_kind, table_name, table_oid,
 };
 pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 
+pub use cell::{CellValue, RowImage};
 pub use column::{ColumnId, ColumnRef};
 pub use config::{
     flush_enabled_from_options, hot_row_limit_from_options, validate_max_rows_per_file,
@@ -66,3 +67,7 @@ pub use storage_id::StorageId;
 pub use strings::dedupe_nonblank;
 pub use table_kind::TableKind;
 pub use table_name::{QualifiedTableName, TableName};
+pub use table_oid::TableOid;
+
+/// Catalog / extension schema name for internal KoldStore objects.
+pub const KOLDSTORE_SCHEMA: &str = "koldstore";

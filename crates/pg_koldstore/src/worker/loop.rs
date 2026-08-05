@@ -16,22 +16,16 @@ use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use koldstore_worker::{
-    flush_check_due, EmptyWakeRetry, PendingDrainBudget, TickResult, WakeCursor, WakeGeneration,
-    MAX_IMMEDIATE_PENDING_TICKS,
+    flush_check_due, millis_until_flush_check, next_soft_fail_backoff_ms, EmptyWakeRetry,
+    PendingDrainBudget, TickResult, WakeCursor, WakeGeneration, MAX_IMMEDIATE_PENDING_TICKS,
 };
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::PgTryBuilder;
 
-use crate::async_mirror::task::AsyncMirrorTask;
+use crate::mirror::task::AsyncMirrorTask;
 
 use super::flush_task::{database_has_auto_flush_tables, run_flush_scheduler_tick};
-
-const SOFT_FAIL_BACKOFF_MIN_MS: u64 = 100;
-const SOFT_FAIL_BACKOFF_MAX_MS: u64 = 30_000;
-const EMPTY_WAKE_RETRY_MIN_MS: u64 = 10;
-const EMPTY_WAKE_RETRY_MAX_MS: u64 = 200;
-const EMPTY_WAKE_RETRY_WINDOW_MS: u64 = 1_000;
 
 /// Runs the persistent database worker until neither async nor auto-flush work remains.
 pub(crate) fn run_async_mirror_applier(database_oid: u32) {
@@ -42,7 +36,7 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     );
 
     let async_task = AsyncMirrorTask::new(database_oid);
-    let slot = crate::async_mirror::lifecycle::slot_name(database_oid);
+    let slot = crate::mirror::lifecycle::slot_name(database_oid);
     let slot_c = CString::new(slot.as_str()).expect("deterministic slot name contains no NUL");
     let registered_generation =
         super::wake::register_worker(database_oid).unwrap_or_else(|| WakeGeneration::new(0));
@@ -58,17 +52,13 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     let mut last_watchdog = Instant::now();
     let mut pending_drain_budget = PendingDrainBudget::new(MAX_IMMEDIATE_PENDING_TICKS);
     let worker_started = Instant::now();
-    let mut empty_wake_retry = EmptyWakeRetry::new(
-        Duration::from_millis(EMPTY_WAKE_RETRY_MIN_MS),
-        Duration::from_millis(EMPTY_WAKE_RETRY_MAX_MS),
-        Duration::from_millis(EMPTY_WAKE_RETRY_WINDOW_MS),
-    );
+    let mut empty_wake_retry = EmptyWakeRetry::default_policy();
     let mut empty_wake_retry_at = None::<Instant>;
 
     loop {
         let mut should_wait = true;
         let watchdog = Duration::from_millis(crate::guc::async_apply_watchdog_interval_ms());
-        let slot_exists = crate::async_mirror::lifecycle::native_slot_exists_cstr(&slot_c);
+        let slot_exists = crate::mirror::lifecycle::native_slot_exists_cstr(&slot_c);
         let now_secs = unix_now_secs();
         let interval = crate::guc::flush_check_interval_seconds();
         let flush_due = flush_check_due(last_flush_check_secs, now_secs, interval);
@@ -168,13 +158,7 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                         pgrx::log!(
                             "koldstore async mirror apply soft-failed (will retry): {error}"
                         );
-                        apply_backoff_ms = if apply_backoff_ms == 0 {
-                            SOFT_FAIL_BACKOFF_MIN_MS
-                        } else {
-                            apply_backoff_ms
-                                .saturating_mul(2)
-                                .clamp(SOFT_FAIL_BACKOFF_MIN_MS, SOFT_FAIL_BACKOFF_MAX_MS)
-                        };
+                        apply_backoff_ms = next_soft_fail_backoff_ms(apply_backoff_ms);
                         apply_retry_at =
                             Some(Instant::now() + Duration::from_millis(apply_backoff_ms));
                     }
@@ -394,23 +378,4 @@ fn unix_now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or(0)
-}
-
-fn millis_until_flush_check(
-    last_check_secs: Option<i64>,
-    now_secs: i64,
-    interval_secs: i64,
-) -> u64 {
-    let interval_secs = interval_secs.max(1);
-    let Some(last_check_secs) = last_check_secs else {
-        return 1;
-    };
-    let elapsed_secs = now_secs.saturating_sub(last_check_secs);
-    if elapsed_secs >= interval_secs {
-        return 1;
-    }
-    u64::try_from(interval_secs.saturating_sub(elapsed_secs))
-        .unwrap_or(1)
-        .saturating_mul(1_000)
-        .max(1)
 }

@@ -24,7 +24,7 @@ pub(crate) fn unique_suffix(label: &str) -> String {
 /// this first; call it explicitly only when a test manages a table without that helper.
 pub(crate) fn preprovision_async_mirror() {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    crate::async_mirror::provision::provision_infrastructure(database_oid)
+    crate::mirror::provision::provision_infrastructure(database_oid)
         .expect("pre-provision async slot/publication");
 }
 

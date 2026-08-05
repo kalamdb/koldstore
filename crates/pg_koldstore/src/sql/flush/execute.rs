@@ -48,7 +48,7 @@ fn claim_flush_job(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<(uuid::Uuid, bool, i64), String> {
-    crate::sql::job_lock_pg::lock_table_job(table_oid)?;
+    crate::sql::job_lock::lock_table_job(table_oid)?;
     let (job_id, force) = ensure_flush_job(table_oid, force)?;
     // Estimate total rows for the progress bar from the current mirror backlog.
     let progress_total = super::spi::mirror_catchup_row_estimate(table_oid)?;
@@ -67,7 +67,7 @@ fn load_flush_prepared_context(
     let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
-    let catalog = crate::sql::migrate_pg::migration_catalog(table_oid.to_u32())?;
+    let catalog = crate::sql::migrate::migration_catalog(table_oid.to_u32())?;
     let mut seen_column_ids = std::collections::BTreeSet::new();
     let mut indexed_columns = catalog
         .columns
@@ -313,7 +313,7 @@ pub(super) fn finalize_flush(
     ctx: &FlushPreparedContext,
     outcome: &TableFlushBatchOutcome,
     client: &koldstore_storage::ObjectStoreClient,
-    phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
+    phase0_applied: Option<crate::mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     // Phase 5.5: finite catch-up after upload, before catalog publication and
     // before SHARE ROW EXCLUSIVE. The transaction-scoped apply lock from phase 0
@@ -400,9 +400,9 @@ pub(crate) fn release_flush_memory(table_oid: pgrx::pg_sys::Oid) {
 fn run_async_prelock_catchup(
     table_oid: pgrx::pg_sys::Oid,
     prune_max_seq: i64,
-    phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
-) -> Result<Option<crate::async_mirror::apply::AppliedWalBoundary>, String> {
-    use crate::async_mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
+    phase0_applied: Option<crate::mirror::apply::AppliedWalBoundary>,
+) -> Result<Option<crate::mirror::apply::AppliedWalBoundary>, String> {
+    use crate::mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
 
     if prune_max_seq <= 0 {
         return Ok(phase0_applied);
@@ -459,9 +459,9 @@ fn run_async_prelock_catchup(
 fn run_async_prune_fence(
     table_oid: pgrx::pg_sys::Oid,
     prune_max_seq: i64,
-    skip_through: Option<crate::async_mirror::apply::AppliedWalBoundary>,
+    skip_through: Option<crate::mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
-    use crate::async_mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
+    use crate::mirror::apply::{apply_bounded, BoundedApplyRequest, PruneSeqFloor};
 
     if prune_max_seq <= 0 {
         return Ok(());
@@ -500,8 +500,8 @@ pub(crate) fn flush_table_pg_impl(
 ) -> Result<pgrx::Uuid, String> {
     // Flush selects authoritative latest-state rows, so WAL capture must be
     // fenced before row selection. Retain L0 for the post-publish prune fence.
-    let phase0 = crate::async_mirror::apply::apply_bounded(
-        crate::async_mirror::apply::BoundedApplyRequest::available_unlimited(),
+    let phase0 = crate::mirror::apply::apply_bounded(
+        crate::mirror::apply::BoundedApplyRequest::available_unlimited(),
     )?;
     let (job_id, force, progress_total) = claim_flush_job(table_oid, force)?;
     let job_uuid = crate::spi::uuid_to_pgrx(job_id);
@@ -528,10 +528,10 @@ fn flush_after_claim(
     force: bool,
     job_id: uuid::Uuid,
     progress_total: i64,
-    phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
+    phase0_applied: Option<crate::mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     let mut ctx = load_flush_prepared_context(table_oid, force, job_id)?;
-    match crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid) {
+    match crate::sql::migrate::refresh_active_schema_if_changed(table_oid) {
         Ok(true) => {
             ctx = load_flush_prepared_context(table_oid, force, job_id)?;
         }
@@ -551,7 +551,7 @@ fn flush_prepared_table(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
     progress_total: i64,
-    phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
+    phase0_applied: Option<crate::mirror::apply::AppliedWalBoundary>,
 ) -> Result<(), String> {
     let mut total_rows_flushed = 0_i64;
     let mut total_batches = 0_i32;

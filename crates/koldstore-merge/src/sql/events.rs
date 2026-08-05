@@ -4,8 +4,7 @@ use koldstore_common::{
     scope::scope_predicate_sql, MirrorChange, QualifiedTableName, ScopeKey, SeqId, SqlStatement,
 };
 use koldstore_mirror::{
-    plan_select_mirror_rows_after_seq_with_params, statement::mirror_to_sql, MirrorRelation,
-    SqlParamType,
+    plan_select_mirror_rows_after_seq_with_params, MirrorRelation, SqlParamType,
 };
 use thiserror::Error;
 
@@ -70,7 +69,7 @@ pub fn changes_since(
 
     let scoped_changes = changes
         .iter()
-        .filter(|change| change.table_oid == table_oid)
+        .filter(|change| change.table_oid.get() == table_oid)
         .filter(|change| change.scope_key.as_ref() == scope_key)
         .cloned()
         .collect::<Vec<_>>();
@@ -106,7 +105,7 @@ pub fn changes_last(
 
     let scoped_changes = changes
         .iter()
-        .filter(|change| change.table_oid == table_oid)
+        .filter(|change| change.table_oid.get() == table_oid)
         .filter(|change| change.scope_key.as_ref() == scope_key)
         .cloned()
         .collect::<Vec<_>>();
@@ -152,15 +151,12 @@ pub fn plan_mirror_changes_last(
         .map(MirrorRelation::new)
         .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
     let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
-    let statement = mirror_to_sql(
-        koldstore_mirror::plan_select_mirror_last_rows_with_params(
-            &mirror,
-            &primary_key,
-            limit_param,
-            &additional_predicates,
-            &additional_param_types,
-        )
-        .map_err(|error| ChangeFeedError::Sql(error.to_string()))?,
+    let statement = koldstore_mirror::plan_select_mirror_last_rows_with_params(
+        &mirror,
+        &primary_key,
+        limit_param,
+        &additional_predicates,
+        &additional_param_types,
     )
     .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
 
@@ -205,16 +201,13 @@ pub fn plan_mirror_changes_since(
         .map(MirrorRelation::new)
         .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
     let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
-    let statement = mirror_to_sql(
-        plan_select_mirror_rows_after_seq_with_params(
-            &mirror,
-            &primary_key,
-            1,
-            3,
-            &additional_predicates,
-            &additional_param_types,
-        )
-        .map_err(|error| ChangeFeedError::Sql(error.to_string()))?,
+    let statement = plan_select_mirror_rows_after_seq_with_params(
+        &mirror,
+        &primary_key,
+        1,
+        3,
+        &additional_predicates,
+        &additional_param_types,
     )
     .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
 

@@ -316,11 +316,13 @@ unsafe fn execute_hot_rows_query(
             let tupdesc = (*tuptable).tupdesc;
             for index in 0..processed {
                 let tuple = *(*tuptable).vals.add(index);
-                let row_image = spi_text_json(tuple, tupdesc, 1)?;
+                let row_image_json = spi_text_json(tuple, tupdesc, 1)?;
                 let pk_json = spi_text_json(tuple, tupdesc, 2)?;
                 let pk = LogicalPk::from_json_object(&pk_json, pk_columns)
                     .map_err(|error| error.to_string())?;
                 let seq = SeqId::new(HOT_SEQ_SENTINEL).map_err(|error| error.to_string())?;
+                let row_image = koldstore_common::RowImage::from_json(&row_image_json)
+                    .map_err(|error| error.to_string())?;
                 rows.push(HotRow {
                     pk,
                     scope_key: None,

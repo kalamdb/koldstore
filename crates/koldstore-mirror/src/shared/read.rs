@@ -1,8 +1,9 @@
 //! Low-level mirror read SQL builders.
 
+use koldstore_common::{SqlParamType, SqlStatement};
+
 use super::error::MirrorResult;
 use super::relation::MirrorRelation;
-use super::statement::{MirrorStatement, SqlParamType};
 use super::write::quoted_pk_columns;
 
 /// Plans the mirror half of `koldstore.changes_since`.
@@ -12,14 +13,15 @@ use super::write::quoted_pk_columns;
 ///
 /// # Errors
 ///
-/// Returns an error when no primary-key columns are supplied.
+/// Returns an error when no primary-key columns are supplied or statement
+/// metadata is invalid.
 pub fn plan_select_mirror_rows_after_seq(
     mirror_table: &MirrorRelation,
     primary_key: &[&str],
     since_param: usize,
     limit_param: usize,
     additional_predicates: &[String],
-) -> MirrorResult<MirrorStatement> {
+) -> MirrorResult<SqlStatement> {
     plan_select_mirror_rows_after_seq_with_params(
         mirror_table,
         primary_key,
@@ -35,7 +37,8 @@ pub fn plan_select_mirror_rows_after_seq(
 ///
 /// # Errors
 ///
-/// Returns an error when no primary-key columns are supplied.
+/// Returns an error when no primary-key columns are supplied or statement
+/// metadata is invalid.
 pub fn plan_select_mirror_rows_after_seq_with_params(
     mirror_table: &MirrorRelation,
     primary_key: &[&str],
@@ -43,7 +46,7 @@ pub fn plan_select_mirror_rows_after_seq_with_params(
     limit_param: usize,
     additional_predicates: &[String],
     additional_param_types: &[(usize, SqlParamType)],
-) -> MirrorResult<MirrorStatement> {
+) -> MirrorResult<SqlStatement> {
     let pk_json = pk_json_projection(primary_key)?;
     let mut where_clauses = vec![format!("mirror.\"seq\" > ${since_param}::bigint")];
     where_clauses.extend(additional_predicates.iter().cloned());
@@ -54,9 +57,9 @@ pub fn plan_select_mirror_rows_after_seq_with_params(
         SqlParamType::Integer,
         additional_param_types,
     );
-    Ok(MirrorStatement::read_with_params(
+    Ok(SqlStatement::read_with_params(
         "changes_since from change-log mirror",
-        format!(
+        &format!(
             r#"SELECT
     mirror."seq" AS seq,
     mirror."op" AS op,
@@ -71,7 +74,7 @@ LIMIT ${limit_param}::integer"#,
             where_clause = where_clauses.join(" AND ")
         ),
         std::mem::take(&mut param_types),
-    ))
+    )?)
 }
 
 /// Plans the newest-N hot mirror rows for KalamDB-style `last_rows` rewind.
@@ -81,12 +84,13 @@ LIMIT ${limit_param}::integer"#,
 ///
 /// # Errors
 ///
-/// Returns an error when no primary-key columns are supplied.
+/// Returns an error when no primary-key columns are supplied or statement
+/// metadata is invalid.
 pub fn plan_select_mirror_last_rows(
     mirror_table: &MirrorRelation,
     primary_key: &[&str],
     limit_param: usize,
-) -> MirrorResult<MirrorStatement> {
+) -> MirrorResult<SqlStatement> {
     plan_select_mirror_last_rows_with_params(mirror_table, primary_key, limit_param, &[], &[])
 }
 
@@ -94,14 +98,15 @@ pub fn plan_select_mirror_last_rows(
 ///
 /// # Errors
 ///
-/// Returns an error when no primary-key columns are supplied.
+/// Returns an error when no primary-key columns are supplied or statement
+/// metadata is invalid.
 pub fn plan_select_mirror_last_rows_with_params(
     mirror_table: &MirrorRelation,
     primary_key: &[&str],
     limit_param: usize,
     additional_predicates: &[String],
     additional_param_types: &[(usize, SqlParamType)],
-) -> MirrorResult<MirrorStatement> {
+) -> MirrorResult<SqlStatement> {
     let pk_json = pk_json_projection(primary_key)?;
     let where_sql = if additional_predicates.is_empty() {
         String::new()
@@ -120,9 +125,9 @@ pub fn plan_select_mirror_last_rows_with_params(
     if limit_param > 0 {
         param_types[limit_param - 1] = SqlParamType::Integer;
     }
-    Ok(MirrorStatement::read_with_params(
+    Ok(SqlStatement::read_with_params(
         "changes_last from change-log mirror",
-        format!(
+        &format!(
             r#"SELECT
     mirror."seq" AS seq,
     mirror."op" AS op,
@@ -135,15 +140,18 @@ LIMIT ${limit_param}::integer"#,
             mirror = mirror_table.quoted(),
         ),
         param_types,
-    ))
+    )?)
 }
 
 /// Plans aggregate stats over one mirror table.
-#[must_use]
-pub fn plan_mirror_stats(mirror_table: &MirrorRelation) -> MirrorStatement {
-    MirrorStatement::read(
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_mirror_stats(mirror_table: &MirrorRelation) -> MirrorResult<SqlStatement> {
+    Ok(SqlStatement::read(
         "select mirror stats",
-        format!(
+        &format!(
             r#"SELECT jsonb_build_object(
     {stats_fields}
 )::text
@@ -151,21 +159,24 @@ FROM {mirror}"#,
             stats_fields = MIRROR_SEQ_STATS_JSON_FIELDS,
             mirror = mirror_table.quoted()
         ),
-    )
+    )?)
 }
 
 /// Plans all-row and delete-only mirror aggregates in one scan.
 ///
 /// Force flush previously ran [`plan_mirror_stats`] then [`plan_mirror_op_stats`];
 /// this collapses both into a single pass with `FILTER (WHERE op = delete)`.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
 pub fn plan_mirror_force_flush_stats(
     mirror_table: &MirrorRelation,
     delete_op: i16,
-) -> MirrorStatement {
-    MirrorStatement::read(
+) -> MirrorResult<SqlStatement> {
+    Ok(SqlStatement::read(
         "select mirror force-flush stats",
-        format!(
+        &format!(
             r#"SELECT jsonb_build_object(
     'all', jsonb_build_object(
         {stats_fields}
@@ -181,7 +192,7 @@ FROM {mirror}"#,
             mirror = mirror_table.quoted(),
             delete_op = delete_op,
         ),
-    )
+    )?)
 }
 
 /// Plans the `max(seq)` among the oldest `limit` mirror rows.
@@ -192,11 +203,16 @@ FROM {mirror}"#,
 ///
 /// Bind parameters:
 /// - `$1` row limit
-#[must_use]
-pub fn plan_mirror_oldest_rows_max_seq(mirror_table: &MirrorRelation) -> MirrorStatement {
-    MirrorStatement::read_with_params(
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_mirror_oldest_rows_max_seq(
+    mirror_table: &MirrorRelation,
+) -> MirrorResult<SqlStatement> {
+    Ok(SqlStatement::read_with_params(
         "select mirror oldest rows max seq",
-        format!(
+        &format!(
             r#"SELECT "seq"::bigint
 FROM {mirror}
 ORDER BY "seq" ASC
@@ -204,17 +220,23 @@ LIMIT 1 OFFSET ($1::bigint - 1)"#,
             mirror = mirror_table.quoted()
         ),
         [SqlParamType::BigInt],
-    )
+    )?)
 }
 
 /// Plans aggregate stats over mirror rows with one operation code.
 ///
 /// Used by force-flush tombstone selection without scanning the full mirror into JSON.
-#[must_use]
-pub fn plan_mirror_op_stats(mirror_table: &MirrorRelation, op: i16) -> MirrorStatement {
-    MirrorStatement::read(
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_mirror_op_stats(
+    mirror_table: &MirrorRelation,
+    op: i16,
+) -> MirrorResult<SqlStatement> {
+    Ok(SqlStatement::read(
         "select mirror op stats",
-        format!(
+        &format!(
             r#"SELECT jsonb_build_object(
     {stats_fields}
 )::text
@@ -224,7 +246,7 @@ WHERE "op" = {op}"#,
             mirror = mirror_table.quoted(),
             op = op
         ),
-    )
+    )?)
 }
 
 /// Shared `jsonb_build_object` fields for mirror seq aggregate stats.

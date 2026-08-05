@@ -266,40 +266,26 @@ pub fn execute_merge_scan_with_filters(
     Ok(result)
 }
 
-fn row_matches_eq(row: &serde_json::Value, filters: &[(String, String)]) -> bool {
+fn row_matches_eq(row: &koldstore_common::RowImage, filters: &[(String, String)]) -> bool {
     filters.iter().all(|(column, expected)| {
         row.get(column)
-            .is_some_and(|value| value_matches_expected(value, expected))
+            .is_some_and(|value| cell_matches_expected(value, expected))
     })
 }
 
-fn row_matches_in(row: &serde_json::Value, filters: &[(String, Vec<String>)]) -> bool {
+fn row_matches_in(row: &koldstore_common::RowImage, filters: &[(String, Vec<String>)]) -> bool {
     filters.iter().all(|(column, expected_values)| {
         row.get(column).is_some_and(|value| {
             expected_values
                 .iter()
-                .any(|expected| value_matches_expected(value, expected))
+                .any(|expected| cell_matches_expected(value, expected))
         })
     })
 }
 
-fn value_matches_expected(value: &serde_json::Value, expected: &str) -> bool {
-    if let Some(actual) = value.as_str() {
-        return actual == expected;
+fn cell_matches_expected(value: &koldstore_common::CellValue, expected: &str) -> bool {
+    match value {
+        koldstore_common::CellValue::Utf8(text) => text == expected,
+        other => other.display_text() == expected,
     }
-    if let Some(actual) = value.as_i64() {
-        return expected.parse::<i64>() == Ok(actual);
-    }
-    if let Some(actual) = value.as_u64() {
-        return expected.parse::<u64>() == Ok(actual);
-    }
-    if let Some(actual) = value.as_f64() {
-        return expected
-            .parse::<f64>()
-            .is_ok_and(|expected| (actual - expected).abs() < f64::EPSILON);
-    }
-    if let Some(actual) = value.as_bool() {
-        return expected.parse::<bool>() == Ok(actual);
-    }
-    value.is_null() && expected == "null"
 }

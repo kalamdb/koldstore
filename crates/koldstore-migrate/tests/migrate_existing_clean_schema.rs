@@ -148,15 +148,16 @@ fn populated_table_initialization_does_not_overwrite_newer_dml_state() {
 fn mirror_initialization_job_starts_in_initialize_mirror_phase_not_system_column_phase() {
     let request = MigrationBackfillJobRequest::new(
         Uuid::from_u128(1),
-        42,
+        koldstore_common::TableOid::from_raw(42),
         &table(),
         koldstore_migrate::jobs::ManagedTableType::Shared,
-        "00000002".to_string(),
+        koldstore_common::StorageId::new("00000002").unwrap(),
         None,
         &ordering(),
         MigrationBatchSize::new(10_000).unwrap(),
         Some(1_000),
-    );
+    )
+    .unwrap();
     let plan = enqueue_migration_backfill_job_plan(request).unwrap();
 
     assert_eq!(plan.payload["phase"], "initialize_mirror");

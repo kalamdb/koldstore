@@ -819,9 +819,7 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
     };
     let (leading_column, leading_type_oid) = inputs
         .catalog
-        .columns
-        .iter()
-        .find(|column| column.column_id.get() == leading_column_id)
+        .column_by_attnum(leading_column_id)
         .map(|column| (column.name.clone(), column.pg_type.type_oid()))
         .unwrap_or_else(|| {
             pgrx::error!(
@@ -897,7 +895,7 @@ fn encode_leading_key(
 ) -> Option<Vec<u8>> {
     let sort_type = koldstore_sortkey::SortKeyType::from_type_oid(leading_type_oid)?;
     let value = row.row_image.get(leading_column)?;
-    koldstore_sortkey::encode_sort_key_json(sort_type, value).ok()
+    koldstore_sortkey::encode_sort_key_json(sort_type, &value.to_json()).ok()
 }
 
 fn load_overlay<P: ScanProfileSink>(

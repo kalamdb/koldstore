@@ -1,4 +1,6 @@
 //! PostgreSQL storage registration SQL entrypoints.
+//!
+//! Domain adapter for [`koldstore_storage`] registration plans.
 
 #[cfg(feature = "pg")]
 use koldstore_storage::registration::*;

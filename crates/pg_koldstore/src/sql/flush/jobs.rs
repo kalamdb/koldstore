@@ -76,7 +76,7 @@ pub(crate) fn reclaim_orphan_running_flush_jobs() -> Result<u64, String> {
         if table_oid == pgrx::pg_sys::InvalidOid {
             continue;
         }
-        if crate::sql::job_lock_pg::try_lock_table_job(table_oid)? {
+        if crate::sql::job_lock::try_lock_table_job(table_oid)? {
             abandoned = abandoned.saturating_add(abandon_running_flush_jobs(table_oid)?);
         }
     }

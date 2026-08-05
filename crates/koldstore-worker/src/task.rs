@@ -1,7 +1,7 @@
 //! Task seam for work executed once per database-worker wake.
 //!
 //! Async mirror apply and built-in flush scheduling both implement this trait
-//! and share the ensure/wait shell in `pg_koldstore::database_worker`.
+//! and share the ensure/wait shell in `pg_koldstore::worker`.
 
 /// Outcome of one worker tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,11 +12,17 @@ use arrow_array::builder::{
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::SchemaRef;
+use koldstore_common::CellValue;
 use koldstore_schema::PgType;
 
 use crate::pg_type_codec::{json_bool, json_f32, json_f64, json_i16, json_i64, json_string_cell};
 use crate::schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
 use crate::writer::CleanColdRecordPlan;
+
+/// One typed column value decoded from SPI or a planned cold row.
+///
+/// Alias of [`CellValue`] so flush/Parquet and merge-scan share one cell model.
+pub type FlushColumnValue = CellValue;
 
 /// One mirror row decoded from SPI for flush encoding.
 #[derive(Debug, Clone, PartialEq)]
@@ -49,29 +55,6 @@ pub fn pk_column_indices(
                 .ok_or_else(|| format!("primary-key column `{pk}` is missing from catalog"))
         })
         .collect()
-}
-
-/// One typed column value decoded from SPI or a planned cold row.
-#[derive(Debug, Clone, PartialEq)]
-pub enum FlushColumnValue {
-    /// SQL NULL.
-    Null,
-    /// Boolean column.
-    Bool(bool),
-    /// `int2`.
-    Int16(i16),
-    /// `int4`.
-    Int32(i32),
-    /// `int8`.
-    Int64(i64),
-    /// `float4`.
-    Float32(f32),
-    /// `float8`.
-    Float64(f64),
-    /// Text-like columns (`text`, `jsonb`, `uuid`, `bytea`, `numeric`, `text[]`).
-    Utf8(String),
-    /// `timestamptz` stored as UTC micros.
-    TimestamptzMicros(i64),
 }
 
 /// Finished cold row batch ready for Parquet encoding.

@@ -9,11 +9,11 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
 | Domain | Library crate(s) | Extension adapter |
 |--------|------------------|-------------------|
 | Setup | `koldstore-setup` | `pg_koldstore` bootstrap SQL + SPI |
-| Migrate | `koldstore-migrate` | `pg_koldstore::sql::ddl`, `migrate::*` |
+| Migrate | `koldstore-migrate` | `pg_koldstore::sql::migrate` |
 | Merge scan | `koldstore-merge` | `pg_koldstore::merge_scan` — see [scanning-table.md](scanning-table.md) (shared preload required) |
-| DML | `koldstore-mirror` | `pg_koldstore::sql::dml`, `hooks::*` |
+| DML | `koldstore-mirror` | `pg_koldstore::hooks`, `pg_koldstore::mirror` |
 | Flush | `koldstore-flush`, `koldstore-manifest` | `pg_koldstore::sql::flush` |
-| DB worker + shared jobs | `koldstore-worker` | `pg_koldstore::database_worker` |
+| DB worker + shared jobs | `koldstore-worker` | `pg_koldstore::worker` |
 | Storage | `koldstore-storage` | storage registration wrappers |
 | Schema | `koldstore-schema` | schema registry SQL execution |
 
@@ -111,7 +111,7 @@ flowchart BT
 `koldstore-setup` is a dependency-free SQL classifier (no `koldstore-*` edges).
 `koldstore-worker` is a leaf crate with no internal `koldstore-*` dependencies
 (DB worker ensure/task/policy). Pure scheduling policy, including the bounded
-immediate-pending retry budget, stays here; `pg_koldstore::database_worker`
+immediate-pending retry budget, stays here; `pg_koldstore::worker`
 owns latch, signal, SPI-transaction, and GUC integration.
 `koldstore-sortkey` is a foundation leaf (Sort Key V1 encode/decode) with only
 a `koldstore-common` edge.

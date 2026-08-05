@@ -1,7 +1,7 @@
 //! Async mirror helpers (PostgreSQL-free).
 //!
 //! Owns the `pgoutput` decoder, tuple→JSON helpers, and apply-batch flush
-//! policy. SPI/WAL orchestration stays in `pg_koldstore::async_mirror`.
+//! policy. SPI/WAL orchestration stays in `pg_koldstore::mirror`.
 
 pub mod apply_row;
 pub mod batch;

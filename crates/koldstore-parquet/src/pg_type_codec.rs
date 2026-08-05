@@ -144,6 +144,60 @@ pub fn arrow_array_from_json(
     Ok(array)
 }
 
+/// Decodes one Arrow cell into a typed [`koldstore_common::CellValue`].
+///
+/// Prefer this on merge/flush paths so cold decode skips per-cell JSON trees.
+/// `timestamptz` stays as PostgreSQL-epoch microseconds (same unit as native hot).
+///
+/// # Errors
+///
+/// Returns an error when the Arrow physical type does not match the type.
+pub fn cell_from_arrow_cell(
+    pg_type: PgType,
+    column_name: &str,
+    array: &dyn Array,
+    row_index: usize,
+) -> Result<koldstore_common::CellValue, String> {
+    use koldstore_common::CellValue;
+
+    if array.is_null(row_index) {
+        return Ok(CellValue::Null);
+    }
+    match pg_type {
+        PgType::Bool => Ok(CellValue::Bool(
+            array_for::<BooleanArray>(array, column_name)?.value(row_index),
+        )),
+        PgType::Int2 => Ok(CellValue::Int16(
+            array_for::<Int16Array>(array, column_name)?.value(row_index),
+        )),
+        PgType::Int4 => Ok(CellValue::Int32(
+            array_for::<Int32Array>(array, column_name)?.value(row_index),
+        )),
+        PgType::Int8 => Ok(CellValue::Int64(
+            array_for::<Int64Array>(array, column_name)?.value(row_index),
+        )),
+        PgType::Float4 => Ok(CellValue::Float32(
+            array_for::<Float32Array>(array, column_name)?.value(row_index),
+        )),
+        PgType::Float8 => Ok(CellValue::Float64(
+            array_for::<Float64Array>(array, column_name)?.value(row_index),
+        )),
+        PgType::Text
+        | PgType::Numeric
+        | PgType::Uuid
+        | PgType::Jsonb
+        | PgType::TextArray
+        | PgType::Bytea => Ok(CellValue::Utf8(
+            array_for::<StringArray>(array, column_name)?
+                .value(row_index)
+                .to_string(),
+        )),
+        PgType::Timestamptz => Ok(CellValue::TimestamptzMicros(
+            array_for::<TimestampMicrosecondArray>(array, column_name)?.value(row_index),
+        )),
+    }
+}
+
 /// Decodes one Arrow cell into JSON for a supported PostgreSQL type.
 ///
 /// # Errors

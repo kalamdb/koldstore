@@ -10,7 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 use arrow_array::{Array, BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
 use futures_util::StreamExt;
-use koldstore_common::{ColdRow, LogicalPk, PkColumn, SeqId};
+use koldstore_common::{ColdRow, LogicalPk, PkColumn, RowImage, SeqId};
 use object_store::ObjectStore;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
@@ -253,8 +253,8 @@ pub struct ParquetReadRequest {
 pub struct CleanColdRow {
     /// Primary-key values encoded by column name.
     pub pk_json: serde_json::Value,
-    /// Base table row image, or `null` for delete markers.
-    pub row_image: serde_json::Value,
+    /// Base table row image (empty for delete markers).
+    pub row_image: RowImage,
     /// KoldStore sequence number.
     pub seq: i64,
     /// Mirror operation code (`1` insert, `2` update, `3` delete).
@@ -883,10 +883,10 @@ fn clean_rows_from_batch(
             }
         }
         let deleted_value = deleted.value(row_index);
-        let mut row_image = serde_json::Map::new();
+        let mut row_image = RowImage::with_capacity(decode_columns.len());
         for column in &decode_columns {
             let value = match batch.column_by_name(&column.name) {
-                Some(array) => crate::pg_type_codec::json_from_arrow_cell(
+                Some(array) => crate::pg_type_codec::cell_from_arrow_cell(
                     column.pg_type,
                     &column.name,
                     array.as_ref(),
@@ -898,25 +898,21 @@ fn clean_rows_from_batch(
                         column.name
                     ));
                 }
-                None => serde_json::Value::Null,
+                None => koldstore_common::CellValue::Null,
             };
             row_image.insert(column.name.clone(), value);
         }
         let mut pk_json = serde_json::Map::new();
         for column in primary_key_columns {
-            pk_json.insert(
-                column.clone(),
-                row_image
-                    .get(column)
-                    .cloned()
-                    .ok_or_else(|| format!("cold row is missing primary-key field `{column}`"))?,
-            );
+            let cell = row_image.get(column).ok_or_else(|| {
+                format!("cold row is missing primary-key field `{column}`")
+            })?;
+            pk_json.insert(column.clone(), cell.to_json());
         }
-        let row_image = if deleted_value {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::Object(row_image)
-        };
+        if deleted_value {
+            // Delete markers keep PK identity only; drop application payload.
+            row_image = RowImage::new();
+        }
         let seq_value = seq.value(row_index);
         let op_value = op.value(row_index);
         if !(1..=3).contains(&op_value) {

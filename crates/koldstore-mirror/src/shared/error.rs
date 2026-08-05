@@ -1,5 +1,6 @@
 //! Mirror storage errors.
 
+use koldstore_common::SqlError;
 use thiserror::Error;
 
 /// Mirror storage API result.
@@ -20,4 +21,13 @@ pub enum MirrorError {
     /// Column names supplied to mirror storage must be valid SQL identifiers.
     #[error("invalid mirror column `{0}`")]
     InvalidColumn(String),
+    /// SQL statement metadata could not be prepared.
+    #[error("{0}")]
+    Sql(String),
+}
+
+impl From<SqlError> for MirrorError {
+    fn from(error: SqlError) -> Self {
+        Self::Sql(error.to_string())
+    }
 }

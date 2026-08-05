@@ -8,10 +8,11 @@
 
 use std::cell::RefCell;
 
-use koldstore_worker::{AtomicWakeRegistry, TransactionDirty, WakeGeneration, WorkerPid};
+use koldstore_worker::{
+    AtomicWakeRegistry, TransactionDirty, WakeGeneration, WorkerPid, WAKE_REGISTRY_CAPACITY,
+};
 use pgrx::{pg_guard, pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
 
-const WAKE_REGISTRY_CAPACITY: usize = 256;
 type SharedWakeRegistry = AssertPGRXSharedMemory<AtomicWakeRegistry<WAKE_REGISTRY_CAPACITY>>;
 
 static WAKE_REGISTRY: PgAtomic<SharedWakeRegistry> =

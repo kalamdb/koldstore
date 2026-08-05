@@ -39,6 +39,14 @@ impl PendingDrainBudget {
     }
 }
 
+const fn flush_interval_secs(interval_secs: i64) -> i64 {
+    if interval_secs < 1 {
+        1
+    } else {
+        interval_secs
+    }
+}
+
 /// Returns whether a flush eligibility check is due.
 #[must_use]
 pub const fn flush_check_due(
@@ -46,33 +54,75 @@ pub const fn flush_check_due(
     now_secs: i64,
     interval_secs: i64,
 ) -> bool {
-    let interval_secs = if interval_secs < 1 { 1 } else { interval_secs };
+    let interval_secs = flush_interval_secs(interval_secs);
     match last_check_secs {
         None => true,
         Some(last) => now_secs.saturating_sub(last) >= interval_secs,
     }
 }
 
+/// Milliseconds until the next flush eligibility check (minimum 1).
+///
+/// Inverse of [`flush_check_due`]: when a check is due (including first run),
+/// returns `1` so the latch wait wakes promptly.
+#[must_use]
+pub fn millis_until_flush_check(
+    last_check_secs: Option<i64>,
+    now_secs: i64,
+    interval_secs: i64,
+) -> u64 {
+    let interval_secs = flush_interval_secs(interval_secs);
+    let Some(last_check_secs) = last_check_secs else {
+        return 1;
+    };
+    let elapsed_secs = now_secs.saturating_sub(last_check_secs);
+    if elapsed_secs >= interval_secs {
+        return 1;
+    }
+    u64::try_from(interval_secs.saturating_sub(elapsed_secs))
+        .unwrap_or(1)
+        .saturating_mul(1_000)
+        .max(1)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{flush_check_due, PendingDrainBudget};
+    use super::{flush_check_due, millis_until_flush_check, PendingDrainBudget};
     use crate::TickResult;
 
     #[test]
     fn first_check_is_always_due() {
         assert!(flush_check_due(None, 100, 30));
+        assert_eq!(millis_until_flush_check(None, 100, 30), 1);
     }
 
     #[test]
     fn check_waits_for_interval() {
         assert!(!flush_check_due(Some(100), 129, 30));
+        assert_eq!(millis_until_flush_check(Some(100), 129, 30), 1_000);
         assert!(flush_check_due(Some(100), 130, 30));
+        assert_eq!(millis_until_flush_check(Some(100), 130, 30), 1);
     }
 
     #[test]
     fn flush_check_due_clamps_interval_below_one_to_one() {
         assert!(!flush_check_due(Some(100), 100, 0));
+        assert_eq!(millis_until_flush_check(Some(100), 100, 0), 1_000);
         assert!(flush_check_due(Some(100), 101, 0));
+        assert_eq!(millis_until_flush_check(Some(100), 101, 0), 1);
+    }
+
+    #[test]
+    fn flush_due_and_millis_until_agree() {
+        for last in [None, Some(0_i64), Some(50), Some(100)] {
+            for now in [0_i64, 50, 99, 100, 129, 130, 200] {
+                for interval in [0_i64, 1, 30] {
+                    let due = flush_check_due(last, now, interval);
+                    let wait = millis_until_flush_check(last, now, interval);
+                    assert_eq!(due, wait == 1, "last={last:?} now={now} interval={interval}");
+                }
+            }
+        }
     }
 
     #[test]

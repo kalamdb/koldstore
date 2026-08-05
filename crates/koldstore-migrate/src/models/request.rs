@@ -1,6 +1,6 @@
 //! Migration request parsing and shared migration error types.
 
-use koldstore_common::ManageTableOptions;
+use koldstore_common::{ManageTableOptions, TableName};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -42,7 +42,7 @@ pub enum MigrationError {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MigrateTableRequest {
     /// PostgreSQL relation name.
-    pub table_name: String,
+    pub table_name: TableName,
     /// `shared` or `user`.
     pub table_type: String,
     /// Storage registration name.
@@ -57,7 +57,7 @@ pub struct MigrateTableRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DemigrateTableRequest {
     /// PostgreSQL relation name.
-    pub table_name: String,
+    pub table_name: TableName,
     /// Optional SQL argument; defaults to rehydrate.
     pub rehydrate: Option<bool>,
     /// Optional SQL argument; defaults to retaining cold artifacts.

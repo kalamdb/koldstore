@@ -19,7 +19,7 @@ use crate::flush::harness::{
     is_retryable_concurrency_error, wait_until_barrier_waiter,
 };
 
-/// Matches `TABLE_JOB_LOCK_NAMESPACE` in `job_lock_pg.rs` (single-bigint advisory key).
+/// Matches `TABLE_JOB_LOCK_NAMESPACE` in `job_lock.rs` (single-bigint advisory key).
 const TABLE_JOB_LOCK_NAMESPACE: i64 = 0x4b54_4a42;
 
 fn table_job_lock_key(table_oid: u32) -> i64 {

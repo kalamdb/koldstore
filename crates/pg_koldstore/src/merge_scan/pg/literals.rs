@@ -22,17 +22,39 @@ pub(super) unsafe fn typed_literal_sql(
     datum_typed_sql(datum, column)
 }
 
+/// Resolves a Const or bound Param into a Sort Key V1 value for cold prune.
+pub(super) unsafe fn literal_sort_key_value(
+    expr: *mut pg_sys::Expr,
+    column: &koldstore_migrate::order::CatalogColumn,
+    params: pg_sys::ParamListInfo,
+) -> Option<koldstore_sortkey::SortKeyValue> {
+    let (datum, isnull, _) = const_or_param_datum(expr, params)?;
+    if isnull {
+        return None;
+    }
+    datum_to_sort_key_value(datum, column)
+}
+
+/// Resolves a Const or bound Param into a typed cell for prune/residual filters.
+pub(super) unsafe fn literal_cell_value(
+    expr: *mut pg_sys::Expr,
+    column: &koldstore_migrate::order::CatalogColumn,
+    params: pg_sys::ParamListInfo,
+) -> Option<koldstore_common::CellValue> {
+    let (datum, isnull, _) = const_or_param_datum(expr, params)?;
+    if isnull {
+        return Some(koldstore_common::CellValue::Null);
+    }
+    datum_to_cell_value(datum, column)
+}
+
 /// Resolves a Const or bound Param into a JSON value for prune/residual filters.
 pub(super) unsafe fn literal_json_value(
     expr: *mut pg_sys::Expr,
     column: &koldstore_migrate::order::CatalogColumn,
     params: pg_sys::ParamListInfo,
 ) -> Option<serde_json::Value> {
-    let (datum, isnull, _) = const_or_param_datum(expr, params)?;
-    if isnull {
-        return None;
-    }
-    datum_to_json_value(datum, column)
+    literal_cell_value(expr, column, params).map(|cell| cell.to_json())
 }
 
 unsafe fn const_or_param_datum(
@@ -125,18 +147,74 @@ unsafe fn quote_sql_literal(value: &str) -> Option<String> {
     Some(literal)
 }
 
+/// Converts a non-null Datum to a Sort Key V1 value for cold segment prune.
+pub(super) unsafe fn datum_to_sort_key_value(
+    datum: pg_sys::Datum,
+    column: &koldstore_migrate::order::CatalogColumn,
+) -> Option<koldstore_sortkey::SortKeyValue> {
+    use koldstore_sortkey::SortKeyValue;
+
+    let sort_type = koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
+    match sort_type {
+        koldstore_sortkey::SortKeyType::Bool => Some(SortKeyValue::Bool(datum.value() != 0)),
+        koldstore_sortkey::SortKeyType::Int2 => {
+            let narrowed = i16::try_from(datum.value() as i64).ok()?;
+            Some(SortKeyValue::Int2(narrowed))
+        }
+        koldstore_sortkey::SortKeyType::Int4 => {
+            let narrowed = i32::try_from(datum.value() as i64).ok()?;
+            Some(SortKeyValue::Int4(narrowed))
+        }
+        koldstore_sortkey::SortKeyType::Int8 => Some(SortKeyValue::Int8(datum.value() as i64)),
+        koldstore_sortkey::SortKeyType::Date => {
+            let narrowed = i32::try_from(datum.value() as i64).ok()?;
+            Some(SortKeyValue::Date(narrowed))
+        }
+        koldstore_sortkey::SortKeyType::Timestamp => {
+            Some(SortKeyValue::Timestamp(datum.value() as i64))
+        }
+        koldstore_sortkey::SortKeyType::Timestamptz => {
+            Some(SortKeyValue::Timestamptz(datum.value() as i64))
+        }
+        koldstore_sortkey::SortKeyType::Uuid => {
+            let mut typoutput = pg_sys::InvalidOid;
+            let mut typisvarlena = false;
+            let oid = column_type_oid(PgType::Uuid);
+            pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
+            let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
+            let text = cstr_owned_pfree(out)?;
+            let uuid = uuid::Uuid::parse_str(&text).ok()?;
+            Some(SortKeyValue::Uuid(uuid))
+        }
+    }
+}
+
+/// Converts a non-null Datum to a typed cell for merge-candidate / prune helpers.
+pub(super) unsafe fn datum_to_cell_value(
+    datum: pg_sys::Datum,
+    column: &koldstore_migrate::order::CatalogColumn,
+) -> Option<koldstore_common::CellValue> {
+    use koldstore_common::CellValue;
+
+    datum_cell_value(datum, column).or_else(|| {
+        datum_json_value_via_output(datum, column).map(|value| CellValue::from_json(&value))
+    })
+}
+
 /// Converts a non-null Datum to JSON for merge-candidate / prune helpers.
 pub(super) unsafe fn datum_to_json_value(
     datum: pg_sys::Datum,
     column: &koldstore_migrate::order::CatalogColumn,
 ) -> Option<serde_json::Value> {
-    datum_json_value(datum, column).or_else(|| datum_json_value_via_output(datum, column))
+    datum_to_cell_value(datum, column).map(|cell| cell.to_json())
 }
 
-unsafe fn datum_json_value(
+unsafe fn datum_cell_value(
     datum: pg_sys::Datum,
     column: &koldstore_migrate::order::CatalogColumn,
-) -> Option<serde_json::Value> {
+) -> Option<koldstore_common::CellValue> {
+    use koldstore_common::CellValue;
+
     match column.pg_type {
         PgType::Text => {
             let text = datum.cast_mut_ptr::<pg_sys::text>();
@@ -145,7 +223,7 @@ unsafe fn datum_json_value(
             }
             let cstr = pg_sys::text_to_cstring(text);
             let value = cstr_owned_pfree(cstr)?;
-            Some(serde_json::Value::String(value))
+            Some(CellValue::Utf8(value))
         }
         PgType::Uuid => {
             let mut typoutput = pg_sys::InvalidOid;
@@ -154,13 +232,21 @@ unsafe fn datum_json_value(
             pg_sys::getTypeOutputInfo(oid, &mut typoutput, &mut typisvarlena);
             let out = pg_sys::OidOutputFunctionCall(typoutput, datum);
             let value = cstr_owned_pfree(out)?;
-            Some(serde_json::Value::String(value))
+            Some(CellValue::Utf8(value))
         }
-        PgType::Bool => Some(serde_json::Value::Bool(datum.value() != 0)),
-        PgType::Int2 | PgType::Int4 | PgType::Int8 => Some(serde_json::json!(datum.value() as i64)),
+        PgType::Bool => Some(CellValue::Bool(datum.value() != 0)),
+        PgType::Int2 => {
+            let narrowed = i16::try_from(datum.value() as i64).ok()?;
+            Some(CellValue::Int16(narrowed))
+        }
+        PgType::Int4 => {
+            let narrowed = i32::try_from(datum.value() as i64).ok()?;
+            Some(CellValue::Int32(narrowed))
+        }
+        PgType::Int8 => Some(CellValue::Int64(datum.value() as i64)),
         // TimestampTzADT is microseconds since the PostgreSQL epoch — the same
         // unit Sort Key V1 persists for timestamptz bounds.
-        PgType::Timestamptz => Some(serde_json::json!(datum.value() as i64)),
+        PgType::Timestamptz => Some(CellValue::TimestamptzMicros(datum.value() as i64)),
         _ => None,
     }
 }

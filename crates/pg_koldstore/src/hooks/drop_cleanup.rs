@@ -41,7 +41,16 @@ pub(super) fn drop_captured_mirrors(mirrors: &[QualifiedTableName]) {
 
     for mirror in mirrors {
         let sql = match mirror.as_table_name() {
-            Ok(table_name) => plan_drop_mirror_table(&MirrorRelation::new(table_name)).sql,
+            Ok(table_name) => match plan_drop_mirror_table(&MirrorRelation::new(table_name)) {
+                Ok(statement) => statement.sql,
+                Err(error) => {
+                    pgrx::warning!(
+                        "koldstore drop: failed to plan drop for {}: {error}",
+                        mirror.quoted()
+                    );
+                    continue;
+                }
+            },
             Err(error) => {
                 pgrx::warning!(
                     "koldstore drop: invalid mirror {}: {error}",
@@ -72,7 +81,7 @@ fn cleanup_one_managed_table_before_drop(
         table_oid.to_u32(),
         cancelled
     );
-    crate::sql::job_lock_pg::lock_table_job(table_oid)?;
+    crate::sql::job_lock::lock_table_job(table_oid)?;
 
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
@@ -93,7 +102,7 @@ fn cleanup_one_managed_table_before_drop(
     )
     .map_err(|error| error.to_string())?;
 
-    let plan = plan_drop_table_cleanup(table, table_oid.to_u32(), DropTableCleanupPolicy::Delete)
+    let plan = plan_drop_table_cleanup(table, koldstore_common::TableOid::from_raw(table_oid.to_u32()), DropTableCleanupPolicy::Delete)
         .map_err(|error| error.to_string())?;
     for statement in &plan.statements {
         crate::spi::update(statement, &[DatumWithOid::from(table_oid)])

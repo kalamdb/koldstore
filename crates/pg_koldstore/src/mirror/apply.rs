@@ -210,7 +210,7 @@ pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome
     // postmaster restart. The applier itself must not re-enter ensure: that takes
     // the worker-registration xact lock held by an in-progress manage_table.
     if !is_background_worker() {
-        crate::database_worker::ensure_async_mirror_worker_once_if_needed();
+        crate::worker::ensure_async_mirror_worker_once_if_needed();
     }
     super::lifecycle::lock_apply(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())?;
     let slot = current_slot_name();

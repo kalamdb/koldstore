@@ -1,11 +1,12 @@
 //! Mirror relation naming.
 
+//! Mirror relation naming.
+
 use koldstore_common::{is_safe_identifier, TableName};
 
 use super::error::{MirrorError, MirrorResult};
 
-/// Schema that owns all clean-schema mirror tables.
-pub const KOLDSTORE_SCHEMA: &str = "koldstore";
+pub use koldstore_common::KOLDSTORE_SCHEMA;
 /// Suffix appended to the source table name for its latest-state mirror.
 pub const CHANGE_LOG_MIRROR_SUFFIX: &str = "__cl";
 

@@ -1,6 +1,6 @@
 use koldstore_common::{
-    ChangeSource, ColdRow, HotRow, LogicalPk, MirrorChange, MirrorOperation, PkColumn, ScopeKey,
-    SeqId,
+    ChangeSource, ColdRow, HotRow, LogicalPk, MirrorChange, MirrorOperation, PkColumn, RowImage,
+    ScopeKey, SeqId,
 };
 use koldstore_merge::{
     changes_since, resolve_rows, tombstone_required, ChangeCursor, NewestFirstWinnerResolver,
@@ -19,7 +19,7 @@ fn hot(id: i64, seq: i64, deleted: bool, body: &str) -> HotRow {
         scope_key: None,
         seq: SeqId::new(seq).unwrap(),
         deleted,
-        row_image: json!({"id": id, "body": body}),
+        row_image: RowImage::from_json_value(json!({"id": id, "body": body})),
     }
 }
 
@@ -30,7 +30,7 @@ fn cold(id: i64, seq: i64, deleted: bool, body: &str) -> ColdRow {
         seq: SeqId::new(seq).unwrap(),
         deleted,
         schema_version: 1,
-        row_image: json!({"id": id, "body": body}),
+        row_image: RowImage::from_json_value(json!({"id": id, "body": body})),
     }
 }
 
@@ -67,12 +67,12 @@ fn resolver_selects_newest_row_per_pk_and_hot_wins_exact_tie() {
     let row1 = by_id.get(&1).expect("pk 1");
     assert_eq!(row1.source, koldstore_merge::RowSource::Hot);
     assert_eq!(row1.seq.get(), 10);
-    assert_eq!(row1.row_image, json!({"id": 1, "body": "hot"}));
+    assert_eq!(row1.row_image.to_json(), json!({"id": 1, "body": "hot"}));
 
     let row2 = by_id.get(&2).expect("pk 2");
     assert_eq!(row2.source, koldstore_merge::RowSource::Hot);
     assert_eq!(row2.seq.get(), 5);
-    assert_eq!(row2.row_image, json!({"id": 2, "body": "hot-2"}));
+    assert_eq!(row2.row_image.to_json(), json!({"id": 2, "body": "hot-2"}));
 }
 
 #[test]
@@ -93,11 +93,11 @@ fn resolver_emits_at_most_one_visible_winner_per_pk() {
         .collect();
     assert_eq!(by_id.keys().copied().collect::<Vec<_>>(), vec![1_i64, 2]);
     assert_eq!(
-        by_id.get(&1).unwrap().row_image,
+        by_id.get(&1).unwrap().row_image.to_json(),
         json!({"id": 1, "body": "hot"})
     );
     assert_eq!(
-        by_id.get(&2).unwrap().row_image,
+        by_id.get(&2).unwrap().row_image.to_json(),
         json!({"id": 2, "body": "cold-2"})
     );
 }
@@ -117,7 +117,7 @@ fn streaming_resolver_keeps_newest_winner_across_payload_batches() {
         .resolve_hot_batch(vec![hot(1, 30, false, "hot")])
         .unwrap();
     assert_eq!(hot_rows.len(), 1);
-    assert_eq!(hot_rows[0].row_image["body"], "hot");
+    assert_eq!(hot_rows[0].row_image["body"].as_str(), Some("hot"));
 
     let newer_cold = resolver
         .resolve_cold_batch(vec![
@@ -128,7 +128,7 @@ fn streaming_resolver_keeps_newest_winner_across_payload_batches() {
         ])
         .unwrap();
     assert_eq!(newer_cold.len(), 1);
-    assert_eq!(newer_cold[0].row_image["body"], "newer-cold");
+    assert_eq!(newer_cold[0].row_image["body"].as_str(), Some("newer-cold"));
 
     let older_cold = resolver
         .resolve_cold_batch(vec![
@@ -138,7 +138,7 @@ fn streaming_resolver_keeps_newest_winner_across_payload_batches() {
         ])
         .unwrap();
     assert_eq!(older_cold.len(), 1);
-    assert_eq!(older_cold[0].row_image["body"], "old-only");
+    assert_eq!(older_cold[0].row_image["body"].as_str(), Some("old-only"));
     assert_eq!(resolver.seen_key_count(), 5);
 }
 
@@ -156,7 +156,7 @@ fn streaming_resolver_resolves_duplicates_inside_one_overlapping_batch() {
         .unwrap();
 
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].row_image["body"], "new");
+    assert_eq!(rows[0].row_image["body"].as_str(), Some("new"));
     assert_eq!(resolver.seen_key_count(), 2);
 }
 
@@ -173,7 +173,7 @@ fn streaming_resolver_mirror_mask_applies_after_live_hot_winners() {
         .unwrap();
 
     assert_eq!(hot_rows.len(), 1);
-    assert_eq!(hot_rows[0].row_image["body"], "live-hot");
+    assert_eq!(hot_rows[0].row_image["body"].as_str(), Some("live-hot"));
     assert!(cold_rows.is_empty());
 }
 
@@ -202,7 +202,7 @@ fn cold_delete_marker_masks_older_live_rows_and_newer_hot_reinsert_wins() {
         seq: SeqId::new(20).unwrap(),
         deleted: true,
         schema_version: 1,
-        row_image: json!({"id": 1}),
+        row_image: RowImage::from_json_value(json!({"id": 1})),
     };
     let old_live = cold(1, 10, false, "old-cold");
 
@@ -213,7 +213,7 @@ fn cold_delete_marker_masks_older_live_rows_and_newer_hot_reinsert_wins() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source, koldstore_merge::RowSource::Hot);
     assert_eq!(rows[0].seq.get(), 30);
-    assert_eq!(rows[0].row_image, json!({"id": 1, "body": "reinserted"}));
+    assert_eq!(rows[0].row_image.to_json(), json!({"id": 1, "body": "reinserted"}));
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn tombstone_required_only_when_cold_may_contain_pk() {
 #[test]
 fn changes_since_orders_by_seq_and_detects_retention_gap() {
     let change = |seq| MirrorChange {
-        table_oid: 1,
+        table_oid: koldstore_common::TableOid::from_raw(1),
         scope_key: Some(ScopeKey::new("a").unwrap()),
         pk_json: serde_json::json!({"id": seq}),
         operation: MirrorOperation::Update,

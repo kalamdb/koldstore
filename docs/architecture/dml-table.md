@@ -8,7 +8,7 @@ accounting, scope enforcement, and how DML state flows into flush and scan.
 **Capture path:** committed-WAL logical decoding + database apply worker
 
 **Mirror contract:** `crates/koldstore-mirror/`
-**Capture/apply:** `crates/pg_koldstore/src/async_mirror/`
+**Capture/apply:** `crates/pg_koldstore/src/mirror/`
 **Counter cache:** `crates/pg_koldstore/src/row_counter_cache.rs`
 
 ---
@@ -361,7 +361,7 @@ sequenceDiagram
 | Shared `__cl` DDL / read / write SQL | `koldstore-mirror/src/shared/` |
 | PK / order mutation guard | `koldstore-mirror/src/guard.rs` |
 | Decoder / batch policy | `koldstore-mirror/src/async/` |
-| Lifecycle / apply / workers | `pg_koldstore/src/async_mirror/` |
+| Lifecycle / apply / workers | `pg_koldstore/src/mirror/` |
 | Migrate orchestration (uses mirror crate) | `koldstore-migrate/src/sql/mirror.rs` |
 | Row counter cache | `pg_koldstore/src/row_counter_cache.rs` |
 | Counter SPI | `pg_koldstore/src/sql/flush/counters.rs` |

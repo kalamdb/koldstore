@@ -1,6 +1,8 @@
 //! Migration entrypoint planning.
 
-use koldstore_common::{is_safe_identifier, ColumnRef, SqlStatement, TableKind};
+use koldstore_common::{
+    is_safe_identifier, ColumnId, ColumnRef, SqlStatement, StorageId, TableKind, TableOid,
+};
 use uuid::Uuid;
 
 use crate::backfill::DEFAULT_BACKFILL_BATCH_ROWS;
@@ -19,9 +21,9 @@ use crate::QualifiedTableName;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationTableContext {
     /// OID of the target table.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Registered storage id.
-    pub storage_id: String,
+    pub storage_id: StorageId,
 }
 
 /// Planned work for the empty-table migration entrypoint.
@@ -30,24 +32,66 @@ pub struct EmptyTableMigrationPlan {
     /// Target table.
     pub table: QualifiedTableName,
     /// OID of the target table.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Registered storage id.
-    pub storage_id: String,
+    pub storage_id: StorageId,
     /// Effective user scope column, if user-scoped.
     pub effective_scope_column: Option<String>,
     /// Read-only probe; any returned row means the greenfield-only path must stop.
     pub empty_table_probe: SqlStatement,
 }
 
-/// Catalog metadata for a populated table migration.
+/// Catalog metadata for a populated table migration / runtime scan.
+///
+/// Columns keep insertion order in [`Self::columns`] for projection and SQL
+/// planning. [`Self::column_by_id`] / [`Self::column_by_attnum`] use an internal
+/// HashMap index so merge-scan attnum resolution stays O(1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExistingTableCatalog {
     /// Primary-key metadata.
     pub primary_key: CatalogPrimaryKey,
-    /// Column metadata.
+    /// Column metadata in catalog order.
     pub columns: Vec<CatalogColumn>,
     /// Simple indexed or constrained columns eligible for cold metadata.
     pub indexed_columns: Vec<ColumnRef>,
+    /// Stable `column_id` → index into [`Self::columns`].
+    by_column_id: std::collections::HashMap<ColumnId, usize>,
+}
+
+impl ExistingTableCatalog {
+    /// Builds a catalog and indexes columns by stable [`ColumnId`].
+    #[must_use]
+    pub fn new(
+        primary_key: CatalogPrimaryKey,
+        columns: Vec<CatalogColumn>,
+        indexed_columns: Vec<ColumnRef>,
+    ) -> Self {
+        let by_column_id = columns
+            .iter()
+            .enumerate()
+            .map(|(index, column)| (column.column_id, index))
+            .collect();
+        Self {
+            primary_key,
+            columns,
+            indexed_columns,
+            by_column_id,
+        }
+    }
+
+    /// Looks up a column by stable catalog identity.
+    #[must_use]
+    pub fn column_by_id(&self, column_id: ColumnId) -> Option<&CatalogColumn> {
+        self.by_column_id
+            .get(&column_id)
+            .and_then(|index| self.columns.get(*index))
+    }
+
+    /// Looks up a column by PostgreSQL `attnum`.
+    #[must_use]
+    pub fn column_by_attnum(&self, attnum: i16) -> Option<&CatalogColumn> {
+        self.column_by_id(ColumnId::from_attnum(attnum))
+    }
 }
 
 /// Planned work for an async existing-table migration.
@@ -56,9 +100,9 @@ pub struct ExistingTableMigrationPlan {
     /// Target table.
     pub table: QualifiedTableName,
     /// OID of the target table.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Registered storage id.
-    pub storage_id: String,
+    pub storage_id: StorageId,
     /// Effective user scope column, if user-scoped.
     pub effective_scope_column: Option<String>,
     /// Oldest-to-newest ordering selected for backfill.
@@ -81,8 +125,7 @@ pub fn plan_empty_table_migration(
     request: &MigrateTableRequest,
     context: MigrationTableContext,
 ) -> MigrationResult<EmptyTableMigrationPlan> {
-    let table = QualifiedTableName::parse(&request.table_name)
-        .map_err(|error| MigrationError::InvalidTableName(error.to_string()))?;
+    let table = QualifiedTableName::from_table_name(&request.table_name);
     if !request.has_supported_table_type() {
         return Err(MigrationError::UnsupportedTableType(
             request.table_type.clone(),
@@ -152,17 +195,20 @@ pub fn plan_existing_table_migration(
         .table_type
         .parse::<TableKind>()
         .map_err(|error| MigrationError::UnsupportedTableType(error.to_string()))?;
-    let backfill_job = enqueue_migration_backfill_job_plan(MigrationBackfillJobRequest::new(
-        job_id,
-        base.table_oid,
-        &base.table,
-        table_type,
-        base.storage_id.clone(),
-        base.effective_scope_column.clone(),
-        &ordering,
-        backfill_batch_size,
-        request.hot_row_limit(),
-    ))
+    let backfill_job = enqueue_migration_backfill_job_plan(
+        MigrationBackfillJobRequest::new(
+            job_id,
+            base.table_oid,
+            &base.table,
+            table_type,
+            base.storage_id.clone(),
+            base.effective_scope_column.clone(),
+            &ordering,
+            backfill_batch_size,
+            request.hot_row_limit(),
+        )
+        .map_err(|error| MigrationError::Job(error.to_string()))?,
+    )
     .map_err(|error| MigrationError::Job(error.to_string()))?;
 
     Ok(ExistingTableMigrationPlan {

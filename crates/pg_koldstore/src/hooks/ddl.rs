@@ -104,7 +104,7 @@ mod process_utility {
             if let Some(table_oid) = copy_from_oid {
                 let copied_rows = qc.is_null() || (*qc).nprocessed > 0;
                 if copied_rows && crate::catalog::cache::is_managed_relation(table_oid) {
-                    crate::database_worker::wake::mark_managed_dml_pending();
+                    crate::worker::wake::mark_managed_dml_pending();
                 }
             }
             if let Some(table_oid) = refresh_oid {
@@ -120,7 +120,7 @@ mod process_utility {
                     // type additions must remain allowed at DDL time; flush refreshes
                     // again and records an error job without pruning hot rows.
                     if let Err(error) =
-                        crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid)
+                        crate::sql::migrate::refresh_active_schema_if_changed(table_oid)
                     {
                         pgrx::warning!(
                             "KoldStore schema refresh after ALTER TABLE deferred: {error}"
@@ -221,7 +221,7 @@ mod process_utility {
             matches!(value.to_ascii_lowercase().as_str(), "true" | "on" | "1")
         });
         if initial_enable {
-            crate::async_mirror::lifecycle::prepare_capture()
+            crate::mirror::lifecycle::prepare_capture()
                 .unwrap_or_else(|error| pgrx::error!("KoldStore ALTER TABLE failed: {error}"));
         }
         let oid = unsafe {
@@ -349,7 +349,7 @@ fn ensure_initial_management(
         .unwrap_or("1000")
         .parse()
         .map_err(|_| "max_rows_per_file must be a positive integer")?;
-    crate::sql::migrate_pg::manage_table_pg_impl(
+    crate::sql::migrate::manage_table_pg_impl(
         table_oid,
         "shared",
         storage,
@@ -479,7 +479,7 @@ fn apply_management_options(
     let initial_enable = option_value(values, "koldstore_enabled")
         .is_some_and(|value| matches!(value.to_ascii_lowercase().as_str(), "true" | "on" | "1"));
     if initial_enable {
-        crate::async_mirror::lifecycle::prepare_capture()?;
+        crate::mirror::lifecycle::prepare_capture()?;
     }
     let catalog_lookup = koldstore_catalog::queries::plan_management_options_lookup()
         .map_err(|error| error.to_string())?;

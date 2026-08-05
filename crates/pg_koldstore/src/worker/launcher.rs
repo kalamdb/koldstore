@@ -80,7 +80,7 @@ fn ensure_appliers_for_async_slots() -> Result<(), String> {
         // Skip when a session ensure already holds the registration lock
         // (e.g. manage_table's open transaction). Blocking here wedged the
         // launcher under pg_test and led to ensure() respawn storms.
-        if !crate::async_mirror::lifecycle::try_lock_worker_registration(oid)? {
+        if !crate::mirror::lifecycle::try_lock_worker_registration(oid)? {
             continue;
         }
         let _ = super::ensure::ensure_async_mirror_worker_for(DatabaseOid::new(oid));

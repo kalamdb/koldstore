@@ -241,7 +241,7 @@ pub(crate) fn activate_table(
     // Ensure the WAL applier once here. Managed commits wake it through the
     // shared generation/latch path; postmaster and the shared_preload launcher
     // re-ensure it after crashes or restart.
-    crate::database_worker::require_async_mirror_worker()?;
+    crate::worker::require_async_mirror_worker()?;
     Ok(())
 }
 
@@ -562,6 +562,6 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         &[DatumWithOid::from(pgrx::pg_sys::Oid::from(database_oid))],
     )
     .map_err(|error| format!("clear async_mirror_state: {error}"))?;
-    crate::database_worker::mark_worker_not_ensured();
+    crate::worker::mark_worker_not_ensured();
     Ok(slot_exists || publication_exists || flush_origins_dropped > 0)
 }

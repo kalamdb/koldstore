@@ -2,37 +2,36 @@
 
 use koldstore_common::{
     escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident,
-    PrimaryKeyColumnShape,
+    PrimaryKeyColumnShape, SqlStatement,
 };
 
 use super::columns::MirrorColumn;
 use super::error::{MirrorError, MirrorResult};
 use super::relation::MirrorRelation;
-use super::statement::MirrorStatement;
 
 /// Primitive mirror table schema statements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirrorSchemaPlan {
     /// Collision probe executed before creating the mirror.
-    pub collision_probe: MirrorStatement,
+    pub collision_probe: SqlStatement,
     /// Exact-PK mirror table DDL.
-    pub create_table: MirrorStatement,
+    pub create_table: SqlStatement,
     /// Sequence cursor index for scans.
-    pub seq_index: MirrorStatement,
+    pub seq_index: SqlStatement,
     /// Partial index over delete-marker rows, keyed by `seq`.
     ///
     /// PERFORMANCE: keeps force-flush tombstone-only selection (stats +
     /// mirror-op-filtered fetch) index-backed instead of scanning every live
     /// mirror row to find the handful of pending deletes.
-    pub tombstone_index: MirrorStatement,
+    pub tombstone_index: SqlStatement,
     /// Idempotent mirror drop.
-    pub drop_table: MirrorStatement,
+    pub drop_table: SqlStatement,
 }
 
 impl MirrorSchemaPlan {
     /// Statements required to create mirror storage after collision checks pass.
     #[must_use]
-    pub fn create_statements(&self) -> [&MirrorStatement; 3] {
+    pub fn create_statements(&self) -> [&SqlStatement; 3] {
         [&self.create_table, &self.seq_index, &self.tombstone_index]
     }
 }
@@ -44,11 +43,12 @@ impl MirrorSchemaPlan {
 ///
 /// # Errors
 ///
-/// Returns an error when a rename uses an unsafe identifier.
+/// Returns an error when a rename uses an unsafe identifier or statement
+/// metadata is invalid.
 pub fn plan_mirror_pk_column_renames(
     mirror_table: &MirrorRelation,
     renames: &[(String, String)],
-) -> MirrorResult<Vec<MirrorStatement>> {
+) -> MirrorResult<Vec<SqlStatement>> {
     let quoted_mirror = mirror_table.quoted();
     let mut statements = Vec::with_capacity(renames.len());
     for (old_name, new_name) in renames {
@@ -60,14 +60,14 @@ pub fn plan_mirror_pk_column_renames(
                 "{old_name} -> {new_name}"
             )));
         }
-        statements.push(MirrorStatement::write(
+        statements.push(SqlStatement::write(
             "rename change-log mirror primary-key column",
-            format!(
+            &format!(
                 "ALTER TABLE {quoted_mirror} RENAME COLUMN {} TO {}",
                 quote_ident(old_name),
                 quote_ident(new_name)
             ),
-        ));
+        )?);
     }
     Ok(statements)
 }
@@ -76,7 +76,8 @@ pub fn plan_mirror_pk_column_renames(
 ///
 /// # Errors
 ///
-/// Returns an error when the key shape is empty or contains nullable columns.
+/// Returns an error when the key shape is empty, contains nullable columns, or
+/// statement metadata is invalid.
 pub fn plan_mirror_schema(
     mirror_table: &MirrorRelation,
     primary_key: &[PrimaryKeyColumnShape],
@@ -88,7 +89,8 @@ pub fn plan_mirror_schema(
 ///
 /// # Errors
 ///
-/// Returns an error when the key shape is empty or contains nullable columns.
+/// Returns an error when the key shape is empty, contains nullable columns, or
+/// statement metadata is invalid.
 pub fn plan_mirror_schema_with_order_key(
     mirror_table: &MirrorRelation,
     primary_key: &[PrimaryKeyColumnShape],
@@ -132,35 +134,38 @@ pub fn plan_mirror_schema_with_order_key(
         quote_ident(&format!("{}_tombstone_seq_idx", mirror_table.relation()));
 
     Ok(MirrorSchemaPlan {
-        collision_probe: MirrorStatement::read(
+        collision_probe: SqlStatement::read(
             "check mirror table collision",
-            format!(
+            &format!(
                 "SELECT to_regclass('{}')::oid",
                 escape_sql_literal(&quoted_mirror)
             ),
-        ),
-        create_table: MirrorStatement::write("create change-log mirror table", create_sql),
-        seq_index: MirrorStatement::write(
+        )?,
+        create_table: SqlStatement::write("create change-log mirror table", &create_sql)?,
+        seq_index: SqlStatement::write(
             "create change-log mirror seq index",
-            format!("CREATE INDEX IF NOT EXISTS {seq_index_name} ON {quoted_mirror} (\"seq\")"),
-        ),
-        tombstone_index: MirrorStatement::write(
+            &format!("CREATE INDEX IF NOT EXISTS {seq_index_name} ON {quoted_mirror} (\"seq\")"),
+        )?,
+        tombstone_index: SqlStatement::write(
             "create change-log mirror tombstone index",
-            format!(
+            &format!(
                 "CREATE INDEX IF NOT EXISTS {tombstone_index_name} ON {quoted_mirror} (\"seq\") WHERE \"op\" = 3"
             ),
-        ),
-        drop_table: plan_drop_mirror_table(mirror_table),
+        )?,
+        drop_table: plan_drop_mirror_table(mirror_table)?,
     })
 }
 
 /// Plans idempotent mirror table drop.
-#[must_use]
-pub fn plan_drop_mirror_table(mirror_table: &MirrorRelation) -> MirrorStatement {
-    MirrorStatement::write(
+///
+/// # Errors
+///
+/// Returns an error when statement metadata is invalid.
+pub fn plan_drop_mirror_table(mirror_table: &MirrorRelation) -> MirrorResult<SqlStatement> {
+    Ok(SqlStatement::write(
         "drop change-log mirror table",
-        format!("DROP TABLE IF EXISTS {}", mirror_table.quoted()),
-    )
+        &format!("DROP TABLE IF EXISTS {}", mirror_table.quoted()),
+    )?)
 }
 
 fn render_pk_column(column: &PrimaryKeyColumnShape) -> MirrorResult<String> {

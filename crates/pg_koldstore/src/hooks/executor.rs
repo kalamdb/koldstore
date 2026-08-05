@@ -61,7 +61,7 @@ mod live {
                 pg_sys::standard_ExecutorEnd(query_desc);
             }
             if changed_managed_relation {
-                crate::database_worker::wake::mark_managed_dml_pending();
+                crate::worker::wake::mark_managed_dml_pending();
             }
         }
     }

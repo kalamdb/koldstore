@@ -143,7 +143,7 @@ fn hot_tombstone_preserves_pk_scope_and_versions() {
         scope_key: Some("a".parse().unwrap()),
         seq: SeqId::new(11).unwrap(),
         deleted: true,
-        row_image: json!({"tenant_id": "a", "id": 1}),
+        row_image: koldstore_common::RowImage::from_json_value(json!({"tenant_id": "a", "id": 1})),
     };
 
     let tombstone = hot.into_tombstone();
@@ -161,7 +161,7 @@ fn cold_row_model_preserves_schema_version_and_delete_marker() {
         seq: SeqId::new(1).unwrap(),
         deleted: false,
         schema_version: 3,
-        row_image: json!({"body": "cold"}),
+        row_image: koldstore_common::RowImage::from_json_value(json!({"body": "cold"})),
     };
 
     assert_eq!(cold.schema_version, 3);

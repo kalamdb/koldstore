@@ -41,12 +41,10 @@ pub(super) unsafe fn cold_side_proven_empty(
     params: pg_sys::ParamListInfo,
 ) -> Result<bool, String> {
     let predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(scanrelid, qual, &catalog.columns, params) },
+        unsafe { segment_prune_predicates(scanrelid, qual, &catalog, params) },
         |column_id| {
             let column = catalog
-                .columns
-                .iter()
-                .find(|column| column.column_id.get() == column_id)?;
+                .column_by_attnum(column_id)?;
             Some(cold_prune_column_policy(
                 column,
                 snapshot.scope_column_id,
@@ -66,9 +64,7 @@ pub(super) unsafe fn cold_side_proven_empty(
 
     for column_id in candidate_columns {
         let Some(column) = catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id.get() == column_id)
+            .column_by_attnum(column_id)
         else {
             continue;
         };
@@ -284,12 +280,10 @@ fn plan_cold_segments(
     let scope_column_id = snapshot.scope_column_id;
     let segment_order_column_id = snapshot.segment_order_column_id;
     let prune_predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(scanrelid, qual, &catalog.columns, params) },
+        unsafe { segment_prune_predicates(scanrelid, qual, &catalog, params) },
         |column_id| {
             let column = catalog
-                .columns
-                .iter()
-                .find(|column| column.column_id.get() == column_id)?;
+                .column_by_attnum(column_id)?;
             Some(cold_prune_column_policy(
                 column,
                 scope_column_id,
@@ -301,9 +295,7 @@ fn plan_cold_segments(
     let mut requested_columns = projection_columns.clone();
     requested_columns.extend(prune_predicates.iter().filter_map(|predicate| {
         catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id.get() == predicate.column_id)
+            .column_by_attnum(predicate.column_id)
             .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
     }));
     requested_columns.sort_by_key(|column| column.column_id);
@@ -450,9 +442,7 @@ fn resolve_segment_index_candidates(
 ) -> Result<SegmentIndexCandidateResolution, String> {
     let preferred = segment_order_column_id.and_then(|column_id| {
         catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id == column_id)
+            .column_by_id(column_id)
             .filter(|column| {
                 koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
                     && predicates
@@ -462,19 +452,15 @@ fn resolve_segment_index_candidates(
     });
     let column = preferred.or_else(|| {
         predicates.iter().find_map(|predicate| {
-            catalog.columns.iter().find(|column| {
-                column.column_id.get() == predicate.column_id
-                    && koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
-                        .is_some()
+            catalog.column_by_attnum(predicate.column_id).filter(|column| {
+                koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
             })
         })
     });
     let Some(column) = column else {
         let order_name = segment_order_column_id.and_then(|column_id| {
             catalog
-                .columns
-                .iter()
-                .find(|column| column.column_id == column_id)
+                .column_by_id(column_id)
                 .map(|column| column.name.clone())
         });
         return Ok(SegmentIndexCandidateResolution {
@@ -687,28 +673,36 @@ fn encode_prune_predicate_bounds(
 ) -> Result<EncodedPredicateBounds, String> {
     let mut bounds = EncodedPredicateBounds::new();
     for predicate in predicates {
-        let Some(column) = catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id.get() == predicate.column_id)
-        else {
+        let Some(column) = catalog.column_by_attnum(predicate.column_id) else {
             continue;
         };
-        let Some(sort_type) =
+        let Some(expected) =
             koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
         else {
             continue;
         };
         let entry = bounds.entry(predicate.column_id).or_default();
         if let Some(value) = predicate.min.as_ref() {
-            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
+            if value.sort_key_type() != expected {
+                return Err(format!(
+                    "prune lower bound type mismatch for column `{}`",
+                    predicate.column
+                ));
+            }
+            let encoded = koldstore_sortkey::encode_sort_key(value)
                 .map_err(|error| error.to_string())?;
             if entry.0.as_ref().is_none_or(|current| encoded > *current) {
                 entry.0 = Some(encoded);
             }
         }
         if let Some(value) = predicate.max.as_ref() {
-            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
+            if value.sort_key_type() != expected {
+                return Err(format!(
+                    "prune upper bound type mismatch for column `{}`",
+                    predicate.column
+                ));
+            }
+            let encoded = koldstore_sortkey::encode_sort_key(value)
                 .map_err(|error| error.to_string())?;
             if entry.1.as_ref().is_none_or(|current| encoded < *current) {
                 entry.1 = Some(encoded);
@@ -991,10 +985,14 @@ fn pk_equality_values(
     })?;
     let value = predicate.min.as_ref()?;
     let literal = match value {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Number(number) => number.to_string(),
-        serde_json::Value::Bool(flag) => flag.to_string(),
-        _ => return None,
+        koldstore_sortkey::SortKeyValue::Bool(flag) => flag.to_string(),
+        koldstore_sortkey::SortKeyValue::Int2(n) => n.to_string(),
+        koldstore_sortkey::SortKeyValue::Int4(n) => n.to_string(),
+        koldstore_sortkey::SortKeyValue::Int8(n) => n.to_string(),
+        koldstore_sortkey::SortKeyValue::Date(n)
+        | koldstore_sortkey::SortKeyValue::Timestamp(n)
+        | koldstore_sortkey::SortKeyValue::Timestamptz(n) => n.to_string(),
+        koldstore_sortkey::SortKeyValue::Uuid(uuid) => uuid.to_string(),
     };
     Some((pk.clone(), vec![literal]))
 }
@@ -1109,7 +1107,7 @@ fn cold_rows_from_segments(
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
         for mut row in segment_rows {
-            remap_row_to_logical_names(&mut row.pk_json, &physical_names);
+            remap_json_to_logical_names(&mut row.pk_json, &physical_names);
             remap_row_to_logical_names(&mut row.row_image, &physical_names);
             fill_missing_logical_nulls(&mut row.row_image, &missing_logical_names);
             rows.push(clean_cold_row_to_common(row, &logical_pk_names)?);
@@ -1139,7 +1137,7 @@ fn physical_name_for_segment(
     ))
 }
 
-fn remap_row_to_logical_names(
+fn remap_json_to_logical_names(
     value: &mut serde_json::Value,
     physical_names: &[(ColumnRef, String)],
 ) {
@@ -1156,14 +1154,26 @@ fn remap_row_to_logical_names(
     }
 }
 
-fn fill_missing_logical_nulls(value: &mut serde_json::Value, missing_names: &[String]) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
+fn remap_row_to_logical_names(
+    image: &mut koldstore_common::RowImage,
+    physical_names: &[(ColumnRef, String)],
+) {
+    let cells = image.cells_mut();
+    for (column, physical_name) in physical_names {
+        if physical_name == &column.name {
+            continue;
+        }
+        if let Some(value) = cells.remove(physical_name) {
+            cells.insert(column.name.clone(), value);
+        }
+    }
+}
+
+fn fill_missing_logical_nulls(image: &mut koldstore_common::RowImage, missing_names: &[String]) {
     for name in missing_names {
-        object
-            .entry(name.clone())
-            .or_insert(serde_json::Value::Null);
+        if !image.contains_key(name) {
+            image.insert(name.clone(), koldstore_common::CellValue::Null);
+        }
     }
 }
 

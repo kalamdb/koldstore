@@ -7,7 +7,9 @@ use std::os::raw::c_char;
 use koldstore_merge::scan::plan::SegmentPrunePredicate;
 use pgrx::pg_sys;
 
-use super::literals::{list_node_pointers, literal_json_value, typed_literal_sql, unwrap_relabel};
+use super::literals::{
+    list_node_pointers, literal_json_value, literal_sort_key_value, typed_literal_sql, unwrap_relabel,
+};
 
 /// One base-relation attribute required by output projection or executor quals.
 #[derive(Debug, Clone)]
@@ -40,7 +42,13 @@ pub(super) struct ResidualFilters {
 #[derive(Debug, Clone, Copy)]
 struct QualCatalog<'a> {
     scanrelid: pg_sys::Index,
-    columns: &'a [koldstore_migrate::order::CatalogColumn],
+    catalog: &'a koldstore_migrate::ExistingTableCatalog,
+}
+
+impl<'a> QualCatalog<'a> {
+    fn column_by_attnum(self, attnum: i16) -> Option<&'a koldstore_migrate::order::CatalogColumn> {
+        self.catalog.column_by_attnum(attnum)
+    }
 }
 
 /// Full physical base-relation projection for `custom_scan_tlist` scans.
@@ -49,22 +57,19 @@ struct QualCatalog<'a> {
 /// targetlist/qual Vars to `INDEX_VAR`. [`required_scan_projection`] then sees
 /// no `scanrelid` Vars; materialize every user column so ExecScan can project.
 pub(super) fn physical_scan_projection(
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: &koldstore_migrate::ExistingTableCatalog,
     tuple_width: usize,
 ) -> Result<ScanProjection, String> {
     let mut projection = Vec::with_capacity(tuple_width);
     for slot_index in 0..tuple_width {
         let attnum =
             pg_sys::AttrNumber::try_from(slot_index + 1).map_err(|error| error.to_string())?;
-        let Some(catalog) = columns
-            .iter()
-            .find(|column| column.column_id.get() == attnum)
-        else {
+        let Some(column) = catalog.column_by_attnum(attnum) else {
             // Dropped attributes stay NULL in the physical slot.
             continue;
         };
         projection.push(ScanProjectionColumn {
-            catalog: catalog.clone(),
+            catalog: column.clone(),
             slot_index,
         });
     }
@@ -83,7 +88,7 @@ pub(super) unsafe fn required_scan_projection(
     scanrelid: pg_sys::Index,
     targetlist: *mut pg_sys::List,
     qual: *mut pg_sys::List,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: &koldstore_migrate::ExistingTableCatalog,
     tuple_width: usize,
 ) -> Result<ScanProjection, String> {
     let mut attrs: *mut pg_sys::Bitmapset = std::ptr::null_mut();
@@ -134,10 +139,7 @@ pub(super) unsafe fn required_scan_projection(
         }
         let attnum =
             pg_sys::AttrNumber::try_from(slot_index + 1).map_err(|error| error.to_string())?;
-        let Some(catalog) = columns
-            .iter()
-            .find(|column| column.column_id.get() == attnum)
-        else {
+        let Some(column) = catalog.column_by_attnum(attnum) else {
             if whole_row {
                 // PostgreSQL represents a dropped attribute in a whole-row
                 // value as NULL; it is intentionally absent from our catalog.
@@ -149,7 +151,7 @@ pub(super) unsafe fn required_scan_projection(
             ));
         };
         projection.push(ScanProjectionColumn {
-            catalog: catalog.clone(),
+            catalog: column.clone(),
             slot_index,
         });
     }
@@ -163,10 +165,10 @@ pub(super) unsafe fn required_scan_projection(
 pub(super) unsafe fn residual_filters(
     scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: &koldstore_migrate::ExistingTableCatalog,
     params: pg_sys::ParamListInfo,
 ) -> ResidualFilters {
-    let catalog = QualCatalog { scanrelid, columns };
+    let catalog = QualCatalog { scanrelid, catalog };
     let mut filters = ResidualFilters::default();
     for node in list_node_pointers(qual) {
         collect_residual_filters(node.cast::<pg_sys::Expr>(), catalog, params, &mut filters);
@@ -268,10 +270,10 @@ unsafe fn point_var_attnum(
 pub(super) unsafe fn segment_prune_predicates(
     scanrelid: pg_sys::Index,
     qual: *mut pg_sys::List,
-    columns: &[koldstore_migrate::order::CatalogColumn],
+    catalog: &koldstore_migrate::ExistingTableCatalog,
     params: pg_sys::ParamListInfo,
 ) -> Vec<SegmentPrunePredicate> {
-    let catalog = QualCatalog { scanrelid, columns };
+    let catalog = QualCatalog { scanrelid, catalog };
     list_node_pointers(qual)
         .into_iter()
         .flat_map(|node| {
@@ -324,10 +326,10 @@ unsafe fn segment_prune_op_expr(
         return None;
     }
 
-    if let Some((column, literal)) = var_and_json_literal(args[0], args[1], catalog, params) {
+    if let Some((column, literal)) = var_and_sort_key_literal(args[0], args[1], catalog, params) {
         return prune_predicate_from_op(column, literal, opname, false);
     }
-    if let Some((column, literal)) = var_and_json_literal(args[1], args[0], catalog, params) {
+    if let Some((column, literal)) = var_and_sort_key_literal(args[1], args[0], catalog, params) {
         return prune_predicate_from_op(column, literal, opname, true);
     }
     None
@@ -335,7 +337,7 @@ unsafe fn segment_prune_op_expr(
 
 fn prune_predicate_from_op(
     column: &koldstore_migrate::order::CatalogColumn,
-    literal: serde_json::Value,
+    literal: koldstore_sortkey::SortKeyValue,
     opname: &str,
     reversed: bool,
 ) -> Option<SegmentPrunePredicate> {
@@ -358,6 +360,25 @@ fn prune_predicate_from_op(
         )),
         _ => None,
     }
+}
+
+unsafe fn var_and_sort_key_literal(
+    column_expr: *mut std::ffi::c_void,
+    literal_expr: *mut std::ffi::c_void,
+    catalog: QualCatalog<'_>,
+    params: pg_sys::ParamListInfo,
+) -> Option<(
+    &koldstore_migrate::order::CatalogColumn,
+    koldstore_sortkey::SortKeyValue,
+)> {
+    let column = var_column(column_expr.cast::<pg_sys::Expr>(), catalog)?;
+    let sort_type =
+        koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
+    let literal = literal_sort_key_value(literal_expr.cast::<pg_sys::Expr>(), column, params)?;
+    if literal.sort_key_type() != sort_type {
+        return None;
+    }
+    Some((column, literal))
 }
 
 unsafe fn var_and_json_literal(
@@ -523,10 +544,10 @@ fn hot_filter_operand_types_compatible(
     column.pg_type.accepts_integer_equality_literal(literal_ty)
 }
 
-unsafe fn var_column(
+unsafe fn var_column<'a>(
     expr: *mut pg_sys::Expr,
-    catalog: QualCatalog<'_>,
-) -> Option<&koldstore_migrate::order::CatalogColumn> {
+    catalog: QualCatalog<'a>,
+) -> Option<&'a koldstore_migrate::order::CatalogColumn> {
     let expr = unwrap_relabel(expr);
     if expr.is_null() || (*expr).type_ != pg_sys::NodeTag::T_Var {
         return None;
@@ -537,10 +558,7 @@ unsafe fn var_column(
     if attno <= 0 || (*var).varlevelsup != 0 || (*var).varno != scanrelid {
         return None;
     }
-    catalog
-        .columns
-        .iter()
-        .find(|column| column.column_id.get() == attno)
+    catalog.column_by_attnum(attno)
 }
 
 unsafe fn operator_is_pg_catalog(operator: pg_sys::Oid) -> bool {

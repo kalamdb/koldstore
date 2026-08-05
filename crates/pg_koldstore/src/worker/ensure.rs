@@ -29,7 +29,7 @@ fn worker_running(worker_type: &str) -> Result<bool, String> {
 
 fn async_slot_exists_for_current_database() -> Result<bool, String> {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    let slot = crate::async_mirror::lifecycle::slot_name(database_oid);
+    let slot = crate::mirror::lifecycle::slot_name(database_oid);
     pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (\
            SELECT 1 FROM pg_catalog.pg_replication_slots \
@@ -100,7 +100,7 @@ pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Resul
         EnsureAction::Register => {}
     }
 
-    crate::async_mirror::lifecycle::lock_worker_registration(database_oid.get())?;
+    crate::mirror::lifecycle::lock_worker_registration(database_oid.get())?;
     if worker_running(&worker_type)? {
         WORKER_ENSURED.store(true, Ordering::Relaxed);
         return Ok(false);

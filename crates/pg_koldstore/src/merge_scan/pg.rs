@@ -810,13 +810,13 @@ unsafe fn initialize_fallback_scan(
             // After setrefs, targetlist/qual Vars are INDEX_VAR against
             // custom_scan_tlist. pull_varattnos(scanrelid) would see nothing;
             // materialize the full physical row for ExecScan projection.
-            physical_scan_projection(&catalog.columns, tuple_width)
+            physical_scan_projection(&catalog, tuple_width)
         } else {
-            required_scan_projection(scanrelid, targetlist, qual, &catalog.columns, tuple_width)
+            required_scan_projection(scanrelid, targetlist, qual, &catalog, tuple_width)
         }
     }
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} projection failed: {error}"));
-    let residual = unsafe { residual_filters(scanrelid, qual, &catalog.columns, params) };
+    let residual = unsafe { residual_filters(scanrelid, qual, &catalog, params) };
     // Hot heap is current-state only, so PK + scope equality and PK range
     // predicates can be pushed into the SPI load. Mutable columns stay residual
     // for cold (pre-merge), but may still appear in hot_equality for post-merge
@@ -828,11 +828,7 @@ unsafe fn initialize_fallback_scan(
         .map(|column| column.name.as_str())
         .collect::<std::collections::HashSet<_>>();
     if let Some(scope_id) = snapshot.scope_column_id {
-        if let Some(scope) = catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id == scope_id)
-        {
+        if let Some(scope) = catalog.column_by_id(scope_id) {
             source_equality_columns.insert(scope.name.as_str());
         }
     }

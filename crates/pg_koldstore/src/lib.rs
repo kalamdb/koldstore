@@ -1,17 +1,14 @@
 //! Thin PostgreSQL integration layer for pg-koldstore.
 
-/// Asynchronous WAL-backed latest-state mirror capture.
-pub mod async_mirror;
 pub mod catalog;
-/// Database-scoped background worker adapter over `koldstore-worker`.
-#[cfg(feature = "pg")]
-pub mod database_worker;
 /// Test-only flush failpoints (GUC-armed; inert when unset).
 pub mod failpoints;
 pub mod guc;
 pub mod hooks;
 pub mod memory;
 pub mod merge_scan;
+/// WAL-backed latest-state mirror capture (slot, apply, provision).
+pub mod mirror;
 pub mod observability;
 #[cfg(feature = "pg")]
 pub mod preload;
@@ -19,6 +16,9 @@ pub mod row_counter_cache;
 pub mod settings;
 pub mod spi;
 pub mod sql;
+/// Database-scoped background worker adapter over `koldstore-worker`.
+#[cfg(feature = "pg")]
+pub mod worker;
 
 #[cfg(feature = "pg_test")]
 mod pg_tests;
@@ -88,10 +88,10 @@ pub extern "C" fn _PG_init() {
     koldstore_storage::ensure_rustls_ring_provider();
     observability::init_tracing();
     guc::define_gucs();
-    database_worker::wake::initialize();
+    worker::wake::initialize();
     catalog::cache::register_invalidation_callback();
     hooks::register_hooks();
     row_counter_cache::register_xact_callbacks();
     sql::flush::spi::register_flush_origin_xact_callback();
-    database_worker::register_launcher_if_shared_preload();
+    worker::register_launcher_if_shared_preload();
 }

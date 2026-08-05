@@ -46,7 +46,7 @@ does not recurse into `KoldMergeScan`.
 
 ## Phase 0 — Async mirror fence
 
-`flush_table` first calls `async_mirror::apply::apply_bounded` (via
+`flush_table` first calls `mirror::apply::apply_bounded` (via
 `apply_available`) and retains the last applied source commit end-LSN (`L0`).
 If the current database has no async logical slot, this is a cheap no-op.
 Otherwise it applies all committed source changes available before the

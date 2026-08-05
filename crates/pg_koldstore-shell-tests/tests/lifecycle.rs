@@ -231,13 +231,16 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
     assert!(mirror_lookup.sql.contains("koldstore.schemas"));
     assert!(mirror_lookup.sql.contains("s.mirror_relation"));
 
-    let mirror_statement = koldstore_mirror::MirrorStatement::read_with_params(
+    let mirror_statement = koldstore_common::SqlStatement::read_with_params(
         "mirror scan",
         "SELECT * FROM koldstore.items__cl WHERE seq > $1::bigint",
-        [koldstore_mirror::SqlParamType::BigInt],
+        [koldstore_common::SqlParamType::BigInt],
+    )
+    .unwrap();
+    assert_eq!(
+        mirror_statement.param_types,
+        vec![spi::SqlParamType::BigInt]
     );
-    let spi_statement = koldstore_mirror::mirror_to_sql(mirror_statement).unwrap();
-    assert_eq!(spi_statement.param_types, vec![spi::SqlParamType::BigInt]);
 
     let relation = catalog::decode::relation_context(&serde_json::json!({
         "namespace": "public",
@@ -271,7 +274,7 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
         "scope_column": null
     }))
     .unwrap();
-    assert_eq!(snapshot.table_oid, 42);
+    assert_eq!(snapshot.table_oid.get(), 42);
     assert_eq!(snapshot.schema_version, 3);
     assert!(snapshot.active);
     assert_eq!(

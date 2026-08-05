@@ -8,8 +8,7 @@
 use koldstore_common::{PrimaryKeyColumnShape, PrimaryKeyShape, SqlStatement};
 use koldstore_mirror::{
     mirror_relation_for_source as storage_mirror_relation_for_source, plan_mirror_pk_guard,
-    plan_mirror_schema_with_order_key, statement::mirror_to_sql, MirrorPkGuardPlan,
-    MirrorStatement,
+    plan_mirror_schema_with_order_key, MirrorPkGuardPlan,
 };
 
 use crate::QualifiedTableName;
@@ -49,6 +48,7 @@ impl From<koldstore_mirror::MirrorError> for MirrorError {
             koldstore_mirror::MirrorError::InvalidColumn(column) => {
                 Self::Sql(format!("invalid mirror storage column `{column}`"))
             }
+            koldstore_mirror::MirrorError::Sql(message) => Self::Sql(message),
         }
     }
 }
@@ -145,11 +145,11 @@ fn plan_change_log_mirror_from_columns_with_order_column(
     Ok(ChangeLogMirrorPlan {
         source_table: source_table.clone(),
         mirror_table,
-        collision_probe: mirror_sql(schema_plan.collision_probe)?,
-        create_table: mirror_sql(schema_plan.create_table)?,
-        seq_index: mirror_sql(schema_plan.seq_index)?,
-        tombstone_index: mirror_sql(schema_plan.tombstone_index)?,
-        drop_table: mirror_sql(schema_plan.drop_table)?,
+        collision_probe: schema_plan.collision_probe,
+        create_table: schema_plan.create_table,
+        seq_index: schema_plan.seq_index,
+        tombstone_index: schema_plan.tombstone_index,
+        drop_table: schema_plan.drop_table,
         pk_guard,
     })
 }
@@ -169,8 +169,4 @@ pub fn mirror_relation_for_source(
     Ok(QualifiedTableName::from_table_name(
         storage_mirror_relation_for_source(&source_name)?.table_name(),
     ))
-}
-
-fn mirror_sql(statement: MirrorStatement) -> MirrorResult<SqlStatement> {
-    mirror_to_sql(statement).map_err(|error| MirrorError::Sql(error.to_string()))
 }

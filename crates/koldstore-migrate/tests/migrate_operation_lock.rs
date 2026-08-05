@@ -5,9 +5,9 @@ use koldstore_migrate::QualifiedTableName;
 #[test]
 fn migration_operation_lock_blocks_concurrent_table_conversion_work() {
     let table = QualifiedTableName::parse("app.items").unwrap();
-    let plan = plan_migration_operation_lock(&table, 42).unwrap();
+    let plan = plan_migration_operation_lock(&table, koldstore_common::TableOid::from_raw(42)).unwrap();
 
-    assert_eq!(plan.table_oid, 42);
+    assert_eq!(plan.table_oid.get(), 42);
     assert_eq!(plan.statements.len(), 2);
     assert!(plan
         .statements
@@ -25,5 +25,5 @@ fn migration_operation_lock_blocks_concurrent_table_conversion_work() {
 fn migration_operation_lock_rejects_missing_table_oid() {
     let table = QualifiedTableName::parse("app.items").unwrap();
 
-    assert!(plan_migration_operation_lock(&table, 0).is_err());
+    assert!(plan_migration_operation_lock(&table, koldstore_common::TableOid::from_raw(0)).is_err());
 }
