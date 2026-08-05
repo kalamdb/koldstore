@@ -4,7 +4,7 @@
 //! - `lifecycle` — slot / publication / advisory locks
 //! - `apply` — SPI peek/apply/advance (idempotent latest-state upserts)
 //! - `provision` — one-shot slot provisioner worker
-//! - `task` — [`koldstore_worker::DatabaseWorkerTask`] for the shared DB worker
+//! - `task` — async-mirror apply tick for the shared DB worker
 //! - `worker` — C entry point for the persistent applier
 //!
 //! The PostgreSQL-free `pgoutput` decoder lives in [`koldstore_mirror::pgoutput`].

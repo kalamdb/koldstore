@@ -8,9 +8,7 @@ use koldstore_catalog::CatalogManifestSegmentRow;
 use koldstore_common::ColumnRef;
 use thiserror::Error;
 
-use crate::model::{
-    Manifest, ManifestBloomFilter, ManifestSegment, PkFilter, SegmentStatus,
-};
+use crate::model::{Manifest, ManifestBloomFilter, ManifestSegment, PkFilter, SegmentStatus};
 
 /// Manifest assembly error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]

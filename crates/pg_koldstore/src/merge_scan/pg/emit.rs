@@ -40,10 +40,7 @@ pub(super) unsafe fn materialize_scan_row_from_image(
     Ok(MaterializedRow { values, is_null })
 }
 
-unsafe fn cell_value_to_datum(
-    value: &CellValue,
-    pg_type: PgType,
-) -> Result<pg_sys::Datum, String> {
+unsafe fn cell_value_to_datum(value: &CellValue, pg_type: PgType) -> Result<pg_sys::Datum, String> {
     match (pg_type, value) {
         (PgType::Bool, CellValue::Bool(flag)) => Ok(pg_sys::Datum::from(*flag)),
         (PgType::Int2, cell) => {

@@ -166,8 +166,10 @@ impl<V> BoundedOidCache<V> {
 
     /// Stores or replaces a value for a table OID.
     pub fn insert(&mut self, table_oid: u32, value: V) {
-        if self.entries.contains_key(&table_oid) {
-            self.entries.insert(table_oid, value);
+        use std::collections::hash_map::Entry;
+
+        if let Entry::Occupied(mut occupied) = self.entries.entry(table_oid) {
+            occupied.insert(value);
             self.touch(table_oid);
             return;
         }

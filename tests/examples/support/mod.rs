@@ -353,6 +353,7 @@ pub async fn set_scope(client: &Client, scope_id: &str) -> Result<()> {
 /// Runs `flush_table` and returns flushed row count from the job record.
 ///
 /// When `ctx` is set, logs flushed row counts and cold artifact paths.
+/// Retries when the shared async-mirror apply lock is briefly held.
 ///
 /// # Errors
 ///
@@ -367,16 +368,12 @@ pub async fn flush_table(
         .map(|ctx| ctx.label.to_string())
         .unwrap_or_else(|| format!("flush_table {relation}"));
     log_flush_inputs(client, relation, &label).await?;
-    let row = timed_async(
+    let job_id = timed_async(
         ctx.map(|ctx| format!("{}: koldstore.flush_table", ctx.label))
             .unwrap_or_else(|| format!("flush_table {relation}")),
-        client.query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)::text",
-            &[&relation],
-        ),
+        e2e::flush_table_job_id(client, relation, false),
     )
     .await?;
-    let job_id: String = row.get(0);
     let progress = timed_async(
         format!("flush job rows_flushed lookup ({job_id})"),
         client.query_one(

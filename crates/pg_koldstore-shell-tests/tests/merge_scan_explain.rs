@@ -8,18 +8,6 @@ fn merge_scan_explain_and_plan_contract_are_exposed() {
         merge_scan::path::custom_scan_explain_label(),
         "Custom Scan (KoldMergeScan)"
     );
-    merge_scan::ffi::register_native_custom_scan();
-    assert_eq!(
-        merge_scan::ffi::native_callback_names(),
-        vec![
-            "CustomPath",
-            "CustomScan",
-            "BeginCustomScan",
-            "ExecCustomScan",
-            "EndCustomScan",
-            "RescanCustomScan",
-        ]
-    );
 
     let plan = merge_scan::plan::MergeScanPlan::new(42, vec!["id".to_string()]);
     assert_eq!(plan.table_oid, 42);

@@ -664,6 +664,7 @@ fn flush_prepared_table(
                 progress_total,
             },
         )
+        .map_err(Into::into)
     };
 
     loop {

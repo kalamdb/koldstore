@@ -1,5 +1,5 @@
-use koldstore_common::{ManageTableOptions, StorageId, TableName, TableOid};
 use koldstore_common::SqlAccess as SpiAccess;
+use koldstore_common::{ManageTableOptions, StorageId, TableName, TableOid};
 use koldstore_migrate::MigrateTableRequest;
 use koldstore_migrate::{plan_empty_table_migration, MigrationError, MigrationTableContext};
 fn shared_request() -> MigrateTableRequest {

@@ -42,9 +42,7 @@ pub(super) fn client_options(
     let mut options = ClientOptions::new().with_allow_http(allow_http);
     if let Some(timeout) = timeout.filter(|value| !value.is_zero()) {
         let connect = timeout.min(Duration::from_secs(5));
-        options = options
-            .with_timeout(timeout)
-            .with_connect_timeout(connect);
+        options = options.with_timeout(timeout).with_connect_timeout(connect);
     } else {
         options = options
             .with_timeout_disabled()
@@ -75,6 +73,25 @@ pub(super) fn wrap_prefix(
     Ok(Arc::new(PrefixStore::new(store, prefix)))
 }
 
+/// Applies optional key-prefix wrapping and builds an [`ObjectStoreClient`].
+#[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
+pub(super) fn finalize_object_store_client<S>(
+    store: S,
+    key_prefix: &str,
+) -> crate::client::StorageResult<crate::client::ObjectStoreClient>
+where
+    S: object_store::ObjectStore + 'static,
+{
+    use std::sync::Arc;
+
+    use object_store::ObjectStore;
+
+    use crate::client::ObjectStoreClient;
+
+    let store: Arc<dyn ObjectStore> = wrap_prefix(Arc::new(store), key_prefix)?;
+    Ok(ObjectStoreClient::from_store(store, None))
+}
+
 /// Parses `scheme://authority[/optional/prefix]` into authority + key prefix.
 ///
 /// Used for `s3://bucket/...`, `gs://bucket/...`, and `azure://container/...`
@@ -85,13 +102,14 @@ pub(super) fn parse_authority_base_path(
     scheme_prefix: &str,
     authority_label: &str,
 ) -> crate::client::StorageResult<(String, String)> {
-    let rest = base_path
-        .strip_prefix(scheme_prefix)
-        .ok_or_else(|| StorageClientError::InvalidPath {
-            message: format!(
-                "{authority_label} base_path must start with {scheme_prefix}: {base_path}"
-            ),
-        })?;
+    let rest =
+        base_path
+            .strip_prefix(scheme_prefix)
+            .ok_or_else(|| StorageClientError::InvalidPath {
+                message: format!(
+                    "{authority_label} base_path must start with {scheme_prefix}: {base_path}"
+                ),
+            })?;
     let rest = rest.trim_matches('/');
     if rest.is_empty() {
         return Err(StorageClientError::InvalidPath {

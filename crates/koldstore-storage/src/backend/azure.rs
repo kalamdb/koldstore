@@ -12,13 +12,10 @@ pub(super) fn open_azure_client(
     config: &serde_json::Value,
     timeout: Option<Duration>,
 ) -> StorageResult<ObjectStoreClient> {
-    use std::sync::Arc;
-
     use object_store::azure::MicrosoftAzureBuilder;
-    use object_store::ObjectStore;
 
+    use super::util::{client_options, finalize_object_store_client, json_bool, json_string};
     use crate::client::StorageClientError;
-    use super::util::{client_options, json_bool, json_string, wrap_prefix};
 
     crate::ensure_rustls_ring_provider();
     let (container, key_prefix, account_from_url) = parse_azure_location(base_path)?;
@@ -55,8 +52,7 @@ pub(super) fn open_azure_client(
             message: error.to_string(),
         })?;
 
-    let store: Arc<dyn ObjectStore> = wrap_prefix(Arc::new(store), &key_prefix)?;
-    Ok(ObjectStoreClient::from_store(store, None))
+    finalize_object_store_client(store, &key_prefix)
 }
 
 #[cfg(feature = "azure")]
@@ -66,8 +62,8 @@ fn apply_azure_credentials(
 ) -> StorageResult<object_store::azure::MicrosoftAzureBuilder> {
     use object_store::azure::AzureConfigKey;
 
-    use crate::client::StorageClientError;
     use super::util::{json_bool, json_string};
+    use crate::client::StorageClientError;
 
     if let Some(key) = json_string(credentials, "access_key")
         .or_else(|| json_string(credentials, "account_key"))
@@ -99,8 +95,7 @@ fn apply_azure_credentials(
         .or_else(|| json_string(credentials, "azure_storage_tenant_id"));
     match (client_id, client_secret, tenant_id) {
         (Some(client_id), Some(client_secret), Some(tenant_id)) => {
-            builder =
-                builder.with_client_secret_authorization(client_id, client_secret, tenant_id);
+            builder = builder.with_client_secret_authorization(client_id, client_secret, tenant_id);
         }
         (None, None, None) => {}
         _ => {

@@ -192,9 +192,13 @@ pub fn cell_from_arrow_cell(
                 .value(row_index)
                 .to_string(),
         )),
-        PgType::Timestamptz => Ok(CellValue::TimestamptzMicros(
-            array_for::<TimestampMicrosecondArray>(array, column_name)?.value(row_index),
-        )),
+        PgType::Timestamptz => {
+            let unix_micros =
+                array_for::<TimestampMicrosecondArray>(array, column_name)?.value(row_index);
+            Ok(CellValue::TimestamptzMicros(unix_micros.saturating_sub(
+                koldstore_sortkey::PG_EPOCH_MICROS_FROM_UNIX,
+            )))
+        }
     }
 }
 

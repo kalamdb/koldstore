@@ -35,7 +35,7 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
         None,
     );
 
-    let async_task = AsyncMirrorTask::new(database_oid);
+    let async_task = AsyncMirrorTask::new();
     let slot = crate::mirror::lifecycle::slot_name(database_oid);
     let slot_c = CString::new(slot.as_str()).expect("deterministic slot name contains no NUL");
     let registered_generation =

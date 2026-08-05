@@ -314,18 +314,24 @@ impl TestDb {
 
     /// Flushes a managed table and returns the number of hot rows written.
     ///
+    /// Retries when the shared async-mirror apply lock is briefly held (fail-fast
+    /// product contract). Tests that assert lock contention must call
+    /// `flush_table` SQL directly instead of this helper.
+    ///
     /// # Errors
     ///
     /// Returns an error when `koldstore.flush_table` fails.
     pub async fn flush_table(&self, relation: &str) -> Result<i64> {
-        let row = self
-            .client
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
-                &[&relation],
-            )
-            .await?;
-        let job_id: String = row.get(0);
+        self.flush_table_with_force(relation, false).await
+    }
+
+    /// Like [`Self::flush_table`], optionally forcing a flush.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when flush fails after apply-lock retries.
+    pub async fn flush_table_with_force(&self, relation: &str, force: bool) -> Result<i64> {
+        let job_id = flush_table_job_id(&self.client, relation, force).await?;
         let progress = self
             .client
             .query_one(
@@ -593,4 +599,64 @@ fn unique_identifier(label: &str) -> String {
         })
         .collect::<String>();
     format!("e2e_{}_{}_{}", sanitized, std::process::id(), id)
+}
+
+/// True when flush failed because a fail-fast entry lock is busy.
+///
+/// Covers the database apply/slot lock and the per-table job lock. Both return
+/// immediately from `flush_table` so callers can retry instead of hanging.
+#[must_use]
+pub fn is_flush_apply_lock_busy(error: &tokio_postgres::Error) -> bool {
+    // `Display` for tokio_postgres is often just "db error"; inspect the DB
+    // message / debug form so fail-fast apply-lock text is visible.
+    let mut text = format!("{error:?}");
+    if let Some(db) = error.as_db_error() {
+        text.push(' ');
+        text.push_str(db.message());
+        if let Some(detail) = db.detail() {
+            text.push(' ');
+            text.push_str(detail);
+        }
+    }
+    text.contains("apply lock")
+        || text.contains("retry shortly")
+        || text.contains("flush unavailable")
+        || text.contains("flush already in progress")
+}
+
+/// Runs `koldstore.flush_table` and returns the job id, retrying apply-lock busy.
+///
+/// # Errors
+///
+/// Returns an error when flush fails for a non-lock reason, or the lock stays
+/// busy across the retry budget.
+pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) -> Result<String> {
+    for attempt in 1..=40 {
+        let result = if force {
+            client
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                    &[&relation],
+                )
+                .await
+        } else {
+            client
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&relation],
+                )
+                .await
+        };
+        match result {
+            Ok(row) => return Ok(row.get(0)),
+            Err(error) if is_flush_apply_lock_busy(&error) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("flush_table {relation} (force={force})"));
+            }
+        }
+    }
+    anyhow::bail!("flush_table still blocked by apply lock after retries for {relation}")
 }

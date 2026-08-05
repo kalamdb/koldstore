@@ -6,8 +6,8 @@ license.workspace = true
 repository.workspace = true
 
 [package.metadata.cargo-machete]
-# `cc` is used from build.rs; `pgrx-tests` / `pgrx-bench` are feature-gated.
-ignored = ["cc", "pgrx-tests", "pgrx-bench"]
+# `pgrx-tests` / `pgrx-bench` are feature-gated.
+ignored = ["pgrx-tests", "pgrx-bench"]
 
 [lib]
 name = "koldstore"
@@ -61,7 +61,6 @@ pgrx-bench = { workspace = true, optional = true }
 pgrx-tests = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
-tracing = { workspace = true, features = ["release_max_level_off"] }
 uuid.workspace = true
 
 [dev-dependencies]
@@ -71,9 +70,6 @@ koldstore-merge.workspace = true
 koldstore-migrate.workspace = true
 koldstore-schema.workspace = true
 koldstore-storage.workspace = true
-
-[build-dependencies]
-cc = "1"
 
 [lints]
 workspace = true

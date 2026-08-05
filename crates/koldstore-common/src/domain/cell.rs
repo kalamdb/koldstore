@@ -34,7 +34,9 @@ pub enum CellValue {
     Float64(f64),
     /// Text-like columns (`text`, `jsonb`, `uuid`, `bytea`, `numeric`, `text[]`).
     Utf8(String),
-    /// `timestamptz` stored as PostgreSQL-epoch UTC microseconds.
+    /// `timestamptz` stored as PostgreSQL-epoch UTC microseconds
+    /// (`TimestampTzADT`). Arrow physical storage remains Unix-epoch micros;
+    /// convert at the Arrow boundary only.
     TimestamptzMicros(i64),
 }
 

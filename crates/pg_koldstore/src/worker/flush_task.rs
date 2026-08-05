@@ -20,9 +20,6 @@ pub(crate) struct FlushTickResult {
     pub had_due_table: bool,
     /// True when the flush job finished as `completed`.
     pub completed: bool,
-    /// True when a due table was selected but skipped because a flush is already
-    /// running (advisory lock held or durable `running` job).
-    pub skipped_busy: bool,
 }
 
 /// Selects the first due auto-flush table, if any.
@@ -117,7 +114,6 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
         return Ok(FlushTickResult {
             had_due_table: false,
             completed: false,
-            skipped_busy: false,
         });
     };
     let oid = pgrx::pg_sys::Oid::from(table_oid);
@@ -130,7 +126,6 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
         return Ok(FlushTickResult {
             had_due_table: true,
             completed: false,
-            skipped_busy: true,
         });
     }
     // `flush_table` re-acquires the same xact lock (reentrant) and ensures/claims
@@ -139,6 +134,5 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     Ok(FlushTickResult {
         had_due_table: true,
         completed: flush_job_completed(job_id)?,
-        skipped_busy: false,
     })
 }

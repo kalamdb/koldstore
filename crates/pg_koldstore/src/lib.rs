@@ -1,6 +1,9 @@
 //! Thin PostgreSQL integration layer for pg-koldstore.
 
 pub mod catalog;
+/// Adapter-layer SPI / PostgreSQL error type.
+#[cfg(feature = "pg")]
+pub(crate) mod error;
 /// Test-only flush failpoints (GUC-armed; inert when unset).
 pub mod failpoints;
 pub mod guc;

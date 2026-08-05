@@ -29,12 +29,7 @@ fn backend_config_validates_supported_storage_urls() {
     .unwrap();
     assert_eq!(s3.kind, StorageBackendKind::S3);
 
-    let gcs = BackendConfig::new(
-        StorageBackendKind::Gcs,
-        "gs://bucket/prefix",
-        json!({}),
-    )
-    .unwrap();
+    let gcs = BackendConfig::new(StorageBackendKind::Gcs, "gs://bucket/prefix", json!({})).unwrap();
     assert_eq!(gcs.kind, StorageBackendKind::Gcs);
 
     let azure = BackendConfig::new(

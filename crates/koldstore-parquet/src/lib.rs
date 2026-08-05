@@ -11,20 +11,19 @@ pub mod schema;
 pub mod writer;
 
 pub use batch_builder::{
-    pk_column_indices, CleanColdRecordBatchBuilder, ColdRecordBatch, FlushColumnValue,
-    FlushMirrorRow,
+    pk_column_indices, CleanColdRecordBatchBuilder, ColdRecordBatch, FlushMirrorRow,
 };
 pub use footer::{
     extract_packed_segment_metadata, ColumnStats, FooterSummary, PackedColumnIndex,
     PackedSegmentMetadata, RowGroupStats, SegmentFooterMetadata,
 };
 pub use footer_cache as parquet_footer_cache;
-pub use koldstore_common::canonical_postgres_type_name;
+pub use koldstore_common::{canonical_postgres_type_name, CellValue};
 pub use koldstore_schema::{PgIntegerArrayOid, PgType, SchemaError};
 pub use object_reader::{ObjectStoreParquetReader, ObjectStoreReadStats};
 pub use pg_type_codec::{
-    arrow_array_for_column, arrow_array_from_json, arrow_data_type, cell_from_arrow_cell, json_bool,
-    json_from_arrow_cell, json_i16, json_i64, jsonb_cell_to_utf8, pg_bytea_hex,
+    arrow_array_for_column, arrow_array_from_json, arrow_data_type, cell_from_arrow_cell,
+    json_bool, json_from_arrow_cell, json_i16, json_i64, jsonb_cell_to_utf8, pg_bytea_hex,
 };
 pub use prune::{select_row_groups_for_pk_values, PruneDecision, RowGroupPruner};
 pub use reader::{

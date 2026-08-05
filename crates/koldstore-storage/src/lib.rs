@@ -21,7 +21,7 @@ pub mod runtime;
 pub use backend::{
     open_client_from_catalog_fields, open_client_from_catalog_fields_with_timeout,
     open_filesystem_client, open_storage_client, open_storage_client_with_timeout, BackendConfig,
-    StorageBackend, StorageBackendKind,
+    StorageBackendKind,
 };
 pub use client::{
     ObjectStoreClient, PutOutcome, PutPrecondition, StorageClient, StorageClientError,

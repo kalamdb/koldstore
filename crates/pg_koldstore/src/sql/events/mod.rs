@@ -297,10 +297,18 @@ fn decode_hot_mirror_tuples(
 ) -> pgrx::spi::Result<Vec<MirrorChange>> {
     let mut out = Vec::new();
     for tuple in tuples {
-        let seq: i64 = tuple.get(1)?.ok_or_else(|| spi_missing("seq"))?;
-        let op: i16 = tuple.get(2)?.ok_or_else(|| spi_missing("op"))?;
-        let pk: pgrx::JsonB = tuple.get(3)?.ok_or_else(|| spi_missing("pk"))?;
-        let deleted: bool = tuple.get(4)?.ok_or_else(|| spi_missing("deleted"))?;
+        let seq: i64 = tuple
+            .get(1)?
+            .ok_or_else(|| crate::spi::missing_attribute("seq"))?;
+        let op: i16 = tuple
+            .get(2)?
+            .ok_or_else(|| crate::spi::missing_attribute("op"))?;
+        let pk: pgrx::JsonB = tuple
+            .get(3)?
+            .ok_or_else(|| crate::spi::missing_attribute("pk"))?;
+        let deleted: bool = tuple
+            .get(4)?
+            .ok_or_else(|| crate::spi::missing_attribute("deleted"))?;
         let row_image: Option<pgrx::JsonB> = tuple.get(5)?;
         let operation = MirrorOperation::from_code(op).map_err(|error| {
             pgrx::spi::SpiError::DatumError(pgrx::datum::TryFromDatumError::NoSuchAttributeName(
@@ -540,11 +548,4 @@ fn physical_name_for_pk(
         segment,
         current_schema_version,
     )
-}
-
-#[cfg(feature = "pg")]
-fn spi_missing(field: &str) -> pgrx::spi::SpiError {
-    pgrx::spi::SpiError::DatumError(pgrx::datum::TryFromDatumError::NoSuchAttributeName(
-        field.to_string(),
-    ))
 }

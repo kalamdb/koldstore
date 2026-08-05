@@ -119,7 +119,11 @@ mod tests {
                 for interval in [0_i64, 1, 30] {
                     let due = flush_check_due(last, now, interval);
                     let wait = millis_until_flush_check(last, now, interval);
-                    assert_eq!(due, wait == 1, "last={last:?} now={now} interval={interval}");
+                    assert_eq!(
+                        due,
+                        wait == 1,
+                        "last={last:?} now={now} interval={interval}"
+                    );
                 }
             }
         }

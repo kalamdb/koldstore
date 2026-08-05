@@ -185,8 +185,7 @@ pub(crate) fn lock_source_table_share_row_exclusive(
 /// a raw [`GetXLogInsertRecPtr`]: at page boundaries the latter points past the
 /// next page header and `XLogFlush` fails with "xlog flush request … is not
 /// satisfied".
-pub(super) fn capture_durable_wal_fence() -> Result<crate::mirror::apply::WalFenceLsn, String>
-{
+pub(super) fn capture_durable_wal_fence() -> Result<crate::mirror::apply::WalFenceLsn, String> {
     let fence = inserted_wal_end_lsn();
     unsafe { pgrx::pg_sys::XLogFlush(fence) };
     Ok(crate::mirror::apply::WalFenceLsn::new(fence))
@@ -644,9 +643,7 @@ fn arm_named_flush_origin_pg15(
     pgrx::Spi::run_with_args(
         "SELECT pg_catalog.pg_advisory_xact_lock($1, $2)",
         &[
-            pgrx::datum::DatumWithOid::from(
-                crate::mirror::lifecycle::FLUSH_ORIGIN_LOCK_NAMESPACE,
-            ),
+            pgrx::datum::DatumWithOid::from(crate::mirror::lifecycle::FLUSH_ORIGIN_LOCK_NAMESPACE),
             pgrx::datum::DatumWithOid::from(database_oid.get() as i32),
         ],
     )
@@ -733,8 +730,7 @@ fn mirror_oldest_rows_cutoff(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let mirror = MirrorRelation::new(snapshot.mirror_relation.clone());
-    let statement =
-        plan_mirror_oldest_rows_max_seq(&mirror).map_err(|error| error.to_string())?;
+    let statement = plan_mirror_oldest_rows_max_seq(&mirror).map_err(|error| error.to_string())?;
     if let Some(max_seq) = crate::spi::execute_prepared(
         &statement,
         &[DatumWithOid::from(limit)],
@@ -789,8 +785,8 @@ fn mirror_force_flush_stats(
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
     let mirror = MirrorRelation::new(snapshot.mirror_relation.clone());
     let delete_code = MirrorOperation::Delete.code();
-    let stats = plan_mirror_force_flush_stats(&mirror, delete_code)
-        .map_err(|error| error.to_string())?;
+    let stats =
+        plan_mirror_force_flush_stats(&mirror, delete_code).map_err(|error| error.to_string())?;
     let json = crate::spi::execute_prepared(&stats, &[], crate::spi::first_row::<String>)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "force flush stats lookup returned no rows".to_string())?;

@@ -6,13 +6,9 @@
 //! the same filter still saw cold via KoldMergeScan.
 
 use anyhow::{Context, Result};
-use tokio::task::JoinHandle;
-use tokio_postgres::Row;
 
 use crate::common;
-use crate::flush::harness::{
-    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter,
-};
+use crate::flush::harness::{barrier_unlock, pause_flush_at};
 
 #[tokio::test]
 async fn ordered_limit_after_multi_wave_flush_returns_cold_rows() -> Result<()> {
@@ -267,34 +263,8 @@ async fn ordered_limit_during_flush_sees_all_rows() -> Result<()> {
             .await?;
         common::fence_async_mirror(&db.client).await?;
 
-        let coordinator = connect_peer(&db).await?;
-        barrier_lock(&coordinator).await?;
-        let flush_client = connect_peer(&db).await?;
-        let flush_relation = table.relation.clone();
-        let flush_handle: JoinHandle<Result<Row>> = tokio::spawn(async move {
-            flush_client
-                .batch_execute("SET koldstore.failpoint = 'wait:before_manifest_publish';")
-                .await?;
-            let row = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-                    &[&flush_relation],
-                )
-                .await
-                .context("flush paused before manifest publish")?;
-            flush_client
-                .batch_execute("SET koldstore.failpoint = '';")
-                .await
-                .ok();
-            Ok(row)
-        });
-        if let Err(error) =
-            wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await
-        {
-            barrier_unlock(&coordinator).await.ok();
-            let _ = flush_handle.await;
-            return Err(error);
-        }
+        let (coordinator, flush_handle) =
+            pause_flush_at(&db, &table.relation, "wait:before_manifest_publish").await?;
 
         // Flush is holding the barrier: every seeded row must still be queryable.
         let mid_count: i64 = db

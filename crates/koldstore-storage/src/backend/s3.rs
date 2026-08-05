@@ -12,13 +12,10 @@ pub(super) fn open_s3_client(
     config: &serde_json::Value,
     timeout: Option<Duration>,
 ) -> StorageResult<ObjectStoreClient> {
-    use std::sync::Arc;
-
     use object_store::aws::AmazonS3Builder;
-    use object_store::ObjectStore;
 
+    use super::util::{client_options, finalize_object_store_client, json_bool, json_string};
     use crate::client::StorageClientError;
-    use super::util::{client_options, json_bool, json_string, wrap_prefix};
 
     crate::ensure_rustls_ring_provider();
     let (bucket, key_prefix) = parse_s3_base_path(base_path)?;
@@ -57,8 +54,7 @@ pub(super) fn open_s3_client(
             message: error.to_string(),
         })?;
 
-    let store: Arc<dyn ObjectStore> = wrap_prefix(Arc::new(store), &key_prefix)?;
-    Ok(ObjectStoreClient::from_store(store, None))
+    finalize_object_store_client(store, &key_prefix)
 }
 
 /// Opens an S3 client when the `s3` feature is disabled.

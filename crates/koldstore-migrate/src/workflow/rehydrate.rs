@@ -262,7 +262,9 @@ pub fn plan_clean_schema_artifact_cleanup(
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
-pub fn plan_catalog_deactivation_count(table_oid: TableOid) -> Result<SqlStatement, DemigrationError> {
+pub fn plan_catalog_deactivation_count(
+    table_oid: TableOid,
+) -> Result<SqlStatement, DemigrationError> {
     let _ = table_oid;
     SqlStatement::write(
         "demigrate deactivate catalog metadata",

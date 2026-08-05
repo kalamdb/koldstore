@@ -75,12 +75,6 @@ impl BackendConfig {
     }
 }
 
-/// Backend factory result.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct StorageBackend {
-    pub config: BackendConfig,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{BackendConfig, StorageBackendKind};

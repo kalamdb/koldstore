@@ -300,12 +300,9 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
             "cleanup must reject active async tables"
         );
 
-        db.client
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-                &[&relation],
-            )
-            .await?;
+        // Fail-fast apply lock: the shared DB worker may briefly hold it between
+        // empty ticks; retry instead of racing a single flush_table call.
+        db.flush_table_with_force(&relation, true).await?;
         assert_eq!(
             common::wait_for_async_mirror(&db.client).await?,
             0,

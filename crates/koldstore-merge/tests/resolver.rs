@@ -213,7 +213,10 @@ fn cold_delete_marker_masks_older_live_rows_and_newer_hot_reinsert_wins() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].source, koldstore_merge::RowSource::Hot);
     assert_eq!(rows[0].seq.get(), 30);
-    assert_eq!(rows[0].row_image.to_json(), json!({"id": 1, "body": "reinserted"}));
+    assert_eq!(
+        rows[0].row_image.to_json(),
+        json!({"id": 1, "body": "reinserted"})
+    );
 }
 
 #[test]

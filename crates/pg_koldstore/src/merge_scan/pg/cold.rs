@@ -41,10 +41,9 @@ pub(super) unsafe fn cold_side_proven_empty(
     params: pg_sys::ParamListInfo,
 ) -> Result<bool, String> {
     let predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(scanrelid, qual, &catalog, params) },
+        unsafe { segment_prune_predicates(scanrelid, qual, catalog, params) },
         |column_id| {
-            let column = catalog
-                .column_by_attnum(column_id)?;
+            let column = catalog.column_by_attnum(column_id)?;
             Some(cold_prune_column_policy(
                 column,
                 snapshot.scope_column_id,
@@ -63,9 +62,7 @@ pub(super) unsafe fn cold_side_proven_empty(
     });
 
     for column_id in candidate_columns {
-        let Some(column) = catalog
-            .column_by_attnum(column_id)
-        else {
+        let Some(column) = catalog.column_by_attnum(column_id) else {
             continue;
         };
         let key = crate::catalog::cache::ColdColumnBoundsCacheKey::new(
@@ -233,8 +230,8 @@ pub(super) fn prepare_cold_row_stream(
         }
 
         let client = open_managed_object_store_client(
-            &planned.storage_type,
-            &planned.base_path,
+            &profile.storage_type,
+            &profile.base_path,
             &planned.credentials,
             &planned.config,
         )
@@ -259,8 +256,6 @@ pub(super) fn prepare_cold_row_stream(
 
 struct PlannedColdSegments {
     profile: ColdReadProfile,
-    storage_type: String,
-    base_path: String,
     credentials: serde_json::Value,
     config: serde_json::Value,
     segments: Vec<SegmentStatsHint>,
@@ -280,10 +275,9 @@ fn plan_cold_segments(
     let scope_column_id = snapshot.scope_column_id;
     let segment_order_column_id = snapshot.segment_order_column_id;
     let prune_predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(scanrelid, qual, &catalog, params) },
+        unsafe { segment_prune_predicates(scanrelid, qual, catalog, params) },
         |column_id| {
-            let column = catalog
-                .column_by_attnum(column_id)?;
+            let column = catalog.column_by_attnum(column_id)?;
             Some(cold_prune_column_policy(
                 column,
                 scope_column_id,
@@ -381,8 +375,6 @@ fn plan_cold_segments(
     };
     Ok(Some(PlannedColdSegments {
         profile,
-        storage_type: manifest_stats.storage_type.clone(),
-        base_path: manifest_stats.base_path.clone(),
         credentials: manifest_stats.credentials.clone(),
         config: manifest_stats.config.clone(),
         segments,
@@ -441,20 +433,21 @@ fn resolve_segment_index_candidates(
     predicates: &[SegmentPrunePredicate],
 ) -> Result<SegmentIndexCandidateResolution, String> {
     let preferred = segment_order_column_id.and_then(|column_id| {
-        catalog
-            .column_by_id(column_id)
-            .filter(|column| {
-                koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
-                    && predicates
-                        .iter()
-                        .any(|predicate| predicate.column_id == column.column_id.get())
-            })
+        catalog.column_by_id(column_id).filter(|column| {
+            koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
+                && predicates
+                    .iter()
+                    .any(|predicate| predicate.column_id == column.column_id.get())
+        })
     });
     let column = preferred.or_else(|| {
         predicates.iter().find_map(|predicate| {
-            catalog.column_by_attnum(predicate.column_id).filter(|column| {
-                koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
-            })
+            catalog
+                .column_by_attnum(predicate.column_id)
+                .filter(|column| {
+                    koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+                        .is_some()
+                })
         })
     });
     let Some(column) = column else {
@@ -689,8 +682,8 @@ fn encode_prune_predicate_bounds(
                     predicate.column
                 ));
             }
-            let encoded = koldstore_sortkey::encode_sort_key(value)
-                .map_err(|error| error.to_string())?;
+            let encoded =
+                koldstore_sortkey::encode_sort_key(value).map_err(|error| error.to_string())?;
             if entry.0.as_ref().is_none_or(|current| encoded > *current) {
                 entry.0 = Some(encoded);
             }
@@ -702,8 +695,8 @@ fn encode_prune_predicate_bounds(
                     predicate.column
                 ));
             }
-            let encoded = koldstore_sortkey::encode_sort_key(value)
-                .map_err(|error| error.to_string())?;
+            let encoded =
+                koldstore_sortkey::encode_sort_key(value).map_err(|error| error.to_string())?;
             if entry.1.as_ref().is_none_or(|current| encoded < *current) {
                 entry.1 = Some(encoded);
             }
@@ -987,9 +980,10 @@ fn pk_equality_values(
     let literal = match value {
         koldstore_sortkey::SortKeyValue::Bool(flag) => flag.to_string(),
         koldstore_sortkey::SortKeyValue::Int2(n) => n.to_string(),
-        koldstore_sortkey::SortKeyValue::Int4(n) => n.to_string(),
-        koldstore_sortkey::SortKeyValue::Int8(n) => n.to_string(),
-        koldstore_sortkey::SortKeyValue::Date(n)
+        koldstore_sortkey::SortKeyValue::Int4(n) | koldstore_sortkey::SortKeyValue::Date(n) => {
+            n.to_string()
+        }
+        koldstore_sortkey::SortKeyValue::Int8(n)
         | koldstore_sortkey::SortKeyValue::Timestamp(n)
         | koldstore_sortkey::SortKeyValue::Timestamptz(n) => n.to_string(),
         koldstore_sortkey::SortKeyValue::Uuid(uuid) => uuid.to_string(),

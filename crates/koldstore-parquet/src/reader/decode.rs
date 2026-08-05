@@ -181,9 +181,9 @@ pub(super) fn clean_rows_from_batch(
         }
         let mut pk_json = serde_json::Map::new();
         for column in primary_key_columns {
-            let cell = row_image.get(column).ok_or_else(|| {
-                format!("cold row is missing primary-key field `{column}`")
-            })?;
+            let cell = row_image
+                .get(column)
+                .ok_or_else(|| format!("cold row is missing primary-key field `{column}`"))?;
             pk_json.insert(column.clone(), cell.to_json());
         }
         if deleted_value {

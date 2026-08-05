@@ -23,12 +23,6 @@ pub fn set_interrupt_hook(hook: Option<fn()>) {
     INTERRUPT_HOOK.with(|cell| cell.set(hook));
 }
 
-/// Returns the current interrupt hook (test helper).
-#[must_use]
-pub fn interrupt_hook() -> Option<fn()> {
-    INTERRUPT_HOOK.with(Cell::get)
-}
-
 fn object_store_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
@@ -62,17 +56,6 @@ where
             tokio::task::block_in_place(|| object_store_runtime().block_on(run))
         }
         _ => object_store_runtime().block_on(run),
-    }
-}
-
-/// Backward-compatible helper when no timeout is configured.
-pub fn block_on_untimed<F>(future: F) -> F::Output
-where
-    F: Future,
-{
-    match block_on(future, None) {
-        Ok(value) => value,
-        Err(Elapsed) => unreachable!("untimed block_on cannot elapse"),
     }
 }
 

@@ -1,15 +1,9 @@
-//! PostgreSQL memory-context ownership helpers and process-heap release.
+//! Process-heap release after large temporary Rust allocations.
+//!
+//! PostgreSQL `palloc` contexts are separate; this targets the Rust global
+//! allocator (glibc `malloc` on Linux GNU) used by Arrow/Parquet/object_store.
 
 use std::cell::Cell;
-
-/// Memory owner labels used in tracing and diagnostics.
-pub const MEMORY_OWNER_LABELS: &[&str] = &[
-    "ffi",
-    "scan_state",
-    "spi_tuple",
-    "arrow_buffer",
-    "object_store_handle",
-];
 
 thread_local! {
     /// Set after merge-scan / flush spikes so `ExecutorEnd` can reclaim arenas.
@@ -35,9 +29,6 @@ pub fn release_process_heap_if_pending() {
 }
 
 /// Asks the process allocator to return free pages after large temporary spikes.
-///
-/// PostgreSQL `palloc` contexts are separate; this targets the Rust global
-/// allocator (glibc `malloc` on Linux GNU) used by Arrow/Parquet/object_store.
 pub fn release_process_heap() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -50,62 +41,11 @@ pub fn release_process_heap() {
     }
 }
 
-/// Testable memory owner accounting for PostgreSQL memory-context boundaries.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MemoryOwner {
-    label: String,
-    allocated_bytes: usize,
-}
-
-impl MemoryOwner {
-    /// Creates a memory owner label.
-    #[must_use]
-    pub fn new(label: impl Into<String>) -> Self {
-        Self {
-            label: label.into(),
-            allocated_bytes: 0,
-        }
-    }
-
-    /// Returns the owner label.
-    #[must_use]
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
-    /// Tracks an allocation under this owner.
-    pub fn track_allocation(&mut self, bytes: usize) {
-        self.allocated_bytes = self.allocated_bytes.saturating_add(bytes);
-    }
-
-    /// Returns tracked bytes.
-    #[must_use]
-    pub const fn allocated_bytes(&self) -> usize {
-        self.allocated_bytes
-    }
-
-    /// Resets tracked allocations after memory context cleanup.
-    pub fn reset(&mut self) {
-        self.allocated_bytes = 0;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
 
-    use super::{
-        mark_heap_trim_pending, release_process_heap_if_pending, MemoryOwner, HEAP_TRIM_PENDING,
-    };
-
-    #[test]
-    fn memory_owner_tracks_and_resets() {
-        let mut owner = MemoryOwner::new("scan_state");
-        owner.track_allocation(128);
-        assert_eq!(owner.allocated_bytes(), 128);
-        owner.reset();
-        assert_eq!(owner.allocated_bytes(), 0);
-    }
+    use super::{mark_heap_trim_pending, release_process_heap_if_pending, HEAP_TRIM_PENDING};
 
     #[test]
     fn heap_trim_pending_is_one_shot() {

@@ -1,8 +1,8 @@
 //! Row-group pruning helpers.
 //!
 //! Segment-level pruning lives in `koldstore-merge`. This module owns:
-//! - **Live ObjectStore path helpers** used by `reader.rs`
-//!   (`select_row_groups_from_metadata` and related).
+//! - **Live ObjectStore/local path helpers** used by `reader/`
+//!   (`select_row_groups_from_metadata`, `prune_row_groups_by_seq_stats`, bloom).
 //! - **[`RowGroupPruner`]** — FooterSummary-oriented API kept for benches and
 //!   unit tests; production merge scan does not call it.
 
@@ -281,4 +281,45 @@ pub(crate) fn bloom_may_contain(
         ParquetPhysicalType::DOUBLE => value.parse::<f64>().map_or(true, |v| bloom.check(&v)),
         ParquetPhysicalType::INT96 => true,
     }
+}
+
+/// Footer-stats seq/commit-seq prune (no I/O).
+///
+/// Keeps row groups whose Int32/Int64 column stats overlap `[min, max]`.
+/// Missing stats or unsupported physical types stay selected.
+pub(crate) fn prune_row_groups_by_seq_stats(
+    metadata: &ParquetMetaData,
+    schema: &SchemaDescriptor,
+    row_groups: &[usize],
+    column: &str,
+    min: i64,
+    max: i64,
+) -> Vec<usize> {
+    let Some(column_idx) = schema.columns().iter().position(|c| c.name() == column) else {
+        return row_groups.to_vec();
+    };
+    row_groups
+        .iter()
+        .copied()
+        .filter(|&rg_index| {
+            let Some(stats) = metadata.row_group(rg_index).column(column_idx).statistics() else {
+                return true;
+            };
+            match stats {
+                Statistics::Int64(values) => values
+                    .min_opt()
+                    .zip(values.max_opt())
+                    .map(|(group_min, group_max)| *group_max >= min && *group_min <= max)
+                    .unwrap_or(true),
+                Statistics::Int32(values) => values
+                    .min_opt()
+                    .zip(values.max_opt())
+                    .map(|(group_min, group_max)| {
+                        i64::from(*group_max) >= min && i64::from(*group_min) <= max
+                    })
+                    .unwrap_or(true),
+                _ => true,
+            }
+        })
+        .collect()
 }

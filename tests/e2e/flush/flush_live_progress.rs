@@ -19,15 +19,9 @@ async fn list_jobs_and_flush_progress_fields_are_populated() -> Result<()> {
             .await
             .context("set_table_auto_flush(false)")?;
 
-        let job_id = db
-            .client
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
-                &[&table.relation],
-            )
+        let job_id = common::flush_table_job_id(&db.client, &table.relation, false)
             .await
-            .context("flush_table")?
-            .get::<_, String>(0);
+            .context("flush_table")?;
 
         let row = db
             .client

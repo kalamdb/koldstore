@@ -192,22 +192,7 @@ async fn text_scope_column_equality_falls_back_without_losing_rows() -> Result<(
 }
 
 async fn force_flush(db: &common::TestDb, relation: &str) -> Result<i64> {
-    let row = db
-        .client
-        .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-            &[&relation],
-        )
-        .await?;
-    let job_id: String = row.get(0);
-    let progress = db
-        .client
-        .query_one(
-            "SELECT COALESCE(rows_flushed, 0)::bigint FROM koldstore.jobs WHERE id = $1::text::uuid",
-            &[&job_id],
-        )
-        .await?;
-    Ok(progress.get(0))
+    db.flush_table_with_force(relation, true).await
 }
 
 fn explain_counter(plan: &str, label: &str) -> Result<usize> {

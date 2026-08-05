@@ -104,7 +104,8 @@ fn mirror_preserves_typmod_collation_and_domain_identity() {
 
 #[test]
 fn primary_key_shape_probe_reads_exact_catalog_metadata() {
-    let probe = register::primary_key_shape_probe_plan(koldstore_common::TableOid::from_raw(42)).unwrap();
+    let probe =
+        register::primary_key_shape_probe_plan(koldstore_common::TableOid::from_raw(42)).unwrap();
 
     assert_eq!(probe.operation, "capture primary-key shape");
     assert!(probe.sql.contains("pg_index"));

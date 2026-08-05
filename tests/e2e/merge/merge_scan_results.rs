@@ -4,7 +4,7 @@ use anyhow::Result;
 use koldstore::merge_scan::exec::{
     execute_merge_scan, execute_merge_scan_with_filters, FilterPlan,
 };
-use koldstore_common::{RowImage, ColdRow, HotRow, LogicalPk, PkColumn, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, RowImage, SeqId};
 use serde_json::json;
 
 fn pk(id: i64) -> LogicalPk {

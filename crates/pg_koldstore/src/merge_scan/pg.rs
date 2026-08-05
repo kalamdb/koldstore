@@ -309,14 +309,6 @@ pub(crate) fn with_hook_disabled<T>(f: impl FnOnce() -> T) -> T {
     })
 }
 
-/// Returns whether `koldstore.schemas` is present in the catalogs.
-///
-/// Planner hooks must not SPI-query the managed catalog while CREATE EXTENSION
-/// (or DROP) is still building it. Syscache avoids nested planning.
-fn managed_catalog_ready() -> bool {
-    crate::catalog::cache::managed_catalog_ready()
-}
-
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn set_rel_pathlist(
     root: *mut pg_sys::PlannerInfo,
@@ -343,7 +335,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     if (*(*root).parse).commandType != pg_sys::CmdType::CMD_SELECT {
         return;
     }
-    if !managed_catalog_ready() {
+    if !crate::catalog::cache::managed_catalog_ready() {
         return;
     }
 

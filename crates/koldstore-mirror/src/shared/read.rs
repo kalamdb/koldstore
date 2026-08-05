@@ -230,10 +230,7 @@ LIMIT 1 OFFSET ($1::bigint - 1)"#,
 /// # Errors
 ///
 /// Returns an error when statement metadata is invalid.
-pub fn plan_mirror_op_stats(
-    mirror_table: &MirrorRelation,
-    op: i16,
-) -> MirrorResult<SqlStatement> {
+pub fn plan_mirror_op_stats(mirror_table: &MirrorRelation, op: i16) -> MirrorResult<SqlStatement> {
     Ok(SqlStatement::read(
         "select mirror op stats",
         &format!(

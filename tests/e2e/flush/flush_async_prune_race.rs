@@ -5,9 +5,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::Row;
 
 use crate::common;
-use crate::flush::harness::{
-    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter, WORKER_COUNT,
-};
+use crate::flush::harness::{barrier_unlock, connect_peer, pause_flush_at, WORKER_COUNT};
 
 async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> Result<String> {
     let relation = db.relation(table_name);
@@ -57,36 +55,7 @@ async fn pause_flush_after_manifest(
     db: &common::TestDb,
     relation: &str,
 ) -> Result<(tokio_postgres::Client, JoinHandle<Result<Row>>)> {
-    let coordinator = connect_peer(db).await?;
-    barrier_lock(&coordinator).await?;
-
-    let flush_client = connect_peer(db).await?;
-    let flush_relation = relation.to_string();
-    let flush_handle: JoinHandle<Result<Row>> = tokio::spawn(async move {
-        flush_client
-            .batch_execute("SET koldstore.failpoint = 'wait:after_manifest_publish';")
-            .await?;
-        let row = flush_client
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-                &[&flush_relation],
-            )
-            .await
-            .context("flush_table during prune-race pause")?;
-        flush_client
-            .batch_execute("SET koldstore.failpoint = '';")
-            .await
-            .ok();
-        Ok(row)
-    });
-
-    if let Err(error) = wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await
-    {
-        barrier_unlock(&coordinator).await.ok();
-        let _ = flush_handle.await;
-        return Err(error);
-    }
-    Ok((coordinator, flush_handle))
+    pause_flush_at(db, relation, "wait:after_manifest_publish").await
 }
 
 /// Reproduces the async flush prune race: UPDATE a selected PK after manifest

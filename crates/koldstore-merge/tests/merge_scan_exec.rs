@@ -1,4 +1,4 @@
-use koldstore_common::{RowImage, ColdRow, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, RowImage, ScopeKey, SeqId};
 use koldstore_merge::scan::exec::{
     begin_merge_scan, begin_merge_scan_with_plan, execute_merge_scan_with_filters,
     ColdAvailability, FilterPlan, ScanResourceCounters,
@@ -205,7 +205,11 @@ fn primary_key_predicates_are_retained_for_pre_merge_cold_prune() {
 
     assert_eq!(
         retained,
-        vec![SegmentPrunePredicate::equality(1, "id", SortKeyValue::Int8(1))]
+        vec![SegmentPrunePredicate::equality(
+            1,
+            "id",
+            SortKeyValue::Int8(1)
+        )]
     );
 }
 
@@ -269,7 +273,11 @@ fn sort_key_scope_and_order_column_predicates_are_pre_merge_safe() {
 #[test]
 fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
     let err = validate_prune_predicates_indexed(
-        &[SegmentPrunePredicate::equality(2, "status", SortKeyValue::Int8(1))],
+        &[SegmentPrunePredicate::equality(
+            2,
+            "status",
+            SortKeyValue::Int8(1),
+        )],
         &[3],
     )
     .unwrap_err();

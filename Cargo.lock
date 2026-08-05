@@ -1540,7 +1540,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
@@ -2013,7 +2012,6 @@ dependencies = [
 name = "pg_koldstore"
 version = "0.1.11-preview.0"
 dependencies = [
- "cc",
  "hex",
  "koldstore-catalog",
  "koldstore-common",
@@ -2032,7 +2030,6 @@ dependencies = [
  "pgrx-tests",
  "serde",
  "serde_json",
- "tracing",
  "uuid",
 ]
 

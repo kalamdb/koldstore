@@ -1,7 +1,5 @@
 //! Object-store open helpers that apply session GUCs and interrupt hooks.
 
-use std::time::Duration;
-
 use koldstore_storage::{
     open_client_from_catalog_fields_with_timeout, ObjectStoreClient, StorageResult,
 };
@@ -24,12 +22,6 @@ pub fn open_managed_object_store_client(
         config,
         crate::guc::object_store_timeout(),
     )
-}
-
-/// Timeout taken from the live GUC (test/helper alias).
-#[must_use]
-pub fn configured_object_store_timeout() -> Option<Duration> {
-    crate::guc::object_store_timeout()
 }
 
 /// Registers Postgres interrupt checking for ObjectStore waits.

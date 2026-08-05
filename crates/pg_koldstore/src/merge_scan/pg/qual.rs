@@ -8,7 +8,7 @@ use koldstore_merge::scan::plan::SegmentPrunePredicate;
 use pgrx::pg_sys;
 
 use super::literals::{
-    list_node_pointers, literal_json_value, literal_sort_key_value, typed_literal_sql, unwrap_relabel,
+    list_node_pointers, literal_sort_key_value, typed_literal_sql, unwrap_relabel,
 };
 
 /// One base-relation attribute required by output projection or executor quals.
@@ -372,23 +372,11 @@ unsafe fn var_and_sort_key_literal(
     koldstore_sortkey::SortKeyValue,
 )> {
     let column = var_column(column_expr.cast::<pg_sys::Expr>(), catalog)?;
-    let sort_type =
-        koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
+    let sort_type = koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())?;
     let literal = literal_sort_key_value(literal_expr.cast::<pg_sys::Expr>(), column, params)?;
     if literal.sort_key_type() != sort_type {
         return None;
     }
-    Some((column, literal))
-}
-
-unsafe fn var_and_json_literal(
-    column_expr: *mut std::ffi::c_void,
-    literal_expr: *mut std::ffi::c_void,
-    catalog: QualCatalog<'_>,
-    params: pg_sys::ParamListInfo,
-) -> Option<(&koldstore_migrate::order::CatalogColumn, serde_json::Value)> {
-    let column = var_column(column_expr.cast::<pg_sys::Expr>(), catalog)?;
-    let literal = literal_json_value(literal_expr.cast::<pg_sys::Expr>(), column, params)?;
     Some((column, literal))
 }
 

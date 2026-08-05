@@ -5,13 +5,9 @@
 //! single-segment missing parquet, and soak already covered elsewhere.
 
 use anyhow::{Context, Result};
-use tokio::task::JoinHandle;
-use tokio_postgres::Row;
 
 use crate::common;
-use crate::flush::harness::{
-    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter,
-};
+use crate::flush::harness::{barrier_unlock, connect_peer, pause_flush_at};
 
 async fn active_segment_paths(db: &common::TestDb, relation: &str) -> Result<Vec<String>> {
     let rows = db
@@ -34,42 +30,6 @@ async fn active_segment_paths(db: &common::TestDb, relation: &str) -> Result<Vec
         .await
         .context("list active cold segments")?;
     Ok(rows.into_iter().map(|row| row.get(0)).collect())
-}
-
-async fn pause_flush_at(
-    db: &common::TestDb,
-    relation: &str,
-    failpoint: &str,
-) -> Result<(tokio_postgres::Client, JoinHandle<Result<Row>>)> {
-    let coordinator = connect_peer(db).await?;
-    barrier_lock(&coordinator).await?;
-    let flush_client = connect_peer(db).await?;
-    let flush_relation = relation.to_string();
-    let armed = failpoint.to_string();
-    let flush_handle: JoinHandle<Result<Row>> = tokio::spawn(async move {
-        flush_client
-            .batch_execute(&format!("SET koldstore.failpoint = '{armed}';"))
-            .await?;
-        let row = flush_client
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-                &[&flush_relation],
-            )
-            .await
-            .context("flush_table during tiered stress pause")?;
-        flush_client
-            .batch_execute("SET koldstore.failpoint = '';")
-            .await
-            .ok();
-        Ok(row)
-    });
-    if let Err(error) = wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await
-    {
-        barrier_unlock(&coordinator).await.ok();
-        let _ = flush_handle.await;
-        return Err(error);
-    }
-    Ok((coordinator, flush_handle))
 }
 
 /// Iceberg-style: after two publishes, losing one active segment must fail closed

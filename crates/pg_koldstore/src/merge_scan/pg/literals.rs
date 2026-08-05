@@ -35,28 +35,6 @@ pub(super) unsafe fn literal_sort_key_value(
     datum_to_sort_key_value(datum, column)
 }
 
-/// Resolves a Const or bound Param into a typed cell for prune/residual filters.
-pub(super) unsafe fn literal_cell_value(
-    expr: *mut pg_sys::Expr,
-    column: &koldstore_migrate::order::CatalogColumn,
-    params: pg_sys::ParamListInfo,
-) -> Option<koldstore_common::CellValue> {
-    let (datum, isnull, _) = const_or_param_datum(expr, params)?;
-    if isnull {
-        return Some(koldstore_common::CellValue::Null);
-    }
-    datum_to_cell_value(datum, column)
-}
-
-/// Resolves a Const or bound Param into a JSON value for prune/residual filters.
-pub(super) unsafe fn literal_json_value(
-    expr: *mut pg_sys::Expr,
-    column: &koldstore_migrate::order::CatalogColumn,
-    params: pg_sys::ParamListInfo,
-) -> Option<serde_json::Value> {
-    literal_cell_value(expr, column, params).map(|cell| cell.to_json())
-}
-
 unsafe fn const_or_param_datum(
     expr: *mut pg_sys::Expr,
     params: pg_sys::ParamListInfo,
@@ -199,14 +177,6 @@ pub(super) unsafe fn datum_to_cell_value(
     datum_cell_value(datum, column).or_else(|| {
         datum_json_value_via_output(datum, column).map(|value| CellValue::from_json(&value))
     })
-}
-
-/// Converts a non-null Datum to JSON for merge-candidate / prune helpers.
-pub(super) unsafe fn datum_to_json_value(
-    datum: pg_sys::Datum,
-    column: &koldstore_migrate::order::CatalogColumn,
-) -> Option<serde_json::Value> {
-    datum_to_cell_value(datum, column).map(|cell| cell.to_json())
 }
 
 unsafe fn datum_cell_value(

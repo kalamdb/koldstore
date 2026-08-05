@@ -5,7 +5,9 @@ use std::path::Path;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::ChunkReader;
 
-use crate::prune::{bloom_may_contain, column_index, select_row_groups_from_metadata};
+use crate::prune::{
+    bloom_may_contain, column_index, prune_row_groups_by_seq_stats, select_row_groups_from_metadata,
+};
 use crate::schema::PgColumn;
 
 use super::decode::{application_columns_for_read, clean_rows_from_batch, projection_mask};
@@ -50,6 +52,29 @@ where
     let application_columns = application_columns_for_read(columns, primary_key_columns, options)?;
 
     let mut effective = options.clone();
+    let total_row_groups = builder.metadata().num_row_groups();
+    let mut selected_row_groups = effective
+        .row_groups
+        .clone()
+        .unwrap_or_else(|| (0..total_row_groups).collect());
+    let mut pruning_applied = effective.row_groups.is_some();
+
+    if let Some(seq_range) = &options.seq_range {
+        selected_row_groups = prune_row_groups_by_seq_stats(
+            builder.metadata(),
+            builder.parquet_schema(),
+            &selected_row_groups,
+            &seq_range.column,
+            seq_range.min.get(),
+            seq_range.max.get(),
+        );
+        pruning_applied = true;
+        if selected_row_groups.is_empty() {
+            return Ok(Vec::new());
+        }
+        effective.row_groups = Some(selected_row_groups.clone());
+    }
+
     if let Some(pk) = &options.pk_values {
         let (selected_from_footer, _) = select_row_groups_from_metadata(
             builder.metadata(),
@@ -57,10 +82,10 @@ where
             &pk.column,
             &pk.values,
         )?;
-        let mut selected = if let Some(catalog_selected) = &effective.row_groups {
+        let mut selected = if pruning_applied {
             selected_from_footer
                 .into_iter()
-                .filter(|row_group| catalog_selected.contains(row_group))
+                .filter(|row_group| selected_row_groups.contains(row_group))
                 .collect()
         } else {
             selected_from_footer

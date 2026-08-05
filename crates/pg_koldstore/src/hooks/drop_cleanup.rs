@@ -100,8 +100,12 @@ fn cleanup_one_managed_table_before_drop(
     )
     .map_err(|error| error.to_string())?;
 
-    let plan = plan_drop_table_cleanup(table, koldstore_common::TableOid::from_raw(table_oid.to_u32()), DropTableCleanupPolicy::Delete)
-        .map_err(|error| error.to_string())?;
+    let plan = plan_drop_table_cleanup(
+        table,
+        koldstore_common::TableOid::from_raw(table_oid.to_u32()),
+        DropTableCleanupPolicy::Delete,
+    )
+    .map_err(|error| error.to_string())?;
     for statement in &plan.statements {
         crate::spi::update(statement, &[DatumWithOid::from(table_oid)])
             .map_err(|error| error.to_string())?;

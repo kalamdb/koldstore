@@ -79,7 +79,7 @@ pub async fn wait_until_barrier_waiter(
         .query_one("SELECT pg_backend_pid()", &[])
         .await?
         .get(0);
-    for _ in 0..200 {
+    for _ in 0..400 {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         // pg_locks is cluster-wide; filter by this database so parallel worker
         // DBs cannot see each other's shared failpoint barrier waiters.
@@ -108,6 +108,128 @@ pub async fn wait_until_barrier_waiter(
         }
     }
     anyhow::bail!("flush did not reach wait: failpoint barrier")
+}
+
+/// Parks `flush_table(..., force=true)` at a `wait:` failpoint behind the shared barrier.
+///
+/// # Errors
+///
+/// Returns an error when barrier setup, flush, or the waiter deadline fails.
+pub async fn pause_flush_at(
+    db: &TestDb,
+    relation: &str,
+    failpoint: &str,
+) -> Result<(Client, JoinHandle<Result<tokio_postgres::Row>>)> {
+    pause_flush_at_with_force(db, relation, failpoint, true).await
+}
+
+/// Like [`pause_flush_at`], with explicit `force` for `flush_table`.
+///
+/// Retries fail-fast apply / table-job lock busy errors so the async worker cannot
+/// flake the pause setup. On early flush exit, unlocks the barrier and surfaces
+/// the flush error (not only the waiter timeout).
+///
+/// # Errors
+///
+/// Returns an error when barrier setup, flush, or the waiter deadline fails.
+pub async fn pause_flush_at_with_force(
+    db: &TestDb,
+    relation: &str,
+    failpoint: &str,
+    force: bool,
+) -> Result<(Client, JoinHandle<Result<tokio_postgres::Row>>)> {
+    anyhow::ensure!(
+        failpoint.starts_with("wait:"),
+        "pause_flush_at expects a wait: failpoint, got {failpoint}"
+    );
+    let coordinator = connect_peer(db).await?;
+    barrier_lock(&coordinator).await?;
+
+    let flush_client = connect_peer(db).await?;
+    let flush_relation = relation.to_string();
+    let armed = failpoint.to_string();
+    let flush_handle: JoinHandle<Result<tokio_postgres::Row>> = tokio::spawn(async move {
+        flush_client
+            .batch_execute(&format!("SET koldstore.failpoint = '{armed}';"))
+            .await?;
+        let row =
+            match flush_table_retrying_entry_locks(&flush_client, &flush_relation, force).await {
+                Ok(row) => row,
+                Err(error) => {
+                    flush_client
+                        .batch_execute("SET koldstore.failpoint = '';")
+                        .await
+                        .ok();
+                    return Err(error).context("flush_table during failpoint pause");
+                }
+            };
+        flush_client
+            .batch_execute("SET koldstore.failpoint = '';")
+            .await
+            .ok();
+        Ok(row)
+    });
+
+    if let Err(error) = wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await
+    {
+        barrier_unlock(&coordinator).await.ok();
+        match flush_handle.await {
+            Ok(Ok(row)) => {
+                return Err(error).context(format!(
+                    "flush returned before failpoint wait (job_id={})",
+                    row.get::<_, String>(0)
+                ));
+            }
+            Ok(Err(flush_error)) => {
+                return Err(flush_error)
+                    .context(format!("flush exited before failpoint wait ({error})"));
+            }
+            Err(join_error) => {
+                return Err(error).context(format!("flush task join failed: {join_error}"));
+            }
+        }
+    }
+    Ok((coordinator, flush_handle))
+}
+
+/// Runs `flush_table` with retries while the session failpoint stays armed.
+///
+/// # Errors
+///
+/// Returns the last PostgreSQL error when entry locks stay busy, or any
+/// non-retryable flush failure.
+pub async fn flush_table_retrying_entry_locks(
+    client: &Client,
+    relation: &str,
+    force: bool,
+) -> Result<tokio_postgres::Row, tokio_postgres::Error> {
+    let mut last_busy = None;
+    for attempt in 1..=30 {
+        let result = if force {
+            client
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                    &[&relation],
+                )
+                .await
+        } else {
+            client
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&relation],
+                )
+                .await
+        };
+        match result {
+            Ok(row) => return Ok(row),
+            Err(error) if common::is_flush_apply_lock_busy(&error) => {
+                last_busy = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_busy.expect("retry loop always records a busy error"))
 }
 
 /// Creates and seeds a rich-types table (jsonb/uuid/float8/timestamptz + nullables).
@@ -378,14 +500,9 @@ pub async fn connect_workers(db: &TestDb, count: usize) -> Result<Vec<Client>> {
 ///
 /// Returns an error when flush fails, the job is not completed, or lookup fails.
 pub async fn flush_table_on(client: &Client, relation: &str) -> Result<i64> {
-    let row = client
-        .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)::text",
-            &[&relation],
-        )
+    let job_id = crate::common::flush_table_job_id(client, relation, false)
         .await
         .with_context(|| format!("flush_table {relation}"))?;
-    let job_id: String = row.get(0);
     let progress = client
         .query_one(
             r#"

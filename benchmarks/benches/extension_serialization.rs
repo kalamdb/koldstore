@@ -3,7 +3,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
 use koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 use koldstore_catalog::FlushPolicy;
-use koldstore_common::{RowImage, ColdRow, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, PkValue, RowImage, ScopeKey, SeqId};
 use koldstore_merge::resolve_rows;
 use koldstore_storage::PathTemplate;
 use serde_json::json;

@@ -555,9 +555,7 @@ mod tests {
             !ManageTableOptions::from_value(&serde_json::json!({ "auto_flush": false }))
                 .auto_flush_enabled()
         );
-        assert!(
-            !ManageTableOptions::from_json_str(r#"{"auto_flush":false}"#).auto_flush_enabled()
-        );
+        assert!(!ManageTableOptions::from_json_str(r#"{"auto_flush":false}"#).auto_flush_enabled());
         assert!(ManageTableOptions::from_json_str("").auto_flush_enabled());
         assert!(ManageTableOptions::from_json_str("not-json").auto_flush_enabled());
     }

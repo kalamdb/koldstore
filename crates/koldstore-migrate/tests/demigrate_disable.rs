@@ -22,8 +22,9 @@ fn migration_rollback_cleanup_removes_partial_catalog_rows_and_mirror_only() {
     use koldstore_migrate::QualifiedTableName;
 
     let table = QualifiedTableName::parse("app.items").unwrap();
-    let cleanup = RollbackCleanup::for_table(table.clone(), koldstore_common::TableOid::from_raw(42))
-        .with_mirror_table(QualifiedTableName::parse("koldstore.items__cl").unwrap());
+    let cleanup =
+        RollbackCleanup::for_table(table.clone(), koldstore_common::TableOid::from_raw(42))
+            .with_mirror_table(QualifiedTableName::parse("koldstore.items__cl").unwrap());
 
     let plan = cleanup.plan().unwrap();
 

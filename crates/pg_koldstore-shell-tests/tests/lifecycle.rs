@@ -1,4 +1,4 @@
-use koldstore::{catalog, guc, hooks, koldstore_version, memory, observability, spi, sql};
+use koldstore::{catalog, guc, hooks, koldstore_version, spi, sql};
 use koldstore_common::{can_set_guc, RoleClass};
 
 #[test]
@@ -138,8 +138,7 @@ fn migration_helpers_match_contract() {
 }
 
 #[test]
-fn spi_and_memory_boundaries_expose_diagnostics() {
-    assert_eq!(spi::KOLDSTORE_SQLSTATE, "XXKLD");
+fn spi_statement_access_and_prepared_plan_keys() {
     assert_eq!(
         spi::map_spi_error("select", "permission denied").to_string(),
         "SQL select failed: permission denied"
@@ -197,39 +196,6 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
         spi::prepared_plan_key(&read_with_param),
         spi::prepared_plan_key(&different_param)
     );
-
-    let executor = spi::RecordingSpiExecutor::default();
-    let rows = spi::execute_catalog_write(&executor, insert).unwrap();
-    assert_eq!(rows.rows_affected, 1);
-    assert_eq!(
-        executor.statements()[0].operation,
-        "insert change-log mirror row"
-    );
-
-    let mut owner = memory::MemoryOwner::new("scan_state");
-    owner.track_allocation(1024);
-    owner.track_allocation(512);
-    assert_eq!(owner.allocated_bytes(), 1536);
-    owner.reset();
-    assert_eq!(owner.allocated_bytes(), 0);
-
-    assert!(memory::MEMORY_OWNER_LABELS.contains(&"scan_state"));
-    assert!(memory::MEMORY_OWNER_LABELS.contains(&"object_store_handle"));
-    assert!(observability::SPAN_NAMES.contains(&"koldstore.merge_execute"));
-
-    let sql_span = observability::KoldstoreSpan::SqlApi {
-        function: "koldstore.manage_table",
-    };
-    assert_eq!(sql_span.name(), "koldstore.sql_api");
-    assert!(sql_span
-        .fields()
-        .contains(&("function", "koldstore.manage_table")));
-
-    let counter = observability::ObjectStoreIoCounter::default();
-    counter.record_read("manifest");
-    counter.record_write("parquet");
-    assert_eq!(counter.reads(), 1);
-    assert_eq!(counter.writes(), 1);
 }
 
 #[test]

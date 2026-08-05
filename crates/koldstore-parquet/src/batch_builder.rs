@@ -19,11 +19,6 @@ use crate::pg_type_codec::{json_bool, json_f32, json_f64, json_i16, json_i64, js
 use crate::schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
 use crate::writer::CleanColdRecordPlan;
 
-/// One typed column value decoded from SPI or a planned cold row.
-///
-/// Alias of [`CellValue`] so flush/Parquet and merge-scan share one cell model.
-pub type FlushColumnValue = CellValue;
-
 /// One mirror row decoded from SPI for flush encoding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlushMirrorRow {
@@ -32,7 +27,7 @@ pub struct FlushMirrorRow {
     /// Mirror operation code.
     pub op: i16,
     /// Application column values in catalog order.
-    pub values: Vec<FlushColumnValue>,
+    pub values: Vec<CellValue>,
     /// Encoded immutable segment-order key retained by the mirror.
     pub order_key: Option<Vec<u8>>,
 }
@@ -105,16 +100,16 @@ impl_append_flush_cell!(TimestampMicrosecondBuilder, i64);
 
 fn append_typed<B, T, F>(
     builder: &mut B,
-    value: Option<&FlushColumnValue>,
+    value: Option<&CellValue>,
     extract: F,
     expected: &str,
 ) -> Result<(), String>
 where
     B: AppendFlushCell<T>,
-    F: FnOnce(&FlushColumnValue) -> Option<T>,
+    F: FnOnce(&CellValue) -> Option<T>,
 {
     match value {
-        None | Some(FlushColumnValue::Null) => builder.append_null_cell(),
+        None | Some(CellValue::Null) => builder.append_null_cell(),
         Some(cell) => match extract(cell) {
             Some(typed) => builder.append_value_cell(typed),
             None => {
@@ -125,103 +120,82 @@ where
     Ok(())
 }
 
-fn append_bool(
-    builder: &mut BooleanBuilder,
-    value: Option<&FlushColumnValue>,
-) -> Result<(), String> {
+fn append_bool(builder: &mut BooleanBuilder, value: Option<&CellValue>) -> Result<(), String> {
     append_typed(
         builder,
         value,
         |cell| match cell {
-            FlushColumnValue::Bool(v) => Some(*v),
+            CellValue::Bool(v) => Some(*v),
             _ => None,
         },
         "boolean",
     )
 }
 
-fn append_int16(
-    builder: &mut Int16Builder,
-    value: Option<&FlushColumnValue>,
-) -> Result<(), String> {
+fn append_int16(builder: &mut Int16Builder, value: Option<&CellValue>) -> Result<(), String> {
     append_typed(
         builder,
         value,
         |cell| match cell {
-            FlushColumnValue::Int16(v) => Some(*v),
+            CellValue::Int16(v) => Some(*v),
             _ => None,
         },
         "int2",
     )
 }
 
-fn append_int32(
-    builder: &mut Int32Builder,
-    value: Option<&FlushColumnValue>,
-) -> Result<(), String> {
+fn append_int32(builder: &mut Int32Builder, value: Option<&CellValue>) -> Result<(), String> {
     append_typed(
         builder,
         value,
         |cell| match cell {
-            FlushColumnValue::Int32(v) => Some(*v),
+            CellValue::Int32(v) => Some(*v),
             _ => None,
         },
         "int4",
     )
 }
 
-fn append_int64(
-    builder: &mut Int64Builder,
-    value: Option<&FlushColumnValue>,
-) -> Result<(), String> {
+fn append_int64(builder: &mut Int64Builder, value: Option<&CellValue>) -> Result<(), String> {
     append_typed(
         builder,
         value,
         |cell| match cell {
-            FlushColumnValue::Int64(v) => Some(*v),
+            CellValue::Int64(v) => Some(*v),
             _ => None,
         },
         "int8",
     )
 }
 
-fn append_float32(
-    builder: &mut Float32Builder,
-    value: Option<&FlushColumnValue>,
-) -> Result<(), String> {
+fn append_float32(builder: &mut Float32Builder, value: Option<&CellValue>) -> Result<(), String> {
     append_typed(
         builder,
         value,
         |cell| match cell {
-            FlushColumnValue::Float32(v) => Some(*v),
+            CellValue::Float32(v) => Some(*v),
             _ => None,
         },
         "float4",
     )
 }
 
-fn append_float64(
-    builder: &mut Float64Builder,
-    value: Option<&FlushColumnValue>,
-) -> Result<(), String> {
+fn append_float64(builder: &mut Float64Builder, value: Option<&CellValue>) -> Result<(), String> {
     append_typed(
         builder,
         value,
         |cell| match cell {
-            FlushColumnValue::Float64(v) => Some(*v),
+            CellValue::Float64(v) => Some(*v),
             _ => None,
         },
         "float8",
     )
 }
 
-fn append_utf8(
-    builder: &mut StringBuilder,
-    value: Option<&FlushColumnValue>,
-) -> Result<(), String> {
+fn append_utf8(builder: &mut StringBuilder, value: Option<&CellValue>) -> Result<(), String> {
     match value {
-        None | Some(FlushColumnValue::Null) => builder.append_null(),
-        Some(FlushColumnValue::Utf8(v)) => builder.append_value(v.as_str()),
+        None | Some(CellValue::Null) => builder.append_null(),
+        Some(CellValue::Utf8(v)) => builder.append_value(v.as_str()),
         Some(other) => {
             return Err(format!("expected utf8 flush value, got {other:?}"));
         }
@@ -231,13 +205,16 @@ fn append_utf8(
 
 fn append_timestamptz(
     builder: &mut TimestampMicrosecondBuilder,
-    value: Option<&FlushColumnValue>,
+    value: Option<&CellValue>,
 ) -> Result<(), String> {
     append_typed(
         builder,
         value,
         |cell| match cell {
-            FlushColumnValue::TimestamptzMicros(v) => Some(*v),
+            // Arrow stores Unix-epoch micros; CellValue is PostgreSQL-epoch.
+            CellValue::TimestamptzMicros(v) => {
+                Some(v.saturating_add(koldstore_sortkey::PG_EPOCH_MICROS_FROM_UNIX))
+            }
             _ => None,
         },
         "timestamptz",
@@ -263,7 +240,7 @@ impl TypedColumnBuilder {
         }
     }
 
-    fn append(&mut self, value: Option<&FlushColumnValue>) -> Result<(), String> {
+    fn append(&mut self, value: Option<&CellValue>) -> Result<(), String> {
         match self {
             Self::Bool(builder) => append_bool(builder, value),
             Self::Int16(builder) => append_int16(builder, value),
@@ -344,7 +321,7 @@ impl CleanColdRecordBatchBuilder {
     /// type does not match the column schema.
     pub fn push_typed_row(
         &mut self,
-        column_values: &[FlushColumnValue],
+        column_values: &[CellValue],
         primary_key_columns: &[String],
         seq: i64,
         op: i16,
@@ -369,7 +346,7 @@ impl CleanColdRecordBatchBuilder {
             .zip(column_values.iter())
         {
             let cell = if (deleted && !primary_key_columns.iter().any(|pk| pk == &column.name))
-                || matches!(value, FlushColumnValue::Null)
+                || matches!(value, CellValue::Null)
             {
                 None
             } else {
@@ -405,7 +382,7 @@ impl CleanColdRecordBatchBuilder {
 
         for (builder, column) in self.builders.iter_mut().zip(self.columns.iter()) {
             let cell = plan_value_to_flush_cell(column.pg_type, row.values.get(&column.name))?;
-            builder.append(if matches!(cell, FlushColumnValue::Null) {
+            builder.append(if matches!(cell, CellValue::Null) {
                 None
             } else {
                 Some(&cell)
@@ -448,30 +425,24 @@ impl CleanColdRecordBatchBuilder {
 fn plan_value_to_flush_cell(
     pg_type: PgType,
     value: Option<&serde_json::Value>,
-) -> Result<FlushColumnValue, String> {
+) -> Result<CellValue, String> {
     if value.is_none() || matches!(value, Some(serde_json::Value::Null)) {
-        return Ok(FlushColumnValue::Null);
+        return Ok(CellValue::Null);
     }
     let value = value.expect("checked for null");
     match pg_type {
-        PgType::Bool => Ok(FlushColumnValue::Bool(
-            json_bool(Some(value))?.expect("non-null"),
-        )),
-        PgType::Int2 => Ok(FlushColumnValue::Int16(
-            json_i16(Some(value))?.expect("non-null"),
-        )),
-        PgType::Int4 => Ok(FlushColumnValue::Int32(
+        PgType::Bool => Ok(CellValue::Bool(json_bool(Some(value))?.expect("non-null"))),
+        PgType::Int2 => Ok(CellValue::Int16(json_i16(Some(value))?.expect("non-null"))),
+        PgType::Int4 => Ok(CellValue::Int32(
             json_i64(Some(value))?
                 .and_then(|value| i32::try_from(value).ok())
                 .ok_or_else(|| format!("int4 value out of range: {value}"))?,
         )),
-        PgType::Int8 => Ok(FlushColumnValue::Int64(
-            json_i64(Some(value))?.expect("non-null"),
-        )),
-        PgType::Float4 => Ok(FlushColumnValue::Float32(
+        PgType::Int8 => Ok(CellValue::Int64(json_i64(Some(value))?.expect("non-null"))),
+        PgType::Float4 => Ok(CellValue::Float32(
             json_f32(Some(value))?.expect("non-null"),
         )),
-        PgType::Float8 => Ok(FlushColumnValue::Float64(
+        PgType::Float8 => Ok(CellValue::Float64(
             json_f64(Some(value))?.expect("non-null"),
         )),
         PgType::Text
@@ -479,16 +450,18 @@ fn plan_value_to_flush_cell(
         | PgType::Uuid
         | PgType::Jsonb
         | PgType::TextArray
-        | PgType::Bytea => Ok(FlushColumnValue::Utf8(
+        | PgType::Bytea => Ok(CellValue::Utf8(
             json_string_cell(Some(value))?.expect("non-null"),
         )),
         PgType::Timestamptz => {
             let text = json_string_cell(Some(value))?.expect("non-null");
-            let micros = chrono::DateTime::parse_from_rfc3339(&text)
+            let unix_micros = chrono::DateTime::parse_from_rfc3339(&text)
                 .or_else(|_| chrono::DateTime::parse_from_str(&text, "%Y-%m-%d %H:%M:%S%.f%:z"))
                 .map(|timestamp| timestamp.timestamp_micros())
                 .map_err(|error| format!("unsupported timestamp literal `{text}`: {error}"))?;
-            Ok(FlushColumnValue::TimestamptzMicros(micros))
+            Ok(CellValue::TimestamptzMicros(unix_micros.saturating_sub(
+                koldstore_sortkey::PG_EPOCH_MICROS_FROM_UNIX,
+            )))
         }
     }
 }
@@ -508,10 +481,7 @@ mod tests {
 
         builder
             .push_typed_row(
-                &[
-                    FlushColumnValue::Int64(7),
-                    FlushColumnValue::Utf8("evt-1".to_string()),
-                ],
+                &[CellValue::Int64(7), CellValue::Utf8("evt-1".to_string())],
                 &primary_key,
                 42,
                 1,

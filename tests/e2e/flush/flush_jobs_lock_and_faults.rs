@@ -16,7 +16,7 @@ use tokio_postgres::Client;
 use crate::common;
 use crate::flush::harness::{
     assert_flush_load_invariants, barrier_lock, barrier_unlock, connect_peer, flush_table_on,
-    is_retryable_concurrency_error, wait_until_barrier_waiter,
+    flush_table_retrying_entry_locks, is_retryable_concurrency_error, wait_until_barrier_waiter,
 };
 
 /// Matches `TABLE_JOB_LOCK_NAMESPACE` in `job_lock.rs` (single-bigint advisory key).
@@ -195,12 +195,8 @@ async fn drop_table_during_flush_after_manifest_publish() -> Result<()> {
             flush_client
                 .batch_execute("SET koldstore.failpoint = 'wait:after_manifest_publish';")
                 .await?;
-            let result = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&flush_relation],
-                )
-                .await;
+            let result =
+                flush_table_retrying_entry_locks(&flush_client, &flush_relation, false).await;
             flush_client
                 .batch_execute("SET koldstore.failpoint = '';")
                 .await
@@ -438,11 +434,7 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
             first
                 .batch_execute("SET koldstore.failpoint = 'wait:after_claim';")
                 .await?;
-            let row = first
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&first_relation],
-                )
+            let row = flush_table_retrying_entry_locks(&first, &first_relation, false)
                 .await
                 .context("first flush_table")?;
             first
@@ -532,11 +524,7 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
             flush_a
                 .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
                 .await?;
-            let _ = flush_a
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&relation_a],
-                )
+            let _ = flush_table_retrying_entry_locks(&flush_a, &relation_a, false)
                 .await
                 .context("flush A")?;
             flush_a
@@ -607,12 +595,8 @@ async fn flush_fails_when_storage_directory_removed_mid_flight() -> Result<()> {
             flush_client
                 .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
                 .await?;
-            let result = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&flush_relation],
-                )
-                .await;
+            let result =
+                flush_table_retrying_entry_locks(&flush_client, &flush_relation, false).await;
             flush_client
                 .batch_execute("SET koldstore.failpoint = '';")
                 .await
@@ -700,12 +684,7 @@ async fn flush_fails_when_storage_root_replaced_with_file_mid_flight() -> Result
             flush_client
                 .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
                 .await?;
-            let _ = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&flush_relation],
-                )
-                .await;
+            let _ = flush_table_retrying_entry_locks(&flush_client, &flush_relation, false).await;
             flush_client
                 .batch_execute("SET koldstore.failpoint = '';")
                 .await
@@ -769,11 +748,7 @@ async fn cancel_running_flush_releases_job_lock_for_retry() -> Result<()> {
             flush_client
                 .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
                 .await?;
-            let row = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&flush_relation],
-                )
+            let row = flush_table_retrying_entry_locks(&flush_client, &flush_relation, false)
                 .await
                 .context("flush under cancel")?;
             flush_client

@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
-use parquet::schema::types::SchemaDescriptor;
 
 use crate::object_reader::ObjectStoreParquetReader;
-use crate::prune::{bloom_may_contain, column_index, select_row_groups_from_metadata};
+use crate::prune::{
+    bloom_may_contain, column_index, prune_row_groups_by_seq_stats, select_row_groups_from_metadata,
+};
 use crate::schema::PgColumn;
 
 use super::decode::{application_columns_for_read, clean_rows_from_batch, projection_mask};
@@ -301,44 +302,6 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         footer_cache_hit,
     };
     Ok((rows, profile))
-}
-
-/// Footer-stats seq/commit-seq prune (no I/O).
-fn prune_row_groups_by_seq_stats(
-    metadata: &parquet::file::metadata::ParquetMetaData,
-    schema: &SchemaDescriptor,
-    row_groups: &[usize],
-    column: &str,
-    min: i64,
-    max: i64,
-) -> Vec<usize> {
-    let Some(column_idx) = schema.columns().iter().position(|c| c.name() == column) else {
-        return row_groups.to_vec();
-    };
-    row_groups
-        .iter()
-        .copied()
-        .filter(|&rg_index| {
-            let Some(stats) = metadata.row_group(rg_index).column(column_idx).statistics() else {
-                return true;
-            };
-            match stats {
-                parquet::file::statistics::Statistics::Int64(values) => values
-                    .min_opt()
-                    .zip(values.max_opt())
-                    .map(|(group_min, group_max)| *group_max >= min && *group_min <= max)
-                    .unwrap_or(true),
-                parquet::file::statistics::Statistics::Int32(values) => values
-                    .min_opt()
-                    .zip(values.max_opt())
-                    .map(|(group_min, group_max)| {
-                        i64::from(*group_max) >= min && i64::from(*group_min) <= max
-                    })
-                    .unwrap_or(true),
-                _ => true,
-            }
-        })
-        .collect()
 }
 
 async fn refine_row_groups_with_bloom(

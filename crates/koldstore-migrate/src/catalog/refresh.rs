@@ -252,13 +252,12 @@ mod tests {
     fn refresh_metadata_resolves_scope_name_from_column_id() {
         let active = active_context();
         let catalog = catalog_with_renames();
-        let metadata =
-            registration_metadata_for_refresh(
-                TableOid::from_raw(42),
-                &active,
-                &catalog,
-                &pk_shape("note_id"),
-            );
+        let metadata = registration_metadata_for_refresh(
+            TableOid::from_raw(42),
+            &active,
+            &catalog,
+            &pk_shape("note_id"),
+        );
         assert_eq!(metadata.scope_column.as_deref(), Some("owner_id"));
         assert_eq!(metadata.primary_key[0].name, "note_id");
     }

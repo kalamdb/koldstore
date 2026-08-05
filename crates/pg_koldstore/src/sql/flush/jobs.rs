@@ -20,28 +20,25 @@ struct PendingFlushJobWire {
 pub(super) fn ensure_flush_job(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
-) -> Result<(uuid::Uuid, bool), String> {
+) -> crate::error::PgResult<(uuid::Uuid, bool)> {
     use pgrx::datum::DatumWithOid;
 
     // Caller must hold the table-job lock. Any durable `running` row here has no
     // live owner (crash / abandoned statement) — mark error so uniqueness clears.
     abandon_running_flush_jobs(table_oid)?;
 
-    let lookup = plan_lookup_active_inline_flush_job().map_err(|error| error.to_string())?;
-    let existing = crate::spi::select_one::<String>(&lookup, &[DatumWithOid::from(table_oid)])
-        .map_err(|error| error.to_string())?
+    let lookup = plan_lookup_active_inline_flush_job()
+        .map_err(crate::error::PgAdapterError::from_display)?;
+    let existing = crate::spi::select_one::<String>(&lookup, &[DatumWithOid::from(table_oid)])?
         .filter(|value| !value.is_empty());
     if let Some(existing) = existing {
-        let wire: PendingFlushJobWire =
-            serde_json::from_str(&existing).map_err(|error| error.to_string())?;
-        return Ok((
-            uuid::Uuid::parse_str(&wire.id).map_err(|error| error.to_string())?,
-            force || wire.force,
-        ));
+        let wire: PendingFlushJobWire = serde_json::from_str(&existing)?;
+        return Ok((uuid::Uuid::parse_str(&wire.id)?, force || wire.force));
     }
 
     let job_id = uuid::Uuid::new_v4();
-    let insert = plan_insert_inline_flush_job().map_err(|error| error.to_string())?;
+    let insert =
+        plan_insert_inline_flush_job().map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &insert,
         &[
@@ -49,27 +46,28 @@ pub(super) fn ensure_flush_job(
             DatumWithOid::from(table_oid),
             DatumWithOid::from(force),
         ],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     Ok((job_id, force))
 }
 
-pub(crate) fn abandon_running_flush_jobs(table_oid: pgrx::pg_sys::Oid) -> Result<u64, String> {
+pub(crate) fn abandon_running_flush_jobs(
+    table_oid: pgrx::pg_sys::Oid,
+) -> crate::error::PgResult<u64> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_abandon_running_flush_jobs().map_err(|error| error.to_string())?;
-    let rows = crate::spi::update(&statement, &[DatumWithOid::from(table_oid)])
-        .map_err(|error| error.to_string())?;
+    let statement =
+        plan_abandon_running_flush_jobs().map_err(crate::error::PgAdapterError::from_display)?;
+    let rows = crate::spi::update(&statement, &[DatumWithOid::from(table_oid)])?;
     Ok(rows.rows_affected)
 }
 
 /// Reclaims durable `running` flush jobs whose table-job lock is free.
-pub(crate) fn reclaim_orphan_running_flush_jobs() -> Result<u64, String> {
-    let statement = plan_list_running_flush_table_oids().map_err(|error| error.to_string())?;
-    let json = crate::spi::select_one::<String>(&statement, &[])
-        .map_err(|error| error.to_string())?
-        .unwrap_or_else(|| "[]".to_string());
-    let oids: Vec<i64> = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+pub(crate) fn reclaim_orphan_running_flush_jobs() -> crate::error::PgResult<u64> {
+    let statement =
+        plan_list_running_flush_table_oids().map_err(crate::error::PgAdapterError::from_display)?;
+    let json =
+        crate::spi::select_one::<String>(&statement, &[])?.unwrap_or_else(|| "[]".to_string());
+    let oids: Vec<i64> = serde_json::from_str(&json)?;
     let mut abandoned = 0_u64;
     for oid_i64 in oids {
         let table_oid = pgrx::pg_sys::Oid::from(u32::try_from(oid_i64).unwrap_or(0));
@@ -87,10 +85,11 @@ pub(super) fn mark_flush_job_running(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
     progress_total: i64,
-) -> Result<(), String> {
+) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_mark_inline_flush_job_running().map_err(|error| error.to_string())?;
+    let statement =
+        plan_mark_inline_flush_job_running().map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
@@ -98,8 +97,7 @@ pub(super) fn mark_flush_job_running(
             DatumWithOid::from(table_oid),
             DatumWithOid::from(progress_total),
         ],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     Ok(())
 }
 
@@ -117,10 +115,11 @@ pub(super) fn update_flush_job_progress(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
     progress: FlushJobProgressUpdate<'_>,
-) -> Result<(), String> {
+) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_update_inline_flush_job_progress().map_err(|error| error.to_string())?;
+    let statement = plan_update_inline_flush_job_progress()
+        .map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
@@ -132,8 +131,7 @@ pub(super) fn update_flush_job_progress(
             DatumWithOid::from(progress.phase),
             DatumWithOid::from(progress.progress_total),
         ],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     Ok(())
 }
 
@@ -143,10 +141,11 @@ pub(super) fn mark_flush_job_completed(
     rows_flushed: i64,
     checkpoint_seq: i64,
     batches_completed: i32,
-) -> Result<(), String> {
+) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_mark_inline_flush_job_completed().map_err(|error| error.to_string())?;
+    let statement = plan_mark_inline_flush_job_completed()
+        .map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
@@ -156,8 +155,7 @@ pub(super) fn mark_flush_job_completed(
             DatumWithOid::from(checkpoint_seq),
             DatumWithOid::from(batches_completed),
         ],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     clear_table_cancel_request(table_oid)?;
     Ok(())
 }
@@ -166,10 +164,11 @@ pub(super) fn mark_flush_job_failed(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
     error_trace: &str,
-) -> Result<(), String> {
+) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_mark_inline_flush_job_failed().map_err(|error| error.to_string())?;
+    let statement =
+        plan_mark_inline_flush_job_failed().map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
@@ -177,8 +176,7 @@ pub(super) fn mark_flush_job_failed(
             DatumWithOid::from(table_oid),
             DatumWithOid::from(error_trace),
         ],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     clear_table_cancel_request(table_oid)?;
     Ok(())
 }
@@ -188,10 +186,10 @@ pub(crate) fn list_jobs_json(
     statuses: Option<serde_json::Value>,
     job_types: Option<serde_json::Value>,
     table_oid: Option<pgrx::pg_sys::Oid>,
-) -> Result<serde_json::Value, String> {
+) -> crate::error::PgResult<serde_json::Value> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_list_jobs().map_err(|error| error.to_string())?;
+    let statement = plan_list_jobs().map_err(crate::error::PgAdapterError::from_display)?;
     let text = crate::spi::select_one::<String>(
         &statement,
         &[
@@ -199,45 +197,44 @@ pub(crate) fn list_jobs_json(
             DatumWithOid::from(job_types.map(pgrx::JsonB)),
             DatumWithOid::from(table_oid),
         ],
-    )
-    .map_err(|error| error.to_string())?
+    )?
     .unwrap_or_else(|| "[]".to_string());
-    serde_json::from_str(&text).map_err(|error| error.to_string())
+    serde_json::from_str(&text).map_err(crate::error::PgAdapterError::from)
 }
 
 pub(super) fn flush_cancel_requested(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
-) -> Result<bool, String> {
+) -> crate::error::PgResult<bool> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_flush_cancel_requested().map_err(|error| error.to_string())?;
+    let statement =
+        plan_flush_cancel_requested().map_err(crate::error::PgAdapterError::from_display)?;
     Ok(crate::spi::select_one::<bool>(
         &statement,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
         ],
-    )
-    .map_err(|error| error.to_string())?
+    )?
     .unwrap_or(false))
 }
 
 pub(super) fn mark_flush_job_cancelled(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
-) -> Result<(), String> {
+) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_mark_inline_flush_job_cancelled().map_err(|error| error.to_string())?;
+    let statement = plan_mark_inline_flush_job_cancelled()
+        .map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
         ],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     clear_table_cancel_request(table_oid)?;
     Ok(())
 }
@@ -248,11 +245,11 @@ pub(super) fn mark_flush_job_completed_after_cancel(
     rows_flushed: i64,
     checkpoint_seq: i64,
     batches_completed: i32,
-) -> Result<(), String> {
+) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement =
-        plan_mark_inline_flush_job_completed_after_cancel().map_err(|error| error.to_string())?;
+    let statement = plan_mark_inline_flush_job_completed_after_cancel()
+        .map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
@@ -262,54 +259,49 @@ pub(super) fn mark_flush_job_completed_after_cancel(
             DatumWithOid::from(checkpoint_seq),
             DatumWithOid::from(batches_completed),
         ],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     clear_table_cancel_request(table_oid)?;
     Ok(())
 }
 
-fn clear_table_cancel_request(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
+fn clear_table_cancel_request(table_oid: pgrx::pg_sys::Oid) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_clear_table_cancel_request().map_err(|error| error.to_string())?;
-    crate::spi::update(&statement, &[DatumWithOid::from(table_oid)])
-        .map_err(|error| error.to_string())?;
+    let statement =
+        plan_clear_table_cancel_request().map_err(crate::error::PgAdapterError::from_display)?;
+    crate::spi::update(&statement, &[DatumWithOid::from(table_oid)])?;
     Ok(())
 }
 
 /// Requests cancel for one job. Returns true when a row was updated.
-pub(crate) fn request_cancel_job(job_id: uuid::Uuid) -> Result<bool, String> {
+pub(crate) fn request_cancel_job(job_id: uuid::Uuid) -> crate::error::PgResult<bool> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_request_cancel_job().map_err(|error| error.to_string())?;
+    let statement =
+        plan_request_cancel_job().map_err(crate::error::PgAdapterError::from_display)?;
     let updated = crate::spi::update_one::<String>(
         &statement,
         &[DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id))],
-    )
-    .map_err(|error| error.to_string())?;
+    )?;
     Ok(updated.is_some())
 }
 
 /// Requests cancel for all active jobs on a table. Returns affected row count.
-pub(crate) fn request_cancel_table_jobs(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+pub(crate) fn request_cancel_table_jobs(
+    table_oid: pgrx::pg_sys::Oid,
+) -> crate::error::PgResult<i64> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_request_cancel_table_jobs().map_err(|error| error.to_string())?;
-    Ok(
-        crate::spi::update_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])
-            .map_err(|error| error.to_string())?
-            .unwrap_or(0),
-    )
+    let statement =
+        plan_request_cancel_table_jobs().map_err(crate::error::PgAdapterError::from_display)?;
+    Ok(crate::spi::update_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])?.unwrap_or(0))
 }
 
 /// DROP/unmanage: cancel pending hard, signal running soft. Returns touched count.
-pub(crate) fn cancel_jobs_for_drop(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
+pub(crate) fn cancel_jobs_for_drop(table_oid: pgrx::pg_sys::Oid) -> crate::error::PgResult<i64> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_cancel_jobs_for_drop().map_err(|error| error.to_string())?;
-    Ok(
-        crate::spi::update_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])
-            .map_err(|error| error.to_string())?
-            .unwrap_or(0),
-    )
+    let statement =
+        plan_cancel_jobs_for_drop().map_err(crate::error::PgAdapterError::from_display)?;
+    Ok(crate::spi::update_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])?.unwrap_or(0))
 }

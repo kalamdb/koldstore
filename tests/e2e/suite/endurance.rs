@@ -57,22 +57,7 @@ async fn repeated_flush_and_hot_dml_cycles_remain_bounded_on_pgrx() -> Result<()
             }
 
             common::fence_async_mirror(&db.client).await?;
-            let flushed = db
-                .client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-                    &[&table.relation],
-                )
-                .await?;
-            let job_id: String = flushed.get(0);
-            let progress = db
-                .client
-                .query_one(
-                    "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
-                    &[&job_id],
-                )
-                .await?;
-            let flushed: i64 = progress.get(0);
+            let flushed = db.flush_table_with_force(&table.relation, true).await?;
             assert!(flushed > 0);
             common::assert_cold_metadata_present(&db.client, &table.relation).await?;
             common::assert_no_active_jobs(&db.client, &table.relation).await?;

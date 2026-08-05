@@ -128,18 +128,15 @@ impl NativeHotCursor {
             return Ok(None);
         }
         let child = self.child;
-        let pk_columns = self.pk_columns.clone();
-        let catalog_columns = self.catalog_columns.clone();
-        let slot_attnums = self.slot_attnums.clone();
         let batch_size = self.batch_size;
         let rows =
             crate::catalog::owner::with_relation_owner_for_merge(self.relation_owner, || {
                 with_hook_disabled(|| unsafe {
                     pull_hot_rows_from_child(
                         child,
-                        &pk_columns,
-                        &catalog_columns,
-                        &slot_attnums,
+                        &self.pk_columns,
+                        &self.catalog_columns,
+                        &self.slot_attnums,
                         batch_size,
                     )
                 })

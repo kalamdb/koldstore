@@ -59,9 +59,7 @@ pub const fn next_soft_fail_backoff_ms(current_ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        next_soft_fail_backoff_ms, SOFT_FAIL_BACKOFF_MAX_MS, SOFT_FAIL_BACKOFF_MIN_MS,
-    };
+    use super::{next_soft_fail_backoff_ms, SOFT_FAIL_BACKOFF_MAX_MS, SOFT_FAIL_BACKOFF_MIN_MS};
 
     #[test]
     fn soft_fail_backoff_starts_at_min_and_doubles_to_cap() {

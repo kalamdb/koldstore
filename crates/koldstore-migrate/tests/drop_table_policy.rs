@@ -7,8 +7,12 @@ fn drop_table_cleanup_plan_records_retain_delete_and_failed_policies() {
 
     let table = QualifiedTableName::parse("app.items").unwrap();
 
-    let retain =
-        plan_drop_table_cleanup(table.clone(), koldstore_common::TableOid::from_raw(42), DropTableCleanupPolicy::Retain).unwrap();
+    let retain = plan_drop_table_cleanup(
+        table.clone(),
+        koldstore_common::TableOid::from_raw(42),
+        DropTableCleanupPolicy::Retain,
+    )
+    .unwrap();
     assert_eq!(retain.outcome, DropTableCleanupOutcome::MetadataDeactivated);
     assert!(retain
         .statements
@@ -16,8 +20,12 @@ fn drop_table_cleanup_plan_records_retain_delete_and_failed_policies() {
         .any(|statement| statement.sql.contains("UPDATE koldstore.schemas")));
     assert!(retain.audit_job.is_none());
 
-    let delete =
-        plan_drop_table_cleanup(table.clone(), koldstore_common::TableOid::from_raw(42), DropTableCleanupPolicy::Delete).unwrap();
+    let delete = plan_drop_table_cleanup(
+        table.clone(),
+        koldstore_common::TableOid::from_raw(42),
+        DropTableCleanupPolicy::Delete,
+    )
+    .unwrap();
     assert_eq!(
         delete.outcome,
         DropTableCleanupOutcome::DeleteArtifactsQueued
@@ -36,7 +44,12 @@ fn drop_table_cleanup_plan_records_retain_delete_and_failed_policies() {
         delete_audit.sql
     );
 
-    let failed = plan_drop_table_cleanup(table, koldstore_common::TableOid::from_raw(42), DropTableCleanupPolicy::Failed).unwrap();
+    let failed = plan_drop_table_cleanup(
+        table,
+        koldstore_common::TableOid::from_raw(42),
+        DropTableCleanupPolicy::Failed,
+    )
+    .unwrap();
     assert_eq!(failed.outcome, DropTableCleanupOutcome::RecoveryRequired);
     let failed_audit = failed.audit_job.expect("failed policy emits audit job");
     assert!(failed_audit.sql.contains("error_trace"));
