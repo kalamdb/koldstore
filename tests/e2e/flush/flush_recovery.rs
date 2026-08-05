@@ -52,6 +52,7 @@ async fn flush_recovery_can_distinguish_manifested_and_orphaned_files_on_pgrx() 
         let db = common::TestDb::start(target, "flush_recovery").await?;
         let table = db.create_indexed_items_table("recovery_items", 24).await?;
         db.manage_shared(&table.relation, "id").await?;
+        common::fence_async_mirror(&db.client).await?;
         db.flush_table(&table.relation).await?;
 
         let manifest_row = db
@@ -134,6 +135,7 @@ async fn flush_republishes_manifest_with_short_shard_name_and_removes_old_versio
         db.manage_shared(&table.relation, "id")
             .await
             .context("manage manifest fixture")?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(
             db.flush_table(&table.relation)
                 .await
@@ -182,7 +184,12 @@ async fn flush_republishes_manifest_with_short_shard_name_and_removes_old_versio
 
         let parquet_before = std::fs::read_dir(first_shard_path.parent().expect("shard parent"))?
             .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == std::ffi::OsStr::new("parquet")))
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == std::ffi::OsStr::new("parquet"))
+            })
             .map(|entry| entry.file_name())
             .collect::<BTreeSet<_>>();
         assert!(
@@ -196,6 +203,7 @@ async fn flush_republishes_manifest_with_short_shard_name_and_removes_old_versio
                 table.relation
             ))
             .await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(
             db.flush_table(&table.relation)
                 .await
@@ -267,6 +275,7 @@ async fn five_filesystem_readers_survive_repeated_manifest_flushes() -> Result<(
         let db = common::TestDb::start(target, "manifest_reader_race").await?;
         let table = db.create_indexed_items_table("reader_items", 16).await?;
         db.manage_shared(&table.relation, "id").await?;
+        common::fence_async_mirror(&db.client).await?;
         assert!(db.flush_table(&table.relation).await? > 0);
 
         let table_prefix: String = db
@@ -322,6 +331,7 @@ async fn five_filesystem_readers_survive_repeated_manifest_flushes() -> Result<(
                     table.relation
                 ))
                 .await?;
+            common::fence_async_mirror(&db.client).await?;
             assert!(db.flush_table(&table.relation).await? > 0);
         }
         stop_readers.store(true, Ordering::Release);
@@ -346,6 +356,7 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
         let db = common::TestDb::start(target, "flush_manifest_retry").await?;
         let table = db.create_indexed_items_table("retry_items", 16).await?;
         db.manage_shared(&table.relation, "id").await?;
+        common::fence_async_mirror(&db.client).await?;
         db.flush_table(&table.relation).await?;
 
         let table_prefix: String = db
@@ -381,22 +392,8 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
             .push(first_segment);
         std::fs::write(&absolute_shard_path, serde_json::to_vec_pretty(&shard)?)?;
 
-        // In async mode, stop the background applier so the next INSERT stays in
-        // WAL until flush's own fence applies it in the same transaction. That is
-        // the path where pending counter deltas must be visible to flush selection.
-        let dbname: String = db
-            .client
-            .query_one("SELECT current_database()", &[])
-            .await?
-            .get(0);
-        db.client
-            .batch_execute(&format!(
-                "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off; \
-                 SET koldstore.internal_async_mirror_worker = off"
-            ))
-            .await?;
-        let _ = common::terminate_async_worker(&db.client).await?;
-
+        // Nested inline skips pre-select apply; drain WAL before flush so the
+        // INSERT is visible to selection (do not rely on flush phase-0).
         db.client
             .batch_execute(&format!(
                 r#"
@@ -407,19 +404,9 @@ async fn flush_retry_rebuilds_manifest_from_catalog_instead_of_appending_stale_f
                 table.relation
             ))
             .await?;
+        common::fence_async_mirror(&db.client).await?;
         let flush_result = db.flush_table(&table.relation).await;
 
-        let dbname: String = db
-            .client
-            .query_one("SELECT current_database()", &[])
-            .await?
-            .get(0);
-        db.client
-            .batch_execute(&format!(
-                "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
-                 RESET koldstore.internal_async_mirror_worker"
-            ))
-            .await?;
         flush_result?;
 
         let rebuilt = koldstore_manifest::try_load_manifest_from_path(&absolute_manifest_path)

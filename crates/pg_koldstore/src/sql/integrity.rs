@@ -36,9 +36,7 @@ pub fn verify_table_integrity_pg(table_name: pgrx::PgRelation) -> pgrx::JsonB {
 }
 
 #[cfg(feature = "pg")]
-fn verify_table_integrity_impl(
-    table_oid: pgrx::pg_sys::Oid,
-) -> Result<serde_json::Value, String> {
+fn verify_table_integrity_impl(table_oid: pgrx::pg_sys::Oid) -> Result<serde_json::Value, String> {
     use pgrx::datum::DatumWithOid;
 
     let statement = plan_verify_table_integrity().map_err(|error| error.to_string())?;

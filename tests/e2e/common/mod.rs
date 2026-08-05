@@ -9,9 +9,11 @@ mod db;
 mod db_pool;
 mod describe_table;
 pub mod equality;
+mod flush_executor;
 mod log;
 pub mod memory;
 mod minio;
+mod oracle;
 mod sql;
 
 pub use assertions::{
@@ -38,15 +40,26 @@ pub use cluster::{
     require_pgrx_server, require_pgrx_server_sync, scenario_pg_matrix, wait_for_postgres, PgTarget,
     PgrxServer,
 };
-pub use db::{flush_table_job_id, is_flush_apply_lock_busy, FixtureStorage, ManagedTable, TestDb};
+pub use db::{
+    flush_table_job_id, is_flush_apply_lock_busy, wait_for_flush_job_terminal, FixtureStorage,
+    ManagedTable, TestDb,
+};
 pub use describe_table::{
     assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
 };
 pub use equality::{
     assert_pk_unique, assert_relations_equal, assert_row_counts_equal, relation_row_count,
 };
+pub use flush_executor::{
+    flush_executor_backend_type, flush_executor_pids, sigkill_flush_executors, sigkill_pid,
+    wait_for_flush_executor_pids, wait_until_no_flush_executors, FLUSH_EXECUTOR_BACKEND_PREFIX,
+};
 pub use log::{log, log_always, log_step, log_step_always, timed_sync, verbose_enabled, StepGuard};
 pub use minio::{minio_enabled, MinioConfig};
+pub use oracle::{
+    apply_dml_to_both, assert_managed_matches_reference, assert_managed_matches_reference_ordered,
+    clone_reference_sql, create_reference_clone,
+};
 pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
     relation_size, row_count, row_count_from_sql, RelationSize, SQL_DEFAULT_COLD_OBJECT_KEY,

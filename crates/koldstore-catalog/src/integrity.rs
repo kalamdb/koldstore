@@ -306,12 +306,12 @@ mod tests {
             .sql
             .contains("active_segment_row_group_cardinality"));
         assert!(statement.sql.contains("no_duplicate_active_pass"));
-        assert!(statement
-            .sql
-            .contains("active_segment_byte_size_positive"));
+        assert!(statement.sql.contains("active_segment_byte_size_positive"));
         assert!(statement.sql.contains("'auto_fixed', false"));
         assert!(statement.sql.contains("'truncated'"));
-        assert!(statement.sql.contains(&format!("LIMIT {SEGMENT_ID_SAMPLE_LIMIT}")));
+        assert!(statement
+            .sql
+            .contains(&format!("LIMIT {SEGMENT_ID_SAMPLE_LIMIT}")));
         assert!(statement.sql.contains("$2::bigint"));
     }
 }

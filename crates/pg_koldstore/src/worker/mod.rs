@@ -14,6 +14,8 @@ mod launcher;
 #[cfg(feature = "pg")]
 mod r#loop;
 #[cfg(feature = "pg")]
+pub(crate) mod txn;
+#[cfg(feature = "pg")]
 pub(crate) mod wake;
 
 #[cfg(feature = "pg")]

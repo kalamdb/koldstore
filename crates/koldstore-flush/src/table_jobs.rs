@@ -44,8 +44,7 @@ pub enum TableFlushJobError {
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_lookup_active_flush_job() -> std::result::Result<SqlStatement, TableFlushJobError>
-{
+pub fn plan_lookup_active_flush_job() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::read_with_params(
         "lookup active flush job",
         &format!(
@@ -163,8 +162,7 @@ VALUES (
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_flush_job_running() -> std::result::Result<SqlStatement, TableFlushJobError>
-{
+pub fn plan_mark_flush_job_running() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
         "mark flush job running",
         r#"
@@ -198,8 +196,7 @@ WHERE id = $1::uuid
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_update_flush_job_progress(
-) -> std::result::Result<SqlStatement, TableFlushJobError> {
+pub fn plan_update_flush_job_progress() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
         "update flush job progress",
         r#"
@@ -231,8 +228,7 @@ WHERE id = $1::uuid
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_flush_job_completed(
-) -> std::result::Result<SqlStatement, TableFlushJobError> {
+pub fn plan_mark_flush_job_completed() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
         "mark flush job completed",
         r#"
@@ -278,8 +274,7 @@ WHERE id = $1::uuid
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_flush_job_failed() -> std::result::Result<SqlStatement, TableFlushJobError>
-{
+pub fn plan_mark_flush_job_failed() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
         "mark flush job failed",
         r#"
@@ -603,8 +598,7 @@ pub fn plan_clear_table_cancel_request() -> std::result::Result<SqlStatement, Ta
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_flush_job_cancelled(
-) -> std::result::Result<SqlStatement, TableFlushJobError> {
+pub fn plan_mark_flush_job_cancelled() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
         "mark flush job cancelled",
         r#"
@@ -687,11 +681,9 @@ WHERE id = $1::uuid
 #[cfg(test)]
 mod tests {
     use super::{
-        flush_phase, plan_insert_flush_job, plan_list_jobs,
-        plan_mark_flush_job_cancelled, plan_mark_flush_job_completed,
-        plan_mark_flush_job_failed, plan_mark_flush_job_running,
-        plan_reclaim_running_flush_jobs, plan_request_cancel_job,
-        plan_update_flush_job_progress,
+        flush_phase, plan_insert_flush_job, plan_list_jobs, plan_mark_flush_job_cancelled,
+        plan_mark_flush_job_completed, plan_mark_flush_job_failed, plan_mark_flush_job_running,
+        plan_reclaim_running_flush_jobs, plan_request_cancel_job, plan_update_flush_job_progress,
     };
 
     #[test]
@@ -716,7 +708,9 @@ mod tests {
         assert!(statement
             .sql
             .contains("flush_seq_upper_bound = COALESCE(flush_seq_upper_bound, $5::bigint)"));
-        assert!(statement.sql.contains("started_at = COALESCE(started_at, clock_timestamp())"));
+        assert!(statement
+            .sql
+            .contains("started_at = COALESCE(started_at, clock_timestamp())"));
         assert!(statement
             .sql
             .contains(&format!("phase = '{}'", flush_phase::CLAIMED)));

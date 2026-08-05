@@ -7,6 +7,9 @@
 //!
 //! - `<name>` or `error:<name>` — abort with an error at that phase
 //! - `wait:<name>` — block on the advisory barrier lock until another session unlocks
+//! - `panic:<name>` — hard-abort the backend (`std::process::abort`; SIGKILL-equivalent
+//!   for harnesses; requires `test-failpoints`)
+//! - `sleep:<name>` — sleep ~5s then continue (requires `test-failpoints`)
 //!
 //! Prefer [`hit_typed`] with [`FlushFailpoint`] at call sites. [`hit`] remains for
 //! string-compatible callers (mirror apply constants, older tests).
@@ -15,6 +18,10 @@ pub use koldstore_flush::{FailpointAction, FlushFailpoint, FAILPOINT_NAMES};
 
 /// Advisory lock key shared with E2E isolation/crash harnesses (`"KOLD"`).
 pub const FAILPOINT_BARRIER_KEY: i64 = 0x4B4F_4C44;
+
+/// Fixed sleep duration for `sleep:` failpoints (v1; optional duration parse later).
+#[cfg(feature = "test-failpoints")]
+const FAILPOINT_SLEEP: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Hits a named failpoint if the session GUC arms it.
 ///
@@ -52,17 +59,16 @@ fn dispatch_action(action: FailpointAction, name: &str) -> Result<(), String> {
         FailpointAction::Wait => wait_barrier(name),
         #[cfg(feature = "test-failpoints")]
         FailpointAction::Panic => {
-            // Stub: SIGKILL / panic harness lands with the process-kill work.
-            Err(format!(
-                "koldstore failpoint panic stub (not implemented): {name}"
-            ))
+            // Immediate hard exit — documents SIGKILL-equivalent for process-kill
+            // harnesses. Prefer external SIGKILL from the test process in e2e.
+            pgrx::log!("koldstore failpoint panic: aborting process at {name}");
+            std::process::abort();
         }
         #[cfg(feature = "test-failpoints")]
         FailpointAction::Sleep => {
-            // Stub: timed sleep harness lands with destructive action wiring.
-            Err(format!(
-                "koldstore failpoint sleep stub (not implemented): {name}"
-            ))
+            pgrx::log!("koldstore failpoint sleep: {name} for {FAILPOINT_SLEEP:?}");
+            std::thread::sleep(FAILPOINT_SLEEP);
+            Ok(())
         }
         #[cfg(not(feature = "test-failpoints"))]
         FailpointAction::Panic | FailpointAction::Sleep => {

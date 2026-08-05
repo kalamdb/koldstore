@@ -81,6 +81,8 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
         ))
         .await?;
 
+    common::fence_async_mirror(&db.client).await?;
+
     // Arm failpoint and attempt flush (expect job failure / abort).
     db.client
         .batch_execute(&format!("SET koldstore.failpoint = '{failpoint}';"))

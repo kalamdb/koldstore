@@ -70,6 +70,15 @@ pub const MIN_MAX_PARALLEL_FLUSH_JOBS: i32 = 1;
 /// Hard cap on parallel flush executors.
 pub const MAX_MAX_PARALLEL_FLUSH_JOBS: i32 = 16;
 
+/// Days to retain terminal (`completed` / `cancelled` / `error`) jobs before purge.
+pub const JOB_RETENTION_DAYS_GUC: &str = "koldstore.job_retention_days";
+/// Default retention window (30 days).
+pub const DEFAULT_JOB_RETENTION_DAYS: i32 = 30;
+/// `0` disables automatic purge.
+pub const MIN_JOB_RETENTION_DAYS: i32 = 0;
+/// Hard cap (~10 years).
+pub const MAX_JOB_RETENTION_DAYS: i32 = 3650;
+
 /// Whether `flush_table` runs in the calling backend or enqueues for executors.
 pub const FLUSH_EXECUTION_GUC: &str = "koldstore.flush_execution";
 /// Production default: enqueue and return UUID; one-shot executors run the work.
@@ -180,6 +189,18 @@ pub const fn bounded_max_parallel_flush_jobs(value: i32) -> i32 {
         MIN_MAX_PARALLEL_FLUSH_JOBS
     } else if value > MAX_MAX_PARALLEL_FLUSH_JOBS {
         MAX_MAX_PARALLEL_FLUSH_JOBS
+    } else {
+        value
+    }
+}
+
+/// Validates and clamps `koldstore.job_retention_days` (`0` disables purge).
+#[must_use]
+pub const fn bounded_job_retention_days(value: i32) -> i32 {
+    if value < MIN_JOB_RETENTION_DAYS {
+        MIN_JOB_RETENTION_DAYS
+    } else if value > MAX_JOB_RETENTION_DAYS {
+        MAX_JOB_RETENTION_DAYS
     } else {
         value
     }

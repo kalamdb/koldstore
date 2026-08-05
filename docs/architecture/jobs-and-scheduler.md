@@ -36,12 +36,13 @@ state. The flush path records `rows_processed`, `rows_flushed`, batches,
 checkpoint sequence, duration, and phase as it progresses.
 
 The extension permits one active (`pending` or `running`) flush job per table.
-`flush_table` try-locks the table advisory lock and the database apply lock,
-then fails fast with a clear error when either is busy (including background
-auto-flush right after server start). On success it marks an orphaned running
-record as errored when no owner remains, reuses an existing pending job when
-present, and performs the work in the calling backend. The same function is
-used for manual calls and scheduler work.
+`flush_table` claims work under the **table** job lock (session lock in queue
+mode). The database **apply/slot** lock is not held for the whole flush: Parquet
+upload runs alongside background mirror apply; finalize try-locks the slot only
+for the short catch-up + prune fence. Entry paths that still need exclusive
+apply (or a busy table lock) fail fast or retry briefly rather than blocking
+clients indefinitely. See [flushing-table.md](flushing-table.md) and
+[mirror-capture.md](mirror-capture.md).
 
 Useful SQL entry points:
 

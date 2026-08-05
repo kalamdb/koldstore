@@ -192,7 +192,9 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 /// after enqueue (required for `#[pg_test]` SPI transactions).
 ///
 /// Fails immediately in inline mode when another backend holds this table's
-/// flush lock or the database apply lock.
+/// session flush lock (`flush already in progress`). Nested inline does not
+/// take the database apply/slot lock until finalize; callers must drain WAL
+/// first (`wait_for_async_mirror` / prior apply).
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
 pub fn flush_table_pg(
@@ -246,4 +248,18 @@ pub fn cancel_job_pg(job_id: pgrx::Uuid) -> bool {
 pub fn cancel_table_jobs_pg(table_name: pgrx::PgRelation) -> i64 {
     jobs::request_cancel_table_jobs(table_name.oid())
         .unwrap_or_else(|error| pgrx::error!("cancel table jobs failed: {error}"))
+}
+
+/// Purges aged terminal jobs in a small batch.
+///
+/// SQL contract: `koldstore.purge_old_jobs(batch_limit int default 100) → bigint`
+///
+/// Uses `koldstore.job_retention_days` (0 disables). Never deletes jobs still
+/// referenced by `pending` cold segments.
+#[cfg(feature = "pg")]
+#[pgrx::pg_extern(name = "purge_old_jobs", schema = "koldstore", security_definer)]
+pub fn purge_old_jobs_pg(batch_limit: pgrx::default!(i32, 100)) -> i64 {
+    let retention_days = crate::guc::job_retention_days();
+    jobs::purge_old_jobs(retention_days, batch_limit)
+        .unwrap_or_else(|error| pgrx::error!("purge old jobs failed: {error}"))
 }

@@ -127,7 +127,17 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
             .await?;
 
         db.insert_pending_flush_job(&table.relation).await?;
-        assert_eq!(db.flush_table(&table.relation).await?, 0);
+        // Path is a plain file so mkdir fails; terminal status=error → Err.
+        let flush_err = db
+            .flush_table(&table.relation)
+            .await
+            .expect_err("filesystem outage must fail the flush job");
+        assert!(
+            flush_err.to_string().contains("status=error")
+                || flush_err.to_string().contains("File exists")
+                || flush_err.to_string().contains("create storage root"),
+            "unexpected outage error: {flush_err:#}"
+        );
 
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 32);
         assert_eq!(

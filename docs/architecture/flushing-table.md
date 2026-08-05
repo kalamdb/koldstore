@@ -20,9 +20,8 @@ All flushes are **table-wide** (`scope_key = ''` in catalog).
 
 ```mermaid
 flowchart TD
-  A["flush_table_pg"] --> W["apply_available async WAL fence"]
-  W --> B["lock_table_job"]
-  B --> C["ensure_flush_job + mark_running"]
+  A["flush_table / queue executor"] --> B["session table-job lock"]
+  B --> C["claim job + fixed target_seq watermark"]
   C --> D["prepare_flush_context"]
   D --> E["refresh_active_schema_if_changed?"]
   E --> F["resolve_flush_stats"]
@@ -34,43 +33,44 @@ flowchart TD
   K --> L["manifest reconcile if needed"]
   L --> M["write derived manifest object"]
   M --> N["CAS generation + activate pending"]
-  N --> O["prune_flushed_hot_rows\nseq-range DELETE"]
-  O --> P["apply_flush_row_count_deltas"]
-  P --> Q["mark job completed"]
+  N --> O["slot lock: pre-lock catch-up + prune fence"]
+  O --> P["prune_flushed_hot_rows\nseq-range DELETE"]
+  P --> Q["apply_flush_row_count_deltas"]
+  Q --> R["mark job completed"]
 ```
 
 Internal mirror/hot SQL runs under `with_custom_scan_disabled` so the flush path
 does not recurse into `KoldMergeScan`.
 
----
+### Apply lock vs Parquet (current contract)
 
-## Phase 0 — Async mirror fence
+`flush_table_with_session_lock` / the queue executor **do not** hold the
+database apply (slot) lock during Parquet encode or object upload. The
+background WAL applier keeps writing `__cl` while that work runs, so
+`changes_since` can stay near real-time for new commits on other (and the same)
+tables.
 
-`flush_table` first calls `mirror::apply::apply_bounded` (via
-`apply_available`) and retains the last applied source commit end-LSN (`L0`).
-If the current database has no async logical slot, this is a cheap no-op.
-Otherwise it applies all committed source changes available before the
-flush takes its table lock or resolves mirror statistics.
+The slot/apply lock is acquired only inside finalize via try-lock + bounded
+retry (`with_slot_lock_retry`): pre-lock catch-up, then the prune fence. That
+short exclusive window is required so prune cannot race concurrent apply on the
+same mirror keys. See [mirror-capture.md](mirror-capture.md) and
+[async-flush-prune-race](../cases/async-flush-prune-race.md).
 
-This makes flush selection a strong consistency boundary: committed WAL changes
-are caught up before selection. See [mirror-capture.md](mirror-capture.md).
-The retained-WAL health threshold never rejects this drain path: once retention
-is high, continuing apply is the recovery action. Slot loss/invalidation and
-flush lock/time budgets remain separate fail-closed correctness boundaries.
+Manual vs automatic: `auto_flush => false` disables scheduler-driven flushes;
+operators and tests still call `flush_table` / `enqueue_flush_job` when needed.
 
-## Phase 6 — Async prune fence (after manifest publish)
+## Finalize — Async prune fence (after manifest publish)
 
 After manifest publish and before `prune_flushed_hot_rows`:
 
-1. `LOCK TABLE ONLY … IN SHARE ROW EXCLUSIVE MODE` (local `lock_timeout`)
-2. Capture durable WAL upper bound `F1`
-3. Bounded apply with `upto_lsn = F1`, skip through `L0`, no durable checkpoint
-   acknowledgement, and target-table sequences strictly above `max_seq`
-4. Existing atomic mirror+hot prune
+1. Acquire the apply/slot lock (try-lock with bounded retry)
+2. Bounded pre-lock catch-up so target-table sequences sit above `max_seq`
+3. `LOCK TABLE ONLY … IN SHARE ROW EXCLUSIVE MODE` (local `lock_timeout`)
+4. Capture durable WAL upper bound and run the prune fence apply
+5. Existing atomic mirror+hot prune, then release locks with the transaction
 
-Parquet upload stays concurrent with DML; only this short finalize window blocks
-writers. Design notes:
-[async-flush-prune-race](../cases/async-flush-prune-race.md).
+Parquet upload stays concurrent with DML and background apply; only this short
+finalize window serializes the slot.
 
 ---
 

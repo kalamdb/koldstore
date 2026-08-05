@@ -11,6 +11,7 @@ pub mod jobs_sql;
 pub mod ops;
 pub mod policy;
 pub mod recovery;
+pub mod retention;
 pub mod scheduler;
 pub mod segment_catalog;
 pub mod segment_write;
@@ -31,6 +32,7 @@ pub use ops::{
     FlushRequest, KoldstoreExecPlan, MirrorFlushSelectionPlan, OpsCommand, OpsError,
 };
 pub use policy::policy_flush_row_count;
+pub use retention::{plan_purge_old_jobs, JobRetentionError, DEFAULT_PURGE_BATCH_LIMIT};
 pub use scheduler::{
     plan_database_has_auto_flush_tables, plan_older_than_eligible_mirror_rows,
     plan_select_auto_flush_candidate_tables, scheduler_should_flush, scheduler_should_flush_parsed,

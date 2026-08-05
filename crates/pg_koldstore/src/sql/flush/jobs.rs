@@ -7,9 +7,9 @@ use koldstore_flush::{
     plan_insert_flush_job, plan_list_jobs, plan_list_running_flush_table_oids,
     plan_lookup_active_flush_job, plan_mark_flush_job_cancelled, plan_mark_flush_job_completed,
     plan_mark_flush_job_completed_after_cancel, plan_mark_flush_job_failed,
-    plan_mark_flush_job_running, plan_reclaim_running_flush_jobs, plan_request_cancel_job,
-    plan_request_cancel_table_jobs, plan_select_pending_flush_candidate,
-    plan_update_flush_job_progress,
+    plan_mark_flush_job_running, plan_purge_old_jobs, plan_reclaim_running_flush_jobs,
+    plan_request_cancel_job, plan_request_cancel_table_jobs, plan_select_pending_flush_candidate,
+    plan_update_flush_job_progress, DEFAULT_PURGE_BATCH_LIMIT,
 };
 
 #[derive(serde::Deserialize)]
@@ -55,13 +55,34 @@ pub(crate) fn enqueue_or_lookup_flush_job(
     Ok(job_id)
 }
 
+/// Looks up a committed active flush job UUID without inserting.
+///
+/// Used when the session table lock is held by another backend so enqueue must
+/// not wait on that backend's uncommitted jobs-row / unique-index conflict.
+pub(crate) fn lookup_active_flush_job_uuid(
+    table_oid: pgrx::pg_sys::Oid,
+) -> crate::error::PgResult<Option<pgrx::Uuid>> {
+    use pgrx::datum::DatumWithOid;
+
+    let lookup =
+        plan_lookup_active_flush_job().map_err(crate::error::PgAdapterError::from_display)?;
+    let existing = crate::spi::select_one::<String>(&lookup, &[DatumWithOid::from(table_oid)])?
+        .filter(|value| !value.is_empty());
+    let Some(existing) = existing else {
+        return Ok(None);
+    };
+    let wire: PendingFlushJobWire = serde_json::from_str(&existing)?;
+    Ok(Some(crate::spi::uuid_to_pgrx(uuid::Uuid::parse_str(
+        &wire.id,
+    )?)))
+}
+
 /// Selects one due pending flush candidate for a one-shot executor.
 ///
 /// Returns a pg-free [`TableOid`]; convert to `pg_sys::Oid` only at SPI / lock edges.
-pub(crate) fn select_pending_flush_candidate(
-) -> crate::error::PgResult<Option<(TableOid, bool)>> {
-    let statement =
-        plan_select_pending_flush_candidate().map_err(crate::error::PgAdapterError::from_display)?;
+pub(crate) fn select_pending_flush_candidate() -> crate::error::PgResult<Option<(TableOid, bool)>> {
+    let statement = plan_select_pending_flush_candidate()
+        .map_err(crate::error::PgAdapterError::from_display)?;
     let json = crate::spi::select_one::<String>(&statement, &[])?.unwrap_or_default();
     if json.is_empty() {
         return Ok(None);
@@ -92,8 +113,8 @@ pub(super) fn ensure_flush_job(
     // same job can be resumed.
     reclaim_running_flush_jobs(table_oid)?;
 
-    let lookup = plan_lookup_active_flush_job()
-        .map_err(crate::error::PgAdapterError::from_display)?;
+    let lookup =
+        plan_lookup_active_flush_job().map_err(crate::error::PgAdapterError::from_display)?;
     let existing = crate::spi::select_one::<String>(&lookup, &[DatumWithOid::from(table_oid)])?
         .filter(|value| !value.is_empty());
     if let Some(existing) = existing {
@@ -102,8 +123,7 @@ pub(super) fn ensure_flush_job(
     }
 
     let job_id = uuid::Uuid::new_v4();
-    let insert =
-        plan_insert_flush_job().map_err(crate::error::PgAdapterError::from_display)?;
+    let insert = plan_insert_flush_job().map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &insert,
         &[
@@ -194,8 +214,8 @@ pub(super) fn update_flush_job_progress(
 ) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_update_flush_job_progress()
-        .map_err(crate::error::PgAdapterError::from_display)?;
+    let statement =
+        plan_update_flush_job_progress().map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
@@ -222,8 +242,8 @@ pub(super) fn mark_flush_job_completed(
 ) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_mark_flush_job_completed()
-        .map_err(crate::error::PgAdapterError::from_display)?;
+    let statement =
+        plan_mark_flush_job_completed().map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
@@ -308,8 +328,8 @@ pub(super) fn mark_flush_job_cancelled(
 ) -> crate::error::PgResult<()> {
     use pgrx::datum::DatumWithOid;
 
-    let statement = plan_mark_flush_job_cancelled()
-        .map_err(crate::error::PgAdapterError::from_display)?;
+    let statement =
+        plan_mark_flush_job_cancelled().map_err(crate::error::PgAdapterError::from_display)?;
     crate::spi::update(
         &statement,
         &[
@@ -389,4 +409,35 @@ pub(crate) fn cancel_jobs_for_drop(table_oid: pgrx::pg_sys::Oid) -> crate::error
     let statement =
         plan_cancel_jobs_for_drop().map_err(crate::error::PgAdapterError::from_display)?;
     Ok(crate::spi::update_one::<i64>(&statement, &[DatumWithOid::from(table_oid)])?.unwrap_or(0))
+}
+
+/// Deletes a batch of aged terminal jobs. Returns deleted count.
+///
+/// Skips jobs still referenced by `pending` cold segments. Caller should pass
+/// `retention_days > 0`; `batch_limit` is clamped to at least 1.
+pub(crate) fn purge_old_jobs(retention_days: i32, batch_limit: i32) -> crate::error::PgResult<i64> {
+    use pgrx::datum::DatumWithOid;
+
+    if retention_days <= 0 {
+        return Ok(0);
+    }
+    let batch_limit = batch_limit.max(1);
+    let statement = plan_purge_old_jobs().map_err(crate::error::PgAdapterError::from_display)?;
+    Ok(crate::spi::update_one::<i64>(
+        &statement,
+        &[
+            DatumWithOid::from(retention_days),
+            DatumWithOid::from(batch_limit),
+        ],
+    )?
+    .unwrap_or(0))
+}
+
+/// Coordinator tick helper: purge using GUC retention and the default batch size.
+pub(crate) fn purge_old_jobs_tick() -> crate::error::PgResult<i64> {
+    let retention_days = crate::guc::job_retention_days();
+    if retention_days <= 0 {
+        return Ok(0);
+    }
+    purge_old_jobs(retention_days, DEFAULT_PURGE_BATCH_LIMIT)
 }

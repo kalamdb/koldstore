@@ -232,13 +232,14 @@ impl StorageClient for ModelObjectStore {
                 key: to.to_string(),
             });
         }
-        let object = state
-            .objects
-            .get(from)
-            .cloned()
-            .ok_or_else(|| StorageClientError::NotFound {
-                key: from.to_string(),
-            })?;
+        let object =
+            state
+                .objects
+                .get(from)
+                .cloned()
+                .ok_or_else(|| StorageClientError::NotFound {
+                    key: from.to_string(),
+                })?;
         state.objects.insert(to.to_string(), object);
         Ok(())
     }
@@ -264,13 +265,9 @@ mod tests {
     #[test]
     fn snapshot_restore_replaces_state() {
         let store = ModelObjectStore::new();
-        store
-            .put("k", b"v1", PutPrecondition::Overwrite)
-            .unwrap();
+        store.put("k", b"v1", PutPrecondition::Overwrite).unwrap();
         let snap = store.snapshot();
-        store
-            .put("k", b"v2", PutPrecondition::Overwrite)
-            .unwrap();
+        store.put("k", b"v2", PutPrecondition::Overwrite).unwrap();
         store
             .put("other", b"x", PutPrecondition::Overwrite)
             .unwrap();
@@ -328,9 +325,7 @@ mod tests {
     #[test]
     fn drop_key_removes_object() {
         let store = ModelObjectStore::new();
-        store
-            .put("gone", b"x", PutPrecondition::Overwrite)
-            .unwrap();
+        store.put("gone", b"x", PutPrecondition::Overwrite).unwrap();
         store.drop_key("gone");
         assert!(store.get("gone").is_err());
     }

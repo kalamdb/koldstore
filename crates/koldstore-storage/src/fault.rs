@@ -569,12 +569,7 @@ mod tests {
                 .collect())
         }
 
-        fn put(
-            &self,
-            key: &str,
-            bytes: &[u8],
-            mode: PutPrecondition,
-        ) -> StorageResult<PutOutcome> {
+        fn put(&self, key: &str, bytes: &[u8], mode: PutPrecondition) -> StorageResult<PutOutcome> {
             let mut objects = self.objects.lock().expect("memory store lock");
             if mode == PutPrecondition::CreateIfAbsent && objects.contains_key(key) {
                 return Err(StorageClientError::AlreadyExists {
@@ -634,7 +629,8 @@ mod tests {
 
     #[test]
     fn fail_nth_operation_injects_and_traces() {
-        let store = FaultInjectingObjectStore::new(MemoryStore::default(), FaultPolicy::fail_nth(2));
+        let store =
+            FaultInjectingObjectStore::new(MemoryStore::default(), FaultPolicy::fail_nth(2));
         store
             .put("a", b"1", PutPrecondition::Overwrite)
             .expect("first put ok");
@@ -718,6 +714,9 @@ mod tests {
         assert_eq!(trace[0].op_number, 3);
         assert_eq!(trace[0].key, "k2");
         assert_eq!(trace[2].op_number, 5);
-        assert_eq!(FaultPolicy::none().max_trace_entries, DEFAULT_MAX_TRACE_ENTRIES);
+        assert_eq!(
+            FaultPolicy::none().max_trace_entries,
+            DEFAULT_MAX_TRACE_ENTRIES
+        );
     }
 }

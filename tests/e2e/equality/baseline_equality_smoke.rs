@@ -63,8 +63,7 @@ async fn baseline_equality_smoke_matches_after_shared_dml() -> Result<()> {
 
         db.flush_table(&managed).await?;
 
-        common::assert_relations_equal(&db.client, &baseline, &managed).await?;
-        common::assert_row_counts_equal(&db.client, &baseline, &managed).await?;
+        common::assert_managed_matches_reference(&db.client, &managed, &baseline).await?;
         common::assert_pk_unique(&db.client, &managed, &["id"]).await?;
         common::assert_pk_unique(&db.client, &baseline, &["id"]).await?;
     }

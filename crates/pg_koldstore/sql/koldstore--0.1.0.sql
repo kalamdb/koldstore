@@ -153,9 +153,9 @@ CREATE TABLE IF NOT EXISTS koldstore.jobs (
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
--- SCALABILITY: completed/cancelled/error jobs are retained forever today. Add a
--- retention/purge policy before high-frequency flush in production, or this
--- table grows without bound (one row per flush/migrate).
+-- Terminal jobs (completed/cancelled/error) are purged by the flush coordinator
+-- (and koldstore.purge_old_jobs) after koldstore.job_retention_days (default 30;
+-- 0 disables). Jobs still referenced by pending cold segments are never deleted.
 
 CREATE INDEX IF NOT EXISTS jobs_pending_idx
   ON koldstore.jobs (table_oid, scope_key, status, updated_at)

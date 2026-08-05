@@ -8,24 +8,11 @@ async fn alter_table_add_nullable_column_refreshes_schema_and_reads_old_cold_row
         let db = common::TestDb::start(target, "schema_evolution_add").await?;
         let table = db.create_indexed_items_table("evolve_items", 12).await?;
         db.manage_shared(&table.relation, "id").await?;
+        common::fence_async_mirror(&db.client).await?;
         assert_eq!(db.flush_table(&table.relation).await?, 12);
 
-        // Stop the async applier before ALTER/INSERT so those commits stay in WAL
-        // until flush's fence applies them in the same transaction. That is the
-        // path where pending counter deltas must be visible to flush selection.
-        let dbname: String = db
-            .client
-            .query_one("SELECT current_database()", &[])
-            .await?
-            .get(0);
-        db.client
-            .batch_execute(&format!(
-                "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off; \
-                 SET koldstore.internal_async_mirror_worker = off"
-            ))
-            .await?;
-        let _ = common::terminate_async_worker(&db.client).await?;
-
+        // Nested inline skips pre-select apply; drain WAL after ALTER/INSERT
+        // instead of relying on flush phase-0 under a stopped async worker.
         db.client
             .batch_execute(&format!(
                 r#"
@@ -38,20 +25,9 @@ async fn alter_table_add_nullable_column_refreshes_schema_and_reads_old_cold_row
                 table.relation, table.relation
             ))
             .await?;
-
-        let flushed = db.flush_table(&table.relation).await;
-        let dbname: String = db
-            .client
-            .query_one("SELECT current_database()", &[])
-            .await?
-            .get(0);
-        db.client
-            .batch_execute(&format!(
-                "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
-                 RESET koldstore.internal_async_mirror_worker"
-            ))
-            .await?;
-        assert_eq!(flushed?, 2);
+        common::fence_async_mirror(&db.client).await?;
+        let flushed = db.flush_table(&table.relation).await?;
+        assert_eq!(flushed, 2);
 
         let schema = db
             .client
@@ -104,6 +80,7 @@ async fn rename_column_preserves_column_id_and_reads_across_schema_versions() ->
         let db = common::TestDb::start(target, "schema_evolution_rename").await?;
         let table = db.create_indexed_items_table("rename_items", 10).await?;
         db.manage_shared(&table.relation, "id").await?;
+        common::fence_async_mirror(&db.client).await?;
         assert_eq!(db.flush_table(&table.relation).await?, 10);
 
         let before = db
@@ -174,6 +151,7 @@ async fn rename_column_preserves_column_id_and_reads_across_schema_versions() ->
                 table.relation, table.relation, table.relation
             ))
             .await?;
+        common::fence_async_mirror(&db.client).await?;
         assert_eq!(db.flush_table(&table.relation).await?, 1);
 
         let after = db
@@ -252,6 +230,7 @@ async fn drop_and_add_same_column_name_uses_new_column_id() -> Result<()> {
         let db = common::TestDb::start(target, "schema_evolution_drop_add").await?;
         let table = db.create_indexed_items_table("drop_add_items", 6).await?;
         db.manage_shared(&table.relation, "id").await?;
+        common::fence_async_mirror(&db.client).await?;
         assert_eq!(db.flush_table(&table.relation).await?, 6);
 
         let before = db
@@ -303,6 +282,7 @@ async fn drop_and_add_same_column_name_uses_new_column_id() -> Result<()> {
                 relation = table.relation
             ))
             .await?;
+        common::fence_async_mirror(&db.client).await?;
         assert_eq!(db.flush_table(&table.relation).await?, 1);
 
         let after = db
@@ -373,8 +353,17 @@ async fn unsupported_alter_table_type_records_error_job_without_pruning_hot_rows
                 table.relation
             ))
             .await?;
-        let flushed = db.flush_table(&table.relation).await?;
-        assert_eq!(flushed, 0);
+        // Unsupported type fails the job; wait_for_terminal surfaces status=error.
+        let flush_err = db
+            .flush_table(&table.relation)
+            .await
+            .expect_err("unsupported tsvector must fail the flush job");
+        let detail = flush_err.to_string();
+        assert!(
+            detail.contains("unsupported PostgreSQL type: tsvector")
+                || detail.contains("status=error"),
+            "unexpected flush error: {detail}"
+        );
 
         let job = db
             .client
@@ -417,6 +406,7 @@ async fn rename_primary_key_keeps_dml_and_cold_reads_working() -> Result<()> {
         let db = common::TestDb::start(target, "schema_evolution_pk_rename").await?;
         let table = db.create_indexed_items_table("pk_rename_items", 8).await?;
         db.manage_shared(&table.relation, "id").await?;
+        common::fence_async_mirror(&db.client).await?;
         assert_eq!(db.flush_table(&table.relation).await?, 8);
 
         db.client

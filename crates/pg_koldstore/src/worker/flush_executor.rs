@@ -5,12 +5,21 @@
 //! pending flush job under session table ownership, runs it, then exits so
 //! PostgreSQL releases the session advisory lock automatically.
 //!
-//! Claim commits separately from encode/upload/finalize so a crash after claim
-//! leaves a resumable `running` job rather than an invisible in-flight attempt.
+//! ## Transaction boundaries (queue / Short)
+//!
+//! Claim commits in its own short transaction. Encode + object upload then run
+//! **outside** any PostgreSQL transaction. Catalog work (mirror fetch, pending
+//! segment insert, finalize, progress, cancel, job complete/fail) uses short
+//! transactions via [`super::txn`] and [`crate::sql::flush::execute::FlushCommitStyle::Short`].
+//!
+//! Inline `flush_table` / `#[pg_test]` keep [`FlushCommitStyle::Nested`] so the
+//! caller's SPI transaction is not mid-committed.
 
 use koldstore_worker::{flush_executor_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder};
 use pgrx::datum::DatumWithOid;
+
+use super::txn;
 
 const FLUSH_EXECUTOR_FUNCTION: &str = "koldstore_flush_executor_main";
 
@@ -106,24 +115,6 @@ fn register_one_flush_executor(
     Ok(true)
 }
 
-fn worker_transaction<R>(body: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
-    unsafe {
-        pgrx::pg_sys::SetCurrentStatementStartTimestamp();
-        pgrx::pg_sys::StartTransactionCommand();
-        pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
-    }
-    let result = body();
-    unsafe {
-        if result.is_ok() && !pgrx::pg_sys::IsAbortedTransactionBlockState() {
-            pgrx::pg_sys::PopActiveSnapshot();
-            pgrx::pg_sys::CommitTransactionCommand();
-        } else {
-            pgrx::pg_sys::AbortCurrentTransaction();
-        }
-    }
-    result
-}
-
 /// Claim outcome that keeps session ownership across the claim→work commit.
 struct ClaimedWork {
     table_oid: pgrx::pg_sys::Oid,
@@ -174,7 +165,7 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
     );
 
     // Short claim transaction: durable running + attempt_token before any I/O.
-    let claimed = match worker_transaction(claim_one_flush_job) {
+    let claimed = match txn::run(claim_one_flush_job) {
         Ok(claimed) => claimed,
         Err(error) => {
             pgrx::warning!("koldstore flush executor claim failed: {error}");
@@ -190,11 +181,11 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         return;
     };
 
-    // Second transaction: encode/upload without slot lock; finalize try-locks slot.
-    if let Err(error) = worker_transaction(|| {
+    // Short-txn flush path: upload outside Postgres txns; catalog SPI uses
+    // FlushCommitStyle::Short. Do not wrap the entire flush in one transaction.
+    if let Err(error) =
         crate::sql::flush::execute::run_claimed_flush_with_session_lock(table_oid, guard, claimed)
-            .map(|_| ())
-    }) {
+    {
         pgrx::warning!("koldstore flush executor failed: {error}");
     }
 }

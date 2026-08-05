@@ -46,6 +46,9 @@ static FLUSH_CHECK_INTERVAL_SECONDS: GucSetting<i32> =
 static MAX_PARALLEL_FLUSH_JOBS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_MAX_PARALLEL_FLUSH_JOBS);
 #[cfg(feature = "pg")]
+static JOB_RETENTION_DAYS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_JOB_RETENTION_DAYS);
+#[cfg(feature = "pg")]
 static FLUSH_EXECUTION: GucSetting<Option<CString>> =
     GucSetting::<Option<CString>>::new(Some(c"queue"));
 #[cfg(feature = "pg")]
@@ -171,7 +174,7 @@ pub fn define_gucs() {
     GucRegistry::define_string_guc(
         c"koldstore.failpoint",
         c"Test-only KoldStore flush failpoint.",
-        c"Arms a named flush failpoint (error:<name> or wait:<name>). Empty disables. For crash-recovery and isolation suites only.",
+        c"Arms a named flush failpoint (error:<name>, wait:<name>, panic:<name>, or sleep:<name>). Empty disables. For crash-recovery and isolation suites only.",
         &FAILPOINT,
         GucContext::Userset,
         flags,
@@ -203,6 +206,16 @@ pub fn define_gucs() {
         &MAX_PARALLEL_FLUSH_JOBS,
         settings::MIN_MAX_PARALLEL_FLUSH_JOBS,
         settings::MAX_MAX_PARALLEL_FLUSH_JOBS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.job_retention_days",
+        c"Days to retain terminal KoldStore jobs before purge.",
+        c"Coordinator ticks delete completed/cancelled/error jobs whose finished_at is older than this many days. 0 disables purge. Jobs still referenced by pending cold segments are never deleted. Clamped to 0..=3650.",
+        &JOB_RETENTION_DAYS,
+        settings::MIN_JOB_RETENTION_DAYS,
+        settings::MAX_JOB_RETENTION_DAYS,
         GucContext::Userset,
         flags,
     );
@@ -369,6 +382,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::MAX_PARALLEL_FLUSH_JOBS_GUC,
             internal: false,
             default_value: "2",
+        },
+        GucDefinition {
+            name: settings::JOB_RETENTION_DAYS_GUC,
+            internal: false,
+            default_value: "30",
         },
         GucDefinition {
             name: settings::FLUSH_EXECUTION_GUC,
@@ -633,6 +651,20 @@ pub fn max_parallel_flush_jobs() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_MAX_PARALLEL_FLUSH_JOBS
+    }
+}
+
+/// Days to retain terminal jobs before coordinator purge (`0` = disabled).
+#[must_use]
+pub fn job_retention_days() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_job_retention_days(JOB_RETENTION_DAYS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_JOB_RETENTION_DAYS
     }
 }
 

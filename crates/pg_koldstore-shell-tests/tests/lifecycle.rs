@@ -80,6 +80,11 @@ fn guc_definitions_include_public_and_internal_settings() {
     ));
     assert!(gucs
         .iter()
+        .any(|guc| guc.name == "koldstore.job_retention_days"
+            && !guc.internal
+            && guc.default_value == "30"));
+    assert!(gucs
+        .iter()
         .any(|guc| guc.name == "koldstore.internal_system_write" && guc.internal));
     assert!(gucs
         .iter()

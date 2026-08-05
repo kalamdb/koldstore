@@ -25,7 +25,18 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
             .await?;
         db.insert_pending_flush_job(&table.relation).await?;
 
-        assert_eq!(db.flush_table(&table.relation).await?, 0);
+        // Storage root is a plain file: Nested flush records status=error.
+        // wait_for_flush_job_terminal surfaces that as Err (not Ok(0)).
+        let flush_err = db
+            .flush_table(&table.relation)
+            .await
+            .expect_err("object outage must fail the flush job");
+        assert!(
+            flush_err.to_string().contains("status=error")
+                || flush_err.to_string().contains("File exists")
+                || flush_err.to_string().contains("create storage root"),
+            "unexpected outage error: {flush_err:#}"
+        );
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 20);
         assert_eq!(
             common::cold_segment_count(&db.client, &table.relation).await?,

@@ -711,6 +711,7 @@ dependencies = [
  "koldstore-migrate",
  "koldstore-parquet",
  "koldstore-storage",
+ "koldstore-worker",
  "parquet",
  "pg_koldstore",
  "serde",

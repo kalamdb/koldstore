@@ -79,6 +79,7 @@ async fn three_state_baseline_equality_with_curated_queries() -> Result<()> {
 
         assert_state(&db, &baseline, &managed, "hot").await?;
 
+        common::fence_async_mirror(&db.client).await?;
         let flushed_mixed = db.flush_table(&managed).await?;
         assert!(
             flushed_mixed > 0,
@@ -98,6 +99,7 @@ async fn three_state_baseline_equality_with_curated_queries() -> Result<()> {
                 ))
                 .await?;
         }
+        common::fence_async_mirror(&db.client).await?;
         let flushed_cold = db.flush_table(&managed).await?;
         assert!(
             flushed_cold >= 0,

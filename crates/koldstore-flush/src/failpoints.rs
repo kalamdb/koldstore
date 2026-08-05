@@ -3,6 +3,10 @@
 //! [`FlushFailpoint`] is the registry of armable phase names. [`FailpointAction`]
 //! parses `error:` / `wait:` / `panic:` / `sleep:` prefixes from the GUC value.
 //! SPI/GUC arming and barrier waits stay in `pg_koldstore::failpoints`.
+//!
+//! Destructive `panic:` / `sleep:` actions are always parseable here; production
+//! `hit` adapters only execute them under the `test-failpoints` feature.
+//! E2E process-kill coverage prefers external SIGKILL of the flush executor.
 
 /// Typed flush / mirror failpoints that map to GUC arming names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -251,6 +255,9 @@ mod tests {
             FlushFailpoint::BeforeSourceLock.as_str(),
             "before_source_lock"
         );
-        assert_eq!(FlushFailpoint::AfterSourceLock.as_str(), "after_source_lock");
+        assert_eq!(
+            FlushFailpoint::AfterSourceLock.as_str(),
+            "after_source_lock"
+        );
     }
 }

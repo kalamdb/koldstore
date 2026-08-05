@@ -421,6 +421,7 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
             .await?;
         manage_with_hot_limit(&db, &table.relation, 10).await?;
         disable_auto_flush(&db.client, &table.relation).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let oid = table_oid(&db.client, &table.relation).await?;
         let lock_key = table_job_lock_key(oid);
@@ -432,7 +433,10 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
         let first_relation = table.relation.clone();
         let first_handle: JoinHandle<Result<String>> = tokio::spawn(async move {
             first
-                .batch_execute("SET koldstore.failpoint = 'wait:after_claim';")
+                .batch_execute(
+                    "SET koldstore.flush_execution = 'inline'; \
+                     SET koldstore.failpoint = 'wait:after_claim';",
+                )
                 .await?;
             let row = flush_table_retrying_entry_locks(&first, &first_relation, false)
                 .await
@@ -445,9 +449,7 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
         });
 
         wait_until_barrier_waiter(&coordinator, || first_handle.is_finished()).await?;
-        // `after_claim` runs only after `lock_table_job`. Async phase-0 apply can
-        // leave a long gap before park; also reject a stale barrier waiter from a
-        // prior pooled-DB peer by requiring the table-job lock itself.
+        // `after_claim` runs only after session table-job lock + claim.
         let mut held = false;
         for _ in 0..80 {
             if count_advisory_holders(&db.client, lock_key).await? >= 1 {
@@ -463,14 +465,23 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
         assert!(held, "first flush must hold table-job lock after claim");
 
         let second = connect_peer(&db).await?;
+        second
+            .batch_execute("SET koldstore.flush_execution = 'inline'")
+            .await?;
         let second_relation = table.relation.clone();
-        let second_err = second
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
-                &[&second_relation],
-            )
-            .await
-            .expect_err("second flush must fail fast while first holds the table-job lock");
+        // Bound the wait: a regression that blocks on the Nested jobs row must
+        // not hang the suite for minutes.
+        let second_err = tokio::time::timeout(Duration::from_secs(5), async {
+            second
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&second_relation],
+                )
+                .await
+        })
+        .await
+        .context("second flush timed out (must fail fast, not block on jobs row)")?
+        .expect_err("second flush must fail fast while first holds the table-job lock");
         let detail = second_err
             .as_db_error()
             .map(|e| e.to_string())
@@ -500,8 +511,12 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
     Ok(())
 }
 
-/// A parked flush holds the database apply lock; a second table's flush fails
-/// fast instead of waiting for the first to finish.
+/// A parked flush holds the database apply/slot lock during finalize; a second
+/// table's flush must not hang forever waiting for it.
+///
+/// Nested inline skips pre-select apply and only takes the slot lock in
+/// finalize (`after_slot_lock`). Flush work errors are recorded on the job row
+/// (SQL still returns the job UUID), so B is asserted via terminal status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
     common::require_pgrx_server().await?;
@@ -514,6 +529,7 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
         manage_with_hot_limit(&db, &table_b.relation, 5).await?;
         disable_auto_flush(&db.client, &table_a.relation).await?;
         disable_auto_flush(&db.client, &table_b.relation).await?;
+        common::fence_async_mirror(&db.client).await?;
 
         let coordinator = connect_peer(&db).await?;
         barrier_lock(&coordinator).await?;
@@ -522,7 +538,7 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
         let relation_a = table_a.relation.clone();
         let handle_a: JoinHandle<Result<()>> = tokio::spawn(async move {
             flush_a
-                .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
+                .batch_execute("SET koldstore.failpoint = 'wait:after_slot_lock';")
                 .await?;
             let _ = flush_table_retrying_entry_locks(&flush_a, &relation_a, false)
                 .await
@@ -538,20 +554,29 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
 
         let flush_b = connect_peer(&db).await?;
         let relation_b = table_b.relation.clone();
-        let err_b = flush_b
+        let job_b: String = flush_b
             .query_one(
                 "SELECT koldstore.flush_table($1::text::regclass)::text",
                 &[&relation_b],
             )
             .await
-            .expect_err("flush B must fail fast while flush A holds the apply lock");
-        let detail = err_b
-            .as_db_error()
+            .context("flush B enqueue/run")?
+            .get(0);
+        let wait_b = common::wait_for_flush_job_terminal(&db.client, &job_b).await;
+        let detail = wait_b
+            .as_ref()
+            .err()
             .map(|e| e.to_string())
-            .unwrap_or_else(|| err_b.to_string());
+            .unwrap_or_default();
         assert!(
-            detail.contains("apply lock") || detail.contains("flush already in progress"),
-            "unexpected flush B error: {detail}"
+            wait_b.is_err(),
+            "flush B must end in job error while A holds the slot/apply lock, got Ok"
+        );
+        assert!(
+            detail.contains("slot lock")
+                || detail.contains("apply lock")
+                || detail.contains("flush already in progress"),
+            "unexpected flush B terminal error: {detail}"
         );
 
         barrier_unlock(&coordinator).await?;

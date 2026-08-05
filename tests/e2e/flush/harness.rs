@@ -23,6 +23,10 @@ pub const BARRIER_WORKER_LOOPS: usize = 20;
 
 /// Opens a second client against the same pgrx database as `db`.
 ///
+/// Forces `koldstore.flush_execution = 'inline'` so session failpoints and
+/// dual-flush try-lock semantics apply. Relying only on `ALTER DATABASE SET`
+/// is fragile when a prior test left a different database default.
+///
 /// # Errors
 ///
 /// Returns an error when the connection fails.
@@ -36,6 +40,10 @@ pub async fn connect_peer(db: &TestDb) -> Result<Client> {
             eprintln!("peer connection error: {error}");
         }
     });
+    client
+        .batch_execute("SET koldstore.flush_execution = 'inline'")
+        .await
+        .context("peer SET flush_execution=inline")?;
     Ok(client)
 }
 
@@ -503,25 +511,9 @@ pub async fn flush_table_on(client: &Client, relation: &str) -> Result<i64> {
     let job_id = crate::common::flush_table_job_id(client, relation, false)
         .await
         .with_context(|| format!("flush_table {relation}"))?;
-    let progress = client
-        .query_one(
-            r#"
-            SELECT rows_flushed, status, coalesce(error_trace, '')
-            FROM koldstore.jobs
-            WHERE id = $1::text::uuid
-            "#,
-            &[&job_id],
-        )
+    crate::common::wait_for_flush_job_terminal(client, &job_id)
         .await
-        .with_context(|| format!("lookup flush job {job_id}"))?;
-    let rows_flushed: i64 = progress.get(0);
-    let status: String = progress.get(1);
-    let error_trace: String = progress.get(2);
-    anyhow::ensure!(
-        status == "completed",
-        "flush_table {relation} job {job_id} status={status} rows_flushed={rows_flushed}: {error_trace}"
-    );
-    Ok(rows_flushed)
+        .with_context(|| format!("wait for flush_table {relation} job {job_id}"))
 }
 
 /// Asserts common post-flush invariants for concurrent scenarios.

@@ -95,6 +95,17 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
         pgrx::log!("koldstore flush scheduler: reclaimed {reclaimed} stuck running flush job(s)");
     }
 
+    // Bounded retention: drop aged terminal jobs (never pending-segment owners).
+    match crate::sql::flush::jobs::purge_old_jobs_tick() {
+        Ok(purged) if purged > 0 => {
+            pgrx::log!("koldstore flush scheduler: purged {purged} aged terminal job(s)");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            pgrx::log!("koldstore flush scheduler: job retention purge failed: {error}");
+        }
+    }
+
     let mut had_due_table = false;
     let mut completed = false;
 
