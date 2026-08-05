@@ -7,11 +7,15 @@ use koldstore_setup::{
     REQUIRED_CATALOG_INDEXES, REQUIRED_CATALOG_TABLES,
 };
 
-const INSTALL_SQL: &str = include_str!("../../pg_koldstore/sql/koldstore--0.1.0.sql");
+const INSTALL_SQL_RAW: &str = include_str!("../../pg_koldstore/sql/koldstore--0.1.0.sql");
+
+fn install_sql() -> String {
+    INSTALL_SQL_RAW.replace("\r\n", "\n")
+}
 
 #[test]
 fn canonical_install_sql_has_required_setup_objects() {
-    let plan = BootstrapPlan::from_sql(INSTALL_SQL);
+    let plan = BootstrapPlan::from_sql(&install_sql());
 
     assert!(missing_catalog_tables(&plan).is_empty());
     assert!(missing_catalog_indexes(&plan).is_empty());
@@ -20,10 +24,11 @@ fn canonical_install_sql_has_required_setup_objects() {
 
 #[test]
 fn cold_segment_index_uses_sort_key_v1_bounds_and_mirrored_indexes() {
-    let table_start = INSTALL_SQL
+    let install_sql = install_sql();
+    let table_start = install_sql
         .find("CREATE TABLE IF NOT EXISTS koldstore.cold_segment_index")
         .unwrap();
-    let table_sql = &INSTALL_SQL[table_start..];
+    let table_sql = &install_sql[table_start..];
     let table_end = table_sql.find(");").unwrap();
     let table_sql = &table_sql[..table_end];
 
@@ -41,22 +46,23 @@ fn cold_segment_index_uses_sort_key_v1_bounds_and_mirrored_indexes() {
     assert!(!table_sql.contains("column_name"));
     assert!(!table_sql.contains("distinct_count"));
 
-    assert!(INSTALL_SQL.contains(
+    assert!(install_sql.contains(
         "ON koldstore.cold_segment_index (\n    table_oid, scope_key, column_id, type_oid, codec_version, min_value\n) INCLUDE (max_value, segment_id)"
     ));
-    assert!(INSTALL_SQL.contains(
+    assert!(install_sql.contains(
         "ON koldstore.cold_segment_index (\n    table_oid, scope_key, column_id, type_oid, codec_version, max_value\n) INCLUDE (min_value, segment_id)"
     ));
-    assert!(!INSTALL_SQL.contains("cold_segment_stats"));
-    assert!(!INSTALL_SQL.contains("cold_segment_stats_lookup_idx"));
+    assert!(!install_sql.contains("cold_segment_stats"));
+    assert!(!install_sql.contains("cold_segment_stats_lookup_idx"));
 }
 
 #[test]
 fn cold_segment_order_index_uses_composite_bounds_and_mirrored_indexes() {
-    let table_start = INSTALL_SQL
+    let install_sql = install_sql();
+    let table_start = install_sql
         .find("CREATE TABLE IF NOT EXISTS koldstore.cold_segment_order_index")
         .unwrap();
-    let table_sql = &INSTALL_SQL[table_start..];
+    let table_sql = &install_sql[table_start..];
     let table_end = table_sql.find(");").unwrap();
     let table_sql = &table_sql[..table_end];
 
@@ -71,20 +77,21 @@ fn cold_segment_order_index_uses_composite_bounds_and_mirrored_indexes() {
     assert!(table_sql.contains("PRIMARY KEY (segment_id, sort_order_id)"));
     assert!(table_sql.contains("scope_key text NOT NULL DEFAULT ''"));
 
-    assert!(INSTALL_SQL.contains(
+    assert!(install_sql.contains(
         "ON koldstore.cold_segment_order_index (\n    table_oid, scope_key, sort_order_id, codec_version, min_composite_key\n) INCLUDE (max_composite_key, segment_id)"
     ));
-    assert!(INSTALL_SQL.contains(
+    assert!(install_sql.contains(
         "ON koldstore.cold_segment_order_index (\n    table_oid, scope_key, sort_order_id, codec_version, max_composite_key\n) INCLUDE (min_composite_key, segment_id)"
     ));
 }
 
 #[test]
 fn cold_segments_store_aligned_row_group_arrays() {
-    let table_start = INSTALL_SQL
+    let install_sql = install_sql();
+    let table_start = install_sql
         .find("CREATE TABLE IF NOT EXISTS koldstore.cold_segments")
         .unwrap();
-    let table_sql = &INSTALL_SQL[table_start..];
+    let table_sql = &install_sql[table_start..];
     let table_end = table_sql.find(");").unwrap();
     let table_sql = &table_sql[..table_end];
 
@@ -101,7 +108,7 @@ fn cold_segments_store_aligned_row_group_arrays() {
 
 #[test]
 fn canonical_install_sql_has_no_duplicate_named_objects() {
-    let plan = BootstrapPlan::from_sql(INSTALL_SQL);
+    let plan = BootstrapPlan::from_sql(&install_sql());
 
     assert_eq!(plan.duplicate_object_names(), Vec::<String>::new());
 }

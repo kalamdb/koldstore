@@ -95,7 +95,7 @@ else
   INSTALL_ARGS=(
     -p pg_koldstore
     --no-default-features
-    --features "$PG_FEATURE s3"
+    --features "$PG_FEATURE s3 cshim"
     --pg-config "$PG_CONFIG"
   )
   if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "true" ]]; then

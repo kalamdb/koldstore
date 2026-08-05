@@ -191,7 +191,8 @@ async fn concurrent_flush_fencing() -> Result<()> {
 
         let ra = ha.await?;
         let rb = hb.await?;
-        // Blocking table job lock serializes concurrent flush_table callers.
+        // Fail-fast table/apply try-locks: one flush wins, the other errors (or
+        // both succeed if they did not overlap). Never hang both callers.
         match (&ra, &rb) {
             (Ok(_), _) | (_, Ok(_)) => {}
             (Err(a), Err(b)) => {

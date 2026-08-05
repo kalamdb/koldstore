@@ -10,23 +10,29 @@ repository.workspace = true
 ignored = ["reqwest"]
 
 [features]
-default = ["s3"]
-# S3/MinIO via object_store aws-base + rustls (ring provider) + ring SigV4.
-# Avoids `object_store/aws` (aws-lc) and native-tls (OpenSSL), both of which
+default = ["s3", "gcs", "azure"]
+# Shared HTTP + ring crypto for cloud backends. Avoids `object_store/{aws,gcp,azure}`
+# (those pull aws-lc via reqwest/rustls) and native-tls (OpenSSL), both of which
 # bloat or conflict inside the PostgreSQL backend process.
-s3 = [
-    "object_store/aws-base",
+cloud-http = [
     "object_store/reqwest",
     "object_store/ring",
     "dep:reqwest",
     "dep:rustls",
 ]
+# S3/MinIO via object_store aws-base + rustls (ring provider) + ring SigV4.
+s3 = ["cloud-http", "object_store/aws-base"]
+# GCS via object_store gcp-base + rustls (ring) for service-account signing.
+gcs = ["cloud-http", "object_store/gcp-base"]
+# Azure Blob via object_store azure-base + rustls (ring).
+azure = ["cloud-http", "object_store/azure-base"]
 
 [dependencies]
 bytes.workspace = true
 futures-util.workspace = true
 koldstore-common.workspace = true
-# `aws-base` / HTTP / signing are opt-in via the `s3` feature.
+# Cloud backends (`aws-base` / `gcp-base` / `azure-base` + HTTP / signing) are
+# opt-in via the `s3` / `gcs` / `azure` features.
 object_store = { workspace = true, features = ["fs"] }
 # Feature-unified with object_store's reqwest; rustls without bundled aws-lc.
 reqwest = { workspace = true, optional = true }
@@ -35,7 +41,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["macros"] }
 uuid.workspace = true
 
 [dev-dependencies]

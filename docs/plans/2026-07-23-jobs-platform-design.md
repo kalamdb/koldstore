@@ -205,7 +205,7 @@ Legend:
 | Crash holding apply lock | Lock released on backend death | Yes | Worker resumes apply; job reclaim as above |
 | Cancel before activate | Pending not published | Yes | Mark cancelled; expire/GC pending for this job |
 | Cancel after activate, during prune | Cold already public | Yes | Finish prune for consistency; mark **`completed`**; set `payload.cancel_requested_after_publish=true` for audit |
-| Concurrent second `flush_table` | Blocked by table lock / unique active job | Yes | Wait or skip (scheduler try-lock) |
+| Concurrent second `flush_table` | Fail-fast on table/apply try-lock; scheduler skips | Yes | Retry after owner finishes |
 | Generation CAS conflict | Other publisher won | Yes | Abort wave; job error or retry with fresh read |
 | Async WAL apply lag | Selection watermark excludes post-start rows | Yes | Next job drains remainder (intentional) |
 

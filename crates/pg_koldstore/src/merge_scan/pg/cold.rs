@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use crate::object_store::open_managed_object_store_client;
 use koldstore_catalog::{preferred_segment_index_access, SegmentIndexLookupShape};
 use koldstore_common::{ColdRow, ColumnId, ColumnRef, SeqId};
 use koldstore_merge::scan::plan::{
@@ -14,7 +15,6 @@ use koldstore_parquet::{
     clean_cold_row_to_common, read_clean_cold_rows_from_object_store_with_size, ParquetReadOptions,
     PgColumn,
 };
-use koldstore_storage::open_client_from_catalog_fields;
 use pgrx::pg_sys;
 
 use super::profile::{elapsed_ms, ColdReadProfile, SegmentReadProfile};
@@ -232,7 +232,7 @@ pub(super) fn prepare_cold_row_stream(
             return Err("cold reads are disabled by koldstore.cold_reads".to_string());
         }
 
-        let client = open_client_from_catalog_fields(
+        let client = open_managed_object_store_client(
             &planned.storage_type,
             &planned.base_path,
             &planned.credentials,
@@ -1064,12 +1064,14 @@ fn cold_rows_from_segments(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut options = ParquetReadOptions::new().with_columns(
-            physical_names
-                .iter()
-                .map(|(_, name)| name.clone())
-                .collect::<Vec<_>>(),
-        );
+        let mut options = ParquetReadOptions::new()
+            .with_columns(
+                physical_names
+                    .iter()
+                    .map(|(_, name)| name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .with_timeout(client.timeout());
         if let Some(row_groups) = &hint.selected_row_groups {
             options = options.with_row_groups(row_groups.iter().copied());
         }

@@ -835,8 +835,8 @@ table-wide writer fence for correctness.
 | Autovacuum | Normal conflicting autovacuum is normally interrupted by the lock request; wraparound-prevention vacuum is not, so timeout/fail/retry is required |
 | DDL / `CREATE INDEX` / trigger changes | Serialize through PostgreSQL relation locks; use consistent lock order and retry deadlock victims |
 | Schema-changing DDL during upload | The source scan's transaction `ACCESS SHARE` must remain held and block `ACCESS EXCLUSIVE` DDL; verify this explicitly, then upgrade to the final writer fence |
-| Two flushes for the same table | Existing table job advisory lock serializes them |
-| Flushes for different async tables | Current database apply transaction lock serializes all passes; document and measure this database-wide throughput limit |
+| Two flushes for the same table | Table job advisory try-lock: loser fails fast |
+| Flushes for different async tables | Database apply try-lock: loser fails fast; document and measure this database-wide throughput limit |
 | Caller keeps transaction open after `flush_table()` | Unsupported or explicitly rejected because source writers remain blocked until caller commit |
 
 ### Cleanup, indexes, and vacuum

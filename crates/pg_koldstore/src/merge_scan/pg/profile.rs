@@ -89,9 +89,13 @@ impl ScanProfileSink for DisabledScanProfiler {
 impl ScanProfiler {
     /// Creates a profiler from PostgreSQL's native executor instrumentation flags.
     pub(super) fn from_instrumentation(instrumentation: i32) -> Self {
+        // Windows bindgen may already type InstrumentOption as i32; keep the
+        // cast for Linux/macOS.
+        #[allow(clippy::unnecessary_cast)]
+        let timer = pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32;
         let collection = ProfileCollectionMode::from_instrumentation(
             instrumentation != 0,
-            instrumentation & pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32 != 0,
+            instrumentation & timer != 0,
         );
         Self {
             collection,

@@ -63,6 +63,9 @@ mod live {
             if changed_managed_relation {
                 crate::worker::wake::mark_managed_dml_pending();
             }
+            // Reclaim Rust heap after merge-scan / flush spikes even when the
+            // next client command is a tiny keepalive (`SELECT 1`).
+            crate::memory::release_process_heap_if_pending();
         }
     }
 

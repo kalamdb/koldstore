@@ -9,6 +9,7 @@ pub mod memory;
 pub mod merge_scan;
 /// WAL-backed latest-state mirror capture (slot, apply, provision).
 pub mod mirror;
+pub mod object_store;
 pub mod observability;
 #[cfg(feature = "pg")]
 pub mod preload;
@@ -84,10 +85,11 @@ pub extern "C" fn _PG_init() {
     }
     preload::mark_loaded_via_shared_preload();
 
-    #[cfg(feature = "s3")]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     koldstore_storage::ensure_rustls_ring_provider();
     observability::init_tracing();
     guc::define_gucs();
+    object_store::install_interrupt_hook();
     worker::wake::initialize();
     catalog::cache::register_invalidation_callback();
     hooks::register_hooks();

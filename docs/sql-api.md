@@ -150,7 +150,9 @@ SELECT koldstore.register_storage(
 );
 ```
 
-`storage_type` must be one of `filesystem`, `s3`, `gcs`, or `azure`.
+`storage_type` must be one of `filesystem`, `s3`, `gcs`, or `azure` (cloud
+kinds require the matching extension cargo feature: `s3`, `gcs`, `azure`, or
+`cloud`).
 
 **Returns:** `uuid` — the storage backend id (`koldstore.storage.id`). Fails with
 `storage \`<name>\` already exists` when the name is taken; use
@@ -398,6 +400,11 @@ SELECT koldstore.flush_table(
 
 Ensures a flush job exists and runs the current flush path synchronously.
 Progress is visible in `koldstore.jobs` and `koldstore.describe_table(...)`.
+
+If another backend already holds this table's flush lock or the database apply
+lock (background auto-flush, WAL apply after restart, or another `flush_table`),
+the call fails immediately with an error such as `flush already in progress`
+instead of waiting.
 
 `force` defaults to `false`. Row selection behavior:
 

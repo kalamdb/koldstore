@@ -121,10 +121,18 @@ fn extension_owner() -> Result<pg_sys::Oid, String> {
 const fn extension_oid_cache_id() -> i32 {
     // PostgreSQL 17's generated pgrx binding prefixes this syscache identifier
     // to avoid a bindgen name collision.
-    pg_sys::SysCacheIdentifier::ZEXTENSIONOID as i32
+    // Windows bindgen may already type this as i32; keep the cast for Linux/macOS.
+    #[allow(clippy::unnecessary_cast)]
+    {
+        pg_sys::SysCacheIdentifier::ZEXTENSIONOID as i32
+    }
 }
 
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg18"))]
 const fn extension_oid_cache_id() -> i32 {
-    pg_sys::SysCacheIdentifier::EXTENSIONOID as i32
+    // Windows bindgen may already type this as i32; keep the cast for Linux/macOS.
+    #[allow(clippy::unnecessary_cast)]
+    {
+        pg_sys::SysCacheIdentifier::EXTENSIONOID as i32
+    }
 }
