@@ -11,6 +11,8 @@ pub const DEFAULT_MAX_OPEN_PARQUET_READERS: i32 = 32;
 /// full-table scans that retain millions of compact PK identities. `0` disables
 /// the cap.
 pub const DEFAULT_MAX_MERGE_SEEN_KEYS: i32 = 1_000_000;
+/// Default ObjectStore / Parquet operation timeout (30 seconds).
+pub const DEFAULT_OBJECT_STORE_TIMEOUT_MS: i32 = 30_000;
 /// Default extension log level.
 pub const DEFAULT_LOG_LEVEL: &str = "info";
 
@@ -22,11 +24,17 @@ pub const MAX_CONCURRENCY_LIMIT: i32 = 1024;
 pub const MIN_MAX_MERGE_SEEN_KEYS: i32 = 0;
 /// Hard cap for `koldstore.max_merge_seen_keys`.
 pub const MAX_MAX_MERGE_SEEN_KEYS: i32 = 100_000_000;
+/// Minimum object-store timeout (`0` = disabled).
+pub const MIN_OBJECT_STORE_TIMEOUT_MS: i32 = 0;
+/// Hard cap for `koldstore.object_store_timeout_ms` (10 minutes).
+pub const MAX_OBJECT_STORE_TIMEOUT_MS: i32 = 600_000;
 
 /// Names of public GUCs owned by pg-koldstore.
 pub const COLD_READS_GUC: &str = "koldstore.cold_reads";
 pub const MAX_OPEN_PARQUET_READERS_GUC: &str = "koldstore.max_open_parquet_readers";
 pub const MAX_MERGE_SEEN_KEYS_GUC: &str = "koldstore.max_merge_seen_keys";
+/// Wall-clock budget for one ObjectStore / Parquet segment operation.
+pub const OBJECT_STORE_TIMEOUT_MS_GUC: &str = "koldstore.object_store_timeout_ms";
 pub const LOG_LEVEL_GUC: &str = "koldstore.log_level";
 /// GUC that sets the minimum allowed `max_rows_per_file` for managed tables.
 pub const MIN_MAX_ROWS_PER_FILE_GUC: &str = "koldstore.min_max_rows_per_file";
@@ -169,6 +177,18 @@ pub const fn bounded_max_merge_seen_keys(value: i32) -> i32 {
         MIN_MAX_MERGE_SEEN_KEYS
     } else if value > MAX_MAX_MERGE_SEEN_KEYS {
         MAX_MAX_MERGE_SEEN_KEYS
+    } else {
+        value
+    }
+}
+
+/// Validates and clamps the ObjectStore operation timeout (`0` stays disabled).
+#[must_use]
+pub const fn bounded_object_store_timeout_ms(value: i32) -> i32 {
+    if value < MIN_OBJECT_STORE_TIMEOUT_MS {
+        MIN_OBJECT_STORE_TIMEOUT_MS
+    } else if value > MAX_OBJECT_STORE_TIMEOUT_MS {
+        MAX_OBJECT_STORE_TIMEOUT_MS
     } else {
         value
     }

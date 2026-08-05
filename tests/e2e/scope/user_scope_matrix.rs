@@ -391,7 +391,8 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
     common::require_pgrx_server().await?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "user_scope_text_collation").await?;
-        // Probe CREATE COLLATION: catalog ICU rows can remain after a non-ICU rebuild.
+        // Probe CREATE COLLATION: catalog ICU rows can remain after a non-ICU rebuild,
+        // and some clusters (e.g. Windows WIN1252) cannot create ICU collations at all.
         let probe = format!("{}.koldstore_icu_probe", db.schema);
         match db
             .client
@@ -410,7 +411,7 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
                     .execute(&format!("DROP COLLATION {probe}"), &[])
                     .await?;
             }
-            Err(error) if common::error_chain_contains(&error, "ICU is not supported") => continue,
+            Err(error) if icu_collation_unavailable(&error) => continue,
             Err(error) => return Err(error.into()),
         }
 
@@ -425,12 +426,7 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
             ))
             .await
         {
-            // tokio_postgres Display is often just "db error"; read the SQLSTATE message.
-            let message = error
-                .as_db_error()
-                .map(|err| err.message().to_string())
-                .unwrap_or_else(|| error.to_string());
-            if message.contains("ICU is not supported") {
+            if icu_collation_unavailable(&error) {
                 continue;
             }
             return Err(error.into());
@@ -486,6 +482,22 @@ async fn nondeterministic_collation_pk_is_rejected_before_scope_moving_merge() -
     }
 
     Ok(())
+}
+
+/// True when this cluster cannot create ICU collations (no ICU build, or DB encoding).
+fn icu_collation_unavailable(error: &tokio_postgres::Error) -> bool {
+    const NEEDLES: &[&str] = &[
+        "ICU is not supported",
+        "current database's encoding is not supported with this provider",
+        "not supported by ICU",
+        "not supported with ICU",
+    ];
+    NEEDLES
+        .iter()
+        .any(|needle| common::error_chain_contains(error, needle))
+        || error
+            .as_db_error()
+            .is_some_and(|err| NEEDLES.iter().any(|needle| err.message().contains(needle)))
 }
 
 async fn assert_user_scope_visibility(

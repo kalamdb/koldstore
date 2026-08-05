@@ -89,7 +89,7 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
-    let client = koldstore_storage::open_client_from_catalog_fields(
+    let client = crate::object_store::open_managed_object_store_client(
         &storage.storage_type,
         &storage.base_path,
         &storage.credentials,
@@ -200,6 +200,9 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 ///
 /// SQL contract:
 /// `koldstore.flush_table(table_name regclass, force boolean default false)`.
+///
+/// Emits PostgreSQL `LOG` lines when the job starts and when it finishes
+/// (duration, rows, segments, bytes, waves), including auto-flush ticks.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
 pub fn flush_table_pg(

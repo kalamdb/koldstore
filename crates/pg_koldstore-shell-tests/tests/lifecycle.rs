@@ -30,6 +30,11 @@ fn guc_definitions_include_public_and_internal_settings() {
         .any(|guc| guc.name == "koldstore.max_merge_seen_keys"
             && !guc.internal
             && guc.default_value == "1000000"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.object_store_timeout_ms"
+            && !guc.internal
+            && guc.default_value == "30000"));
     assert!(gucs.iter().any(|guc| guc.name == "koldstore.log_level"
         && !guc.internal
         && guc.default_value == "info"));
@@ -94,6 +99,10 @@ fn application_roles_cannot_set_internal_gucs() {
     assert!(can_set_guc(
         RoleClass::Application,
         "koldstore.max_merge_seen_keys",
+    ));
+    assert!(can_set_guc(
+        RoleClass::Application,
+        "koldstore.object_store_timeout_ms",
     ));
     assert!(can_set_guc(
         RoleClass::Application,

@@ -4,6 +4,8 @@
 //! metadata, ordered by exclusive mirror `seq` cursor.
 
 #[cfg(feature = "pg")]
+use crate::object_store::open_managed_object_store_client;
+#[cfg(feature = "pg")]
 use koldstore_common::{
     scope::active_scope_for_table, ChangeSource, MirrorChange, MirrorOperation, QualifiedTableName,
     ScopeKey, SeqId, SqlParamType, TableKind,
@@ -16,8 +18,6 @@ use koldstore_merge::group_segments_oldest_first;
 use koldstore_parquet::{
     read_clean_cold_rows_from_object_store_with_size, CleanColdRow, ParquetReadOptions, PgColumn,
 };
-#[cfg(feature = "pg")]
-use koldstore_storage::open_client_from_catalog_fields;
 #[cfg(feature = "pg")]
 use pgrx::datum::DatumWithOid;
 #[cfg(feature = "pg")]
@@ -360,7 +360,7 @@ fn fetch_cold_changes(
     }
 
     let catalog = crate::catalog::cache::cached_migration_catalog(table_oid)?;
-    let client = open_client_from_catalog_fields(
+    let client = open_managed_object_store_client(
         &manifest.storage_type,
         &manifest.base_path,
         &manifest.credentials,
@@ -412,7 +412,9 @@ fn fetch_cold_changes(
                 })
                 .collect::<Result<Vec<_>, String>>()?;
 
-            let mut options = ParquetReadOptions::new().with_columns(physical_pk_names.clone());
+            let mut options = ParquetReadOptions::new()
+                .with_columns(physical_pk_names.clone())
+                .with_timeout(client.timeout());
             if let Ok(min_seq) = SeqId::new(since_seq.saturating_add(1).max(1)) {
                 options = options.with_clean_seq_range(min_seq, segment.max_seq);
             }

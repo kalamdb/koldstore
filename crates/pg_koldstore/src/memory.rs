@@ -95,7 +95,7 @@ mod tests {
     use std::cell::Cell;
 
     use super::{
-        mark_heap_trim_pending, release_process_heap_if_pending, HEAP_TRIM_PENDING, MemoryOwner,
+        mark_heap_trim_pending, release_process_heap_if_pending, MemoryOwner, HEAP_TRIM_PENDING,
     };
 
     #[test]

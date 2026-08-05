@@ -16,9 +16,7 @@ use koldstore_flush::{
     WrittenFlushSegment,
 };
 use koldstore_manifest::write_manifest_with_client;
-use koldstore_storage::{
-    manifest_object_key, open_client_from_catalog_fields, render_regular_table_prefix, PathTemplate,
-};
+use koldstore_storage::{manifest_object_key, render_regular_table_prefix, PathTemplate};
 
 use super::jobs::{
     ensure_flush_job, flush_cancel_requested, mark_flush_job_cancelled, mark_flush_job_completed,
@@ -224,6 +222,10 @@ pub(super) fn stream_write_flush_batches(
         .iter()
         .map(|written| written.segment_id)
         .collect();
+    let bytes_written = written_segments
+        .iter()
+        .map(|written| written.catalog_row.byte_size)
+        .fold(0_i64, i64::saturating_add);
     // PERFORMANCE: catalog is the source of truth for publishable segments.
     // Build the derived manifest once after pending inserts — skip object-store
     // reload + in-memory append that duplicated large JSON each wave.
@@ -237,6 +239,7 @@ pub(super) fn stream_write_flush_batches(
     Ok(TableFlushBatchOutcome {
         total_rows_flushed,
         last_max_seq,
+        bytes_written,
         mirror_ops: selection.mirror_ops.clone(),
         prune_max_seq: stream_outcome.max_seq,
         manifest,
@@ -276,9 +279,10 @@ fn write_streamed_chunk(
     *total_rows_flushed = total_rows_flushed.saturating_add(chunk_stats.row_count);
     *last_max_seq = chunk_stats.max_seq;
     pgrx::log!(
-        "koldstore flush: wrote+cataloged segment batch={} rows={} total_rows={}",
+        "koldstore flush: wrote+cataloged segment batch={} rows={} bytes={} total_rows={}",
         *batch_number,
         chunk_stats.row_count,
+        written.catalog_row.byte_size,
         *total_rows_flushed
     );
     *batch_number = batch_number.saturating_add(1);
@@ -497,15 +501,27 @@ pub(crate) fn flush_table_pg_impl(
     )?;
     let (job_id, force, progress_total) = claim_flush_job(table_oid, force)?;
     let job_uuid = crate::spi::uuid_to_pgrx(job_id);
+    let started = std::time::Instant::now();
+    let table = crate::catalog::resolve::qualified_relation_name(table_oid)
+        .unwrap_or_else(|_| format!("oid={}", table_oid.to_u32()));
+    pgrx::log!(
+        "koldstore flush: started table={table} job={job_id} force={force} estimated_rows={progress_total}"
+    );
     match flush_after_claim(
         table_oid,
         force,
         job_id,
         progress_total,
         phase0.last_applied,
+        started,
+        &table,
     ) {
         Ok(()) => Ok(job_uuid),
         Err(error) => {
+            pgrx::log!(
+                "koldstore flush: failed table={table} job={job_id} duration={} error={error}",
+                format_flush_duration(started)
+            );
             mark_flush_job_failed(job_id, table_oid, &error)?;
             // Segments/manifest/hot cleanup may already have committed work in
             // this transaction; drop stale merge-scan caches even on failure.
@@ -521,6 +537,8 @@ fn flush_after_claim(
     job_id: uuid::Uuid,
     progress_total: i64,
     phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
+    started: std::time::Instant,
+    table: &str,
 ) -> Result<(), String> {
     let mut ctx = load_flush_prepared_context(table_oid, force, job_id)?;
     match crate::sql::migrate_pg::refresh_active_schema_if_changed(table_oid) {
@@ -530,7 +548,14 @@ fn flush_after_claim(
         Ok(false) => {}
         Err(error) => return Err(error),
     }
-    flush_prepared_table(table_oid, &ctx, progress_total, phase0_applied)
+    flush_prepared_table(
+        table_oid,
+        &ctx,
+        progress_total,
+        phase0_applied,
+        started,
+        table,
+    )
 }
 
 /// Cap catch-up waves inside one flush job (each wave ≤ `max_rows_per_flush`).
@@ -539,14 +564,43 @@ fn flush_after_claim(
 /// / `flush_table` call without leaving hundreds of tiny completed job rows.
 const MAX_CATCHUP_WAVES_PER_JOB: u32 = 64;
 
+fn format_flush_duration(started: std::time::Instant) -> String {
+    let elapsed = started.elapsed();
+    if elapsed.as_secs() >= 1 {
+        format!("{:.3}s", elapsed.as_secs_f64())
+    } else {
+        format!("{}ms", elapsed.as_millis())
+    }
+}
+
+fn format_flush_bytes(bytes: i64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let bytes = u64::try_from(bytes.max(0)).unwrap_or(0);
+    let bytes_f = bytes as f64;
+    if bytes_f >= GB {
+        format!("{bytes} ({:.1} GB)", bytes_f / GB)
+    } else if bytes_f >= MB {
+        format!("{bytes} ({:.1} MB)", bytes_f / MB)
+    } else if bytes_f >= KB {
+        format!("{bytes} ({:.1} kB)", bytes_f / KB)
+    } else {
+        format!("{bytes} bytes")
+    }
+}
+
 fn flush_prepared_table(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
     progress_total: i64,
     phase0_applied: Option<crate::async_mirror::apply::AppliedWalBoundary>,
+    started: std::time::Instant,
+    table: &str,
 ) -> Result<(), String> {
     let mut total_rows_flushed = 0_i64;
     let mut total_batches = 0_i32;
+    let mut total_bytes_written = 0_i64;
     let mut last_max_seq = 0_i64;
     let mut skip_through = phase0_applied;
     let mut waves = 0_u32;
@@ -556,7 +610,7 @@ fn flush_prepared_table(
     let catchup_upto_seq = mirror_catchup_watermark(table_oid)?;
 
     // One client per job: reused across waves for segment publish + manifest write.
-    let client = open_client_from_catalog_fields(
+    let client = crate::object_store::open_managed_object_store_client(
         &ctx.storage.storage_type,
         &ctx.storage.base_path,
         &ctx.storage.credentials,
@@ -587,9 +641,13 @@ fn flush_prepared_table(
             return finish_flush_after_cancel(
                 ctx.job_id,
                 table_oid,
+                table,
+                started,
                 total_rows_flushed,
                 total_batches,
+                total_bytes_written,
                 last_max_seq,
+                waves,
             );
         }
         report_progress(
@@ -607,9 +665,13 @@ fn flush_prepared_table(
             return finish_flush_after_cancel(
                 ctx.job_id,
                 table_oid,
+                table,
+                started,
                 total_rows_flushed,
                 total_batches,
+                total_bytes_written,
                 last_max_seq,
+                waves,
             );
         }
         if !should_start_catchup_wave(
@@ -621,9 +683,7 @@ fn flush_prepared_table(
         }
         waves = waves.saturating_add(1);
         pgrx::log!(
-            "koldstore flush: starting table={} wave={} rows={} max_seq={} force={} catchup_upto={:?}",
-            ctx.relation.name,
-            waves,
+            "koldstore flush: starting table={table} wave={waves} rows={} max_seq={} force={} catchup_upto={:?}",
             selection.stats.row_count,
             selection.stats.max_seq,
             ctx.force,
@@ -645,9 +705,13 @@ fn flush_prepared_table(
             return finish_flush_after_cancel(
                 ctx.job_id,
                 table_oid,
+                table,
+                started,
                 total_rows_flushed,
                 total_batches,
+                total_bytes_written,
                 last_max_seq,
+                waves,
             );
         }
         report_progress(
@@ -662,6 +726,7 @@ fn flush_prepared_table(
 
         total_rows_flushed = total_rows_flushed.saturating_add(outcome.total_rows_flushed);
         total_batches = total_batches.saturating_add(wave_batches);
+        total_bytes_written = total_bytes_written.saturating_add(outcome.bytes_written);
         last_max_seq = outcome.last_max_seq;
 
         // Drop wave-owned buffers before the next selection / encode pass.
@@ -692,16 +757,32 @@ fn flush_prepared_table(
         last_max_seq,
         total_batches,
     )?;
+    pgrx::log!(
+        "koldstore flush: completed table={table} job={} duration={} rows={} segments={} bytes={} waves={} max_seq={} force={}",
+        ctx.job_id,
+        format_flush_duration(started),
+        total_rows_flushed,
+        total_batches,
+        format_flush_bytes(total_bytes_written),
+        waves,
+        last_max_seq,
+        ctx.force
+    );
     release_flush_memory(table_oid);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_flush_after_cancel(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
+    table: &str,
+    started: std::time::Instant,
     total_rows_flushed: i64,
     total_batches: i32,
+    total_bytes_written: i64,
     last_max_seq: i64,
+    waves: u32,
 ) -> Result<(), String> {
     if total_rows_flushed > 0 {
         // Publish already committed in an earlier wave of this statement: do not
@@ -713,8 +794,21 @@ fn finish_flush_after_cancel(
             last_max_seq,
             total_batches,
         )?;
+        pgrx::log!(
+            "koldstore flush: cancelled-after-progress table={table} job={job_id} duration={} rows={} segments={} bytes={} waves={} max_seq={}",
+            format_flush_duration(started),
+            total_rows_flushed,
+            total_batches,
+            format_flush_bytes(total_bytes_written),
+            waves,
+            last_max_seq
+        );
     } else {
         mark_flush_job_cancelled(job_id, table_oid)?;
+        pgrx::log!(
+            "koldstore flush: cancelled table={table} job={job_id} duration={}",
+            format_flush_duration(started)
+        );
     }
     release_flush_memory(table_oid);
     Ok(())

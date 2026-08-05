@@ -15,9 +15,11 @@ pub mod object;
 pub mod path_template;
 pub mod publish;
 pub mod registration;
+pub mod runtime;
 
 pub use backend::{
-    open_client_from_catalog_fields, open_filesystem_client, open_storage_client, BackendConfig,
+    open_client_from_catalog_fields, open_client_from_catalog_fields_with_timeout,
+    open_filesystem_client, open_storage_client, open_storage_client_with_timeout, BackendConfig,
     StorageBackend, StorageBackendKind,
 };
 pub use client::{
@@ -40,6 +42,7 @@ pub use registration::{
     StorageRegistration, StorageRegistrationPlan, DEFAULT_REGULAR_PATH_TMPL,
     DEFAULT_SCOPED_PATH_TMPL, SUPPORTED_STORAGE_TYPES,
 };
+pub use runtime::{block_on as block_on_object_store, set_interrupt_hook, Elapsed};
 
 /// Installs the rustls `ring` crypto provider once.
 ///

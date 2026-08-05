@@ -544,10 +544,10 @@ unsafe fn var_column(
 }
 
 unsafe fn operator_is_pg_catalog(operator: pg_sys::Oid) -> bool {
-    let tuple = pg_sys::SearchSysCache1(
-        pg_sys::SysCacheIdentifier::OPEROID as i32,
-        pg_sys::Datum::from(operator),
-    );
+    // Windows bindgen may already type this as i32; keep the cast for Linux/macOS.
+    #[allow(clippy::unnecessary_cast)]
+    let cache_id = pg_sys::SysCacheIdentifier::OPEROID as i32;
+    let tuple = pg_sys::SearchSysCache1(cache_id, pg_sys::Datum::from(operator));
     if tuple.is_null() {
         return false;
     }

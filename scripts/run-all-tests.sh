@@ -153,13 +153,20 @@ ensure_pgrx_postgres() {
   cargo pgrx init --pg"${pg}" "${pg_config}"
 }
 
+# pgrx features for extension builds. Windows (and other non-Linux/macOS hosts)
+# require `cshim`; include it everywhere so the same feature set works locally.
+pgrx_extension_features() {
+  local base="$1"
+  echo "${base} s3 cshim"
+}
+
 cargo_pgrx_install_koldstore() {
   local pg_feature="$1"
   local pg_config="$2"
   local install_args=(
     -p pg_koldstore
     --no-default-features
-    --features "${pg_feature} s3"
+    --features "$(pgrx_extension_features "${pg_feature}")"
     --pg-config "${pg_config}"
   )
 
@@ -201,7 +208,8 @@ run_local_pgrx_e2e() {
 
 run_local_pg_test() {
   local pg="$1"
-  local features="pg${pg} pg_test s3"
+  local features
+  features="$(pgrx_extension_features "pg${pg} pg_test")"
   local manifest="${ROOT_DIR}/crates/pg_koldstore/Cargo.toml"
   local target_dir="${CARGO_TARGET_DIR:-${ROOT_DIR}/target}"
 
@@ -325,7 +333,8 @@ if [[ "${SKIP_PGRX}" -eq 0 ]]; then
     [[ -z "${pg}" ]] && continue
     if ensure_pgrx_postgres "${pg}"; then
       step "pgrx feature compile check pg${pg}"
-      cargo clippy -p pg_koldstore --all-targets --no-default-features --features "pg${pg} pg_test s3" -- -D warnings
+      cargo clippy -p pg_koldstore --all-targets --no-default-features \
+        --features "$(pgrx_extension_features "pg${pg} pg_test")" -- -D warnings
 
       step "pgrx install check pg${pg}"
       cargo_pgrx_install_koldstore "pg${pg}" "$(configured_pg_config "${pg}")"

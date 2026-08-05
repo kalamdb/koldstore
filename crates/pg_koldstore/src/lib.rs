@@ -12,6 +12,7 @@ pub mod guc;
 pub mod hooks;
 pub mod memory;
 pub mod merge_scan;
+pub mod object_store;
 pub mod observability;
 #[cfg(feature = "pg")]
 pub mod preload;
@@ -88,6 +89,7 @@ pub extern "C" fn _PG_init() {
     koldstore_storage::ensure_rustls_ring_provider();
     observability::init_tracing();
     guc::define_gucs();
+    object_store::install_interrupt_hook();
     database_worker::wake::initialize();
     catalog::cache::register_invalidation_callback();
     hooks::register_hooks();
