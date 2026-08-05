@@ -946,9 +946,9 @@ fn required_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a dyn Arr
 fn parquet_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("koldstore-parquet")
+        // Match object-store: PG backends are sync; avoid multi-thread worker
+        // stacks that inflate idle RSS after the first cold Parquet open.
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("create tokio runtime for parquet object-store IO")

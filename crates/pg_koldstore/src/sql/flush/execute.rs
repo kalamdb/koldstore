@@ -382,16 +382,8 @@ pub(super) fn finalize_flush(
 /// manifest allocations do not stay pinned in the backend RSS.
 pub(crate) fn release_flush_memory(table_oid: pgrx::pg_sys::Oid) {
     crate::catalog::cache::invalidate_table_globally(table_oid);
-    // Linux glibc: return free heap pages to the OS after large temporary spikes.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    {
-        extern "C" {
-            fn malloc_trim(pad: usize) -> std::os::raw::c_int;
-        }
-        unsafe {
-            let _ = malloc_trim(0);
-        }
-    }
+    crate::memory::mark_heap_trim_pending();
+    crate::memory::release_process_heap();
 }
 
 /// Phase-5.5: finite pre-lock catch-up after object upload.

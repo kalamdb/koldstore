@@ -1067,6 +1067,10 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     // `scan` drops here, releasing ScanMemory and buffered Datums.
                 }
             });
+            // Rust/Arrow arenas are outside PostgreSQL MemoryContexts. Mark a
+            // trim so ExecutorEnd returns free huge pages after this query;
+            // otherwise pooled idle backends keep hundreds of MB of RSS.
+            crate::memory::mark_heap_trim_pending();
         }
         end_custom_plan_children(node);
     }

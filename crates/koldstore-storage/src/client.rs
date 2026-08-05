@@ -386,9 +386,10 @@ fn map_object_store_error(error: object_store::Error) -> StorageClientError {
 fn object_store_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("koldstore-object-store")
+        // PostgreSQL backends are sync and single-threaded. A current-thread
+        // runtime avoids per-backend worker stacks that formerly retained tens
+        // of MB after the first cold/object-store touch.
+        tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("create tokio runtime for object_store IO")
@@ -399,9 +400,8 @@ fn block_on<F>(future: F) -> F::Output
 where
     F: Future,
 {
-    // Flush/SPI paths are sync and use a dedicated multi-thread runtime.
-    // `block_in_place` is only legal on multi-thread callers; current-thread
-    // test/runtime handles must fall back to a plain nested `block_on`.
+    // Sync SPI/flush paths drive ObjectStore futures on a dedicated runtime.
+    // `block_in_place` is only legal on multi-thread callers (e.g. tests).
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             tokio::task::block_in_place(|| object_store_runtime().block_on(future))
