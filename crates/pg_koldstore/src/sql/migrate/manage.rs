@@ -17,6 +17,7 @@ use koldstore_migrate::{introspection, MigrateTableRequest};
 #[cfg(feature = "pg")]
 use uuid::Uuid;
 #[cfg(feature = "pg")]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn manage_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     table_type: &str,
