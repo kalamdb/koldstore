@@ -96,4 +96,6 @@ fn is_transient_flush_error(error: &anyhow::Error) -> bool {
         || text.contains("selection mismatch")
         || text.contains("could not serialize")
         || text.contains("status=error")
+        || text.contains("apply lock")
+        || text.contains("retry shortly")
 }

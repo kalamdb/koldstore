@@ -29,7 +29,20 @@ fn backend_config_validates_supported_storage_urls() {
     .unwrap();
     assert_eq!(s3.kind, StorageBackendKind::S3);
 
+    let gcs = BackendConfig::new(StorageBackendKind::Gcs, "gs://bucket/prefix", json!({})).unwrap();
+    assert_eq!(gcs.kind, StorageBackendKind::Gcs);
+
+    let azure = BackendConfig::new(
+        StorageBackendKind::Azure,
+        "azure://container/prefix",
+        json!({}),
+    )
+    .unwrap();
+    assert_eq!(azure.kind, StorageBackendKind::Azure);
+
     assert!(BackendConfig::new(StorageBackendKind::S3, "/not/s3", json!({})).is_err());
+    assert!(BackendConfig::new(StorageBackendKind::Gcs, "s3://bucket", json!({})).is_err());
+    assert!(BackendConfig::new(StorageBackendKind::Azure, "gs://bucket", json!({})).is_err());
 }
 
 #[test]

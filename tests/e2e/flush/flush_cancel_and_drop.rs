@@ -6,9 +6,7 @@ use anyhow::{bail, Context, Result};
 use tokio::task::JoinHandle;
 
 use crate::common;
-use crate::flush::harness::{
-    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter,
-};
+use crate::flush::harness::{barrier_unlock, connect_peer, pause_flush_at_with_force};
 
 #[tokio::test]
 async fn cancel_pending_flush_job_marks_cancelled() -> Result<()> {
@@ -97,30 +95,9 @@ async fn cancel_running_flush_before_activate_marks_cancelled() -> Result<()> {
             .await
             .ok();
 
-        let coordinator = connect_peer(&db).await?;
-        barrier_lock(&coordinator).await?;
-
-        let flush_client = connect_peer(&db).await?;
-        let flush_relation = table.relation.clone();
-        let flush_handle: JoinHandle<Result<String>> = tokio::spawn(async move {
-            flush_client
-                .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
+        let (coordinator, flush_handle) =
+            pause_flush_at_with_force(&db, &table.relation, "wait:after_select_rows", false)
                 .await?;
-            let row = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&flush_relation],
-                )
-                .await
-                .context("flush_table under cancel")?;
-            flush_client
-                .batch_execute("SET koldstore.failpoint = '';")
-                .await
-                .ok();
-            Ok(row.get::<_, String>(0))
-        });
-
-        wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await?;
 
         let cancelled = db
             .client
@@ -137,7 +114,7 @@ async fn cancel_running_flush_before_activate_marks_cancelled() -> Result<()> {
         );
 
         barrier_unlock(&coordinator).await?;
-        let job_id = flush_handle.await??;
+        let job_id = flush_handle.await??.get::<_, String>(0);
 
         let row = db
             .client
@@ -270,43 +247,9 @@ async fn drop_table_during_flush_waits_for_cancel_then_succeeds() -> Result<()> 
             .await
             .ok();
 
-        let coordinator = connect_peer(&db).await?;
-        barrier_lock(&coordinator).await?;
-
-        let flush_client = connect_peer(&db).await?;
-        let flush_relation = table.relation.clone();
-        let flush_handle: JoinHandle<Result<()>> = tokio::spawn(async move {
-            flush_client
-                .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
+        let (coordinator, flush_handle) =
+            pause_flush_at_with_force(&db, &table.relation, "wait:after_select_rows", false)
                 .await?;
-            let result = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&flush_relation],
-                )
-                .await;
-            flush_client
-                .batch_execute("SET koldstore.failpoint = '';")
-                .await
-                .ok();
-            match result {
-                Ok(_) => Ok(()),
-                Err(error) => {
-                    let detail = error.to_string();
-                    if detail.contains("does not exist")
-                        || detail.contains("cancel")
-                        || detail.contains("managed schema")
-                        || detail.contains("flush")
-                    {
-                        Ok(())
-                    } else {
-                        Err(error.into())
-                    }
-                }
-            }
-        });
-
-        wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await?;
 
         // DROP signals cancel then waits on the table-job advisory lock. Unlock
         // the failpoint so flush can observe cancel, exit, and release the lock.
@@ -322,7 +265,19 @@ async fn drop_table_during_flush_waits_for_cancel_then_succeeds() -> Result<()> 
 
         tokio::time::sleep(Duration::from_millis(150)).await;
         barrier_unlock(&coordinator).await?;
-        flush_handle.await??;
+        match flush_handle.await? {
+            Ok(_) => {}
+            Err(error) => {
+                let detail = format!("{error:#}");
+                if !(detail.contains("does not exist")
+                    || detail.contains("cancel")
+                    || detail.contains("managed schema")
+                    || detail.contains("flush"))
+                {
+                    return Err(error);
+                }
+            }
+        }
         drop_handle.await??;
 
         let active = db

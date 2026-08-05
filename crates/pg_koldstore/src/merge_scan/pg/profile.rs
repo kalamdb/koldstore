@@ -89,9 +89,13 @@ impl ScanProfileSink for DisabledScanProfiler {
 impl ScanProfiler {
     /// Creates a profiler from PostgreSQL's native executor instrumentation flags.
     pub(super) fn from_instrumentation(instrumentation: i32) -> Self {
+        // Windows bindgen may already type InstrumentOption as i32; keep the
+        // cast for Linux/macOS.
+        #[allow(clippy::unnecessary_cast)]
+        let timer = pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32;
         let collection = ProfileCollectionMode::from_instrumentation(
             instrumentation != 0,
-            instrumentation & pg_sys::InstrumentOption::INSTRUMENT_TIMER as i32 != 0,
+            instrumentation & timer != 0,
         );
         Self {
             collection,
@@ -173,6 +177,10 @@ pub(super) enum EmitPath {
     ColdNative,
     /// Hot+cold winners emitted from newest-first cold segment groups.
     MergeStream,
+    /// Ordered progressive merge using native child hot cursor + cold stream.
+    OrderedMergeNative,
+    /// Unordered LIMIT: native hot-first, cold deferred until hot exhausts.
+    UnorderedHotFirst,
 }
 
 impl EmitPath {
@@ -182,6 +190,8 @@ impl EmitPath {
             Self::HotNative => "hot_native",
             Self::ColdNative => "cold_native",
             Self::MergeStream => "merge_stream",
+            Self::OrderedMergeNative => "ordered_merge_native",
+            Self::UnorderedHotFirst => "unordered_hot_first",
         }
     }
 }
@@ -429,7 +439,12 @@ pub(super) fn explain_visual_pipeline(
     }
     match execution {
         Some(execution) => {
-            explain_text(es, "Hot Actual Access", hot_actual_access(emit_path));
+            let used_spi = execution.hot_spi_query.is_some();
+            explain_text(
+                es,
+                "Hot Actual Access",
+                hot_actual_access(emit_path, used_spi),
+            );
             if let Some(sql) = execution.hot_spi_query.as_deref() {
                 explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
             }
@@ -477,6 +492,13 @@ pub(super) fn explain_visual_pipeline(
         None,
         profile.segments_opened as i64,
     );
+    if profile.segments_opened == 0 && analyze {
+        explain_text(
+            es,
+            "Cold Skip Reason",
+            "hot satisfied parent Limit without cold expansion",
+        );
+    }
     // Catalog lookup determines which Parquet segments open — nest Parquet
     // under the catalog node so visualizers show the real dependency.
     explain_open_group(es, "Plans", Some("Plans"), false);
@@ -577,7 +599,14 @@ fn explain_visual_postgres_hot_access(
     if !hot_plan_label.is_empty() {
         explain_text(es, "Hot Planned Access", hot_plan_label);
     }
-    explain_text(es, "Hot Actual Access", hot_actual_access(emit_path));
+    let used_spi = execution
+        .and_then(|execution| execution.hot_spi_query.as_ref())
+        .is_some();
+    explain_text(
+        es,
+        "Hot Actual Access",
+        hot_actual_access(emit_path, used_spi),
+    );
     match execution {
         Some(execution) => {
             explain_integer(es, "Actual Rows", None, execution.hot_rows as i64);
@@ -620,12 +649,16 @@ fn explain_hot_scan(
     }
     match execution {
         Some(execution) => {
-            explain_text(es, "Actual Access", hot_actual_access(emit_path));
+            let used_spi = execution.hot_spi_query.is_some();
+            explain_text(es, "Actual Access", hot_actual_access(emit_path, used_spi));
             if let Some(sql) = execution.hot_spi_query.as_deref() {
                 explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
             }
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
-            if matches!(emit_path, EmitPath::MergeStream) {
+            if matches!(
+                emit_path,
+                EmitPath::MergeStream | EmitPath::OrderedMergeNative | EmitPath::UnorderedHotFirst
+            ) {
                 explain_integer(
                     es,
                     "Peak Hot Batch Rows",
@@ -640,12 +673,19 @@ fn explain_hot_scan(
 }
 
 /// Honest runtime hot access label — distinct from the planner's child shape.
-fn hot_actual_access(emit_path: EmitPath) -> &'static str {
+///
+/// When ordered/unordered native open falls back to SPI JSON (narrow child
+/// tlist / `count(*)`), `used_spi` is true and the label must not claim native.
+fn hot_actual_access(emit_path: EmitPath, used_spi: bool) -> &'static str {
+    if used_spi {
+        return "SPI JSON Keyset Scan";
+    }
     match emit_path {
         EmitPath::HotChild => "Native PostgreSQL Child",
         EmitPath::HotNative => "SPI Native Tuple Scan",
         EmitPath::ColdNative => "SPI Native Point Probe",
         EmitPath::MergeStream => "SPI JSON Keyset Scan",
+        EmitPath::OrderedMergeNative | EmitPath::UnorderedHotFirst => "Native PostgreSQL Child",
     }
 }
 
@@ -727,6 +767,13 @@ fn explain_cold_scan(
             None,
             profile.segments_opened as i64,
         );
+        if profile.segments_opened == 0 {
+            explain_text(
+                es,
+                "Cold Skip Reason",
+                "hot satisfied parent Limit without cold expansion",
+            );
+        }
     } else {
         explain_integer(
             es,
@@ -882,7 +929,13 @@ fn explain_merge(
                 None,
                 execution.overlay_rows_removed as i64,
             );
-            if matches!(emit_path, EmitPath::MergeStream | EmitPath::ColdNative) {
+            if matches!(
+                emit_path,
+                EmitPath::MergeStream
+                    | EmitPath::OrderedMergeNative
+                    | EmitPath::UnorderedHotFirst
+                    | EmitPath::ColdNative
+            ) {
                 explain_integer(es, "Seen Keys", None, execution.seen_key_count as i64);
                 explain_integer(
                     es,

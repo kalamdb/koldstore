@@ -38,7 +38,7 @@ pub use cluster::{
     require_pgrx_server, require_pgrx_server_sync, scenario_pg_matrix, wait_for_postgres, PgTarget,
     PgrxServer,
 };
-pub use db::{FixtureStorage, ManagedTable, TestDb};
+pub use db::{flush_table_job_id, is_flush_apply_lock_busy, FixtureStorage, ManagedTable, TestDb};
 pub use describe_table::{
     assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
 };

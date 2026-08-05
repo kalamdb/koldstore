@@ -2,8 +2,8 @@
 fn demigration_sql_deactivates_managed_metadata() {
     use koldstore_migrate::rehydrate::{plan_catalog_deactivation, plan_flush_deactivation};
 
-    let catalog = plan_catalog_deactivation(42).unwrap();
-    let flush = plan_flush_deactivation(42).unwrap();
+    let catalog = plan_catalog_deactivation(koldstore_common::TableOid::from_raw(42)).unwrap();
+    let flush = plan_flush_deactivation(koldstore_common::TableOid::from_raw(42)).unwrap();
 
     assert_eq!(
         catalog.sql,
@@ -22,12 +22,13 @@ fn migration_rollback_cleanup_removes_partial_catalog_rows_and_mirror_only() {
     use koldstore_migrate::QualifiedTableName;
 
     let table = QualifiedTableName::parse("app.items").unwrap();
-    let cleanup = RollbackCleanup::for_table(table.clone(), 42)
-        .with_mirror_table(QualifiedTableName::parse("koldstore.items__cl").unwrap());
+    let cleanup =
+        RollbackCleanup::for_table(table.clone(), koldstore_common::TableOid::from_raw(42))
+            .with_mirror_table(QualifiedTableName::parse("koldstore.items__cl").unwrap());
 
     let plan = cleanup.plan().unwrap();
 
-    assert_eq!(plan.table_oid, 42);
+    assert_eq!(plan.table_oid.get(), 42);
     assert!(plan
         .statements
         .iter()

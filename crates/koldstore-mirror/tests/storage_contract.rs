@@ -5,8 +5,8 @@ use koldstore_common::{
 use koldstore_mirror::{
     mirror_relation_for_source, plan_async_mirror_batch_delete_existing,
     plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, plan_mirror_schema,
-    plan_mirror_stats, plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorAccess,
-    MirrorColumn, SqlParamType,
+    plan_mirror_stats, plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorColumn,
+    SqlAccess, SqlParamType,
 };
 
 fn pk_shape(name: &str, type_name: &str) -> PrimaryKeyColumnShape {
@@ -44,8 +44,8 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
     let mirror = mirror_relation_for_source(&TableName::parse("app.items").unwrap()).unwrap();
     let plan = plan_mirror_schema(&mirror, &[pk_shape("id", "bigint")]).unwrap();
 
-    assert_eq!(plan.collision_probe.access, MirrorAccess::ReadOnly);
-    assert_eq!(plan.create_table.access, MirrorAccess::ReadWrite);
+    assert_eq!(plan.collision_probe.access, SqlAccess::ReadOnly);
+    assert_eq!(plan.create_table.access, SqlAccess::ReadWrite);
     assert!(plan
         .create_table
         .sql
@@ -177,7 +177,7 @@ fn mirror_changes_since_scan_keeps_callers_in_control_of_predicates() {
         &["mirror.\"tenant_id\" = $2".to_string()],
     )
     .unwrap();
-    let stats = plan_mirror_stats(&mirror);
+    let stats = plan_mirror_stats(&mirror).unwrap();
 
     assert!(scan
         .sql

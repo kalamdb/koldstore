@@ -163,19 +163,10 @@ impl ManifestSegment {
 
 /// Sort Key V1 segment and row-group bounds for one indexed column.
 ///
-/// Hex strings mirror PostgreSQL `bytea` values. Array position is the
-/// zero-based Parquet row-group ID; `None` mirrors a SQL NULL array element.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ManifestColumnIndex {
-    pub column_id: i16,
-    pub type_oid: u32,
-    pub codec_version: i16,
-    pub min_value: Option<String>,
-    pub max_value: Option<String>,
-    pub row_group_min_values: Vec<Option<String>>,
-    pub row_group_max_values: Vec<Option<String>>,
-    pub row_group_null_counts: Vec<Option<i64>>,
-}
+/// Same wire shape as [`koldstore_catalog::CatalogSegmentIndexBound`] (hex Storekey
+/// bounds). Kept as a type alias so catalog assembly and object-store JSON share
+/// one model.
+pub type ManifestColumnIndex = koldstore_catalog::CatalogSegmentIndexBound;
 
 /// Segment status in object-store manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

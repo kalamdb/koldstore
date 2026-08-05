@@ -12,7 +12,7 @@ fn change(
     source: ChangeSource,
 ) -> MirrorChange {
     MirrorChange {
-        table_oid,
+        table_oid: koldstore_common::TableOid::from_raw(table_oid),
         scope_key: scope.map(|scope| ScopeKey::new(scope).unwrap()),
         pk_json: json!({"id": id}),
         operation,

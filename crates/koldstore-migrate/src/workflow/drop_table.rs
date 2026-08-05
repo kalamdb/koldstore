@@ -1,6 +1,6 @@
 //! DROP TABLE cleanup planning for managed tables.
 
-use koldstore_common::SqlStatement;
+use koldstore_common::{SqlStatement, TableOid};
 use thiserror::Error;
 
 use crate::rehydrate::plan_catalog_deactivation;
@@ -42,7 +42,7 @@ pub struct DropTableCleanupPlan {
     /// Dropped table.
     pub table: QualifiedTableName,
     /// Dropped table oid.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Cleanup policy.
     pub policy: DropTableCleanupPolicy,
     /// Cleanup outcome.
@@ -66,7 +66,7 @@ pub struct DropTableCleanupPlan {
 /// Returns an error when SQL statement metadata cannot be prepared.
 pub fn plan_drop_table_cleanup(
     table: QualifiedTableName,
-    table_oid: u32,
+    table_oid: TableOid,
     policy: DropTableCleanupPolicy,
 ) -> Result<DropTableCleanupPlan, DropTableCleanupError> {
     let deactivate = plan_catalog_deactivation(table_oid)

@@ -1,4 +1,4 @@
-use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions};
+use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions, StorageId, TableName, TableOid};
 use koldstore_migrate::{
     jobs::MigrationJobPhase,
     order::{CatalogColumn, CatalogPrimaryKey, OrderingSource},
@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 fn request(options: ManageTableOptions) -> MigrateTableRequest {
     MigrateTableRequest {
-        table_name: "app.items".to_string(),
+        table_name: TableName::parse("app.items").unwrap(),
         table_type: "shared".to_string(),
         storage_name: "local".to_string(),
         scope_column: None,
@@ -19,23 +19,23 @@ fn request(options: ManageTableOptions) -> MigrateTableRequest {
 
 fn context() -> MigrationTableContext {
     MigrationTableContext {
-        table_oid: 42,
-        storage_id: "00000007".to_string(),
+        table_oid: TableOid::from_raw(42),
+        storage_id: StorageId::new("00000007").unwrap(),
     }
 }
 
 #[test]
 fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
-    let catalog = ExistingTableCatalog {
-        primary_key: CatalogPrimaryKey::single(1, "id"),
-        indexed_columns: vec![ColumnRef::new(ColumnId::from_attnum(2), "body")],
-        columns: vec![
+    let catalog = ExistingTableCatalog::new(
+        CatalogPrimaryKey::single(1, "id"),
+        vec![
             CatalogColumn::bigint(1, "id")
                 .primary_key()
                 .default_expr("nextval('items_id_seq'::regclass)"),
             CatalogColumn::text(2, "body"),
         ],
-    };
+        vec![ColumnRef::new(ColumnId::from_attnum(2), "body")],
+    );
 
     let plan = plan_existing_table_migration(
         &request({
@@ -49,8 +49,8 @@ fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
     )
     .unwrap();
 
-    assert_eq!(plan.table_oid, 42);
-    assert_eq!(plan.storage_id, "00000007");
+    assert_eq!(plan.table_oid.get(), 42);
+    assert_eq!(plan.storage_id.as_str(), "00000007");
     assert_eq!(plan.ordering.column, "id");
     assert_eq!(
         plan.ordering.source,
@@ -79,14 +79,14 @@ fn existing_table_migration_plan_prepares_async_mirror_initialization_job() {
 
 #[test]
 fn existing_table_migration_plan_accepts_explicit_migration_order_by_from_options() {
-    let catalog = ExistingTableCatalog {
-        primary_key: CatalogPrimaryKey::single(1, "id"),
-        indexed_columns: vec![ColumnRef::new(ColumnId::from_attnum(2), "created_at")],
-        columns: vec![
+    let catalog = ExistingTableCatalog::new(
+        CatalogPrimaryKey::single(1, "id"),
+        vec![
             CatalogColumn::uuid(1, "id").primary_key(),
             CatalogColumn::timestamp(2, "created_at"),
         ],
-    };
+        vec![ColumnRef::new(ColumnId::from_attnum(2), "created_at")],
+    );
 
     let plan = plan_existing_table_migration(
         &request(ManageTableOptions::from_value(&serde_json::json!({
@@ -104,11 +104,11 @@ fn existing_table_migration_plan_accepts_explicit_migration_order_by_from_option
 
 #[test]
 fn existing_table_migration_plan_rejects_existing_rows_without_stable_ordering() {
-    let catalog = ExistingTableCatalog {
-        primary_key: CatalogPrimaryKey::single(1, "id"),
-        indexed_columns: Vec::new(),
-        columns: vec![CatalogColumn::uuid(1, "id").primary_key()],
-    };
+    let catalog = ExistingTableCatalog::new(
+        CatalogPrimaryKey::single(1, "id"),
+        vec![CatalogColumn::uuid(1, "id").primary_key()],
+        Vec::new(),
+    );
 
     let error = plan_existing_table_migration(
         &request(ManageTableOptions::default()),

@@ -7,7 +7,9 @@
 use serde::Deserialize;
 use uuid::Uuid;
 
-use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions, PrimaryKeyShape, SqlStatement};
+use koldstore_common::{
+    ColumnId, ColumnRef, ManageTableOptions, PrimaryKeyShape, SqlStatement, StorageId, TableOid,
+};
 use koldstore_schema::{MirrorInitializationState, SchemaColumn};
 
 use crate::plan::ExistingTableCatalog;
@@ -25,7 +27,7 @@ pub struct ActiveSchemaRefreshContext {
     /// Managed table type.
     pub table_type: String,
     /// Registered storage id.
-    pub storage_id: String,
+    pub storage_id: StorageId,
     /// Optional scope column.
     pub scope_column: Option<String>,
     /// Mirror relation oid as text.
@@ -59,7 +61,7 @@ pub struct SchemaRefreshPlan {
 /// `options.scope_column_id` so renames do not leave a stale `schemas.scope_column`.
 #[must_use]
 pub fn registration_metadata_for_refresh(
-    table_oid: u32,
+    table_oid: TableOid,
     active: &ActiveSchemaRefreshContext,
     catalog: &ExistingTableCatalog,
     primary_key_shape: &PrimaryKeyShape,
@@ -194,7 +196,7 @@ mod tests {
     use crate::order::{CatalogColumn, CatalogPrimaryKey};
     use koldstore_common::{
         ColumnId, ColumnRef, ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn,
-        PkOrdinal, PrimaryKeyColumnShape,
+        PkOrdinal, PrimaryKeyColumnShape, StorageId, TableOid,
     };
     use koldstore_schema::SchemaColumn;
 
@@ -202,7 +204,7 @@ mod tests {
         ActiveSchemaRefreshContext {
             version: 1,
             table_type: "user".to_string(),
-            storage_id: Uuid::nil().to_string(),
+            storage_id: StorageId::new("a1b2c3d4").unwrap(),
             scope_column: Some("user_id".to_string()),
             mirror_relation: "koldstore.notes__cl".to_string(),
             primary_key: vec![ColumnRef::new(ColumnId::from_attnum(1), "id")],
@@ -220,15 +222,15 @@ mod tests {
     }
 
     fn catalog_with_renames() -> ExistingTableCatalog {
-        ExistingTableCatalog {
-            primary_key: CatalogPrimaryKey::single(1, "note_id"),
-            columns: vec![
+        ExistingTableCatalog::new(
+            CatalogPrimaryKey::single(1, "note_id"),
+            vec![
                 CatalogColumn::bigint(1, "note_id"),
                 CatalogColumn::text(2, "owner_id"),
                 CatalogColumn::timestamp(3, "occurred_at"),
             ],
-            indexed_columns: vec![],
-        }
+            vec![],
+        )
     }
 
     fn pk_shape(name: &str) -> PrimaryKeyShape {
@@ -250,8 +252,12 @@ mod tests {
     fn refresh_metadata_resolves_scope_name_from_column_id() {
         let active = active_context();
         let catalog = catalog_with_renames();
-        let metadata =
-            registration_metadata_for_refresh(42, &active, &catalog, &pk_shape("note_id"));
+        let metadata = registration_metadata_for_refresh(
+            TableOid::from_raw(42),
+            &active,
+            &catalog,
+            &pk_shape("note_id"),
+        );
         assert_eq!(metadata.scope_column.as_deref(), Some("owner_id"));
         assert_eq!(metadata.primary_key[0].name, "note_id");
     }

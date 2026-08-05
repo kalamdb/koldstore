@@ -1,12 +1,12 @@
 //! Wire type for cold-segment rows used to assemble `manifest.json`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One Sort Key V1 bound row loaded for manifest export.
 ///
 /// Produced by joining `koldstore.cold_segment_index` when assembling
 /// `manifest.json`. Bounds are hex-encoded Storekey bytes (`encode(..., 'hex')`).
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CatalogSegmentIndexBound {
     /// Stable source-column ID (`pg_attribute.attnum`).
     pub column_id: i16,

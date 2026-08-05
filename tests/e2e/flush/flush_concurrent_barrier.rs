@@ -7,8 +7,8 @@ use tokio_postgres::Row;
 use crate::common;
 use crate::flush::harness::{
     assert_flush_load_invariants, barrier_lock, barrier_unlock, connect_peer, connect_workers,
-    join_workers, spawn_barrier_workers, wait_until_barrier_waiter, BARRIER_WORKER_LOOPS,
-    WORKER_COUNT,
+    flush_table_retrying_entry_locks, join_workers, spawn_barrier_workers,
+    wait_until_barrier_waiter, BARRIER_WORKER_LOOPS, WORKER_COUNT,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -31,12 +31,8 @@ async fn flush_barrier_overlaps_ten_mixed_workers() -> Result<()> {
                 .await?;
             // Concurrent DML while paused can produce selection/write mismatch;
             // isolation schedules use the same tolerate-then-clean-flush pattern.
-            let result = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&flush_relation],
-                )
-                .await;
+            let result =
+                flush_table_retrying_entry_locks(&flush_client, &flush_relation, false).await;
             flush_client
                 .batch_execute("SET koldstore.failpoint = '';")
                 .await

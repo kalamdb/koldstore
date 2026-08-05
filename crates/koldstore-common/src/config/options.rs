@@ -322,6 +322,19 @@ impl ManageTableOptions {
         serde_json::from_value(value.clone()).unwrap_or_default()
     }
 
+    /// Decodes schema options from a JSON text blob without an intermediate `Value` tree.
+    ///
+    /// Invalid JSON yields [`Self::default`] (same contract as [`Self::from_value`] on
+    /// malformed objects). Prefer this on catalog scan hot paths.
+    #[must_use]
+    pub fn from_json_str(text: &str) -> Self {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed == "null" {
+            return Self::default();
+        }
+        serde_json::from_str(trimmed).unwrap_or_default()
+    }
+
     /// Encodes schema options to JSON for catalog persistence.
     ///
     /// Derived fields such as `cold_metadata` are merged separately at registration time.
@@ -542,6 +555,9 @@ mod tests {
             !ManageTableOptions::from_value(&serde_json::json!({ "auto_flush": false }))
                 .auto_flush_enabled()
         );
+        assert!(!ManageTableOptions::from_json_str(r#"{"auto_flush":false}"#).auto_flush_enabled());
+        assert!(ManageTableOptions::from_json_str("").auto_flush_enabled());
+        assert!(ManageTableOptions::from_json_str("not-json").auto_flush_enabled());
     }
 
     #[test]

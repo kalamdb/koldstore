@@ -217,12 +217,7 @@ async fn changes_since_seq_pagination_survives_flush() -> Result<()> {
         assert_eq!(ids.len(), 50, "no duplicate PKs across pages");
 
         let cursor_before_flush = last_seq;
-        db.client
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)",
-                &[&relation],
-            )
-            .await?;
+        common::flush_table_job_id(&db.client, &relation, true).await?;
 
         // Exact versions selected for flush are pruned; cursor must remain valid
         // for any newer mirror versions.
@@ -860,12 +855,7 @@ async fn changes_since_flush_prune_exposes_retention_floor_not_silent_catchup() 
             .unwrap();
         assert!(pre_flush.iter().all(|row| row.get::<_, String>(3) == "hot"));
 
-        db.client
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)",
-                &[&relation],
-            )
-            .await?;
+        common::flush_table_job_id(&db.client, &relation, true).await?;
 
         let hot_after: i64 = db
             .client
@@ -969,14 +959,7 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
                 ))
                 .await?;
             common::wait_for_async_mirror(&db.client).await?;
-            let flushed: String = db
-                .client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-                    &[&relation],
-                )
-                .await?
-                .get(0);
+            let flushed = common::flush_table_job_id(&db.client, &relation, true).await?;
             assert!(!flushed.is_empty());
         }
 
@@ -1118,12 +1101,7 @@ async fn changes_since_last_rows_rewinds_newest_n_like_kalamdb() -> Result<()> {
         );
 
         // Flush then last_rows still sees cold winners.
-        db.client
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)",
-                &[&relation],
-            )
-            .await?;
+        common::flush_table_job_id(&db.client, &relation, true).await?;
         let after_flush = db
             .client
             .query(

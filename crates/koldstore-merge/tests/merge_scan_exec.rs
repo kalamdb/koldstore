@@ -1,4 +1,4 @@
-use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, ScopeKey, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, RowImage, ScopeKey, SeqId};
 use koldstore_merge::scan::exec::{
     begin_merge_scan, begin_merge_scan_with_plan, execute_merge_scan_with_filters,
     ColdAvailability, FilterPlan, ScanResourceCounters,
@@ -9,6 +9,7 @@ use koldstore_merge::scan::plan::{
     ColdPruneColumnPolicy, MergeMetadataAttnums, MergeScanPlan, SegmentHint, SegmentPrunePredicate,
     SegmentStatsHint,
 };
+use koldstore_sortkey::SortKeyValue;
 use serde_json::json;
 
 fn pk(id: i64) -> LogicalPk {
@@ -21,7 +22,7 @@ fn hot(id: i64, seq: i64, deleted: bool, status: &str) -> HotRow {
         scope_key: None,
         seq: SeqId::new(seq).unwrap(),
         deleted,
-        row_image: json!({"id": id, "status": status}),
+        row_image: RowImage::from_json_value(json!({"id": id, "status": status})),
     }
 }
 
@@ -32,7 +33,7 @@ fn cold(id: i64, seq: i64, status: &str) -> ColdRow {
         seq: SeqId::new(seq).unwrap(),
         deleted: false,
         schema_version: 1,
-        row_image: json!({"id": id, "status": status}),
+        row_image: RowImage::from_json_value(json!({"id": id, "status": status})),
     }
 }
 
@@ -145,7 +146,7 @@ fn residual_and_security_quals_run_after_winner_resolution() {
     .unwrap();
 
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0].row_image["status"], "open");
+    assert_eq!(result.rows[0].row_image["status"].as_str(), Some("open"));
     assert_eq!(result.filtered_rows, 1);
     assert_eq!(result.security_filtered_rows, 0);
 }
@@ -174,10 +175,10 @@ fn scan_state_cleanup_releases_resources_and_rescan_resets_merge_state() {
 #[test]
 fn primary_key_predicates_are_retained_for_pre_merge_cold_prune() {
     let predicates = vec![
-        SegmentPrunePredicate::equality(1, "id", json!(1)),
-        SegmentPrunePredicate::equality(2, "tenant_id", json!("tenant-a")),
-        SegmentPrunePredicate::equality(3, "conversation_id", json!("conv-1")),
-        SegmentPrunePredicate::lower_bound(2, "tenant_id", json!("tenant-m")),
+        SegmentPrunePredicate::equality(1, "id", SortKeyValue::Int8(1)),
+        SegmentPrunePredicate::equality(2, "tenant_id", SortKeyValue::Int8(1)),
+        SegmentPrunePredicate::equality(3, "conversation_id", SortKeyValue::Int8(1)),
+        SegmentPrunePredicate::lower_bound(2, "tenant_id", SortKeyValue::Int8(2)),
     ];
     let retained = retain_pre_merge_cold_prune_predicates(predicates, |column| match column {
         1 => Some(ColdPruneColumnPolicy {
@@ -204,7 +205,11 @@ fn primary_key_predicates_are_retained_for_pre_merge_cold_prune() {
 
     assert_eq!(
         retained,
-        vec![SegmentPrunePredicate::equality(1, "id", json!(1))]
+        vec![SegmentPrunePredicate::equality(
+            1,
+            "id",
+            SortKeyValue::Int8(1)
+        )]
     );
 }
 
@@ -212,8 +217,8 @@ fn primary_key_predicates_are_retained_for_pre_merge_cold_prune() {
 fn text_scope_predicates_are_not_pre_merge_safe_without_sort_key() {
     let retained = retain_pre_merge_cold_prune_predicates(
         vec![
-            SegmentPrunePredicate::equality(2, "tenant_id", json!("tenant-a")),
-            SegmentPrunePredicate::lower_bound(2, "tenant_id", json!("tenant-m")),
+            SegmentPrunePredicate::equality(2, "tenant_id", SortKeyValue::Int8(1)),
+            SegmentPrunePredicate::lower_bound(2, "tenant_id", SortKeyValue::Int8(2)),
         ],
         |_| {
             Some(ColdPruneColumnPolicy {
@@ -231,9 +236,9 @@ fn text_scope_predicates_are_not_pre_merge_safe_without_sort_key() {
 fn sort_key_scope_and_order_column_predicates_are_pre_merge_safe() {
     let retained = retain_pre_merge_cold_prune_predicates(
         vec![
-            SegmentPrunePredicate::equality(2, "tenant_id", json!(7)),
-            SegmentPrunePredicate::lower_bound(4, "event_time", json!(100)),
-            SegmentPrunePredicate::equality(3, "payload", json!("x")),
+            SegmentPrunePredicate::equality(2, "tenant_id", SortKeyValue::Int8(7)),
+            SegmentPrunePredicate::lower_bound(4, "event_time", SortKeyValue::Int8(100)),
+            SegmentPrunePredicate::equality(3, "payload", SortKeyValue::Int8(1)),
         ],
         |column| match column {
             2 => Some(ColdPruneColumnPolicy {
@@ -259,8 +264,8 @@ fn sort_key_scope_and_order_column_predicates_are_pre_merge_safe() {
     assert_eq!(
         retained,
         vec![
-            SegmentPrunePredicate::equality(2, "tenant_id", json!(7)),
-            SegmentPrunePredicate::lower_bound(4, "event_time", json!(100)),
+            SegmentPrunePredicate::equality(2, "tenant_id", SortKeyValue::Int8(7)),
+            SegmentPrunePredicate::lower_bound(4, "event_time", SortKeyValue::Int8(100)),
         ]
     );
 }
@@ -268,7 +273,11 @@ fn sort_key_scope_and_order_column_predicates_are_pre_merge_safe() {
 #[test]
 fn non_indexed_prune_predicates_are_rejected_before_cold_files_open() {
     let err = validate_prune_predicates_indexed(
-        &[SegmentPrunePredicate::equality(2, "status", json!("open"))],
+        &[SegmentPrunePredicate::equality(
+            2,
+            "status",
+            SortKeyValue::Int8(1),
+        )],
         &[3],
     )
     .unwrap_err();

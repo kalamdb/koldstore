@@ -54,7 +54,33 @@ pub struct SegmentStatsHint {
     pub selected_row_groups: Option<Vec<usize>>,
 }
 
+/// Resolves the Parquet field name for a logical column in one segment schema.
+///
+/// Returns `None` when the column was added after the segment was written
+/// (callers materialize NULL). Prefer this over falling back to the logical
+/// name on historical schemas — renames keep the same `column_id` with a
+/// different physical name.
+#[must_use]
+pub fn physical_name_for_segment_column(
+    column_id: i16,
+    logical_name: &str,
+    hint: &SegmentStatsHint,
+    current_schema_version: i32,
+) -> Option<String> {
+    if let Some(name) = hint.physical_names.get(&column_id) {
+        return Some(name.clone());
+    }
+    if hint.schema_version == current_schema_version {
+        return Some(logical_name.to_string());
+    }
+    None
+}
+
 /// Min/max predicate proven safe for segment-level candidate pruning.
+///
+/// Bounds are typed Sort Key V1 values (not JSON). The PostgreSQL adapter
+/// converts Const/Param datums once; catalog prune encodes to `bytea` without
+/// a JSON round-trip.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SegmentPrunePredicate {
     /// Stable column ID whose segment stats should be checked.
@@ -62,9 +88,9 @@ pub struct SegmentPrunePredicate {
     /// Current column name for diagnostics and physical-name resolution.
     pub column: String,
     /// Inclusive lower bound, when present.
-    pub min: Option<serde_json::Value>,
+    pub min: Option<koldstore_sortkey::SortKeyValue>,
     /// Inclusive upper bound, when present.
-    pub max: Option<serde_json::Value>,
+    pub max: Option<koldstore_sortkey::SortKeyValue>,
 }
 
 impl SegmentPrunePredicate {
@@ -79,7 +105,11 @@ impl SegmentPrunePredicate {
 
     /// Builds an equality pruning predicate.
     #[must_use]
-    pub fn equality(column_id: i16, column: impl Into<String>, value: serde_json::Value) -> Self {
+    pub fn equality(
+        column_id: i16,
+        column: impl Into<String>,
+        value: koldstore_sortkey::SortKeyValue,
+    ) -> Self {
         Self {
             column_id,
             column: column.into(),
@@ -93,8 +123,8 @@ impl SegmentPrunePredicate {
     pub fn closed_range(
         column_id: i16,
         column: impl Into<String>,
-        min: serde_json::Value,
-        max: serde_json::Value,
+        min: koldstore_sortkey::SortKeyValue,
+        max: koldstore_sortkey::SortKeyValue,
     ) -> Self {
         Self {
             column_id,
@@ -106,7 +136,11 @@ impl SegmentPrunePredicate {
 
     /// Builds a lower-bound pruning predicate.
     #[must_use]
-    pub fn lower_bound(column_id: i16, column: impl Into<String>, min: serde_json::Value) -> Self {
+    pub fn lower_bound(
+        column_id: i16,
+        column: impl Into<String>,
+        min: koldstore_sortkey::SortKeyValue,
+    ) -> Self {
         Self {
             column_id,
             column: column.into(),
@@ -117,7 +151,11 @@ impl SegmentPrunePredicate {
 
     /// Builds an upper-bound pruning predicate.
     #[must_use]
-    pub fn upper_bound(column_id: i16, column: impl Into<String>, max: serde_json::Value) -> Self {
+    pub fn upper_bound(
+        column_id: i16,
+        column: impl Into<String>,
+        max: koldstore_sortkey::SortKeyValue,
+    ) -> Self {
         Self {
             column_id,
             column: column.into(),

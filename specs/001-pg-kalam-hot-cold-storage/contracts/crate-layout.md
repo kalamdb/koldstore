@@ -173,7 +173,7 @@ Rules:
 
 ## Background Worker Boundary
 
-Built-in scheduler code lives in `pg_koldstore/src/database_worker/flush_task.rs`
+Built-in scheduler code lives in `pg_koldstore/src/worker/flush_task.rs`
 because PostgreSQL background workers are extension integration. Flush job logic
 should be thin orchestration over:
 

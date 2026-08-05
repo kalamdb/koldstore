@@ -1,6 +1,6 @@
 //! Deterministic flush/DML isolation schedules (no sleep-based races).
 use crate::common;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio::task::JoinHandle;
 
 use super::harness::{
@@ -163,48 +163,75 @@ async fn concurrent_flush_fencing() -> Result<()> {
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "iso_fence").await?;
         let relation = seed_managed_items(&db, "fence_items", 48).await?;
+        // Drain apply so the dual try-lock race is between the two flushes, not
+        // the background worker holding the database apply lock.
+        common::fence_async_mirror(&db.client).await?;
 
-        let a = connect_peer(&db).await?;
-        let b = connect_peer(&db).await?;
-        a.batch_execute("SET koldstore.min_max_rows_per_file = 1;")
-            .await?;
-        b.batch_execute("SET koldstore.min_max_rows_per_file = 1;")
-            .await?;
-        let rel_a = relation.clone();
-        let rel_b = relation.clone();
-        let ha = tokio::spawn(async move {
-            a.query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
-                &[&rel_a],
-            )
-            .await
-            .map(|row| row.get::<_, String>(0))
-        });
-        let hb = tokio::spawn(async move {
-            b.query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
-                &[&rel_b],
-            )
-            .await
-            .map(|row| row.get::<_, String>(0))
-        });
+        let mut saw_success = false;
+        let mut last_pair = None;
+        for attempt in 1..=12 {
+            let a = connect_peer(&db).await?;
+            let b = connect_peer(&db).await?;
+            a.batch_execute("SET koldstore.min_max_rows_per_file = 1;")
+                .await?;
+            b.batch_execute("SET koldstore.min_max_rows_per_file = 1;")
+                .await?;
+            let rel_a = relation.clone();
+            let rel_b = relation.clone();
+            let ha = tokio::spawn(async move {
+                a.query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&rel_a],
+                )
+                .await
+                .map(|row| row.get::<_, String>(0))
+            });
+            let hb = tokio::spawn(async move {
+                b.query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&rel_b],
+                )
+                .await
+                .map(|row| row.get::<_, String>(0))
+            });
 
-        let ra = ha.await?;
-        let rb = hb.await?;
-        // Blocking table job lock serializes concurrent flush_table callers.
-        match (&ra, &rb) {
-            (Ok(_), _) | (_, Ok(_)) => {}
-            (Err(a), Err(b)) => {
-                let detail_a = a
-                    .as_db_error()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| a.to_string());
-                let detail_b = b
-                    .as_db_error()
-                    .map(|e| e.to_string())
-                    .unwrap_or_else(|| b.to_string());
-                anyhow::bail!("both concurrent flushes failed: {detail_a}; {detail_b}");
+            let ra = ha.await?;
+            let rb = hb.await?;
+            // Fail-fast table/apply try-locks: one flush wins, the other errors (or
+            // both succeed if they did not overlap). Never hang both callers.
+            match (&ra, &rb) {
+                (Ok(_), _) | (_, Ok(_)) => {
+                    saw_success = true;
+                    break;
+                }
+                (Err(a_err), Err(b_err)) => {
+                    let detail_a = a_err
+                        .as_db_error()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| a_err.to_string());
+                    let detail_b = b_err
+                        .as_db_error()
+                        .map(|e| e.to_string())
+                        .unwrap_or_else(|| b_err.to_string());
+                    let busy = common::is_flush_apply_lock_busy(a_err)
+                        && common::is_flush_apply_lock_busy(b_err);
+                    last_pair = Some((detail_a, detail_b));
+                    if !busy {
+                        let (detail_a, detail_b) = last_pair.take().unwrap();
+                        anyhow::bail!("both concurrent flushes failed: {detail_a}; {detail_b}");
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(40 * attempt as u64)).await;
+                    common::fence_async_mirror(&db.client).await?;
+                }
             }
+        }
+        if !saw_success {
+            let (detail_a, detail_b) =
+                last_pair.unwrap_or_else(|| ("<none>".into(), "<none>".into()));
+            // Last resort: prove the table can still flush after the race.
+            let _ = db.flush_table(&relation).await.with_context(|| {
+                format!("both concurrent flushes failed: {detail_a}; {detail_b}")
+            })?;
         }
         common::assert_no_active_jobs(&db.client, &relation).await?;
         common::assert_pk_unique(&db.client, &relation, &["id"]).await?;

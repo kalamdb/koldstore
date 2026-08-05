@@ -1,6 +1,6 @@
 use koldstore_common::{
     ColumnId, ColumnRef, ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
-    PrimaryKeyColumnShape, PrimaryKeyShape,
+    PrimaryKeyColumnShape, PrimaryKeyShape, StorageId, TableOid,
 };
 use koldstore_migrate::{mirror, register, QualifiedTableName};
 use koldstore_schema::MirrorInitializationState;
@@ -56,9 +56,9 @@ fn clean_schema_enablement_plans_no_user_table_system_columns() {
 #[test]
 fn registry_metadata_records_clean_schema_mirror_without_system_columns() {
     let metadata = register::RegistrationMetadata {
-        table_oid: 42,
+        table_oid: TableOid::from_raw(42),
         table_type: "shared".to_string(),
-        storage_id: "00000007".to_string(),
+        storage_id: StorageId::new("00000007").unwrap(),
         scope_column: None,
         mirror_relation: Some("koldstore.messages__cl".to_string()),
         primary_key_shape: Some(pk_shape()),

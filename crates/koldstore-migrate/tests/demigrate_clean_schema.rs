@@ -6,7 +6,7 @@ use koldstore_migrate::{
 fn context() -> DemigrationContext {
     DemigrationContext {
         table: QualifiedTableName::parse("app.items").unwrap(),
-        table_oid: 42,
+        table_oid: koldstore_common::TableOid::from_raw(42),
         cold_object_prefix: "app/items/".to_string(),
         logical_reader_name: "koldstore.logical_items_current".to_string(),
         mirror_table: Some(QualifiedTableName::parse("koldstore.items__cl").unwrap()),

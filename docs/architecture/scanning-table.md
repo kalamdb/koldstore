@@ -38,8 +38,21 @@ execution; it is not a request to silently read only the heap.
    native paths: the heap is complete.
 3. Do constant predicates and complete aggregate Sort Key bounds prove no cold
    segment can match? If so, retain native paths.
-4. Otherwise install KoldMergeScan with the cheapest native path as its hot
-   child.
+4. Otherwise install a **portfolio** of `KoldMergeScan` paths via `add_path`:
+   - a non-ordering fallback around the cheapest native hot child
+     (`GeneralMerge`, `ExactPrimaryKey`, or `UnorderedHotFirst`)
+   - an `OrderedProgressive` wrapper for each native path whose leading
+     pathkeys match the primary key or configured segment-order column, with
+     those `pathkeys` copied onto the custom path so PostgreSQL can avoid an
+     external `Sort` for supported `ORDER BY` / `LIMIT`
+
+Cold-proven-empty predicates keep native Index/Seq/Bitmap paths with no
+`KoldMergeScan` wrapper (plan-time early return; not a CustomPath strategy).
+
+Unsafe unwrapped heap paths and leftover `partial_pathlist` entries are
+cleared so Gather / Gather Merge cannot omit cold rows. Strategy identity and
+an empty default `scope_key` are stored in custom private data (forward-compat
+for single-scope partitions).
 
 The planner stores both present and absent managed-table lookups in a bounded
 backend cache. For a managed table it reads only compact catalog hints:
@@ -66,11 +79,21 @@ At plan time the cheapest native hot path becomes the custom scan's child. The
 custom scan is not parallel-safe, so it owns the final scan path whenever cold
 is possible. There is no DSM/parallel custom-scan implementation today.
 
-### JSON visual plan
+### JSON explain contract
 
-`EXPLAIN (ANALYZE, FORMAT JSON)` exposes KoldStore-owned work through the
-root `Custom Scan (KoldMergeScan)` node's standard `Plans` array, so plan
-visualizers can render the read pipeline:
+When a native hot child is initialized under `KoldMergeScan`, PostgreSQL owns
+the child's `Plans` entry. Hot and cold diagnostics then appear as `Scan
+Sources` property groups on the custom scan (`Hot Scan`, `Cold Scan`, `Mirror
+Scan`), not as synthetic plan nodes:
+
+    KoldMergeScan
+    |- <native Index / Bitmap / Seq Scan>   # Plans child
+    Scan Sources:
+      Hot Scan / Cold Scan / Mirror Scan    # property groups
+
+Synthetic `KoldStore Internal` plan nodes are emitted only when no native
+child is present (for example SPI-backed general merge), so visualizers still
+see the cold catalog → Parquet pipeline:
 
     KoldMergeScan
     |- KoldStore Hot Scan
@@ -79,33 +102,37 @@ visualizers can render the read pipeline:
        `- KoldStore Segment Catalog Scan
           `- KoldStore Parquet Scan (one per selected segment)
 
-Every added node has `"KoldStore Internal": true`; it is a diagnostic
-representation of work performed inside the custom executor, not a separate
-PostgreSQL executor node.
-
 Hot labels distinguish planner shape from runtime:
 
 - `Hot Planned Access` / `Planned Access` — cheapest native child shape
   retained from planning (for example `Index Scan`).
 - `Hot Actual Access` / `Actual Access` — what actually ran
-  (`Native PostgreSQL Child` for `hot_child`, `SPI JSON Keyset Scan` for
-  mixed `merge_stream`, and SPI native labels for hot-only/cold-native
-  fallbacks).
+  (`Native PostgreSQL Child` for `hot_child`, `OrderedProgressive` /
+  `ordered_merge_native`, and `UnorderedHotFirst` / `unordered_hot_first`;
+  `SPI JSON Keyset Scan` only for unordered `GeneralMerge` / `merge_stream`;
+  SPI native labels for hot-only/cold-native fallbacks).
 - `Hot SPI Query` — first-page SPI text for `merge_stream` JSON keyset
   paging (absent when the native child ran).
+- `Strategy` — portfolio identity (`Ordered Progressive`, `General Merge`, …).
 
-The catalog node reports the published object-store manifest path as
-diagnostic metadata only. Runtime selection queries
-`koldstore.cold_segments` and (when bounds apply) `koldstore.cold_segment_index`;
-those SPI texts appear as `Cold Segments Query` / `Segment Index Query`.
-`Runtime Manifest Read` is always false for this path. Parquet segment nodes
-are nested under the catalog node to show that catalog prune decides which
-files open. Mirror tombstone counters remain under the text `Mirror Scan`
-group; they are not duplicated as a visual plan node. A real native hot child
-remains a normal PostgreSQL child plan when it is the active execution path.
-If an instrumented PK probe misses and execution falls through to cold
-storage, the exhausted hot child is omitted so the graph shows the catalog,
-Parquet, and merge work that actually ran.
+`OrderedProgressive` and `UnorderedHotFirst` widen the native hot child to a
+physical relation target list so merge can read PK and full row images from
+`ExecProcNode` slots under the relation-owner merge identity, then project to
+the query target list after winner resolution. When cold is proven empty and
+emit is `hot_child`, the widened child is copied into `ss_ScanTupleSlot` and
+`ExecScan` applies the CustomScan projection (copying into
+`ps_ResultTupleSlot` directly would segfault on narrow `SELECT` lists). SPI
+JSON keyset paging remains the hot source only for non-ordered general merge
+(and as a fallback when a native child still omits required columns, e.g.
+`count(*)`).
+
+Runtime selection queries `koldstore.cold_segments` and (when bounds apply)
+`koldstore.cold_segment_index`; those SPI texts appear as `Cold Segments
+Query` / `Segment Index Query`. `Runtime Manifest Read` is always false for
+this path. When synthetic cold nodes are emitted, Parquet segment nodes nest
+under the catalog node to show that catalog prune decides which files open.
+Mirror tombstone counters remain under the text `Mirror Scan` group; they are
+not duplicated as a visual plan node.
 
 ## Executor fast paths
 
@@ -135,11 +162,22 @@ allowed to surface:
 | delete | masked | no row |
 | no mirror row | eligible | newest cold winner may surface |
 
-Hot rows are read in bounded keyset pages. Cold data is decoded one segment
-group at a time. The resolver retains exact PK identities so the newest row
-wins across hot, mirror, and cold sources; koldstore.max_merge_seen_keys caps
-this set and fails closed when exceeded (0 disables the cap). Parent LIMIT can
-stop before older cold groups are opened.
+Hot rows are read either from the native child (`OrderedProgressive` and
+`UnorderedHotFirst`) or in bounded SPI JSON keyset pages (`GeneralMerge`).
+Cold data is decoded one segment group at a time. The resolver retains exact PK
+identities so the newest row wins across hot, mirror, and cold sources, and
+preserves batch encounter order so ordered progressive paths can honor pathkeys
+without an external `Sort` when the top-N is covered by hot.
+`koldstore.max_merge_seen_keys` caps this set and fails closed when exceeded
+(0 disables the cap). Parent LIMIT can stop before older cold groups are opened.
+
+`OrderedProgressive` loads catalog composite bounds from
+`koldstore.cold_segment_order_index` without opening Parquet. After each hot
+page it compares actual leading Sort Key encodings to the cold frontier: when
+hot strictly dominates, cold and the deferred mirror stay unread (typical
+hot-dominant `ORDER BY … LIMIT`). When cold may win or tie, remaining hot and
+competitive cold row groups are resolved and sorted by the leading Sort Key so
+mixed top-N results stay correct without SPI JSON paging.
 
 The regular hot+cold path materializes resolved rows into the base relation's
 slot layout and lets PostgreSQL evaluate compiled user quals after winner

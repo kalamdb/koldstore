@@ -6,9 +6,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::common;
-use crate::flush::harness::{
-    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter,
-};
+use crate::flush::harness::{barrier_unlock, connect_peer, pause_flush_at};
 
 /// Stuck writer holding ROW EXCLUSIVE must block the prune fence; hot stays
 /// authoritative until the writer finishes, then flush can complete.
@@ -106,7 +104,31 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
             Ok(())
         });
 
-        let flushed = db.flush_table(&primary.relation).await?;
+        // Continuous noise keeps the async applier on the database apply lock.
+        // Pause the worker so flush can take the lock and fence WAL (including
+        // noise) in phase-0; the DML stream itself stays live.
+        let dbname: String = db
+            .client
+            .query_one("SELECT current_database()", &[])
+            .await?
+            .get(0);
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off; \
+                 SET koldstore.internal_async_mirror_worker = off"
+            ))
+            .await?;
+        let _ = common::terminate_async_worker(&db.client).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let flush_result = db.flush_table(&primary.relation).await;
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+                 RESET koldstore.internal_async_mirror_worker"
+            ))
+            .await?;
+        let flushed = flush_result?;
         assert_eq!(flushed, 40);
         stop.store(true, Ordering::Relaxed);
         noise_handle.await??;
@@ -224,28 +246,8 @@ async fn worker_kill_during_flush_upload_leaves_consistent_mirror() -> Result<()
         common::fence_async_mirror(&db.client).await?;
         common::wait_for_async_worker(&db.client).await?;
 
-        let coordinator = connect_peer(&db).await?;
-        barrier_lock(&coordinator).await?;
-        let flush_client = connect_peer(&db).await?;
-        let relation = table.relation.clone();
-        let flush_handle = tokio::spawn(async move {
-            flush_client
-                .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
-                .await?;
-            let row = flush_client
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-                    &[&relation],
-                )
-                .await;
-            flush_client
-                .batch_execute("SET koldstore.failpoint = '';")
-                .await
-                .ok();
-            row.map_err(anyhow::Error::from)
-        });
-
-        wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await?;
+        let (coordinator, flush_handle) =
+            pause_flush_at(&db, &table.relation, "wait:after_select_rows").await?;
         assert!(common::terminate_async_worker(&db.client).await?);
 
         barrier_unlock(&coordinator).await?;

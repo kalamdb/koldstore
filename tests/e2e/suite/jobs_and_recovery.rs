@@ -228,23 +228,12 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
         let mirror_rows = common::row_count(&db.client, &mirror_relation).await?;
         assert_eq!(mirror_rows, base_rows);
 
-        let flushed = db
-            .client
-            .query_one(
-                r#"
-                WITH job AS (
-                  SELECT koldstore.flush_table($1::text::regclass) AS id
-                )
-                SELECT
-                  pg_typeof(id)::text AS return_type,
-                  id::text AS job_id
-                FROM job
-                "#,
-                &[&table.relation],
-            )
-            .await?;
-        assert_eq!(flushed.get::<_, String>("return_type"), "uuid");
-        let flush_job_id = flushed.get::<_, String>("job_id");
+        let flush_job_id = common::flush_table_job_id(&db.client, &table.relation, false).await?;
+        assert_eq!(
+            flush_job_id.len(),
+            36,
+            "flush_table must return a uuid job id, got {flush_job_id}"
+        );
 
         let status_row = db
             .client

@@ -37,6 +37,9 @@ Thumbs.db
 .vscode/
 .idea/
 
+# Local git worktrees (isolated feature workspaces)
+.worktrees/
+
 /benchmarks/scripts/__pycache__
 
 # Release Docker build staging (created in CI / local experiments)

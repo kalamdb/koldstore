@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use koldstore_common::SqlStatement;
+use koldstore_common::{SqlStatement, TableOid};
 
 use crate::QualifiedTableName;
 
@@ -29,13 +29,13 @@ pub struct MigrationLockKey {
     /// Namespace.
     pub namespace: i64,
     /// Table oid.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
 }
 
 impl MigrationLockKey {
     /// Builds a lock key for a table oid.
     #[must_use]
-    pub const fn for_table(table_oid: u32) -> Self {
+    pub const fn for_table(table_oid: TableOid) -> Self {
         Self {
             namespace: MIGRATION_LOCK_NAMESPACE,
             table_oid,
@@ -45,7 +45,7 @@ impl MigrationLockKey {
     /// Packs the namespace and table oid into one PostgreSQL advisory-lock key.
     #[must_use]
     pub const fn as_advisory_lock_key(self) -> i64 {
-        self.namespace ^ ((self.table_oid as i64) << 32)
+        self.namespace ^ ((self.table_oid.get() as i64) << 32)
     }
 }
 
@@ -53,7 +53,7 @@ impl MigrationLockKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationOperationLockPlan {
     /// Target table oid.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Advisory lock key to bind into the first statement.
     pub lock_key: MigrationLockKey,
     /// Lock statements in acquisition order.
@@ -68,9 +68,9 @@ pub struct MigrationOperationLockPlan {
 /// be represented by the SPI helper boundary.
 pub fn plan_migration_operation_lock(
     table: &QualifiedTableName,
-    table_oid: u32,
+    table_oid: TableOid,
 ) -> LockResult<MigrationOperationLockPlan> {
-    if table_oid == 0 {
+    if table_oid.get() == 0 {
         return Err(LockError::MissingTableOid);
     }
 

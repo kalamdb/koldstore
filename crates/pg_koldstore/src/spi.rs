@@ -6,16 +6,12 @@
 use std::{
     collections::hash_map::DefaultHasher,
     hash::{Hash, Hasher},
-    sync::Mutex,
 };
 
 pub use koldstore_common::sql::{
     map_sql_error as map_spi_error, SqlAccess as SpiAccess, SqlError as SpiError, SqlParamType,
     SqlResult as SpiResult, SqlStatement as SpiStatement,
 };
-
-/// SQLSTATE used for pg-koldstore errors.
-pub const KOLDSTORE_SQLSTATE: &str = "XXKLD";
 
 /// Maps one pg-free parameter type to a PostgreSQL OID.
 #[cfg(feature = "pg")]
@@ -87,34 +83,6 @@ pub struct SpiRows {
     pub rows_affected: u64,
 }
 
-/// Testable SPI executor boundary.
-pub trait SpiExecutor {
-    /// Executes a validated statement.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the underlying SPI call fails.
-    fn execute(&self, statement: SpiStatement) -> SpiResult<SpiRows>;
-}
-
-/// Executes a read/write catalog statement.
-///
-/// # Errors
-///
-/// Returns an error if the statement is not read/write or execution fails.
-pub fn execute_catalog_write(
-    executor: &impl SpiExecutor,
-    statement: SpiStatement,
-) -> SpiResult<SpiRows> {
-    if statement.access != SpiAccess::ReadWrite {
-        return Err(map_spi_error(
-            &statement.operation,
-            "write helper requires read/write statement",
-        ));
-    }
-    executor.execute(statement)
-}
-
 /// Ensures a statement is read-only before using a read SPI path.
 ///
 /// # Errors
@@ -145,31 +113,13 @@ pub fn require_read_write(statement: &SpiStatement) -> SpiResult<()> {
     Ok(())
 }
 
-/// Recording executor used by pure Rust tests.
-#[derive(Debug, Default)]
-pub struct RecordingSpiExecutor {
-    statements: Mutex<Vec<SpiStatement>>,
-}
-
-impl RecordingSpiExecutor {
-    /// Returns the recorded statement sequence.
-    #[must_use]
-    pub fn statements(&self) -> Vec<SpiStatement> {
-        self.statements
-            .lock()
-            .map(|statements| statements.clone())
-            .unwrap_or_default()
-    }
-}
-
-impl SpiExecutor for RecordingSpiExecutor {
-    fn execute(&self, statement: SpiStatement) -> SpiResult<SpiRows> {
-        self.statements
-            .lock()
-            .map_err(|_| map_spi_error(&statement.operation, "recording executor lock poisoned"))?
-            .push(statement);
-        Ok(SpiRows { rows_affected: 1 })
-    }
+/// Builds a SPI datum-error for a missing result column name.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn missing_attribute(name: &str) -> pgrx::spi::SpiError {
+    pgrx::spi::SpiError::DatumError(pgrx::datum::TryFromDatumError::NoSuchAttributeName(
+        name.to_string(),
+    ))
 }
 
 #[cfg(feature = "pg")]

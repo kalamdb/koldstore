@@ -3,6 +3,12 @@
 use crate::{is_safe_identifier, quote_ident, ScopeKey, TableKind};
 use thiserror::Error;
 
+/// Default catalog / progressive-path scope when product scoping is inactive.
+///
+/// Progressive scans assume one query → one scope; this empty key matches
+/// shared-table catalog rows until per-user manifests land.
+pub const DEFAULT_SCOPE_KEY: &str = "";
+
 /// Scope enforcement error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ScopeError {

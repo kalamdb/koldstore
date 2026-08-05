@@ -54,10 +54,10 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-24.04
     needs: read_version
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -108,7 +108,7 @@ jobs:
       KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
       PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -203,7 +203,7 @@ jobs:
           - { pg: 18, arch: amd64, distro: ubuntu24.04, runner: ubuntu-24.04 }
           - { pg: 18, arch: arm64, distro: ubuntu24.04, runner: ubuntu-24.04-arm }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install curl for rustup
         run: |
@@ -230,7 +230,7 @@ jobs:
             --install-deps
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pkg-pg${{ matrix.pg }}-${{ matrix.distro }}-${{ matrix.arch }}
           path: |
@@ -259,7 +259,7 @@ jobs:
           - { pg: 17, arch: amd64, distro: debian12, runner: ubuntu-24.04 }
           - { pg: 17, arch: arm64, distro: debian12, runner: ubuntu-24.04-arm }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install curl for rustup
         run: |
@@ -292,7 +292,7 @@ jobs:
             --install-deps
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pkg-pg${{ matrix.pg }}-${{ matrix.distro }}-${{ matrix.arch }}
           path: |
@@ -321,7 +321,7 @@ jobs:
           - { pg: 18, arch: amd64, distro: rocky9, runner: ubuntu-24.04 }
           - { pg: 18, arch: arm64, distro: rocky9, runner: ubuntu-24.04-arm }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install curl for rustup
         run: dnf -y install --allowerasing ca-certificates curl
@@ -345,7 +345,7 @@ jobs:
             --install-deps
 
       - name: Upload package artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pkg-pg${{ matrix.pg }}-${{ matrix.distro }}-${{ matrix.arch }}
           path: |
@@ -366,7 +366,7 @@ jobs:
         (needs.pgrx_tests.result == 'success' || needs.pgrx_tests.result == 'skipped')
       }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -385,7 +385,7 @@ jobs:
             --install-deps
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pkg-pg18-macos-arm64
           path: dist/${{ needs.read_version.outputs.version }}/*.tar.gz
@@ -404,7 +404,7 @@ jobs:
         (needs.pgrx_tests.result == 'success' || needs.pgrx_tests.result == 'skipped')
       }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Enable Windows long paths
         shell: bash
@@ -441,7 +441,7 @@ jobs:
           ./scripts/build/windows.ps1 -Pg 18 -Version "${{ needs.read_version.outputs.version }}"
 
       - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pkg-pg18-windows-amd64
           path: dist/${{ needs.read_version.outputs.version }}/*.zip
@@ -467,7 +467,7 @@ jobs:
       }}
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: release-assets
           pattern: pkg-*
@@ -564,7 +564,7 @@ jobs:
       DOCKER_REPO_INPUT: ${{ inputs.docker_repo }}
       GHCR_IMAGE_INPUT: ${{ inputs.ghcr_image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Validate Docker Hub secrets
         shell: bash
@@ -618,7 +618,7 @@ jobs:
           echo "Candidate arch tag: ${CANDIDATE_TAG}-${ARCH} (${{ matrix.platform }})"
 
       - name: Download PG${{ env.DOCKER_PG_MAJOR }} ${{ matrix.arch }} package artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: pkg-pg${{ env.DOCKER_PG_MAJOR }}-${{ env.DOCKER_PG_DISTRO }}-${{ matrix.arch }}
           path: pkg-download/
@@ -704,7 +704,7 @@ jobs:
 
       - name: Upload Docker smoke-test log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pg-docker-smoke-${{ matrix.arch }}
           path: pg-docker-smoke-${{ matrix.arch }}.txt
@@ -728,7 +728,7 @@ jobs:
       DOCKER_REPO_INPUT: ${{ inputs.docker_repo }}
       GHCR_IMAGE_INPUT: ${{ inputs.ghcr_image }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set Docker image variables
         id: vars

@@ -8,18 +8,6 @@ fn merge_scan_explain_and_plan_contract_are_exposed() {
         merge_scan::path::custom_scan_explain_label(),
         "Custom Scan (KoldMergeScan)"
     );
-    merge_scan::ffi::register_native_custom_scan();
-    assert_eq!(
-        merge_scan::ffi::native_callback_names(),
-        vec![
-            "CustomPath",
-            "CustomScan",
-            "BeginCustomScan",
-            "ExecCustomScan",
-            "EndCustomScan",
-            "RescanCustomScan",
-        ]
-    );
 
     let plan = merge_scan::plan::MergeScanPlan::new(42, vec!["id".to_string()]);
     assert_eq!(plan.table_oid, 42);
@@ -111,43 +99,62 @@ fn merge_scan_plan_serializes_complete_custom_private_payload() {
 
 #[test]
 fn managed_read_replaces_heap_only_final_paths_but_keeps_hot_child_path() {
-    use merge_scan::path::{build_path_replacement, PlannerPath};
+    use merge_scan::path::{build_path_portfolio, HotChildCandidate, PlannerPath};
 
-    let decision = build_path_replacement(
+    let decision = build_path_portfolio(
         true,
         vec![
-            PlannerPath::seq_scan("heap seq", 50.0),
-            PlannerPath::index_scan("hot pk index", 10.0),
-            PlannerPath::bitmap_scan("hot bitmap", 20.0),
+            HotChildCandidate::new(
+                PlannerPath::seq_scan("heap seq", 50.0),
+                None,
+                0,
+                0,
+                vec![1],
+                false,
+            ),
+            HotChildCandidate::new(
+                PlannerPath::index_scan("hot pk index", 10.0),
+                None,
+                0,
+                0,
+                vec![1],
+                false,
+            ),
+            HotChildCandidate::new(
+                PlannerPath::bitmap_scan("hot bitmap", 20.0),
+                None,
+                0,
+                0,
+                vec![1],
+                false,
+            ),
         ],
+        0.0,
     )
     .unwrap();
 
-    assert_eq!(decision.final_paths.len(), 1);
-    assert_eq!(
-        decision.final_paths[0].explain_label(),
-        "Custom Scan (KoldMergeScan)"
-    );
-    assert_eq!(
-        decision.custom_child_paths,
-        vec![PlannerPath::index_scan("hot pk index", 10.0)]
-    );
+    assert_eq!(decision.entries.len(), 1);
+    assert_eq!(decision.entries[0].hot_child.name, "hot pk index");
     assert_eq!(decision.removed_heap_final_paths, 3);
     assert!(!decision.heap_only_final_path_available());
+    assert_eq!(
+        decision.final_paths()[0].explain_label(),
+        "Custom Scan (KoldMergeScan)"
+    );
 }
 
 #[test]
 fn unmanaged_read_keeps_postgres_heap_paths_without_custom_scan() {
-    use merge_scan::path::{build_path_replacement, PlannerPath};
+    use merge_scan::path::{build_path_portfolio, PlannerPath};
 
-    let heap_paths = vec![
+    let heap_paths = [
         PlannerPath::seq_scan("heap seq", 50.0),
         PlannerPath::index_scan("hot pk index", 10.0),
     ];
-    let decision = build_path_replacement(false, heap_paths.clone()).unwrap();
+    let decision = build_path_portfolio(false, Vec::new(), 0.0).unwrap();
 
-    assert_eq!(decision.final_paths, heap_paths);
-    assert!(decision.custom_child_paths.is_empty());
+    assert!(decision.entries.is_empty());
     assert_eq!(decision.removed_heap_final_paths, 0);
-    assert!(decision.heap_only_final_path_available());
+    // Unmanaged portfolio is empty; callers keep their own heap_paths.
+    assert_eq!(heap_paths.len(), 2);
 }

@@ -16,7 +16,7 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// before the setup creates temp tables, registers storage, or creates a table.
 pub(crate) fn preprovision_async_mirror() {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    crate::async_mirror::provision::provision_infrastructure(database_oid)
+    crate::mirror::provision::provision_infrastructure(database_oid)
         .expect("pre-provision async slot/publication");
 }
 

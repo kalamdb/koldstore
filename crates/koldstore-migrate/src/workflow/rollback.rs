@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use koldstore_common::SqlStatement;
+use koldstore_common::{SqlStatement, TableName, TableOid};
 
 use crate::QualifiedTableName;
 
@@ -24,11 +24,11 @@ pub enum RollbackError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackCleanup {
     /// Relation name.
-    pub table_name: String,
+    pub table_name: TableName,
     /// Safely quoted relation name.
     pub quoted_table_name: Option<String>,
     /// Target relation oid.
-    pub table_oid: Option<u32>,
+    pub table_oid: Option<TableOid>,
     /// Clean-schema mirror table to drop if it was created before failure.
     pub mirror_table: Option<QualifiedTableName>,
 }
@@ -37,32 +37,38 @@ pub struct RollbackCleanup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RollbackCleanupPlan {
     /// Target table oid.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Cleanup statements in dependency order.
     pub statements: Vec<SqlStatement>,
 }
 
 impl RollbackCleanup {
     /// Creates cleanup for a relation.
-    #[must_use]
-    pub fn new(table_name: impl Into<String>) -> Self {
-        Self {
-            table_name: table_name.into(),
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `table_name` is not a valid PostgreSQL identifier.
+    pub fn new(table_name: impl AsRef<str>) -> Result<Self, RollbackError> {
+        let table_name = TableName::parse(table_name.as_ref())
+            .map_err(|error| RollbackError::Spi(error.to_string()))?;
+        Ok(Self {
+            table_name,
             quoted_table_name: None,
             table_oid: None,
             mirror_table: None,
-        }
+        })
     }
 
     /// Creates cleanup for a parsed relation and catalog table oid.
     #[must_use]
-    pub fn for_table(table: QualifiedTableName, table_oid: u32) -> Self {
+    pub fn for_table(table: QualifiedTableName, table_oid: TableOid) -> Self {
+        let quoted_table_name = Some(table.quoted());
+        let table_name = table
+            .as_table_name()
+            .expect("QualifiedTableName components remain valid");
         Self {
-            table_name: table.schema.as_ref().map_or_else(
-                || table.name.clone(),
-                |schema| format!("{schema}.{}", table.name),
-            ),
-            quoted_table_name: Some(table.quoted()),
+            table_name,
+            quoted_table_name,
             table_oid: Some(table_oid),
             mirror_table: None,
         }
@@ -84,7 +90,7 @@ impl RollbackCleanup {
     pub fn plan(&self) -> RollbackResult<RollbackCleanupPlan> {
         let table_oid = self
             .table_oid
-            .filter(|oid| *oid != 0)
+            .filter(|oid| oid.get() != 0)
             .ok_or(RollbackError::MissingTableOid)?;
         let mut statements = Vec::with_capacity(6);
 

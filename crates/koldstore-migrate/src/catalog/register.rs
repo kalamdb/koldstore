@@ -10,7 +10,7 @@ use uuid::Uuid;
 use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions, SqlParamType, SqlStatement};
 use koldstore_common::{
     PgCollation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
-    PrimaryKeyShape,
+    PrimaryKeyShape, StorageId, TableOid,
 };
 use koldstore_schema::{normalize_type_name, MirrorInitializationState, SchemaColumn, TypeMatrix};
 
@@ -236,11 +236,11 @@ impl ColdMetadataConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegistrationMetadata {
     /// Table oid.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Table type.
     pub table_type: String,
     /// Storage id.
-    pub storage_id: String,
+    pub storage_id: StorageId,
     /// Scope column.
     pub scope_column: Option<String>,
     /// Table-specific change-log mirror relation.
@@ -267,7 +267,7 @@ pub struct RegistrationMetadata {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedRegistrationMetadata {
     /// Table oid.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Schema version.
     pub version: u32,
     /// Whether the schema row is active.
@@ -293,7 +293,7 @@ pub struct PreparedRegistrationMetadata {
     /// Options JSON including flush policy.
     pub options: Value,
     /// Storage registration id.
-    pub storage_id: String,
+    pub storage_id: StorageId,
 }
 
 /// Planned `koldstore.schemas` catalog insertion.
@@ -311,9 +311,9 @@ impl RegistrationMetadata {
     /// Returns true when metadata is sufficient to activate a managed table.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.table_oid != 0
+        self.table_oid.get() != 0
             && matches!(self.table_type.as_str(), "shared" | "user")
-            && !self.storage_id.trim().is_empty()
+            && !self.storage_id.as_str().is_empty()
             && !self.primary_key.is_empty()
             && self
                 .primary_key
@@ -341,13 +341,13 @@ impl RegistrationMetadata {
     ///
     /// Returns an error when required migration metadata is missing or invalid.
     pub fn validate(&self) -> RegistryResult<()> {
-        if self.table_oid == 0 {
+        if self.table_oid.get() == 0 {
             return Err(RegistryError::MissingTableOid);
         }
         if !matches!(self.table_type.as_str(), "shared" | "user") {
             return Err(RegistryError::UnsupportedTableType(self.table_type.clone()));
         }
-        if self.storage_id.trim().is_empty() {
+        if self.storage_id.as_str().is_empty() {
             return Err(RegistryError::MissingStorageId);
         }
         if self.primary_key.is_empty()
@@ -464,8 +464,8 @@ pub fn schema_columns_from_catalog(columns: &[crate::order::CatalogColumn]) -> V
 ///
 /// Returns an error when `table_oid` is zero or statement metadata cannot be
 /// prepared.
-pub fn plan_activate_managed_schema(table_oid: u32) -> RegistryResult<SqlStatement> {
-    if table_oid == 0 {
+pub fn plan_activate_managed_schema(table_oid: TableOid) -> RegistryResult<SqlStatement> {
+    if table_oid.get() == 0 {
         return Err(RegistryError::MissingTableOid);
     }
 
@@ -627,8 +627,8 @@ pub struct PrimaryKeyShapeCatalogRow {
 ///
 /// Returns an error when `table_oid` is zero or statement metadata cannot be
 /// represented by the SPI helper.
-pub fn primary_key_shape_probe_plan(table_oid: u32) -> RegistryResult<SqlStatement> {
-    if table_oid == 0 {
+pub fn primary_key_shape_probe_plan(table_oid: TableOid) -> RegistryResult<SqlStatement> {
+    if table_oid.get() == 0 {
         return Err(RegistryError::MissingTableOid);
     }
 

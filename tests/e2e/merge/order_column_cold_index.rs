@@ -466,14 +466,7 @@ fn explain_counter(plan: &str, label: &str) -> Result<usize> {
 }
 
 async fn force_flush(db: &common::TestDb, relation: &str) -> Result<i64> {
-    let row = db
-        .client
-        .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-            &[&relation],
-        )
-        .await?;
-    let job_id: String = row.get(0);
+    let job_id = common::flush_table_job_id(&db.client, relation, true).await?;
     let progress = db
         .client
         .query_one(

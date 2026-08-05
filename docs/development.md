@@ -107,7 +107,7 @@ Weekly HammerDB: `.github/workflows/weekly-hammerdb.yml`.
 External-tool layout: `docs/plans/2026-07-21-testing-gaps-external-tools.md`.
 Script layout: `scripts/README.md` (everyday runners at top level; readiness/CI/build in subfolders).
 
-PR / main CI: `.github/workflows/ci-tests.yml` runs fmt/clippy/unit and
+PR / main CI: `.github/workflows/ci.yml` runs fmt/clippy/unit and
 `cargo pgrx test` across PostgreSQL 15–18. E2E covers PostgreSQL 15–18 with
 WAL-only capture. Examples, storage comparison, and SQL regression retain
 their PostgreSQL matrix. Manual workflow runs expose a PostgreSQL dropdown

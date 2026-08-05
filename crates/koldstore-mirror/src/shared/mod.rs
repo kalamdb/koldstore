@@ -27,7 +27,7 @@ pub use schema::{
     plan_drop_mirror_table, plan_mirror_pk_column_renames, plan_mirror_schema,
     plan_mirror_schema_with_order_key, MirrorSchemaPlan,
 };
-pub use statement::{mirror_to_sql, MirrorAccess, MirrorStatement, SqlParamType};
+pub use statement::{SqlAccess, SqlParamType, SqlStatement};
 pub use write::{
     plan_async_mirror_batch_delete_existing, plan_async_mirror_batch_update,
     plan_async_mirror_batch_upsert, plan_upsert_mirror_row, quoted_pk_columns,

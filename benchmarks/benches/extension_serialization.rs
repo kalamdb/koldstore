@@ -3,7 +3,7 @@ use std::hint::black_box;
 use criterion::{criterion_group, criterion_main, Criterion};
 use koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 use koldstore_catalog::FlushPolicy;
-use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, PkValue, ScopeKey, SeqId};
+use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, PkValue, RowImage, ScopeKey, SeqId};
 use koldstore_merge::resolve_rows;
 use koldstore_storage::PathTemplate;
 use serde_json::json;
@@ -106,7 +106,7 @@ fn hot_rows(count: usize) -> Vec<HotRow> {
             scope_key: Some(ScopeKey::new("user-42").expect("valid scope")),
             seq: SeqId::new((idx + 20_000) as i64).expect("valid seq"),
             deleted: idx % 23 == 0,
-            row_image: json!({ "id": idx, "source": "hot" }),
+            row_image: RowImage::from_json_value(json!({ "id": idx, "source": "hot" })),
         })
         .collect()
 }
@@ -119,7 +119,7 @@ fn cold_rows(count: usize) -> Vec<ColdRow> {
             seq: SeqId::new((idx + 1) as i64).expect("valid seq"),
             deleted: false,
             schema_version: 1,
-            row_image: json!({ "id": idx, "source": "cold" }),
+            row_image: RowImage::from_json_value(json!({ "id": idx, "source": "cold" })),
         })
         .collect()
 }

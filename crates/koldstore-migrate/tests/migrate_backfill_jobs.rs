@@ -1,6 +1,7 @@
 use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_common::{
     ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    StorageId, TableOid,
 };
 use koldstore_migrate::{
     backfill::plan_mirror_initialization_batch,
@@ -76,10 +77,10 @@ fn existing_table_mirror_initialization_batches_without_rewriting_base_schema() 
 #[test]
 fn migration_backfill_job_payload_is_type_safe_and_operator_visible() {
     let job_id = Uuid::from_u128(11);
-    let storage_id = "00000016".to_string();
+    let storage_id = StorageId::new("00000016").unwrap();
     let request = MigrationBackfillJobRequest::new(
         job_id,
-        42,
+        TableOid::from_raw(42),
         &table(),
         ManagedTableType::Shared,
         storage_id,
@@ -87,12 +88,13 @@ fn migration_backfill_job_payload_is_type_safe_and_operator_visible() {
         &ordering(),
         MigrationBatchSize::new(10_000).unwrap(),
         Some(1_000),
-    );
+    )
+    .unwrap();
 
     let plan = enqueue_migration_backfill_job_plan(request).unwrap();
 
     assert_eq!(plan.job_id, job_id);
-    assert_eq!(plan.table_oid, 42);
+    assert_eq!(plan.table_oid.get(), 42);
     assert_eq!(plan.payload["table_name"], "app.items");
     assert_eq!(plan.payload["table_type"], "shared");
     assert_eq!(plan.payload["order_column"], "id");

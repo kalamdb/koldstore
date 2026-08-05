@@ -1,13 +1,13 @@
 use crate::common;
 
 use anyhow::Result;
-use koldstore_common::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId};
+use koldstore_common::{ChangeSource, MirrorChange, MirrorOperation, ScopeKey, SeqId, TableOid};
 use koldstore_merge::events;
 use serde_json::json;
 
 fn change(id: i64, seq: i64, operation: MirrorOperation, source: ChangeSource) -> MirrorChange {
     MirrorChange {
-        table_oid: 42,
+        table_oid: TableOid::from_raw(42),
         scope_key: None,
         pk_json: json!({"id": id}),
         operation,

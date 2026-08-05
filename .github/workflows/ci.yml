@@ -1,0 +1,303 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      pg_version:
+        description: PostgreSQL version filter
+        type: choice
+        required: true
+        default: All
+        options:
+          - All
+          - "15"
+          - "16"
+          - "17"
+          - "18"
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+
+# Needed so EnricoMi can publish check runs + PR comments from JUnit.
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  rust:
+    name: fmt / clippy / unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-nextest --locked
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+      - name: Unit tests (nextest)
+        run: |
+          cargo nextest run --profile ci --workspace --no-default-features \
+            --exclude e2e --exclude examples --exclude storage-comparison \
+            --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests --exclude stress
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: (!cancelled())
+        with:
+          check_name: Unit tests
+          files: target/nextest/ci/junit.xml
+          comment_mode: failures
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-unit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  pgrx-test:
+    name: "pg_test (PG ${{ matrix.pg }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.pg_version != 'All' && format('[{0}]', inputs.pg_version) || '[15,16,17,18]') }}
+    env:
+      PG_VER: ${{ matrix.pg }}
+      PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install PostgreSQL ${{ matrix.pg }} development packages
+        run: |
+          bash scripts/ci/install-pgdg-dev.sh "${PG_VER}"
+
+      - name: Install cargo-pgrx and cargo-nextest
+        run: |
+          cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+          cargo install cargo-nextest --locked
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
+
+      # pgrx-tests installs into pg_config --sharedir/--pkglibdir. Apt packages
+      # put those under /usr, so the runner needs write access.
+      - name: Allow non-root extension install into system PostgreSQL
+        run: |
+          share_ext="$("${PGRX_PG_CONFIG}" --sharedir)/extension"
+          pkglib="$("${PGRX_PG_CONFIG}" --pkglibdir)"
+          sudo mkdir -p "${share_ext}" "${pkglib}"
+          sudo chmod a+w "${share_ext}" "${pkglib}"
+
+      # Serial threads are required: #[pg_test] shares one DB and one async logical
+      # slot; parallel flush fences race on PostgreSQL's nowait slot acquire.
+      # Use nextest --test-threads 1 (same as scripts/run-all-tests.sh), not
+      # `cargo pgrx test`, which defaults to parallel libtest threads.
+      - name: "Run pg_test suite (nextest, serial)"
+        run: |
+          features="pg${PG_VER} pg_test s3"
+          manifest="${GITHUB_WORKSPACE}/crates/pg_koldstore/Cargo.toml"
+          CARGO_TARGET_DIR="${GITHUB_WORKSPACE}/target" \
+            PGRX_FEATURES="${features}" \
+            PGRX_NO_DEFAULT_FEATURES=true \
+            PGRX_ALL_FEATURES=false \
+            PGRX_BUILD_PROFILE=dev \
+            PGRX_NO_SCHEMA=false \
+            PGRX_MANIFEST_PATH="${manifest}" \
+            cargo nextest run \
+              --profile ci \
+              --manifest-path "${manifest}" \
+              --features "${features}" \
+              --no-default-features \
+              --test-threads 1
+        env:
+          RUST_BACKTRACE: "1"
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: (!cancelled())
+        with:
+          check_name: "pg_test (PG ${{ matrix.pg }})"
+          files: target/nextest/ci/junit.xml
+          comment_mode: failures
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-pg-test-pg${{ matrix.pg }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  e2e:
+    name: E2E (PG ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.pg_version != 'All' && format('[{0}]', inputs.pg_version) || '[15,16,17,18]') }}
+    env:
+      PG_VER: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGVERSION: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGPORT: ${{ format('288{0}', matrix.pg) }}
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      KOLDSTORE_E2E_THREADS: "4"
+      KOLDSTORE_E2E_NEXTEST_PROFILE: ci
+      PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL ${{ matrix.pg }} development packages
+        run: |
+          bash scripts/ci/install-pgdg-dev.sh "${PG_VER}"
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
+
+      - name: Start MinIO for S3-backed E2E
+        run: bash scripts/ci/start-minio.sh
+
+      - name: Run E2E suite
+        run: bash scripts/run-pg-e2e.sh "${PG_VER}"
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+          KOLDSTORE_MINIO: "1"
+          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+          KOLDSTORE_MINIO_BUCKET: koldstore-test
+      - name: Publish test results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        if: (!cancelled())
+        with:
+          check_name: "E2E (PG ${{ matrix.pg }})"
+          files: target/nextest/ci/junit.xml
+          comment_mode: failures
+      - name: Upload JUnit
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-e2e-pg${{ matrix.pg }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  pgrx-integration:
+    name: Examples + storage + SQL (PG ${{ matrix.pg }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.pg_version != 'All' && format('[{0}]', inputs.pg_version) || '[15,16,17,18]') }}
+    env:
+      PG_VER: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGVERSION: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGPORT: ${{ format('288{0}', matrix.pg) }}
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      KOLDSTORE_EXAMPLE_PGVERSION: ${{ matrix.pg }}
+      PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      # Keep example scenarios CI-friendly while still exercising flush + concurrency.
+      KOLDSTORE_EXAMPLE_ROWS: "2000"
+      KOLDSTORE_EXAMPLE_CLIENTS: "4"
+      KOLDSTORE_EXAMPLE_SCOPES: "8"
+      KOLDSTORE_EXAMPLE_TIMEOUT_SECS: "600"
+      KOLDSTORE_STORAGE_ROWS: "10000"
+      KOLDSTORE_STORAGE_HOT_LIMIT: "2000"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL ${{ matrix.pg }} development packages
+        run: |
+          bash scripts/ci/install-pgdg-dev.sh "${PG_VER}"
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
+
+      - name: Compile pg_koldstore for PostgreSQL ${{ matrix.pg }}
+        run: cargo clippy -p pg_koldstore --all-targets --no-default-features --features pg${PG_VER},pg_test,s3 -- -D warnings
+
+      - name: Run example scenarios
+        run: bash scripts/run-examples.sh
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+
+      - name: Run storage comparison (baseline vs managed)
+        run: bash scripts/run-storage-comparison.sh --all-sides --pg-version "${PG_VER}"
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+
+      - name: Run KoldStore SQL regression
+        run: bash scripts/run-sql-regression.sh "${PG_VER}"
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+
+  memory:
+    name: memory checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      PG_VER: 16
+      KOLDSTORE_E2E_PGVERSION: 16
+      KOLDSTORE_E2E_PGPORT: 28816
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      KOLDSTORE_MEMORY_PG_VERSION: "16"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL 16 development packages
+        run: |
+          bash scripts/ci/install-pgdg-dev.sh 16
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 "${PGRX_PG_CONFIG}"
+
+      - name: Start MinIO for S3-backed memory E2E
+        run: bash scripts/ci/start-minio.sh
+
+      - name: Run memory checks
+        run: tests/memory/run_memory_checks.sh
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+          KOLDSTORE_MINIO: "1"
+          KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+          KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+          KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+          KOLDSTORE_MINIO_BUCKET: koldstore-test

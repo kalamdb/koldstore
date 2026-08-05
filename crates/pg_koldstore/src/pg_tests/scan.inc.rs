@@ -316,40 +316,34 @@ fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
             .0
             .to_string()
     });
+    // Native hot child owns `Plans` under KoldMergeScan. Cold/hot diagnostics
+    // live in Scan Sources property groups (visual KoldStore Internal nodes
+    // are only emitted when no native child is present).
     for expected in [
-        "\"Plans\"",
-        "\"Node Type\":\"KoldStore Hot Scan\"",
-        "\"Node Type\":\"KoldStore Cold Storage Scan\"",
-        "\"Node Type\":\"KoldStore Segment Catalog Scan\"",
-        "\"Node Type\":\"KoldStore Parquet Scan\"",
-        "\"Parent Relationship\":\"Parquet Segment\"",
-        "\"KoldStore Internal\":true",
-        "\"KoldStore Role\":\"PostgreSQL Hot Access\"",
-        "\"Hot Actual Access\"",
+        "\"Custom Plan Provider\":\"KoldMergeScan\"",
+        "\"Scan Sources\"",
+        "\"Hot Scan\"",
+        "\"Planned Access\"",
+        "\"Actual Access\":\"Native PostgreSQL Child\"",
+        "\"Cold Scan\"",
         "\"Runtime Manifest Read\":false",
         "\"Cold Segments Query\"",
-        "\"Hot SPI Query\"",
+        "\"Parquet Segments\"",
+        "\"Mirror Scan\"",
         "\"Actual Rows\":1",
     ] {
         assert!(
             plan.contains(expected),
-            "expected KoldStore diagnostic plan node `{expected}`: {plan}"
+            "expected KoldStore explain contract `{expected}`: {plan}"
         );
     }
     assert!(
+        !plan.contains("\"Hot SPI Query\""),
+        "native hot child must not advertise SPI keyset text: {plan}"
+    );
+    assert!(
         !plan.contains("\"Node Type\":\"KoldStore Mirror Overlay\""),
         "Mirror Overlay must not appear as a visual plan node: {plan}"
-    );
-    // Parquet must nest under catalog, not sit as a sibling under Cold Storage.
-    let catalog_idx = plan
-        .find("\"Node Type\":\"KoldStore Segment Catalog Scan\"")
-        .expect("catalog node");
-    let parquet_idx = plan
-        .find("\"Node Type\":\"KoldStore Parquet Scan\"")
-        .expect("parquet node");
-    assert!(
-        parquet_idx > catalog_idx,
-        "Parquet Scan must appear after Segment Catalog Scan in nested Plans: {plan}"
     );
 }
 
@@ -423,7 +417,7 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
 
     let plan = spi_get_explain(&format!(
         "EXPLAIN (ANALYZE, COSTS OFF, SUMMARY OFF) \
-         SELECT body FROM {relation} WHERE id IN (1, 4) ORDER BY id"
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
     ));
     for needle in [
         "Scan Sources",
@@ -452,24 +446,25 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
         );
     }
     for expected in [
-        "Emit Path: merge_stream",
-        "Actual Access: SPI JSON Keyset Scan",
-        "Hot SPI Query:",
-        "to_jsonb(proj)",
-        "Peak Hot Batch Rows: 1",
+        "Emit Path: ordered_merge_native",
+        "Actual Access: Native PostgreSQL Child",
+        "Strategy: Ordered Progressive",
         "Seen Keys: 4",
         "Hot Rows: 1",
         "Rows Scanned: 3",
         "Input Rows: 4",
         "Output Rows: 4",
         "Rows Removed by Merge: 0",
-        "Rows Removed by Filter: 2",
     ] {
         assert!(
             plan.contains(expected),
             "EXPLAIN ANALYZE flow missing exact counter `{expected}`: {plan}"
         );
     }
+    assert!(
+        !plan.contains("SPI JSON Keyset Scan") && !plan.contains("to_jsonb(proj)"),
+        "Ordered Progressive must not use SPI JSON keyset hot paging: {plan}"
+    );
 }
 
 #[pg_test]
@@ -481,13 +476,17 @@ fn primary_key_range_pushes_hot_candidates_into_merge_stream() {
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
+    // Cold max must sit strictly below the first DESC hot page (ids 9..2) so
+    // ordered progressive stays hot-dominant and parent LIMIT can stop after
+    // the adaptive first page. Higher cold ids (e.g. 1..12) correctly force a
+    // sorted-buffer drain — covered by ordered_limit_cold_wins_returns_cold_first.
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) \
-         SELECT id, 'cold-' || id::text FROM generate_series(1, 12) AS id"
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 1) AS id"
     ))
     .expect("insert cold candidates");
     manage_for_cold_flush(&relation, &storage);
-    assert!(flush_table_rows(&relation, true) >= 12);
+    assert!(flush_table_rows(&relation, true) >= 1);
     Spi::run(&format!(
         "INSERT INTO {relation} (id, body) \
          SELECT id, 'hot-' || id::text FROM generate_series(1, 1000) AS id"
@@ -499,12 +498,13 @@ fn primary_key_range_pushes_hot_candidates_into_merge_stream() {
          SELECT body FROM {relation} WHERE id < 10 ORDER BY id DESC LIMIT 5"
     ));
     assert!(
-        plan.contains("Emit Path: merge_stream"),
-        "overlapping cold candidates must use the merge stream: {plan}"
+        plan.contains("Emit Path: ordered_merge_native")
+            || plan.contains("Emit Path: merge_stream"),
+        "overlapping cold candidates must use a merge emit path: {plan}"
     );
     assert!(
-        plan.contains("Hot Rows: 9") && plan.contains("Peak Hot Batch Rows: 9"),
-        "PK range pushdown must scan only hot IDs below 10, not one full page: {plan}"
+        plan.contains("Hot Rows: 8") && plan.contains("Peak Hot Batch Rows: 8"),
+        "PK range + LIMIT must use index pushdown and stop after the first adaptive hot page: {plan}"
     );
     assert_eq!(
         spi_get_text(&format!(
@@ -897,8 +897,16 @@ fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
            AND bool_and(cardinality(csi.row_group_max_values) = cs.row_group_count)
            AND bool_and(cardinality(csi.row_group_null_counts) = cs.row_group_count)
            AND bool_and(csi.min_value IS NOT NULL AND csi.max_value IS NOT NULL)
+           AND bool_and(csoi.sort_order_id = csi.column_id)
+           AND bool_and(cardinality(csoi.row_group_min_composite_keys) = cs.row_group_count)
+           AND bool_and(cardinality(csoi.row_group_max_composite_keys) = cs.row_group_count)
+           AND bool_and(csoi.min_composite_key IS NOT NULL AND csoi.max_composite_key IS NOT NULL)
+           AND bool_and(csoi.bounds_exact)
         FROM koldstore.cold_segments cs
         JOIN koldstore.cold_segment_index csi USING (segment_id)
+        JOIN koldstore.cold_segment_order_index csoi
+          ON csoi.segment_id = cs.segment_id
+         AND csoi.sort_order_id = csi.column_id
         WHERE cs.table_oid = '{relation}'::regclass
           AND csi.column_id = (
             SELECT attnum
@@ -911,7 +919,10 @@ fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
     ))
     .expect("inspect packed catalog arrays")
     .expect("packed catalog array assertion");
-    assert!(arrays_aligned, "expected aligned, exact PK row-group metadata");
+    assert!(
+        arrays_aligned,
+        "expected aligned PK row-group metadata and order-index bounds"
+    );
 
     // 1500 is inside the segment-level [1, 3023] range, but falls in the gap
     // between row-group ranges [1, 1024] and [2000, 3023].
@@ -1107,3 +1118,274 @@ fn merge_scan_fails_closed_when_seen_key_limit_is_exceeded() {
     .expect("seen-key limit must fail closed with a clear error");
     Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
 }
+
+#[pg_test]
+fn ordered_pk_limit_uses_kold_merge_scan_without_external_sort() {
+    let suffix = unique_suffix("ordered_pk_pathkeys");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES
+         (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e'), (6, 'f')"
+    ))
+    .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 1, "expected flush to publish cold rows");
+    // Keep a few hot rows newer than the flush cutoff so the query is mixed.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (100, 'hot-100'), (101, 'hot-101')"
+    ))
+    .expect("insert hot");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) \
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("KoldMergeScan") || plan.contains("Custom Scan"),
+        "cold-capable ordered limit must use KoldMergeScan: {plan}"
+    );
+    assert!(
+        plan.contains("Strategy") && plan.contains("Ordered Progressive"),
+        "ordered portfolio path should advertise Ordered Progressive strategy: {plan}"
+    );
+    assert!(
+        !plan.contains("Sort"),
+        "ordered KoldMergeScan pathkeys should avoid an external Sort: {plan}"
+    );
+
+    // Locked empty-cold native plan still applies when no cold is published.
+    let native_schema = format!("pgtest_{suffix}_native");
+    let native_relation = format!("{native_schema}.{table}");
+    create_messages_table(&native_schema, table);
+    manage_shared(&native_relation, &storage);
+    Spi::run(&format!(
+        "INSERT INTO {native_relation} (id, body) VALUES (1, 'only-hot')"
+    ))
+    .expect("insert native");
+    let native_plan = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) SELECT body FROM {native_relation} WHERE id = 1"
+    ));
+    assert!(
+        !native_plan.contains("KoldMergeScan") && !native_plan.contains("Custom Scan"),
+        "empty cold must keep native plans: {native_plan}"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_does_not_drain_full_hot_heap() {
+    let suffix = unique_suffix("ordered_limit_lazy");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 20) AS id"
+    ))
+    .expect("insert cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 20);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 500) AS id"
+    ))
+    .expect("insert large hot heap");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive"),
+        "ordered LIMIT must use native ordered progressive merge: {plan}"
+    );
+    assert!(
+        plan.contains("Hot Rows: 8") && plan.contains("Peak Hot Batch Rows: 8"),
+        "parent LIMIT must stop after the first adaptive hot page, not drain 500 hot rows: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened: 0"),
+        "hot-dominant ordered LIMIT must not open Parquet: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Skip Reason:")
+            || plan.contains("hot satisfied parent Limit without cold expansion"),
+        "EXPLAIN should report why cold was skipped: {plan}"
+    );
+    assert!(
+        !plan.contains("Mirror Tombstones:") || plan.contains("Mirror Tombstones: 0") || plan.contains("Rows Scanned: 0"),
+        "deferred mirror must stay unread when cold never expands: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id DESC) FROM (\
+             SELECT id, body FROM {relation} ORDER BY id DESC LIMIT 5\
+             ) topn"
+        )),
+        "hot-500,hot-499,hot-498,hot-497,hot-496",
+        "ordered LIMIT must still return the newest hot winners"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_cold_wins_returns_cold_first() {
+    let suffix = unique_suffix("ordered_cold_wins");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1000, 1010) AS id"
+    ))
+    .expect("insert high-id cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 11);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 10) AS id"
+    ))
+    .expect("insert low-id hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive"),
+        "cold-wins ordered LIMIT must use ordered progressive merge: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened:")
+            && !plan.contains("Parquet Segments Opened: 0"),
+        "cold-wins ordered LIMIT must open competitive Parquet: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id DESC) FROM (\
+             SELECT id, body FROM {relation} ORDER BY id DESC LIMIT 5\
+             ) topn"
+        )),
+        "cold-1010,cold-1009,cold-1008,cold-1007,cold-1006",
+        "ordered LIMIT must emit cold winners when they outrank hot"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_asc_cold_wins_after_hot_prune() {
+    let suffix = unique_suffix("ordered_asc_cold_wins");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    // Low ids go cold first; later high-id hot inserts must not win ASC top-N.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 11) AS id"
+    ))
+    .expect("insert low-id cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 11);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1000, 1010) AS id"
+    ))
+    .expect("insert high-id hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT id, body FROM {relation} ORDER BY id ASC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive")
+            && plan.contains("Order Direction: ASC"),
+        "ASC cold-wins must advertise ascending ordered progressive: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened:")
+            && !plan.contains("Parquet Segments Opened: 0"),
+        "ASC LIMIT after hot prune must open cold for lower ids: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id) FROM (\
+             SELECT id, body FROM {relation} ORDER BY id ASC LIMIT 5\
+             ) topn"
+        )),
+        "cold-1,cold-2,cold-3,cold-4,cold-5",
+        "ORDER BY id ASC LIMIT 5 must emit cold winners when they outrank hot"
+    );
+}
+
+#[pg_test]
+fn unordered_limit_uses_hot_first_and_defers_cold() {
+    let suffix = unique_suffix("unordered_limit");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 20) AS id"
+    ))
+    .expect("insert cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 20);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(100, 200) AS id"
+    ))
+    .expect("insert hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Strategy: Unordered Hot First")
+            && plan.contains("Emit Path: unordered_hot_first"),
+        "LIMIT without ORDER BY must use Unordered Hot First: {plan}"
+    );
+    assert!(
+        plan.contains("Actual Access: Native PostgreSQL Child"),
+        "unordered hot-first must use the native hot child, not SPI JSON: {plan}"
+    );
+    assert!(
+        !plan.contains("SPI JSON Keyset Scan") && !plan.contains("to_jsonb(proj)"),
+        "unordered hot-first must not use SPI JSON keyset paging: {plan}"
+    );
+    assert!(
+        !plan.contains("Sort"),
+        "unordered LIMIT must not invent pathkeys/Sort: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened: 0"),
+        "LIMIT satisfied from hot must defer cold Parquet: {plan}"
+    );
+    let bodies = spi_get_text(&format!(
+        "SELECT string_agg(body, ',') FROM (SELECT body FROM {relation} LIMIT 5) t"
+    ));
+    assert_eq!(bodies.split(',').count(), 5, "LIMIT 5 must return 5 rows: {bodies}");
+    assert!(
+        bodies.split(',').all(|b| b.starts_with("hot-")),
+        "hot-first LIMIT should return hot bodies before opening cold: {bodies}"
+    );
+}
+

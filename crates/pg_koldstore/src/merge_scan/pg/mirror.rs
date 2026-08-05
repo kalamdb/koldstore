@@ -110,6 +110,65 @@ WHERE {where_clause}
     })?
 }
 
+/// Loads tombstones for a batch of cold candidate PKs only (no full-table scan).
+pub(super) fn load_mirror_tombstones_for_pks(
+    mirror_relation: &TableName,
+    primary_key_columns: &[ColumnRef],
+    candidate_pks: &[LogicalPk],
+) -> Result<MirrorOverlay, String> {
+    if candidate_pks.is_empty() {
+        return Ok(MirrorOverlay::default());
+    }
+    if primary_key_columns.is_empty() {
+        return Err("mirror overlay requires primary key columns".to_string());
+    }
+    let pk_columns = primary_key_columns
+        .iter()
+        .map(|column| PkColumn::new(&column.name).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let pk_json = super::spi_query::jsonb_pk_object_pairs(
+        "mirror",
+        primary_key_columns
+            .iter()
+            .map(|column| column.name.as_str()),
+    );
+    let candidates = serde_json::Value::Array(
+        candidate_pks
+            .iter()
+            .map(LogicalPk::to_canonical_json)
+            .collect(),
+    );
+    let sql = format!(
+        r#"
+SELECT jsonb_build_object({pk_json})::text AS pk_json
+FROM {mirror} AS mirror
+WHERE mirror."op" = 3
+  AND jsonb_build_object({pk_json}) IN (
+        SELECT value FROM jsonb_array_elements($1::jsonb) AS t(value)
+      )
+"#,
+        pk_json = pk_json,
+        mirror = mirror_relation.quoted(),
+    );
+    let candidates_text = candidates.to_string();
+    crate::catalog::owner::with_extension_owner(|| {
+        with_hook_disabled(|| unsafe {
+            execute_batched_mirror_probe(&sql, &pk_columns, &candidates_text)
+        })
+    })?
+}
+
+unsafe fn execute_batched_mirror_probe(
+    query: &str,
+    pk_columns: &[PkColumn],
+    pk_array_json: &str,
+) -> Result<MirrorOverlay, String> {
+    // Bind candidate PK JSON via format into a stable literal for SPI (read-only).
+    let escaped = pk_array_json.replace('\'', "''");
+    let bound_query = query.replace("$1::jsonb", &format!("'{escaped}'::jsonb"));
+    execute_mirror_overlay_query(&bound_query, pk_columns)
+}
+
 unsafe fn execute_mirror_overlay_query(
     query: &str,
     pk_columns: &[PkColumn],

@@ -312,41 +312,24 @@ fn sort_flush_rows(rows: &mut [FlushMirrorRow], primary_key_indices: &[usize]) {
 }
 
 fn compare_flush_values(
-    left: Option<&koldstore_parquet::FlushColumnValue>,
-    right: Option<&koldstore_parquet::FlushColumnValue>,
+    left: Option<&koldstore_common::CellValue>,
+    right: Option<&koldstore_common::CellValue>,
 ) -> std::cmp::Ordering {
-    use koldstore_parquet::FlushColumnValue;
+    use koldstore_common::CellValue;
     match (left, right) {
-        (Some(FlushColumnValue::Bool(left)), Some(FlushColumnValue::Bool(right))) => {
+        (Some(CellValue::Bool(left)), Some(CellValue::Bool(right))) => left.cmp(right),
+        (Some(CellValue::Int16(left)), Some(CellValue::Int16(right))) => left.cmp(right),
+        (Some(CellValue::Int32(left)), Some(CellValue::Int32(right))) => left.cmp(right),
+        (Some(CellValue::Int64(left)), Some(CellValue::Int64(right))) => left.cmp(right),
+        (Some(CellValue::Float32(left)), Some(CellValue::Float32(right))) => left.total_cmp(right),
+        (Some(CellValue::Float64(left)), Some(CellValue::Float64(right))) => left.total_cmp(right),
+        (Some(CellValue::Utf8(left)), Some(CellValue::Utf8(right))) => left.cmp(right),
+        (Some(CellValue::TimestamptzMicros(left)), Some(CellValue::TimestamptzMicros(right))) => {
             left.cmp(right)
         }
-        (Some(FlushColumnValue::Int16(left)), Some(FlushColumnValue::Int16(right))) => {
-            left.cmp(right)
-        }
-        (Some(FlushColumnValue::Int32(left)), Some(FlushColumnValue::Int32(right))) => {
-            left.cmp(right)
-        }
-        (Some(FlushColumnValue::Int64(left)), Some(FlushColumnValue::Int64(right))) => {
-            left.cmp(right)
-        }
-        (Some(FlushColumnValue::Float32(left)), Some(FlushColumnValue::Float32(right))) => {
-            left.total_cmp(right)
-        }
-        (Some(FlushColumnValue::Float64(left)), Some(FlushColumnValue::Float64(right))) => {
-            left.total_cmp(right)
-        }
-        (Some(FlushColumnValue::Utf8(left)), Some(FlushColumnValue::Utf8(right))) => {
-            left.cmp(right)
-        }
-        (
-            Some(FlushColumnValue::TimestamptzMicros(left)),
-            Some(FlushColumnValue::TimestamptzMicros(right)),
-        ) => left.cmp(right),
-        (Some(FlushColumnValue::Null), Some(FlushColumnValue::Null)) | (None, None) => {
-            std::cmp::Ordering::Equal
-        }
-        (Some(FlushColumnValue::Null) | None, _) => std::cmp::Ordering::Less,
-        (_, Some(FlushColumnValue::Null) | None) => std::cmp::Ordering::Greater,
+        (Some(CellValue::Null), Some(CellValue::Null)) | (None, None) => std::cmp::Ordering::Equal,
+        (Some(CellValue::Null) | None, _) => std::cmp::Ordering::Less,
+        (_, Some(CellValue::Null) | None) => std::cmp::Ordering::Greater,
         (Some(left), Some(right)) => format!("{left:?}").cmp(&format!("{right:?}")),
     }
 }
@@ -355,7 +338,7 @@ fn compare_flush_values(
 mod tests {
     use super::*;
     use koldstore_common::{ColumnId, ColumnRef};
-    use koldstore_parquet::{FlushColumnValue, PgType};
+    use koldstore_parquet::{CellValue, PgType};
     use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue};
 
     fn input(target_file_size_bytes: Option<u64>, max_rows_per_file: usize) -> StreamEncodeInput {
@@ -386,10 +369,7 @@ mod tests {
             .map(|seq| FlushMirrorRow {
                 seq,
                 op: 1,
-                values: vec![
-                    FlushColumnValue::Int64(seq),
-                    FlushColumnValue::Utf8("payload".repeat(20)),
-                ],
+                values: vec![CellValue::Int64(seq), CellValue::Utf8("payload".repeat(20))],
                 order_key: None,
             })
             .collect()
@@ -485,19 +465,19 @@ mod tests {
             FlushMirrorRow {
                 seq: 1,
                 op: 1,
-                values: vec![FlushColumnValue::Int64(3), FlushColumnValue::Int64(10)],
+                values: vec![CellValue::Int64(3), CellValue::Int64(10)],
                 order_key: Some(vec![10]),
             },
             FlushMirrorRow {
                 seq: 2,
                 op: 1,
-                values: vec![FlushColumnValue::Int64(2), FlushColumnValue::Int64(10)],
+                values: vec![CellValue::Int64(2), CellValue::Int64(10)],
                 order_key: Some(vec![10]),
             },
             FlushMirrorRow {
                 seq: 3,
                 op: 1,
-                values: vec![FlushColumnValue::Int64(1), FlushColumnValue::Int64(5)],
+                values: vec![CellValue::Int64(1), CellValue::Int64(5)],
                 order_key: Some(vec![5]),
             },
         ];

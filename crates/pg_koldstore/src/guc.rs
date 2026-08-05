@@ -19,6 +19,9 @@ static MAX_OPEN_PARQUET_READERS: GucSetting<i32> =
 static MAX_MERGE_SEEN_KEYS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_MAX_MERGE_SEEN_KEYS);
 #[cfg(feature = "pg")]
+static OBJECT_STORE_TIMEOUT_MS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_OBJECT_STORE_TIMEOUT_MS);
+#[cfg(feature = "pg")]
 static LOG_LEVEL: GucSetting<Option<CString>> = GucSetting::<Option<CString>>::new(Some(c"info"));
 #[cfg(feature = "pg")]
 static ENABLE_MERGE_SCAN: GucSetting<bool> = GucSetting::<bool>::new(true);
@@ -95,6 +98,16 @@ pub fn define_gucs() {
         &MAX_MERGE_SEEN_KEYS,
         settings::MIN_MAX_MERGE_SEEN_KEYS,
         settings::MAX_MAX_MERGE_SEEN_KEYS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.object_store_timeout_ms",
+        c"Timeout for one ObjectStore or Parquet segment operation.",
+        c"Fail-fast wall-clock budget for cold reads and flush object I/O. 0 disables the timeout (query cancel still aborts in-flight waits). Clamped to 0..=600000 milliseconds.",
+        &OBJECT_STORE_TIMEOUT_MS,
+        settings::MIN_OBJECT_STORE_TIMEOUT_MS,
+        settings::MAX_OBJECT_STORE_TIMEOUT_MS,
         GucContext::Userset,
         flags,
     );
@@ -282,6 +295,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::MAX_MERGE_SEEN_KEYS_GUC,
             internal: false,
             default_value: "1000000",
+        },
+        GucDefinition {
+            name: settings::OBJECT_STORE_TIMEOUT_MS_GUC,
+            internal: false,
+            default_value: "30000",
         },
         GucDefinition {
             name: settings::LOG_LEVEL_GUC,
@@ -476,6 +494,30 @@ pub fn max_merge_seen_keys() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_MAX_MERGE_SEEN_KEYS
+    }
+}
+
+/// ObjectStore / Parquet operation timeout (`None` when disabled / `0`).
+#[must_use]
+pub fn object_store_timeout() -> Option<std::time::Duration> {
+    let ms = object_store_timeout_ms();
+    (ms > 0).then(|| std::time::Duration::from_millis(ms))
+}
+
+/// ObjectStore / Parquet operation timeout in milliseconds (`0` = disabled).
+#[must_use]
+pub fn object_store_timeout_ms() -> u64 {
+    #[cfg(feature = "pg")]
+    {
+        u64::try_from(settings::bounded_object_store_timeout_ms(
+            OBJECT_STORE_TIMEOUT_MS.get(),
+        ))
+        .unwrap_or(0)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        u64::try_from(settings::DEFAULT_OBJECT_STORE_TIMEOUT_MS).unwrap_or(30_000)
     }
 }
 

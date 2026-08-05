@@ -59,7 +59,7 @@ fn flush_segment_publish_create_is_readable_and_idempotent() {
     assert!(
         written.catalog_row.path.starts_with(&format!(
             "001/segment-0000-{}.",
-            koldstore_manifest::segment_path_token(written.segment_id)
+            koldstore_common::segment_path_token(written.segment_id)
         )),
         "object path should use padded folder/segment + short token, got {}",
         written.catalog_row.path
@@ -151,7 +151,7 @@ fn flush_segment_publish_rejects_corrupt_existing_final() {
     let segment_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
     let final_key = format!(
         "app/items/001/segment-0001-{}.parquet",
-        koldstore_manifest::segment_path_token(segment_id)
+        koldstore_common::segment_path_token(segment_id)
     );
     client
         .put(

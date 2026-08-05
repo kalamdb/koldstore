@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use koldstore_common::{ColumnId, ColumnRef, TableName};
+use koldstore_common::{ColumnId, ColumnRef, ManageTableOptions, TableName, TableOid};
 use koldstore_schema::MirrorInitializationState;
 use serde::Deserialize;
 
@@ -28,9 +28,14 @@ const _: () = assert!(MANAGED_TABLE_SNAPSHOT_CACHE_LIMIT >= 1024);
 ///
 /// Catalog lookups may legitimately return no row. Keeping that absence avoids
 /// repeating the same lookup while still letting invalidation remove the entry.
+///
+/// Eviction is LRU: [`Self::get`] and [`Self::insert`] promote the key to most
+/// recently used so hot tables stay resident under the entry cap.
 #[derive(Debug)]
 pub struct OptionalLookupCache<K, V> {
     entries: HashMap<K, Option<V>>,
+    /// Oldest at the front; newest at the back.
+    order: std::collections::VecDeque<K>,
     limit: usize,
 }
 
@@ -41,11 +46,12 @@ impl<K, V> Default for OptionalLookupCache<K, V> {
 }
 
 impl<K, V> OptionalLookupCache<K, V> {
-    /// Builds a cache that evicts an arbitrary entry when `limit` is exceeded.
+    /// Builds a cache that evicts the least-recently-used entry when `limit` is exceeded.
     #[must_use]
     pub fn with_limit(limit: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            order: std::collections::VecDeque::new(),
             limit: limit.max(1),
         }
     }
@@ -57,32 +63,53 @@ where
     V: Clone,
 {
     /// Returns `None` for a cache miss and `Some(None)` for cached absence.
-    #[must_use]
-    pub fn get(&self, key: &K) -> Option<Option<V>> {
-        self.entries.get(key).cloned()
+    ///
+    /// Hits promote `key` to most-recently-used.
+    pub fn get(&mut self, key: &K) -> Option<Option<V>> {
+        let value = self.entries.get(key)?.clone();
+        self.touch(key);
+        Some(value)
     }
 
     /// Stores either a present value or a successful absent lookup.
     ///
-    /// When the cache is at capacity and `key` is new, one existing entry is
-    /// evicted (arbitrary key order, matching the footer-cache policy).
+    /// When the cache is at capacity and `key` is new, the least-recently-used
+    /// entry is evicted.
     pub fn insert(&mut self, key: K, value: Option<V>) {
-        if self.entries.len() >= self.limit && !self.entries.contains_key(&key) {
-            if let Some(evicted) = self.entries.keys().next().cloned() {
+        if self.entries.contains_key(&key) {
+            self.entries.insert(key.clone(), value);
+            self.touch(&key);
+            return;
+        }
+        while self.entries.len() >= self.limit {
+            if let Some(evicted) = self.order.pop_front() {
                 self.entries.remove(&evicted);
+            } else {
+                break;
             }
         }
-        self.entries.insert(key, value);
+        self.entries.insert(key.clone(), value);
+        self.order.push_back(key);
+    }
+
+    fn touch(&mut self, key: &K) {
+        if let Some(index) = self.order.iter().position(|entry| entry == key) {
+            if let Some(entry) = self.order.remove(index) {
+                self.order.push_back(entry);
+            }
+        }
     }
 
     /// Retains entries matching `keep`.
     pub fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
         self.entries.retain(|key, _| keep(key));
+        self.order.retain(|key| keep(key));
     }
 
     /// Clears every cached lookup.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.order.clear();
     }
 
     /// Returns the number of cached entries.
@@ -100,11 +127,13 @@ where
 
 /// Bounded in-process map keyed by table OID.
 ///
-/// Evicts an arbitrary entry when inserting past [`DEFAULT_OPTIONAL_LOOKUP_CACHE_LIMIT`]
-/// so week-long backends that touch many managed tables do not grow without bound.
+/// Evicts the least-recently-used entry when inserting past the configured
+/// limit so week-long backends that touch many managed tables stay bounded
+/// while keeping hot tables resident.
 #[derive(Debug)]
 pub struct BoundedOidCache<V> {
     entries: HashMap<u32, V>,
+    order: std::collections::VecDeque<u32>,
     limit: usize,
 }
 
@@ -115,39 +144,64 @@ impl<V> Default for BoundedOidCache<V> {
 }
 
 impl<V> BoundedOidCache<V> {
-    /// Builds a cache that evicts an arbitrary entry when `limit` is exceeded.
+    /// Builds a cache that evicts the least-recently-used entry when `limit` is exceeded.
     #[must_use]
     pub fn with_limit(limit: usize) -> Self {
         Self {
             entries: HashMap::new(),
+            order: std::collections::VecDeque::new(),
             limit: limit.max(1),
         }
     }
 
-    /// Returns a shared reference when present.
-    #[must_use]
-    pub fn get(&self, table_oid: u32) -> Option<&V> {
-        self.entries.get(&table_oid)
+    /// Returns a cloned value when present and promotes the key to MRU.
+    pub fn get(&mut self, table_oid: u32) -> Option<V>
+    where
+        V: Clone,
+    {
+        let value = self.entries.get(&table_oid)?.clone();
+        self.touch(table_oid);
+        Some(value)
     }
 
     /// Stores or replaces a value for a table OID.
     pub fn insert(&mut self, table_oid: u32, value: V) {
-        if self.entries.len() >= self.limit && !self.entries.contains_key(&table_oid) {
-            if let Some(evicted) = self.entries.keys().next().copied() {
+        use std::collections::hash_map::Entry;
+
+        if let Entry::Occupied(mut occupied) = self.entries.entry(table_oid) {
+            occupied.insert(value);
+            self.touch(table_oid);
+            return;
+        }
+        while self.entries.len() >= self.limit {
+            if let Some(evicted) = self.order.pop_front() {
                 self.entries.remove(&evicted);
+            } else {
+                break;
             }
         }
         self.entries.insert(table_oid, value);
+        self.order.push_back(table_oid);
+    }
+
+    fn touch(&mut self, table_oid: u32) {
+        if let Some(index) = self.order.iter().position(|entry| *entry == table_oid) {
+            if let Some(entry) = self.order.remove(index) {
+                self.order.push_back(entry);
+            }
+        }
     }
 
     /// Removes one table from the cache.
     pub fn invalidate(&mut self, table_oid: u32) {
         self.entries.remove(&table_oid);
+        self.order.retain(|entry| *entry != table_oid);
     }
 
     /// Clears all entries.
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.order.clear();
     }
 
     /// Returns the number of cached entries.
@@ -167,7 +221,7 @@ impl<V> BoundedOidCache<V> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedTableSnapshot {
     /// Source table OID.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Active schema version.
     pub schema_version: i32,
     /// Whether this schema entry is active.
@@ -225,20 +279,21 @@ impl ManagedTableSnapshotCache {
 
     /// Returns `None` on cache miss, `Some(None)` for cached absence, and
     /// `Some(Some(snapshot))` for a cached managed-table snapshot.
-    #[must_use]
-    pub fn get(&self, table_oid: u32) -> Option<Option<Arc<ManagedTableSnapshot>>> {
+    ///
+    /// Hits promote the table to most-recently-used.
+    pub fn get(&mut self, table_oid: u32) -> Option<Option<Arc<ManagedTableSnapshot>>> {
         self.inner.get(&table_oid)
     }
 
     /// Stores or replaces a snapshot for a table OID.
     pub fn insert(&mut self, snapshot: ManagedTableSnapshot) {
-        let table_oid = snapshot.table_oid;
+        let table_oid = snapshot.table_oid.get();
         self.inner.insert(table_oid, Some(Arc::new(snapshot)));
     }
 
     /// Stores an already-shared snapshot.
     pub fn insert_shared(&mut self, snapshot: Arc<ManagedTableSnapshot>) {
-        let table_oid = snapshot.table_oid;
+        let table_oid = snapshot.table_oid.get();
         self.inner.insert(table_oid, Some(snapshot));
     }
 
@@ -305,11 +360,19 @@ struct ManagedTableSnapshotWire {
     initialization_state: MirrorInitializationState,
     mirror_relation: String,
     primary_key: Vec<ColumnRef>,
+    /// Exact PK shape JSON from `koldstore.schemas.primary_key_shape`.
+    ///
+    /// Kept as [`serde_json::Value`] only for rename-stable hashing: the catalog
+    /// blob may be a full [`koldstore_common::PrimaryKeyShape`] object or a
+    /// legacy column array, and identity must ignore display `name` fields.
+    /// Runtime callers use [`ManagedTableSnapshot::primary_key_columns`], not
+    /// this blob. This is not a Sort Key encoding.
     primary_key_shape: serde_json::Value,
     #[serde(default)]
-    scope_column: Option<serde_json::Value>,
+    scope_column: Option<String>,
+    /// Typed manage-table options (`koldstore.schemas.options`).
     #[serde(default)]
-    options: serde_json::Value,
+    options: ManageTableOptions,
 }
 
 impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
@@ -319,20 +382,11 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
         use std::collections::hash_map::DefaultHasher;
 
         let table_oid = u32::try_from(wire.table_oid).map_err(|error| error.to_string())?;
+        let table_oid = TableOid::new(table_oid).map_err(|error| error.to_string())?;
         let schema_version =
             i32::try_from(wire.schema_version).map_err(|error| error.to_string())?;
         let mirror_relation =
             TableName::parse(&wire.mirror_relation).map_err(|error| error.to_string())?;
-        let scope_column = match wire.scope_column {
-            None => None,
-            Some(scope) if scope.is_null() => None,
-            Some(scope) => Some(
-                scope
-                    .as_str()
-                    .ok_or_else(|| "field `scope_column` must be string or null".to_string())?
-                    .to_string(),
-            ),
-        };
         let mut hasher = DefaultHasher::new();
         for column in &wire.primary_key {
             column.column_id.hash(&mut hasher);
@@ -340,20 +394,9 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
         hash_primary_key_shape(&wire.primary_key_shape, &mut hasher);
         let segment_order_column_id = wire
             .options
-            .get("segment_order_column_id")
-            .and_then(serde_json::Value::as_i64)
-            .map(i16::try_from)
-            .transpose()
-            .map_err(|error| error.to_string())?
+            .segment_order_column_id
             .map(ColumnId::from_attnum);
-        let scope_column_id = wire
-            .options
-            .get("scope_column_id")
-            .and_then(serde_json::Value::as_i64)
-            .map(i16::try_from)
-            .transpose()
-            .map_err(|error| error.to_string())?
-            .map(ColumnId::from_attnum);
+        let scope_column_id = wire.options.scope_column_id.map(ColumnId::from_attnum);
 
         Ok(Self {
             table_oid,
@@ -363,7 +406,7 @@ impl TryFrom<ManagedTableSnapshotWire> for ManagedTableSnapshot {
             mirror_relation,
             primary_key_columns: wire.primary_key,
             primary_key_shape_hash: hasher.finish(),
-            scope_column,
+            scope_column: wire.scope_column.filter(|scope| !scope.is_empty()),
             scope_column_id,
             segment_order_column_id,
         })
@@ -506,6 +549,18 @@ mod tests {
         cache.insert(3, "c".to_string());
         assert_eq!(cache.len(), 2);
         assert!(cache.get(3).is_some());
+    }
+
+    #[test]
+    fn optional_lookup_cache_lru_keeps_recently_used() {
+        let mut cache = OptionalLookupCache::<u32, String>::with_limit(2);
+        cache.insert(1, Some("a".to_string()));
+        cache.insert(2, Some("b".to_string()));
+        assert_eq!(cache.get(&1), Some(Some("a".to_string()))); // promote 1
+        cache.insert(3, Some("c".to_string())); // evicts LRU=2
+        assert_eq!(cache.get(&1), Some(Some("a".to_string())));
+        assert_eq!(cache.get(&2), None);
+        assert_eq!(cache.get(&3), Some(Some("c".to_string())));
     }
 
     #[test]

@@ -531,13 +531,7 @@ async fn enqueue_flush_job(client: &Client, pg_version: u16) -> Result<()> {
 }
 
 async fn flush_table(client: &Client, pg_version: u16) -> Result<i64> {
-    let row = client
-        .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)::text",
-            &[&relation(pg_version)],
-        )
-        .await?;
-    let job_id: String = row.get(0);
+    let job_id = common::flush_table_job_id(client, &relation(pg_version), false).await?;
     let progress = client
         .query_one(
             "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",

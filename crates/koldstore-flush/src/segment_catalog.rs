@@ -146,7 +146,8 @@ index_input AS (
         row_group_count,
         row_group_offset
     )
-)
+),
+inserted_index AS (
 INSERT INTO koldstore.cold_segment_index (
     segment_id,
     table_oid,
@@ -194,6 +195,54 @@ DO UPDATE SET
     row_group_min_values = EXCLUDED.row_group_min_values,
     row_group_max_values = EXCLUDED.row_group_max_values,
     row_group_null_counts = EXCLUDED.row_group_null_counts
+RETURNING
+    segment_id,
+    table_oid,
+    scope_key,
+    column_id,
+    codec_version,
+    min_value,
+    max_value,
+    row_group_min_values,
+    row_group_max_values
+)
+INSERT INTO koldstore.cold_segment_order_index (
+    segment_id,
+    table_oid,
+    scope_key,
+    sort_order_id,
+    codec_version,
+    min_composite_key,
+    max_composite_key,
+    row_group_min_composite_keys,
+    row_group_max_composite_keys,
+    physically_sorted,
+    bounds_exact
+)
+SELECT
+    segment_id,
+    table_oid,
+    scope_key,
+    column_id::integer,
+    codec_version,
+    min_value,
+    max_value,
+    row_group_min_values,
+    row_group_max_values,
+    false,
+    (min_value IS NOT NULL AND max_value IS NOT NULL)
+FROM inserted_index
+ON CONFLICT (segment_id, sort_order_id)
+DO UPDATE SET
+    table_oid = EXCLUDED.table_oid,
+    scope_key = EXCLUDED.scope_key,
+    codec_version = EXCLUDED.codec_version,
+    min_composite_key = EXCLUDED.min_composite_key,
+    max_composite_key = EXCLUDED.max_composite_key,
+    row_group_min_composite_keys = EXCLUDED.row_group_min_composite_keys,
+    row_group_max_composite_keys = EXCLUDED.row_group_max_composite_keys,
+    physically_sorted = EXCLUDED.physically_sorted,
+    bounds_exact = EXCLUDED.bounds_exact
 "#,
     )
     .map_err(|error| SegmentCatalogError::Sql(error.to_string()))
@@ -284,6 +333,9 @@ mod tests {
         assert!(statement.sql.contains("object_etag"));
         assert!(statement.sql.contains("column_id"));
         assert!(statement.sql.contains("koldstore.cold_segment_index"));
+        assert!(statement.sql.contains("koldstore.cold_segment_order_index"));
+        assert!(statement.sql.contains("sort_order_id"));
+        assert!(statement.sql.contains("min_composite_key"));
         assert!(statement.sql.contains("codec_version"));
         assert!(statement.sql.contains("row_group_count"));
         assert!(statement.sql.contains("row_group_row_counts"));

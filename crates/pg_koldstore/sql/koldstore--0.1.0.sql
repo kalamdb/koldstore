@@ -247,9 +247,49 @@ ON koldstore.cold_segment_index (
     table_oid, scope_key, column_id, type_oid, codec_version, max_value
 ) INCLUDE (min_value, segment_id);
 
+-- Composite order bounds for progressive OrderedProgressive frontiers.
+-- sort_order_id currently mirrors the leading order column_id (PK or configured
+-- segment-order column). min/max_composite_key start as that column's Sort Key
+-- V1 bound; multi-column composite encoding can refine later without a new table.
+CREATE TABLE IF NOT EXISTS koldstore.cold_segment_order_index (
+    segment_id uuid NOT NULL
+        REFERENCES koldstore.cold_segments(segment_id) ON DELETE CASCADE,
+    table_oid oid NOT NULL,
+    scope_key text NOT NULL DEFAULT '',
+    sort_order_id integer NOT NULL,
+    codec_version smallint NOT NULL,
+    min_composite_key bytea,
+    max_composite_key bytea,
+    row_group_min_composite_keys bytea[] NOT NULL,
+    row_group_max_composite_keys bytea[] NOT NULL,
+    physically_sorted boolean NOT NULL,
+    bounds_exact boolean NOT NULL,
+    PRIMARY KEY (segment_id, sort_order_id),
+    CHECK ((min_composite_key IS NULL) = (max_composite_key IS NULL)),
+    CHECK (
+        min_composite_key IS NULL
+        OR min_composite_key <= max_composite_key
+    ),
+    CHECK (
+        cardinality(row_group_min_composite_keys)
+        = cardinality(row_group_max_composite_keys)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS cold_segment_order_index_min_idx
+ON koldstore.cold_segment_order_index (
+    table_oid, scope_key, sort_order_id, codec_version, min_composite_key
+) INCLUDE (max_composite_key, segment_id);
+
+CREATE INDEX IF NOT EXISTS cold_segment_order_index_max_idx
+ON koldstore.cold_segment_order_index (
+    table_oid, scope_key, sort_order_id, codec_version, max_composite_key
+) INCLUDE (min_composite_key, segment_id);
+
 -- NOTE: Do not add per-PK catalog tables (e.g. exact cold_pk_hints). Cold
 -- presence is discovered via Sort Key V1 bounds in cold_segment_index and
 -- Parquet stats/bloom, so catalog size stays O(segments × indexed columns).
+-- Ordered frontiers use cold_segment_order_index (O(segments × sort orders)).
 
 -- PERFORMANCE: maintain O(1) row counters on koldstore.manifest (see table_counters.rs).
 CREATE OR REPLACE FUNCTION koldstore.internal_ensure_manifest_row(p_table_oid oid)
@@ -350,5 +390,6 @@ REVOKE ALL ON
   koldstore.jobs,
   koldstore.table_cancel_requests,
   koldstore.cold_segments,
-  koldstore.cold_segment_index
+  koldstore.cold_segment_index,
+  koldstore.cold_segment_order_index
 FROM PUBLIC;

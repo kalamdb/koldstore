@@ -1,7 +1,7 @@
 use koldstore_common::SqlAccess as SpiAccess;
 use koldstore_common::{
     ColumnId, ColumnRef, ManageTableOptions, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
-    PrimaryKeyColumnShape, PrimaryKeyShape,
+    PrimaryKeyColumnShape, PrimaryKeyShape, StorageId, TableOid,
 };
 use koldstore_migrate::register::{
     cold_metadata_config, plan_schema_registry_insert_with_id, IndexedColumnSource,
@@ -28,9 +28,9 @@ fn pk_shape() -> PrimaryKeyShape {
 
 fn metadata() -> RegistrationMetadata {
     RegistrationMetadata {
-        table_oid: 42,
+        table_oid: TableOid::from_raw(42),
         table_type: "user".to_string(),
-        storage_id: "00000007".to_string(),
+        storage_id: StorageId::new("00000007").unwrap(),
         scope_column: Some("user_id".to_string()),
         mirror_relation: Some("koldstore.items__cl".to_string()),
         primary_key_shape: Some(pk_shape()),
@@ -58,7 +58,7 @@ fn schema_registry_plan_captures_greenfield_metadata() {
     let plan = plan_schema_registry_insert_with_id(&metadata(), Uuid::from_u128(99)).unwrap();
 
     assert_eq!(plan.schema_id, Uuid::from_u128(99));
-    assert_eq!(plan.metadata.table_oid, 42);
+    assert_eq!(plan.metadata.table_oid.get(), 42);
     assert_eq!(plan.metadata.version, INITIAL_SCHEMA_VERSION);
     assert_eq!(plan.metadata.scope_column.as_deref(), Some("user_id"));
     assert_eq!(
@@ -305,7 +305,5 @@ fn schema_registry_plan_rejects_incomplete_metadata() {
     invalid.primary_key_shape = None;
     assert!(plan_schema_registry_insert_with_id(&invalid, Uuid::from_u128(99)).is_err());
 
-    invalid = metadata();
-    invalid.storage_id = String::new();
-    assert!(plan_schema_registry_insert_with_id(&invalid, Uuid::from_u128(99)).is_err());
+    assert!(StorageId::new("").is_err());
 }

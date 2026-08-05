@@ -16,7 +16,7 @@ SELECT koldstore.manage_table(
 );
 
 SELECT count(*) AS empty_count FROM sqlreg.empty_t;
-SELECT koldstore.flush_table('sqlreg.empty_t'::regclass);
+SELECT sqlreg.flush_table('sqlreg.empty_t'::regclass);
 SELECT count(*) AS empty_after_flush FROM sqlreg.empty_t;
 
 -- Single-row flush/select
@@ -36,7 +36,7 @@ SELECT koldstore.manage_table(
   migration_order_by => 'id'
 );
 
-SELECT koldstore.flush_table('sqlreg.one_row'::regclass);
+SELECT sqlreg.flush_table('sqlreg.one_row'::regclass);
 SELECT id, body FROM sqlreg.one_row;
 
 -- Before-flush SELECT must equal after-flush SELECT
@@ -62,7 +62,7 @@ SELECT koldstore.manage_table(
 CREATE TEMP TABLE before_flush AS
 SELECT id, body, qty FROM sqlreg.before_after ORDER BY id;
 
-SELECT koldstore.flush_table('sqlreg.before_after'::regclass);
+SELECT sqlreg.flush_table('sqlreg.before_after'::regclass);
 
 CREATE TEMP TABLE after_flush AS
 SELECT id, body, qty FROM sqlreg.before_after ORDER BY id;
@@ -103,7 +103,7 @@ SELECT koldstore.manage_table(
   migration_order_by => 'id'
 );
 
-SELECT koldstore.flush_table('sqlreg.hot_cold'::regclass);
+SELECT sqlreg.flush_table('sqlreg.hot_cold'::regclass);
 
 INSERT INTO sqlreg.hot_cold (id, body) VALUES (100, 'hot-new');
 

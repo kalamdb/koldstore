@@ -68,7 +68,7 @@ jobs:
       KOLDSTORE_STRESS_BYTEA_BYTES: ${{ inputs.bytea_bytes }}
       KOLDSTORE_STRESS_LATENCY_MULTIPLIER: ${{ inputs.latency_multiplier }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
@@ -91,7 +91,7 @@ jobs:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
       - name: Upload stress report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: chat-penetration-report

@@ -39,7 +39,7 @@ New in-server suite under `crates/pg_koldstore/src/pg_tests/` (15 tests), includ
 | Integrity | `scripts/readiness/run-integrity-checks.sh` |
 | Upstream PG | `scripts/readiness/run-upstream-pg-regress.sh`, `.github/workflows/upstream-pg-regress.yml` |
 | HammerDB / report | `scripts/hammerdb/`, `scripts/readiness/run-hammerdb.sh`, `scripts/readiness/run-readiness-report.sh`, weekly `.github/workflows/weekly-hammerdb.yml` |
-| CI | `.github/workflows/ci-tests.yml` (PG 15–18: `cargo pgrx test`, E2E, examples, SQL regression, storage), `.github/workflows/nightly-readiness.yml` |
+| CI | `.github/workflows/ci.yml` (PG 15–18: `cargo pgrx test`, E2E, examples, SQL regression, storage), `.github/workflows/nightly-readiness.yml` |
 
 ## Local commands
 

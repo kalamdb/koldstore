@@ -19,7 +19,7 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
     let plan = plan_demigration(
         DemigrationContext {
             table: QualifiedTableName::parse("app.items").unwrap(),
-            table_oid: 42,
+            table_oid: koldstore_common::TableOid::from_raw(42),
             cold_object_prefix: "app/items/".to_string(),
             logical_reader_name: "KoldMergeScan".to_string(),
             mirror_table: Some(QualifiedTableName::parse("koldstore.items__cl").unwrap()),
@@ -29,7 +29,7 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
     .unwrap();
 
     assert_eq!(plan.mode, DemigrationMode::Rehydrate);
-    assert_eq!(plan.lock.table_oid, 42);
+    assert_eq!(plan.lock.table_oid.get(), 42);
     assert_eq!(plan.cold_artifact_action, ColdArtifactAction::Retain);
     assert!(plan.warning.is_none());
     assert!(plan
@@ -49,14 +49,14 @@ fn default_demigration_plan_rehydrates_current_rows_and_retains_cold_artifacts()
 #[test]
 fn demigrate_table_request_maps_sql_defaults_to_demigration_options() {
     let request = koldstore_migrate::DemigrateTableRequest {
-        table_name: "app.items".to_string(),
+        table_name: koldstore_common::TableName::parse("app.items").unwrap(),
         rehydrate: None,
         drop_cold: None,
     };
 
     let options = request.options();
 
-    assert_eq!(request.table_name, "app.items");
+    assert_eq!(request.table_name.as_str(), "app.items");
     assert!(options.rehydrate);
     assert!(!options.drop_cold);
 }

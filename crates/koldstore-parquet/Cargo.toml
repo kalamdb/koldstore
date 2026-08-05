@@ -14,14 +14,13 @@ futures-util.workspace = true
 koldstore-common.workspace = true
 koldstore-schema.workspace = true
 koldstore-sortkey.workspace = true
+koldstore-storage.workspace = true
 object_store.workspace = true
 parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
 
 [dev-dependencies]
-koldstore-storage.workspace = true
 tempfile.workspace = true
 
 [lints]

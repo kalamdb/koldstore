@@ -1,4 +1,4 @@
-use koldstore::{catalog, guc, hooks, koldstore_version, memory, observability, spi, sql};
+use koldstore::{catalog, guc, hooks, koldstore_version, spi, sql};
 use koldstore_common::{can_set_guc, RoleClass};
 
 #[test]
@@ -30,6 +30,11 @@ fn guc_definitions_include_public_and_internal_settings() {
         .any(|guc| guc.name == "koldstore.max_merge_seen_keys"
             && !guc.internal
             && guc.default_value == "1000000"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.object_store_timeout_ms"
+            && !guc.internal
+            && guc.default_value == "30000"));
     assert!(gucs.iter().any(|guc| guc.name == "koldstore.log_level"
         && !guc.internal
         && guc.default_value == "info"));
@@ -97,6 +102,10 @@ fn application_roles_cannot_set_internal_gucs() {
     ));
     assert!(can_set_guc(
         RoleClass::Application,
+        "koldstore.object_store_timeout_ms",
+    ));
+    assert!(can_set_guc(
+        RoleClass::Application,
         "koldstore.min_max_rows_per_file",
     ));
     assert!(!can_set_guc(
@@ -129,8 +138,7 @@ fn migration_helpers_match_contract() {
 }
 
 #[test]
-fn spi_and_memory_boundaries_expose_diagnostics() {
-    assert_eq!(spi::KOLDSTORE_SQLSTATE, "XXKLD");
+fn spi_statement_access_and_prepared_plan_keys() {
     assert_eq!(
         spi::map_spi_error("select", "permission denied").to_string(),
         "SQL select failed: permission denied"
@@ -188,39 +196,6 @@ fn spi_and_memory_boundaries_expose_diagnostics() {
         spi::prepared_plan_key(&read_with_param),
         spi::prepared_plan_key(&different_param)
     );
-
-    let executor = spi::RecordingSpiExecutor::default();
-    let rows = spi::execute_catalog_write(&executor, insert).unwrap();
-    assert_eq!(rows.rows_affected, 1);
-    assert_eq!(
-        executor.statements()[0].operation,
-        "insert change-log mirror row"
-    );
-
-    let mut owner = memory::MemoryOwner::new("scan_state");
-    owner.track_allocation(1024);
-    owner.track_allocation(512);
-    assert_eq!(owner.allocated_bytes(), 1536);
-    owner.reset();
-    assert_eq!(owner.allocated_bytes(), 0);
-
-    assert!(memory::MEMORY_OWNER_LABELS.contains(&"scan_state"));
-    assert!(memory::MEMORY_OWNER_LABELS.contains(&"object_store_handle"));
-    assert!(observability::SPAN_NAMES.contains(&"koldstore.merge_execute"));
-
-    let sql_span = observability::KoldstoreSpan::SqlApi {
-        function: "koldstore.manage_table",
-    };
-    assert_eq!(sql_span.name(), "koldstore.sql_api");
-    assert!(sql_span
-        .fields()
-        .contains(&("function", "koldstore.manage_table")));
-
-    let counter = observability::ObjectStoreIoCounter::default();
-    counter.record_read("manifest");
-    counter.record_write("parquet");
-    assert_eq!(counter.reads(), 1);
-    assert_eq!(counter.writes(), 1);
 }
 
 #[test]
@@ -231,13 +206,16 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
     assert!(mirror_lookup.sql.contains("koldstore.schemas"));
     assert!(mirror_lookup.sql.contains("s.mirror_relation"));
 
-    let mirror_statement = koldstore_mirror::MirrorStatement::read_with_params(
+    let mirror_statement = koldstore_common::SqlStatement::read_with_params(
         "mirror scan",
         "SELECT * FROM koldstore.items__cl WHERE seq > $1::bigint",
-        [koldstore_mirror::SqlParamType::BigInt],
+        [koldstore_common::SqlParamType::BigInt],
+    )
+    .unwrap();
+    assert_eq!(
+        mirror_statement.param_types,
+        vec![spi::SqlParamType::BigInt]
     );
-    let spi_statement = koldstore_mirror::mirror_to_sql(mirror_statement).unwrap();
-    assert_eq!(spi_statement.param_types, vec![spi::SqlParamType::BigInt]);
 
     let relation = catalog::decode::relation_context(&serde_json::json!({
         "namespace": "public",
@@ -271,7 +249,7 @@ fn catalog_helpers_build_queries_and_decode_contexts() {
         "scope_column": null
     }))
     .unwrap();
-    assert_eq!(snapshot.table_oid, 42);
+    assert_eq!(snapshot.table_oid.get(), 42);
     assert_eq!(snapshot.schema_version, 3);
     assert!(snapshot.active);
     assert_eq!(

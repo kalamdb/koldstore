@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use crate::object_store::open_managed_object_store_client;
 use koldstore_catalog::{preferred_segment_index_access, SegmentIndexLookupShape};
 use koldstore_common::{ColdRow, ColumnId, ColumnRef, SeqId};
 use koldstore_merge::scan::plan::{
@@ -14,7 +15,6 @@ use koldstore_parquet::{
     clean_cold_row_to_common, read_clean_cold_rows_from_object_store_with_size, ParquetReadOptions,
     PgColumn,
 };
-use koldstore_storage::open_client_from_catalog_fields;
 use pgrx::pg_sys;
 
 use super::profile::{elapsed_ms, ColdReadProfile, SegmentReadProfile};
@@ -41,12 +41,9 @@ pub(super) unsafe fn cold_side_proven_empty(
     params: pg_sys::ParamListInfo,
 ) -> Result<bool, String> {
     let predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(scanrelid, qual, &catalog.columns, params) },
+        unsafe { segment_prune_predicates(scanrelid, qual, catalog, params) },
         |column_id| {
-            let column = catalog
-                .columns
-                .iter()
-                .find(|column| column.column_id.get() == column_id)?;
+            let column = catalog.column_by_attnum(column_id)?;
             Some(cold_prune_column_policy(
                 column,
                 snapshot.scope_column_id,
@@ -65,11 +62,7 @@ pub(super) unsafe fn cold_side_proven_empty(
     });
 
     for column_id in candidate_columns {
-        let Some(column) = catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id.get() == column_id)
-        else {
+        let Some(column) = catalog.column_by_attnum(column_id) else {
             continue;
         };
         let key = crate::catalog::cache::ColdColumnBoundsCacheKey::new(
@@ -158,6 +151,49 @@ impl ColdRowStream {
     pub(super) fn reset(&mut self) {
         self.next_group = 0;
     }
+
+    /// True when catalog still has unopened segment groups for this scan.
+    #[must_use]
+    pub(super) fn has_pending_segments(&self) -> bool {
+        self.next_group < self.segment_groups.len()
+    }
+
+    /// Intersects planned row groups with order-frontier competitive groups.
+    ///
+    /// Missing order-index rows leave the hint unchanged. An empty competitive
+    /// set marks the segment with `selected_row_groups = Some([])` so open is skipped.
+    pub(super) fn apply_competitive_row_groups(
+        &mut self,
+        table_oid: pg_sys::Oid,
+        scope_key: &str,
+        sort_order_id: i32,
+        direction: koldstore_merge::scan::OrderDirection,
+        hot_key: Option<&[u8]>,
+    ) -> Result<(), String> {
+        for group in &mut self.segment_groups {
+            for hint in group {
+                let Some(selected) = super::cold_frontier::competitive_row_groups_for_path(
+                    table_oid,
+                    scope_key,
+                    sort_order_id,
+                    &hint.object_path,
+                    direction,
+                    hot_key,
+                )?
+                else {
+                    continue;
+                };
+                hint.selected_row_groups = Some(match hint.selected_row_groups.take() {
+                    Some(existing) => existing
+                        .into_iter()
+                        .filter(|rg| selected.contains(rg))
+                        .collect(),
+                    None => selected,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Prepares a cold stream without opening or decoding a Parquet file.
@@ -193,9 +229,9 @@ pub(super) fn prepare_cold_row_stream(
             return Err("cold reads are disabled by koldstore.cold_reads".to_string());
         }
 
-        let client = open_client_from_catalog_fields(
-            &planned.storage_type,
-            &planned.base_path,
+        let client = open_managed_object_store_client(
+            &profile.storage_type,
+            &profile.base_path,
             &planned.credentials,
             &planned.config,
         )
@@ -220,8 +256,6 @@ pub(super) fn prepare_cold_row_stream(
 
 struct PlannedColdSegments {
     profile: ColdReadProfile,
-    storage_type: String,
-    base_path: String,
     credentials: serde_json::Value,
     config: serde_json::Value,
     segments: Vec<SegmentStatsHint>,
@@ -241,12 +275,9 @@ fn plan_cold_segments(
     let scope_column_id = snapshot.scope_column_id;
     let segment_order_column_id = snapshot.segment_order_column_id;
     let prune_predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(scanrelid, qual, &catalog.columns, params) },
+        unsafe { segment_prune_predicates(scanrelid, qual, catalog, params) },
         |column_id| {
-            let column = catalog
-                .columns
-                .iter()
-                .find(|column| column.column_id.get() == column_id)?;
+            let column = catalog.column_by_attnum(column_id)?;
             Some(cold_prune_column_policy(
                 column,
                 scope_column_id,
@@ -258,9 +289,7 @@ fn plan_cold_segments(
     let mut requested_columns = projection_columns.clone();
     requested_columns.extend(prune_predicates.iter().filter_map(|predicate| {
         catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id.get() == predicate.column_id)
+            .column_by_attnum(predicate.column_id)
             .map(|column| ColumnRef::new(column.column_id, column.name.clone()))
     }));
     requested_columns.sort_by_key(|column| column.column_id);
@@ -346,8 +375,6 @@ fn plan_cold_segments(
     };
     Ok(Some(PlannedColdSegments {
         profile,
-        storage_type: manifest_stats.storage_type.clone(),
-        base_path: manifest_stats.base_path.clone(),
         credentials: manifest_stats.credentials.clone(),
         config: manifest_stats.config.clone(),
         segments,
@@ -406,32 +433,27 @@ fn resolve_segment_index_candidates(
     predicates: &[SegmentPrunePredicate],
 ) -> Result<SegmentIndexCandidateResolution, String> {
     let preferred = segment_order_column_id.and_then(|column_id| {
-        catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id == column_id)
-            .filter(|column| {
-                koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
-                    && predicates
-                        .iter()
-                        .any(|predicate| predicate.column_id == column.column_id.get())
-            })
+        catalog.column_by_id(column_id).filter(|column| {
+            koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid()).is_some()
+                && predicates
+                    .iter()
+                    .any(|predicate| predicate.column_id == column.column_id.get())
+        })
     });
     let column = preferred.or_else(|| {
         predicates.iter().find_map(|predicate| {
-            catalog.columns.iter().find(|column| {
-                column.column_id.get() == predicate.column_id
-                    && koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
+            catalog
+                .column_by_attnum(predicate.column_id)
+                .filter(|column| {
+                    koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
                         .is_some()
-            })
+                })
         })
     });
     let Some(column) = column else {
         let order_name = segment_order_column_id.and_then(|column_id| {
             catalog
-                .columns
-                .iter()
-                .find(|column| column.column_id == column_id)
+                .column_by_id(column_id)
                 .map(|column| column.name.clone())
         });
         return Ok(SegmentIndexCandidateResolution {
@@ -644,29 +666,37 @@ fn encode_prune_predicate_bounds(
 ) -> Result<EncodedPredicateBounds, String> {
     let mut bounds = EncodedPredicateBounds::new();
     for predicate in predicates {
-        let Some(column) = catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id.get() == predicate.column_id)
-        else {
+        let Some(column) = catalog.column_by_attnum(predicate.column_id) else {
             continue;
         };
-        let Some(sort_type) =
+        let Some(expected) =
             koldstore_sortkey::SortKeyType::from_type_oid(column.pg_type.type_oid())
         else {
             continue;
         };
         let entry = bounds.entry(predicate.column_id).or_default();
         if let Some(value) = predicate.min.as_ref() {
-            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
-                .map_err(|error| error.to_string())?;
+            if value.sort_key_type() != expected {
+                return Err(format!(
+                    "prune lower bound type mismatch for column `{}`",
+                    predicate.column
+                ));
+            }
+            let encoded =
+                koldstore_sortkey::encode_sort_key(value).map_err(|error| error.to_string())?;
             if entry.0.as_ref().is_none_or(|current| encoded > *current) {
                 entry.0 = Some(encoded);
             }
         }
         if let Some(value) = predicate.max.as_ref() {
-            let encoded = koldstore_sortkey::encode_sort_key_json(sort_type, value)
-                .map_err(|error| error.to_string())?;
+            if value.sort_key_type() != expected {
+                return Err(format!(
+                    "prune upper bound type mismatch for column `{}`",
+                    predicate.column
+                ));
+            }
+            let encoded =
+                koldstore_sortkey::encode_sort_key(value).map_err(|error| error.to_string())?;
             if entry.1.as_ref().is_none_or(|current| encoded < *current) {
                 entry.1 = Some(encoded);
             }
@@ -948,10 +978,15 @@ fn pk_equality_values(
     })?;
     let value = predicate.min.as_ref()?;
     let literal = match value {
-        serde_json::Value::String(text) => text.clone(),
-        serde_json::Value::Number(number) => number.to_string(),
-        serde_json::Value::Bool(flag) => flag.to_string(),
-        _ => return None,
+        koldstore_sortkey::SortKeyValue::Bool(flag) => flag.to_string(),
+        koldstore_sortkey::SortKeyValue::Int2(n) => n.to_string(),
+        koldstore_sortkey::SortKeyValue::Int4(n) | koldstore_sortkey::SortKeyValue::Date(n) => {
+            n.to_string()
+        }
+        koldstore_sortkey::SortKeyValue::Int8(n)
+        | koldstore_sortkey::SortKeyValue::Timestamp(n)
+        | koldstore_sortkey::SortKeyValue::Timestamptz(n) => n.to_string(),
+        koldstore_sortkey::SortKeyValue::Uuid(uuid) => uuid.to_string(),
     };
     Some((pk.clone(), vec![literal]))
 }
@@ -1023,12 +1058,14 @@ fn cold_rows_from_segments(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let mut options = ParquetReadOptions::new().with_columns(
-            physical_names
-                .iter()
-                .map(|(_, name)| name.clone())
-                .collect::<Vec<_>>(),
-        );
+        let mut options = ParquetReadOptions::new()
+            .with_columns(
+                physical_names
+                    .iter()
+                    .map(|(_, name)| name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .with_timeout(client.timeout());
         if let Some(row_groups) = &hint.selected_row_groups {
             options = options.with_row_groups(row_groups.iter().copied());
         }
@@ -1066,7 +1103,7 @@ fn cold_rows_from_segments(
             .map(|column| column.name.clone())
             .collect::<Vec<_>>();
         for mut row in segment_rows {
-            remap_row_to_logical_names(&mut row.pk_json, &physical_names);
+            remap_json_to_logical_names(&mut row.pk_json, &physical_names);
             remap_row_to_logical_names(&mut row.row_image, &physical_names);
             fill_missing_logical_nulls(&mut row.row_image, &missing_logical_names);
             rows.push(clean_cold_row_to_common(row, &logical_pk_names)?);
@@ -1088,18 +1125,15 @@ fn physical_name_for_segment(
     hint: &SegmentStatsHint,
     current_schema_version: i32,
 ) -> Result<Option<String>, String> {
-    if let Some(name) = hint.physical_names.get(&column.column_id.get()) {
-        return Ok(Some(name.clone()));
-    }
-    if hint.schema_version == current_schema_version {
-        return Ok(Some(column.name.clone()));
-    }
-    // Additive columns (and drop+add with a new attnum) are absent from older
-    // segment schemas; callers materialize NULL for the current logical name.
-    Ok(None)
+    Ok(koldstore_merge::scan::physical_name_for_segment_column(
+        column.column_id.get(),
+        &column.name,
+        hint,
+        current_schema_version,
+    ))
 }
 
-fn remap_row_to_logical_names(
+fn remap_json_to_logical_names(
     value: &mut serde_json::Value,
     physical_names: &[(ColumnRef, String)],
 ) {
@@ -1116,14 +1150,26 @@ fn remap_row_to_logical_names(
     }
 }
 
-fn fill_missing_logical_nulls(value: &mut serde_json::Value, missing_names: &[String]) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
+fn remap_row_to_logical_names(
+    image: &mut koldstore_common::RowImage,
+    physical_names: &[(ColumnRef, String)],
+) {
+    let cells = image.cells_mut();
+    for (column, physical_name) in physical_names {
+        if physical_name == &column.name {
+            continue;
+        }
+        if let Some(value) = cells.remove(physical_name) {
+            cells.insert(column.name.clone(), value);
+        }
+    }
+}
+
+fn fill_missing_logical_nulls(image: &mut koldstore_common::RowImage, missing_names: &[String]) {
     for name in missing_names {
-        object
-            .entry(name.clone())
-            .or_insert(serde_json::Value::Null);
+        if !image.contains_key(name) {
+            image.insert(name.clone(), koldstore_common::CellValue::Null);
+        }
     }
 }
 

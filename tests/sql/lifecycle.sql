@@ -23,7 +23,7 @@ WHERE table_oid = 'sqlreg.lifecycle_t'::regclass::oid AND active;
 SELECT (koldstore.describe_table('sqlreg.lifecycle_t'::regclass)
          ? 'storage_binding') AS has_storage_binding;
 
-SELECT koldstore.flush_table('sqlreg.lifecycle_t'::regclass);
+SELECT sqlreg.flush_table('sqlreg.lifecycle_t'::regclass);
 
 SELECT id, body FROM sqlreg.lifecycle_t ORDER BY id;
 

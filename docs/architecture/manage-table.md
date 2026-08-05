@@ -7,7 +7,7 @@ lives in a change-log mirror (`koldstore.{table}__cl`), catalog tables, and
 (once flushed) cold Parquet segments.
 
 **SQL entrypoint:** `koldstore.manage_table(table_name regclass, storage text, …) → uuid`
-**Orchestrator:** `crates/pg_koldstore/src/sql/migrate_pg.rs`
+**Orchestrator:** `crates/pg_koldstore/src/sql/migrate/mod.rs`
 **Planning:** `crates/koldstore-migrate/`
 
 Prerequisite: register object storage first with `koldstore.register_storage`.
@@ -54,7 +54,7 @@ Those happen on the first `koldstore.flush_table` call.
 
 ## Phase 0 — SQL arguments and options
 
-`manage_table_pg` (`migrate_pg.rs`) parses:
+`manage_table_pg` (`migrate/mod.rs`) parses:
 
 | Argument | Default | Purpose |
 |----------|---------|---------|
@@ -90,7 +90,7 @@ in [mirror-capture.md](mirror-capture.md).
 
 ### 1.1 Advisory lock
 
-`lock_table_job(table_oid)` (`job_lock_pg.rs`) takes a transaction-scoped
+`lock_table_job(table_oid)` (`job_lock.rs`) takes a transaction-scoped
 advisory lock so flush/migration cannot race on the same table.
 
 ### 1.2 Resolve identifiers
@@ -367,7 +367,7 @@ Serde: `#[serde(rename_all = "snake_case")]` on job phase enums.
 
 | Layer | Crate | Role |
 |-------|-------|------|
-| SQL / SPI | `pg_koldstore::sql::migrate_pg` | Orchestration |
+| SQL / SPI | `pg_koldstore::sql::migrate` | Orchestration |
 | Planning | `koldstore-migrate` | Mirror, backfill, registry, jobs, scope |
 | Mirror DDL | `koldstore-mirror` | `__cl` table contract |
 | Options / policy | `koldstore-common` | `ManageTableOptions`, `FlushPolicy` |

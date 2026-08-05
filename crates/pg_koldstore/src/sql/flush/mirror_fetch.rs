@@ -2,9 +2,8 @@
 
 use koldstore_common::SqlStatement;
 use koldstore_migrate::order::CatalogColumn;
-use koldstore_parquet::{jsonb_cell_to_utf8, pg_bytea_hex, FlushColumnValue, FlushMirrorRow};
+use koldstore_parquet::{jsonb_cell_to_utf8, pg_bytea_hex, CellValue, FlushMirrorRow};
 use koldstore_schema::PgType;
-use koldstore_sortkey::PG_EPOCH_MICROS_FROM_UNIX;
 
 /// Fetches one keyset page of mirror rows selected for flush.
 ///
@@ -79,10 +78,10 @@ fn decode_mirror_row(
     // PERFORMANCE: Ordinal access avoids per-column name lookups (SPI_fnumber).
     let seq = tuple
         .get::<i64>(seq_ordinal)?
-        .ok_or_else(|| missing_attribute("seq"))?;
+        .ok_or_else(|| crate::spi::missing_attribute("seq"))?;
     let op = tuple
         .get::<i16>(op_ordinal)?
-        .ok_or_else(|| missing_attribute("op"))?;
+        .ok_or_else(|| crate::spi::missing_attribute("op"))?;
     let mut values = Vec::with_capacity(columns.len());
     for (index, column) in columns.iter().enumerate() {
         values.push(read_column(tuple, column, index + 1)?);
@@ -99,73 +98,62 @@ fn decode_mirror_row(
     })
 }
 
-fn missing_attribute(name: &str) -> pgrx::spi::SpiError {
-    pgrx::spi::SpiError::DatumError(pgrx::datum::TryFromDatumError::NoSuchAttributeName(
-        name.to_string(),
-    ))
-}
-
 fn read_column(
     tuple: &pgrx::spi::SpiHeapTupleData<'_>,
     column: &CatalogColumn,
     ordinal: usize,
-) -> pgrx::spi::Result<FlushColumnValue> {
+) -> pgrx::spi::Result<CellValue> {
     let value = match column.pg_type {
         PgType::Bool => tuple
             .get::<bool>(ordinal)?
-            .map(FlushColumnValue::Bool)
-            .unwrap_or(FlushColumnValue::Null),
+            .map(CellValue::Bool)
+            .unwrap_or(CellValue::Null),
         PgType::Int2 => tuple
             .get::<i16>(ordinal)?
-            .map(FlushColumnValue::Int16)
-            .unwrap_or(FlushColumnValue::Null),
+            .map(CellValue::Int16)
+            .unwrap_or(CellValue::Null),
         PgType::Int4 => tuple
             .get::<i32>(ordinal)?
-            .map(FlushColumnValue::Int32)
-            .unwrap_or(FlushColumnValue::Null),
+            .map(CellValue::Int32)
+            .unwrap_or(CellValue::Null),
         PgType::Int8 => tuple
             .get::<i64>(ordinal)?
-            .map(FlushColumnValue::Int64)
-            .unwrap_or(FlushColumnValue::Null),
+            .map(CellValue::Int64)
+            .unwrap_or(CellValue::Null),
         PgType::Float4 => tuple
             .get::<f32>(ordinal)?
-            .map(FlushColumnValue::Float32)
-            .unwrap_or(FlushColumnValue::Null),
+            .map(CellValue::Float32)
+            .unwrap_or(CellValue::Null),
         PgType::Float8 => tuple
             .get::<f64>(ordinal)?
-            .map(FlushColumnValue::Float64)
-            .unwrap_or(FlushColumnValue::Null),
+            .map(CellValue::Float64)
+            .unwrap_or(CellValue::Null),
         PgType::Text => tuple
             .get::<String>(ordinal)?
-            .map(FlushColumnValue::Utf8)
-            .unwrap_or(FlushColumnValue::Null),
+            .map(CellValue::Utf8)
+            .unwrap_or(CellValue::Null),
         PgType::Uuid => tuple
             .get::<pgrx::Uuid>(ordinal)?
-            .map(|uuid| FlushColumnValue::Utf8(uuid.to_string()))
-            .unwrap_or(FlushColumnValue::Null),
+            .map(|uuid| CellValue::Utf8(uuid.to_string()))
+            .unwrap_or(CellValue::Null),
         PgType::Jsonb => tuple
             .get::<pgrx::JsonB>(ordinal)?
-            .map(|json| FlushColumnValue::Utf8(jsonb_cell_to_utf8(&json.0)))
-            .unwrap_or(FlushColumnValue::Null),
+            .map(|json| CellValue::Utf8(jsonb_cell_to_utf8(&json.0)))
+            .unwrap_or(CellValue::Null),
         PgType::Bytea => tuple
             .get::<Vec<u8>>(ordinal)?
-            .map(|bytes| FlushColumnValue::Utf8(pg_bytea_hex(&bytes)))
-            .unwrap_or(FlushColumnValue::Null),
+            .map(|bytes| CellValue::Utf8(pg_bytea_hex(&bytes)))
+            .unwrap_or(CellValue::Null),
         PgType::Numeric | PgType::TextArray => tuple
             .get::<String>(ordinal)?
-            .map(FlushColumnValue::Utf8)
-            .unwrap_or(FlushColumnValue::Null),
+            .map(CellValue::Utf8)
+            .unwrap_or(CellValue::Null),
         PgType::Timestamptz => {
-            // PERFORMANCE: Convert PG epoch micros → Unix micros directly.
-            // Avoids to_iso_string + chrono RFC3339 parse per timestamp cell.
+            // Keep CellValue in PostgreSQL-epoch micros (same as Datum / hot).
+            // Arrow TimestampMicrosecond is Unix-epoch; convert here only.
             match tuple.get::<pgrx::datum::TimestampWithTimeZone>(ordinal)? {
-                Some(timestamp) => {
-                    let pg_micros = timestamp.into_inner();
-                    FlushColumnValue::TimestamptzMicros(
-                        pg_micros.saturating_add(PG_EPOCH_MICROS_FROM_UNIX),
-                    )
-                }
-                None => FlushColumnValue::Null,
+                Some(timestamp) => CellValue::TimestamptzMicros(timestamp.into_inner()),
+                None => CellValue::Null,
             }
         }
     };

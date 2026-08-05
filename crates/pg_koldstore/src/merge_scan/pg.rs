@@ -17,31 +17,45 @@ use koldstore_merge::scan::CUSTOM_PATH_NAME;
 use pgrx::pg_sys;
 
 mod cold;
+mod cold_frontier;
 mod emit;
 mod execute;
 mod hot;
+mod hot_cursor;
 mod keyset;
 mod literals;
 mod mirror;
+mod path_strategy;
+mod pg_list;
 mod profile;
 mod qual;
 mod spi_query;
 mod tuple;
 
 use cold::{cold_side_proven_empty, planned_cold_read_profile};
+use path_strategy::{
+    install_path_portfolio, leading_column_id_from_path_private,
+    order_descending_from_path_private, path_strategy_tag_from_private,
+    scope_key_from_path_private, sort_order_id_from_path_private, strategy_explain_label,
+    PortfolioInstallArgs, STRATEGY_TAG_GENERAL_MERGE, STRATEGY_TAG_ORDERED_PROGRESSIVE,
+    STRATEGY_TAG_UNORDERED_HOT_FIRST,
+};
 use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
-use qual::{required_scan_projection, residual_filters};
+use qual::{physical_scan_projection, required_scan_projection, residual_filters};
 use tuple::{slot_attribute_count, store_materialized_row, MaterializedRow, ScanMemory};
+
+use pg_list::{
+    list_cstring_at, list_integer_at, list_len, list_nth_ptr, make_pg_string, order_descending_flag,
+};
 
 const CUSTOM_SCAN_NAME: &[u8] = b"KoldMergeScan\0";
 const PRIVATE_EXACT_PK_INDEX: i32 = 0;
 const PRIVATE_RUNTIME_DELEGATE_SAFE_INDEX: i32 = 1;
-
-/// Catalog lookup + merge overlay overhead added on top of the hot child cost.
-const CATALOG_LOOKUP_COST: f64 = 10.0;
-const MERGE_OVERLAY_COST: f64 = 5.0;
-/// Per active cold segment estimate used at plan time (local catalog only).
-const COLD_SEGMENT_COST: f64 = 25.0;
+const PRIVATE_STRATEGY_TAG_INDEX: i32 = 2;
+const PRIVATE_SCOPE_KEY_INDEX: i32 = 3;
+const PRIVATE_SORT_ORDER_ID_INDEX: i32 = 4;
+const PRIVATE_LEADING_COLUMN_ID_INDEX: i32 = 5;
+const PRIVATE_ORDER_DESCENDING_INDEX: i32 = 6;
 
 thread_local! {
     static SCAN_STATES: RefCell<HashMap<usize, ScanExecutionState>> = RefCell::new(HashMap::new());
@@ -160,6 +174,8 @@ struct KoldMergeScanState {
     custom: pg_sys::CustomScanState,
     hot_probe: HotProbeState,
     hot_child: *mut pg_sys::PlanState,
+    /// One-shot slot stashed for exact-PK hits that still need ExecScan projection.
+    prefetched_slot: *mut pg_sys::TupleTableSlot,
     eflags: c_int,
 }
 
@@ -293,14 +309,6 @@ pub(crate) fn with_hook_disabled<T>(f: impl FnOnce() -> T) -> T {
     })
 }
 
-/// Returns whether `koldstore.schemas` is present in the catalogs.
-///
-/// Planner hooks must not SPI-query the managed catalog while CREATE EXTENSION
-/// (or DROP) is still building it. Syscache avoids nested planning.
-fn managed_catalog_ready() -> bool {
-    crate::catalog::cache::managed_catalog_ready()
-}
-
 #[pgrx::pg_guard]
 unsafe extern "C-unwind" fn set_rel_pathlist(
     root: *mut pg_sys::PlannerInfo,
@@ -327,7 +335,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     if (*(*root).parse).commandType != pg_sys::CmdType::CMD_SELECT {
         return;
     }
-    if !managed_catalog_ready() {
+    if !crate::catalog::cache::managed_catalog_ready() {
         return;
     }
 
@@ -336,10 +344,6 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     if !managed {
         return;
     }
-
-    let Some(hot_child) = find_cheapest_path((*rel).pathlist) else {
-        return;
-    };
 
     let known_manifest = with_hook_disabled(|| {
         match crate::catalog::cache::cached_manifest_planner_hint(table_oid) {
@@ -357,11 +361,15 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
         return;
     }
 
+    let snapshot = with_hook_disabled(|| {
+        crate::catalog::cache::managed_table_snapshot(table_oid)
+            .ok()
+            .flatten()
+    });
+
     if let Some((_, generation)) = known_manifest {
         let cold_side_empty = with_hook_disabled(|| {
-            let Some(snapshot) = crate::catalog::cache::managed_table_snapshot(table_oid)
-                .map_err(|error| error.to_string())?
-            else {
+            let Some(snapshot) = snapshot.as_ref() else {
                 return Ok(false);
             };
             let catalog = crate::catalog::cache::cached_migration_catalog(table_oid)?;
@@ -370,7 +378,7 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
                 cold_side_proven_empty(
                     table_oid,
                     rti,
-                    &snapshot,
+                    snapshot,
                     &catalog,
                     actual_clauses,
                     generation,
@@ -385,36 +393,35 @@ unsafe extern "C-unwind" fn set_rel_pathlist(
     }
 
     let segment_count = known_manifest.map_or(0, |(segment_count, _)| segment_count);
-    let cold_cost = segment_count as f64 * COLD_SEGMENT_COST;
-    let startup_cost = (*hot_child).startup_cost + CATALOG_LOOKUP_COST;
-    let total_cost = (*hot_child).total_cost + CATALOG_LOOKUP_COST + cold_cost + MERGE_OVERLAY_COST;
+    let primary_key_attnums = snapshot
+        .as_ref()
+        .map(|snap| {
+            snap.primary_key_columns
+                .iter()
+                .map(|column| column.column_id.get())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let segment_order_attnum = snapshot
+        .as_ref()
+        .and_then(|snap| snap.segment_order_column_id.map(|id| id.get()));
+    let actual_clauses = pg_sys::extract_actual_clauses((*rel).baserestrictinfo, false);
+    let exact_full_primary_key_equality =
+        qual::quals_cover_primary_key(rti, actual_clauses, &primary_key_attnums);
 
-    let custom_path =
-        pg_sys::palloc0(std::mem::size_of::<pg_sys::CustomPath>()) as *mut pg_sys::CustomPath;
-    if custom_path.is_null() {
-        return;
-    }
-
-    (*custom_path).path.type_ = pg_sys::NodeTag::T_CustomPath;
-    (*custom_path).path.pathtype = pg_sys::NodeTag::T_CustomScan;
-    (*custom_path).path.parent = rel;
-    (*custom_path).path.pathtarget = (*rel).reltarget;
-    (*custom_path).path.param_info = (*hot_child).param_info;
-    (*custom_path).path.rows = (*hot_child).rows;
-    (*custom_path).path.startup_cost = startup_cost;
-    (*custom_path).path.total_cost = total_cost;
-    (*custom_path).path.parallel_safe = false;
-    (*custom_path).custom_paths = pg_sys::lappend(std::ptr::null_mut(), hot_child.cast::<c_void>());
-    (*custom_path).methods = &raw const PATH_METHODS;
-
-    // Managed reads must expose only KoldMergeScan as a final path. Clear both
-    // `pathlist` and `partial_pathlist`: PostgreSQL builds Gather / Gather Merge
-    // *after* this hook from leftover partials. Leaving heap IndexScan partials
-    // lets `ORDER BY … LIMIT` prefer a hot-heap-only plan that omits cold rows
-    // after flush (visible as count(*) > 0 but ordered SELECT returning empty).
-    (*rel).pathlist = std::ptr::null_mut();
-    (*rel).partial_pathlist = std::ptr::null_mut();
-    (*rel).pathlist = pg_sys::lappend(std::ptr::null_mut(), (&raw mut (*custom_path).path).cast());
+    // Strategy selection and CustomPath portfolio live in `path_strategy`.
+    install_path_portfolio(
+        rel,
+        &PortfolioInstallArgs {
+            scanrelid: rti,
+            primary_key_attnums,
+            segment_order_attnum,
+            exact_full_primary_key_equality,
+            segment_count,
+            scope_key: koldstore_common::DEFAULT_SCOPE_KEY.to_string(),
+        },
+        &raw const PATH_METHODS,
+    );
 }
 
 #[pgrx::pg_guard]
@@ -452,6 +459,28 @@ unsafe extern "C-unwind" fn plan_custom_path(
         && qual::quals_cover_primary_key(scanrelid, actual_clauses, &primary_key_attnums);
     let runtime_delegate_safe = (*best_path).path.param_info.is_null();
 
+    let path_private = (*best_path).custom_private;
+    let strategy_tag = path_strategy_tag_from_private(path_private);
+    let scope_key = unsafe { scope_key_from_path_private(path_private) };
+    let sort_order_id = unsafe { sort_order_id_from_path_private(path_private) };
+    let leading_column_id = unsafe { leading_column_id_from_path_private(path_private) };
+    let order_descending = unsafe { order_descending_from_path_private(path_private) };
+
+    // Native hot merge (ordered + unordered hot-first) needs PK and full row
+    // images from ExecProcNode even when the query SELECT list is narrow.
+    // Prefer widening the native child over custom_scan_tlist: INDEX_VAR
+    // rewrite against a physical custom_scan_tlist has caused
+    // "variable not found in subplan target list" on Aggregate/Limit plans.
+    let mut planned_children = custom_plans;
+    if matches!(
+        strategy_tag,
+        STRATEGY_TAG_ORDERED_PROGRESSIVE | STRATEGY_TAG_UNORDERED_HOT_FIRST
+    ) && !root.is_null()
+        && !rel.is_null()
+    {
+        planned_children = widen_native_hot_children(root, rel, custom_plans);
+    }
+
     (*scan).scan.plan.type_ = pg_sys::NodeTag::T_CustomScan;
     (*scan).scan.plan.startup_cost = (*best_path).path.startup_cost;
     (*scan).scan.plan.total_cost = (*best_path).path.total_cost;
@@ -460,15 +489,74 @@ unsafe extern "C-unwind" fn plan_custom_path(
     (*scan).scan.plan.qual = actual_clauses;
     (*scan).scan.scanrelid = scanrelid;
     (*scan).flags = (*best_path).flags;
-    (*scan).custom_plans = custom_plans;
+    (*scan).custom_plans = planned_children;
     // Do not alias `qual` here: Postgres frees `custom_exprs` and `qual` separately.
     (*scan).custom_exprs = std::ptr::null_mut();
-    (*scan).custom_private = serialize_custom_private(exact_pk_lookup, runtime_delegate_safe);
+    (*scan).custom_private = serialize_custom_private(
+        exact_pk_lookup,
+        runtime_delegate_safe,
+        strategy_tag,
+        &scope_key,
+        sort_order_id,
+        leading_column_id,
+        order_descending,
+    );
     (*scan).custom_scan_tlist = std::ptr::null_mut();
     (*scan).custom_relids = std::ptr::null_mut();
     (*scan).methods = &raw const SCAN_METHODS;
 
     scan.cast::<pg_sys::Plan>()
+}
+
+/// Widens each native-hot-merge child to a physical relation tlist.
+///
+/// Ordered progressive and unordered hot-first need PK (and full row images)
+/// from `ExecProcNode`; a query-shaped projection like `SELECT body` would
+/// omit those attributes and force SPI JSON keyset fallback.
+///
+/// [`IndexOnlyScan`] children are left unchanged: a physical tlist asks for
+/// heap columns the index-only path cannot emit, and setrefs then fails with
+/// `variable not found in subplan target list`. When the index-only tlist
+/// already covers the PK (e.g. `SELECT id ORDER BY id`), [`NativeHotCursor`]
+/// still opens; otherwise execution falls back to SPI JSON.
+unsafe fn widen_native_hot_children(
+    root: *mut pg_sys::PlannerInfo,
+    rel: *mut pg_sys::RelOptInfo,
+    custom_plans: *mut pg_sys::List,
+) -> *mut pg_sys::List {
+    if custom_plans.is_null() {
+        return custom_plans;
+    }
+    let physical = pg_sys::build_physical_tlist(root, rel);
+    if physical.is_null() {
+        return custom_plans;
+    }
+    let len = list_len(custom_plans);
+    let mut widened_list: *mut pg_sys::List = std::ptr::null_mut();
+    for idx in 0..len {
+        let child = list_nth_ptr(custom_plans, idx).cast::<pg_sys::Plan>();
+        if child.is_null() {
+            continue;
+        }
+        // Index-only scans cannot project arbitrary heap columns.
+        let node = if (*child).type_ == pg_sys::NodeTag::T_IndexOnlyScan {
+            child
+        } else {
+            let parallel_safe = (*child).parallel_safe;
+            let widened = pg_sys::change_plan_targetlist(child, physical, parallel_safe);
+            if widened.is_null() {
+                child
+            } else {
+                widened
+            }
+        };
+        widened_list = pg_sys::lappend(widened_list, node.cast::<c_void>());
+    }
+    if widened_list.is_null() {
+        custom_plans
+    } else {
+        widened_list
+    }
 }
 
 #[pgrx::pg_guard]
@@ -484,6 +572,7 @@ unsafe extern "C-unwind" fn create_custom_scan_state(
     (*state).ss.ps.type_ = pg_sys::NodeTag::T_CustomScanState;
     (*state).methods = &raw const EXEC_METHODS;
     (*provider).hot_probe = HotProbeState::Disabled;
+    (*provider).prefetched_slot = std::ptr::null_mut();
     #[cfg(not(feature = "pg15"))]
     {
         (*state).slotOps = &raw const pg_sys::TTSOpsVirtual;
@@ -707,11 +796,19 @@ unsafe fn initialize_fallback_scan(
         .map_or(0, |scan| scan.scan.scanrelid);
     let tuple_width = unsafe { slot_attribute_count((*node).ss.ss_ScanTupleSlot) }
         .unwrap_or_else(|| pgrx::error!("{CUSTOM_PATH_NAME} scan tuple descriptor is unavailable"));
+    let custom_scan = plan.cast::<pg_sys::CustomScan>();
     let scan_projection = unsafe {
-        required_scan_projection(scanrelid, targetlist, qual, &catalog.columns, tuple_width)
+        if !custom_scan.is_null() && !(*custom_scan).custom_scan_tlist.is_null() {
+            // After setrefs, targetlist/qual Vars are INDEX_VAR against
+            // custom_scan_tlist. pull_varattnos(scanrelid) would see nothing;
+            // materialize the full physical row for ExecScan projection.
+            physical_scan_projection(&catalog, tuple_width)
+        } else {
+            required_scan_projection(scanrelid, targetlist, qual, &catalog, tuple_width)
+        }
     }
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} projection failed: {error}"));
-    let residual = unsafe { residual_filters(scanrelid, qual, &catalog.columns, params) };
+    let residual = unsafe { residual_filters(scanrelid, qual, &catalog, params) };
     // Hot heap is current-state only, so PK + scope equality and PK range
     // predicates can be pushed into the SPI load. Mutable columns stay residual
     // for cold (pre-merge), but may still appear in hot_equality for post-merge
@@ -723,11 +820,7 @@ unsafe fn initialize_fallback_scan(
         .map(|column| column.name.as_str())
         .collect::<std::collections::HashSet<_>>();
     if let Some(scope_id) = snapshot.scope_column_id {
-        if let Some(scope) = catalog
-            .columns
-            .iter()
-            .find(|column| column.column_id == scope_id)
-        {
+        if let Some(scope) = catalog.column_by_id(scope_id) {
             source_equality_columns.insert(scope.name.as_str());
         }
     }
@@ -824,8 +917,15 @@ unsafe extern "C-unwind" fn exec_custom_scan(
             };
             if !tuple_slot_is_empty(child_slot) {
                 (*provider).hot_probe = HotProbeState::Hit;
-                // The native child has already applied the complete PostgreSQL
-                // qual and projection, so its slot is safe to return directly.
+                if hot_child_matches_scan_tupdesc(node, child) {
+                    (*provider).prefetched_slot = child_slot;
+                    return pg_sys::ExecScan(
+                        &raw mut (*node).ss,
+                        Some(next_provider_prefetched_hot_child),
+                        Some(recheck_scan_tuple),
+                    );
+                }
+                // Query-shaped child already matches CustomScan output.
                 return child_slot;
             }
 
@@ -850,6 +950,13 @@ unsafe extern "C-unwind" fn exec_custom_scan(
         HotProbeState::Hit => return std::ptr::null_mut(),
         HotProbeState::Delegate => {
             let child = (*provider).hot_child;
+            if hot_child_matches_scan_tupdesc(node, child) {
+                return pg_sys::ExecScan(
+                    &raw mut (*node).ss,
+                    Some(next_delegate_hot_child_tuple),
+                    Some(recheck_scan_tuple),
+                );
+            }
             return if child.is_null() {
                 std::ptr::null_mut()
             } else {
@@ -857,11 +964,6 @@ unsafe extern "C-unwind" fn exec_custom_scan(
             };
         }
         HotProbeState::Disabled | HotProbeState::Fallback => {}
-    }
-
-    let slot = (*node).ss.ps.ps_ResultTupleSlot;
-    if slot.is_null() {
-        return std::ptr::null_mut();
     }
 
     let use_child = SCAN_STATES.with(|states| {
@@ -872,7 +974,7 @@ unsafe extern "C-unwind" fn exec_custom_scan(
     });
 
     if use_child {
-        return exec_hot_child_slot(node, slot);
+        return emit_hot_child_from_scan_state(node);
     }
 
     // Emitted rows are base-relation scan tuples. ExecScan applies the
@@ -953,6 +1055,10 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
                     // `scan` drops here, releasing ScanMemory and buffered Datums.
                 }
             });
+            // Rust/Arrow arenas are outside PostgreSQL MemoryContexts. Mark a
+            // trim so ExecutorEnd returns free huge pages after this query;
+            // otherwise pooled idle backends keep hundreds of MB of RSS.
+            crate::memory::mark_heap_trim_pending();
         }
         end_custom_plan_children(node);
     }
@@ -1052,6 +1158,31 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         return;
     }
 
+    let plan = (*node).ss.ps.plan;
+    let strategy_tag = custom_private_strategy_tag(plan);
+    profile::explain_text(es, "Strategy", strategy_explain_label(strategy_tag));
+    if strategy_tag == STRATEGY_TAG_ORDERED_PROGRESSIVE {
+        let leading = custom_private_leading_column_id(plan);
+        if leading > 0 {
+            profile::explain_text(
+                es,
+                "Output Order",
+                &format!("column_id {leading} (with primary-key tie-break)"),
+            );
+        }
+        let order = if custom_private_order_descending(plan) {
+            "DESC"
+        } else {
+            "ASC"
+        };
+        profile::explain_text(es, "Order Direction", order);
+        profile::explain_text(
+            es,
+            "Cold Frontier Source",
+            "koldstore.cold_segment_order_index",
+        );
+    }
+
     let execution_meta = if (*es).analyze {
         let active = SCAN_STATES.with(|states| {
             states.borrow().get(&(node as usize)).map(|scan| {
@@ -1113,7 +1244,7 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         // Fallback when the hot child was not initialized into custom_ps (cold
         // emit paths). Graph clients that walk custom_ps still see nested Plans
         // when the child was initialized for hot-only streaming.
-        profile::explain_text(es, "Hot Plan", &hot_label);
+        profile::explain_text(es, "Hot Planned Access", &hot_label);
         profile::explain_visual_pipeline(
             es,
             &cold_profile,
@@ -1128,22 +1259,7 @@ unsafe extern "C-unwind" fn explain_custom_scan(
     profile::explain_scan_profile(es, &cold_profile, &hot_label, emit_path, execution.as_ref());
 }
 
-unsafe fn list_len(list: *mut pg_sys::List) -> i32 {
-    if list.is_null() {
-        0
-    } else {
-        (*list).length
-    }
-}
-
-unsafe fn list_nth_ptr(list: *mut pg_sys::List, index: i32) -> *mut c_void {
-    if list.is_null() || index < 0 || index >= (*list).length || (*list).elements.is_null() {
-        return std::ptr::null_mut();
-    }
-    (*(*list).elements.add(index as usize)).ptr_value
-}
-
-unsafe fn exec_proc_node(node: *mut pg_sys::PlanState) -> *mut pg_sys::TupleTableSlot {
+pub(super) unsafe fn exec_proc_node(node: *mut pg_sys::PlanState) -> *mut pg_sys::TupleTableSlot {
     let Some(exec) = (*node).ExecProcNode else {
         return std::ptr::null_mut();
     };
@@ -1164,10 +1280,23 @@ unsafe fn exec_copy_slot(dst: *mut pg_sys::TupleTableSlot, src: *mut pg_sys::Tup
     }
 }
 
-unsafe fn exec_hot_child_slot(
-    node: *mut pg_sys::CustomScanState,
-    result_slot: *mut pg_sys::TupleTableSlot,
+/// Pulls the next native hot-child tuple into the CustomScan scan slot.
+///
+/// Used as the [`ExecScan`] access method for [`ScanEmitMode::HotChild`]. The
+/// child may be tlist-widened to a physical relation image; ExecScan then
+/// projects to the query target list.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn next_hot_child_tuple(
+    scan_state: *mut pg_sys::ScanState,
 ) -> *mut pg_sys::TupleTableSlot {
+    if scan_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let node = scan_state.cast::<pg_sys::CustomScanState>();
+    let slot = (*scan_state).ss_ScanTupleSlot;
+    if slot.is_null() {
+        return std::ptr::null_mut();
+    }
     let Some(child) = hot_child_planstate(node) else {
         return std::ptr::null_mut();
     };
@@ -1185,16 +1314,121 @@ unsafe fn exec_hot_child_slot(
     }
     #[cfg(feature = "pg_test")]
     FAST_PATH_TUPLE_COPIES.fetch_add(1, Ordering::Relaxed);
-    exec_copy_slot(result_slot, child_slot);
-    result_slot
+    exec_copy_slot(slot, child_slot);
+    slot
 }
 
-unsafe fn tuple_slot_is_empty(slot: *mut pg_sys::TupleTableSlot) -> bool {
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn next_delegate_hot_child_tuple(
+    scan_state: *mut pg_sys::ScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    if scan_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let node = scan_state.cast::<pg_sys::CustomScanState>();
+    let slot = (*scan_state).ss_ScanTupleSlot;
+    if slot.is_null() {
+        return std::ptr::null_mut();
+    }
+    let provider = KoldMergeScanState::from_custom(node);
+    let child = (*provider).hot_child;
+    if child.is_null() {
+        return std::ptr::null_mut();
+    }
+    let child_slot = exec_proc_node(child);
+    if tuple_slot_is_empty(child_slot) {
+        return std::ptr::null_mut();
+    }
+    exec_copy_slot(slot, child_slot);
+    slot
+}
+
+/// One-shot access method for exact-PK hits that still need ExecScan projection.
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn next_provider_prefetched_hot_child(
+    scan_state: *mut pg_sys::ScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    if scan_state.is_null() {
+        return std::ptr::null_mut();
+    }
+    let node = scan_state.cast::<pg_sys::CustomScanState>();
+    let slot = (*scan_state).ss_ScanTupleSlot;
+    if slot.is_null() {
+        return std::ptr::null_mut();
+    }
+    let provider = KoldMergeScanState::from_custom(node);
+    let child_slot = (*provider).prefetched_slot;
+    (*provider).prefetched_slot = std::ptr::null_mut();
+    if tuple_slot_is_empty(child_slot) {
+        return std::ptr::null_mut();
+    }
+    exec_copy_slot(slot, child_slot);
+    slot
+}
+
+/// Emits HotChild mode rows from [`SCAN_STATES`].
+///
+/// Widened (relation-shaped) children go through ExecScan so plan projection
+/// can narrow `SELECT body` etc. Query-shaped children passthrough.
+unsafe fn emit_hot_child_from_scan_state(
+    node: *mut pg_sys::CustomScanState,
+) -> *mut pg_sys::TupleTableSlot {
+    let child = hot_child_planstate(node).unwrap_or(std::ptr::null_mut());
+    if hot_child_matches_scan_tupdesc(node, child) {
+        return pg_sys::ExecScan(
+            &raw mut (*node).ss,
+            Some(next_hot_child_tuple),
+            Some(recheck_scan_tuple),
+        );
+    }
+    let prefetched = SCAN_STATES.with(|states| {
+        let mut states = states.borrow_mut();
+        let scan = states.get_mut(&(node as usize))?;
+        match &mut scan.mode {
+            ScanEmitMode::HotChild { prefetched } => prefetched.take(),
+            _ => None,
+        }
+    });
+    prefetched.unwrap_or_else(|| {
+        if child.is_null() {
+            std::ptr::null_mut()
+        } else {
+            exec_proc_node(child)
+        }
+    })
+}
+
+/// True when the native child's result type matches `ss_ScanTupleSlot`.
+///
+/// Widened Index/Seq/Bitmap children match the relation descriptor. Unwidened
+/// IndexOnlyScan children usually do not and must passthrough without
+/// ExecScan re-projection.
+unsafe fn hot_child_matches_scan_tupdesc(
+    node: *mut pg_sys::CustomScanState,
+    child: *mut pg_sys::PlanState,
+) -> bool {
+    if child.is_null() {
+        return false;
+    }
+    let scan_slot = (*node).ss.ss_ScanTupleSlot;
+    let child_slot = (*child).ps_ResultTupleSlot;
+    if scan_slot.is_null() || child_slot.is_null() {
+        return false;
+    }
+    let scan_desc = (*scan_slot).tts_tupleDescriptor;
+    let child_desc = (*child_slot).tts_tupleDescriptor;
+    if scan_desc.is_null() || child_desc.is_null() {
+        return false;
+    }
+    scan_desc == child_desc
+}
+
+pub(super) unsafe fn tuple_slot_is_empty(slot: *mut pg_sys::TupleTableSlot) -> bool {
     slot.is_null()
         || ((*slot).tts_nvalid == 0 && ((*slot).tts_flags & pg_sys::TTS_FLAG_EMPTY as u16) != 0)
 }
 
-unsafe fn hot_child_planstate(
+pub(super) unsafe fn hot_child_planstate(
     node: *mut pg_sys::CustomScanState,
 ) -> Option<*mut pg_sys::PlanState> {
     let list = (*node).custom_ps;
@@ -1246,71 +1480,84 @@ unsafe fn hot_child_explain_label(node: *mut pg_sys::CustomScanState) -> String 
     }
 }
 
-unsafe fn find_cheapest_path(pathlist: *mut pg_sys::List) -> Option<*mut pg_sys::Path> {
-    let len = list_len(pathlist);
-    let mut best: *mut pg_sys::Path = std::ptr::null_mut();
-    let mut best_cost = f64::INFINITY;
-    for idx in 0..len {
-        let path = list_nth_ptr(pathlist, idx) as *mut pg_sys::Path;
-        if path.is_null() {
-            continue;
-        }
-        if (*path).type_ == pg_sys::NodeTag::T_CustomPath {
-            continue;
-        }
-        if (*path).total_cost < best_cost {
-            best_cost = (*path).total_cost;
-            best = path;
-        }
-    }
-    if best.is_null() {
-        None
-    } else {
-        Some(best)
-    }
-}
-
-/// Encodes executor-critical flags as native PostgreSQL nodes.
+/// Encodes executor-critical flags plus strategy identity as native nodes.
+///
+/// Layout: `[exact_pk, runtime_delegate_safe, strategy_tag, scope_key,
+/// sort_order_id, leading_column_id, order_descending]`.
 unsafe fn serialize_custom_private(
     exact_pk_lookup: bool,
     runtime_delegate_safe: bool,
+    strategy_tag: i32,
+    scope_key: &str,
+    sort_order_id: i32,
+    leading_column_id: i16,
+    order_descending: bool,
 ) -> *mut pg_sys::List {
     let exact_pk = pg_sys::makeInteger(i32::from(exact_pk_lookup));
     let runtime_delegate = pg_sys::makeInteger(i32::from(runtime_delegate_safe));
-    let private = pg_sys::lappend(std::ptr::null_mut(), exact_pk.cast::<c_void>());
-    pg_sys::lappend(private, runtime_delegate.cast::<c_void>())
+    let strategy = pg_sys::makeInteger(strategy_tag);
+    let scope_node = make_pg_string(scope_key);
+    let sort_order = pg_sys::makeInteger(sort_order_id);
+    let leading = pg_sys::makeInteger(i32::from(leading_column_id));
+    let descending = pg_sys::makeInteger(i32::from(order_descending));
+    let mut private = pg_sys::lappend(std::ptr::null_mut(), exact_pk.cast::<c_void>());
+    private = pg_sys::lappend(private, runtime_delegate.cast::<c_void>());
+    private = pg_sys::lappend(private, strategy.cast::<c_void>());
+    private = pg_sys::lappend(private, scope_node.cast::<c_void>());
+    private = pg_sys::lappend(private, sort_order.cast::<c_void>());
+    private = pg_sys::lappend(private, leading.cast::<c_void>());
+    pg_sys::lappend(private, descending.cast::<c_void>())
+}
+
+/// Returns the path strategy tag from scan private data (default: general merge).
+pub(super) unsafe fn custom_private_strategy_tag(plan: *mut pg_sys::Plan) -> i32 {
+    list_integer_at(custom_private_list(plan), PRIVATE_STRATEGY_TAG_INDEX)
+        .unwrap_or(STRATEGY_TAG_GENERAL_MERGE)
+}
+
+/// Returns the single-scope key from scan private data (default: `""`).
+pub(super) unsafe fn custom_private_scope_key(plan: *mut pg_sys::Plan) -> String {
+    list_cstring_at(custom_private_list(plan), PRIVATE_SCOPE_KEY_INDEX).unwrap_or_default()
+}
+
+/// Returns the catalog sort-order id from scan private data (0 if absent).
+pub(super) unsafe fn custom_private_sort_order_id(plan: *mut pg_sys::Plan) -> i32 {
+    list_integer_at(custom_private_list(plan), PRIVATE_SORT_ORDER_ID_INDEX).unwrap_or(0)
+}
+
+unsafe fn custom_private_leading_column_id(plan: *mut pg_sys::Plan) -> i16 {
+    list_integer_at(custom_private_list(plan), PRIVATE_LEADING_COLUMN_ID_INDEX).unwrap_or(0) as i16
+}
+
+/// Returns true when ordered progressive private data advertises DESC order.
+///
+/// Missing/invalid private data defaults to ASC.
+pub(super) unsafe fn custom_private_order_descending(plan: *mut pg_sys::Plan) -> bool {
+    order_descending_flag(list_integer_at(
+        custom_private_list(plan),
+        PRIVATE_ORDER_DESCENDING_INDEX,
+    ))
 }
 
 /// Reads the executor's exact-PK marker without allocation or JSON parsing.
 unsafe fn custom_private_exact_pk(plan: *mut pg_sys::Plan) -> bool {
-    if plan.is_null() {
-        return false;
-    }
-    let custom_scan = plan.cast::<pg_sys::CustomScan>();
-    let private = (*custom_scan).custom_private;
-    if list_len(private) <= PRIVATE_EXACT_PK_INDEX {
-        return false;
-    }
-    let marker = list_nth_ptr(private, PRIVATE_EXACT_PK_INDEX).cast::<pg_sys::Integer>();
-    if marker.is_null() || (*marker).type_ != pg_sys::NodeTag::T_Integer {
-        return false;
-    }
-    (*marker).ival != 0
+    list_integer_at(custom_private_list(plan), PRIVATE_EXACT_PK_INDEX).is_some_and(|v| v != 0)
 }
 
 /// Returns whether executor-time external parameters are stable across rescans.
 unsafe fn custom_private_runtime_delegate_safe(plan: *mut pg_sys::Plan) -> bool {
+    list_integer_at(
+        custom_private_list(plan),
+        PRIVATE_RUNTIME_DELEGATE_SAFE_INDEX,
+    )
+    .is_some_and(|v| v != 0)
+}
+
+unsafe fn custom_private_list(plan: *mut pg_sys::Plan) -> *mut pg_sys::List {
     if plan.is_null() {
-        return false;
+        return std::ptr::null_mut();
     }
-    let custom_scan = plan.cast::<pg_sys::CustomScan>();
-    let private = (*custom_scan).custom_private;
-    if list_len(private) <= PRIVATE_RUNTIME_DELEGATE_SAFE_INDEX {
-        return false;
-    }
-    let marker =
-        list_nth_ptr(private, PRIVATE_RUNTIME_DELEGATE_SAFE_INDEX).cast::<pg_sys::Integer>();
-    !marker.is_null() && (*marker).type_ == pg_sys::NodeTag::T_Integer && (*marker).ival != 0
+    (*plan.cast::<pg_sys::CustomScan>()).custom_private
 }
 
 unsafe fn resolve_rte_oid(

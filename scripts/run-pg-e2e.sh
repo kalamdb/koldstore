@@ -95,7 +95,7 @@ else
   INSTALL_ARGS=(
     -p pg_koldstore
     --no-default-features
-    --features "$PG_FEATURE s3"
+    --features "$PG_FEATURE s3 cshim"
     --pg-config "$PG_CONFIG"
   )
   if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "true" ]]; then
@@ -307,6 +307,12 @@ if ! cargo nextest --version >/dev/null 2>&1; then
 fi
 
 NEXT_ARGS=(-p e2e --test-threads "$THREADS")
+if [[ -n "${KOLDSTORE_E2E_NEXTEST_PROFILE:-}" ]]; then
+  NEXT_ARGS+=(--profile "${KOLDSTORE_E2E_NEXTEST_PROFILE}")
+fi
+if [[ "${KOLDSTORE_E2E_NO_FAIL_FAST:-}" == "1" || "${KOLDSTORE_E2E_NO_FAIL_FAST:-}" == "true" ]]; then
+  NEXT_ARGS+=(--no-fail-fast)
+fi
 if [[ "${KOLDSTORE_E2E_VERBOSE:-}" == "1" || "${KOLDSTORE_E2E_VERBOSE:-}" == "true" ]]; then
   echo "E2E verbose logging enabled (KOLDSTORE_E2E_VERBOSE); showing live test output"
   NEXT_ARGS+=(--no-capture)

@@ -1,7 +1,7 @@
 //! Task seam for work executed once per database-worker wake.
 //!
-//! Async mirror apply and built-in flush scheduling both implement this trait
-//! and share the ensure/wait shell in `pg_koldstore::database_worker`.
+//! Async mirror apply and built-in flush scheduling share the ensure/wait shell
+//! in `pg_koldstore::worker` and report outcomes with [`TickResult`].
 
 /// Outcome of one worker tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,22 +15,4 @@ pub enum TickResult {
     ContinuePending,
     /// Exit the worker loop (for example when infrastructure was removed).
     Stop,
-}
-
-/// One unit of work the database worker runs after a wake.
-///
-/// Implementors must be memory-bounded per tick and idempotent under replay
-/// (crash between durable write and slot advance must be safe).
-pub trait DatabaseWorkerTask {
-    /// Short name for logs and diagnostics.
-    fn name(&self) -> &'static str;
-
-    /// Runs one bounded work tick.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the tick fails fatally; the adapter treats that as
-    /// a worker ERROR exit. Transient empty work should return
-    /// [`TickResult::ContinueIdle`].
-    fn tick(&self) -> Result<TickResult, String>;
 }

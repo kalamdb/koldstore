@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{KoldstoreError, LogicalPk, Result, ScopeKey, SeqId, StablePkHash};
+use crate::{KoldstoreError, LogicalPk, Result, RowImage, ScopeKey, SeqId, StablePkHash, TableOid};
 
 /// Operation recorded in a latest-state change-log mirror.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -137,8 +137,8 @@ pub struct HotRow {
     pub seq: SeqId,
     /// Whether this row is a tombstone.
     pub deleted: bool,
-    /// Application column payload.
-    pub row_image: Value,
+    /// Application column payload (typed cells — not JSON).
+    pub row_image: RowImage,
 }
 
 impl HotRow {
@@ -168,8 +168,8 @@ pub struct ColdRow {
     pub deleted: bool,
     /// Segment schema version.
     pub schema_version: u32,
-    /// Application column payload.
-    pub row_image: Value,
+    /// Application column payload (typed cells — not JSON).
+    pub row_image: RowImage,
 }
 
 /// Hot tombstone that masks older cold rows.
@@ -199,7 +199,7 @@ pub enum ChangeSource {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MirrorChange {
     /// Relation oid represented as a stable integer in pure crates.
-    pub table_oid: u32,
+    pub table_oid: TableOid,
     /// Optional user scope.
     pub scope_key: Option<ScopeKey>,
     /// JSON primary-key object.
