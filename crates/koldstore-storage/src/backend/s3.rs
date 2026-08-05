@@ -41,7 +41,9 @@ pub(super) fn open_s3_client(
         .as_deref()
         .is_some_and(|value| value.starts_with("http://"));
 
-    let mut client_options = ClientOptions::new();
+    // `with_client_options` replaces the builder's ClientOptions entirely, so
+    // `allow_http` must live on this options object (not a prior builder call).
+    let mut client_options = ClientOptions::new().with_allow_http(allow_http);
     if let Some(timeout) = timeout.filter(|value| !value.is_zero()) {
         let connect = timeout.min(Duration::from_secs(5));
         client_options = client_options
@@ -59,7 +61,6 @@ pub(super) fn open_s3_client(
         .with_access_key_id(access_key)
         .with_secret_access_key(secret_key)
         .with_virtual_hosted_style_request(!path_style)
-        .with_allow_http(allow_http)
         .with_client_options(client_options);
     if let Some(endpoint) = endpoint {
         builder = builder.with_endpoint(endpoint);
@@ -158,6 +159,37 @@ mod tests {
         assert_eq!(
             parse_s3_base_path("s3://koldstore-test/prod/").unwrap(),
             ("koldstore-test".to_string(), "prod".to_string())
+        );
+    }
+
+    /// Regression: `with_client_options` must not wipe `allow_http` for MinIO.
+    #[cfg(feature = "s3")]
+    #[test]
+    fn http_minio_endpoint_does_not_fail_with_builder_error() {
+        use crate::client::StorageClient;
+
+        let client = super::open_s3_client(
+            "s3://koldstore-test/probe/",
+            &serde_json::json!({
+                "access_key_id": "minioadmin",
+                "secret_access_key": "minioadmin",
+            }),
+            &serde_json::json!({
+                "endpoint": "http://127.0.0.1:1",
+                "region": "us-east-1",
+                "path_style": true,
+            }),
+            None,
+        )
+        .expect("S3 client with http endpoint must build");
+
+        let err = client
+            .list("")
+            .expect_err("nothing should listen on 127.0.0.1:1");
+        let message = err.to_string();
+        assert!(
+            !message.contains("builder error"),
+            "allow_http must survive ClientOptions replacement; got: {message}"
         );
     }
 }
