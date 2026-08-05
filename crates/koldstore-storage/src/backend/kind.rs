@@ -22,8 +22,8 @@ impl StorageBackendKind {
         match value.trim().to_ascii_lowercase().as_str() {
             "filesystem" | "file" | "local" => Ok(Self::Filesystem),
             "s3" | "aws" | "minio" => Ok(Self::S3),
-            "gcs" | "gs" => Ok(Self::Gcs),
-            "azure" | "abfs" => Ok(Self::Azure),
+            "gcs" | "gs" | "gcp" => Ok(Self::Gcs),
+            "azure" | "az" | "abfs" | "abfss" | "adl" => Ok(Self::Azure),
             other => Err(format!("unsupported storage_type `{other}`")),
         }
     }
@@ -45,10 +45,22 @@ mod tests {
     use super::StorageBackendKind;
 
     #[test]
-    fn storage_backend_kind_accepts_minio_alias() {
+    fn storage_backend_kind_accepts_cloud_aliases() {
         assert_eq!(
             StorageBackendKind::parse("minio").unwrap(),
             StorageBackendKind::S3
+        );
+        assert_eq!(
+            StorageBackendKind::parse("gcp").unwrap(),
+            StorageBackendKind::Gcs
+        );
+        assert_eq!(
+            StorageBackendKind::parse("az").unwrap(),
+            StorageBackendKind::Azure
+        );
+        assert_eq!(
+            StorageBackendKind::parse("abfss").unwrap(),
+            StorageBackendKind::Azure
         );
     }
 }

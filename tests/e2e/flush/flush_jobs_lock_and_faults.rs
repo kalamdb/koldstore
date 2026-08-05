@@ -4,7 +4,7 @@
 //! - DROP while flush holds the table-job lock (later phase than select-only)
 //! - DROP while mirror capture is actively absorbing DML
 //! - Four concurrent 10k-row flushes
-//! - Same-table dual flush serialization vs cross-table independence
+//! - Same-table dual flush fail-fast vs cross-table apply-lock fail-fast
 //! - Mid-flush storage directory removal / path corruption
 
 use std::time::Duration;
@@ -413,9 +413,9 @@ async fn four_tables_flush_10k_rows_in_parallel() -> Result<()> {
     Ok(())
 }
 
-/// Same-table dual flush: second caller waits on the table-job advisory lock.
+/// Same-table dual flush: second caller fails fast while the first holds the lock.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn dual_flush_same_table_waits_on_job_lock_then_serializes() -> Result<()> {
+async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -472,33 +472,29 @@ async fn dual_flush_same_table_waits_on_job_lock_then_serializes() -> Result<()>
 
         let second = connect_peer(&db).await?;
         let second_relation = table.relation.clone();
-        let second_handle: JoinHandle<Result<String>> = tokio::spawn(async move {
-            let row = second
-                .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
-                    &[&second_relation],
-                )
-                .await
-                .context("second flush_table")?;
-            Ok(row.get::<_, String>(0))
-        });
-
-        // While the first flush owns the table-job lock, the second must stay blocked.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        let second_err = second
+            .query_one(
+                "SELECT koldstore.flush_table($1::text::regclass)::text",
+                &[&second_relation],
+            )
+            .await
+            .expect_err("second flush must fail fast while first holds the table-job lock");
+        let detail = second_err
+            .as_db_error()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| second_err.to_string());
         assert!(
-            !second_handle.is_finished(),
-            "second flush must block on the table-job lock while first is parked at after_claim"
+            detail.contains("flush already in progress"),
+            "unexpected second-flush error: {detail}"
         );
-        // Prefer observing an advisory waiter, but JoinHandle liveness is authoritative.
-        let _ = count_advisory_waiters(&db.client, lock_key).await?;
 
         barrier_unlock(&coordinator).await?;
         let first_job = first_handle.await??;
-        let second_job = second_handle.await??;
-        assert_ne!(
-            first_job, second_job,
-            "serialized flushes must produce distinct job ids"
-        );
+        assert!(!first_job.is_empty(), "first flush must return a job id");
+
+        // After the first releases locks, a retry must succeed.
+        let retried = flush_table_on(&db.client, &table.relation).await?;
+        assert!(retried >= 0);
 
         common::assert_no_active_jobs(&db.client, &table.relation).await?;
         common::assert_pk_unique(&db.client, &table.relation, &["id"]).await?;
@@ -512,10 +508,10 @@ async fn dual_flush_same_table_waits_on_job_lock_then_serializes() -> Result<()>
     Ok(())
 }
 
-/// A parked flush holds the database apply lock for its whole transaction, so a
-/// second table's flush must wait — then both complete after the first resumes.
+/// A parked flush holds the database apply lock; a second table's flush fails
+/// fast instead of waiting for the first to finish.
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
-async fn parked_flush_serializes_other_table_flush_on_apply_lock() -> Result<()> {
+async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -554,21 +550,29 @@ async fn parked_flush_serializes_other_table_flush_on_apply_lock() -> Result<()>
 
         let flush_b = connect_peer(&db).await?;
         let relation_b = table_b.relation.clone();
-        let handle_b: JoinHandle<Result<i64>> =
-            tokio::spawn(async move { flush_table_on(&flush_b, &relation_b).await });
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let err_b = flush_b
+            .query_one(
+                "SELECT koldstore.flush_table($1::text::regclass)::text",
+                &[&relation_b],
+            )
+            .await
+            .expect_err("flush B must fail fast while flush A holds the apply lock");
+        let detail = err_b
+            .as_db_error()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| err_b.to_string());
         assert!(
-            !handle_b.is_finished(),
-            "flush B must wait while flush A holds the database apply lock"
+            detail.contains("apply lock") || detail.contains("flush already in progress"),
+            "unexpected flush B error: {detail}"
         );
 
         barrier_unlock(&coordinator).await?;
         handle_a.await??;
-        let rows_b = handle_b.await??;
+
+        let rows_b = flush_table_on(&db.client, &table_b.relation).await?;
         assert!(
             rows_b > 0,
-            "flush B must complete after A releases apply lock"
+            "flush B must succeed after A releases apply lock"
         );
 
         assert_flush_load_invariants(&db.client, &table_a.relation).await?;

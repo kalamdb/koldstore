@@ -40,7 +40,12 @@ impl BackendConfig {
             StorageBackendKind::S3 => base_path.starts_with("s3://"),
             StorageBackendKind::Gcs => base_path.starts_with("gs://"),
             StorageBackendKind::Azure => {
-                base_path.starts_with("azure://") || base_path.starts_with("abfs://")
+                let lower = base_path.to_ascii_lowercase();
+                lower.starts_with("azure://")
+                    || lower.starts_with("az://")
+                    || lower.starts_with("adl://")
+                    || lower.starts_with("abfs://")
+                    || lower.starts_with("abfss://")
             }
         };
         if !valid {

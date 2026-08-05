@@ -23,14 +23,20 @@ pub const DEFAULT_REGULAR_PATH_TMPL: &str = "{namespace}/{tableName}/";
 /// Default scoped table object path template.
 pub const DEFAULT_SCOPED_PATH_TMPL: &str = "{namespace}/{tableName}/{scopeId}/";
 
-/// Supported storage backends.
+/// Supported storage backends for the current build.
 ///
-/// `s3` is only listed when this crate is built with the `s3` feature (default
-/// for the storage package itself; opt-in via `pg_koldstore`'s `s3` feature).
-#[cfg(feature = "s3")]
-pub const SUPPORTED_STORAGE_TYPES: &[&str] = &["filesystem", "s3", "gcs", "azure"];
-#[cfg(not(feature = "s3"))]
-pub const SUPPORTED_STORAGE_TYPES: &[&str] = &["filesystem", "gcs", "azure"];
+/// Cloud kinds are listed only when the matching cargo feature is enabled
+/// (`s3` / `gcs` / `azure`; all default-on for this crate, opt-in from
+/// `pg_koldstore`).
+pub const SUPPORTED_STORAGE_TYPES: &[&str] = &[
+    "filesystem",
+    #[cfg(feature = "s3")]
+    "s3",
+    #[cfg(feature = "gcs")]
+    "gcs",
+    #[cfg(feature = "azure")]
+    "azure",
+];
 
 // Scalar subquery always returns exactly one row (NULL on name conflict) so
 // `Spi::get_one*` never hits "SpiTupleTable positioned before the start or

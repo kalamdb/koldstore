@@ -85,7 +85,7 @@ pub extern "C" fn _PG_init() {
     }
     preload::mark_loaded_via_shared_preload();
 
-    #[cfg(feature = "s3")]
+    #[cfg(any(feature = "s3", feature = "gcs", feature = "azure"))]
     koldstore_storage::ensure_rustls_ring_provider();
     observability::init_tracing();
     guc::define_gucs();

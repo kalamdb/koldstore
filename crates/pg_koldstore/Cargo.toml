@@ -34,8 +34,13 @@ pg_test = ["dep:pgrx-tests"]
 pg_bench = ["dep:pgrx-bench"]
 # Test-only flush failpoints for crash-recovery suites. No-op in release unless enabled.
 test-failpoints = []
-# S3 / MinIO via object_store (rustls + ring, no aws-lc/OpenSSL). Keep enabled for release installs.
+# Cloud object stores via object_store (rustls + ring, no aws-lc/OpenSSL).
+# Keep enabled for release installs that need the matching backend.
 s3 = ["koldstore-storage/s3"]
+gcs = ["koldstore-storage/gcs"]
+azure = ["koldstore-storage/azure"]
+# Convenience: all cloud backends.
+cloud = ["s3", "gcs", "azure"]
 
 [dependencies]
 hex.workspace = true

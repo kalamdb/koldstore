@@ -307,12 +307,16 @@ SET koldstore.user_id = 'user-123';
 
 ## Storage backends
 
-| Provider             | `storage_type` | Example `base_path`         |
-| -------------------- | -------------- | --------------------------- |
-| Local filesystem     | `filesystem`   | `/var/lib/koldstore`        |
-| Amazon S3 / MinIO    | `s3`           | `s3://bucket/prefix/`       |
-| Google Cloud Storage | `gcs`          | `gs://bucket/prefix/`       |
-| Azure Blob           | `azure`        | `azure://container/prefix/` |
+| Provider             | `storage_type` | Example `base_path`         | Cargo feature |
+| -------------------- | -------------- | --------------------------- | ------------- |
+| Local filesystem     | `filesystem`   | `/var/lib/koldstore`        | (always)      |
+| Amazon S3 / MinIO    | `s3`           | `s3://bucket/prefix/`       | `s3`          |
+| Google Cloud Storage | `gcs`          | `gs://bucket/prefix/`       | `gcs`         |
+| Azure Blob           | `azure`        | `azure://container/prefix/` | `azure`       |
+
+All I/O goes through `object_store`; each cloud kind is a thin catalog → builder
+factory. Enable backends when installing the extension, for example
+`--features "pg16 cloud"` (or `s3` / `gcs` / `azure` individually).
 
 Example S3-compatible registration:
 
@@ -325,3 +329,29 @@ SELECT koldstore.register_storage(
   config       => '{"endpoint":"http://localhost:9000","region":"us-east-1","path_style":true}'::jsonb
 );
 ```
+
+Example GCS registration (service account JSON key string, or nested object):
+
+```sql
+SELECT koldstore.register_storage(
+  name         => 'gcs-prod',
+  storage_type => 'gcs',
+  base_path    => 'gs://koldstore-prod/cold/',
+  credentials  => '{"service_account_key":"{...}"}'::jsonb,
+  config       => '{}'::jsonb
+);
+```
+
+Example Azure Blob registration:
+
+```sql
+SELECT koldstore.register_storage(
+  name         => 'azure-prod',
+  storage_type => 'azure',
+  base_path    => 'azure://koldstore/cold/',
+  credentials  => '{"account_name":"myaccount","access_key":"..."}'::jsonb,
+  config       => '{}'::jsonb
+);
+```
+
+`abfs://filesystem@account.dfs.core.windows.net/prefix` is also accepted for Azure.

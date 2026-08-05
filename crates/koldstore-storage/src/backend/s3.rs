@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::client::{ObjectStoreClient, StorageClientError, StorageResult};
+use crate::client::{ObjectStoreClient, StorageResult};
 
 /// Opens an S3-compatible client, applying HTTP timeouts from `timeout`.
 #[cfg(feature = "s3")]
@@ -15,10 +15,10 @@ pub(super) fn open_s3_client(
     use std::sync::Arc;
 
     use object_store::aws::AmazonS3Builder;
-    use object_store::client::ClientOptions;
-    use object_store::path::Path as ObjectPath;
-    use object_store::prefix::PrefixStore;
     use object_store::ObjectStore;
+
+    use crate::client::StorageClientError;
+    use super::util::{client_options, json_bool, json_string, wrap_prefix};
 
     crate::ensure_rustls_ring_provider();
     let (bucket, key_prefix) = parse_s3_base_path(base_path)?;
@@ -41,27 +41,13 @@ pub(super) fn open_s3_client(
         .as_deref()
         .is_some_and(|value| value.starts_with("http://"));
 
-    // `with_client_options` replaces the builder's ClientOptions entirely, so
-    // `allow_http` must live on this options object (not a prior builder call).
-    let mut client_options = ClientOptions::new().with_allow_http(allow_http);
-    if let Some(timeout) = timeout.filter(|value| !value.is_zero()) {
-        let connect = timeout.min(Duration::from_secs(5));
-        client_options = client_options
-            .with_timeout(timeout)
-            .with_connect_timeout(connect);
-    } else {
-        client_options = client_options
-            .with_timeout_disabled()
-            .with_connect_timeout_disabled();
-    }
-
     let mut builder = AmazonS3Builder::new()
         .with_bucket_name(bucket)
         .with_region(region)
         .with_access_key_id(access_key)
         .with_secret_access_key(secret_key)
         .with_virtual_hosted_style_request(!path_style)
-        .with_client_options(client_options);
+        .with_client_options(client_options(timeout, allow_http));
     if let Some(endpoint) = endpoint {
         builder = builder.with_endpoint(endpoint);
     }
@@ -71,15 +57,7 @@ pub(super) fn open_s3_client(
             message: error.to_string(),
         })?;
 
-    let store: Arc<dyn ObjectStore> = if key_prefix.is_empty() {
-        Arc::new(store)
-    } else {
-        let prefix =
-            ObjectPath::parse(&key_prefix).map_err(|error| StorageClientError::InvalidPath {
-                message: error.to_string(),
-            })?;
-        Arc::new(PrefixStore::new(store, prefix))
-    };
+    let store: Arc<dyn ObjectStore> = wrap_prefix(Arc::new(store), &key_prefix)?;
     Ok(ObjectStoreClient::from_store(store, None))
 }
 
@@ -91,59 +69,13 @@ pub(super) fn open_s3_client(
     _config: &serde_json::Value,
     _timeout: Option<Duration>,
 ) -> StorageResult<ObjectStoreClient> {
-    Err(StorageClientError::Backend {
-        message: "s3 backend requires the `s3` cargo feature (not enabled in this build)"
-            .to_string(),
-    })
+    Err(super::util::feature_disabled("s3", "s3"))
 }
 
 /// Parses `s3://bucket` or `s3://bucket/optional/prefix` into bucket + prefix.
 #[cfg(any(feature = "s3", test))]
 pub(super) fn parse_s3_base_path(base_path: &str) -> StorageResult<(String, String)> {
-    let rest = base_path
-        .strip_prefix("s3://")
-        .ok_or_else(|| StorageClientError::InvalidPath {
-            message: format!("s3 base_path must start with s3://: {base_path}"),
-        })?;
-    let rest = rest.trim_matches('/');
-    if rest.is_empty() {
-        return Err(StorageClientError::InvalidPath {
-            message: format!("s3 base_path missing bucket: {base_path}"),
-        });
-    }
-    let (bucket, prefix) = match rest.split_once('/') {
-        Some((bucket, prefix)) => (bucket.to_string(), prefix.trim_matches('/').to_string()),
-        None => (rest.to_string(), String::new()),
-    };
-    if bucket.is_empty() {
-        return Err(StorageClientError::InvalidPath {
-            message: format!("s3 base_path missing bucket: {base_path}"),
-        });
-    }
-    Ok((bucket, prefix))
-}
-
-#[cfg(feature = "s3")]
-fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_string)
-}
-
-#[cfg(feature = "s3")]
-fn json_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
-    match value.get(key)? {
-        serde_json::Value::Bool(flag) => Some(*flag),
-        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
-            "true" | "1" | "yes" => Some(true),
-            "false" | "0" | "no" => Some(false),
-            _ => None,
-        },
-        _ => None,
-    }
+    super::util::parse_authority_base_path(base_path, "s3://", "bucket")
 }
 
 #[cfg(test)]

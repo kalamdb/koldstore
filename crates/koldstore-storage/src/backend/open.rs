@@ -4,23 +4,27 @@ use std::time::Duration;
 
 use crate::client::{ObjectStoreClient, StorageClientError, StorageResult};
 
+use super::azure::open_azure_client;
 use super::config::BackendConfig;
 use super::fs::parse_filesystem_root;
+use super::gcs::open_gcs_client;
 use super::kind::StorageBackendKind;
 use super::s3::open_s3_client;
 
 /// Opens a durable storage client for the configured backend.
 ///
 /// Filesystem backends use [`LocalFileSystem`](object_store::local::LocalFileSystem)
-/// with `with_fsync(true)`. S3-compatible backends (including MinIO) use
-/// [`AmazonS3Builder`](object_store::aws::AmazonS3Builder) when the `s3`
-/// cargo feature is enabled.
+/// with `with_fsync(true)`. Cloud backends use the matching `object_store`
+/// builder when the corresponding cargo feature is enabled:
+/// - S3 / MinIO: [`AmazonS3Builder`](object_store::aws::AmazonS3Builder) (`s3`)
+/// - GCS: [`GoogleCloudStorageBuilder`](object_store::gcp::GoogleCloudStorageBuilder) (`gcs`)
+/// - Azure: [`MicrosoftAzureBuilder`](object_store::azure::MicrosoftAzureBuilder) (`azure`)
 ///
 /// # Errors
 ///
 /// Returns an error when the backend kind is unsupported, credentials are
-/// missing, the `s3` feature is disabled for an S3 config, or the client
-/// cannot be constructed.
+/// missing, the required cargo feature is disabled, or the client cannot be
+/// constructed.
 pub fn open_storage_client(
     config: &BackendConfig,
     credentials: &serde_json::Value,
@@ -33,8 +37,8 @@ pub fn open_storage_client(
 /// # Errors
 ///
 /// Returns an error when the backend kind is unsupported, credentials are
-/// missing, the `s3` feature is disabled for an S3 config, or the client
-/// cannot be constructed.
+/// missing, the required cargo feature is disabled, or the client cannot be
+/// constructed.
 pub fn open_storage_client_with_timeout(
     config: &BackendConfig,
     credentials: &serde_json::Value,
@@ -48,13 +52,11 @@ pub fn open_storage_client_with_timeout(
         StorageBackendKind::S3 => {
             open_s3_client(&config.base_path, credentials, &config.config, timeout)?
         }
-        StorageBackendKind::Gcs | StorageBackendKind::Azure => {
-            return Err(StorageClientError::Backend {
-                message: format!(
-                    "{:?} client open is not wired yet (base_path={})",
-                    config.kind, config.base_path
-                ),
-            })
+        StorageBackendKind::Gcs => {
+            open_gcs_client(&config.base_path, credentials, &config.config, timeout)?
+        }
+        StorageBackendKind::Azure => {
+            open_azure_client(&config.base_path, credentials, &config.config, timeout)?
         }
     };
     Ok(client.with_timeout(timeout))

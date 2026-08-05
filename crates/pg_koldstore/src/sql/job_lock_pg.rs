@@ -19,9 +19,9 @@ pub(crate) const fn table_job_advisory_lock_key(table_oid: u32) -> i64 {
 
 /// Takes a transaction-scoped lock for flush/migration work on one table.
 ///
-/// Blocks until the lock is available so concurrent `flush_table` /
-/// `manage_table` callers serialize rather than failing the loser with
-/// try-lock contention.
+/// Blocks until the lock is available. Used by `manage_table` / DROP cleanup
+/// and by `flush_table` after a successful try-lock (re-entrant). Manual
+/// `flush_table` fail-fasts via [`try_lock_table_job`] instead of waiting here.
 ///
 /// # Errors
 ///

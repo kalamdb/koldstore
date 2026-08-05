@@ -1,10 +1,13 @@
 //! Storage backend configuration and client factory.
 
+mod azure;
 mod config;
 mod fs;
+mod gcs;
 mod kind;
 mod open;
 mod s3;
+mod util;
 
 pub use config::{BackendConfig, StorageBackend};
 pub use kind::StorageBackendKind;

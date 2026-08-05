@@ -310,6 +310,20 @@ pub(crate) fn lock_apply(database_oid: u32) -> Result<(), String> {
     lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 
+/// Non-blocking variant of [`lock_apply`] for fail-fast callers such as
+/// `flush_table`.
+///
+/// Returns `true` when this transaction now holds the lock (including when the
+/// same backend already held it). Returns `false` when another backend holds
+/// it (background apply tick, auto-flush, or another fence).
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot evaluate the advisory lock query.
+pub(crate) fn try_lock_apply(database_oid: u32) -> Result<bool, String> {
+    try_lock_database(APPLY_LOCK_NAMESPACE, database_oid)
+}
+
 /// Poll interval while waiting for another backend to release the logical slot.
 const SLOT_INACTIVE_POLL: Duration = Duration::from_millis(10);
 /// Abort-window wait only: locks are released before `ReplicationSlotRelease`.
@@ -449,15 +463,7 @@ pub(crate) fn lock_worker_registration(database_oid: u32) -> Result<(), String> 
 
 /// Non-blocking variant for the cluster launcher (skip when a session holds the lock).
 pub(crate) fn try_lock_worker_registration(database_oid: u32) -> Result<bool, String> {
-    pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)",
-        &[
-            DatumWithOid::from(WORKER_LOCK_NAMESPACE),
-            DatumWithOid::from(database_oid as i32),
-        ],
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "worker registration try-lock returned no row".to_string())
+    try_lock_database(WORKER_LOCK_NAMESPACE, database_oid)
 }
 
 fn lock_database(namespace: i32, database_oid: u32) -> Result<(), String> {
@@ -469,6 +475,18 @@ fn lock_database(namespace: i32, database_oid: u32) -> Result<(), String> {
         ],
     )
     .map_err(|error| error.to_string())
+}
+
+fn try_lock_database(namespace: i32, database_oid: u32) -> Result<bool, String> {
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT pg_catalog.pg_try_advisory_xact_lock($1, $2)",
+        &[
+            DatumWithOid::from(namespace),
+            DatumWithOid::from(database_oid as i32),
+        ],
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "database advisory try-lock returned no row".to_string())
 }
 
 /// Returns the current database's async slot name.

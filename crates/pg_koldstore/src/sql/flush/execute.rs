@@ -42,10 +42,36 @@ pub(super) struct FlushPreparedContext {
     target_file_size_bytes: Option<u64>,
 }
 
+/// Acquires table-job + database apply locks without waiting.
+///
+/// Manual `flush_table` must not block behind auto-flush or a long WAL apply
+/// tick after restart — those can hold locks for minutes with no client-visible
+/// progress. Scheduler ticks already skip via try-lock; SQL callers get a clear
+/// error instead.
+fn require_flush_entry_locks(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
+    let table = crate::catalog::resolve::qualified_relation_name(table_oid)
+        .unwrap_or_else(|_| format!("oid={}", table_oid.to_u32()));
+    if !crate::sql::job_lock_pg::try_lock_table_job(table_oid)? {
+        return Err(format!(
+            "flush already in progress for {table}; retry after it completes \
+             (background auto-flush may run right after server start)"
+        ));
+    }
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    if !crate::async_mirror::lifecycle::try_lock_apply(database_oid)? {
+        return Err(format!(
+            "flush unavailable for {table}: async mirror apply or another flush \
+             holds the database apply lock; retry shortly"
+        ));
+    }
+    Ok(())
+}
+
 fn claim_flush_job(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<(uuid::Uuid, bool, i64), String> {
+    // Re-entrant: [`require_flush_entry_locks`] already took the try-lock.
     crate::sql::job_lock_pg::lock_table_job(table_oid)?;
     let (job_id, force) = ensure_flush_job(table_oid, force)?;
     // Estimate total rows for the progress bar from the current mirror backlog.
@@ -494,8 +520,12 @@ pub(crate) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> Result<pgrx::Uuid, String> {
+    // Fail fast before any WAL peek: auto-flush / apply can hold these locks for
+    // a long time after restart, which previously made SQL callers appear hung.
+    require_flush_entry_locks(table_oid)?;
     // Flush selects authoritative latest-state rows, so WAL capture must be
     // fenced before row selection. Retain L0 for the post-publish prune fence.
+    // Apply lock is already held (re-entrant inside apply_bounded).
     let phase0 = crate::async_mirror::apply::apply_bounded(
         crate::async_mirror::apply::BoundedApplyRequest::available_unlimited(),
     )?;
