@@ -182,7 +182,7 @@ async fn flush_republishes_manifest_with_short_shard_name_and_removes_old_versio
 
         let parquet_before = std::fs::read_dir(first_shard_path.parent().expect("shard parent"))?
             .filter_map(Result::ok)
-            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "parquet"))
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == std::ffi::OsStr::new("parquet")))
             .map(|entry| entry.file_name())
             .collect::<BTreeSet<_>>();
         assert!(
