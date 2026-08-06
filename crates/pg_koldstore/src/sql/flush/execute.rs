@@ -191,6 +191,7 @@ fn stream_write_flush_batches(
     selection: &ResolvedFlushSelection,
     client: &koldstore_storage::ObjectStoreClient,
     commit_style: FlushCommitStyle,
+    started: std::time::Instant,
 ) -> Result<StreamedFlushPass, String> {
     let stats = &selection.stats;
     let table_prefix = render_regular_table_prefix(
@@ -295,6 +296,7 @@ fn stream_write_flush_batches(
                     &mut last_max_seq,
                     &mut pending_segments,
                     chunk,
+                    started,
                 )
             },
         )
@@ -368,7 +370,13 @@ fn write_streamed_chunk(
     last_max_seq: &mut i64,
     pending_segments: &mut Vec<PendingFlushSegmentRef>,
     chunk: FlushWriteChunk,
+    started: std::time::Instant,
 ) -> Result<(), String> {
+    // Per-chunk budget check: a single pass over a very large force flush can
+    // stream many chunks before the outer per-pass check in
+    // `flush_prepared_table` runs again, so re-check here too or a huge
+    // one-pass flush could outlive `flush_job_max_runtime_seconds` entirely.
+    ensure_flush_runtime_budget(started)?;
     // Wait/error failpoints need SPI; keep them inside a short txn when Short.
     commit_style.run_spi(|| {
         crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::DuringParquetWrite)
@@ -924,6 +932,23 @@ fn format_flush_bytes(bytes: i64) -> String {
     }
 }
 
+/// Fails the attempt when wall-clock budget is exceeded (`0` disables).
+fn ensure_flush_runtime_budget(started: std::time::Instant) -> Result<(), String> {
+    let max_secs = crate::guc::flush_job_max_runtime_seconds();
+    if max_secs <= 0 {
+        return Ok(());
+    }
+    let elapsed = started.elapsed().as_secs();
+    let budget = u64::try_from(max_secs).unwrap_or(u64::MAX);
+    if elapsed >= budget {
+        return Err(format!(
+            "flush job exceeded koldstore.flush_job_max_runtime_seconds ({max_secs}); \
+             elapsed={elapsed}s"
+        ));
+    }
+    Ok(())
+}
+
 fn flush_prepared_table(
     table_oid: pgrx::pg_sys::Oid,
     ctx: &FlushPreparedContext,
@@ -977,6 +1002,7 @@ fn flush_prepared_table(
     };
 
     loop {
+        ensure_flush_runtime_budget(started)?;
         if commit_style
             .run_spi(|| flush_cancel_requested(ctx.job_id, table_oid).map_err(Into::into))?
         {
@@ -1010,6 +1036,7 @@ fn flush_prepared_table(
         })?;
         // Re-check after the select barrier so peer cancel/DROP can stop work
         // before object writes begin.
+        ensure_flush_runtime_budget(started)?;
         if commit_style
             .run_spi(|| flush_cancel_requested(ctx.job_id, table_oid).map_err(Into::into))?
         {
@@ -1054,10 +1081,11 @@ fn flush_prepared_table(
         // Pass: select already done → upload/persist batches (commits between
         // SPI phases when Short) → manifest+finalize short txn → continue.
         let streamed =
-            stream_write_flush_batches(table_oid, ctx, &selection, &client, commit_style)?;
+            stream_write_flush_batches(table_oid, ctx, &selection, &client, commit_style, started)?;
         let pass_batches =
             i32::try_from(streamed.pending_segment_ids.len()).map_err(|error| error.to_string())?;
-        // Cooperative cancel before publish: do not activate this pass.
+        // Cooperative cancel / runtime budget before publish: do not activate this pass.
+        ensure_flush_runtime_budget(started)?;
         if commit_style
             .run_spi(|| flush_cancel_requested(ctx.job_id, table_oid).map_err(Into::into))?
         {

@@ -70,6 +70,15 @@ pub const MIN_MAX_PARALLEL_FLUSH_JOBS: i32 = 1;
 /// Hard cap on parallel flush executors.
 pub const MAX_MAX_PARALLEL_FLUSH_JOBS: i32 = 16;
 
+/// Wall-clock budget for one flush job attempt (`0` disables).
+pub const FLUSH_JOB_MAX_RUNTIME_SECONDS_GUC: &str = "koldstore.flush_job_max_runtime_seconds";
+/// Default flush job wall-clock budget (30 minutes).
+pub const DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS: i32 = 30 * 60;
+/// Minimum flush job runtime (`0` = disabled).
+pub const MIN_FLUSH_JOB_MAX_RUNTIME_SECONDS: i32 = 0;
+/// Hard cap for flush job runtime (24 hours).
+pub const MAX_FLUSH_JOB_MAX_RUNTIME_SECONDS: i32 = 24 * 3600;
+
 /// Days to retain terminal (`completed` / `cancelled` / `error`) jobs before purge.
 pub const JOB_RETENTION_DAYS_GUC: &str = "koldstore.job_retention_days";
 /// Default retention window (30 days).
@@ -189,6 +198,18 @@ pub const fn bounded_max_parallel_flush_jobs(value: i32) -> i32 {
         MIN_MAX_PARALLEL_FLUSH_JOBS
     } else if value > MAX_MAX_PARALLEL_FLUSH_JOBS {
         MAX_MAX_PARALLEL_FLUSH_JOBS
+    } else {
+        value
+    }
+}
+
+/// Validates and clamps `koldstore.flush_job_max_runtime_seconds` (`0` disables).
+#[must_use]
+pub const fn bounded_flush_job_max_runtime_seconds(value: i32) -> i32 {
+    if value < MIN_FLUSH_JOB_MAX_RUNTIME_SECONDS {
+        MIN_FLUSH_JOB_MAX_RUNTIME_SECONDS
+    } else if value > MAX_FLUSH_JOB_MAX_RUNTIME_SECONDS {
+        MAX_FLUSH_JOB_MAX_RUNTIME_SECONDS
     } else {
         value
     }

@@ -46,6 +46,9 @@ static FLUSH_CHECK_INTERVAL_SECONDS: GucSetting<i32> =
 static MAX_PARALLEL_FLUSH_JOBS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_MAX_PARALLEL_FLUSH_JOBS);
 #[cfg(feature = "pg")]
+static FLUSH_JOB_MAX_RUNTIME_SECONDS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS);
+#[cfg(feature = "pg")]
 static JOB_RETENTION_DAYS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_JOB_RETENTION_DAYS);
 #[cfg(feature = "pg")]
@@ -171,10 +174,11 @@ pub fn define_gucs() {
         flags,
     );
     // Test-only: empty default keeps production paths inert unless explicitly armed.
+    // wait/panic/sleep require the test-failpoints build so production cannot park.
     GucRegistry::define_string_guc(
         c"koldstore.failpoint",
         c"Test-only KoldStore flush failpoint.",
-        c"Arms a named flush failpoint (error:<name>, wait:<name>, panic:<name>, or sleep:<name>). Empty disables. For crash-recovery and isolation suites only.",
+        c"Arms a named flush failpoint (error:<name>, wait:<name>, panic:<name>, or sleep:<name>). Empty disables. wait/panic/sleep require a test-failpoints build. For crash-recovery and isolation suites only.",
         &FAILPOINT,
         GucContext::Userset,
         flags,
@@ -206,6 +210,16 @@ pub fn define_gucs() {
         &MAX_PARALLEL_FLUSH_JOBS,
         settings::MIN_MAX_PARALLEL_FLUSH_JOBS,
         settings::MAX_MAX_PARALLEL_FLUSH_JOBS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.flush_job_max_runtime_seconds",
+        c"Wall-clock budget for one flush job attempt.",
+        c"Flush aborts with an error when a single attempt exceeds this many seconds (checked between passes and between streamed batches within a pass). 0 disables. Default 1800 (30 minutes). Clamped to 0..=86400.",
+        &FLUSH_JOB_MAX_RUNTIME_SECONDS,
+        settings::MIN_FLUSH_JOB_MAX_RUNTIME_SECONDS,
+        settings::MAX_FLUSH_JOB_MAX_RUNTIME_SECONDS,
         GucContext::Userset,
         flags,
     );
@@ -382,6 +396,11 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::MAX_PARALLEL_FLUSH_JOBS_GUC,
             internal: false,
             default_value: "2",
+        },
+        GucDefinition {
+            name: settings::FLUSH_JOB_MAX_RUNTIME_SECONDS_GUC,
+            internal: false,
+            default_value: "1800",
         },
         GucDefinition {
             name: settings::JOB_RETENTION_DAYS_GUC,
@@ -587,20 +606,22 @@ pub fn min_max_rows_per_file() -> i32 {
     }
 }
 
-/// Current test-only failpoint arming value (empty when disabled).
+/// Current test-only failpoint arming value, owned but unparsed.
+///
+/// Returns the raw `CString` rather than an allocated `String` so the hot
+/// `failpoints::hit` call sites (invoked at every flush phase and mirror
+/// apply tick) can borrow the text with zero extra allocations instead of
+/// paying for a fresh UTF-8 copy on every disarmed check.
 #[must_use]
-pub fn failpoint_value() -> String {
+pub fn failpoint_value() -> Option<std::ffi::CString> {
     #[cfg(feature = "pg")]
     {
-        FAILPOINT
-            .get()
-            .and_then(|value| value.to_str().ok().map(str::to_string))
-            .unwrap_or_default()
+        FAILPOINT.get()
     }
 
     #[cfg(not(feature = "pg"))]
     {
-        String::new()
+        None
     }
 }
 
@@ -651,6 +672,20 @@ pub fn max_parallel_flush_jobs() -> i32 {
     #[cfg(not(feature = "pg"))]
     {
         settings::DEFAULT_MAX_PARALLEL_FLUSH_JOBS
+    }
+}
+
+/// Wall-clock budget for one flush job attempt (`0` = disabled).
+#[must_use]
+pub fn flush_job_max_runtime_seconds() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_flush_job_max_runtime_seconds(FLUSH_JOB_MAX_RUNTIME_SECONDS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS
     }
 }
 

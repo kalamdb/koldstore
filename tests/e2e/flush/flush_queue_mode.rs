@@ -182,6 +182,15 @@ async fn queue_flush_reclaims_orphan_running_job_and_completes() -> Result<()> {
         let table = db
             .create_indexed_items_table("queue_reclaim_items", 32)
             .await?;
+        // Orphan payload starts as force=false; flush_table(..., true) must
+        // reclaim + upgrade force so undersized policy cannot no-op the job.
+        // ALTER DATABASE so the queue executor inherits the file-size floor.
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" SET koldstore.min_max_rows_per_file = 1; \
+                 SET koldstore.min_max_rows_per_file = 1;"
+            ))
+            .await?;
         db.client
             .execute(
                 r#"
@@ -190,7 +199,7 @@ async fn queue_flush_reclaims_orphan_running_job_and_completes() -> Result<()> {
                   storage => $2,
                   hot_row_limit => 4,
                   min_flush_rows => 1,
-                  max_rows_per_file => 1000,
+                  max_rows_per_file => 8,
                   migration_order_by => 'id',
                   auto_flush => false
                 )
@@ -229,7 +238,10 @@ async fn queue_flush_reclaims_orphan_running_job_and_completes() -> Result<()> {
             .context("insert orphan running flush job")?;
 
         let flushed = db.flush_table_with_force(&table.relation, true).await?;
-        anyhow::ensure!(flushed > 0, "reclaim path must still flush rows");
+        anyhow::ensure!(
+            flushed > 0,
+            "reclaim path must still flush rows (got rows_flushed={flushed})"
+        );
 
         let leftover_running: i64 = db
             .client
@@ -252,7 +264,8 @@ async fn queue_flush_reclaims_orphan_running_job_and_completes() -> Result<()> {
 
         db.client
             .batch_execute(&format!(
-                "ALTER DATABASE \"{dbname}\" RESET koldstore.flush_check_interval_seconds;"
+                "ALTER DATABASE \"{dbname}\" RESET koldstore.flush_check_interval_seconds; \
+                 ALTER DATABASE \"{dbname}\" RESET koldstore.min_max_rows_per_file;"
             ))
             .await
             .ok();

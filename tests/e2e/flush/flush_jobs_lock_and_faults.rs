@@ -52,8 +52,19 @@ async fn manage_with_hot_limit(
 ) -> Result<()> {
     // Keep max_rows_per_file at a small floor so policy flush is due for the
     // modest e2e fixtures (default 1000 would skip undersized excess).
+    // ALTER DATABASE so flush peers inherit the floor — session SET alone is
+    // not enough: execute validates stored max_rows_per_file against the peer
+    // GUC and would fail before wait: failpoints.
+    let dbname: String = db
+        .client
+        .query_one("SELECT current_database()::text", &[])
+        .await?
+        .get(0);
     db.client
-        .batch_execute("SET koldstore.min_max_rows_per_file = 1;")
+        .batch_execute(&format!(
+            "ALTER DATABASE \"{dbname}\" SET koldstore.min_max_rows_per_file = 1; \
+             SET koldstore.min_max_rows_per_file = 1;"
+        ))
         .await?;
     db.client
         .execute(
@@ -500,8 +511,12 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
         let first_job = first_handle.await??;
         assert!(!first_job.is_empty(), "first flush must return a job id");
 
-        // After the first releases locks, a retry must succeed.
-        let retried = flush_table_on(&db.client, &table.relation).await?;
+        // After the first releases locks, a retry must acquire the lock. Policy
+        // flush may return 0 rows if the parked job already drained excess.
+        let retried = db
+            .flush_table_with_force(&table.relation, true)
+            .await
+            .context("retry flush after first released table-job lock")?;
         assert!(retried >= 0);
 
         common::assert_no_active_jobs(&db.client, &table.relation).await?;
@@ -808,7 +823,25 @@ async fn cancel_running_flush_releases_job_lock_for_retry() -> Result<()> {
                 .unwrap_or_default())
         });
 
-        wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await?;
+        if let Err(error) =
+            wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await
+        {
+            barrier_unlock(&coordinator).await.ok();
+            match flush_handle.await {
+                Ok(Ok(job_id)) => {
+                    return Err(error).context(format!(
+                        "flush returned before failpoint wait (job_id={job_id})"
+                    ));
+                }
+                Ok(Err(flush_error)) => {
+                    return Err(flush_error)
+                        .context(format!("flush exited before failpoint wait ({error})"));
+                }
+                Err(join_error) => {
+                    return Err(error).context(format!("flush task join failed: {join_error}"));
+                }
+            }
+        }
         let cancelled = db
             .client
             .query_one(

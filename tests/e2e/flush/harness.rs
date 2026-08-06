@@ -41,11 +41,33 @@ pub async fn wait_until_barrier_waiter(
     coordinator: &Client,
     flush_finished: impl Fn() -> bool,
 ) -> Result<()> {
+    wait_until_barrier_waiter_deadline(
+        coordinator,
+        flush_finished,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+}
+
+/// Like [`wait_until_barrier_waiter`] with an explicit deadline.
+///
+/// Queue flush executors can take longer to reach `after_select_rows` under
+/// parallel E2E load than Nested session flushes.
+///
+/// # Errors
+///
+/// Returns an error when the wait query fails or the deadline elapses.
+pub async fn wait_until_barrier_waiter_deadline(
+    coordinator: &Client,
+    flush_finished: impl Fn() -> bool,
+    deadline: std::time::Duration,
+) -> Result<()> {
     let coordinator_pid: i32 = coordinator
         .query_one("SELECT pg_backend_pid()", &[])
         .await?
         .get(0);
-    for _ in 0..400 {
+    let started = std::time::Instant::now();
+    loop {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         // Two-key advisory lock is already per-database (namespace + db oid);
         // still join activity so a dying peer cannot look like a live waiter.
@@ -73,6 +95,9 @@ pub async fn wait_until_barrier_waiter(
             return Ok(());
         }
         if flush_finished() {
+            break;
+        }
+        if started.elapsed() >= deadline {
             break;
         }
     }

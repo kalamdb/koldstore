@@ -271,5 +271,21 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
         visible, 36,
         "expected 36 visible rows after postmaster restart recovery, got {visible}"
     );
+
+    // Policy retry may leave hot_row_limit rows hot; still require cold objects,
+    // mirror/hot agreement, integrity, and on-disk parquet/manifest.
+    crate::crash::invariants::assert_recovered_flush_data_plane(
+        &client,
+        &relation,
+        &db.storage_root,
+        crate::crash::invariants::RecoveredFlushExpect {
+            visible_rows: 36,
+            expect_hot_fully_pruned: false,
+            min_cold_segments: 1,
+            reference: None,
+        },
+    )
+    .await
+    .context("postmaster restart data-plane checks")?;
     Ok(())
 }

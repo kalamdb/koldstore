@@ -162,7 +162,7 @@ ensure_pgrx_postgres() {
 # require `cshim`; include it everywhere so the same feature set works locally.
 pgrx_extension_features() {
   local base="$1"
-  echo "${base} s3 cshim"
+  echo "${base} s3 cshim test-failpoints"
 }
 
 cargo_pgrx_install_koldstore() {

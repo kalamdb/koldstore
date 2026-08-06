@@ -4,8 +4,9 @@
 //! parses `error:` / `wait:` / `panic:` / `sleep:` prefixes from the GUC value.
 //! SPI/GUC arming and barrier waits stay in `pg_koldstore::failpoints`.
 //!
-//! Destructive `panic:` / `sleep:` actions are always parseable here; production
-//! `hit` adapters only execute them under the `test-failpoints` feature.
+//! Destructive `panic:` / `sleep:` / `wait:` actions are always parseable here;
+//! production `hit` adapters only execute them under the `test-failpoints`
+//! feature so a mistaken `SET koldstore.failpoint` cannot park a backend.
 //! E2E process-kill coverage prefers external SIGKILL of the flush executor.
 
 /// Typed flush / mirror failpoints that map to GUC arming names.

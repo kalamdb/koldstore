@@ -6,9 +6,11 @@
 
 use crate::common;
 use crate::flush::harness::{
-    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter,
+    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter_deadline,
 };
 use anyhow::{Context, Result};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[tokio::test]
@@ -89,7 +91,7 @@ async fn list_jobs_and_flush_progress_fields_are_populated() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queue_flush_exposes_live_job_progress_while_parked() -> Result<()> {
     common::require_pgrx_server().await?;
 
@@ -102,12 +104,16 @@ async fn queue_flush_exposes_live_job_progress_while_parked() -> Result<()> {
             .await?
             .get(0);
 
-        // Queue + short SPI commits so peer SELECTs see mid-flush job rows.
-        // Database-level failpoint so the one-shot executor inherits it.
+        // Override fixture `inline` for queue executors (they inherit database GUCs).
+        // Do not arm the failpoint yet — manage/fence spawn the async mirror worker,
+        // which must not inherit a flush wait barrier.
+        // min_max_rows_per_file must be database-level: the one-shot executor does
+        // not inherit session SET, and manage_table's max_rows_per_file=16 would
+        // otherwise fail validation inside the executor before after_select_rows.
         db.client
             .batch_execute(&format!(
                 "ALTER DATABASE \"{dbname}\" SET koldstore.flush_execution = 'queue'; \
-                 ALTER DATABASE \"{dbname}\" SET koldstore.failpoint = 'wait:after_select_rows'; \
+                 ALTER DATABASE \"{dbname}\" SET koldstore.min_max_rows_per_file = 1; \
                  SET koldstore.flush_execution = 'queue'; \
                  SET koldstore.min_max_rows_per_file = 1;"
             ))
@@ -132,6 +138,14 @@ async fn queue_flush_exposes_live_job_progress_while_parked() -> Result<()> {
             .context("manage_table")?;
         common::fence_async_mirror(&db.client).await?;
 
+        // Arm after manage/fence so only the flush executor inherits the wait.
+        db.client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" SET koldstore.failpoint = 'wait:after_select_rows';"
+            ))
+            .await
+            .context("arm database failpoint for flush executor")?;
+
         let coordinator = connect_peer(&db).await?;
         barrier_lock(&coordinator).await?;
 
@@ -149,9 +163,69 @@ async fn queue_flush_exposes_live_job_progress_while_parked() -> Result<()> {
         common::wait_for_flush_executor_pids(&db.client, Duration::from_secs(30))
             .await
             .context("wait for flush executor")?;
-        wait_until_barrier_waiter(&coordinator, || false)
-            .await
-            .context("wait for executor failpoint barrier")?;
+
+        // Stop waiting early if the job leaves running without parking (missed
+        // failpoint / early error) so the failure is actionable.
+        let job_left_running = Arc::new(AtomicBool::new(false));
+        let probe = connect_peer(&db).await?;
+        let probe_job = job_id.clone();
+        let left = Arc::clone(&job_left_running);
+        let probe_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let status: Result<String, _> = probe
+                    .query_one(
+                        "SELECT status FROM koldstore.jobs WHERE id = $1::text::uuid",
+                        &[&probe_job],
+                    )
+                    .await
+                    .map(|row| row.get(0));
+                match status {
+                    Ok(status)
+                        if matches!(status.as_str(), "completed" | "error" | "cancelled") =>
+                    {
+                        left.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        left.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            }
+        });
+
+        let wait_result = wait_until_barrier_waiter_deadline(
+            &coordinator,
+            || job_left_running.load(Ordering::SeqCst),
+            Duration::from_secs(45),
+        )
+        .await;
+        probe_handle.abort();
+        if let Err(error) = wait_result {
+            let status: String = db
+                .client
+                .query_one(
+                    "SELECT status || ':' || coalesce(phase, '') || ':' || coalesce(error_trace, '') \
+                     FROM koldstore.jobs WHERE id = $1::text::uuid",
+                    &[&job_id],
+                )
+                .await
+                .map(|row| row.get(0))
+                .unwrap_or_else(|_| "<unreadable>".to_string());
+            barrier_unlock(&coordinator).await.ok();
+            let _ = db
+                .client
+                .batch_execute(&format!(
+                    "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
+                     RESET koldstore.failpoint;"
+                ))
+                .await;
+            return Err(error).context(format!(
+                "executor did not park at after_select_rows (job={job_id} state={status})"
+            ));
+        }
 
         // While the executor is parked, peer must see committed running progress.
         let live = db
@@ -212,7 +286,9 @@ async fn queue_flush_exposes_live_job_progress_while_parked() -> Result<()> {
         db.client
             .batch_execute(&format!(
                 "ALTER DATABASE \"{dbname}\" RESET koldstore.flush_execution; \
-                 RESET koldstore.flush_execution;"
+                 ALTER DATABASE \"{dbname}\" RESET koldstore.min_max_rows_per_file; \
+                 RESET koldstore.flush_execution; \
+                 RESET koldstore.min_max_rows_per_file;"
             ))
             .await
             .ok();

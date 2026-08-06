@@ -60,12 +60,31 @@ pub(crate) fn enqueue_or_lookup_flush_job(
 /// Returns `None` when policy selection is empty — including when excess is
 /// positive but below `max_rows_per_file` — so undersized flushes are never
 /// queued. `force = true` always enqueues.
+///
+/// Queue callers unlock the table-job lock before this runs, so ownerless
+/// durable `running` rows are reclaimed here (when the lock is free) and a
+/// `force=true` call upgrades a pending job's payload before spawn.
 pub(crate) fn enqueue_flush_job_if_due(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> crate::error::PgResult<Option<pgrx::Uuid>> {
-    if let Some(existing) = lookup_active_flush_job_uuid(table_oid)? {
-        return Ok(Some(existing));
+    // Mirror ensure_flush_job's reclaim, but only when no live owner holds the
+    // session table-job lock. Otherwise a concurrent executor still owns work.
+    if crate::sql::job_lock::try_lock_table_job(table_oid)
+        .map_err(crate::error::PgAdapterError::from_display)?
+    {
+        let _ = reclaim_running_flush_jobs(table_oid)?;
+        crate::sql::job_lock::unlock_table_job(table_oid)
+            .map_err(crate::error::PgAdapterError::from_display)?;
+    }
+
+    if let Some((existing_id, existing_force)) = lookup_active_flush_job(table_oid)? {
+        if force && !existing_force {
+            // Upgrade pending force intent; still returns the same job UUID when
+            // the row is pending (or the active id if another owner still runs).
+            return Ok(Some(enqueue_or_lookup_flush_job(table_oid, true)?));
+        }
+        return Ok(Some(crate::spi::uuid_to_pgrx(existing_id)));
     }
     if !force {
         let estimate = super::spi::flush_progress_total_estimate(table_oid, false)
