@@ -316,29 +316,31 @@ fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
             .0
             .to_string()
     });
-    // Native hot child still owns its own plan node; KoldStore Internal nodes
-    // are always emitted as sibling Plans for the catalog → parquet tracing diagram.
+    // Native hot child still owns `Plans`; Internal nodes live under the distinct
+    // `KoldStore Pipeline` key so JSON parsers keep both. `pgrx::Json` →
+    // `serde_json::Value::to_string()` is compact (no spaces after `:`).
     for expected in [
-        "\"Custom Plan Provider\": \"KoldMergeScan\"",
+        "\"Custom Plan Provider\":\"KoldMergeScan\"",
+        "\"KoldStore Pipeline\"",
         "\"Scan Sources\"",
         "\"Hot Scan\"",
         "\"Planned Access\"",
-        "\"Actual Access\": \"Native PostgreSQL Child\"",
+        "\"Actual Access\":\"Native PostgreSQL Child\"",
         "\"Cold Scan\"",
-        "\"Runtime Manifest Read\": false",
+        "\"Runtime Manifest Read\":false",
         "\"Cold Segments Query\"",
         "\"Parquet Segments\"",
         "\"Mirror Scan\"",
-        "\"Actual Rows\": 1",
-        "\"Node Type\": \"KoldStore Hot Scan\"",
-        "\"Node Type\": \"KoldStore Cold Storage Scan\"",
-        "\"Node Type\": \"KoldStore Segment Catalog Scan\"",
-        "\"Node Type\": \"KoldStore Catalog Query\"",
-        "\"Node Type\": \"KoldStore Parquet Scan\"",
-        "\"Node Type\": \"KoldStore Parquet Footer\"",
-        "\"Node Type\": \"KoldStore Parquet Row Group Prune\"",
-        "\"Node Type\": \"KoldStore Parquet Column Fetch\"",
-        "\"KoldStore Internal\": true",
+        "\"Actual Rows\":1",
+        "\"Node Type\":\"KoldStore Hot Scan\"",
+        "\"Node Type\":\"KoldStore Cold Storage Scan\"",
+        "\"Node Type\":\"KoldStore Segment Catalog Scan\"",
+        "\"Node Type\":\"KoldStore Catalog Query\"",
+        "\"Node Type\":\"KoldStore Parquet Scan\"",
+        "\"Node Type\":\"KoldStore Parquet Footer\"",
+        "\"Node Type\":\"KoldStore Parquet Row Group Prune\"",
+        "\"Node Type\":\"KoldStore Parquet Column Fetch\"",
+        "\"KoldStore Internal\":true",
     ] {
         assert!(
             plan.contains(expected),

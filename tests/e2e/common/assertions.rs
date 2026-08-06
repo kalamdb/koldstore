@@ -69,10 +69,13 @@ pub fn assert_kold_merge_scan_explain(plan: &str) -> Result<()> {
 /// Asserts `EXPLAIN (ANALYZE, FORMAT JSON)` includes the KoldStore tracing diagram.
 ///
 /// Expects catalog query → segment catalog → parquet scan → footer / prune /
-/// column-fetch children under `KoldStore Internal` plan nodes.
+/// column-fetch children under `KoldStore Pipeline` (distinct from native
+/// `Plans`) as `KoldStore Internal` plan nodes. Matches both PostgreSQL's
+/// spaced JSON and compact re-serialization.
 pub fn assert_kold_merge_scan_explain_json_tracing(plan_json: &str) -> Result<()> {
     for expected in [
         "\"Custom Plan Provider\": \"KoldMergeScan\"",
+        "\"KoldStore Pipeline\"",
         "\"Node Type\": \"KoldStore Hot Scan\"",
         "\"Node Type\": \"KoldStore Cold Storage Scan\"",
         "\"Node Type\": \"KoldStore Segment Catalog Scan\"",
@@ -84,8 +87,9 @@ pub fn assert_kold_merge_scan_explain_json_tracing(plan_json: &str) -> Result<()
         "\"KoldStore Internal\": true",
         "\"Query\"",
     ] {
+        let compact = expected.replace(": ", ":");
         anyhow::ensure!(
-            plan_json.contains(expected),
+            plan_json.contains(expected) || plan_json.contains(&compact),
             "expected explain JSON tracing contract `{expected}` in:\n{plan_json}"
         );
     }

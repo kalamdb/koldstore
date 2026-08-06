@@ -6,8 +6,9 @@
 //! mirror JIT (`Label:\n` + indent) because `ExplainOpenGroup` is a no-op for
 //! TEXT. Graph clients that parse structured formats get nested Scan Sources,
 //! Merge, Timing, and Parquet Segments groups. JSON always exposes a diagnostic
-//! `Plans` tracing subtree (catalog query → segment index → each Parquet file
-//! with footer / prune / range-GET children) so visualizers can attribute time.
+//! `KoldStore Pipeline` tracing array (catalog query → segment index → each
+//! Parquet file with footer / prune / range-GET children) so visualizers can
+//! attribute time without colliding with PostgreSQL's native-child `Plans`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -416,9 +417,10 @@ pub(super) fn explain_scan_profile(
 /// PostgreSQL renders native executor children beneath `Plans`. Cold catalog
 /// lookup and Parquet opens execute inside one `KoldMergeScan`, so they need
 /// explicit diagnostic nodes for graph clients. These nodes are marked
-/// `KoldStore Internal` and are always emitted for `FORMAT JSON` — including
-/// when a native hot child already owns part of `Plans` — so EXPLAIN remains a
-/// usable tracing diagram for where time goes.
+/// `KoldStore Internal` and are always emitted for `FORMAT JSON` under the
+/// distinct `KoldStore Pipeline` key — never under `Plans` — so they coexist
+/// with a native hot child instead of being overwritten when JSON parsers keep
+/// the last duplicate key.
 pub(super) fn explain_visual_pipeline(
     es: *mut pg_sys::ExplainState,
     profile: &ColdReadProfile,
@@ -432,7 +434,9 @@ pub(super) fn explain_visual_pipeline(
 
     let analyze = explain_is_analyze(es);
     let show_timing = explain_wants_timing(es);
-    explain_open_group(es, "Plans", Some("Plans"), false);
+    // Must not reuse "Plans": ExplainCustomScan runs before PostgreSQL walks
+    // custom_ps into Plans, and duplicate JSON keys drop the first array.
+    explain_open_group(es, "KoldStore Pipeline", Some("KoldStore Pipeline"), false);
 
     explain_visual_node_open(es, "KoldStore Hot Scan", "Hot Source");
     if !hot_plan_label.is_empty() {
@@ -516,7 +520,7 @@ pub(super) fn explain_visual_pipeline(
         explain_visual_timing_node(es, profile, execution, show_timing);
     }
 
-    explain_close_group(es, "Plans", Some("Plans"), false);
+    explain_close_group(es, "KoldStore Pipeline", Some("KoldStore Pipeline"), false);
 }
 
 fn explain_visual_catalog_node(

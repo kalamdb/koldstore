@@ -1241,8 +1241,8 @@ unsafe extern "C-unwind" fn explain_custom_scan(
     }
 
     if !hot_label.is_empty() {
-        // Always emit the JSON tracing diagram (catalog → segments → parquet
-        // I/O stages), including when a native hot child also owns `Plans`.
+        // Always emit the JSON tracing diagram under `KoldStore Pipeline`
+        // (not `Plans`) so it coexists with a native hot child.
         if hot_child_planstate(node).is_none() {
             profile::explain_text(es, "Hot Planned Access", &hot_label);
         }
