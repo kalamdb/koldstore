@@ -12,7 +12,7 @@ use koldstore_merge::{NewestFirstWinnerResolver, ResolvedRow, RowSource};
 use koldstore_migrate::{order::CatalogColumn, ExistingTableCatalog};
 use pgrx::pg_sys;
 
-use super::cold::{prepare_cold_row_stream, ColdRowStream};
+use super::cold::{prepare_cold_row_stream, ColdReadPhase, ColdRowStream};
 use super::cold_frontier;
 use super::emit::materialize_scan_row_from_image;
 use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader, HotRangeFilter};
@@ -103,6 +103,8 @@ struct OrderedProgressiveCtrl {
     scope_key: String,
     sort_order_id: i32,
     mode: OrderedEmitMode,
+    /// When true, first cold emit from [`OrderedEmitMode::SortedBuffer`] hydrates body.
+    body_hydrate_pending: bool,
 }
 
 #[derive(Debug)]
@@ -187,6 +189,12 @@ impl MergeRowStream {
         mut execution: Option<&mut ScanExecutionProfile>,
     ) -> Result<Option<MaterializedRow>, String> {
         loop {
+            // Lazy body hydrate: open body columns only when a cold winner is
+            // about to emit. Parent LIMIT that stops on hot-only keeps body opens at 0.
+            if self.ordered_needs_body_hydrate() {
+                self.hydrate_ordered_cold_bodies(cold_profile, execution.as_deref_mut())?;
+            }
+
             if let Some(ctrl) = self.ordered.as_mut() {
                 if let OrderedEmitMode::SortedBuffer(queue) = &mut ctrl.mode {
                     return match queue.pop_front() {
@@ -241,7 +249,9 @@ impl MergeRowStream {
             }
 
             let collect_profile = execution.is_some();
-            let Some((cold_rows, segment_profiles)) = self.cold.next_batch(collect_profile)? else {
+            let Some((cold_rows, segment_profiles)) =
+                self.cold.next_batch(ColdReadPhase::Full, collect_profile)?
+            else {
                 return Ok(None);
             };
             let decoded_rows = cold_rows.len();
@@ -281,6 +291,80 @@ impl MergeRowStream {
             }
             self.cold_winners = VecDeque::from(winners);
         }
+    }
+
+    /// True when the next SortedBuffer emit is a cold row still missing body columns.
+    fn ordered_needs_body_hydrate(&self) -> bool {
+        let Some(ctrl) = self.ordered.as_ref() else {
+            return false;
+        };
+        if !ctrl.body_hydrate_pending {
+            return false;
+        }
+        match &ctrl.mode {
+            OrderedEmitMode::SortedBuffer(queue) => queue
+                .front()
+                .is_some_and(|row| row.source == RowSource::Cold),
+            OrderedEmitMode::Streaming => false,
+        }
+    }
+
+    /// Re-opens competitive segments for body columns and merges into cold winners.
+    fn hydrate_ordered_cold_bodies(
+        &mut self,
+        cold_profile: &mut ColdReadProfile,
+        mut execution: Option<&mut ScanExecutionProfile>,
+    ) -> Result<(), String> {
+        if !self.cold.late_materialization_enabled() {
+            if let Some(ctrl) = self.ordered.as_mut() {
+                ctrl.body_hydrate_pending = false;
+            }
+            return Ok(());
+        }
+
+        self.cold.reset();
+        let mut body_by_pk_seq: std::collections::HashMap<
+            (serde_json::Value, i64),
+            koldstore_common::RowImage,
+        > = std::collections::HashMap::new();
+        loop {
+            let collect_profile = execution.is_some();
+            let Some((cold_rows, segment_profiles)) = self.cold.next_body_batch(collect_profile)?
+            else {
+                break;
+            };
+            let decoded_rows = cold_rows.len();
+            if let Some(execution) = execution.as_deref_mut() {
+                let opened = segment_profiles.len();
+                cold_profile.body_opens += opened;
+                cold_profile.segments_opened += opened;
+                cold_profile.segments.extend(segment_profiles);
+                execution.cold_rows += decoded_rows;
+                execution.peak_cold_batch_rows = execution.peak_cold_batch_rows.max(decoded_rows);
+            }
+            for row in cold_rows {
+                let pk_json = row.pk.to_canonical_json();
+                body_by_pk_seq.insert((pk_json, row.seq.get()), row.row_image);
+            }
+        }
+
+        if let Some(ctrl) = self.ordered.as_mut() {
+            if let OrderedEmitMode::SortedBuffer(queue) = &mut ctrl.mode {
+                for row in queue.iter_mut() {
+                    if row.source != RowSource::Cold {
+                        continue;
+                    }
+                    let key = (row.pk_json.clone(), row.seq.get());
+                    if let Some(body) = body_by_pk_seq.get(&key) {
+                        for (name, value) in body.iter() {
+                            row.row_image.insert(name.clone(), value.clone());
+                        }
+                    }
+                }
+            }
+            ctrl.body_hydrate_pending = false;
+        }
+        Ok(())
     }
 
     /// When the loaded hot page cannot strictly dominate cold, drain + sort.
@@ -343,14 +427,26 @@ impl MergeRowStream {
             buffered.extend(self.hot_winners.drain(..));
         }
 
+        let compete_phase = self.cold.late_materialization_enabled();
+        let cold_phase = if compete_phase {
+            ColdReadPhase::Compete
+        } else {
+            ColdReadPhase::Full
+        };
         loop {
             let collect_profile = execution.is_some();
-            let Some((cold_rows, segment_profiles)) = self.cold.next_batch(collect_profile)? else {
+            let Some((cold_rows, segment_profiles)) =
+                self.cold.next_batch(cold_phase, collect_profile)?
+            else {
                 break;
             };
             let decoded_rows = cold_rows.len();
             if let Some(execution) = execution.as_deref_mut() {
-                cold_profile.segments_opened += segment_profiles.len();
+                let opened = segment_profiles.len();
+                cold_profile.segments_opened += opened;
+                if compete_phase {
+                    cold_profile.compete_opens += opened;
+                }
                 cold_profile.segments.extend(segment_profiles);
                 execution.cold_rows += decoded_rows;
                 execution.peak_cold_batch_rows = execution.peak_cold_batch_rows.max(decoded_rows);
@@ -391,8 +487,13 @@ impl MergeRowStream {
                 OrderDirection::Desc => right_key.cmp(&left_key),
             }
         });
+        let needs_body_hydrate = compete_phase
+            && buffered
+                .iter()
+                .any(|row| row.source == RowSource::Cold && !row.deleted);
         if let Some(ctrl) = self.ordered.as_mut() {
             ctrl.mode = OrderedEmitMode::SortedBuffer(VecDeque::from(buffered));
+            ctrl.body_hydrate_pending = needs_body_hydrate;
         }
         self.cold_winners.clear();
         Ok(())
@@ -565,7 +666,7 @@ unsafe fn execute_scan_sources_with_profile<P: ScanProfileSink>(
         );
     }
 
-    let (cold_profile, cold_stream) = prepare_cold_stream(&inputs);
+    let (mut cold_profile, cold_stream) = prepare_cold_stream(&inputs);
     let has_no_cold_source = cold_stream.is_none();
     if has_no_cold_source {
         initialize_custom_plan_children(inputs.node, inputs.estate, inputs.eflags);
@@ -592,7 +693,9 @@ unsafe fn execute_scan_sources_with_profile<P: ScanProfileSink>(
         Some(cold_stream) if inputs.pk_point_lookup => {
             prepare_cold_point_stream(cold_stream, &inputs, profiler)
         }
-        Some(cold_stream) => prepare_merged_stream(cold_stream, &inputs, profiler),
+        Some(cold_stream) => {
+            prepare_merged_stream(cold_stream, &mut cold_profile, &inputs, profiler)
+        }
     };
 
     ScanSourceExecution {
@@ -693,13 +796,14 @@ fn prepare_cold_point_stream<P: ScanProfileSink>(
 
 fn prepare_merged_stream<P: ScanProfileSink>(
     cold_stream: ColdRowStream,
+    cold_profile: &mut ColdReadProfile,
     inputs: &ScanSourceInputs<'_>,
     profiler: &mut P,
 ) -> (ScanEmitMode, EmitPath, usize) {
     let plan = unsafe { (*inputs.node).ss.ps.plan };
     let strategy_tag = unsafe { custom_private_strategy_tag(plan) };
     if strategy_tag == STRATEGY_TAG_ORDERED_PROGRESSIVE {
-        return prepare_ordered_merged_stream(cold_stream, inputs, profiler);
+        return prepare_ordered_merged_stream(cold_stream, cold_profile, inputs, profiler);
     }
     if strategy_tag == STRATEGY_TAG_UNORDERED_HOT_FIRST {
         return prepare_unordered_hot_first_stream(cold_stream, inputs, profiler);
@@ -775,7 +879,8 @@ fn prepare_unordered_hot_first_stream<P: ScanProfileSink>(
 }
 
 fn prepare_ordered_merged_stream<P: ScanProfileSink>(
-    cold_stream: ColdRowStream,
+    mut cold_stream: ColdRowStream,
+    cold_profile: &mut ColdReadProfile,
     inputs: &ScanSourceInputs<'_>,
     profiler: &mut P,
 ) -> (ScanEmitMode, EmitPath, usize) {
@@ -826,6 +931,13 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
                 "{CUSTOM_PATH_NAME} ordered merge missing leading column_id {leading_column_id} in catalog"
             )
         });
+    if let Some(leading) = inputs.catalog.column_by_attnum(leading_column_id) {
+        let leading_ref = koldstore_common::ColumnRef::new(leading.column_id, leading.name.clone());
+        if cold_stream.enable_late_materialization(&leading_ref) {
+            cold_profile.compete_columns = cold_stream.compete_projection_names();
+            cold_profile.body_columns = cold_stream.body_projection_names();
+        }
+    }
     let cold_bound =
         cold_frontier::load_cold_best_bound(inputs.table_oid, &scope_key, sort_order_id, direction)
             .unwrap_or_else(|error| {
@@ -846,6 +958,7 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
             scope_key,
             sort_order_id,
             mode: OrderedEmitMode::Streaming,
+            body_hydrate_pending: false,
         },
     );
     (

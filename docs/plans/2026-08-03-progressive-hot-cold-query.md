@@ -2,7 +2,18 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Status:** Phases 0–5 complete on `feature/progressive-hot-cold-query` (PR #74). Phase 6+ deferred.  
+**Status (as of 2026-08-07):** Phases 0–5 **complete** (PR #74 on `main`). **Do not re-implement.** Late materialization (first Phase 6+ cut) is **implemented**; remaining Phase 6+ items (page index / Bloom, etc.) stay deferred.
+
+| Phase | State |
+| --- | --- |
+| 0 Baseline | **Done** (historical snapshot) |
+| 1 Strategy + portfolio + pathkeys | **Done** |
+| 2 Native ordered hot cursor | **Done** |
+| 3 Ordered cold frontier + order index | **Done** |
+| 4 RG expansion + deferred overlay (lean) | **Done**; full late-mat → Phase 6 |
+| 5 UnorderedHotFirst | **Done** |
+| 6+ Late mat / Bloom / aggregates / joins | **Not done** — track only |
+
 **Design:** [2026-08-03-progressive-hot-cold-query-design.md](2026-08-03-progressive-hot-cold-query-design.md)  
 **Baseline:** [2026-08-03-progressive-hot-cold-baseline.md](2026-08-03-progressive-hot-cold-baseline.md)
 
@@ -255,7 +266,7 @@ cargo pgrx test -p pg_koldstore pg15
 
 **Acceptance:** only competitive row groups open; payload columns late where possible.
 
-**Landed:** `select_competitive_row_groups` + path-based order-index RG refine on ordered expand. Full late-materialization (order/PK/seq before body) remains Phase 6+.
+**Landed:** `select_competitive_row_groups` + path-based order-index RG refine on ordered expand. Late materialization (compete → conditional body hydrate) landed as the first Phase 6+ cut — see [late-materialization-design](2026-08-03-late-materialization-design.md).
 
 ### Task 4.2: Batched mirror + hot PK probes for cold candidates — **done**
 
@@ -283,9 +294,9 @@ cargo pgrx test -p pg_koldstore pg15
 
 ## Phase 6+: Later (track only)
 
-- Parquet page index / Bloom on PK miss
-- Late materialization (order key + PK + seq before body payload) —
-  **design:** [2026-08-03-late-materialization-design.md](2026-08-03-late-materialization-design.md)
+- Late materialization (order key + PK before body payload) —
+  **done** ([design](2026-08-03-late-materialization-design.md))
+- Parquet page index / Bloom filter pushdown
 - True mid-stream ordered interleave (vs cold-wins sorted buffer when ranges overlap)
 - Partial aggregate upper paths
 - Join / runtime filter optimizations
@@ -293,14 +304,14 @@ cargo pgrx test -p pg_koldstore pg15
 
 ---
 
-## Status summary (2026-08-03)
+## Status summary (2026-08-07)
 
-| Doc | Role |
-| --- | --- |
-| [baseline](2026-08-03-progressive-hot-cold-baseline.md) | Phase 0 contracts + green tests before portfolio |
-| [design](2026-08-03-progressive-hot-cold-query-design.md) | Architecture source of truth |
-| This plan | Phases 0–5 **complete**; Phase 6+ deferred (late-mat design ready) |
-| [late materialization](2026-08-03-late-materialization-design.md) | First Phase 6+ cut: compete-then-body Parquet opens |
+| Doc | Role | Action |
+| --- | --- | --- |
+| [baseline](2026-08-03-progressive-hot-cold-baseline.md) | Phase 0 contracts + green tests before portfolio | **Historical — no work** |
+| [design](2026-08-03-progressive-hot-cold-query-design.md) | Architecture source of truth | **Keep; Phases 0–5 shipped** |
+| This plan | Phases 0–5 **complete**; late-mat done; other Phase 6+ deferred | **Do not re-implement 0–5** |
+| [late materialization](2026-08-03-late-materialization-design.md) | First Phase 6+ cut: compete-then-body Parquet opens | **Done** |
 
 Cold-proven-empty is **not** a `KoldPathStrategy` tag: it remains the locked plan-time native early return (`cold_side_proven_empty` / empty manifest).
 

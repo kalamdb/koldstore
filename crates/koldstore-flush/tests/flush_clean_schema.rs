@@ -132,6 +132,69 @@ fn batched_flush_selection_can_filter_mirror_ops() {
 }
 
 #[test]
+fn ordered_flush_selection_orders_by_order_key_pk_and_seq() {
+    use koldstore_flush::ops::plan_mirror_flush_selection_batch_with_order_key;
+
+    let plan = plan_mirror_flush_selection_batch_with_order_key(
+        &table(),
+        &mirror(),
+        &["id".to_string()],
+        &["id".to_string(), "body".to_string()],
+        None,
+        None,
+        true,
+        &[SqlParamType::BigInt],
+    )
+    .unwrap();
+
+    assert!(plan
+        .statement
+        .sql
+        .contains("mirror.\"order_key\" AS order_key"));
+    assert!(plan.statement.sql.contains(
+        "ORDER BY mirror.\"order_key\" ASC NULLS LAST, mirror.\"id\" ASC, mirror.\"seq\" ASC"
+    ));
+    assert!(plan
+        .statement
+        .sql
+        .contains("($2::boolean OR (mirror.\"order_key\""));
+    assert!(plan
+        .statement
+        .sql
+        .contains("mirror.\"order_key\", mirror.\"id\", mirror.\"seq\")"));
+    assert!(!plan.statement.sql.contains("mirror.\"seq\" > $2::bigint"));
+    assert_eq!(
+        plan.statement.param_types,
+        vec![
+            SqlParamType::BigInt,  // max_seq
+            SqlParamType::Boolean, // first page
+            SqlParamType::Bytea,   // after order_key
+            SqlParamType::BigInt,  // after pk
+            SqlParamType::BigInt,  // after seq
+            SqlParamType::BigInt,  // limit
+        ]
+    );
+}
+
+#[test]
+fn ordered_flush_selection_requires_pk_param_types() {
+    use koldstore_flush::ops::plan_mirror_flush_selection_batch_with_order_key;
+
+    let error = plan_mirror_flush_selection_batch_with_order_key(
+        &table(),
+        &mirror(),
+        &["id".to_string()],
+        &["id".to_string(), "body".to_string()],
+        None,
+        None,
+        true,
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("SqlParamType per primary-key"));
+}
+
+#[test]
 fn seq_range_cleanup_deletes_by_max_seq_without_json() {
     let plan = plan_seq_range_cleanup(&table(), &mirror(), &["id".to_string()], None).unwrap();
 

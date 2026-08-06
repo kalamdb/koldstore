@@ -51,7 +51,8 @@ Options:
 Environment (optional overrides for heavy suites; CI-friendly defaults apply):
   KOLDSTORE_EXAMPLE_ROWS / CLIENTS / SCOPES / TIMEOUT_SECS
   KOLDSTORE_STORAGE_ROWS / HOT_LIMIT / DML_SAMPLE
-  KOLDSTORE_STRESS_SOAK_SECONDS / CLIENTS (defaults: 30s smoke, 4 clients)
+  KOLDSTORE_STRESS_SOAK_SECONDS / CLIENTS / LATENCY_MULTIPLIER
+                           (defaults: 30s smoke, 4 clients, multiplier 8)
 
 Examples:
   scripts/run-all-tests.sh
@@ -421,9 +422,12 @@ if [[ "${SKIP_STRESS}" -eq 0 ]]; then
   step "stress smoke (chat penetration)"
   # Short default so all-tests stays local-friendly; full soaks use
   # scripts/run-chat-penetration.sh / the manual CI workflow.
+  # Multiplier 8 (vs full-soak 4): 30s smoke has few history samples, so flush
+  # prune / cold-publish tails dominate p95 without being a product regression.
   KOLDSTORE_STRESS_SOAK_SECONDS="${KOLDSTORE_STRESS_SOAK_SECONDS:-30}" \
     KOLDSTORE_STRESS_CLIENTS="${KOLDSTORE_STRESS_CLIENTS:-4}" \
     KOLDSTORE_STRESS_HISTORY_CLIENTS="${KOLDSTORE_STRESS_HISTORY_CLIENTS:-2}" \
+    KOLDSTORE_STRESS_LATENCY_MULTIPLIER="${KOLDSTORE_STRESS_LATENCY_MULTIPLIER:-8}" \
     KOLDSTORE_STRESS_PGVERSION="$(first_pg_version)" \
     scripts/run-chat-penetration.sh --packs chat,cold_dml
 fi

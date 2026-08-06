@@ -211,14 +211,34 @@ fn stream_write_flush_batches(
         QualifiedTableName::parse(&format!("{}.{}", ctx.relation.namespace, ctx.relation.name))
             .map_err(|error| error.to_string())?;
     let mirror = QualifiedTableName::from_table_name(&ctx.snapshot.mirror_relation);
+    let primary_key_columns: Vec<String> = ctx
+        .snapshot
+        .primary_key_names()
+        .map(str::to_string)
+        .collect();
+    let primary_key_param_types = if ctx.snapshot.segment_order_column_id.is_some() {
+        primary_key_columns
+            .iter()
+            .map(|pk_name| {
+                let column = ctx
+                    .catalog
+                    .columns
+                    .iter()
+                    .find(|column| column.name == *pk_name)
+                    .ok_or_else(|| {
+                        format!("primary-key column `{pk_name}` missing from catalog")
+                    })?;
+                super::mirror_fetch::flush_keyset_param_type(column.pg_type)
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
     let encode_input = StreamEncodeInput {
         table,
         mirror,
-        primary_key_columns: ctx
-            .snapshot
-            .primary_key_names()
-            .map(str::to_string)
-            .collect(),
+        primary_key_columns: primary_key_columns.clone(),
+        primary_key_param_types,
         base_column_names: ctx
             .catalog
             .columns
@@ -266,14 +286,15 @@ fn stream_write_flush_batches(
     let stream_outcome = crate::merge_scan::pg::with_custom_scan_disabled(|| {
         stream_flush_chunks(
             &encode_input,
-            |statement, max_seq, after_seq| {
+            |statement, max_seq, cursor| {
                 // Short: each mirror fetch is its own catalog transaction.
                 commit_style.run_spi(|| {
                     fetch_mirror_batch(
                         catalog_columns,
+                        &primary_key_columns,
                         statement,
                         max_seq,
-                        after_seq,
+                        cursor,
                         fetch_batch_size,
                         ctx.snapshot.segment_order_column_id.is_some(),
                     )

@@ -301,6 +301,14 @@ pub(super) struct ColdReadProfile {
     pub(super) segments_pruned_catalog_index: usize,
     /// Segments opened after catalog prune.
     pub(super) segments_opened: usize,
+    /// OrderedProgressive compete-phase Parquet opens (0 when late-mat off).
+    pub(super) compete_opens: usize,
+    /// OrderedProgressive body-hydrate Parquet opens (0 when skipped or late-mat off).
+    pub(super) body_opens: usize,
+    /// Compete projection names when late materialization is armed.
+    pub(super) compete_columns: Vec<String>,
+    /// Body projection names when late materialization is armed.
+    pub(super) body_columns: Vec<String>,
     /// Stable column ID used for cold_segment_index lookup, when any.
     pub(super) segment_index_order_column_id: Option<i16>,
     /// Current name of the order column (diagnostic only).
@@ -333,6 +341,10 @@ impl ColdReadProfile {
             segments_considered: 0,
             segments_pruned_catalog_index: 0,
             segments_opened: 0,
+            compete_opens: 0,
+            body_opens: 0,
+            compete_columns: Vec::new(),
+            body_columns: Vec::new(),
             segment_index_order_column_id: None,
             segment_index_order_column: None,
             segment_index_lookup_shape: None,
@@ -502,6 +514,10 @@ pub(super) fn explain_visual_pipeline(
         None,
         profile.segments_opened as i64,
     );
+    if analyze {
+        explain_integer(es, "Cold Compete Opens", None, profile.compete_opens as i64);
+        explain_integer(es, "Cold Body Opens", None, profile.body_opens as i64);
+    }
     if profile.segments_opened == 0 && analyze {
         explain_text(
             es,
@@ -922,6 +938,14 @@ fn explain_cold_scan(
             None,
             profile.segments_opened as i64,
         );
+        explain_integer(es, "Cold Compete Opens", None, profile.compete_opens as i64);
+        explain_integer(es, "Cold Body Opens", None, profile.body_opens as i64);
+        if !profile.compete_columns.is_empty() {
+            explain_list(es, "Cold Compete Columns", &profile.compete_columns);
+        }
+        if !profile.body_columns.is_empty() {
+            explain_list(es, "Cold Body Columns", &profile.body_columns);
+        }
         if profile.segments_opened == 0 {
             explain_text(
                 es,

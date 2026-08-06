@@ -126,6 +126,23 @@ JSON keyset paging remains the hot source only for non-ordered general merge
 (and as a fallback when a native child still omits required columns, e.g.
 `count(*)`).
 
+### Late materialization (`OrderedProgressive` only)
+
+When cold expand is required and the scan projection is wider than order key +
+PK, cold Parquet opens split into:
+
+1. **Compete** — order key + PK (plus forced cold meta) to resolve/sort against
+   hot.
+2. **Body** — remaining projected columns, opened only when a cold winner is
+   about to emit.
+
+Parent `LIMIT` that stops on hot-only after compete keeps **Cold Body Opens**
+at 0. Narrow projections (`SELECT id ORDER BY id`) fail open to a single Full
+open so compete+body never double-reads. EXPLAIN ANALYZE reports `Cold Compete
+Opens`, `Cold Body Opens`, and optional `Cold Compete Columns` /
+`Cold Body Columns`. `GeneralMerge` and `UnorderedHotFirst` stay on Full opens
+only.
+
 Runtime selection queries `koldstore.cold_segments` and (when bounds apply)
 `koldstore.cold_segment_index`; those SPI texts appear as `Cold Segments
 Query` / `Segment Index Query`. `Runtime Manifest Read` is always false for

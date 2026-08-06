@@ -334,6 +334,129 @@ fn bare_heap_index_scan_without_merge(plan: &str) -> bool {
     has_index && !plan.contains("Custom Scan (KoldMergeScan)")
 }
 
+/// Late materialization: compete opens for sort, body opens only when cold emits.
+#[tokio::test]
+async fn ordered_limit_late_materialization_stages() -> Result<()> {
+    common::require_pgrx_server().await?;
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "merge_late_mat").await?;
+        let relation = db.relation("late_mat_items");
+        db.client
+            .batch_execute(&format!(
+                r#"
+                CREATE TABLE {relation} (
+                  id bigint PRIMARY KEY,
+                  title text NOT NULL,
+                  body text NOT NULL
+                );
+                INSERT INTO {relation} (id, title, body)
+                SELECT gs, 't-' || gs, repeat('x', 64) || gs::text
+                FROM generate_series(1, 40) AS gs;
+                "#
+            ))
+            .await?;
+        db.manage_shared(&relation, "id").await?;
+        db.client
+            .execute(
+                "SELECT koldstore.set_table_auto_flush($1::text::regclass, false)",
+                &[&relation],
+            )
+            .await?;
+        common::fence_async_mirror(&db.client).await?;
+        anyhow::ensure!(db.flush_table(&relation).await? > 0);
+        common::assert_no_active_jobs(&db.client, &relation).await?;
+
+        // Flush prune frees heap PK slots; re-insert newer hot versions of the
+        // lowest ids so ASC LIMIT can stop on hot after compete expands cold.
+        db.client
+            .batch_execute(&format!(
+                r#"
+                INSERT INTO {relation} (id, title, body)
+                SELECT gs, 'hot-t-' || gs, 'hot-' || gs
+                FROM generate_series(1, 8) AS gs;
+                "#
+            ))
+            .await?;
+        common::fence_async_mirror(&db.client).await?;
+
+        let hot_only = common::explain_analyze(
+            &db.client,
+            &format!("SELECT id, title, body FROM {relation} ORDER BY id ASC LIMIT 3"),
+        )
+        .await?;
+        common::assert_kold_merge_scan_explain(&hot_only)?;
+        anyhow::ensure!(
+            hot_only.contains("Strategy: Ordered Progressive"),
+            "expected Ordered Progressive:\n{hot_only}"
+        );
+        let compete = explain_counter(&hot_only, "Cold Compete Opens")?;
+        let body = explain_counter(&hot_only, "Cold Body Opens")?;
+        anyhow::ensure!(
+            compete >= 1,
+            "hot/cold overlap must compete before LIMIT:\n{hot_only}"
+        );
+        anyhow::ensure!(
+            body == 0,
+            "hot-only LIMIT after compete must skip body hydrate:\n{hot_only}"
+        );
+        anyhow::ensure!(
+            hot_only.contains("Cold Body Columns:") && hot_only.contains("body"),
+            "wide projection must advertise body columns:\n{hot_only}"
+        );
+
+        let hot_bodies: Vec<String> = db
+            .client
+            .query(
+                &format!("SELECT body FROM {relation} ORDER BY id ASC LIMIT 3"),
+                &[],
+            )
+            .await?
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        anyhow::ensure!(
+            hot_bodies
+                == vec![
+                    "hot-1".to_string(),
+                    "hot-2".to_string(),
+                    "hot-3".to_string()
+                ],
+            "expected hot bodies, got {hot_bodies:?}"
+        );
+
+        // Cold outranks hot for DESC: body hydrate must run.
+        let cold_emit = common::explain_analyze(
+            &db.client,
+            &format!("SELECT id, title, body FROM {relation} ORDER BY id DESC LIMIT 5"),
+        )
+        .await?;
+        let compete_cold = explain_counter(&cold_emit, "Cold Compete Opens")?;
+        let body_cold = explain_counter(&cold_emit, "Cold Body Opens")?;
+        anyhow::ensure!(
+            compete_cold >= 1 && body_cold >= 1,
+            "cold emit must compete and hydrate body:\n{cold_emit}"
+        );
+
+        // Narrow SELECT fails open to Full (no compete/body split).
+        let narrow = common::explain_analyze(
+            &db.client,
+            &format!("SELECT id FROM {relation} ORDER BY id DESC LIMIT 5"),
+        )
+        .await?;
+        anyhow::ensure!(
+            explain_counter(&narrow, "Cold Compete Opens")? == 0
+                && explain_counter(&narrow, "Cold Body Opens")? == 0
+                && explain_counter(&narrow, "Parquet Segments Opened")? >= 1,
+            "narrow SELECT must fail-open to Full opens:\n{narrow}"
+        );
+        anyhow::ensure!(
+            !narrow.contains("Cold Body Columns:"),
+            "narrow fail-open must not list body columns:\n{narrow}"
+        );
+    }
+    Ok(())
+}
+
 fn explain_counter(plan: &str, label: &str) -> Result<usize> {
     plan.lines()
         .find_map(|line| {

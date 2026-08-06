@@ -311,7 +311,7 @@ WHERE job_type = 'flush'
     .map_err(|error| OpsError::Sql(error.to_string()))
 }
 
-/// Plans one keyset-batched page of mirror-backed flush rows.
+/// Plans one keyset-batched page of mirror-backed flush rows (seq order).
 ///
 /// PERFORMANCE: Used by the streaming flush path. Returns one page of rows as a plain
 /// `SELECT` (no `jsonb_agg`); `pg_koldstore` decodes SPI heap tuples directly.
@@ -340,14 +340,32 @@ pub fn plan_mirror_flush_selection_batch(
         scope_column,
         mirror_ops,
         false,
+        &[],
     )
 }
 
-/// Plans one keyset page and optionally returns the mirror's encoded order key.
+/// Plans one keyset page and optionally returns rows in segment order-key order.
+///
+/// When `sort_by_order_key` is false, bind parameters match
+/// [`plan_mirror_flush_selection_batch`].
+///
+/// When `sort_by_order_key` is true, PostgreSQL sorts by
+/// `(order_key, primary key…, seq)` and pages with a matching keyset:
+/// - `$1` mirror `seq` upper bound (`max_seq`)
+/// - `$2` first-page flag (`true` skips the keyset predicate)
+/// - `$3` exclusive lower `order_key` (`bytea`)
+/// - `$4..$(3+N)` exclusive lower primary-key values
+/// - `$(4+N)` exclusive lower `seq`
+/// - `$(5+N)` page size limit
+/// - optional scope text after the limit
+///
+/// `primary_key_param_types` must align with `primary_key_columns` when sorting.
 ///
 /// # Errors
 ///
-/// Returns an error when identifiers are unsafe or statement metadata cannot be prepared.
+/// Returns an error when identifiers are unsafe, parameter metadata is incomplete,
+/// or statement metadata cannot be prepared.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_mirror_flush_selection_batch_with_order_key(
     table: &QualifiedTableName,
     mirror_table: &QualifiedTableName,
@@ -355,7 +373,8 @@ pub fn plan_mirror_flush_selection_batch_with_order_key(
     base_columns: &[String],
     scope_column: Option<&str>,
     mirror_ops: Option<&[i16]>,
-    include_order_key: bool,
+    sort_by_order_key: bool,
+    primary_key_param_types: &[SqlParamType],
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     plan_mirror_flush_selection_inner(
         table,
@@ -364,8 +383,27 @@ pub fn plan_mirror_flush_selection_batch_with_order_key(
         base_columns,
         scope_column,
         mirror_ops,
-        include_order_key,
+        sort_by_order_key,
+        primary_key_param_types,
     )
+}
+
+/// SQL cast fragment for a one-based bind parameter.
+#[must_use]
+pub fn sql_param_cast(param_index: usize, param_type: SqlParamType) -> String {
+    let cast = match param_type {
+        SqlParamType::BigInt => "bigint",
+        SqlParamType::Integer => "integer",
+        SqlParamType::Text => "text",
+        SqlParamType::Jsonb => "jsonb",
+        SqlParamType::Bytea => "bytea",
+        SqlParamType::Oid => "oid",
+        SqlParamType::Uuid => "uuid",
+        SqlParamType::UuidArray => "uuid[]",
+        SqlParamType::SmallIntArray => "smallint[]",
+        SqlParamType::Boolean => "boolean",
+    };
+    format!("${param_index}::{cast}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -376,11 +414,17 @@ fn plan_mirror_flush_selection_inner(
     base_columns: &[String],
     scope_column: Option<&str>,
     mirror_ops: Option<&[i16]>,
-    include_order_key: bool,
+    sort_by_order_key: bool,
+    primary_key_param_types: &[SqlParamType],
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     if primary_key_columns.is_empty() {
         return Err(OpsError::Sql(
             "flush selection requires primary key".to_string(),
+        ));
+    }
+    if sort_by_order_key && primary_key_param_types.len() != primary_key_columns.len() {
+        return Err(OpsError::Sql(
+            "ordered flush selection requires one SqlParamType per primary-key column".to_string(),
         ));
     }
     let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
@@ -415,20 +459,55 @@ fn plan_mirror_flush_selection_inner(
             koldstore_mirror::MirrorColumn::Op.quoted_name()
         ),
     ]);
-    if include_order_key {
+    if sort_by_order_key {
         select_columns.push("mirror.\"order_key\" AS order_key".to_string());
     }
 
-    let mut where_clauses = vec![
-        "mirror.\"seq\" <= $1::bigint".to_string(),
-        "mirror.\"seq\" > $2::bigint".to_string(),
-    ];
-    let mut param_types = vec![
-        SqlParamType::BigInt,
-        SqlParamType::BigInt,
-        SqlParamType::BigInt,
-    ];
-    let scope_param = 4_usize;
+    let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];
+    let mut param_types = vec![SqlParamType::BigInt];
+    let limit_param;
+    let order_by;
+    if sort_by_order_key {
+        // $2 = first page; $3 = after order_key; $4.. = after PK; then after seq + limit.
+        let after_order_key_param = 3_usize;
+        let mut keyset_left = vec!["mirror.\"order_key\"".to_string()];
+        let mut keyset_right = vec![sql_param_cast(after_order_key_param, SqlParamType::Bytea)];
+        param_types.push(SqlParamType::Boolean);
+        param_types.push(SqlParamType::Bytea);
+        for (index, (pk_column, pk_type)) in pk_columns
+            .iter()
+            .zip(primary_key_param_types.iter().copied())
+            .enumerate()
+        {
+            let param_index = after_order_key_param + 1 + index;
+            keyset_left.push(format!("mirror.{pk_column}"));
+            keyset_right.push(sql_param_cast(param_index, pk_type));
+            param_types.push(pk_type);
+        }
+        let after_seq_param = after_order_key_param + 1 + pk_columns.len();
+        keyset_left.push("mirror.\"seq\"".to_string());
+        keyset_right.push(sql_param_cast(after_seq_param, SqlParamType::BigInt));
+        param_types.push(SqlParamType::BigInt);
+        where_clauses.push(format!(
+            "($2::boolean OR ({left}) > ({right}))",
+            left = keyset_left.join(", "),
+            right = keyset_right.join(", "),
+        ));
+        limit_param = after_seq_param + 1;
+        param_types.push(SqlParamType::BigInt);
+        let mut order_parts = vec!["mirror.\"order_key\" ASC NULLS LAST".to_string()];
+        for pk_column in &pk_columns {
+            order_parts.push(format!("mirror.{pk_column} ASC"));
+        }
+        order_parts.push("mirror.\"seq\" ASC".to_string());
+        order_by = order_parts.join(", ");
+    } else {
+        where_clauses.push("mirror.\"seq\" > $2::bigint".to_string());
+        param_types.push(SqlParamType::BigInt);
+        limit_param = 3_usize;
+        param_types.push(SqlParamType::BigInt);
+        order_by = "mirror.\"seq\" ASC".to_string();
+    }
     if let Some(ops) = mirror_ops {
         if !ops.is_empty() {
             where_clauses
@@ -436,6 +515,7 @@ fn plan_mirror_flush_selection_inner(
         }
     }
     if let Some(scope_column) = scope_column {
+        let scope_param = param_types.len() + 1;
         let predicate =
             koldstore_common::scope::scope_predicate_sql("mirror", scope_column, scope_param)
                 .map_err(|error| OpsError::Sql(error.to_string()))?;
@@ -461,11 +541,12 @@ fn plan_mirror_flush_selection_inner(
 SELECT {select_columns}
 {from_clause}
 WHERE {where_clause}
-ORDER BY mirror."seq" ASC
-LIMIT $3::bigint
+ORDER BY {order_by}
+LIMIT {limit_cast}
 "#,
         select_columns = select_columns.join(", "),
         where_clause = where_clauses.join(" AND "),
+        limit_cast = sql_param_cast(limit_param, SqlParamType::BigInt),
     );
     let statement =
         SqlStatement::read_with_params("select mirror-backed flush rows batch", &sql, param_types)

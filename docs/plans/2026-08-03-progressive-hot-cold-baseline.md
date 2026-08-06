@@ -1,8 +1,9 @@
 # Progressive Hot–Cold Scan Baseline (Task 0.1)
 
+**Status (as of 2026-08-06):** **Historical / complete** — Phase 0 baseline snapshot only. **No further implementation work.** Live contracts live in `docs/architecture/scanning-table.md`.
+
 Captured: 2026-08-03  
-Branch: `feature/progressive-hot-cold-query`  
-Worktree: `.worktrees/progressive-hot-cold-query` (later folded into main checkout)  
+Branch at capture: `feature/progressive-hot-cold-query` (merged to `main` via PR #74)  
 HEAD at capture: `bc49147edde6950d1a6c7ea692e72f5186480541`
 
 Phase 0 baseline before `KoldPathStrategy`. No production code changes in this
@@ -10,8 +11,8 @@ task — only these notes.
 
 **Follow-up:** Phases 1–5 of
 [2026-08-03-progressive-hot-cold-query.md](2026-08-03-progressive-hot-cold-query.md)
-are complete on this branch. Treat this file as the pre-portfolio contract
-snapshot; live behavior is in `docs/architecture/scanning-table.md`.
+are complete on `main`. Treat this file as the pre-portfolio contract
+snapshot; do not re-run as a todo list.
 
 ## Contracts preserved (must stay green)
 

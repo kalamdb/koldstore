@@ -91,6 +91,15 @@ pub(super) unsafe fn cold_side_proven_empty(
     Ok(false)
 }
 
+/// Which Parquet application-column set a cold open should load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ColdReadPhase {
+    /// Order key + PK for OrderedProgressive compete (before body hydrate).
+    Compete,
+    /// Full emit projection (GeneralMerge / UnorderedHotFirst / fail-open).
+    Full,
+}
+
 /// Lazily opens safe newest-first segment groups for one CustomScan.
 #[derive(Debug)]
 pub(super) struct ColdRowStream {
@@ -98,6 +107,10 @@ pub(super) struct ColdRowStream {
     segment_groups: Vec<Vec<SegmentStatsHint>>,
     next_group: usize,
     projection_columns: Vec<ColumnRef>,
+    /// When set, OrderedProgressive may compete with a narrow column set first.
+    compete_columns: Option<Vec<ColumnRef>>,
+    /// Full projection minus compete (empty when late materialization is off).
+    body_columns: Vec<ColumnRef>,
     catalog_columns: Vec<koldstore_migrate::order::CatalogColumn>,
     primary_key_columns: Vec<ColumnRef>,
     schema_version: i32,
@@ -122,20 +135,82 @@ type SegmentIndexCandidateSpiRow = (
 );
 
 impl ColdRowStream {
+    /// Enables compete-then-body opens for OrderedProgressive when beneficial.
+    ///
+    /// Returns `true` when late materialization is armed. Narrow projections
+    /// (compete ≈ full) fail open to a single Full open.
+    pub(super) fn enable_late_materialization(&mut self, leading_column: &ColumnRef) -> bool {
+        let mut compete = self.primary_key_columns.clone();
+        if !compete
+            .iter()
+            .any(|column| column.column_id == leading_column.column_id)
+        {
+            compete.push(leading_column.clone());
+        }
+        compete.sort_by_key(|column| column.column_id);
+        compete.dedup_by_key(|column| column.column_id);
+
+        let body: Vec<ColumnRef> = self
+            .projection_columns
+            .iter()
+            .filter(|column| {
+                !compete
+                    .iter()
+                    .any(|compete_column| compete_column.column_id == column.column_id)
+            })
+            .cloned()
+            .collect();
+        // Fail-open: no body left, or compete already includes everything useful.
+        if body.is_empty() || compete.len() >= self.projection_columns.len() {
+            self.compete_columns = None;
+            self.body_columns.clear();
+            return false;
+        }
+        self.compete_columns = Some(compete);
+        self.body_columns = body;
+        true
+    }
+
+    /// True when OrderedProgressive should compete before hydrating body columns.
+    #[must_use]
+    pub(super) fn late_materialization_enabled(&self) -> bool {
+        self.compete_columns.is_some() && !self.body_columns.is_empty()
+    }
+
+    /// Application columns loaded during the compete phase (when armed).
+    #[must_use]
+    pub(super) fn compete_projection_names(&self) -> Vec<String> {
+        self.compete_columns
+            .as_ref()
+            .map(|columns| columns.iter().map(|column| column.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Application body columns hydrated after compete (when armed).
+    #[must_use]
+    pub(super) fn body_projection_names(&self) -> Vec<String> {
+        self.body_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect()
+    }
+
     /// Reads the next overlapping segment group and closes every reader before
     /// returning its decoded rows.
     pub(super) fn next_batch(
         &mut self,
+        phase: ColdReadPhase,
         collect_profile: bool,
     ) -> Result<Option<ColdBatch>, String> {
         let Some(group) = self.segment_groups.get(self.next_group) else {
             return Ok(None);
         };
         self.next_group += 1;
+        let projected = self.columns_for_phase(phase);
         let (rows, profiles) = cold_rows_from_segments(
             &self.client,
             group,
-            &self.projection_columns,
+            projected,
             &self.catalog_columns,
             &self.primary_key_columns,
             self.schema_version,
@@ -147,7 +222,56 @@ impl ColdRowStream {
         Ok(Some((rows, profiles)))
     }
 
-    /// Rewinds catalog-owned segment descriptors for PostgreSQL rescan.
+    fn columns_for_phase(&self, phase: ColdReadPhase) -> &[ColumnRef] {
+        match phase {
+            ColdReadPhase::Full => &self.projection_columns,
+            ColdReadPhase::Compete => self
+                .compete_columns
+                .as_deref()
+                .unwrap_or(&self.projection_columns),
+        }
+    }
+
+    /// Columns for a body hydrate open: body ∪ primary key (for join).
+    fn body_read_columns(&self) -> Vec<ColumnRef> {
+        let mut columns = self.body_columns.clone();
+        for pk in &self.primary_key_columns {
+            if !columns
+                .iter()
+                .any(|column| column.column_id == pk.column_id)
+            {
+                columns.push(pk.clone());
+            }
+        }
+        columns
+    }
+
+    /// Reads one body-hydrate group using body∪PK projection.
+    pub(super) fn next_body_batch(
+        &mut self,
+        collect_profile: bool,
+    ) -> Result<Option<ColdBatch>, String> {
+        let Some(group) = self.segment_groups.get(self.next_group) else {
+            return Ok(None);
+        };
+        self.next_group += 1;
+        let projected = self.body_read_columns();
+        let (rows, profiles) = cold_rows_from_segments(
+            &self.client,
+            group,
+            &projected,
+            &self.catalog_columns,
+            &self.primary_key_columns,
+            self.schema_version,
+            self.pk_probe.clone(),
+        )?;
+        if !collect_profile {
+            return Ok(Some((rows, Vec::new())));
+        }
+        Ok(Some((rows, profiles)))
+    }
+
+    /// Rewinds catalog-owned segment descriptors for PostgreSQL rescan or body hydrate.
     pub(super) fn reset(&mut self) {
         self.next_group = 0;
     }
@@ -245,6 +369,8 @@ pub(super) fn prepare_cold_row_stream(
                 segment_groups,
                 next_group: 0,
                 projection_columns: planned.projection_columns,
+                compete_columns: None,
+                body_columns: Vec::new(),
                 catalog_columns: catalog.columns.clone(),
                 primary_key_columns: snapshot.primary_key_columns.clone(),
                 schema_version: snapshot.schema_version,
@@ -359,6 +485,10 @@ fn plan_cold_segments(
         segments_considered,
         segments_pruned_catalog_index,
         segments_opened: segments.len(),
+        compete_opens: 0,
+        body_opens: 0,
+        compete_columns: Vec::new(),
+        body_columns: Vec::new(),
         segment_index_order_column_id: index_column_id,
         segment_index_order_column: index_column_name,
         segment_index_lookup_shape: Some(segment_index_lookup_shape),
@@ -910,6 +1040,10 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
             segments_considered: manifest_stats.segments.len(),
             segments_pruned_catalog_index: 0,
             segments_opened: manifest_stats.segments.len(),
+            compete_opens: 0,
+            body_opens: 0,
+            compete_columns: Vec::new(),
+            body_columns: Vec::new(),
             segment_index_order_column_id,
             segment_index_order_column: None,
             segment_index_lookup_shape: segment_index_order_column_id

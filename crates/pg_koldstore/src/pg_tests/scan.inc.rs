@@ -1227,6 +1227,10 @@ fn ordered_limit_does_not_drain_full_hot_heap() {
         "hot-dominant ordered LIMIT must not open Parquet: {plan}"
     );
     assert!(
+        plan.contains("Cold Compete Opens: 0") && plan.contains("Cold Body Opens: 0"),
+        "hot-dominant ordered LIMIT must not compete or hydrate body: {plan}"
+    );
+    assert!(
         plan.contains("Cold Skip Reason:")
             || plan.contains("hot satisfied parent Limit without cold expansion"),
         "EXPLAIN should report why cold was skipped: {plan}"
@@ -1270,7 +1274,7 @@ fn ordered_limit_cold_wins_returns_cold_first() {
 
     let plan = spi_get_explain(&format!(
         "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
-         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+         SELECT id, body FROM {relation} ORDER BY id DESC LIMIT 5"
     ));
     assert!(
         plan.contains("Emit Path: ordered_merge_native")
@@ -1281,6 +1285,17 @@ fn ordered_limit_cold_wins_returns_cold_first() {
         plan.contains("Parquet Segments Opened:")
             && !plan.contains("Parquet Segments Opened: 0"),
         "cold-wins ordered LIMIT must open competitive Parquet: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Compete Opens:")
+            && !plan.contains("Cold Compete Opens: 0")
+            && plan.contains("Cold Body Opens:")
+            && !plan.contains("Cold Body Opens: 0"),
+        "cold emit must compete then hydrate body columns: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Body Columns:") && plan.contains("body"),
+        "late materialization must list body as a body column: {plan}"
     );
     assert_eq!(
         spi_get_text(&format!(
@@ -1331,6 +1346,13 @@ fn ordered_limit_asc_cold_wins_after_hot_prune() {
             && !plan.contains("Parquet Segments Opened: 0"),
         "ASC LIMIT after hot prune must open cold for lower ids: {plan}"
     );
+    assert!(
+        plan.contains("Cold Compete Opens:")
+            && !plan.contains("Cold Compete Opens: 0")
+            && plan.contains("Cold Body Opens:")
+            && !plan.contains("Cold Body Opens: 0"),
+        "ASC cold emit must use compete-then-body late materialization: {plan}"
+    );
     assert_eq!(
         spi_get_text(&format!(
             "SELECT string_agg(body, ',' ORDER BY id) FROM (\
@@ -1339,6 +1361,118 @@ fn ordered_limit_asc_cold_wins_after_hot_prune() {
         )),
         "cold-1,cold-2,cold-3,cold-4,cold-5",
         "ORDER BY id ASC LIMIT 5 must emit cold winners when they outrank hot"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_late_mat_skips_body_when_limit_is_hot_only() {
+    let suffix = unique_suffix("ordered_late_mat_hot_only");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 30) AS id"
+    ))
+    .expect("insert cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 30);
+    // Flush prune frees the heap PK slots; re-insert newer hot versions of the
+    // lowest ids so ASC LIMIT can stop on hot after compete expands cold.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 8) AS id"
+    ))
+    .expect("re-insert hot overrides for low ids");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT id, body FROM {relation} ORDER BY id ASC LIMIT 3"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive"),
+        "late-mat hot-only LIMIT must stay on ordered progressive: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Compete Opens:")
+            && !plan.contains("Cold Compete Opens: 0"),
+        "hot/cold overlap must compete so sort can prefer hot: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Body Opens: 0"),
+        "parent LIMIT satisfied from hot after compete must skip body hydrate: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Body Columns:") && plan.contains("body"),
+        "wide projection must arm late materialization body columns: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id) FROM (\
+             SELECT id, body FROM {relation} ORDER BY id ASC LIMIT 3\
+             ) topn"
+        )),
+        "hot-1,hot-2,hot-3",
+        "ASC LIMIT after hot updates must return hot bodies without body opens"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_narrow_select_fail_opens_to_full() {
+    let suffix = unique_suffix("ordered_late_mat_narrow");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1000, 1010) AS id"
+    ))
+    .expect("insert high-id cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 11);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 10) AS id"
+    ))
+    .expect("insert low-id hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT id FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive"),
+        "narrow ordered LIMIT must stay on ordered progressive: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened:")
+            && !plan.contains("Parquet Segments Opened: 0"),
+        "narrow cold-wins LIMIT must still open Parquet: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Compete Opens: 0") && plan.contains("Cold Body Opens: 0"),
+        "narrow SELECT id must fail-open to a single Full open (no compete/body split): {plan}"
+    );
+    assert!(
+        !plan.contains("Cold Body Columns:"),
+        "fail-open narrow projection must not advertise body columns: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(id::text, ',' ORDER BY id DESC) FROM (\
+             SELECT id FROM {relation} ORDER BY id DESC LIMIT 5\
+             ) topn"
+        )),
+        "1010,1009,1008,1007,1006",
+        "narrow ordered LIMIT must still return cold-winning ids"
     );
 }
 
@@ -1388,6 +1522,10 @@ fn unordered_limit_uses_hot_first_and_defers_cold() {
     assert!(
         plan.contains("Parquet Segments Opened: 0"),
         "LIMIT satisfied from hot must defer cold Parquet: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Compete Opens: 0") && plan.contains("Cold Body Opens: 0"),
+        "unordered hot-first must not use ordered late materialization: {plan}"
     );
     let bodies = spi_get_text(&format!(
         "SELECT string_agg(body, ',') FROM (SELECT body FROM {relation} LIMIT 5) t"

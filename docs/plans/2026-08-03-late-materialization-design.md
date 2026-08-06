@@ -1,8 +1,22 @@
 # Late Materialization Design (Phase 6+)
 
-**Status:** Design approved (2026-08-03)  
+**Status (as of 2026-08-07):** **Implemented** on OrderedProgressive (compete →
+conditional body hydrate, EXPLAIN counters, fail-open for narrow projections).
 **Parent:** [progressive hot–cold query design](2026-08-03-progressive-hot-cold-query-design.md)  
 **Plan tracker:** [progressive plan Phase 6+](2026-08-03-progressive-hot-cold-query.md#phase-6-later-track-only)
+
+### Implementation checklist
+
+| Item | State |
+| --- | --- |
+| Compete-then-body re-read on `OrderedProgressive` | **Done** |
+| `compete_columns` / Compete vs Full phase on cold stream | **Done** |
+| Conditional body hydrate only when cold winners emit | **Done** (lazy on first cold emit) |
+| EXPLAIN `Cold Compete Opens` / `Cold Body Opens` | **Done** |
+| Fail-open to single Full open for narrow projections | **Done** |
+| Regression e2e (wide body + hot-only LIMIT → body opens = 0) | **Done** |
+
+Phases 0–5 progressive scan (path portfolio, native hot, order index, RG expand, UnorderedHotFirst) are already on `main` / this branch. This document remains the first Phase 6+ cut — **not outdated**.
 
 ## Goal
 
