@@ -69,3 +69,17 @@ fn policy_flush_row_count_skips_undersized_segment_below_max_rows_per_file() {
     assert_eq!(policy_flush_row_count(2_000, &policy), 1_000);
     assert_eq!(policy_flush_row_count(2_500, &policy), 1_500);
 }
+
+#[test]
+fn policy_flush_row_count_recovers_half_chunk_undershoot_to_full_file() {
+    // CI ai_memory shape: excess=1000, min_flush_rows=300 → half-chunk drops the
+    // 100-row remainder (900), which is below max_rows_per_file=1000. Still flush
+    // one full file because raw excess meets the floor.
+    let policy = FlushPolicy::RowLimit {
+        hot_row_limit: 1_000,
+        min_flush_rows: 300,
+        max_rows_per_file: 1_000,
+        max_rows_per_flush: 10_000,
+    };
+    assert_eq!(policy_flush_row_count(2_000, &policy), 1_000);
+}

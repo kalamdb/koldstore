@@ -42,8 +42,10 @@ pub const fn selected_rows_meet_file_minimum(selected: u64, max_rows_per_file: u
 /// resolved with an index-backed max-seq lookup, so no in-memory row list is
 /// needed to answer "how many rows should flush".
 ///
-/// Returns `0` when the selection would be smaller than `max_rows_per_file`, so
-/// callers neither enqueue nor run a flush for an undersized segment.
+/// Returns `0` when the selection would be smaller than `max_rows_per_file` and
+/// raw excess cannot fill a file either, so callers neither enqueue nor run a
+/// flush for an undersized segment. When half-chunk rounding undershoots the
+/// file floor but `excess >= max_rows_per_file`, returns one full file.
 #[must_use]
 pub fn policy_flush_row_count(pending: i64, policy: &FlushPolicy) -> i64 {
     let limit = match policy {
@@ -57,7 +59,18 @@ pub fn policy_flush_row_count(pending: i64, policy: &FlushPolicy) -> i64 {
     let excess = pending - limit;
     let selected =
         flush_rows_for_excess(excess, policy.min_flush_rows()).min(policy.max_rows_per_flush());
-    if !selected_rows_meet_file_minimum(selected, policy.max_rows_per_file()) {
+    let file_min = policy.max_rows_per_file().max(1);
+    if selected == 0 {
+        return 0;
+    }
+    if selected < file_min {
+        // Half-chunk / min_flush rounding can undershoot the file floor even when
+        // raw excess could fill a segment (e.g. excess=1000, min_flush_rows=300 →
+        // selected=900 with max_rows_per_file=1000). Flush one full file rather
+        // than skipping the job entirely.
+        if excess >= file_min {
+            return i64::try_from(file_min.min(policy.max_rows_per_flush())).unwrap_or(0);
+        }
         return 0;
     }
     i64::try_from(selected).unwrap_or(0)

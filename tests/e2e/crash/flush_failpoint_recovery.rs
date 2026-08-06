@@ -169,7 +169,7 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
             ));
             // Best-effort: if a job row was written before the error propagated, it
             // should carry error_trace for operator tracking.
-            if let Ok(row) = db
+            if let Ok(Some(row)) = db
                 .client
                 .query_opt(
                     r#"
@@ -184,15 +184,13 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
                 )
                 .await
             {
-                if let Some(row) = row {
-                    let status: String = row.get("status");
-                    let error_trace: Option<String> = row.get("error_trace");
-                    if status == "error" {
-                        anyhow::ensure!(
-                            error_trace.as_deref().is_some_and(|t| !t.is_empty()),
-                            "failpoint {failpoint}: errored SQL path must persist error_trace"
-                        );
-                    }
+                let status: String = row.get("status");
+                let error_trace: Option<String> = row.get("error_trace");
+                if status == "error" {
+                    anyhow::ensure!(
+                        error_trace.as_deref().is_some_and(|t| !t.is_empty()),
+                        "failpoint {failpoint}: errored SQL path must persist error_trace"
+                    );
                 }
             }
         }
@@ -207,7 +205,10 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
         )
         .await?;
 
-    let retried = db.flush_table(&table.relation).await?;
+    // Late failpoints (e.g. after_cleanup_before_job_complete) may already have
+    // published cold + cleaned hot, so a policy flush correctly returns NULL.
+    // Force drains any remaining mirror work without weakening the visibility check.
+    let retried = db.flush_table_with_force(&table.relation, true).await?;
     common::log_always(format!(
         "failpoint {failpoint}: retry flushed rows_flushed={retried}"
     ));
