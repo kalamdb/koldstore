@@ -19,7 +19,7 @@ SELECT koldstore.manage_table(
   auto_flush => false
 );
 
-SELECT sqlreg.flush_table('sqlreg.demigrate_t'::regclass);
+SELECT sqlreg.flush_table('sqlreg.demigrate_t'::regclass, false);
 
 SELECT count(*)::bigint AS cold_segments_before
 FROM koldstore.cold_segments
