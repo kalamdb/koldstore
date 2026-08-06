@@ -262,6 +262,9 @@ run_isolated_side() {
   echo "running repetition=${CURRENT_REPETITION}/${REPETITIONS} side=${side} (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, warmup_rows=${WARMUP_ROWS:-auto})"
   if [[ -n "${WRITE_JSON_DIR}" ]]; then
     mkdir -p "${WRITE_JSON_DIR}"
+    # nextest may run with a different cwd; keep the JSON path absolute so CI
+    # upload-artifact can find it from the repo root.
+    WRITE_JSON_DIR="$(cd "${WRITE_JSON_DIR}" && pwd)"
     results_json="${WRITE_JSON_DIR}/${side}.json"
   elif [[ "${UPDATE_RESULTS}" == "1" ]]; then
     local repetition_dir

@@ -367,9 +367,12 @@ impl TestDb {
 
     /// Enqueues a flush job (or returns the existing active job UUID as text).
     ///
+    /// Uses `force => true` so a pending job is created even when policy flush
+    /// would skip (no excess / undersized segment).
+    ///
     /// # Errors
     ///
-    /// Returns an error when the enqueue fails.
+    /// Returns an error when the enqueue fails or returns NULL.
     pub async fn insert_pending_flush_job(&self, relation: &str) -> Result<String> {
         let row = self
             .client
@@ -377,13 +380,16 @@ impl TestDb {
                 r#"
                 SELECT koldstore.enqueue_flush_job(
                   table_name => $1::text::regclass,
-                  force      => false
+                  force      => true
                 )::text
                 "#,
                 &[&relation],
             )
             .await?;
-        Ok(row.get(0))
+        let job_id: Option<String> = row.get(0);
+        job_id
+            .filter(|value| !value.is_empty() && value != "null")
+            .ok_or_else(|| anyhow::anyhow!("enqueue_flush_job returned NULL for {relation}"))
     }
 
     /// Opens an object-store client for this fixture's MinIO prefix.
