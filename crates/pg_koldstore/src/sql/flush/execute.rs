@@ -89,7 +89,7 @@ fn claim_flush_job(
     // would bump the session lock count and require a matching extra unlock).
     let (job_id, force) = ensure_flush_job(table_oid, force)?;
     // Fixed watermark + progress estimate at claim (newer rows stay hot).
-    let progress_total = super::spi::mirror_catchup_row_estimate(table_oid)?;
+    let progress_total = super::spi::flush_progress_total_estimate(table_oid, force)?;
     let target_seq =
         super::spi::mirror_catchup_watermark(table_oid)?.and_then(|seq| SeqId::new(seq).ok());
     let attempt_token = mark_flush_job_running(job_id, table_oid, progress_total, target_seq)?;
@@ -254,6 +254,13 @@ fn stream_write_flush_batches(
         row_group_size: koldstore_parquet::WriterOptions::default().row_group_size,
         mirror_ops: selection.mirror_ops.clone(),
         sort_by_order_key: ctx.snapshot.segment_order_column_id.is_some(),
+        order_key_column: ctx.snapshot.segment_order_column_id.and_then(|column_id| {
+            ctx.catalog
+                .columns
+                .iter()
+                .find(|column| column.column_id == column_id)
+                .map(|column| column.name.clone())
+        }),
     };
     let catalog_columns = &ctx.catalog.columns;
     let fetch_batch_size = encode_input.fetch_batch_size;
@@ -397,6 +404,11 @@ fn write_streamed_chunk(
                 job_id: ctx.job_id,
                 attempt_token: ctx.attempt_token,
                 pass_id,
+                physically_sorted_sort_order_id: ctx
+                    .snapshot
+                    .segment_order_column_id
+                    .map(|column_id| i32::from(column_id.get()))
+                    .unwrap_or(0),
             },
             &written,
         )?;
@@ -689,7 +701,7 @@ fn run_async_prune_fence(
 pub(crate) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
-) -> Result<pgrx::Uuid, String> {
+) -> Result<Option<pgrx::Uuid>, String> {
     match crate::guc::flush_execution_mode() {
         crate::settings::FlushExecutionMode::Inline => {
             // Try-lock *before* enqueue. Nested inline holds an open transaction
@@ -697,10 +709,15 @@ pub(crate) fn flush_table_pg_impl(
             // block forever on the unique active-flush index / row instead of
             // failing fast with "flush already in progress".
             let table_lock = try_acquire_flush_table_lock(table_oid)?;
-            let job_uuid = crate::sql::flush::jobs::enqueue_or_lookup_flush_job(table_oid, force)
-                .map_err(|error| error.to_string())?;
+            let Some(job_uuid) =
+                crate::sql::flush::jobs::enqueue_flush_job_if_due(table_oid, force)
+                    .map_err(|error| error.to_string())?
+            else {
+                drop(table_lock);
+                return Ok(None);
+            };
             flush_table_with_session_lock(table_oid, force, table_lock)?;
-            Ok(job_uuid)
+            Ok(Some(job_uuid))
         }
         crate::settings::FlushExecutionMode::Queue => {
             // Probe ownership without blocking on Nested jobs-row / unique-index
@@ -711,19 +728,23 @@ pub(crate) fn flush_table_pg_impl(
                     crate::sql::flush::jobs::lookup_active_flush_job_uuid(table_oid)
                         .map_err(|error| error.to_string())?
                 {
-                    return Ok(existing);
+                    return Ok(Some(existing));
                 }
                 return Err(flush_already_in_progress_message(table_oid));
             }
             // Queue callers must not keep the session lock; one-shot executors
             // claim it for the real attempt.
             crate::sql::job_lock::unlock_table_job(table_oid)?;
-            let job_uuid = crate::sql::flush::jobs::enqueue_or_lookup_flush_job(table_oid, force)
-                .map_err(|error| error.to_string())?;
+            let Some(job_uuid) =
+                crate::sql::flush::jobs::enqueue_flush_job_if_due(table_oid, force)
+                    .map_err(|error| error.to_string())?
+            else {
+                return Ok(None);
+            };
             if let Err(error) = crate::worker::spawn_flush_executor_if_needed() {
                 pgrx::warning!("koldstore flush_table: could not spawn flush executor: {error}");
             }
-            Ok(job_uuid)
+            Ok(Some(job_uuid))
         }
     }
 }

@@ -701,7 +701,16 @@ pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) ->
                 .await
         };
         match result {
-            Ok(row) => return Ok(row.get(0)),
+            Ok(row) => {
+                let job_id: Option<String> = row.get(0);
+                match job_id.filter(|value| !value.is_empty() && value != "null") {
+                    Some(job_id) => return Ok(job_id),
+                    None => anyhow::bail!(
+                        "flush_table returned NULL for {relation} (force={force}); \
+                         no flush work due (excess below max_rows_per_file / min_flush_rows)"
+                    ),
+                }
+            }
             Err(error) if is_flush_entry_lock_busy(&error) => {
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
             }

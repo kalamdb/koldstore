@@ -285,7 +285,6 @@ pub fn plan_mark_migration_backfill_running() -> Result<SqlStatement, MigrationJ
 UPDATE koldstore.jobs
 SET status = 'running',
     phase = 'initialize_mirror',
-    progress_unit = 'rows',
     progress_total = GREATEST(progress_total, $3::bigint),
     payload = jsonb_set(
         jsonb_set(payload, '{phase}', '"initialize_mirror"'::jsonb, true),
@@ -318,7 +317,6 @@ SET status = 'running',
     rows_processed = $3::bigint,
     progress_current = $3::bigint,
     progress_total = GREATEST(progress_total, $3::bigint, $4::bigint),
-    progress_unit = 'rows',
     batches_completed = $5::integer,
     payload = jsonb_set(
         jsonb_set(payload, '{phase}', '"initialize_mirror"'::jsonb, true),
@@ -351,7 +349,6 @@ SET status = 'completed',
     rows_processed = $3::bigint,
     progress_current = $3::bigint,
     progress_total = GREATEST(progress_total, $3::bigint),
-    progress_unit = 'rows',
     batches_completed = GREATEST(batches_completed, CASE WHEN $3::bigint > 0 THEN 1 ELSE 0 END),
     payload = jsonb_set(
         jsonb_set(payload, '{phase}', '"finished"'::jsonb, true),

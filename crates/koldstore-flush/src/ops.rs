@@ -562,7 +562,6 @@ LEFT JOIN LATERAL (
             'batches_completed', job_snapshot.batches_completed,
             'progress_current', job_snapshot.progress_current,
             'progress_total', job_snapshot.progress_total,
-            'progress_unit', job_snapshot.progress_unit,
             'checkpoint_seq', job_snapshot.checkpoint_seq,
             'duration_ms', COALESCE(
                 (job_snapshot.payload->>'duration_ms')::bigint,
@@ -598,7 +597,6 @@ LEFT JOIN LATERAL (
             batches_completed,
             progress_current,
             progress_total,
-            progress_unit,
             checkpoint_seq,
             payload,
             created_at,

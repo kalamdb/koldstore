@@ -17,8 +17,10 @@ pub(crate) mod spi;
 /// `koldstore.enqueue_flush_job(table_name regclass, force boolean default false) → uuid`.
 ///
 /// Same durable-queue contract as [`flush_table_pg`]: inserts a pending job or
-/// returns the existing active job id, upgrading pending force intent when
-/// requested. Does not spawn executors (use `flush_table` for that).
+/// returns the existing active job id when work is due. Returns `NULL` when
+/// policy selection is empty (including selections below `max_rows_per_file`)
+/// so undersized flushes are never queued. Does not spawn executors (use
+/// `flush_table` for that).
 ///
 /// Flush jobs are table-wide (`scope_key = ''`), matching `flush_table`. Per-user
 /// partitioning for user-scoped tables is owned by manage-time `scope_column` /
@@ -28,7 +30,7 @@ pub(crate) mod spi;
 pub fn enqueue_flush_job_pg(
     table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
-) -> pgrx::Uuid {
+) -> Option<pgrx::Uuid> {
     enqueue_flush_job_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("enqueue flush job failed: {error}"))
 }
@@ -37,8 +39,8 @@ pub fn enqueue_flush_job_pg(
 fn enqueue_flush_job_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
-) -> Result<pgrx::Uuid, String> {
-    jobs::enqueue_or_lookup_flush_job(table_oid, force).map_err(|error| error.to_string())
+) -> Result<Option<pgrx::Uuid>, String> {
+    jobs::enqueue_flush_job_if_due(table_oid, force).map_err(|error| error.to_string())
 }
 
 /// Discovers and recovers orphaned segment objects through the SQL API.
@@ -187,6 +189,8 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 /// `koldstore.flush_table(table_name regclass, force boolean default false) → uuid`.
 ///
 /// Enqueues (or reuses) a durable flush job and returns its UUID immediately.
+/// Returns `NULL` when no flush work is due (policy selection empty, including
+/// selections below `max_rows_per_file`) so undersized jobs are never queued.
 /// With `koldstore.flush_execution = 'queue'` (default), a one-shot executor is
 /// spawned best-effort. With `'inline'`, the calling backend runs the flush
 /// after enqueue (required for `#[pg_test]` SPI transactions).
@@ -200,7 +204,7 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 pub fn flush_table_pg(
     table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
-) -> pgrx::Uuid {
+) -> Option<pgrx::Uuid> {
     execute::flush_table_pg_impl(table_name.oid(), force)
         .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
 }

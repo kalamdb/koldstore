@@ -136,8 +136,9 @@ than embedding large values in row storage.
   [performance](performance.md).
 
 Built-in row-limit auto-flush scheduling is available on the database worker
-(`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Time-based
-`max_flush_interval` and predicate move policies remain deferred. See
+(`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Auto-flush
+enqueues durable jobs for one-shot executors; it is not PostgreSQL autovacuum.
+Time-based `max_flush_interval` and predicate move policies remain deferred. See
 [operations/scheduling.md](operations/scheduling.md).
 
 ## Storage layout and pruning

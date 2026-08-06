@@ -1,10 +1,13 @@
 # Jobs and Scheduler
 
-KoldStore uses durable rows in `koldstore.jobs` to expose migration and flush
-work to operators. A database-scoped background worker applies committed WAL
-and, on a separate cadence, evaluates automatic flush eligibility. Jobs are
-durable state and progress records; they are not a separate queue consumer that
-performs flushes later.
+KoldStore uses durable rows in `koldstore.jobs` as a PostgreSQL-native flush
+queue. A database-scoped coordinator applies committed WAL, evaluates automatic
+flush eligibility, and spawns bounded one-shot flush executors. Jobs are both
+the work request and the operator-visible progress record.
+
+Production default is `koldstore.flush_execution = queue`.
+`koldstore.flush_execution = inline` exists only so `#[pg_test]` SPI
+transactions can run flush in the calling backend.
 
 ## Runtime topology
 
@@ -14,10 +17,12 @@ flowchart TD
   worker --> apply["Bounded WAL mirror apply"]
   worker --> cadence{"Flush check due?"}
   cadence -->|yes| candidate["Find first eligible table"]
-  candidate --> lock{"Table job lock free?"}
-  lock -->|yes| flush["Run flush_table inline"]
-  lock -->|no| skip["Skip this tick"]
-  flush --> jobs["Update koldstore.jobs"]
+  candidate --> enqueue["Enqueue flush job"]
+  enqueue --> spawn["Spawn flush executors\nupto max_parallel_flush_jobs"]
+  client["flush_table()"] --> enqueue
+  client --> spawn
+  spawn --> exec["One-shot flush executor"]
+  exec --> jobs["Update koldstore.jobs"]
 ```
 
 The launcher discovers KoldStore logical slots after postmaster start and
@@ -36,20 +41,19 @@ state. The flush path records `rows_processed`, `rows_flushed`, batches,
 checkpoint sequence, duration, and phase as it progresses.
 
 The extension permits one active (`pending` or `running`) flush job per table.
-`flush_table` claims work under the **table** job lock (session lock in queue
-mode). The database **apply/slot** lock is not held for the whole flush: Parquet
+In queue mode, `flush_table` enqueues (or reuses) that job and returns its UUID
+immediately; a one-shot executor claims the **table** job lock and runs the
+work. The database **apply/slot** lock is not held for the whole flush: Parquet
 upload runs alongside background mirror apply; finalize try-locks the slot only
-for the short catch-up + prune fence. Entry paths that still need exclusive
-apply (or a busy table lock) fail fast or retry briefly rather than blocking
-clients indefinitely. See [flushing-table.md](flushing-table.md) and
-[mirror-capture.md](mirror-capture.md).
+for the short catch-up + prune fence. See [flushing-table.md](flushing-table.md)
+and [mirror-capture.md](mirror-capture.md).
 
 Useful SQL entry points:
 
 | Entry point | Purpose |
 | --- | --- |
-| `koldstore.enqueue_flush_job(table, force := false)` | Create a pending job if one is not already active; it does not itself flush. |
-| `koldstore.flush_table(table, force := false)` | Claim or create the job and execute it inline; returns its UUID. |
+| `koldstore.flush_table(table)` | Enqueue or reuse the active flush job, spawn an executor when needed, return its UUID. |
+| `koldstore.enqueue_flush_job(table)` | Same durable enqueue/lookup without spawning executors. |
 | `koldstore.list_jobs(statuses, job_types, table)` | Read job status and progress as JSON. |
 | `koldstore.cancel_job(id)` | Request cooperative cancellation of one active job. |
 | `koldstore.cancel_table_jobs(table)` | Cancel pending work and request cancellation of running work for a table. |
@@ -71,8 +75,13 @@ applier; a 30-second watchdog recovers missed in-memory hints.
 
 The flush check is independent of the apply wake and runs only when
 `koldstore.flush_check_interval_seconds` is due. This avoids catalog scans on
-every commit wake. The worker evaluates at most one table and runs at most one
-flush per check.
+every commit wake. The worker evaluates at most one table and enqueues at most
+one auto-flush job per check, then may spawn multiple executors for already
+pending work up to `koldstore.max_parallel_flush_jobs`.
+
+Auto-flush eligibility is **not** driven by PostgreSQL autovacuum. It uses
+KoldStore mirror / hot-row policy on that check cadence. See
+[operations/scheduling.md](../operations/scheduling.md).
 
 ## Automatic flush selection
 
@@ -87,7 +96,7 @@ the first one whose policy is due.
 - `older_than` policies resolve eligible mirror rows through the flush stats
   path.
 - A busy table is skipped without waiting; a later check can choose it again.
-- Manual `enqueue_flush_job` and `flush_table` ignore the automatic-flush
+- Manual `flush_table` / `enqueue_flush_job` ignore the automatic-flush
   opt-out, so operators can flush an opted-out table deliberately.
 
 The internal `koldstore.internal_run_flush_scheduler_tick()` exists for tests
@@ -100,8 +109,11 @@ and diagnostics. Production scheduling comes from the database worker.
 | `koldstore.async_apply_watchdog_interval_ms` | Safety recovery cadence for a missed commit wakeup. |
 | `koldstore.async_apply_max_rows_per_tick` / `...max_ms_per_tick` | Bound one apply transaction. |
 | `koldstore.flush_check_interval_seconds` | Automatic-flush evaluation cadence. |
+| `koldstore.max_parallel_flush_jobs` | Cap on concurrent one-shot flush executors per database. |
+| `koldstore.flush_execution` | `queue` (default) or `inline` (SPI tests only). |
+| `koldstore.job_retention_days` | Days to retain terminal jobs before purge (`0` disables). |
 | `auto_flush` table option | Enables or opts a table out of background flushes. |
 | Flush policy | Defines row-limit or age-based eligibility and the amount selected. |
 
 See [mirror capture](mirror-capture.md) for apply correctness and
-[flushing](flushing-table.md) for the inline flush lifecycle.
+[flushing](flushing-table.md) for the flush lifecycle after a job is claimed.

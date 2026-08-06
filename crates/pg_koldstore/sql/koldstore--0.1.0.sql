@@ -139,7 +139,6 @@ CREATE TABLE IF NOT EXISTS koldstore.jobs (
   rows_flushed bigint NOT NULL DEFAULT 0,
   progress_current bigint NOT NULL DEFAULT 0,
   progress_total bigint NOT NULL DEFAULT 0,
-  progress_unit text NOT NULL DEFAULT '',
   attempts integer NOT NULL DEFAULT 0,
   -- Fences job progress mutations across reclaim: a stale executor cannot
   -- mutate a job after a new attempt_token is claimed.

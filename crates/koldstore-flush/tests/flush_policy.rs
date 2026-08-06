@@ -54,3 +54,18 @@ fn policy_flush_row_count_chunks_large_excess_like_row_selection_did() {
     };
     assert_eq!(policy_flush_row_count(11_250, &policy), 1_000);
 }
+
+#[test]
+fn policy_flush_row_count_skips_undersized_segment_below_max_rows_per_file() {
+    // Docker demo shape: min_flush_rows=1 allows any excess, but a 450-row
+    // selection must not enqueue when max_rows_per_file is 1000.
+    let policy = FlushPolicy::RowLimit {
+        hot_row_limit: 1_000,
+        min_flush_rows: 1,
+        max_rows_per_file: 1_000,
+        max_rows_per_flush: 10_000,
+    };
+    assert_eq!(policy_flush_row_count(1_450, &policy), 0);
+    assert_eq!(policy_flush_row_count(2_000, &policy), 1_000);
+    assert_eq!(policy_flush_row_count(2_500, &policy), 1_500);
+}

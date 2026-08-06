@@ -14,11 +14,20 @@ fn policy_selection_returns_empty_when_pending_within_hot_limit() {
 
 #[test]
 fn policy_selection_uses_cutoff_when_excess_exists() {
-    let policy = FlushPolicy::new(100, 50, 1_000);
+    // max_rows_per_file must be <= selected excess (150) or policy returns empty.
+    let policy = FlushPolicy::new(100, 50, 100);
     let selection =
         resolve_policy_flush_selection(250, Some(&policy), Some((150, 999)), FlushStats::empty());
     assert_eq!(selection.stats.row_count, 150);
     assert_eq!(selection.stats.max_seq, 999);
+}
+
+#[test]
+fn policy_selection_rejects_undersized_excess_below_max_rows_per_file() {
+    let policy = FlushPolicy::new(100, 50, 1_000);
+    let selection =
+        resolve_policy_flush_selection(250, Some(&policy), Some((150, 999)), FlushStats::empty());
+    assert_eq!(selection.stats.row_count, 0);
 }
 
 #[test]

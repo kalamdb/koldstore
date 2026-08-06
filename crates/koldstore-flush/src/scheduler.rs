@@ -147,12 +147,20 @@ mod tests {
     use serde_json::json;
 
     fn row_limit_options(hot_row_limit: u64, min_flush_rows: u64) -> serde_json::Value {
+        row_limit_options_with_file(hot_row_limit, min_flush_rows, 1)
+    }
+
+    fn row_limit_options_with_file(
+        hot_row_limit: u64,
+        min_flush_rows: u64,
+        max_rows_per_file: u64,
+    ) -> serde_json::Value {
         json!({
             "flush_policy": {
                 "type": "row_limit",
                 "hot_row_limit": hot_row_limit,
                 "min_flush_rows": min_flush_rows,
-                "max_rows_per_file": 1000,
+                "max_rows_per_file": max_rows_per_file,
                 "max_rows_per_flush": 10_000
             }
         })
@@ -185,6 +193,13 @@ mod tests {
     fn scheduler_flushes_when_excess_meets_min_flush_rows() {
         let options = row_limit_options(10, 100);
         assert!(scheduler_should_flush(&options, 200));
+    }
+
+    #[test]
+    fn scheduler_skips_when_selected_below_max_rows_per_file() {
+        let options = row_limit_options_with_file(1_000, 1, 1_000);
+        assert!(!scheduler_should_flush(&options, 1_450));
+        assert!(scheduler_should_flush(&options, 2_000));
     }
 
     #[test]

@@ -106,23 +106,60 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
 
     match flush_result {
         Ok(row) => {
-            let job_id: String = row.get(0);
-            let status: String = db
+            let job_id: Option<String> = row.get(0);
+            let Some(job_id) = job_id.filter(|v| !v.is_empty() && v != "null") else {
+                common::log_always(format!(
+                    "failpoint {failpoint}: flush returned NULL (no work / already idle)"
+                ));
+                // Still recover + retry below.
+                let _ = db
+                    .client
+                    .query_one(
+                        "SELECT koldstore.recover_segments($1::text::regclass, false)",
+                        &[&table.relation],
+                    )
+                    .await?;
+                let retried = db.flush_table(&table.relation).await?;
+                common::log_always(format!(
+                    "failpoint {failpoint}: retry flushed rows_flushed={retried}"
+                ));
+                common::fence_async_mirror(&db.client).await?;
+                common::assert_relations_equal(&db.client, &baseline_rel, &table.relation).await?;
+                return Ok(());
+            };
+            let row = db
                 .client
                 .query_one(
-                    "SELECT status FROM koldstore.jobs WHERE id = $1::text::uuid",
+                    "SELECT status, error_trace, phase FROM koldstore.jobs WHERE id = $1::text::uuid",
                     &[&job_id],
                 )
-                .await?
-                .get(0);
+                .await?;
+            let status: String = row.get("status");
+            let error_trace: Option<String> = row.get("error_trace");
+            let phase: String = row.get("phase");
             if status == "completed" {
                 // Failpoint may sit after successful completion marker; still recover.
                 common::log_always(format!(
                     "failpoint {failpoint}: flush reported success status={status}"
                 ));
+            } else if status == "error" {
+                anyhow::ensure!(
+                    error_trace.as_deref().is_some_and(|t| !t.is_empty()),
+                    "failpoint {failpoint}: error job must persist error_trace (phase={phase})"
+                );
+                anyhow::ensure!(
+                    error_trace
+                        .as_deref()
+                        .is_some_and(|t| t.contains("failpoint") || !t.is_empty()),
+                    "failpoint {failpoint}: error_trace should explain failure, got {error_trace:?}"
+                );
+                common::log_always(format!(
+                    "failpoint {failpoint}: flush job status=error phase={phase} error_trace={}",
+                    error_trace.as_deref().unwrap_or("")
+                ));
             } else {
                 common::log_always(format!(
-                    "failpoint {failpoint}: flush job status={status} (expected non-success)"
+                    "failpoint {failpoint}: flush job status={status} phase={phase} error_trace={error_trace:?}"
                 ));
             }
         }
@@ -130,6 +167,34 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
             common::log_always(format!(
                 "failpoint {failpoint}: flush errored as expected: {error}"
             ));
+            // Best-effort: if a job row was written before the error propagated, it
+            // should carry error_trace for operator tracking.
+            if let Ok(row) = db
+                .client
+                .query_opt(
+                    r#"
+                    SELECT status, error_trace
+                    FROM koldstore.jobs
+                    WHERE table_oid = $1::text::regclass::oid
+                      AND job_type = 'flush'
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    "#,
+                    &[&table.relation],
+                )
+                .await
+            {
+                if let Some(row) = row {
+                    let status: String = row.get("status");
+                    let error_trace: Option<String> = row.get("error_trace");
+                    if status == "error" {
+                        anyhow::ensure!(
+                            error_trace.as_deref().is_some_and(|t| !t.is_empty()),
+                            "failpoint {failpoint}: errored SQL path must persist error_trace"
+                        );
+                    }
+                }
+            }
         }
     }
 

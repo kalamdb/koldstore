@@ -112,8 +112,18 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     if let Some(table_oid) = select_first_due_auto_flush_table()? {
         had_due_table = true;
         let oid = pgrx::pg_sys::Oid::from(table_oid);
-        let job_id = crate::sql::flush::jobs::enqueue_or_lookup_flush_job(oid, false)
+        let job_id = crate::sql::flush::jobs::enqueue_flush_job_if_due(oid, false)
             .map_err(|error| error.to_string())?;
+        let Some(job_id) = job_id else {
+            pgrx::log!(
+                "koldstore flush scheduler: skip table_oid={} (no due work)",
+                table_oid
+            );
+            return Ok(FlushTickResult {
+                had_due_table: true,
+                completed: false,
+            });
+        };
         pgrx::log!(
             "koldstore flush scheduler: enqueued table_oid={} job={}",
             table_oid,
