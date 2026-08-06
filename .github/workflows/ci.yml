@@ -330,9 +330,14 @@ jobs:
       - name: Download current storage-bench artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: storage-bench-*
-          path: current-storage-bench
-          merge-multiple: false
+          name: storage-bench-pg
+          path: current-storage-bench/pg
+
+      - name: Download current storage-bench async artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: storage-bench-async
+          path: current-storage-bench/async
 
       - name: Resolve base branch and download baseline artifacts
         id: baseline

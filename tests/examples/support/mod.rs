@@ -367,6 +367,9 @@ pub async fn flush_table(
     let label = ctx
         .map(|ctx| ctx.label.to_string())
         .unwrap_or_else(|| format!("flush_table {relation}"));
+    // Policy flush reads mirror pending counts; catch up WAL apply after concurrent
+    // writers before deciding whether a flush is due.
+    fence_mirror_if_needed(client).await?;
     log_flush_inputs(client, relation, &label).await?;
     let job_id = timed_async(
         ctx.map(|ctx| format!("{}: koldstore.flush_table", ctx.label))

@@ -322,6 +322,9 @@ impl TestDb {
     ///
     /// Returns an error when flush fails after apply-lock retries.
     pub async fn flush_table_with_force(&self, relation: &str, force: bool) -> Result<i64> {
+        // Policy flush decides from mirror pending counts; catch up WAL apply so
+        // recently committed DML is visible to the due check.
+        super::async_mirror::fence_async_mirror(&self.client).await?;
         let job_id = flush_table_job_id(&self.client, relation, force).await?;
         wait_for_flush_job_terminal(&self.client, &job_id).await
     }

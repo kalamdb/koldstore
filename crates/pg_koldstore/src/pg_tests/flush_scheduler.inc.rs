@@ -152,6 +152,9 @@ fn flush_scheduler_reclaims_orphan_running_flush_job() {
         ))
         .expect("insert");
     }
+    // Excess after reclaim is 5 rows; keep max_rows_per_file at that floor so the
+    // undersized-segment gate does not skip the follow-on auto-flush.
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -159,7 +162,7 @@ fn flush_scheduler_reclaims_orphan_running_flush_job() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => true
         )
