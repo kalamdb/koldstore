@@ -185,9 +185,7 @@ async fn toxiproxy_latency_cancels_cold_read_without_corrupt_catalog() -> Result
 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start_minio(target, "toxi_read_cancel").await?;
-        let table = db
-            .create_indexed_items_table("toxi_read_items", 24)
-            .await?;
+        let table = db.create_indexed_items_table("toxi_read_items", 24).await?;
         db.manage_shared(&table.relation, "id").await?;
         // Flush before latency toxic would also hang; reset temporarily.
         toxiproxy_reset()?;

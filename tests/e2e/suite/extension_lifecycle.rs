@@ -28,10 +28,7 @@ async fn drop_extension_requires_cascade_with_managed_tables_then_reinstalls() -
             .get(0);
         assert!(present, "koldstore must be installed before DROP");
 
-        let without_cascade = db
-            .client
-            .batch_execute("DROP EXTENSION koldstore;")
-            .await;
+        let without_cascade = db.client.batch_execute("DROP EXTENSION koldstore;").await;
         match without_cascade {
             Ok(()) => bail!(
                 "DROP EXTENSION without CASCADE must fail while managed tables/dependents exist"
@@ -83,7 +80,10 @@ async fn drop_extension_requires_cascade_with_managed_tables_then_reinstalls() -
             .await
             .context("call koldstore_version after reinstall")?
             .get(0);
-        assert!(!version.is_empty(), "reinstalled extension must report a version");
+        assert!(
+            !version.is_empty(),
+            "reinstalled extension must report a version"
+        );
 
         // CASCADE drops catalog storage rows; re-register and manage a fresh table.
         let root = db.storage_root.display().to_string();
