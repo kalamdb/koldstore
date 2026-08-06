@@ -29,12 +29,14 @@ async fn cancel_pending_flush_job_marks_cancelled() -> Result<()> {
         let job_id = db
             .client
             .query_one(
-                "SELECT koldstore.enqueue_flush_job($1::text::regclass)::text",
+                "SELECT koldstore.enqueue_flush_job($1::text::regclass, true)::text",
                 &[&table.relation],
             )
             .await
             .context("enqueue_flush_job")?
-            .get::<_, String>(0);
+            .get::<_, Option<String>>(0)
+            .filter(|value| !value.is_empty() && value != "null")
+            .context("enqueue_flush_job returned NULL")?;
         assert!(!job_id.is_empty());
 
         let cancelled = db
@@ -141,7 +143,7 @@ async fn drop_table_cancels_jobs_and_deletes_cold_objects() -> Result<()> {
             .await
             .ok();
 
-        let _ = db.flush_table(&table.relation).await?;
+        let _ = db.flush_table_with_force(&table.relation, true).await?;
 
         let prefix = {
             let parts: Vec<&str> = table.relation.split('.').collect();

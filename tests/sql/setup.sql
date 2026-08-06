@@ -28,7 +28,9 @@ SET koldstore.flush_execution = 'inline';
 
 -- Fail-fast apply lock: retry like e2e `flush_table_job_id` so background
 -- mirror apply briefly holding the lock does not flake ON_ERROR_STOP cases.
-CREATE OR REPLACE FUNCTION sqlreg.flush_table(rel regclass, force boolean DEFAULT false)
+-- Default force=true so policy no-ops (empty / under hot_row_limit / undersized
+-- excess) still return a job UUID for stable expected outputs.
+CREATE OR REPLACE FUNCTION sqlreg.flush_table(rel regclass, force boolean DEFAULT true)
 RETURNS uuid
 LANGUAGE plpgsql
 AS $$

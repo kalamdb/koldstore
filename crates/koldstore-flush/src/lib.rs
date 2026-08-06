@@ -33,7 +33,7 @@ pub use ops::{
     plan_select_pending_flush_candidate, FlushJobEnqueuePlan, FlushRequest, KoldstoreExecPlan,
     MirrorFlushSelectionPlan, OpsCommand, OpsError,
 };
-pub use policy::policy_flush_row_count;
+pub use policy::{policy_flush_row_count, selected_rows_meet_file_minimum};
 pub use retention::{plan_purge_old_jobs, JobRetentionError, DEFAULT_PURGE_BATCH_LIMIT};
 pub use scheduler::{
     plan_database_has_auto_flush_tables, plan_older_than_eligible_mirror_rows,

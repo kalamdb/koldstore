@@ -18,6 +18,8 @@ SIDE="${KOLDSTORE_STORAGE_SIDE:-}"
 UPDATE_RESULTS=0
 RENDER_ONLY=0
 ALL_SIDES=0
+# Optional directory for per-side JSON without RESULTS.md publication gates (CI).
+WRITE_JSON_DIR="${KOLDSTORE_STORAGE_WRITE_JSON_DIR:-}"
 RESULTS_DIR="${KOLDSTORE_STORAGE_RESULTS_DIR:-${ROOT_DIR}/docs/benchmarks/.storage-results}"
 RESULTS_MD="${KOLDSTORE_STORAGE_RESULTS_MD:-${ROOT_DIR}/docs/benchmarks/RESULTS.md}"
 CURRENT_REPETITION=1
@@ -57,6 +59,8 @@ Options:
   --all-sides       Run both sides per repetition (fresh server per side)
   --update-results  Merge JSON into docs/benchmarks/RESULTS.md and print it
                       (clean tree + multiple-of-6 repetitions required)
+  --write-json-dir DIR  Write <side>.json under DIR after each side (no
+                      RESULTS.md gates; for CI artifact upload)
   --render-only     Re-render RESULTS.md from existing run-NN/*.json under
                       docs/benchmarks/.storage-results (no benchmark). Implies
                       --update-results output path; still prints to console.
@@ -122,6 +126,10 @@ while [[ $# -gt 0 ]]; do
     --update-results)
       UPDATE_RESULTS=1
       shift
+      ;;
+    --write-json-dir)
+      WRITE_JSON_DIR="${2:?missing value for --write-json-dir}"
+      shift 2
       ;;
     --render-only)
       RENDER_ONLY=1
@@ -252,7 +260,13 @@ run_isolated_side() {
   prepare_fresh_server "${skip_install}"
   EXTENSION_INSTALLED=1
   echo "running repetition=${CURRENT_REPETITION}/${REPETITIONS} side=${side} (rows=${ROWS}, hot_limit=${HOT_LIMIT}, dml_sample=${DML_SAMPLE}, insert_batch_rows=${INSERT_BATCH_ROWS}, warmup_rows=${WARMUP_ROWS:-auto})"
-  if [[ "${UPDATE_RESULTS}" == "1" ]]; then
+  if [[ -n "${WRITE_JSON_DIR}" ]]; then
+    mkdir -p "${WRITE_JSON_DIR}"
+    # nextest may run with a different cwd; keep the JSON path absolute so CI
+    # upload-artifact can find it from the repo root.
+    WRITE_JSON_DIR="$(cd "${WRITE_JSON_DIR}" && pwd)"
+    results_json="${WRITE_JSON_DIR}/${side}.json"
+  elif [[ "${UPDATE_RESULTS}" == "1" ]]; then
     local repetition_dir
     repetition_dir="${RESULTS_DIR}/run-$(printf '%02d' "${CURRENT_REPETITION}")"
     mkdir -p "${repetition_dir}"

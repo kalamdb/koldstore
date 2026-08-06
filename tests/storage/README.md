@@ -7,6 +7,13 @@ This package is excluded from the default workspace `cargo nextest` run (same as
 `e2e` / `examples`) because it needs a prepared pgrx PostgreSQL. Use
 `scripts/run-storage-comparison.sh`.
 
+**CI:** GitHub Actions runs a dedicated PG 16 job matrix with **10k rows** /
+`hot_limit=2000`, sides `pg` and `async` **in parallel on separate runners**
+(each wipes its own `~/.pgrx`). A follow-up job compares JSON artifacts against
+the previous successful CI run on the base branch and posts one sticky PR
+comment (markdown table) plus an HTML report artifact. Local `--all-sides`
+remains **sequential** on one machine.
+
 Schema: [`schema.sql`](schema.sql)
 
 Order of measurement (isolated `--side` / `--all-sides`):

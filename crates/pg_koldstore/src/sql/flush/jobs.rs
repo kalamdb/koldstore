@@ -55,6 +55,28 @@ pub(crate) fn enqueue_or_lookup_flush_job(
     Ok(job_id)
 }
 
+/// Enqueues only when flush work is due (or an active job already exists).
+///
+/// Returns `None` when policy selection is empty — including when excess is
+/// positive but below `max_rows_per_file` — so undersized flushes are never
+/// queued. `force = true` always enqueues.
+pub(crate) fn enqueue_flush_job_if_due(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+) -> crate::error::PgResult<Option<pgrx::Uuid>> {
+    if let Some(existing) = lookup_active_flush_job_uuid(table_oid)? {
+        return Ok(Some(existing));
+    }
+    if !force {
+        let estimate = super::spi::flush_progress_total_estimate(table_oid, false)
+            .map_err(crate::error::PgAdapterError::from_display)?;
+        if estimate <= 0 {
+            return Ok(None);
+        }
+    }
+    Ok(Some(enqueue_or_lookup_flush_job(table_oid, force)?))
+}
+
 /// Looks up a committed active flush job without inserting.
 ///
 /// Used when the session table lock is held by another backend so enqueue must

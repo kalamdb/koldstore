@@ -7,8 +7,8 @@
 use koldstore_common::{ColumnRef, QualifiedTableName, SqlStatement};
 use koldstore_parquet::{
     extract_packed_segment_metadata, CleanColdRecordBatchBuilder, ColdMetadataColumn,
-    ColdRecordBatch, FlushMirrorRow, PgColumn, SegmentSplitPolicy, StreamingParquetSegmentWriter,
-    WriterOptions,
+    ColdRecordBatch, FlushMirrorRow, PgColumn, SegmentSplitPolicy, SortingColumnSpec,
+    StreamingParquetSegmentWriter, WriterOptions,
 };
 
 use crate::write::FlushWriteChunk;
@@ -46,6 +46,8 @@ pub struct StreamEncodeInput {
     pub mirror_ops: Option<Vec<i16>>,
     /// Collects the bounded flush selection and sorts by mirror `order_key`, then PK.
     pub sort_by_order_key: bool,
+    /// Application column name for [`Self::sort_by_order_key`] (Parquet sort metadata).
+    pub order_key_column: Option<String>,
 }
 
 struct SegmentBuilder {
@@ -60,6 +62,26 @@ struct SegmentBuilder {
 
 impl SegmentBuilder {
     fn new(input: &StreamEncodeInput) -> Self {
+        let mut sorting_columns = Vec::new();
+        if input.sort_by_order_key {
+            if let Some(order_key) = input.order_key_column.as_deref() {
+                sorting_columns.push(SortingColumnSpec::ascending(order_key));
+            }
+            for pk in &input.primary_key_columns {
+                if input
+                    .order_key_column
+                    .as_deref()
+                    .is_none_or(|order_key| order_key != pk)
+                {
+                    sorting_columns.push(SortingColumnSpec::ascending(pk));
+                }
+            }
+        }
+        // Mirror fetch / encode always writes ascending `seq` (heap-like insert
+        // order for insert-only tables). Declare it natively so readers can trust
+        // Parquet row-group sort metadata instead of inventing a custom order.
+        sorting_columns.push(SortingColumnSpec::ascending(ColdMetadataColumn::Seq.name()));
+
         let options = WriterOptions {
             compression: input.compression.clone(),
             row_group_size: input.row_group_size.max(1),
@@ -76,7 +98,8 @@ impl SegmentBuilder {
                         .map(|column| column.name.as_str()),
                 ),
         )
-        .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str));
+        .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str))
+        .with_sorting_columns(sorting_columns);
         Self {
             options,
             split_policy: SegmentSplitPolicy::new(
@@ -361,6 +384,7 @@ mod tests {
             row_group_size: 1,
             mirror_ops: None,
             sort_by_order_key: false,
+            order_key_column: None,
         }
     }
 

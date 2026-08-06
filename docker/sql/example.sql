@@ -13,6 +13,9 @@
 -- Notes:
 --   * MinIO is reached at http://minio:9000 from inside the compose network.
 --   * koldstore_hot_row_limit = 1000 keeps at most 1000 mirror rows hot before flushing oldest rows by seq.
+--   * Auto-flush waits until selected excess >= koldstore_max_rows_per_file (no undersized segments).
+--   * Prefer min_flush_rows aligned with max_rows_per_file in production; min_flush_rows=1 alone
+--     still will not enqueue until at least one full max_rows_per_file of excess exists.
 
 \set ON_ERROR_STOP on
 

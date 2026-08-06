@@ -2,8 +2,8 @@ use koldstore_common::{ColumnId, ColumnRef};
 use koldstore_parquet::{
     extract_packed_segment_metadata, plan_clean_cold_record, record_batch_from_clean_cold_records,
     ColumnStats, FooterSummary, ParquetSegmentWriter, PgColumn, PgType, RowGroupStats,
-    SegmentFooterMetadata, SegmentMetadataInput, SegmentSplitPolicy, StreamingParquetSegmentWriter,
-    WriterOptions,
+    SegmentFooterMetadata, SegmentMetadataInput, SegmentSplitPolicy, SortingColumnSpec,
+    StreamingParquetSegmentWriter, WriterOptions,
 };
 use koldstore_sortkey::{decode_sort_key, SortKeyType, SortKeyValue};
 use std::sync::Arc;
@@ -125,9 +125,7 @@ fn writer_plan_bounds_streaming_row_groups_by_configured_row_group_size() {
     let writer = ParquetSegmentWriter::new(WriterOptions {
         compression: "zstd".to_string(),
         row_group_size: 2,
-        statistics_columns: Vec::new(),
-        bloom_filter_columns: Vec::new(),
-        bloom_filter_false_positive_rate: Some(0.01),
+        ..WriterOptions::default()
     });
 
     let plan = writer.plan_streaming_row_groups(5);
@@ -532,6 +530,61 @@ fn clean_cold_record_batch_builder_preserves_payloads_and_metadata_types() {
         .unwrap();
     assert!(!deleted.value(0));
     assert!(deleted.value(1));
+}
+
+#[test]
+fn writer_declares_native_parquet_sorting_columns_in_row_group_metadata() {
+    use parquet::file::metadata::SortingColumn;
+
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions::default()
+            .with_statistics_columns(["id", "seq"])
+            .with_sorting_columns(vec![
+                SortingColumnSpec::ascending("id"),
+                SortingColumnSpec::ascending("seq"),
+            ]),
+    );
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
+        Field::new("deleted", DataType::Boolean, false),
+        Field::new("schema_version", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(Int64Array::from(vec![1, 2, 3])),
+            Arc::new(Int64Array::from(vec![10, 20, 30])),
+            Arc::new(arrow_array::Int16Array::from(vec![1, 1, 1])),
+            Arc::new(BooleanArray::from(vec![false, false, false])),
+            Arc::new(arrow_array::UInt32Array::from(vec![1, 1, 1])),
+        ],
+    )
+    .unwrap();
+
+    let metadata = writer
+        .write_record_batches(Vec::new(), schema, vec![batch])
+        .unwrap();
+    let sorting = metadata
+        .row_group(0)
+        .sorting_columns()
+        .expect("sorting_columns must be declared in the Parquet footer");
+    assert_eq!(
+        sorting,
+        &vec![
+            SortingColumn {
+                column_idx: 0,
+                descending: false,
+                nulls_first: false,
+            },
+            SortingColumn {
+                column_idx: 1,
+                descending: false,
+                nulls_first: false,
+            },
+        ]
+    );
 }
 
 #[test]

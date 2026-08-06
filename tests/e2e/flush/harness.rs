@@ -471,7 +471,8 @@ pub async fn connect_workers(db: &TestDb, count: usize) -> Result<Vec<Client>> {
 pub async fn flush_table_on(client: &Client, relation: &str) -> Result<i64> {
     let job_id = crate::common::flush_table_job_id(client, relation, false)
         .await
-        .with_context(|| format!("flush_table {relation}"))?;
+        .with_context(|| format!("flush_table {relation}"))?
+        .with_context(|| format!("expected flush job for {relation}"))?;
     crate::common::wait_for_flush_job_terminal(client, &job_id)
         .await
         .with_context(|| format!("wait for flush_table {relation} job {job_id}"))

@@ -19,12 +19,37 @@ use parquet::{
     arrow::ArrowWriter,
     basic::{Compression, ZstdLevel},
     errors::ParquetError,
-    file::metadata::{PageIndexPolicy, ParquetMetaDataReader},
+    file::metadata::{PageIndexPolicy, ParquetMetaDataReader, SortingColumn},
     file::properties::{EnabledStatistics, WriterProperties},
     file::reader::{ChunkReader, Length},
     schema::types::ColumnPath,
 };
 use serde_json::json;
+
+/// Declared Parquet row-group sort key (metadata only; rows must already be sorted).
+///
+/// Mapped to native [`SortingColumn`] leaf indexes when the Arrow schema is known.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortingColumnSpec {
+    /// Arrow / Parquet leaf column name.
+    pub column: String,
+    /// When true, values are sorted descending within each row group.
+    pub descending: bool,
+    /// When true, nulls sort before non-null values.
+    pub nulls_first: bool,
+}
+
+impl SortingColumnSpec {
+    /// Ascending sort with nulls last (matches typical PostgreSQL `ASC NULLS LAST`).
+    #[must_use]
+    pub fn ascending(column: impl Into<String>) -> Self {
+        Self {
+            column: column.into(),
+            descending: false,
+            nulls_first: false,
+        }
+    }
+}
 
 /// Writer options.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +59,8 @@ pub struct WriterOptions {
     pub statistics_columns: Vec<String>,
     pub bloom_filter_columns: Vec<String>,
     pub bloom_filter_false_positive_rate: Option<f64>,
+    /// Native Parquet `sorting_columns` declared in row-group metadata.
+    pub sorting_columns: Vec<SortingColumnSpec>,
 }
 
 /// Independent file-packing limits applied after flush eligibility is resolved.
@@ -120,10 +147,10 @@ impl StreamingParquetSegmentWriter {
         let output = SharedWriteBuffer::default();
         let writer = ArrowWriter::try_new(
             output.clone(),
-            schema,
+            Arc::clone(&schema),
             Some(
                 options
-                    .try_native_writer_properties()
+                    .try_native_writer_properties_for_schema(schema.as_ref())
                     .map_err(ParquetError::General)?,
             ),
         )?;
@@ -447,6 +474,7 @@ impl Default for WriterOptions {
             statistics_columns: Vec::new(),
             bloom_filter_columns: Vec::new(),
             bloom_filter_false_positive_rate: Some(0.01),
+            sorting_columns: Vec::new(),
         }
     }
 }
@@ -474,20 +502,52 @@ impl WriterOptions {
         self
     }
 
-    /// Builds native Parquet writer properties for stats, bloom metadata, and compression.
+    /// Declares native Parquet row-group `sorting_columns` (rows must already match).
+    #[must_use]
+    pub fn with_sorting_columns(mut self, columns: Vec<SortingColumnSpec>) -> Self {
+        self.sorting_columns = columns;
+        self
+    }
+
+    /// Builds native Parquet writer properties without resolving sort column indexes.
     ///
-    /// Bloom filters use parquet 59's `set_column_bloom_filter_max_ndv`, sized to
-    /// the configured row-group row count (library-recommended heuristic).
+    /// Prefer [`Self::try_native_writer_properties_for_schema`] when writing so
+    /// [`SortingColumnSpec`] names become footer `sorting_columns`.
     ///
     /// # Errors
     ///
     /// Returns an error when the configured compression codec is unsupported.
     pub fn try_native_writer_properties(&self) -> Result<WriterProperties, String> {
+        self.try_native_writer_properties_with_sorting(None)
+    }
+
+    /// Builds native Parquet writer properties, resolving sort specs against `schema`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when compression is unsupported or a sort column is missing.
+    pub fn try_native_writer_properties_for_schema(
+        &self,
+        schema: &arrow_schema::Schema,
+    ) -> Result<WriterProperties, String> {
+        let sorting = if self.sorting_columns.is_empty() {
+            None
+        } else {
+            Some(resolve_sorting_columns(schema, &self.sorting_columns)?)
+        };
+        self.try_native_writer_properties_with_sorting(sorting)
+    }
+
+    fn try_native_writer_properties_with_sorting(
+        &self,
+        sorting_columns: Option<Vec<SortingColumn>>,
+    ) -> Result<WriterProperties, String> {
         let row_group_size = self.row_group_size.max(1);
         let mut builder = WriterProperties::builder()
             .set_compression(parquet_compression(&self.compression)?)
             .set_max_row_group_row_count(Some(row_group_size))
-            .set_statistics_enabled(EnabledStatistics::None);
+            .set_statistics_enabled(EnabledStatistics::None)
+            .set_sorting_columns(sorting_columns);
         for column in &self.statistics_columns {
             builder = builder.set_column_statistics_enabled(
                 ColumnPath::from(column.as_str()),
@@ -505,6 +565,35 @@ impl WriterOptions {
         }
         Ok(builder.build())
     }
+}
+
+/// Maps sort specs to Parquet leaf indexes for a flat clean-schema Arrow schema.
+fn resolve_sorting_columns(
+    schema: &arrow_schema::Schema,
+    specs: &[SortingColumnSpec],
+) -> Result<Vec<SortingColumn>, String> {
+    specs
+        .iter()
+        .map(|spec| {
+            let column_idx = schema.index_of(&spec.column).map_err(|_| {
+                format!(
+                    "parquet sorting column `{}` is missing from the Arrow schema",
+                    spec.column
+                )
+            })?;
+            let column_idx = i32::try_from(column_idx).map_err(|_| {
+                format!(
+                    "parquet sorting column `{}` index {column_idx} exceeds i32",
+                    spec.column
+                )
+            })?;
+            Ok(SortingColumn {
+                column_idx,
+                descending: spec.descending,
+                nulls_first: spec.nulls_first,
+            })
+        })
+        .collect()
 }
 
 /// Segment writer.
@@ -646,10 +735,10 @@ impl ParquetSegmentWriter {
     {
         let mut writer = ArrowWriter::try_new(
             writer,
-            schema,
+            Arc::clone(&schema),
             Some(
                 self.options
-                    .try_native_writer_properties()
+                    .try_native_writer_properties_for_schema(schema.as_ref())
                     .map_err(ParquetError::General)?,
             ),
         )?;

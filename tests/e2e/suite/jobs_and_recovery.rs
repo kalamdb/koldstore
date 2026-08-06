@@ -1,6 +1,6 @@
 use crate::common;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 #[tokio::test]
 async fn jobs_are_durable_idempotent_and_use_active_indexes_on_pgrx() -> Result<()> {
@@ -212,7 +212,9 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
         let mirror_rows = common::row_count(&db.client, &mirror_relation).await?;
         assert_eq!(mirror_rows, base_rows);
 
-        let flush_job_id = common::flush_table_job_id(&db.client, &table.relation, false).await?;
+        let flush_job_id = common::flush_table_job_id(&db.client, &table.relation, false)
+            .await?
+            .context("flush_table must return a uuid job id")?;
         assert_eq!(
             flush_job_id.len(),
             36,

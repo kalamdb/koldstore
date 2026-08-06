@@ -64,7 +64,9 @@ async fn queue_flush_table_completes_via_executor_and_prunes_hot() -> Result<()>
             .await?;
         common::fence_async_mirror(&db.client).await?;
 
-        let job_id = common::flush_table_job_id(&db.client, &table.relation, true).await?;
+        let job_id = common::flush_table_job_id(&db.client, &table.relation, true)
+            .await?
+            .context("force flush must return a job id")?;
         // Executor should appear briefly (may finish before we observe it under load).
         let _ = common::wait_for_flush_executor_pids(&db.client, Duration::from_secs(5)).await;
         let flushed = common::wait_for_flush_job_terminal(&db.client, &job_id).await?;
@@ -297,12 +299,16 @@ async fn queue_dual_flush_returns_same_active_job() -> Result<()> {
         let coordinator = common::connect_peer(&db).await?;
         common::barrier_lock(&coordinator).await?;
 
-        let first = common::flush_table_job_id(&db.client, &table.relation, true).await?;
+        let first = common::flush_table_job_id(&db.client, &table.relation, true)
+            .await?
+            .context("first force flush must return a job id")?;
         wait_until_barrier_waiter(&coordinator, || false)
             .await
             .context("queue executor should park at after_select_rows")?;
 
-        let second = common::flush_table_job_id(&db.client, &table.relation, true).await?;
+        let second = common::flush_table_job_id(&db.client, &table.relation, true)
+            .await?
+            .context("busy queue flush must return the active job id")?;
         anyhow::ensure!(
             first == second,
             "busy queue flush must return the active job id ({first} vs {second})"

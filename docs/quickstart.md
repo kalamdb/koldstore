@@ -182,10 +182,11 @@ SELECT
 
 ## 5. Flush to cold
 
-`koldstore.flush_table` evaluates the configured flush policy, runs the flush
-inline, and returns the flush job id. With `hot_row_limit => 1000` and 1012
-tracked keys, only the 12 oldest mirror entries move to cold storage; the
-newest 1000 keys stay hot.
+`koldstore.flush_table` evaluates the configured flush policy, enqueues a durable
+flush job (or reuses one already active), starts a queue executor, and returns
+the job UUID immediately. With `hot_row_limit => 1000` and 1012 tracked keys,
+only the 12 oldest mirror entries move to cold storage; the newest 1000 keys
+stay hot.
 
 ```sql
 SELECT koldstore.flush_table(table_name => 'app.messages') AS flush_job_id;
@@ -197,16 +198,18 @@ SELECT koldstore.flush_table(table_name => 'app.messages') AS flush_job_id;
  e30eb374-a9db-4ff1-97d3-72f8511dfc60
 ```
 
+Poll the job until it completes (queue mode does not wait inside `flush_table`):
+
 ```sql
-SELECT rows_flushed
+SELECT status, rows_flushed
 FROM koldstore.jobs
 WHERE id = 'e30eb374-a9db-4ff1-97d3-72f8511dfc60'::uuid;
 ```
 
 ```text
- rows_flushed
---------------
-           12
+ status    | rows_flushed
+-----------+--------------
+ completed |           12
 ```
 
 The application table still returns all rows through `KoldMergeScan`:

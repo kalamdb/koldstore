@@ -287,8 +287,11 @@ async fn manage_auto_flush(
     storage: &str,
     auto_flush: bool,
 ) -> Result<()> {
-    // Use the default max_rows_per_file floor (1000) so the background worker
-    // can flush without inheriting a session-only min_max_rows_per_file SET.
+    // Keep max_rows_per_file small enough that a 10-row insert over hot_row_limit=5
+    // is eligible (selected excess must be >= max_rows_per_file).
+    client
+        .batch_execute("SET koldstore.min_max_rows_per_file = 1;")
+        .await?;
     client
         .execute(
             r#"
@@ -297,7 +300,7 @@ async fn manage_auto_flush(
               storage => $2,
               hot_row_limit => 5,
               min_flush_rows => 1,
-              max_rows_per_file => 1000,
+              max_rows_per_file => 5,
               auto_flush => $3
             )
             "#,

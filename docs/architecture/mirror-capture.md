@@ -80,7 +80,9 @@ active managed table still depends on it.
   is the strong consistency API.
 - Automatic flush is optional (`auto_flush`). Latency-sensitive change-feed
   consumers often manage tables with `auto_flush => false` and call
-  `flush_table` deliberately so finalize windows are predictable.
+  `flush_table` deliberately so finalize windows are predictable. Auto-flush
+  enqueues durable jobs on KoldStore's check interval; it is not PostgreSQL
+  autovacuum.
 
 ## Flush concurrency (apply stays live during Parquet)
 

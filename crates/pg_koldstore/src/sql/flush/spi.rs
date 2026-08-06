@@ -54,9 +54,15 @@ pub(crate) fn resolve_flush_stats(
             FlushPolicy::OlderThan {
                 age,
                 min_flush_rows,
+                max_rows_per_file,
                 max_rows_per_flush,
-                ..
-            } => older_than_cutoff(table_oid, *age, *min_flush_rows, *max_rows_per_flush)?,
+            } => older_than_cutoff(
+                table_oid,
+                *age,
+                *min_flush_rows,
+                *max_rows_per_file,
+                *max_rows_per_flush,
+            )?,
             FlushPolicy::Filter { .. } => {
                 return Err("filter flush policy is not supported yet".into())
             }
@@ -105,6 +111,7 @@ fn older_than_cutoff(
     table_oid: pgrx::pg_sys::Oid,
     age: koldstore_common::MoveAfter,
     min_flush_rows: u64,
+    max_rows_per_file: u64,
     max_rows_per_flush: u64,
 ) -> Result<Option<(i64, i64)>, String> {
     use pgrx::datum::DatumWithOid;
@@ -141,6 +148,9 @@ fn older_than_cutoff(
     })
     .map_err(|error| error.to_string())?;
     if count < min_flush_rows as i64 {
+        return Ok(None);
+    }
+    if !koldstore_flush::selected_rows_meet_file_minimum(count.max(0) as u64, max_rows_per_file) {
         return Ok(None);
     }
     Ok(max_seq.map(|seq| (count, seq)))
@@ -274,6 +284,9 @@ pub(super) struct FlushSegmentWriterIdentity {
     pub job_id: uuid::Uuid,
     pub attempt_token: uuid::Uuid,
     pub pass_id: uuid::Uuid,
+    /// `cold_segment_order_index.sort_order_id` that matches Parquet physical sort,
+    /// or `0` when segments are only seq-sorted (default flush).
+    pub physically_sorted_sort_order_id: i32,
 }
 
 /// Catalogs every segment written by one `flush_table` call.
@@ -420,6 +433,7 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.job_id)),
             DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.attempt_token)),
             DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.pass_id)),
+            DatumWithOid::from(writer.physically_sorted_sort_order_id),
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -838,7 +852,20 @@ pub(super) fn mirror_catchup_watermark(
     }
 }
 
-/// Row count for the flush progress bar at claim time (mirror backlog size).
-pub(super) fn mirror_catchup_row_estimate(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
-    Ok(mirror_flush_stats(table_oid)?.row_count.max(0))
+/// Row count for the flush progress bar at claim time.
+///
+/// Policy flushes use the selected flush count (not the full mirror backlog).
+/// Force / no-policy flushes use the O(1) pending mirror counter.
+pub(super) fn flush_progress_total_estimate(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+) -> Result<i64, String> {
+    let pending = mirror_pending_row_count(table_oid)?.max(0);
+    if force {
+        return Ok(pending);
+    }
+    match active_flush_policy(table_oid)? {
+        Some(policy) => Ok(policy_flush_row_count(pending, &policy)),
+        None => Ok(pending),
+    }
 }

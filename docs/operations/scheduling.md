@@ -1,30 +1,38 @@
 # Scheduling flushes
 
-For common shared managed tables, configure scheduling directly:
+KoldStore moves excess hot rows to cold Parquet through durable flush jobs in
+`koldstore.jobs`. Production default is `koldstore.flush_execution = queue`:
+something enqueues a job, then a one-shot flush executor claims and runs it.
+Callers do not wait for Parquet encode, upload, or prune.
 
-```sql
-ALTER TABLE events SET (
-  koldstore_enabled = true,
-  koldstore_storage = 'cold_s3',
-  koldstore_move_after = '7 days',
-  koldstore_min_flush_rows = 1000,
-  koldstore_max_rows_per_flush = 10000
-);
-```
+You choose **when a job is enqueued**. Execution is always policy-based
+(`hot_row_limit` / `min_flush_rows` / `max_rows_per_file` from manage-time
+options). Starting a job and selecting rows are the same path —
+`koldstore.flush_table` is the public “enqueue and start” entry point.
 
-Age scheduling uses a bounded probe on the indexed mirror `seq`, never an
-application-table scan. Row age begins when WAL is applied to the mirror.
-Updating a row gives it a newer sequence and restarts inactivity. `seq`
-encodes age for flush policy, not a public commit-order cursor.
+## How auto-flush decides to enqueue
 
-KoldStore includes a built-in flush scheduler on the per-database background
-worker (the same process that applies async mirror WAL). On each
-`koldstore.flush_check_interval_seconds` tick it:
+This is **not** PostgreSQL autovacuum.
+
+| | Autovacuum | KoldStore auto-flush |
+|---|---|---|
+| Trigger | Dead tuples, freeze horizons, wraparound risk | Mirror / hot-row policy on managed tables |
+| Cadence | Autovacuum launcher + per-table thresholds | `koldstore.flush_check_interval_seconds` on the database worker |
+| Work | VACUUM / ANALYZE heap | Enqueue a flush job → Parquet + prune |
+
+Conceptually both are background maintenance when a threshold is crossed, but
+they use different metrics and workers. Autovacuum never enqueues KoldStore
+flush jobs, and KoldStore does not hook the autovacuum launcher.
+
+On each `flush_check_interval_seconds` tick the database worker:
 
 1. Applies available async mirror WAL first (when an async slot exists)
 2. Evaluates active managed tables with `auto_flush` enabled
-3. When `hot_row_limit` / `min_flush_rows` say a flush is needed, runs one
-   `flush_table` (which ensures/claims the job inline)
+3. When `hot_row_limit` / `min_flush_rows` say a flush is due **and** the
+   selected row count is at least `max_rows_per_file`, enqueues at most one
+   flush job and spawns flush executors up to
+   `koldstore.max_parallel_flush_jobs`. Undersized selections (for example 450
+   excess with `max_rows_per_file = 1000`) are skipped — no job row is created.
 
 ## Built-in scheduler
 
@@ -117,15 +125,37 @@ SELECT koldstore.manage_table(
 SELECT koldstore.set_table_auto_flush('app.messages'::regclass, false);
 ```
 
-`flush_table` / `enqueue_flush_job` ignore `auto_flush` — opt-out is
-scheduler-only.
+`flush_table` ignores `auto_flush` — opt-out is scheduler-only.
+
+## Manual start (queue job)
+
+```sql
+SELECT koldstore.flush_table(table_name => 'app.messages') AS flush_job_id;
+```
+
+With `flush_execution = queue` (default):
+
+1. Inserts a pending flush job if none is already active for the table, or
+   returns the existing active job UUID
+2. Spawns a flush executor when capacity allows
+3. Returns the job UUID immediately — poll `koldstore.jobs` /
+   `koldstore.list_jobs` for progress
+
+Returns `NULL` when nothing is due (including when excess is below
+`max_rows_per_file`). `enqueue_flush_job` inserts or returns the same durable
+job UUID but does **not** spawn executors; prefer `flush_table` when you want
+work to start.
+
+Row selection always follows the table flush policy (oldest excess by mirror
+`seq`). Policy-aware flushes wait until they can fill at least one
+`max_rows_per_file` segment.
 
 ## pg_cron fallback
 
 Use [pg_cron](https://github.com/citusdata/pg_cron) for `auto_flush => false`
-tables, or when the built-in worker is unavailable (no preload and no session
-ensure yet). Policy-aware flushes are safe to run often: when nothing is
-eligible, the job completes with `rows_flushed = 0`.
+tables, or when you want wall-clock schedules (for example every five minutes)
+instead of the built-in check interval. Policy-aware flushes are safe to run
+often: when nothing is eligible, `flush_table` returns `NULL` and creates no job.
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_cron;

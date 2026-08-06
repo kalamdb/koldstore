@@ -322,7 +322,12 @@ impl TestDb {
     ///
     /// Returns an error when flush fails after apply-lock retries.
     pub async fn flush_table_with_force(&self, relation: &str, force: bool) -> Result<i64> {
-        let job_id = flush_table_job_id(&self.client, relation, force).await?;
+        // Policy flush decides from mirror pending counts; catch up WAL apply so
+        // recently committed DML is visible to the due check.
+        super::async_mirror::fence_async_mirror(&self.client).await?;
+        let Some(job_id) = flush_table_job_id(&self.client, relation, force).await? else {
+            return Ok(0);
+        };
         wait_for_flush_job_terminal(&self.client, &job_id).await
     }
 
@@ -362,9 +367,12 @@ impl TestDb {
 
     /// Enqueues a flush job (or returns the existing active job UUID as text).
     ///
+    /// Uses `force => true` so a pending job is created even when policy flush
+    /// would skip (no excess / undersized segment).
+    ///
     /// # Errors
     ///
-    /// Returns an error when the enqueue fails.
+    /// Returns an error when the enqueue fails or returns NULL.
     pub async fn insert_pending_flush_job(&self, relation: &str) -> Result<String> {
         let row = self
             .client
@@ -372,13 +380,16 @@ impl TestDb {
                 r#"
                 SELECT koldstore.enqueue_flush_job(
                   table_name => $1::text::regclass,
-                  force      => false
+                  force      => true
                 )::text
                 "#,
                 &[&relation],
             )
             .await?;
-        Ok(row.get(0))
+        let job_id: Option<String> = row.get(0);
+        job_id
+            .filter(|value| !value.is_empty() && value != "null")
+            .ok_or_else(|| anyhow::anyhow!("enqueue_flush_job returned NULL for {relation}"))
     }
 
     /// Opens an object-store client for this fixture's MinIO prefix.
@@ -679,11 +690,18 @@ pub async fn wait_for_flush_job_terminal(client: &Client, job_id: &str) -> Resul
 
 /// Runs `koldstore.flush_table` and returns the job id, retrying apply-lock busy.
 ///
+/// When `force` is false and the policy has no due work, returns `Ok(None)` —
+/// a no-op flush is success, not an error.
+///
 /// # Errors
 ///
 /// Returns an error when flush fails for a non-lock reason, or the lock stays
 /// busy across the retry budget.
-pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) -> Result<String> {
+pub async fn flush_table_job_id(
+    client: &Client,
+    relation: &str,
+    force: bool,
+) -> Result<Option<String>> {
     for attempt in 1..=40 {
         let result = if force {
             client
@@ -701,7 +719,17 @@ pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) ->
                 .await
         };
         match result {
-            Ok(row) => return Ok(row.get(0)),
+            Ok(row) => {
+                let job_id: Option<String> = row.get(0);
+                match job_id.filter(|value| !value.is_empty() && value != "null") {
+                    Some(job_id) => return Ok(Some(job_id)),
+                    None if !force => return Ok(None),
+                    None => anyhow::bail!(
+                        "flush_table returned NULL for {relation} (force=true); \
+                         expected force flush to enqueue work"
+                    ),
+                }
+            }
             Err(error) if is_flush_entry_lock_busy(&error) => {
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
             }
