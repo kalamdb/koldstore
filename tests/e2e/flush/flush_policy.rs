@@ -64,7 +64,8 @@ async fn undersized_excess_below_max_rows_per_file_does_not_enqueue() -> Result<
         common::fence_async_mirror(&db.client).await?;
         let job_id = common::flush_table_job_id(&db.client, &relation, false)
             .await
-            .context("flush after full-file excess")?;
+            .context("flush after full-file excess")?
+            .context("expected flush job after full-file excess")?;
         let row = db
             .client
             .query_one(

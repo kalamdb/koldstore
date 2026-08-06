@@ -238,6 +238,8 @@ fn flush_scheduler_tick_enqueues_and_flushes_when_over_hot_limit() {
         ))
         .expect("insert");
     }
+    // Excess is 5 rows; file floor must match or the undersized gate skips flush.
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -245,7 +247,7 @@ fn flush_scheduler_tick_enqueues_and_flushes_when_over_hot_limit() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => true
         )
@@ -288,6 +290,7 @@ fn flush_scheduler_skips_auto_flush_disabled_tables() {
         ))
         .expect("insert");
     }
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -295,7 +298,7 @@ fn flush_scheduler_skips_auto_flush_disabled_tables() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => false
         )
@@ -368,6 +371,7 @@ fn flush_scheduler_skips_table_with_recent_error_job() {
         ))
         .expect("insert");
     }
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -375,7 +379,7 @@ fn flush_scheduler_skips_table_with_recent_error_job() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => true
         )
@@ -432,6 +436,7 @@ fn flush_scheduler_retries_after_error_cooldown() {
         ))
         .expect("insert");
     }
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -439,7 +444,7 @@ fn flush_scheduler_retries_after_error_cooldown() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => true
         )
@@ -499,6 +504,7 @@ fn flush_scheduler_tick_processes_only_one_due_table() {
             ))
             .expect("insert");
         }
+        Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
         Spi::run(&format!(
             r#"
             SELECT koldstore.manage_table(
@@ -506,7 +512,7 @@ fn flush_scheduler_tick_processes_only_one_due_table() {
               storage => '{storage}',
               hot_row_limit => 5,
               min_flush_rows => 1,
-              max_rows_per_file => 1000,
+              max_rows_per_file => 5,
               migration_order_by => 'id',
               auto_flush => true
             )

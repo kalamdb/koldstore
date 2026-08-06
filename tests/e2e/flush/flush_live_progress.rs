@@ -29,7 +29,8 @@ async fn list_jobs_and_flush_progress_fields_are_populated() -> Result<()> {
 
         let job_id = common::flush_table_job_id(&db.client, &table.relation, false)
             .await
-            .context("flush_table")?;
+            .context("flush_table")?
+            .context("expected flush job id")?;
 
         let row = db
             .client

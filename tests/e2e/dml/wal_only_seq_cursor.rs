@@ -7,7 +7,7 @@
 use crate::common;
 use crate::flush::harness::connect_peer;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use koldstore_common::QualifiedTableName;
 use koldstore_merge::events;
 use std::collections::{BTreeMap, BTreeSet};
@@ -959,7 +959,9 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
                 ))
                 .await?;
             common::wait_for_async_mirror(&db.client).await?;
-            let flushed = common::flush_table_job_id(&db.client, &relation, true).await?;
+            let flushed = common::flush_table_job_id(&db.client, &relation, true)
+                .await?
+                .context("force flush must return a job id")?;
             assert!(!flushed.is_empty());
         }
 

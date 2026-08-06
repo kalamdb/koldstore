@@ -295,7 +295,7 @@ jobs:
 
       - name: Run storage comparison (${{ matrix.side }})
         run: |
-          mkdir -p target/storage-bench
+          mkdir -p ci-artifacts/storage-bench
           bash scripts/run-storage-comparison.sh \
             --side "${{ matrix.side }}" \
             --pg-version 16 \
@@ -303,7 +303,7 @@ jobs:
             --hot-limit 2000 \
             --dml-sample 1000 \
             --warmup-rows 0 \
-            --write-json-dir target/storage-bench
+            --write-json-dir ci-artifacts/storage-bench
         env:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
@@ -312,8 +312,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: storage-bench-${{ matrix.side }}
-          path: target/storage-bench/${{ matrix.side }}.json
-          if-no-files-found: warn
+          path: ci-artifacts/storage-bench/${{ matrix.side }}.json
+          if-no-files-found: error
 
   storage-report:
     name: Storage bench report

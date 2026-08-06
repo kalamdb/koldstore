@@ -325,7 +325,9 @@ impl TestDb {
         // Policy flush decides from mirror pending counts; catch up WAL apply so
         // recently committed DML is visible to the due check.
         super::async_mirror::fence_async_mirror(&self.client).await?;
-        let job_id = flush_table_job_id(&self.client, relation, force).await?;
+        let Some(job_id) = flush_table_job_id(&self.client, relation, force).await? else {
+            return Ok(0);
+        };
         wait_for_flush_job_terminal(&self.client, &job_id).await
     }
 
@@ -682,11 +684,18 @@ pub async fn wait_for_flush_job_terminal(client: &Client, job_id: &str) -> Resul
 
 /// Runs `koldstore.flush_table` and returns the job id, retrying apply-lock busy.
 ///
+/// When `force` is false and the policy has no due work, returns `Ok(None)` —
+/// a no-op flush is success, not an error.
+///
 /// # Errors
 ///
 /// Returns an error when flush fails for a non-lock reason, or the lock stays
 /// busy across the retry budget.
-pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) -> Result<String> {
+pub async fn flush_table_job_id(
+    client: &Client,
+    relation: &str,
+    force: bool,
+) -> Result<Option<String>> {
     for attempt in 1..=40 {
         let result = if force {
             client
@@ -707,10 +716,11 @@ pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) ->
             Ok(row) => {
                 let job_id: Option<String> = row.get(0);
                 match job_id.filter(|value| !value.is_empty() && value != "null") {
-                    Some(job_id) => return Ok(job_id),
+                    Some(job_id) => return Ok(Some(job_id)),
+                    None if !force => return Ok(None),
                     None => anyhow::bail!(
-                        "flush_table returned NULL for {relation} (force={force}); \
-                         no flush work due (excess below max_rows_per_file / min_flush_rows)"
+                        "flush_table returned NULL for {relation} (force=true); \
+                         expected force flush to enqueue work"
                     ),
                 }
             }
