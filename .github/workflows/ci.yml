@@ -199,7 +199,7 @@ jobs:
           if-no-files-found: warn
 
   pgrx-integration:
-    name: Examples + storage + SQL (PG ${{ matrix.pg }})
+    name: Examples + SQL (PG ${{ matrix.pg }})
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -220,8 +220,6 @@ jobs:
       KOLDSTORE_EXAMPLE_CLIENTS: "4"
       KOLDSTORE_EXAMPLE_SCOPES: "8"
       KOLDSTORE_EXAMPLE_TIMEOUT_SECS: "600"
-      KOLDSTORE_STORAGE_ROWS: "10000"
-      KOLDSTORE_STORAGE_HOT_LIMIT: "2000"
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.96.0
@@ -248,15 +246,209 @@ jobs:
         env:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
 
-      - name: Run storage comparison (baseline vs managed)
-        run: bash scripts/run-storage-comparison.sh --all-sides --pg-version "${PG_VER}"
-        env:
-          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
-
       - name: Run KoldStore SQL regression
         run: bash scripts/run-sql-regression.sh "${PG_VER}"
         env:
           KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+
+  # Dedicated PG16 storage bench: pg and async sides on separate runners so
+  # each can wipe its own ~/.pgrx without serializing. Report job compares
+  # against the previous successful CI artifacts and posts one sticky PR comment.
+  storage-bench:
+    name: "Storage bench (PG 16, ${{ matrix.side }})"
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # Skip when workflow_dispatch filtered to a non-16 major.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.pg_version != 'All' && inputs.pg_version != '16') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        side: [pg, async]
+    env:
+      PG_VER: "16"
+      KOLDSTORE_E2E_PGVERSION: "16"
+      KOLDSTORE_E2E_PGPORT: "28816"
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
+      KOLDSTORE_STORAGE_ROWS: "10000"
+      KOLDSTORE_STORAGE_HOT_LIMIT: "2000"
+      KOLDSTORE_STORAGE_DML_SAMPLE: "1000"
+      KOLDSTORE_STORAGE_WARMUP_ROWS: "0"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL 16 development packages
+        run: bash scripts/ci/install-pgdg-dev.sh 16
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL 16
+        run: cargo pgrx init --pg16 "${PGRX_PG_CONFIG}"
+
+      - name: Run storage comparison (${{ matrix.side }})
+        run: |
+          mkdir -p target/storage-bench
+          bash scripts/run-storage-comparison.sh \
+            --side "${{ matrix.side }}" \
+            --pg-version 16 \
+            --rows 10000 \
+            --hot-limit 2000 \
+            --dml-sample 1000 \
+            --warmup-rows 0 \
+            --write-json-dir target/storage-bench
+        env:
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+
+      - name: Upload storage-bench JSON
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: storage-bench-${{ matrix.side }}
+          path: target/storage-bench/${{ matrix.side }}.json
+          if-no-files-found: warn
+
+  storage-report:
+    name: Storage bench report
+    runs-on: ubuntu-latest
+    needs: storage-bench
+    if: ${{ always() && !cancelled() && needs.storage-bench.result != 'skipped' && !(github.event_name == 'workflow_dispatch' && inputs.pg_version != 'All' && inputs.pg_version != '16') }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download current storage-bench artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: storage-bench-*
+          path: current-storage-bench
+          merge-multiple: false
+
+      - name: Resolve base branch and download baseline artifacts
+        id: baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p baseline-storage-bench
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE_BRANCH="${{ github.base_ref }}"
+          else
+            BASE_BRANCH="${{ github.ref_name }}"
+          fi
+          echo "base_branch=${BASE_BRANCH}" >> "$GITHUB_OUTPUT"
+
+          # Latest successful CI run on the base branch that is not this run.
+          RUN_JSON="$(
+            gh run list \
+              --workflow ci.yml \
+              --branch "${BASE_BRANCH}" \
+              --status success \
+              --limit 20 \
+              --json databaseId,headSha \
+              --jq "map(select(.databaseId != ${{ github.run_id }})) | .[0] // {}"
+          )"
+          RUN_ID="$(python3 -c "import json,sys; d=json.loads(sys.argv[1] or '{}'); print(d.get('databaseId') or '')" "${RUN_JSON}")"
+          BASE_SHA="$(python3 -c "import json,sys; d=json.loads(sys.argv[1] or '{}'); print(d.get('headSha') or '')" "${RUN_JSON}")"
+          echo "base_run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+
+          if [[ -z "${RUN_ID}" ]]; then
+            echo "No prior successful CI run on ${BASE_BRANCH}; continuing without baseline."
+            exit 0
+          fi
+
+          echo "Downloading storage-bench artifacts from run ${RUN_ID} (${BASE_SHA})"
+          for side in pg async; do
+            if gh run download "${RUN_ID}" \
+                --name "storage-bench-${side}" \
+                --dir "baseline-storage-bench/${side}" 2>/dev/null; then
+              echo "downloaded storage-bench-${side}"
+            else
+              echo "baseline artifact storage-bench-${side} missing (first run after this feature)"
+            fi
+          done
+
+      - name: Locate JSON inputs
+        id: paths
+        run: |
+          set -euo pipefail
+          find current-storage-bench baseline-storage-bench -type f -name '*.json' -print || true
+
+          find_json() {
+            local root="$1"
+            local side="$2"
+            local hit
+            hit="$(find "${root}" -type f \( -path "*/storage-bench-${side}/*" -o -path "*/${side}/*" \) -name "${side}.json" 2>/dev/null | head -n 1 || true)"
+            if [[ -z "${hit}" ]]; then
+              hit="$(find "${root}" -type f -name "${side}.json" 2>/dev/null | head -n 1 || true)"
+            fi
+            echo "${hit}"
+          }
+
+          CURRENT_PG="$(find_json current-storage-bench pg)"
+          CURRENT_ASYNC="$(find_json current-storage-bench async)"
+          BASE_PG="$(find_json baseline-storage-bench pg)"
+          BASE_ASYNC="$(find_json baseline-storage-bench async)"
+
+          echo "current_pg=${CURRENT_PG}" >> "$GITHUB_OUTPUT"
+          echo "current_async=${CURRENT_ASYNC}" >> "$GITHUB_OUTPUT"
+          echo "base_pg=${BASE_PG}" >> "$GITHUB_OUTPUT"
+          echo "base_async=${BASE_ASYNC}" >> "$GITHUB_OUTPUT"
+
+          if [[ -z "${CURRENT_PG}" || -z "${CURRENT_ASYNC}" ]]; then
+            echo "::error::Missing current storage-bench JSON (pg=${CURRENT_PG:-none} async=${CURRENT_ASYNC:-none})"
+            exit 1
+          fi
+
+      - name: Compare base vs current
+        run: |
+          set -euo pipefail
+          mkdir -p target/storage-bench-report
+          ARGS=(
+            --current-pg "${{ steps.paths.outputs.current_pg }}"
+            --current-async "${{ steps.paths.outputs.current_async }}"
+            --base-branch "${{ steps.baseline.outputs.base_branch }}"
+            --base-sha "${{ steps.baseline.outputs.base_sha }}"
+            --current-sha "${{ github.sha }}"
+            --html-out target/storage-bench-report/report.html
+            --md-out target/storage-bench-report/comment.md
+          )
+          if [[ -n "${{ steps.paths.outputs.base_pg }}" ]]; then
+            ARGS+=(--base-pg "${{ steps.paths.outputs.base_pg }}")
+          fi
+          if [[ -n "${{ steps.paths.outputs.base_async }}" ]]; then
+            ARGS+=(--base-async "${{ steps.paths.outputs.base_async }}")
+          fi
+          python3 scripts/ci/compare-storage-bench.py "${ARGS[@]}"
+          cat target/storage-bench-report/comment.md >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: storage-ci-report
+          path: |
+            target/storage-bench-report/report.html
+            target/storage-bench-report/comment.md
+          if-no-files-found: warn
+
+      - name: Post sticky PR comment
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/post-storage-bench-comment.sh target/storage-bench-report/comment.md
 
   memory:
     name: memory checks
