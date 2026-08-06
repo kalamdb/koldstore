@@ -21,6 +21,15 @@ const PROVISIONER_FUNCTION: &str = "koldstore_async_mirror_slot_provisioner_main
 ///
 /// Returns an error when PostgreSQL cannot register, start, or stop the worker.
 pub(crate) fn provision_infrastructure(database_oid: u32) -> Result<(), String> {
+    let slot = slot_name(database_oid);
+    // Idempotent: `#[pg_test]` helpers may call this more than once; after the
+    // first call SPI (e.g. SET flush_execution) assigns an XID, and a second
+    // FindStartpoint would deadlock waiting on that parent transaction.
+    if super::lifecycle::native_slot_exists(&slot)
+        && super::lifecycle::native_publication_exists_for_provision()
+    {
+        return Ok(());
+    }
     let worker = BackgroundWorkerBuilder::new("koldstore async slot provisioner")
         .set_type("koldstore async slot provisioner")
         .set_library(LIBRARY_NAME)

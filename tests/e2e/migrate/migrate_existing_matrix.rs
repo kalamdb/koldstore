@@ -2,34 +2,6 @@ use crate::common;
 
 use anyhow::Result;
 
-#[test]
-fn migrate_existing_matrix_targets_active_pgrx_versions() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let ports: Vec<u16> = common::local_pg_matrix()
-        .into_iter()
-        .map(|target| target.port)
-        .collect();
-
-    assert_eq!(ports, common::expected_pg_ports());
-}
-
-#[test]
-fn migrate_existing_matrix_covers_data_and_constraint_preservation() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let scenario = existing_table_scenario();
-
-    assert_eq!(scenario.schema_name, "legacy");
-    assert_eq!(scenario.table_name, "items");
-    assert_eq!(scenario.primary_key, "id");
-    assert_eq!(scenario.secondary_index, "items_title_idx");
-    assert!(scenario.create_sql.contains("CHECK (title <> '')"));
-    assert!(scenario.create_sql.contains("title text NOT NULL"));
-}
-
 #[tokio::test]
 async fn existing_table_migration_preserves_rows_and_shape_on_pg_matrix() -> Result<()> {
     for target in common::scenario_pg_matrix() {

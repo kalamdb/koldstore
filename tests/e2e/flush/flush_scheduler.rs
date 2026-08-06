@@ -150,6 +150,81 @@ async fn flush_check_interval_seconds_is_honored_after_worker_restart() -> Resul
     Ok(())
 }
 
+/// After the database worker is (re)started, orphan `running` jobs are reclaimed
+/// and auto-flush proceeds — the production path after postmaster / worker boot.
+#[tokio::test]
+async fn worker_startup_reclaims_orphan_running_and_auto_flushes() -> Result<()> {
+    common::require_pgrx_server().await?;
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "sched_boot").await?;
+        let relation = db.relation("msgs");
+        let dbname = current_database(&db.client).await?;
+
+        configure_flush_interval_and_restart_worker(&db.client, &dbname, 1).await?;
+        create_messages_table(&db.client, &relation).await?;
+        manage_auto_flush(&db.client, &relation, &db.storage_name, true).await?;
+        insert_rows(&db.client, &relation, 1, 10).await?;
+        common::fence_async_mirror(&db.client).await?;
+
+        // Stop the worker before planting the orphan so auto-flush cannot race
+        // ahead and complete a flush before reclaim runs.
+        let _ = common::terminate_async_worker(&db.client).await?;
+        let completed_before = completed_flush_jobs(&db.client, &relation).await?;
+
+        // Simulate a crash-orphaned durable claim with no session lock holder.
+        db.client
+            .execute(
+                r#"
+                INSERT INTO koldstore.jobs (
+                  id, table_oid, scope_key, job_type, status, phase, payload
+                ) VALUES (
+                  gen_random_uuid(),
+                  $1::text::regclass::oid,
+                  '',
+                  'flush',
+                  'running',
+                  'writing',
+                  '{"force":false}'::jsonb
+                )
+                "#,
+                &[&relation],
+            )
+            .await?;
+
+        // Bounce the worker so its first flush-check tick reclaims + schedules.
+        restart_database_worker(&db.client).await?;
+        wait_for_completed_flush_jobs(
+            &db.client,
+            &relation,
+            completed_before + 1,
+            SCHEDULER_DEADLINE,
+        )
+        .await?;
+
+        let leftover_running: i64 = db
+            .client
+            .query_one(
+                r#"
+                SELECT count(*)::bigint
+                FROM koldstore.jobs
+                WHERE table_oid = $1::text::regclass::oid
+                  AND job_type = 'flush'
+                  AND status = 'running'
+                "#,
+                &[&relation],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(
+            leftover_running == 0,
+            "startup reclaim must clear orphan running jobs, got {leftover_running}"
+        );
+
+        reset_flush_interval(&db.client, &dbname).await?;
+    }
+    Ok(())
+}
+
 async fn current_database(client: &tokio_postgres::Client) -> Result<String> {
     Ok(client
         .query_one("SELECT current_database()::text", &[])

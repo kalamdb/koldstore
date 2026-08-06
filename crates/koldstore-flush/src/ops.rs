@@ -176,7 +176,7 @@ pub const fn flush_table_request(
     }
 }
 
-/// Plans enqueueing a flush job for a table/scope and optional `_seq` watermark.
+/// Plans INSERT … ON CONFLICT DO NOTHING then lookup of the active flush job id.
 ///
 /// Inserts a pending flush job when none is active. On conflict with an existing
 /// pending/running flush job, returns that job's id. When `force = true`, upgrades
@@ -187,21 +187,6 @@ pub const fn flush_table_request(
 /// - `$2` scope key text (NULL → `''`)
 /// - `$3` optional `flush_seq_upper_bound`
 /// - `$4` force boolean
-///
-/// # Errors
-///
-/// Returns an error when SPI statement metadata cannot be prepared.
-pub fn enqueue_flush_job_plan(
-    request: FlushRequest,
-    seq_upper_bound: Option<SeqId>,
-) -> Result<FlushJobEnqueuePlan, OpsError> {
-    plan_enqueue_or_lookup_flush_job(request, seq_upper_bound)
-}
-
-/// Plans INSERT … ON CONFLICT DO NOTHING then lookup of the active flush job id.
-///
-/// Same contract as [`enqueue_flush_job_plan`]; preferred name for callers that
-/// emphasize the coalesce-with-existing-active-job behavior.
 ///
 /// # Errors
 ///

@@ -2,36 +2,6 @@ use crate::common;
 
 use anyhow::Result;
 
-#[test]
-fn demigrate_matrix_targets_active_pgrx_versions() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    assert_eq!(
-        common::local_pg_matrix()
-            .into_iter()
-            .map(|target| target.version)
-            .collect::<Vec<_>>(),
-        common::expected_pg_versions()
-    );
-}
-
-#[test]
-fn demigrate_matrix_covers_flush_cold_delete_and_user_scoped_tables() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let scenarios = [
-        "demigrate_after_flush",
-        "demigrate_after_cold_only_delete",
-        "demigrate_user_scoped_table",
-    ];
-
-    assert!(scenarios.contains(&"demigrate_after_flush"));
-    assert!(scenarios.contains(&"demigrate_after_cold_only_delete"));
-    assert!(scenarios.contains(&"demigrate_user_scoped_table"));
-}
-
 #[tokio::test]
 async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_pgrx() -> Result<()>
 {

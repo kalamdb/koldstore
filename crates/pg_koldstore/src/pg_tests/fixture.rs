@@ -23,12 +23,15 @@ pub(crate) fn unique_suffix(label: &str) -> String {
 /// with this backend. Prefer calling via [`register_temp_storage`], which invokes
 /// this first; call it explicitly only when a test manages a table without that helper.
 pub(crate) fn preprovision_async_mirror() {
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    // Provision *before* any SPI: pgrx SPI assigns a parent XID, and logical-slot
+    // FindStartpoint would then wait on this backend while we wait on the
+    // provisioner (`BgWorkerShutdown`).
+    crate::mirror::provision::provision_infrastructure(database_oid)
+        .expect("pre-provision async slot/publication");
     // Queue-mode flush returns before completion and cannot be observed by a
     // peer executor inside an uncommitted `#[pg_test]` transaction.
     Spi::run("SET koldstore.flush_execution = 'inline'").expect("set flush_execution=inline");
-    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    crate::mirror::provision::provision_infrastructure(database_oid)
-        .expect("pre-provision async slot/publication");
 }
 
 /// Registers filesystem storage under a unique temp directory and returns its name.

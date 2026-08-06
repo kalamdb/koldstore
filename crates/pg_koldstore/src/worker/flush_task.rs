@@ -155,13 +155,9 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
 fn flush_job_completed(job_id: pgrx::Uuid) -> Result<bool, String> {
     use pgrx::datum::DatumWithOid;
 
-    pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT EXISTS (\
-           SELECT 1 FROM koldstore.jobs \
-           WHERE id = $1::uuid AND status = 'completed'\
-         )",
-        &[DatumWithOid::from(job_id)],
-    )
-    .map_err(|error| error.to_string())
-    .map(|value| value.unwrap_or(false))
+    let statement =
+        koldstore_flush::plan_flush_job_is_completed().map_err(|error| error.to_string())?;
+    crate::spi::select_one::<bool>(&statement, &[DatumWithOid::from(job_id)])
+        .map(|value| value.unwrap_or(false))
+        .map_err(|error| error.to_string())
 }

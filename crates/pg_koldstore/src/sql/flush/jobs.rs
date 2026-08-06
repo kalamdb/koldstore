@@ -55,13 +55,14 @@ pub(crate) fn enqueue_or_lookup_flush_job(
     Ok(job_id)
 }
 
-/// Looks up a committed active flush job UUID without inserting.
+/// Looks up a committed active flush job without inserting.
 ///
 /// Used when the session table lock is held by another backend so enqueue must
-/// not wait on that backend's uncommitted jobs-row / unique-index conflict.
-pub(crate) fn lookup_active_flush_job_uuid(
+/// not wait on that backend's uncommitted jobs-row / unique-index conflict, and
+/// by claim paths that already hold the lock.
+fn lookup_active_flush_job(
     table_oid: pgrx::pg_sys::Oid,
-) -> crate::error::PgResult<Option<pgrx::Uuid>> {
+) -> crate::error::PgResult<Option<(uuid::Uuid, bool)>> {
     use pgrx::datum::DatumWithOid;
 
     let lookup =
@@ -72,9 +73,14 @@ pub(crate) fn lookup_active_flush_job_uuid(
         return Ok(None);
     };
     let wire: PendingFlushJobWire = serde_json::from_str(&existing)?;
-    Ok(Some(crate::spi::uuid_to_pgrx(uuid::Uuid::parse_str(
-        &wire.id,
-    )?)))
+    Ok(Some((uuid::Uuid::parse_str(&wire.id)?, wire.force)))
+}
+
+/// Looks up a committed active flush job UUID without inserting.
+pub(crate) fn lookup_active_flush_job_uuid(
+    table_oid: pgrx::pg_sys::Oid,
+) -> crate::error::PgResult<Option<pgrx::Uuid>> {
+    Ok(lookup_active_flush_job(table_oid)?.map(|(id, _)| crate::spi::uuid_to_pgrx(id)))
 }
 
 /// Selects one due pending flush candidate for a one-shot executor.
@@ -113,13 +119,8 @@ pub(super) fn ensure_flush_job(
     // same job can be resumed.
     reclaim_running_flush_jobs(table_oid)?;
 
-    let lookup =
-        plan_lookup_active_flush_job().map_err(crate::error::PgAdapterError::from_display)?;
-    let existing = crate::spi::select_one::<String>(&lookup, &[DatumWithOid::from(table_oid)])?
-        .filter(|value| !value.is_empty());
-    if let Some(existing) = existing {
-        let wire: PendingFlushJobWire = serde_json::from_str(&existing)?;
-        return Ok((uuid::Uuid::parse_str(&wire.id)?, force || wire.force));
+    if let Some((existing_id, existing_force)) = lookup_active_flush_job(table_oid)? {
+        return Ok((existing_id, force || existing_force));
     }
 
     let job_id = uuid::Uuid::new_v4();

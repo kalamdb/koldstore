@@ -200,7 +200,7 @@ async fn changes_since_insert_visible_within_one_second_under_load() -> Result<(
             committed_at + VISIBILITY_BOUND,
         )
         .await?;
-        common::log(&format!(
+        common::log(format!(
             "insert changes_since lag={lag:?} (bound={VISIBILITY_BOUND:?})"
         ));
 
@@ -244,7 +244,7 @@ async fn changes_since_update_visible_within_one_second_under_load() -> Result<(
             committed_at + VISIBILITY_BOUND,
         )
         .await?;
-        common::log(&format!(
+        common::log(format!(
             "update changes_since lag={lag:?} (bound={VISIBILITY_BOUND:?})"
         ));
 
@@ -284,7 +284,7 @@ async fn changes_since_delete_visible_within_one_second_under_load() -> Result<(
             committed_at + VISIBILITY_BOUND,
         )
         .await?;
-        common::log(&format!(
+        common::log(format!(
             "delete changes_since lag={lag:?} (bound={VISIBILITY_BOUND:?})"
         ));
 
@@ -312,7 +312,7 @@ async fn mirror_row_visible_within_one_second_without_fence() -> Result<()> {
         let committed_at = Instant::now();
         let lag =
             wait_mirror_pk(&db.client, &mirror, 7, 1, committed_at + VISIBILITY_BOUND).await?;
-        common::log(&format!(
+        common::log(format!(
             "mirror insert lag={lag:?} (bound={VISIBILITY_BOUND:?})"
         ));
         assert!(
@@ -375,7 +375,7 @@ async fn four_tables_parallel_1k_commits_visible_within_one_second() -> Result<(
                     .await?
                     .get(0);
                 if count >= 1000 {
-                    common::log(&format!(
+                    common::log(format!(
                         "{relation}: 1000 changes_since rows after {:?}",
                         committed_at.elapsed()
                     ));
@@ -448,7 +448,7 @@ async fn changes_since_stays_realtime_during_manual_parquet_flush() -> Result<()
             committed_at + VISIBILITY_BOUND,
         )
         .await?;
-        common::log(&format!(
+        common::log(format!(
             "during Parquet flush: insert changes_since lag={lag:?}"
         ));
 
@@ -483,7 +483,7 @@ async fn changes_since_stays_realtime_during_manual_parquet_flush() -> Result<()
             committed_at + VISIBILITY_BOUND,
         )
         .await?;
-        common::log(&format!(
+        common::log(format!(
             "after manual flush: insert changes_since lag={lag:?}"
         ));
     }

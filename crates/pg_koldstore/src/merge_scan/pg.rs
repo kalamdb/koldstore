@@ -1240,11 +1240,12 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         }
     }
 
-    if !hot_label.is_empty() && hot_child_planstate(node).is_none() {
-        // Fallback when the hot child was not initialized into custom_ps (cold
-        // emit paths). Graph clients that walk custom_ps still see nested Plans
-        // when the child was initialized for hot-only streaming.
-        profile::explain_text(es, "Hot Planned Access", &hot_label);
+    if !hot_label.is_empty() {
+        // Always emit the JSON tracing diagram (catalog → segments → parquet
+        // I/O stages), including when a native hot child also owns `Plans`.
+        if hot_child_planstate(node).is_none() {
+            profile::explain_text(es, "Hot Planned Access", &hot_label);
+        }
         profile::explain_visual_pipeline(
             es,
             &cold_profile,

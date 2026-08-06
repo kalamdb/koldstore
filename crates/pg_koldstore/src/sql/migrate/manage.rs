@@ -193,7 +193,7 @@ pub(crate) fn manage_table_pg_impl(
     // Hold the apply lock for the whole publish → backfill → catch-up window so
     // the shared applied_lsn cannot advance past this table's undecoded WAL.
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    crate::mirror::lifecycle::lock_apply(database_oid)
+    crate::mirror::lifecycle::lock_slot(database_oid)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     crate::sql::flush::spi::lock_source_table_share_row_exclusive(table_oid)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));

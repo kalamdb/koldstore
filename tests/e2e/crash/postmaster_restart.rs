@@ -172,10 +172,8 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
         )
         .await?;
 
-    // Hold the failpoint barrier so flush parks at wait:after_select_rows.
-    db.client
-        .execute("SELECT pg_advisory_lock($1)", &[&0x4B4F_4C44_i64])
-        .await?;
+    // Hold the per-database failpoint barrier so flush parks at wait:after_select_rows.
+    common::barrier_lock(&db.client).await?;
 
     let flush_target = common::PgTarget {
         version,

@@ -3,6 +3,7 @@
 mod async_load_soak;
 mod endurance;
 mod failure_injection;
+mod flush_memory_spike;
 mod full_lifecycle;
 mod jobs_and_recovery;
 mod memory_leak;

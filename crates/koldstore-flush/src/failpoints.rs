@@ -98,7 +98,7 @@ impl FlushFailpoint {
             "during_hot_cleanup" => Self::DuringHotCleanup,
             "after_cleanup_before_job_complete" => Self::AfterCleanupBeforeJobComplete,
             "after_job_complete_before_temp_cleanup" => Self::AfterJobCompleteBeforeTempCleanup,
-            "after_pass_progress" | "after_wave_progress" => Self::AfterPassProgress,
+            "after_pass_progress" => Self::AfterPassProgress,
             "before_slot_lock" => Self::BeforeSlotLock,
             "after_slot_lock" => Self::AfterSlotLock,
             "before_source_lock" => Self::BeforeSourceLock,
@@ -112,7 +112,7 @@ impl FlushFailpoint {
     /// All registered failpoints (stable order for docs / tests).
     #[must_use]
     pub const fn all() -> &'static [Self] {
-        &FLUSH_FAILPOINTS
+        FLUSH_FAILPOINTS
     }
 }
 

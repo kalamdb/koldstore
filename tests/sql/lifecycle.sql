@@ -13,7 +13,8 @@ SELECT koldstore.manage_table(
   hot_row_limit => 10,
   min_flush_rows => 1,
   max_rows_per_file => 10,
-  migration_order_by => 'id'
+  migration_order_by => 'id',
+  auto_flush => false
 );
 
 SELECT count(*)::bigint AS active_schemas

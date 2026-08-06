@@ -135,10 +135,11 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
 }
 
 #[pg_test]
-fn flush_scheduler_skips_table_with_running_flush_job() {
-    // A durable `running` flush means another backend owns the work. The next
-    // tick must ignore that table instead of waiting or starting a second job.
-    let suffix = unique_suffix("flush_skip_running");
+fn flush_scheduler_reclaims_orphan_running_flush_job() {
+    // A durable `running` row with no session table-job lock is an orphan (owner
+    // crashed). The tick reclaims it to pending and may flush. Live owners are
+    // skipped via try_lock in the same tick (covered by e2e dual-flush).
+    let suffix = unique_suffix("flush_reclaim_orphan");
     let schema = format!("pgtest_{suffix}");
     let table = "msgs";
     let relation = format!("{schema}.{table}");
@@ -181,14 +182,14 @@ fn flush_scheduler_skips_table_with_running_flush_job() {
         )
         "#
     ))
-    .expect("insert running flush job");
+    .expect("insert orphan running flush job");
 
     let ran = Spi::get_one::<bool>("SELECT koldstore.internal_run_flush_scheduler_tick()")
         .expect("scheduler tick")
         .expect("non-null");
     assert!(
-        !ran,
-        "scheduler must skip while a flush job is already running"
+        ran,
+        "orphan running job must be reclaimed so auto-flush can proceed"
     );
 
     let completed = spi_get_i64(&format!(
@@ -200,9 +201,22 @@ fn flush_scheduler_skips_table_with_running_flush_job() {
           AND status = 'completed'
         "#
     ));
+    assert!(
+        completed >= 1,
+        "reclaimed orphan must allow a completed flush, got {completed}"
+    );
+    let leftover_running = spi_get_i64(&format!(
+        r#"
+        SELECT count(*)::bigint
+        FROM koldstore.jobs
+        WHERE table_oid = '{relation}'::regclass::oid
+          AND job_type = 'flush'
+          AND status = 'running'
+        "#
+    ));
     assert_eq!(
-        completed, 0,
-        "skipped tick must not create a completed flush job"
+        leftover_running, 0,
+        "orphan running row must not remain after the tick"
     );
 }
 

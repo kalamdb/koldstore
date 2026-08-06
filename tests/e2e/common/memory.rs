@@ -33,6 +33,31 @@ impl Default for OverheadBudget {
     }
 }
 
+/// Absolute peak-spike budgets for flush / large-query windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpikeBudget {
+    /// Max RSS growth above baseline during the operation.
+    pub max_rss_spike_bytes: u64,
+    /// Max pg_context growth above baseline during the operation.
+    pub max_context_spike_bytes: u64,
+    /// Max retained RSS growth after the operation cools down.
+    pub max_rss_retained_bytes: u64,
+    /// Max retained context growth after cooldown.
+    pub max_context_retained_bytes: u64,
+}
+
+impl Default for SpikeBudget {
+    fn default() -> Self {
+        Self {
+            // Flush encode + workers can temporarily hold Parquet buffers.
+            max_rss_spike_bytes: 512 * 1024 * 1024,
+            max_context_spike_bytes: 256 * 1024 * 1024,
+            max_rss_retained_bytes: 128 * 1024 * 1024,
+            max_context_retained_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
 /// Captures PostgreSQL memory-context totals and RSS for the current backend
 /// plus workers whose command line contains the cluster port.
 ///
@@ -72,6 +97,61 @@ pub async fn capture_snapshot(client: &Client, pg_port: u16) -> Result<MemorySna
     })
 }
 
+/// Polls process RSS while `work` runs so mid-operation spikes are visible.
+///
+/// Samples every `poll_every` against `pg_port` workers (flush executors share
+/// the cluster). The SQL session snapshot is taken before/after on `client`.
+///
+/// # Errors
+///
+/// Returns an error when snapshot capture or `work` fails.
+pub async fn measure_peak_during<F, Fut>(
+    client: &Client,
+    pg_port: u16,
+    poll_every: std::time::Duration,
+    work: F,
+) -> Result<PeakAllocation>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let before = capture_snapshot(client, pg_port).await?;
+    let peak_rss = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(before.rss_bytes));
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stop_poller = std::sync::Arc::clone(&stop);
+    let peak_rss_poller = std::sync::Arc::clone(&peak_rss);
+    let poller = tokio::spawn(async move {
+        while !stop_poller.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(rss) = matched_processes_rss_bytes(&format!(":{pg_port}"))
+                .or_else(|_| matched_processes_rss_bytes(&format!("port={pg_port}")))
+            {
+                peak_rss_poller.fetch_max(rss, std::sync::atomic::Ordering::Relaxed);
+            }
+            tokio::time::sleep(poll_every).await;
+        }
+    });
+
+    let work_result = work().await;
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = poller.await;
+    work_result?;
+
+    let after = capture_snapshot(client, pg_port).await?;
+    // Cool-down: catch delayed release after flush executor exit.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let cool = capture_snapshot(client, pg_port).await?;
+    let polled = MemorySnapshot {
+        rss_bytes: peak_rss.load(std::sync::atomic::Ordering::Relaxed),
+        pg_context_bytes: before
+            .pg_context_bytes
+            .max(after.pg_context_bytes)
+            .max(cool.pg_context_bytes),
+        allocator_bytes: None,
+    };
+    PeakAllocation::from_samples(&[before, polled, after, cool])
+        .context("peak measurement needs samples")
+}
+
 /// Loads growth budgets from environment overrides when present.
 #[must_use]
 pub fn growth_budget_from_env() -> GrowthBudget {
@@ -87,6 +167,25 @@ pub fn growth_budget_from_env() -> GrowthBudget {
     }
     if let Some(value) = env_u64("KOLDSTORE_MEMORY_MAX_RSS_BYTES_PER_CYCLE") {
         budget.max_rss_bytes_per_cycle = value;
+    }
+    budget
+}
+
+/// Loads peak-spike budgets (flush / large query) from the environment when set.
+#[must_use]
+pub fn spike_budget_from_env() -> SpikeBudget {
+    let mut budget = SpikeBudget::default();
+    if let Some(value) = env_u64("KOLDSTORE_MEMORY_MAX_FLUSH_RSS_SPIKE_BYTES") {
+        budget.max_rss_spike_bytes = value;
+    }
+    if let Some(value) = env_u64("KOLDSTORE_MEMORY_MAX_FLUSH_CONTEXT_SPIKE_BYTES") {
+        budget.max_context_spike_bytes = value;
+    }
+    if let Some(value) = env_u64("KOLDSTORE_MEMORY_MAX_FLUSH_RSS_RETAINED_BYTES") {
+        budget.max_rss_retained_bytes = value;
+    }
+    if let Some(value) = env_u64("KOLDSTORE_MEMORY_MAX_FLUSH_CONTEXT_RETAINED_BYTES") {
+        budget.max_context_retained_bytes = value;
     }
     budget
 }
@@ -115,6 +214,14 @@ pub fn batch_rows() -> i64 {
 #[must_use]
 pub fn scan_reps() -> usize {
     env_usize("KOLDSTORE_MEMORY_SCAN_REPS").unwrap_or(8).max(2)
+}
+
+/// Row count for the large-query memory gate (default 20_000).
+#[must_use]
+pub fn large_query_rows() -> i64 {
+    env_i64("KOLDSTORE_MEMORY_LARGE_QUERY_ROWS")
+        .unwrap_or(20_000)
+        .max(2_000)
 }
 
 /// Loads plain-vs-koldstore overhead budgets from the environment when set.

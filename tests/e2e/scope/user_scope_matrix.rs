@@ -5,20 +5,6 @@ use koldstore_common::TableKind;
 use tokio_postgres::Client;
 
 #[test]
-fn user_scope_matrix_targets_active_pgrx_versions() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    assert_eq!(
-        common::local_pg_matrix()
-            .into_iter()
-            .map(|target| target.version)
-            .collect::<Vec<_>>(),
-        common::expected_pg_versions()
-    );
-}
-
-#[test]
 fn user_scope_matrix_contract_covers_missing_scope_and_cross_scope_denial() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");

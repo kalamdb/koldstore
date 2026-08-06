@@ -1,0 +1,31 @@
+CREATE TABLE
+CREATE TABLE
+INSERT 0 3
+INSERT 0 12
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+ inner_join_count
+------------------
+               12
+(1 row)
+
+ left_join_count
+-----------------
+              12
+(1 row)
+
+ id | name
+----+------
+  1 | a
+  6 | c
+ 12 | c
+(3 rows)
+

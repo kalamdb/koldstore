@@ -5,9 +5,9 @@
 //! YAML / XML stay consistent with native plan nodes. TEXT section headers
 //! mirror JIT (`Label:\n` + indent) because `ExplainOpenGroup` is a no-op for
 //! TEXT. Graph clients that parse structured formats get nested Scan Sources,
-//! Merge, Timing, and Parquet Segments groups. JSON additionally exposes a
-//! clearly marked diagnostic `Plans` subtree when the executor owns the
-//! hot/cold pipeline, so plan visualizers can render its read stages.
+//! Merge, Timing, and Parquet Segments groups. JSON always exposes a diagnostic
+//! `Plans` tracing subtree (catalog query → segment index → each Parquet file
+//! with footer / prune / range-GET children) so visualizers can attribute time.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -413,11 +413,12 @@ pub(super) fn explain_scan_profile(
 
 /// Renders KoldStore-owned read stages as plan-shaped JSON objects.
 ///
-/// PostgreSQL renders only executor plan nodes beneath `Plans`. On merge paths,
-/// the cold reader and catalog lookup execute inside one `KoldMergeScan`, so
-/// they otherwise have no visual representation. These nodes are explicitly
-/// marked as internal diagnostics and are only emitted when there is no native
-/// child plan for PostgreSQL to render itself.
+/// PostgreSQL renders native executor children beneath `Plans`. Cold catalog
+/// lookup and Parquet opens execute inside one `KoldMergeScan`, so they need
+/// explicit diagnostic nodes for graph clients. These nodes are marked
+/// `KoldStore Internal` and are always emitted for `FORMAT JSON` — including
+/// when a native hot child already owns part of `Plans` — so EXPLAIN remains a
+/// usable tracing diagram for where time goes.
 pub(super) fn explain_visual_pipeline(
     es: *mut pg_sys::ExplainState,
     profile: &ColdReadProfile,
@@ -451,7 +452,7 @@ pub(super) fn explain_visual_pipeline(
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
             if show_timing {
                 if let Some(ms) = execution.hot_scan_ms {
-                    explain_float(es, "Read Time", "ms", ms, 3);
+                    explain_float(es, "Actual Total Time", "ms", ms, 3);
                 }
             }
         }
@@ -479,6 +480,11 @@ pub(super) fn explain_visual_pipeline(
     );
     if let Some(execution) = execution {
         explain_integer(es, "Rows Scanned", None, execution.cold_rows as i64);
+        if show_timing {
+            if let Some(ms) = profile.cold_read_ms() {
+                explain_float(es, "Actual Total Time", "ms", ms, 3);
+            }
+        }
     }
     explain_integer(
         es,
@@ -505,6 +511,10 @@ pub(super) fn explain_visual_pipeline(
     explain_visual_catalog_node(es, profile, analyze, show_timing);
     explain_close_group(es, "Plans", Some("Plans"), false);
     explain_visual_node_close(es, "KoldStore Cold Storage Scan");
+
+    if let Some(execution) = execution {
+        explain_visual_timing_node(es, profile, execution, show_timing);
+    }
 
     explain_close_group(es, "Plans", Some("Plans"), false);
 }
@@ -558,29 +568,170 @@ fn explain_visual_catalog_node(
             candidates as i64,
         );
     }
-    if let Some(query) = profile.cold_segments_query.as_deref() {
-        explain_text(es, "Cold Segments Query", &compact_sql_for_explain(query));
-    }
-    if let Some(query) = profile.segment_index_query.as_deref() {
-        explain_text(es, "Segment Index Query", &compact_sql_for_explain(query));
-    }
     if show_timing {
         if let Some(ms) = profile.manifest_read_ms {
-            explain_float(es, "Segment Catalog Lookup Time", "ms", ms, 3);
-        }
-        if let Some(ms) = profile.segment_index_lookup_ms {
-            explain_float(es, "Segment Index Lookup Time", "ms", ms, 3);
+            explain_float(es, "Actual Total Time", "ms", ms, 3);
         }
     }
-    // Parquet opens are children of catalog selection.
+
+    // Nested catalog queries + Parquet opens form the tracing spine.
     explain_open_group(es, "Plans", Some("Plans"), false);
+    if let Some(query) = profile.cold_segments_query.as_deref() {
+        explain_visual_node_open(es, "KoldStore Catalog Query", "Cold Segments Catalog");
+        explain_text(es, "Relation", "koldstore.cold_segments");
+        explain_text(es, "Query", &compact_sql_for_explain(query));
+        if show_timing {
+            if let Some(ms) = profile.manifest_read_ms {
+                explain_float(es, "Actual Total Time", "ms", ms, 3);
+            }
+        }
+        explain_visual_node_close(es, "KoldStore Catalog Query");
+    }
+    if let Some(query) = profile.segment_index_query.as_deref() {
+        explain_visual_node_open(es, "KoldStore Segment Index Query", "Segment Index");
+        explain_text(es, "Relation", "koldstore.cold_segment_index");
+        explain_text(es, "Query", &compact_sql_for_explain(query));
+        if show_timing {
+            if let Some(ms) = profile.segment_index_lookup_ms {
+                explain_float(es, "Actual Total Time", "ms", ms, 3);
+            }
+        }
+        explain_visual_node_close(es, "KoldStore Segment Index Query");
+    }
     for segment in &profile.segments {
         explain_visual_node_open(es, "KoldStore Parquet Scan", "Parquet Segment");
         explain_segment(es, segment, show_timing, analyze);
+        if segment.parquet.is_some() {
+            explain_open_group(es, "Plans", Some("Plans"), false);
+            explain_visual_parquet_io_stages(es, segment, show_timing, analyze);
+            explain_close_group(es, "Plans", Some("Plans"), false);
+        }
         explain_visual_node_close(es, "KoldStore Parquet Scan");
     }
     explain_close_group(es, "Plans", Some("Plans"), false);
     explain_visual_node_close(es, "KoldStore Segment Catalog Scan");
+}
+
+fn explain_visual_parquet_io_stages(
+    es: *mut pg_sys::ExplainState,
+    segment: &SegmentReadProfile,
+    show_timing: bool,
+    executed: bool,
+) {
+    let Some(parquet) = &segment.parquet else {
+        return;
+    };
+
+    explain_visual_node_open(es, "KoldStore Parquet Footer", "Footer Metadata");
+    explain_bool(es, "Footer First", parquet.footer_first);
+    explain_bool(es, "Footer Cache Hit", parquet.footer_cache_hit);
+    if let Some(size) = parquet.file_size {
+        explain_uinteger(es, "Object Bytes", Some("bytes"), size);
+    }
+    explain_text(es, "Status", if executed { "executed" } else { "planned" });
+    explain_visual_node_close(es, "KoldStore Parquet Footer");
+
+    explain_visual_node_open(
+        es,
+        "KoldStore Parquet Row Group Prune",
+        "Row Group Selection",
+    );
+    explain_integer(
+        es,
+        "Row Groups Total",
+        None,
+        parquet.row_groups_total as i64,
+    );
+    explain_integer(
+        es,
+        "Row Groups Selected",
+        None,
+        parquet.row_groups_selected.len() as i64,
+    );
+    explain_integer(
+        es,
+        "Row Groups Skipped",
+        None,
+        parquet.row_groups_skipped as i64,
+    );
+    explain_bool(es, "Stats Pruned", parquet.stats_pruned);
+    explain_text(es, "Bloom", parquet.bloom.as_str());
+    if parquet.bloom_filters_fetched > 0 {
+        explain_integer(
+            es,
+            "Bloom Filters Fetched",
+            None,
+            parquet.bloom_filters_fetched as i64,
+        );
+    }
+    if !parquet.row_groups_selected.is_empty() {
+        let selected = parquet
+            .row_groups_selected
+            .iter()
+            .map(|idx| idx.to_string())
+            .collect::<Vec<_>>();
+        explain_list(es, "Selected Row Groups", &selected);
+    }
+    explain_visual_node_close(es, "KoldStore Parquet Row Group Prune");
+
+    explain_visual_node_open(es, "KoldStore Parquet Column Fetch", "Column Range GET");
+    explain_uinteger(es, "Range Gets", None, parquet.range_calls);
+    explain_uinteger(es, "Bytes Read", Some("bytes"), parquet.bytes_read);
+    if executed {
+        explain_integer(es, "Rows Returned", None, parquet.rows_returned as i64);
+        if show_timing {
+            if let Some(ms) = segment.read_ms {
+                explain_float(es, "Actual Total Time", "ms", ms, 3);
+            }
+        }
+    }
+    if !parquet.projected_columns.is_empty() {
+        explain_list(es, "Projected Columns", &parquet.projected_columns);
+    }
+    explain_visual_node_close(es, "KoldStore Parquet Column Fetch");
+}
+
+fn explain_visual_timing_node(
+    es: *mut pg_sys::ExplainState,
+    profile: &ColdReadProfile,
+    execution: &ScanExecutionProfile,
+    show_timing: bool,
+) {
+    if !show_timing {
+        return;
+    }
+    explain_visual_node_open(es, "KoldStore Timing", "Phase Timing");
+    if let Some(ms) = execution.initialization_ms {
+        explain_float(es, "Initialization Time", "ms", ms, 3);
+    }
+    if let Some(ms) = execution.metadata_ms {
+        explain_float(es, "Metadata Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.manifest_read_ms {
+        explain_float(es, "Segment Catalog Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.segment_index_lookup_ms {
+        explain_float(es, "Segment Index Time", "ms", ms, 3);
+    }
+    if let Some(ms) = execution.hot_scan_ms {
+        explain_float(es, "Hot Scan Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.cold_read_ms() {
+        explain_float(es, "Cold Read Time", "ms", ms, 3);
+    }
+    if let Some(ms) = execution.mirror_scan_ms {
+        explain_float(es, "Mirror Scan Time", "ms", ms, 3);
+    }
+    if let Some(ms) = execution.overlay_ms {
+        explain_float(es, "Overlay Time", "ms", ms, 3);
+    }
+    if let Some(ms) = execution.merge_ms {
+        explain_float(es, "Merge Time", "ms", ms, 3);
+    }
+    if let Some(ms) = execution.materialization_ms {
+        explain_float(es, "Materialization Time", "ms", ms, 3);
+    }
+    explain_visual_node_close(es, "KoldStore Timing");
 }
 
 fn explain_visual_postgres_hot_access(

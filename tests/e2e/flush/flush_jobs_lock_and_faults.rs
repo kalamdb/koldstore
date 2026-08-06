@@ -554,15 +554,31 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
 
         let flush_b = connect_peer(&db).await?;
         let relation_b = table_b.relation.clone();
-        let job_b: String = flush_b
-            .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
-                &[&relation_b],
-            )
-            .await
-            .context("flush B enqueue/run")?
-            .get(0);
-        let wait_b = common::wait_for_flush_job_terminal(&db.client, &job_b).await;
+        // Product slot-lock budget is ~10s (200 × 50ms). Bound the client wait
+        // so a regression that blocks forever fails this suite quickly.
+        let started = std::time::Instant::now();
+        let job_b: String = tokio::time::timeout(Duration::from_secs(15), async {
+            flush_b
+                .query_one(
+                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    &[&relation_b],
+                )
+                .await
+        })
+        .await
+        .context("flush B enqueue timed out (must not block forever on slot lock)")?
+        .context("flush B enqueue/run")?
+        .get(0);
+        let wait_b = tokio::time::timeout(Duration::from_secs(20), async {
+            common::wait_for_flush_job_terminal(&db.client, &job_b).await
+        })
+        .await
+        .context("flush B terminal wait exceeded 20s (slot lock deadline regression)")?;
+        anyhow::ensure!(
+            started.elapsed() < Duration::from_secs(25),
+            "cross-table flush contention must resolve within 25s, took {:?}",
+            started.elapsed()
+        );
         let detail = wait_b
             .as_ref()
             .err()
@@ -575,7 +591,8 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
         assert!(
             detail.contains("slot lock")
                 || detail.contains("apply lock")
-                || detail.contains("flush already in progress"),
+                || detail.contains("flush already in progress")
+                || detail.contains("deadline"),
             "unexpected flush B terminal error: {detail}"
         );
 

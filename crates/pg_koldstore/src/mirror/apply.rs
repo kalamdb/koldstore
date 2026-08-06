@@ -244,7 +244,7 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
 
     // Peek/advance use nowait slot acquire. After terminate (or worker abort),
     // advisory locks can be released before ReplicationSlotRelease — wait out
-    // that window under lock_apply before touching the slot.
+    // that window under lock_slot before touching the slot.
     super::lifecycle::wait_until_slot_inactive(&slot)
         .map_err(|error| format!("wait slot inactive before apply: {error}"))?;
 

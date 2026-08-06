@@ -206,9 +206,16 @@ pub fn register_invalidation_callback() {
 /// Flush completion uses this after publishing a new manifest so backends that
 /// cached the pre-flush absence reload cold-segment metadata before their next
 /// managed-table plan or execution.
+///
+/// `CacheInvalidateRelcacheByRelid` asserts [`IsTransactionState`]. Queue flush
+/// runs Short SPI commits between phases; callers outside a txn still clear the
+/// backend-local caches, and skip the cluster broadcast until a txn is open.
 #[cfg(feature = "pg")]
 pub fn invalidate_table_globally(table_oid: pgrx::pg_sys::Oid) {
     invalidate_table(table_oid);
+    if !unsafe { pgrx::pg_sys::IsTransactionState() } {
+        return;
+    }
     unsafe {
         pgrx::pg_sys::CacheInvalidateRelcacheByRelid(table_oid);
     }

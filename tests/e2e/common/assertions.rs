@@ -66,6 +66,32 @@ pub fn assert_kold_merge_scan_explain(plan: &str) -> Result<()> {
     Ok(())
 }
 
+/// Asserts `EXPLAIN (ANALYZE, FORMAT JSON)` includes the KoldStore tracing diagram.
+///
+/// Expects catalog query → segment catalog → parquet scan → footer / prune /
+/// column-fetch children under `KoldStore Internal` plan nodes.
+pub fn assert_kold_merge_scan_explain_json_tracing(plan_json: &str) -> Result<()> {
+    for expected in [
+        "\"Custom Plan Provider\": \"KoldMergeScan\"",
+        "\"Node Type\": \"KoldStore Hot Scan\"",
+        "\"Node Type\": \"KoldStore Cold Storage Scan\"",
+        "\"Node Type\": \"KoldStore Segment Catalog Scan\"",
+        "\"Node Type\": \"KoldStore Catalog Query\"",
+        "\"Node Type\": \"KoldStore Parquet Scan\"",
+        "\"Node Type\": \"KoldStore Parquet Footer\"",
+        "\"Node Type\": \"KoldStore Parquet Row Group Prune\"",
+        "\"Node Type\": \"KoldStore Parquet Column Fetch\"",
+        "\"KoldStore Internal\": true",
+        "\"Query\"",
+    ] {
+        anyhow::ensure!(
+            plan_json.contains(expected),
+            "expected explain JSON tracing contract `{expected}` in:\n{plan_json}"
+        );
+    }
+    Ok(())
+}
+
 /// Asserts a managed-table read uses either `KoldMergeScan` or a native heap plan.
 ///
 /// When published cold cannot contribute (empty manifest / proven-empty bounds),

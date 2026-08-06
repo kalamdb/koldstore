@@ -139,9 +139,11 @@ fn flush_sql_requests_capture_table_scope_and_enqueue_metadata() {
     assert_eq!(table_flush.scope_key.as_ref().unwrap().as_str(), "tenant-a");
     assert!(table_flush.force);
 
-    let enqueue =
-        koldstore_flush::ops::enqueue_flush_job_plan(table_flush, Some(SeqId::new(1_000).unwrap()))
-            .unwrap();
+    let enqueue = koldstore_flush::ops::plan_enqueue_or_lookup_flush_job(
+        table_flush,
+        Some(SeqId::new(1_000).unwrap()),
+    )
+    .unwrap();
     assert_eq!(enqueue.seq_upper_bound.unwrap().get(), 1_000);
     assert!(enqueue.statement.sql.contains("flush_seq_upper_bound"));
     assert!(enqueue.statement.sql.contains("ON CONFLICT"));

@@ -1,0 +1,52 @@
+DO
+CREATE ROLE
+GRANT
+ALTER DEFAULT PRIVILEGES
+CREATE TABLE
+INSERT 0 5
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+ALTER TABLE
+GRANT
+SET
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+SET
+SET
+ user_a_count
+--------------
+            2
+(1 row)
+
+ id | title
+----+-------
+  1 | a1
+  2 | a2
+(2 rows)
+
+SET
+ user_b_count
+--------------
+            3
+(1 row)
+
+ id | title
+----+-------
+  3 | b1
+  4 | b2
+  5 | b3
+(3 rows)
+
+RESET
+ missing_scope_count
+---------------------
+                   0
+(1 row)
+
+RESET

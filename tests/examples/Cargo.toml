@@ -12,6 +12,7 @@ ignored = [
     "koldstore-common",
     "koldstore-memory-tests",
     "koldstore-storage",
+    "koldstore-worker",
     "serde",
     "serde_json",
 ]
@@ -43,6 +44,7 @@ chrono.workspace = true
 koldstore-common.workspace = true
 koldstore-memory-tests = { path = "../memory" }
 koldstore-storage = { workspace = true, features = ["s3"] }
+koldstore-worker.workspace = true
 parquet.workspace = true
 serde.workspace = true
 serde_json.workspace = true

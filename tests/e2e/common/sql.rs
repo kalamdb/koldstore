@@ -142,6 +142,35 @@ pub async fn explain_analyze(client: &Client, sql: &str) -> Result<String> {
         .join("\n"))
 }
 
+/// Returns an `EXPLAIN (ANALYZE, FORMAT JSON)` plan as a single JSON string.
+///
+/// # Errors
+///
+/// Returns an error when `EXPLAIN` fails.
+pub async fn explain_analyze_json(client: &Client, sql: &str) -> Result<String> {
+    use tokio_postgres::SimpleQueryMessage;
+
+    let messages = client
+        .simple_query(&format!(
+            "EXPLAIN (ANALYZE, FORMAT JSON, COSTS OFF, SUMMARY OFF) {sql}"
+        ))
+        .await
+        .context("EXPLAIN ANALYZE FORMAT JSON")?;
+    let mut lines = Vec::new();
+    for message in messages {
+        if let SimpleQueryMessage::Row(row) = message {
+            if let Some(value) = row.get(0) {
+                lines.push(value.to_string());
+            }
+        }
+    }
+    anyhow::ensure!(
+        !lines.is_empty(),
+        "EXPLAIN ANALYZE FORMAT JSON returned no rows"
+    );
+    Ok(lines.join("\n"))
+}
+
 /// Returns an `EXPLAIN` plan with sequential scans disabled for index eligibility checks.
 ///
 /// # Errors

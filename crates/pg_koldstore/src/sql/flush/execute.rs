@@ -207,8 +207,12 @@ fn stream_write_flush_batches(
     let mut last_max_seq = 0_i64;
     let mut pending_segments: Vec<PendingFlushSegmentRef> = Vec::new();
 
-    let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
-    let table = QualifiedTableName::parse(&relation).map_err(|error| error.to_string())?;
+    // Use the already-loaded relation context — do not SPI here. Short mode is
+    // between catalog commits (no open txn); `qualified_relation_name` would
+    // Assert(IsTransactionState) in the flush executor.
+    let table =
+        QualifiedTableName::parse(&format!("{}.{}", ctx.relation.namespace, ctx.relation.name))
+            .map_err(|error| error.to_string())?;
     let mirror = QualifiedTableName::from_table_name(&ctx.snapshot.mirror_relation);
     let encode_input = StreamEncodeInput {
         table,
@@ -466,6 +470,11 @@ pub(super) fn finalize_flush(
             outcome.manifest.max_seq,
             &outcome.pending_segment_ids,
         )?;
+        // Broadcast before hot prune so peer backends drop a stale "no cold"
+        // cache. Otherwise queue Short-commit readers can observe pruned hot
+        // while still planning as hot-only (count/LIMIT → 0). Relcache
+        // invalidation requires an open txn (this finalize SPI boundary).
+        crate::catalog::cache::invalidate_table_globally(table_oid);
         crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterManifestPublish)?;
         run_async_prune_fence(table_oid, outcome.prune_max_seq, skip_through)?;
         crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeHotCleanup)?;
@@ -511,14 +520,16 @@ pub(super) fn finalize_flush(
 /// Callers run finalize fence work while the lock is held. Nested apply uses
 /// [`apply_bounded_locked`] so we do not depend on re-entrant blocking lock.
 fn with_slot_lock_retry<T>(body: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    use crate::mirror::lifecycle::try_lock_apply;
+    use crate::mirror::lifecycle::try_lock_slot;
 
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    const MAX_ATTEMPTS: u32 = 32;
-    const SLEEP_MS: u64 = 25;
+    // Bound wait so finalize never blocks forever on a stuck applier, but allow
+    // several seconds under parallel E2E / busy apply (former ~0.8s budget flaked).
+    const MAX_ATTEMPTS: u32 = 200;
+    const SLEEP_MS: u64 = 50;
     for attempt in 1..=MAX_ATTEMPTS {
         crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::BeforeSlotLock)?;
-        if try_lock_apply(database_oid)? {
+        if try_lock_slot(database_oid)? {
             crate::failpoints::hit_typed(crate::failpoints::FlushFailpoint::AfterSlotLock)?;
             return body();
         }
@@ -535,6 +546,9 @@ fn with_slot_lock_retry<T>(body: impl FnOnce() -> Result<T, String>) -> Result<T
 ///
 /// Call after each pass and again when the job finishes so large Parquet /
 /// manifest allocations do not stay pinned in the backend RSS.
+///
+/// Relcache broadcast requires an open transaction; between Short SPI commits
+/// only the backend-local caches are cleared.
 pub(crate) fn release_flush_memory(table_oid: pgrx::pg_sys::Oid) {
     crate::catalog::cache::invalidate_table_globally(table_oid);
     crate::memory::mark_heap_trim_pending();
@@ -743,6 +757,7 @@ pub(crate) fn flush_table_with_session_lock(
 }
 
 /// Claimed flush job identity returned by [`claim_flush_job`].
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ClaimedFlushJob {
     pub job_id: uuid::Uuid,
     pub attempt_token: uuid::Uuid,
@@ -778,7 +793,10 @@ pub(crate) fn run_claimed_flush_with_session_lock(
     claimed: ClaimedFlushJob,
 ) -> Result<pgrx::Uuid, String> {
     let _table_lock = table_lock;
-    let table = crate::catalog::resolve::qualified_relation_name(table_oid)
+    // Claim already committed; open a short txn for catalog SPI (relcache asserts
+    // if SPI runs with no active transaction in a BGWorker).
+    let table = FlushCommitStyle::Short
+        .run_spi(|| crate::catalog::resolve::qualified_relation_name(table_oid))
         .unwrap_or_else(|_| format!("oid={}", table_oid.to_u32()));
     run_flush_after_claim(table_oid, &table, claimed, FlushCommitStyle::Short)
 }
@@ -802,17 +820,7 @@ fn run_flush_after_claim(
         "koldstore flush: started table={table} job={job_id} attempt={attempt_token} force={force} estimated_rows={progress_total} target_seq={:?}",
         target_seq.map(SeqId::get)
     );
-    match flush_after_claim(
-        table_oid,
-        force,
-        job_id,
-        attempt_token,
-        progress_total,
-        target_seq,
-        started,
-        table,
-        commit_style,
-    ) {
+    match flush_after_claim(table_oid, &claimed, started, table, commit_style) {
         Ok(()) => Ok(job_uuid),
         Err(error) => {
             pgrx::log!(
@@ -820,9 +828,13 @@ fn run_flush_after_claim(
                 format_flush_duration(started)
             );
             commit_style.run_spi(|| {
-                mark_flush_job_failed(job_id, table_oid, attempt_token, &error).map_err(Into::into)
+                mark_flush_job_failed(job_id, table_oid, attempt_token, &error)
+                    .map_err(|err| err.to_string())?;
+                // Broadcast under the same short txn; CacheInvalidate asserts
+                // IsTransactionState (queue executor is otherwise idle).
+                crate::catalog::cache::invalidate_table_globally(table_oid);
+                Ok(())
             })?;
-            crate::catalog::cache::invalidate_table_globally(table_oid);
             Ok(job_uuid)
         }
     }
@@ -830,25 +842,23 @@ fn run_flush_after_claim(
 
 fn flush_after_claim(
     table_oid: pgrx::pg_sys::Oid,
-    force: bool,
-    job_id: uuid::Uuid,
-    attempt_token: uuid::Uuid,
-    progress_total: i64,
-    target_seq: Option<SeqId>,
+    claimed: &ClaimedFlushJob,
     started: std::time::Instant,
     table: &str,
     commit_style: FlushCommitStyle,
 ) -> Result<(), String> {
+    let ClaimedFlushJob {
+        job_id,
+        attempt_token,
+        force,
+        progress_total,
+        target_seq,
+    } = *claimed;
     let mut ctx = commit_style
         .run_spi(|| load_flush_prepared_context(table_oid, force, job_id, attempt_token))?;
-    match commit_style
-        .run_spi(|| crate::sql::migrate::refresh_active_schema_if_changed(table_oid))?
-    {
-        true => {
-            ctx = commit_style
-                .run_spi(|| load_flush_prepared_context(table_oid, force, job_id, attempt_token))?;
-        }
-        false => {}
+    if commit_style.run_spi(|| crate::sql::migrate::refresh_active_schema_if_changed(table_oid))? {
+        ctx = commit_style
+            .run_spi(|| load_flush_prepared_context(table_oid, force, job_id, attempt_token))?;
     }
     flush_prepared_table(
         table_oid,

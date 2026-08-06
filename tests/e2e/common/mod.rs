@@ -14,12 +14,14 @@ mod log;
 pub mod memory;
 mod minio;
 mod oracle;
+mod peer;
 mod sql;
 
 pub use assertions::{
     assert_kold_merge_scan_cold_reads, assert_kold_merge_scan_executed_cold_reads,
-    assert_kold_merge_scan_explain, assert_kold_merge_scan_hot_planned_access,
-    assert_managed_read_plan, assert_minio_listing_contains,
+    assert_kold_merge_scan_explain, assert_kold_merge_scan_explain_json_tracing,
+    assert_kold_merge_scan_hot_planned_access, assert_managed_read_plan,
+    assert_minio_listing_contains,
 };
 
 pub use async_mirror::{
@@ -41,7 +43,7 @@ pub use cluster::{
     PgrxServer,
 };
 pub use db::{
-    flush_table_job_id, is_flush_apply_lock_busy, wait_for_flush_job_terminal, FixtureStorage,
+    flush_table_job_id, is_flush_entry_lock_busy, wait_for_flush_job_terminal, FixtureStorage,
     ManagedTable, TestDb,
 };
 pub use describe_table::{
@@ -60,8 +62,11 @@ pub use oracle::{
     apply_dml_to_both, assert_managed_matches_reference, assert_managed_matches_reference_ordered,
     clone_reference_sql, create_reference_clone,
 };
+pub use peer::{
+    barrier_lock, barrier_unlock, connect_flush_peer, connect_peer, BARRIER_LOCK_NAMESPACE,
+};
 pub use sql::{
-    assert_index_scan, explain, explain_analyze, explain_with_seqscan_disabled, hot_row_count,
-    relation_size, row_count, row_count_from_sql, RelationSize, SQL_DEFAULT_COLD_OBJECT_KEY,
-    SQL_DEFAULT_MANIFEST_OBJECT_KEY,
+    assert_index_scan, explain, explain_analyze, explain_analyze_json,
+    explain_with_seqscan_disabled, hot_row_count, relation_size, row_count, row_count_from_sql,
+    RelationSize, SQL_DEFAULT_COLD_OBJECT_KEY, SQL_DEFAULT_MANIFEST_OBJECT_KEY,
 };

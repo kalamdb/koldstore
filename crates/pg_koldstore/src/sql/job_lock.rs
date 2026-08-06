@@ -6,8 +6,9 @@
 //! exit, or crash.
 //!
 //! Keys use the single-argument `bigint` advisory-lock form so every table OID
-//! maps 1:1. The two-`integer` form forced a signed `i32` cast that obscures
-//! high OIDs and is easy to get wrong at SPI boundaries.
+//! maps 1:1. Lock/unlock go through `DirectFunctionCall` (not SPI) so queue
+//! flush executors can release ownership between short SPI commits without an
+//! open transaction (`GetCurrentTransactionId` / relcache asserts).
 
 /// Namespace for table-scoped flush/migration job locks (fits in 32 bits).
 const TABLE_JOB_LOCK_NAMESPACE: i64 = 0x4b54_4a42;
@@ -59,12 +60,6 @@ impl TableJobLockGuard {
         }
     }
 
-    /// Table OID this guard owns.
-    #[must_use]
-    pub fn table_oid(&self) -> pgrx::pg_sys::Oid {
-        self.table_oid
-    }
-
     /// Releases ownership without waiting for `Drop`.
     pub fn unlock(mut self) {
         self.release();
@@ -90,6 +85,24 @@ impl Drop for TableJobLockGuard {
     }
 }
 
+unsafe extern "C-unwind" fn advisory_lock_int8(
+    call_info: pgrx::pg_sys::FunctionCallInfo,
+) -> pgrx::pg_sys::Datum {
+    unsafe { pgrx::pg_sys::pg_advisory_lock_int8(call_info) }
+}
+
+unsafe extern "C-unwind" fn advisory_try_lock_int8(
+    call_info: pgrx::pg_sys::FunctionCallInfo,
+) -> pgrx::pg_sys::Datum {
+    unsafe { pgrx::pg_sys::pg_try_advisory_lock_int8(call_info) }
+}
+
+unsafe extern "C-unwind" fn advisory_unlock_int8(
+    call_info: pgrx::pg_sys::FunctionCallInfo,
+) -> pgrx::pg_sys::Datum {
+    unsafe { pgrx::pg_sys::pg_advisory_unlock_int8(call_info) }
+}
+
 /// Takes a session-scoped lock for flush/migration work on one table.
 ///
 /// Blocks until the lock is available. Used by `manage_table` / DROP cleanup
@@ -103,11 +116,13 @@ impl Drop for TableJobLockGuard {
 /// Returns an error when PostgreSQL cannot evaluate the advisory lock query.
 pub fn lock_table_job(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
     let key = table_job_advisory_lock_key(table_oid.to_u32());
-    pgrx::Spi::run_with_args(
-        "SELECT pg_advisory_lock($1::bigint)",
-        &[pgrx::datum::DatumWithOid::from(key)],
-    )
-    .map_err(|error| error.to_string())?;
+    unsafe {
+        pgrx::pg_sys::DirectFunctionCall1Coll(
+            Some(advisory_lock_int8),
+            pgrx::pg_sys::InvalidOid,
+            pgrx::pg_sys::Datum::from(key),
+        );
+    }
     Ok(())
 }
 
@@ -122,28 +137,34 @@ pub fn lock_table_job(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
 /// Returns an error when PostgreSQL cannot evaluate the advisory lock query.
 pub fn try_lock_table_job(table_oid: pgrx::pg_sys::Oid) -> Result<bool, String> {
     let key = table_job_advisory_lock_key(table_oid.to_u32());
-    let acquired = pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT pg_try_advisory_lock($1::bigint)",
-        &[pgrx::datum::DatumWithOid::from(key)],
-    )
-    .map_err(|error| error.to_string())?
-    .unwrap_or(false);
-    Ok(acquired)
+    let datum = unsafe {
+        pgrx::pg_sys::DirectFunctionCall1Coll(
+            Some(advisory_try_lock_int8),
+            pgrx::pg_sys::InvalidOid,
+            pgrx::pg_sys::Datum::from(key),
+        )
+    };
+    // PostgreSQL bool datums are non-zero for true (`DatumGetBool` is a C macro).
+    Ok(datum.value() != 0)
 }
 
 /// Releases one level of session table job lock ownership.
 ///
+/// Safe to call with no open PostgreSQL transaction (queue flush Drop paths).
+///
 /// # Errors
 ///
-/// Returns an error when PostgreSQL cannot evaluate the unlock query.
+/// Returns an error when the lock was not held by this backend.
 pub fn unlock_table_job(table_oid: pgrx::pg_sys::Oid) -> Result<(), String> {
     let key = table_job_advisory_lock_key(table_oid.to_u32());
-    let released = pgrx::Spi::get_one_with_args::<bool>(
-        "SELECT pg_advisory_unlock($1::bigint)",
-        &[pgrx::datum::DatumWithOid::from(key)],
-    )
-    .map_err(|error| error.to_string())?
-    .unwrap_or(false);
+    let datum = unsafe {
+        pgrx::pg_sys::DirectFunctionCall1Coll(
+            Some(advisory_unlock_int8),
+            pgrx::pg_sys::InvalidOid,
+            pgrx::pg_sys::Datum::from(key),
+        )
+    };
+    let released = datum.value() != 0;
     if !released {
         return Err(format!(
             "table job lock was not held for oid={}",

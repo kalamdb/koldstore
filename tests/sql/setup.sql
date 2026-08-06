@@ -22,6 +22,9 @@ WHERE NOT EXISTS (
 );
 
 SET koldstore.min_max_rows_per_file = 1;
+-- SQL cases assert post-flush SELECTs in the same session; Nested/inline runs
+-- flush to completion before returning (queue mode would race the executor).
+SET koldstore.flush_execution = 'inline';
 
 -- Fail-fast apply lock: retry like e2e `flush_table_job_id` so background
 -- mirror apply briefly holding the lock does not flake ON_ERROR_STOP cases.

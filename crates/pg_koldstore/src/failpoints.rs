@@ -16,8 +16,12 @@
 
 pub use koldstore_flush::{FailpointAction, FlushFailpoint, FAILPOINT_NAMES};
 
-/// Advisory lock key shared with E2E isolation/crash harnesses (`"KOLD"`).
-pub const FAILPOINT_BARRIER_KEY: i64 = 0x4B4F_4C44;
+/// Advisory-lock namespace for `wait:` failpoints (`"KOLD"` as i32).
+///
+/// Paired with [`pgrx::pg_sys::MyDatabaseId`] so parallel E2E worker databases
+/// do not share one cluster-wide barrier (bigint `pg_advisory_lock` keyed only
+/// on `"KOLD"` previously let one test steal another's unlock).
+pub const FAILPOINT_BARRIER_NAMESPACE: i32 = 0x4B4F_4C44;
 
 /// Fixed sleep duration for `sleep:` failpoints (v1; optional duration parse later).
 #[cfg(feature = "test-failpoints")]
@@ -93,16 +97,24 @@ fn wait_barrier(name: &str) -> Result<(), String> {
     #[cfg(feature = "pg")]
     {
         use pgrx::datum::DatumWithOid;
-        // Block until the coordinating session releases the barrier lock.
+        // Per-database two-key lock: parallel E2E worker DBs must not share one
+        // cluster-wide barrier. Block until the coordinating session unlocks.
         // pg_advisory_lock/unlock return void — use Spi::run, not bool decode.
+        let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32() as i32;
         pgrx::Spi::run_with_args(
-            "SELECT pg_advisory_lock($1)",
-            &[DatumWithOid::from(FAILPOINT_BARRIER_KEY)],
+            "SELECT pg_advisory_lock($1, $2)",
+            &[
+                DatumWithOid::from(FAILPOINT_BARRIER_NAMESPACE),
+                DatumWithOid::from(database_oid),
+            ],
         )
         .map_err(|error| error.to_string())?;
         pgrx::Spi::run_with_args(
-            "SELECT pg_advisory_unlock($1)",
-            &[DatumWithOid::from(FAILPOINT_BARRIER_KEY)],
+            "SELECT pg_advisory_unlock($1, $2)",
+            &[
+                DatumWithOid::from(FAILPOINT_BARRIER_NAMESPACE),
+                DatumWithOid::from(database_oid),
+            ],
         )
         .map_err(|error| error.to_string())?;
         pgrx::log!("koldstore failpoint wait released: {name}");

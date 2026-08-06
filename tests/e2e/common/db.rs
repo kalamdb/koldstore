@@ -587,12 +587,12 @@ fn unique_identifier(label: &str) -> String {
 
 /// True when flush failed because a fail-fast entry lock is busy.
 ///
-/// Covers the database apply/slot lock and the per-table job lock. Both return
+/// Covers the database slot lock and the per-table job lock. Both return
 /// immediately from `flush_table` so callers can retry instead of hanging.
 #[must_use]
-pub fn is_flush_apply_lock_busy(error: &tokio_postgres::Error) -> bool {
+pub fn is_flush_entry_lock_busy(error: &tokio_postgres::Error) -> bool {
     // `Display` for tokio_postgres is often just "db error"; inspect the DB
-    // message / debug form so fail-fast apply-lock text is visible.
+    // message / debug form so fail-fast lock text is visible.
     let mut text = format!("{error:?}");
     if let Some(db) = error.as_db_error() {
         text.push(' ');
@@ -702,7 +702,7 @@ pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) ->
         };
         match result {
             Ok(row) => return Ok(row.get(0)),
-            Err(error) if is_flush_apply_lock_busy(&error) => {
+            Err(error) if is_flush_entry_lock_busy(&error) => {
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
             }
             Err(error) => {

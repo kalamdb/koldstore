@@ -213,8 +213,8 @@ async fn concurrent_flush_fencing() -> Result<()> {
                         .as_db_error()
                         .map(|e| e.to_string())
                         .unwrap_or_else(|| b_err.to_string());
-                    let busy = common::is_flush_apply_lock_busy(a_err)
-                        && common::is_flush_apply_lock_busy(b_err);
+                    let busy = common::is_flush_entry_lock_busy(a_err)
+                        && common::is_flush_entry_lock_busy(b_err);
                     last_pair = Some((detail_a, detail_b));
                     if !busy {
                         let (detail_a, detail_b) = last_pair.take().unwrap();

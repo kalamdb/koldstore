@@ -68,6 +68,28 @@ SELECT COALESCE((
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
 }
 
+/// Plans a boolean check that a flush job UUID is in terminal `completed` status.
+///
+/// Bind parameters:
+/// - `$1` job id (`uuid`)
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_flush_job_is_completed() -> std::result::Result<SqlStatement, TableFlushJobError> {
+    SqlStatement::read_with_params(
+        "flush job is completed",
+        r#"
+SELECT EXISTS (
+    SELECT 1 FROM koldstore.jobs
+    WHERE id = $1::uuid AND status = 'completed'
+)
+"#,
+        [koldstore_common::SqlParamType::Uuid],
+    )
+    .map_err(|error| TableFlushJobError::Sql(error.to_string()))
+}
+
 /// Plans reclaim of a stuck `running` flush job when this backend holds the
 /// session table-job lock (previous owner crashed or left without a terminal
 /// status). The same durable job returns to `pending` so a later claim resumes

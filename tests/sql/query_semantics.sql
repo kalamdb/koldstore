@@ -12,7 +12,8 @@ SELECT koldstore.manage_table(
   hot_row_limit => 10,
   min_flush_rows => 1,
   max_rows_per_file => 10,
-  migration_order_by => 'id'
+  migration_order_by => 'id',
+  auto_flush => false
 );
 
 SELECT count(*) AS empty_count FROM sqlreg.empty_t;
@@ -33,7 +34,8 @@ SELECT koldstore.manage_table(
   hot_row_limit => 1,
   min_flush_rows => 1,
   max_rows_per_file => 1,
-  migration_order_by => 'id'
+  migration_order_by => 'id',
+  auto_flush => false
 );
 
 SELECT sqlreg.flush_table('sqlreg.one_row'::regclass);
@@ -56,7 +58,8 @@ SELECT koldstore.manage_table(
   hot_row_limit => 5,
   min_flush_rows => 1,
   max_rows_per_file => 10,
-  migration_order_by => 'id'
+  migration_order_by => 'id',
+  auto_flush => false
 );
 
 CREATE TEMP TABLE before_flush AS
@@ -100,7 +103,8 @@ SELECT koldstore.manage_table(
   hot_row_limit => 4,
   min_flush_rows => 1,
   max_rows_per_file => 8,
-  migration_order_by => 'id'
+  migration_order_by => 'id',
+  auto_flush => false
 );
 
 SELECT sqlreg.flush_table('sqlreg.hot_cold'::regclass);
