@@ -1,8 +1,8 @@
 //! WAL-only seq cursor coverage for issue #71.
 //!
 //! Focused activation, commit-order seq assignment, `koldstore.changes_since`
-//! pagination (hot + cold), watermark continuity across worker restart, and
-//! flush cursor continuity.
+//! pagination (hot + cold, mid-cursor spans, newest rewind), watermark
+//! continuity across worker restart, and flush cursor continuity.
 
 use crate::common;
 use crate::flush::harness::connect_peer;
@@ -927,6 +927,177 @@ async fn changes_since_flush_prune_exposes_retention_floor_not_silent_catchup() 
         assert_eq!(after[0].get::<_, i64>(0), 41);
         assert!(after[0].get::<_, i64>(1) > flushed_max_seq);
         assert_eq!(after[0].get::<_, String>(2), "hot");
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn changes_since_merges_cold_oldest_and_hot_newest_with_mid_cursor() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_cs_hot_cold").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_mix", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        db.client
+            .execute(
+                r#"
+                SELECT koldstore.manage_table(
+                  table_name => $1::text::regclass,
+                  storage => $2,
+                  hot_row_limit => 25,
+                  min_flush_rows => 1,
+                  max_rows_per_file => 1000,
+                  migration_order_by => 'id',
+                  auto_flush => false
+                )
+                "#,
+                &[&relation, &db.storage_name],
+            )
+            .await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        // Seed a cold generation, then leave a hot tail + newer inserts.
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} \
+                     SELECT id, 'pre-' || id FROM generate_series(1, 80) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, 80).await?;
+        common::wait_for_async_mirror(&db.client).await?;
+        common::flush_table_job_id(&db.client, &relation, true)
+            .await?
+            .context("force flush seed batch")?;
+
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} \
+                     SELECT id, 'post-' || id FROM generate_series(81, 100) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::fence_async_mirror(&db.client).await?;
+        let mirror_rows: i64 = db
+            .client
+            .query_one(&format!("SELECT count(*)::bigint FROM {mirror}"), &[])
+            .await?
+            .get(0);
+        assert!(
+            mirror_rows >= 20,
+            "expected hot mirror tail after post-flush inserts, got {mirror_rows}"
+        );
+
+        let hot_count = common::hot_row_count(&db.client, &relation).await?;
+        assert!(
+            hot_count > 0,
+            "expected a hot tail after flush + inserts, got hot={hot_count}"
+        );
+        let cold_count: i64 = db
+            .client
+            .query_one(
+                "SELECT coalesce(sum(row_count), 0)::bigint \
+                 FROM koldstore.cold_segments \
+                 WHERE table_oid = $1::text::regclass AND status = 'active'",
+                &[&relation],
+            )
+            .await?
+            .get(0);
+        assert!(
+            cold_count > 0,
+            "expected cold segments after flush, got cold_rows={cold_count}"
+        );
+
+        // From start: oldest rows are cold, newest are hot.
+        let full = db
+            .client
+            .query(
+                "SELECT seq, (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 1000) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(full.len(), 100, "latest-state feed must cover all PKs");
+        let sources: BTreeSet<String> = full.iter().map(|row| row.get(2)).collect();
+        assert!(
+            sources.contains("cold") && sources.contains("hot"),
+            "full feed must mix cold oldest and hot newest, got {sources:?}"
+        );
+        let oldest_source: String = full[0].get(2);
+        let newest_source: String = full[full.len() - 1].get(2);
+        assert_eq!(oldest_source, "cold", "oldest retained change must be cold");
+        assert_eq!(newest_source, "hot", "newest change must be hot");
+
+        let first_hot_seq = full
+            .iter()
+            .find(|row| row.get::<_, String>(2) == "hot")
+            .map(|row| row.get::<_, i64>(0))
+            .context("expected at least one hot change")?;
+        let last_cold_seq = full
+            .iter()
+            .rev()
+            .find(|row| row.get::<_, String>(2) == "cold")
+            .map(|row| row.get::<_, i64>(0))
+            .context("expected at least one cold change")?;
+        assert!(
+            last_cold_seq < first_hot_seq,
+            "cold seqs must precede hot seqs (last_cold={last_cold_seq}, first_hot={first_hot_seq})"
+        );
+
+        // Mid-cursor inside cold history: page must continue through cold into hot.
+        let mid_cursor = last_cold_seq.saturating_sub(5).max(1);
+        let spanning = db
+            .client
+            .query(
+                "SELECT seq, (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, $2::bigint, 40) \
+                 ORDER BY seq",
+                &[&relation, &mid_cursor],
+            )
+            .await?;
+        assert!(
+            !spanning.is_empty(),
+            "mid-cursor page must return rows after seq={mid_cursor}"
+        );
+        assert!(spanning.iter().all(|row| row.get::<_, i64>(0) > mid_cursor));
+        let span_sources: BTreeSet<String> = spanning.iter().map(|row| row.get(2)).collect();
+        assert!(
+            span_sources.contains("cold") && span_sources.contains("hot"),
+            "mid-cursor page must include both cold and hot sources, got {span_sources:?} \
+             (cursor={mid_cursor}, last_cold={last_cold_seq}, first_hot={first_hot_seq})"
+        );
+
+        // Newest-N rewind must land on the hot post-flush inserts.
+        let newest = db
+            .client
+            .query(
+                "SELECT (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 1000, 5) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(newest.len(), 5);
+        let newest_ids: Vec<i64> = newest.iter().map(|row| row.get(0)).collect();
+        assert_eq!(newest_ids, vec![96, 97, 98, 99, 100]);
+        assert!(
+            newest.iter().all(|row| row.get::<_, String>(1) == "hot"),
+            "last_rows rewind must come from the hot tail"
+        );
 
         unmanage(&db.client, &relation).await?;
     }

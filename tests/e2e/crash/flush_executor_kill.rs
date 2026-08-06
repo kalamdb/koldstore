@@ -35,6 +35,9 @@ async fn flush_executor_sigkill_recovers_and_completes() -> Result<()> {
         return Ok(());
     }
 
+    // SIGKILL of a bgworker restarts the whole postmaster — hold the cluster
+    // exclusive so sibling E2E fixtures are not mid-query when connections die.
+    let _cluster = common::acquire_cluster_exclusive()?;
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {

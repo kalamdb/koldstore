@@ -332,10 +332,12 @@ tables (WAL-only committed-WAL mirror capture).
 SELECT koldstore.wait_for_async_mirror();
 ```
 
-Applies committed source changes available at the fence boundary and waits
-until the mirror has reached that boundary. This provides a strong consistency
-point for an async table. The background worker normally performs the same work
-without an explicit call, and `flush_table` fences automatically.
+Applies committed source changes available at the fence boundary and returns
+when the mirror has reached that boundary. The fence LSN is captured at call
+time (and forced durable), so concurrent writers after that point do not extend
+the wait. This is an **optional** strong-consistency API for reads/benchmarks —
+`flush_table` and auto-flush do **not** call it (they enqueue/spawn and return).
+The background worker normally keeps the mirror caught up without an explicit call.
 
 **Returns:** `bigint` — the number of source row-change messages applied by
 this invocation. A return value of `0` can mean the worker had already caught

@@ -42,6 +42,7 @@ async fn long_flush_executor_sigkill_recovers_mirror_hot_query_and_cold() -> Res
         return Ok(());
     }
 
+    let _cluster = common::acquire_cluster_exclusive()?;
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {

@@ -23,20 +23,28 @@ const VISIBILITY_BOUND: Duration = Duration::from_secs(1);
 const POLL_SLEEP: Duration = Duration::from_millis(10);
 
 async fn manage_no_auto_flush(db: &common::TestDb, relation: &str) -> Result<()> {
+    manage_no_auto_flush_with_hot_limit(db, relation, None).await
+}
+
+async fn manage_no_auto_flush_with_hot_limit(
+    db: &common::TestDb,
+    relation: &str,
+    hot_row_limit: Option<i64>,
+) -> Result<()> {
     db.client
         .execute(
             r#"
             SELECT koldstore.manage_table(
               table_name => $1::text::regclass,
               storage => $2,
-              hot_row_limit => NULL,
+              hot_row_limit => $3,
               min_flush_rows => 1,
               max_rows_per_file => 1000,
               migration_order_by => 'id',
               auto_flush => false
             )
             "#,
-            &[&relation, &db.storage_name],
+            &[&relation, &db.storage_name, &hot_row_limit],
         )
         .await
         .with_context(|| format!("manage_table auto_flush=false for {relation}"))?;
@@ -59,6 +67,24 @@ async fn create_events_table(db: &common::TestDb, name: &str) -> Result<String> 
         ))
         .await?;
     manage_no_auto_flush(db, &relation).await?;
+    Ok(relation)
+}
+
+async fn create_events_table_with_hot_limit(
+    db: &common::TestDb,
+    name: &str,
+    hot_row_limit: i64,
+) -> Result<String> {
+    let relation = db.relation(name);
+    db.client
+        .batch_execute(&format!(
+            "CREATE TABLE {relation} (
+               id bigint PRIMARY KEY,
+               body text NOT NULL
+             )"
+        ))
+        .await?;
+    manage_no_auto_flush_with_hot_limit(db, &relation, Some(hot_row_limit)).await?;
     Ok(relation)
 }
 
@@ -397,13 +423,16 @@ async fn four_tables_parallel_1k_commits_visible_within_one_second() -> Result<(
 
 /// While Parquet upload holds the failpoint wait (apply lock free), a probe
 /// commit must still land in `changes_since` within one second.
+///
+/// Also asserts retained cold/hot history remains readable via `changes_since`
+/// from a mid-cursor while that flush is parked.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn changes_since_stays_realtime_during_manual_parquet_flush() -> Result<()> {
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "cs_lat_flush").await?;
-        let relation = create_events_table(&db, "lat_flush").await?;
+        let relation = create_events_table_with_hot_limit(&db, "lat_flush", 20).await?;
         db.client
             .batch_execute(&format!(
                 "INSERT INTO {relation} (id, body)
@@ -411,6 +440,43 @@ async fn changes_since_stays_realtime_during_manual_parquet_flush() -> Result<()
             ))
             .await?;
         common::fence_async_mirror(&db.client).await?;
+        // Publish a cold generation so mid-flush reads must merge cold + hot.
+        common::flush_table_job_id(&db.client, &relation, true)
+            .await?
+            .context("seed flush before pause")?;
+        db.client
+            .batch_execute(&format!(
+                "INSERT INTO {relation} (id, body)
+                 SELECT g, 'hot-' || g::text FROM generate_series(65, 80) AS g"
+            ))
+            .await?;
+        common::fence_async_mirror(&db.client).await?;
+
+        let history_before = db
+            .client
+            .query(
+                "SELECT seq, (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 1000) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        let history_ids: std::collections::BTreeSet<i64> =
+            history_before.iter().map(|row| row.get(1)).collect();
+        assert_eq!(
+            history_ids.len(),
+            80,
+            "pre-pause history must cover ids 1..=80, got {} rows / {} unique",
+            history_before.len(),
+            history_ids.len()
+        );
+        let history_sources: std::collections::BTreeSet<String> =
+            history_before.iter().map(|row| row.get(2)).collect();
+        assert!(
+            history_sources.contains("cold") && history_sources.contains("hot"),
+            "pre-pause history must already mix cold+hot, got {history_sources:?}"
+        );
+        let mid_cursor = history_before[history_before.len() / 2].get::<_, i64>(0);
 
         // Inline so the session failpoint is hit in the same backend as flush_table
         // (queue executors would not inherit a session-level SET).
@@ -430,6 +496,22 @@ async fn changes_since_stays_realtime_during_manual_parquet_flush() -> Result<()
             pause_flush_at(&db, &relation, "wait:during_parquet_write").await?;
 
         let probe = connect_peer(&db).await?;
+        // Retained history (including cold) must stay readable mid-flush.
+        let mid_page = probe
+            .query(
+                "SELECT seq, (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, $2::bigint, 40) \
+                 ORDER BY seq",
+                &[&relation, &mid_cursor],
+            )
+            .await
+            .context("changes_since mid-cursor while flush paused")?;
+        assert!(
+            !mid_page.is_empty(),
+            "mid-cursor changes_since must return rows while flush is paused"
+        );
+        assert!(mid_page.iter().all(|row| row.get::<_, i64>(0) > mid_cursor));
+
         let cursor = changes_since_cursor(&probe, &relation).await?;
         let probe_id = 9_001i64;
         probe

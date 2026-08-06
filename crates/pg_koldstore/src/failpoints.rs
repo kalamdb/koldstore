@@ -29,10 +29,6 @@ pub const FAILPOINT_BARRIER_NAMESPACE: i32 = 0x4B4F_4C44;
 #[cfg(feature = "test-failpoints")]
 const FAILPOINT_SLEEP: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Poll interval while waiting on the failpoint barrier (interruptible).
-#[cfg(feature = "test-failpoints")]
-const FAILPOINT_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(50);
-
 /// Hits a named failpoint if the session GUC arms it.
 ///
 /// Borrows the armed GUC text in place (no owned-`String` conversion) so the
@@ -113,43 +109,44 @@ fn current_failpoint() -> Option<std::ffi::CString> {
     }
 }
 
-/// Parks until the coordinator releases the barrier, while remaining cancellable.
+/// Parks until the coordinator releases the barrier.
 ///
-/// Uses `pg_try_advisory_lock` + short sleeps so `CHECK_FOR_INTERRUPTS` can honor
-/// `pg_cancel_backend` / statement timeout / postmaster death instead of blocking
-/// forever inside `pg_advisory_lock`.
+/// Uses a genuine blocking `pg_advisory_lock`, not a `pg_try_advisory_lock`
+/// poll loop: PostgreSQL's own lock-wait machinery (`ProcSleep`) already
+/// honors `pg_cancel_backend` / statement timeout / postmaster death while
+/// parked, so no manual interrupt-check loop is needed. Just as important,
+/// only a genuine blocking wait registers as a `granted = false` row in
+/// `pg_locks` — the signal E2E harnesses poll for to detect "flush is
+/// parked at the barrier". A `pg_try_advisory_lock` loop never blocks long
+/// enough to be observed there, so harnesses would see the flush as never
+/// having reached the wait and time out instead.
 #[cfg(feature = "test-failpoints")]
 fn wait_barrier(name: &str) -> Result<(), String> {
     #[cfg(feature = "pg")]
     {
         use pgrx::datum::DatumWithOid;
+        // Per-database two-key lock: parallel E2E worker DBs must not share one
+        // cluster-wide barrier. pg_advisory_lock/unlock return void — use
+        // Spi::run, not bool decode.
         let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32() as i32;
-        loop {
-            // Honor query cancel / backend die while parked for tests.
-            pgrx::check_for_interrupts!();
-            let locked = pgrx::Spi::get_one_with_args::<bool>(
-                "SELECT pg_try_advisory_lock($1, $2)",
-                &[
-                    DatumWithOid::from(FAILPOINT_BARRIER_NAMESPACE),
-                    DatumWithOid::from(database_oid),
-                ],
-            )
-            .map_err(|error| error.to_string())?
-            .unwrap_or(false);
-            if locked {
-                pgrx::Spi::run_with_args(
-                    "SELECT pg_advisory_unlock($1, $2)",
-                    &[
-                        DatumWithOid::from(FAILPOINT_BARRIER_NAMESPACE),
-                        DatumWithOid::from(database_oid),
-                    ],
-                )
-                .map_err(|error| error.to_string())?;
-                pgrx::log!("koldstore failpoint wait released: {name}");
-                return Ok(());
-            }
-            std::thread::sleep(FAILPOINT_WAIT_POLL);
-        }
+        pgrx::Spi::run_with_args(
+            "SELECT pg_advisory_lock($1, $2)",
+            &[
+                DatumWithOid::from(FAILPOINT_BARRIER_NAMESPACE),
+                DatumWithOid::from(database_oid),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        pgrx::Spi::run_with_args(
+            "SELECT pg_advisory_unlock($1, $2)",
+            &[
+                DatumWithOid::from(FAILPOINT_BARRIER_NAMESPACE),
+                DatumWithOid::from(database_oid),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        pgrx::log!("koldstore failpoint wait released: {name}");
+        Ok(())
     }
     #[cfg(not(feature = "pg"))]
     {

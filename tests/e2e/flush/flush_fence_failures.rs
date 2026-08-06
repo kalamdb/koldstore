@@ -107,6 +107,10 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
         // Continuous noise keeps the async applier on the database apply lock.
         // Pause the worker so flush can take the lock and fence WAL (including
         // noise) in phase-0; the DML stream itself stays live.
+        //
+        // `flush_table` first calls `wait_for_async_mirror`, which must complete
+        // under continuous writers by fencing to the call-time WAL LSN (not
+        // waiting for the stream to go idle forever).
         let dbname: String = db
             .client
             .query_one("SELECT current_database()", &[])
@@ -128,10 +132,11 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
                  RESET koldstore.internal_async_mirror_worker"
             ))
             .await?;
-        let flushed = flush_result?;
-        assert_eq!(flushed, 40);
         stop.store(true, Ordering::Relaxed);
-        noise_handle.await??;
+        let noise_result = noise_handle.await?;
+        let flushed = flush_result?;
+        noise_result?;
+        assert_eq!(flushed, 40);
 
         common::assert_flush_pruned_hot_storage(&db.client, &primary.relation, 40).await?;
         common::assert_pk_unique(&db.client, &primary.relation, &["id"]).await?;

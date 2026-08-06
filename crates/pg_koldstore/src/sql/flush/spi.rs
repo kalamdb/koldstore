@@ -184,47 +184,10 @@ pub(crate) fn lock_source_table_share_row_exclusive(
 
 /// Captures the end of inserted WAL and forces it durable on disk.
 ///
-/// Required so logical decoding with `upto_lsn = F1` can see commits that used
-/// `synchronous_commit = off`.
-///
-/// Uses `XLogFlush` directly rather than SPI-polling `pg_current_wal_flush_lsn`
-/// with `pg_sleep`: during `flush_table` the apply advisory lock blocks the
-/// async worker, so that poll can sit for the full ~10s budget per flush.
-///
-/// The fence LSN must be the end of inserted WAL ([`inserted_wal_end_lsn`]), not
-/// a raw [`GetXLogInsertRecPtr`]: at page boundaries the latter points past the
-/// next page header and `XLogFlush` fails with "xlog flush request … is not
-/// satisfied".
+/// Delegates to [`crate::mirror::apply::capture_durable_wal_fence`] so flush
+/// prune fences and `wait_for_async_mirror` share one LSN capture path.
 pub(super) fn capture_durable_wal_fence() -> Result<crate::mirror::apply::WalFenceLsn, String> {
-    let fence = inserted_wal_end_lsn();
-    unsafe { pgrx::pg_sys::XLogFlush(fence) };
-    Ok(crate::mirror::apply::WalFenceLsn::new(fence))
-}
-
-/// Latest inserted WAL end pointer that is safe to pass to [`XLogFlush`].
-///
-/// Prefer `GetXLogInsertEndRecPtr` when the running PostgreSQL exports it.
-/// PG 16.13 does not; emulate the page-boundary correction instead.
-fn inserted_wal_end_lsn() -> pgrx::pg_sys::XLogRecPtr {
-    #[cfg(not(feature = "pg16"))]
-    {
-        unsafe { pgrx::pg_sys::GetXLogInsertEndRecPtr() }
-    }
-    #[cfg(feature = "pg16")]
-    {
-        // Same correction as GetXLogInsertEndRecPtr / XLogBytePosToEndRecPtr:
-        // at a page boundary GetXLogInsertRecPtr sits just after the page header
-        // (e.g. …/018 or …/028) while no WAL exists there yet.
-        let insert = unsafe { pgrx::pg_sys::GetXLogInsertRecPtr() };
-        let page_off = insert % u64::from(pgrx::pg_sys::XLOG_BLCKSZ);
-        let short_phd = std::mem::size_of::<pgrx::pg_sys::XLogPageHeaderData>() as u64;
-        let long_phd = std::mem::size_of::<pgrx::pg_sys::XLogLongPageHeaderData>() as u64;
-        if page_off == short_phd || page_off == long_phd {
-            insert - page_off
-        } else {
-            insert
-        }
-    }
+    crate::mirror::apply::capture_durable_wal_fence()
 }
 
 pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> {

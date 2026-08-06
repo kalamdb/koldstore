@@ -129,19 +129,15 @@ fn load_flush_prepared_context(
             }
         }
     }
-    let min_floor = u64::try_from(crate::guc::min_max_rows_per_file())
-        .unwrap_or(koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE);
     let options = super::spi::active_manage_options(table_oid)?.unwrap_or_default();
     let policy = options.flush_policy();
     let configured = policy.as_ref().map(FlushPolicy::max_rows_per_file);
-    if let Some(value) = configured {
-        let hint = format!(
-            "lower the floor for testing with SET {} = <value>",
-            crate::settings::MIN_MAX_ROWS_PER_FILE_GUC
-        );
-        koldstore_common::validate_max_rows_per_file(value, min_floor, Some(&hint))?;
-    }
-    let max_rows_per_file = max_rows_per_file_from_policy(configured, min_floor)?;
+    // Trust the catalog value: `manage_table` already validated against the
+    // floor GUC in the managing session. Re-checking against the *current*
+    // backend's `min_max_rows_per_file` breaks queue flush executors (and any
+    // peer) that never inherited that session SET — they would reject a
+    // persisted `max_rows_per_file=5` with the default floor of 1000.
+    let max_rows_per_file = max_rows_per_file_from_policy(configured, 1)?;
     let target_file_size_bytes = options
         .target_file_size_mb
         .map(|megabytes| {

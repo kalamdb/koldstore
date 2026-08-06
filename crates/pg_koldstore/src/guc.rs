@@ -166,7 +166,7 @@ pub fn define_gucs() {
     GucRegistry::define_int_guc(
         c"koldstore.min_max_rows_per_file",
         c"Minimum allowed max_rows_per_file for managed tables.",
-        c"Rejects manage_table and flush settings below this floor. Lower temporarily for tests with SET koldstore.min_max_rows_per_file = <value>.",
+        c"Rejects manage_table (and ALTER) settings below this floor. Already-persisted catalog policies are trusted at flush time so queue executors need not inherit the managing session's SET. Lower temporarily for tests with SET / ALTER DATABASE koldstore.min_max_rows_per_file = <value>.",
         &MIN_MAX_ROWS_PER_FILE,
         settings::MIN_MIN_MAX_ROWS_PER_FILE,
         settings::MAX_MIN_MAX_ROWS_PER_FILE,

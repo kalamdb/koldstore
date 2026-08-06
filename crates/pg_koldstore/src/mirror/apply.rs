@@ -111,6 +111,24 @@ impl BoundedApplyRequest {
             max_ms: Some(0),
         }
     }
+
+    /// Strong-consistency fence: apply through a fixed durable WAL upper bound.
+    ///
+    /// Unlike [`Self::available_unlimited`], concurrent commits after `fence`
+    /// cannot extend the catch-up target — the stream goes idle relative to
+    /// this bound even under continuous writers.
+    #[must_use]
+    pub fn upto_fence(fence: WalFenceLsn) -> Self {
+        Self {
+            upper_bound: Some(fence),
+            skip_through: None,
+            acknowledge_durable_checkpoint: true,
+            advance_slot_on_empty: true,
+            target_prune_floor: None,
+            max_rows: Some(0),
+            max_ms: Some(0),
+        }
+    }
 }
 
 /// Outcome of a bounded apply pass.
@@ -635,6 +653,56 @@ fn current_flush_lsn() -> u64 {
     unsafe { pgrx::pg_sys::GetFlushRecPtr(std::ptr::null_mut()) }
 }
 
+/// Captures the end of inserted WAL and forces it durable on disk.
+///
+/// Required so logical decoding with `upto_lsn = F` can see commits that used
+/// `synchronous_commit = off`. Shared by [`wait_for_async_mirror`] and flush
+/// prune fences.
+///
+/// Uses `XLogFlush` directly rather than SPI-polling `pg_current_wal_flush_lsn`
+/// with `pg_sleep`: under the apply advisory lock the async worker is blocked,
+/// so that poll can sit for a long budget per call.
+///
+/// The fence LSN must be the end of inserted WAL ([`inserted_wal_end_lsn`]), not
+/// a raw [`GetXLogInsertRecPtr`]: at page boundaries the latter points past the
+/// next page header and `XLogFlush` fails with "xlog flush request … is not
+/// satisfied".
+///
+/// # Errors
+///
+/// Currently infallible; returns [`Result`] so call sites share one error path.
+pub fn capture_durable_wal_fence() -> Result<WalFenceLsn, String> {
+    let fence = inserted_wal_end_lsn();
+    unsafe { pgrx::pg_sys::XLogFlush(fence) };
+    Ok(WalFenceLsn::new(fence))
+}
+
+/// Latest inserted WAL end pointer that is safe to pass to [`XLogFlush`].
+///
+/// Prefer `GetXLogInsertEndRecPtr` when the running PostgreSQL exports it.
+/// PG 16.13 does not; emulate the page-boundary correction instead.
+fn inserted_wal_end_lsn() -> pgrx::pg_sys::XLogRecPtr {
+    #[cfg(not(feature = "pg16"))]
+    {
+        unsafe { pgrx::pg_sys::GetXLogInsertEndRecPtr() }
+    }
+    #[cfg(feature = "pg16")]
+    {
+        // Same correction as GetXLogInsertEndRecPtr / XLogBytePosToEndRecPtr:
+        // at a page boundary GetXLogInsertRecPtr sits just after the page header
+        // (e.g. …/018 or …/028) while no WAL exists there yet.
+        let insert = unsafe { pgrx::pg_sys::GetXLogInsertRecPtr() };
+        let page_off = insert % u64::from(pgrx::pg_sys::XLOG_BLCKSZ);
+        let short_phd = std::mem::size_of::<pgrx::pg_sys::XLogPageHeaderData>() as u64;
+        let long_phd = std::mem::size_of::<pgrx::pg_sys::XLogLongPageHeaderData>() as u64;
+        if page_off == short_phd || page_off == long_phd {
+            insert - page_off
+        } else {
+            insert
+        }
+    }
+}
+
 fn read_durable_seq_high_watermark() -> Result<i64, String> {
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
     Ok(pgrx::Spi::get_one_with_args::<i64>(
@@ -1088,25 +1156,34 @@ fn is_background_worker() -> bool {
     unsafe { !pgrx::pg_sys::MyBgworkerEntry.is_null() }
 }
 
-/// Applies available committed WAL and returns the number of row changes.
+/// Applies committed WAL available at the fence boundary and returns row changes.
 ///
-/// SQL contract: `koldstore.wait_for_async_mirror()` is the explicit strong
-/// consistency fence for async mode and benchmark accounting. It loops with an
-/// unlimited per-pass budget until the stream is idle. The timeout is
-/// **idle-based**: progress (applied row changes) resets it, so a large catch-up
-/// that keeps applying does not fail solely because wall time exceeded 300s.
+/// SQL contract: `koldstore.wait_for_async_mirror()` is an **optional** strong-
+/// consistency fence for callers that need the mirror caught up before a read
+/// or benchmark sample. It is **not** on the flush hot path:
+/// `flush_table` / auto-flush enqueue and return (or spawn) without calling this.
+///
+/// Captures a durable WAL upper bound at call time and applies through that
+/// bound only. Concurrent commits after the fence LSN are not waited on —
+/// callers that need a later boundary must fence again. This is synchronous
+/// apply work for the backlog at the fence, not an idle wait for writers to stop.
+///
+/// Timeouts remain as safety nets when an apply pass cannot finish the fence.
 #[pgrx::pg_extern(name = "wait_for_async_mirror", schema = "koldstore")]
 pub fn wait_for_async_mirror() -> i64 {
     const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
     const HARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3600);
+    let fence = capture_durable_wal_fence()
+        .unwrap_or_else(|error| pgrx::error!("async mirror fence LSN capture failed: {error}"));
     let started = std::time::Instant::now();
     let mut last_progress = started;
     let mut total = 0_i64;
     loop {
-        let outcome = apply_bounded(BoundedApplyRequest::available_unlimited())
+        let outcome = apply_bounded(BoundedApplyRequest::upto_fence(fence))
             .unwrap_or_else(|error| pgrx::error!("async mirror apply failed: {error}"));
         total = total.saturating_add(outcome.row_changes);
-        if outcome.row_changes == 0 && !outcome.budget_exhausted {
+        // Finished the fixed fence (or nothing left at this bound).
+        if !outcome.budget_exhausted {
             break;
         }
         if outcome.row_changes > 0 {
@@ -1114,8 +1191,10 @@ pub fn wait_for_async_mirror() -> i64 {
         }
         if last_progress.elapsed() >= IDLE_TIMEOUT || started.elapsed() >= HARD_TIMEOUT {
             pgrx::error!(
-                "async mirror fence timed out after {}s with {total} row changes applied",
-                started.elapsed().as_secs()
+                "async mirror fence timed out after {}s with {total} row changes applied \
+                 (fence_lsn={})",
+                started.elapsed().as_secs(),
+                format_pg_lsn(fence.get())
             );
         }
     }

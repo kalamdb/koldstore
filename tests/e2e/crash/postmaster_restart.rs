@@ -138,6 +138,8 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
         );
         return Ok(());
     }
+    // Immediate restart kills every backend on the shared pgrx cluster.
+    let _cluster = common::acquire_cluster_exclusive()?;
     common::require_pgrx_server().await?;
 
     let target = common::scenario_pg_matrix()

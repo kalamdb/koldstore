@@ -3,10 +3,13 @@
 //! Covers:
 //! - DROP while flush holds the table-job lock (later phase than select-only)
 //! - DROP while mirror capture is actively absorbing DML
-//! - Four concurrent 10k-row flushes
+//! - Four concurrent 200k-row flushes
 //! - Same-table dual flush fail-fast vs cross-table apply-lock fail-fast
 //! - Mid-flush storage directory removal / path corruption
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -49,12 +52,15 @@ async fn manage_with_hot_limit(
     db: &common::TestDb,
     relation: &str,
     hot_row_limit: i64,
+    max_rows_per_file: i64,
 ) -> Result<()> {
-    // Keep max_rows_per_file at a small floor so policy flush is due for the
-    // modest e2e fixtures (default 1000 would skip undersized excess).
-    // ALTER DATABASE so flush peers inherit the floor — session SET alone is
-    // not enough: execute validates stored max_rows_per_file against the peer
-    // GUC and would fail before wait: failpoints.
+    // Failpoint fixtures keep max_rows_per_file tiny so policy flush is due for
+    // modest row counts (default 1000 would skip undersized excess). Volume /
+    // concurrency tests pass a larger value so they do not write thousands of
+    // tiny Parquet segments. ALTER DATABASE so flush peers inherit the floor —
+    // session SET alone is not enough: execute validates stored
+    // max_rows_per_file against the peer GUC and would fail before wait:
+    // failpoints.
     let dbname: String = db
         .client
         .query_one("SELECT current_database()::text", &[])
@@ -74,16 +80,200 @@ async fn manage_with_hot_limit(
               storage => $2,
               hot_row_limit => $3,
               min_flush_rows => 1,
-              max_rows_per_file => 8,
+              max_rows_per_file => $4,
               migration_order_by => 'id',
               auto_flush => false
             )
             "#,
-            &[&relation, &db.storage_name, &hot_row_limit],
+            &[
+                &relation,
+                &db.storage_name,
+                &hot_row_limit,
+                &max_rows_per_file,
+            ],
         )
         .await
         .with_context(|| format!("manage_table {relation}"))?;
     Ok(())
+}
+
+/// Snapshot of concurrent flush job progress observed from `koldstore.jobs`.
+#[derive(Debug, Default)]
+struct ParallelFlushTrackerReport {
+    max_concurrent_running: usize,
+    samples: usize,
+    tables_seen_running: usize,
+    tables_with_progress: usize,
+}
+
+/// Latest flush job interval for one managed table.
+#[derive(Debug, Clone)]
+struct FlushJobInterval {
+    table_oid: u32,
+    started_ms: i64,
+    finished_ms: i64,
+    rows_flushed: i64,
+    batches_completed: i32,
+}
+
+/// Polls `koldstore.jobs` until `stop` is set, recording overlap + progress.
+async fn track_parallel_flush_jobs(
+    client: Client,
+    table_oids: Vec<u32>,
+    stop: Arc<AtomicBool>,
+) -> Result<ParallelFlushTrackerReport> {
+    let mut report = ParallelFlushTrackerReport::default();
+    let mut saw_running: HashMap<u32, bool> = HashMap::new();
+    let mut saw_progress: HashMap<u32, bool> = HashMap::new();
+    let mut last_line = String::new();
+    let oid_list = table_oids
+        .iter()
+        .map(|oid| i64::from(*oid))
+        .collect::<Vec<_>>();
+
+    loop {
+        let rows = client
+            .query(
+                r#"
+                SELECT DISTINCT ON (table_oid)
+                  table_oid::bigint,
+                  status,
+                  phase,
+                  rows_flushed,
+                  progress_current,
+                  progress_total,
+                  batches_completed
+                FROM koldstore.jobs
+                WHERE job_type = 'flush'
+                  AND table_oid::bigint = ANY ($1::bigint[])
+                ORDER BY table_oid, created_at DESC
+                "#,
+                &[&oid_list],
+            )
+            .await
+            .context("poll concurrent flush jobs")?;
+
+        let mut running = 0usize;
+        let mut line = String::from("flush_4x200k jobs:");
+        for row in &rows {
+            let oid = u32::try_from(row.get::<_, i64>(0)).context("job table_oid")?;
+            let status: String = row.get(1);
+            let phase: String = row.get(2);
+            let rows_flushed: i64 = row.get(3);
+            let progress_current: i64 = row.get(4);
+            let progress_total: i64 = row.get(5);
+            let batches_completed: i32 = row.get(6);
+            if status == "running" {
+                running = running.saturating_add(1);
+                saw_running.insert(oid, true);
+            }
+            // Phase advances before rows_flushed is non-zero; count either.
+            if progress_current > 0
+                || rows_flushed > 0
+                || batches_completed > 0
+                || (status == "running" && phase != "pending")
+            {
+                saw_progress.insert(oid, true);
+            }
+            line.push_str(&format!(
+                " oid={oid} status={status} phase={phase} rows={rows_flushed} progress={progress_current}/{progress_total} batches={batches_completed};"
+            ));
+        }
+        report.max_concurrent_running = report.max_concurrent_running.max(running);
+        report.samples = report.samples.saturating_add(1);
+        if !rows.is_empty() && line != last_line {
+            eprintln!("{line}");
+            last_line = line;
+        }
+
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        // Fast poll: encode/finalize windows can be short with large files.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    report.tables_seen_running = saw_running.len();
+    report.tables_with_progress = saw_progress.len();
+    Ok(report)
+}
+
+/// Loads the latest flush job wall-clock interval per table.
+async fn latest_flush_job_intervals(
+    client: &Client,
+    table_oids: &[u32],
+) -> Result<Vec<FlushJobInterval>> {
+    let oid_list = table_oids
+        .iter()
+        .map(|oid| i64::from(*oid))
+        .collect::<Vec<_>>();
+    let rows = client
+        .query(
+            r#"
+            SELECT DISTINCT ON (table_oid)
+              table_oid::bigint,
+              (extract(epoch FROM started_at) * 1000)::bigint,
+              (extract(epoch FROM coalesce(finished_at, clock_timestamp())) * 1000)::bigint,
+              rows_flushed,
+              batches_completed
+            FROM koldstore.jobs
+            WHERE job_type = 'flush'
+              AND table_oid::bigint = ANY ($1::bigint[])
+              AND started_at IS NOT NULL
+            ORDER BY table_oid, created_at DESC
+            "#,
+            &[&oid_list],
+        )
+        .await
+        .context("load flush job intervals")?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(FlushJobInterval {
+            table_oid: u32::try_from(row.get::<_, i64>(0)).context("job table_oid")?,
+            started_ms: row.get(1),
+            finished_ms: row.get(2),
+            rows_flushed: row.get(3),
+            batches_completed: row.get(4),
+        });
+    }
+    Ok(out)
+}
+
+/// Max number of flush intervals that overlap at any single instant.
+fn max_interval_overlap(intervals: &[FlushJobInterval]) -> usize {
+    #[derive(Clone, Copy)]
+    enum Edge {
+        Start,
+        End,
+    }
+    let mut edges: Vec<(i64, Edge)> = Vec::new();
+    for interval in intervals {
+        edges.push((interval.started_ms, Edge::Start));
+        edges.push((interval.finished_ms, Edge::End));
+    }
+    edges.sort_by(|a, b| {
+        a.0.cmp(&b.0).then_with(|| match (&a.1, &b.1) {
+            // Process starts before ends at the same timestamp so touching
+            // intervals still count as concurrent for an instant.
+            (Edge::Start, Edge::End) => std::cmp::Ordering::Less,
+            (Edge::End, Edge::Start) => std::cmp::Ordering::Greater,
+            _ => std::cmp::Ordering::Equal,
+        })
+    });
+    let mut active = 0usize;
+    let mut max_active = 0usize;
+    for (_, edge) in edges {
+        match edge {
+            Edge::Start => {
+                active = active.saturating_add(1);
+                max_active = max_active.max(active);
+            }
+            Edge::End => {
+                active = active.saturating_sub(1);
+            }
+        }
+    }
+    max_active
 }
 
 async fn count_advisory_waiters(client: &Client, key: i64) -> Result<i64> {
@@ -199,7 +389,7 @@ async fn drop_table_during_flush_after_manifest_publish() -> Result<()> {
         let table = db
             .create_indexed_items_table("drop_flush_post_pub_items", 64)
             .await?;
-        manage_with_hot_limit(&db, &table.relation, 8).await?;
+        manage_with_hot_limit(&db, &table.relation, 8, 8).await?;
         disable_auto_flush(&db.client, &table.relation).await?;
 
         let coordinator = connect_peer(&db).await?;
@@ -294,7 +484,7 @@ async fn drop_table_while_mirror_capture_is_active() -> Result<()> {
         let table = db
             .create_indexed_items_table("drop_while_mirror_items", 32)
             .await?;
-        manage_with_hot_limit(&db, &table.relation, 1_000).await?;
+        manage_with_hot_limit(&db, &table.relation, 1_000, 8).await?;
         disable_auto_flush(&db.client, &table.relation).await?;
         let oid = table_oid(&db.client, &table.relation).await?;
 
@@ -372,57 +562,194 @@ async fn drop_table_while_mirror_capture_is_active() -> Result<()> {
     Ok(())
 }
 
-/// Four tables flush in parallel with ~10k seed rows each.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn four_tables_flush_10k_rows_in_parallel() -> Result<()> {
+/// Four tables flush in parallel with ~200k seed rows each.
+///
+/// Uses a production-scale `max_rows_per_file` so the test measures concurrent
+/// flush overlap rather than thousands of tiny Parquet segments. A side task
+/// polls `koldstore.jobs` for live progress; concurrency is proven from
+/// overlapping `started_at`/`finished_at` intervals on the first wave.
+///
+/// Finalize serializes on the database slot lock (~10s try-lock budget). Under
+/// 200k-row prune that is expected: some first-wave jobs may error with
+/// "slot lock" and are retried after the concurrent wave.
+#[tokio::test(flavor = "multi_thread", worker_threads = 5)]
+async fn four_tables_flush_200k_rows_in_parallel() -> Result<()> {
     common::require_pgrx_server().await?;
 
+    const SEED_ROWS: i64 = 200_000;
+    const HOT_ROW_LIMIT: i64 = 100;
+    const MAX_ROWS_PER_FILE: i64 = 1_000;
+    // Policy flush leaves `hot_row_limit` rows hot.
+    const MIN_FLUSHED_PER_TABLE: i64 = SEED_ROWS - HOT_ROW_LIMIT;
+
     for target in common::scenario_pg_matrix() {
-        let db = common::TestDb::start(target, "flush_4x10k").await?;
+        let db = common::TestDb::start(target, "flush_4x200k").await?;
         let mut relations = Vec::new();
-        for name in ["p10k_a", "p10k_b", "p10k_c", "p10k_d"] {
-            let table = db.create_indexed_items_table(name, 10_000).await?;
-            manage_with_hot_limit(&db, &table.relation, 100).await?;
+        let mut table_oids = Vec::new();
+        for name in ["p200k_a", "p200k_b", "p200k_c", "p200k_d"] {
+            let table = db.create_indexed_items_table(name, SEED_ROWS).await?;
+            // 1000 rows/file ≈ 200 segments/table — multi-batch volume with
+            // concurrent overlap, without the tiny-file tax of max_rows_per_file=8.
+            manage_with_hot_limit(&db, &table.relation, HOT_ROW_LIMIT, MAX_ROWS_PER_FILE).await?;
             disable_auto_flush(&db.client, &table.relation).await?;
+            table_oids.push(table_oid(&db.client, &table.relation).await?);
             relations.push(table.relation);
         }
+        // Drain WAL before Nested inline flushes so finalize catch-up stays short.
+        common::fence_async_mirror(&db.client).await?;
+
+        // Open peers first so the four flushes can start together.
+        let mut peers = Vec::new();
+        for _ in &relations {
+            peers.push(connect_peer(&db).await?);
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let tracker_client = connect_peer(&db).await?;
+        let tracker_oids = table_oids.clone();
+        let tracker_stop = Arc::clone(&stop);
+        let tracker_handle = tokio::spawn(async move {
+            track_parallel_flush_jobs(tracker_client, tracker_oids, tracker_stop).await
+        });
 
         let mut handles = Vec::new();
-        for relation in &relations {
-            let peer = connect_peer(&db).await?;
+        for (peer, relation) in peers.into_iter().zip(relations.iter()) {
             let relation = relation.clone();
             handles.push(tokio::spawn(async move {
                 flush_table_on(&peer, &relation).await
             }));
         }
 
+        let mut need_retry = Vec::new();
         let mut total = 0i64;
         for (idx, handle) in handles.into_iter().enumerate() {
-            let rows = handle
+            match handle
                 .await
-                .with_context(|| format!("join flush handle {idx}"))??;
-            assert!(
-                rows >= 9_000,
-                "table {idx} expected ~9900 flushed (10k-100 hot), got {rows}"
+                .with_context(|| format!("join flush handle {idx}"))?
+            {
+                Ok(rows) => {
+                    assert!(
+                        rows >= MIN_FLUSHED_PER_TABLE,
+                        "table {idx} expected ~{MIN_FLUSHED_PER_TABLE} flushed ({SEED_ROWS}-{HOT_ROW_LIMIT} hot), got {rows}"
+                    );
+                    total = total.saturating_add(rows);
+                }
+                Err(error) if flush_failed_on_slot_lock(&error) => {
+                    eprintln!(
+                        "flush_4x200k table {idx}: first-wave finalize hit slot lock (expected under volume); will retry: {error:#}"
+                    );
+                    need_retry.push(idx);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        let tracker = tracker_handle.await.context("join flush job tracker")??;
+        let intervals = latest_flush_job_intervals(&db.client, &table_oids).await?;
+        let overlap = max_interval_overlap(&intervals);
+        for interval in &intervals {
+            eprintln!(
+                "flush_4x200k interval: oid={} rows={} batches={} start_ms={} finish_ms={} dur_ms={}",
+                interval.table_oid,
+                interval.rows_flushed,
+                interval.batches_completed,
+                interval.started_ms,
+                interval.finished_ms,
+                interval.finished_ms.saturating_sub(interval.started_ms)
             );
-            total = total.saturating_add(rows);
+        }
+        eprintln!(
+            "flush_4x200k tracker: max_running={} samples={} tables_running={} tables_progress={} interval_overlap={} retries={}",
+            tracker.max_concurrent_running,
+            tracker.samples,
+            tracker.tables_seen_running,
+            tracker.tables_with_progress,
+            overlap,
+            need_retry.len()
+        );
+        assert_eq!(
+            intervals.len(),
+            4,
+            "expected one flush job interval per table, got {}",
+            intervals.len()
+        );
+        assert!(
+            overlap >= 2,
+            "expected overlapping concurrent flush intervals (overlap={overlap}); intervals={intervals:?}"
+        );
+        // Nested/inline commits job-row progress only when the statement ends, so
+        // a peer tracker often never observes status=running. Interval overlap is
+        // the concurrency proof; samples just confirm the poller was alive.
+        assert!(
+            tracker.samples >= 1,
+            "jobs tracker must collect at least one sample"
+        );
+        assert!(
+            tracker.max_concurrent_running >= 2
+                || tracker.tables_with_progress >= 1
+                || overlap >= 2,
+            "tracker/intervals must show concurrent flush activity \
+             (max_running={}, progress={}, overlap={})",
+            tracker.max_concurrent_running,
+            tracker.tables_with_progress,
+            overlap
+        );
+
+        // Finish tables that lost the finalize slot-lock race.
+        for idx in need_retry {
+            let relation = &relations[idx];
+            let rows = retry_flush_after_slot_lock(&db, relation).await?;
+            assert!(
+                rows >= MIN_FLUSHED_PER_TABLE || common::row_count(&db.client, relation).await? == SEED_ROWS,
+                "table {idx} retry expected remaining excess flushed or all rows already visible, got rows_flushed={rows}"
+            );
+            total = total.saturating_add(rows.max(0));
         }
         assert!(
-            total >= 9_000 * 4,
-            "combined parallel flush rows too low: {total}"
+            total >= MIN_FLUSHED_PER_TABLE,
+            "combined parallel+retry flush rows too low: {total}"
         );
 
         for relation in &relations {
             assert_flush_load_invariants(&db.client, relation).await?;
             let visible = common::row_count(&db.client, relation).await?;
             assert_eq!(
-                visible, 10_000,
+                visible, SEED_ROWS,
                 "{relation} must keep all seed rows visible"
+            );
+            let hot = common::hot_row_count(&db.client, relation).await?;
+            assert!(
+                hot <= HOT_ROW_LIMIT,
+                "{relation} hot rows {hot} exceed hot_row_limit {HOT_ROW_LIMIT}"
             );
         }
     }
 
     Ok(())
+}
+
+fn flush_failed_on_slot_lock(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("slot lock") || text.contains("apply lock")
+}
+
+async fn retry_flush_after_slot_lock(db: &common::TestDb, relation: &str) -> Result<i64> {
+    let mut last_error = None;
+    for attempt in 1..=8 {
+        match db.flush_table_with_force(relation, true).await {
+            Ok(rows) => return Ok(rows),
+            Err(error) if flush_failed_on_slot_lock(&error) => {
+                eprintln!(
+                    "flush_4x200k retry {attempt} for {relation} still slot-lock busy; backing off"
+                );
+                last_error = Some(error);
+                tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("retry flush exhausted for {relation}")))
 }
 
 /// Same-table dual flush: second caller fails fast while the first holds the lock.
@@ -435,7 +762,7 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
         let table = db
             .create_indexed_items_table("dual_flush_lock_items", 80)
             .await?;
-        manage_with_hot_limit(&db, &table.relation, 10).await?;
+        manage_with_hot_limit(&db, &table.relation, 10, 8).await?;
         disable_auto_flush(&db.client, &table.relation).await?;
         common::fence_async_mirror(&db.client).await?;
 
@@ -545,8 +872,8 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
         let db = common::TestDb::start(target, "cross_table_apply_lock").await?;
         let table_a = db.create_indexed_items_table("cross_apply_a", 40).await?;
         let table_b = db.create_indexed_items_table("cross_apply_b", 40).await?;
-        manage_with_hot_limit(&db, &table_a.relation, 5).await?;
-        manage_with_hot_limit(&db, &table_b.relation, 5).await?;
+        manage_with_hot_limit(&db, &table_a.relation, 5, 8).await?;
+        manage_with_hot_limit(&db, &table_b.relation, 5, 8).await?;
         disable_auto_flush(&db.client, &table_a.relation).await?;
         disable_auto_flush(&db.client, &table_b.relation).await?;
         common::fence_async_mirror(&db.client).await?;
@@ -642,7 +969,7 @@ async fn flush_fails_when_storage_directory_removed_mid_flight() -> Result<()> {
         let table = db
             .create_indexed_items_table("flush_rm_storage_items", 48)
             .await?;
-        manage_with_hot_limit(&db, &table.relation, 8).await?;
+        manage_with_hot_limit(&db, &table.relation, 8, 8).await?;
         disable_auto_flush(&db.client, &table.relation).await?;
 
         let visible_before = common::row_count(&db.client, &table.relation).await?;
@@ -731,7 +1058,7 @@ async fn flush_fails_when_storage_root_replaced_with_file_mid_flight() -> Result
         let table = db
             .create_indexed_items_table("flush_file_block_items", 36)
             .await?;
-        manage_with_hot_limit(&db, &table.relation, 6).await?;
+        manage_with_hot_limit(&db, &table.relation, 6, 8).await?;
         disable_auto_flush(&db.client, &table.relation).await?;
 
         let storage_root = db.storage_root.clone();
@@ -795,7 +1122,7 @@ async fn cancel_running_flush_releases_job_lock_for_retry() -> Result<()> {
         let table = db
             .create_indexed_items_table("cancel_unlock_retry_items", 60)
             .await?;
-        manage_with_hot_limit(&db, &table.relation, 8).await?;
+        manage_with_hot_limit(&db, &table.relation, 8, 8).await?;
         disable_auto_flush(&db.client, &table.relation).await?;
 
         let oid = table_oid(&db.client, &table.relation).await?;

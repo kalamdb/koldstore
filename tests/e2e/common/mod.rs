@@ -46,6 +46,7 @@ pub use db::{
     flush_table_job_id, is_flush_entry_lock_busy, wait_for_flush_job_terminal, FixtureStorage,
     ManagedTable, TestDb,
 };
+pub use db_pool::{acquire_cluster_exclusive, ClusterExclusiveGuard};
 pub use describe_table::{
     assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
 };
