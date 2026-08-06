@@ -12,6 +12,9 @@ external signal). They cover managed-table behavior only:
 | `lifecycle.sql` | manage / describe / flush / unmanage |
 | `dml.sql` | insert / update / delete / reinsert |
 | `query_semantics.sql` | empty/one-row, before==after flush, mixed hot+cold, `ORDER BY`/`LIMIT` |
+| `joins.sql` | managed×plain join counts + compact `KoldMergeScan` plan-shape assert |
+| `scope.sql` | RLS / `koldstore.user_id` fail-closed reads |
+| `demigrate.sql` | unmanage cleanup |
 | `errors.sql` | missing PK and double-manage error contracts |
 
 ## Layout

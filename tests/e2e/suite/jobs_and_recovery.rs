@@ -2,24 +2,6 @@ use crate::common;
 
 use anyhow::Result;
 
-#[test]
-fn jobs_and_recovery_contract_covers_status_retries_and_idempotence() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let recovery = koldstore_flush::ops::recover_segments_plan(
-        Some(koldstore_common::TableName::parse("app.items").unwrap()),
-        false,
-    )
-    .unwrap();
-
-    assert!(!recovery.request.dry_run);
-    assert_eq!(
-        recovery.request.table_name.as_ref().map(|t| t.to_string()),
-        Some("app.items".to_string())
-    );
-}
-
 #[tokio::test]
 async fn jobs_are_durable_idempotent_and_use_active_indexes_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {

@@ -32,10 +32,10 @@ if [[ -x "${ROOT_DIR}/scripts/run-pg-e2e.sh" ]]; then
   source "${E2E_ENV_FILE}"
 fi
 
-echo "running deep E2E memory leak gates (flush/DML/merge-scan; MinIO when enabled)"
+echo "running deep E2E memory leak + peak-spike gates (flush/DML/merge-scan; MinIO when enabled)"
 echo "comparison metrics table is printed at the end of memory_overhead_vs_plain_postgres_*"
 # Always show stdout/stderr so the plain-vs-koldstore memory table is visible.
-cargo nextest run -p e2e -E 'test(memory_leak::)' --test-threads 1 --no-capture
+cargo nextest run -p e2e -E 'test(memory_leak::) + test(flush_memory_spike::)' --test-threads 1 --no-capture
 
 if command -v valgrind >/dev/null 2>&1; then
   echo "valgrind is available; optional secondary pass: cargo pgrx test --valgrind"

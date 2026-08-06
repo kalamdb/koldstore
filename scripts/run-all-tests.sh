@@ -408,8 +408,8 @@ fi
 
 if [[ "${SKIP_MEMORY}" -eq 0 ]]; then
   step "memory checks"
-  # E2E already ran suite::memory_leak::* in the e2e step; only re-run the
-  # deep gates when e2e was skipped.
+  # E2E already ran suite::memory_leak::* and suite::flush_memory_spike::* in
+  # the e2e step; only re-run the deep gates when e2e was skipped.
   if [[ "${SKIP_E2E}" -eq 0 ]]; then
     KOLDSTORE_MEMORY_SKIP_E2E=1 tests/memory/run_memory_checks.sh
   else

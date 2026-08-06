@@ -43,3 +43,28 @@ FROM sqlreg.join_items i
 INNER JOIN sqlreg.join_accounts a ON a.account_id = i.account_id
 WHERE i.id IN (1, 6, 12)
 ORDER BY i.id;
+
+-- Compact plan-shape check (avoid dumping unstable cold-query EXPLAIN text).
+DO $$
+DECLARE
+  r record;
+  plan text := '';
+BEGIN
+  FOR r IN
+    EXECUTE $q$
+      EXPLAIN (COSTS OFF)
+      SELECT count(*)::bigint
+      FROM sqlreg.join_items i
+      INNER JOIN sqlreg.join_accounts a ON a.account_id = i.account_id
+    $q$
+  LOOP
+    plan := plan || r."QUERY PLAN" || E'\n';
+  END LOOP;
+  IF position('Custom Scan (KoldMergeScan)' IN plan) = 0 THEN
+    RAISE EXCEPTION 'expected KoldMergeScan in join plan:%', E'\n' || plan;
+  END IF;
+  IF position('Join' IN plan) = 0
+     AND position('Nested Loop' IN plan) = 0 THEN
+    RAISE EXCEPTION 'expected a join node in plan:%', E'\n' || plan;
+  END IF;
+END $$;
