@@ -50,6 +50,11 @@ async fn manage_with_hot_limit(
     relation: &str,
     hot_row_limit: i64,
 ) -> Result<()> {
+    // Keep max_rows_per_file at a small floor so policy flush is due for the
+    // modest e2e fixtures (default 1000 would skip undersized excess).
+    db.client
+        .batch_execute("SET koldstore.min_max_rows_per_file = 1;")
+        .await?;
     db.client
         .execute(
             r#"
@@ -58,7 +63,7 @@ async fn manage_with_hot_limit(
               storage => $2,
               hot_row_limit => $3,
               min_flush_rows => 1,
-              max_rows_per_file => 5000,
+              max_rows_per_file => 8,
               migration_order_by => 'id',
               auto_flush => false
             )
@@ -797,7 +802,10 @@ async fn cancel_running_flush_releases_job_lock_for_retry() -> Result<()> {
                 .batch_execute("SET koldstore.failpoint = '';")
                 .await
                 .ok();
-            Ok(row.get::<_, String>(0))
+            Ok(row
+                .get::<_, Option<String>>(0)
+                .filter(|value| !value.is_empty() && value != "null")
+                .unwrap_or_default())
         });
 
         wait_until_barrier_waiter(&coordinator, || flush_handle.is_finished()).await?;
