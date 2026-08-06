@@ -42,6 +42,7 @@ impl From<ManifestAssemblyError> for SegmentCatalogError {
 /// - `$28` writer_job_id
 /// - `$29` writer_attempt_token
 /// - `$30` pass_id
+/// - `$31` physically_sorted_sort_order_id (`0` = none; else marks matching order index)
 ///
 /// `segment_ordinal` is taken from each row's `batch_number`.
 ///
@@ -244,7 +245,7 @@ SELECT
     max_value,
     row_group_min_values,
     row_group_max_values,
-    false,
+    ($31::integer <> 0 AND column_id = $31::integer),
     (min_value IS NOT NULL AND max_value IS NOT NULL)
 FROM inserted_index
 ON CONFLICT (segment_id, sort_order_id)
@@ -353,9 +354,14 @@ mod tests {
         assert!(statement.sql.contains("$28::uuid"));
         assert!(statement.sql.contains("$29::uuid"));
         assert!(statement.sql.contains("$30::uuid"));
+        assert!(statement.sql.contains("$31::integer"));
+        assert!(statement
+            .sql
+            .contains("($31::integer <> 0 AND column_id = $31::integer)"));
         assert!(statement.sql.contains("column_id"));
         assert!(statement.sql.contains("koldstore.cold_segment_index"));
         assert!(statement.sql.contains("koldstore.cold_segment_order_index"));
+        assert!(statement.sql.contains("physically_sorted"));
         assert!(statement.sql.contains("sort_order_id"));
         assert!(statement.sql.contains("min_composite_key"));
         assert!(statement.sql.contains("codec_version"));

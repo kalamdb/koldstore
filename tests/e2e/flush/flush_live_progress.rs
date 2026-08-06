@@ -5,7 +5,9 @@
 //! one transaction and is not used here for live visibility.
 
 use crate::common;
-use crate::flush::harness::{barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter};
+use crate::flush::harness::{
+    barrier_lock, barrier_unlock, connect_peer, wait_until_barrier_waiter,
+};
 use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
 
@@ -71,7 +73,11 @@ async fn list_jobs_and_flush_progress_fields_are_populated() -> Result<()> {
             jobs.as_array().is_some_and(|arr| {
                 arr.iter().any(|job| {
                     job.get("id").and_then(|v| v.as_str()) == Some(job_id.as_str())
-                        && job.get("progress_total").and_then(|v| v.as_i64()).unwrap_or(0) > 0
+                        && job
+                            .get("progress_total")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0)
+                            > 0
                         && job.get("progress_unit").is_none()
                 })
             }),
@@ -228,10 +234,7 @@ async fn wait_for_job_terminal(
             )
             .await?
             .get(0);
-        if matches!(
-            status.as_str(),
-            "completed" | "error" | "cancelled"
-        ) {
+        if matches!(status.as_str(), "completed" | "error" | "cancelled") {
             anyhow::ensure!(
                 status == "completed",
                 "flush job ended as {status}, expected completed"

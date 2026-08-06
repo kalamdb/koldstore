@@ -150,10 +150,7 @@ fn older_than_cutoff(
     if count < min_flush_rows as i64 {
         return Ok(None);
     }
-    if !koldstore_flush::selected_rows_meet_file_minimum(
-        count.max(0) as u64,
-        max_rows_per_file,
-    ) {
+    if !koldstore_flush::selected_rows_meet_file_minimum(count.max(0) as u64, max_rows_per_file) {
         return Ok(None);
     }
     Ok(max_seq.map(|seq| (count, seq)))
