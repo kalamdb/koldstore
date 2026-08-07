@@ -46,6 +46,8 @@ pub struct DatabaseWorkSnapshot {
     pub flush_limit: u32,
     /// Earliest future pending flush `available_at`, Unix epoch milliseconds.
     pub next_flush_due_at_ms: i64,
+    /// Earliest future time-policy maintenance wake, Unix epoch milliseconds.
+    pub next_maintenance_due_at_ms: i64,
 }
 
 impl DatabaseWorkSnapshot {
@@ -81,6 +83,7 @@ struct DatabaseWorkEntry {
     flush_running: AtomicU32,
     flush_limit: AtomicU32,
     next_flush_due_at_ms: AtomicI64,
+    next_maintenance_due_at_ms: AtomicI64,
 }
 
 impl DatabaseWorkEntry {
@@ -99,6 +102,7 @@ impl DatabaseWorkEntry {
             flush_running: AtomicU32::new(0),
             flush_limit: AtomicU32::new(1),
             next_flush_due_at_ms: AtomicI64::new(0),
+            next_maintenance_due_at_ms: AtomicI64::new(0),
         }
     }
 
@@ -119,6 +123,7 @@ impl DatabaseWorkEntry {
             flush_running: self.flush_running.load(Ordering::Acquire),
             flush_limit: self.flush_limit.load(Ordering::Acquire).max(1),
             next_flush_due_at_ms: self.next_flush_due_at_ms.load(Ordering::Acquire),
+            next_maintenance_due_at_ms: self.next_maintenance_due_at_ms.load(Ordering::Acquire),
         }
     }
 }
@@ -434,6 +439,35 @@ impl<const N: usize> SupervisorRegistry<N> {
                 .is_ok()
     }
 
+    pub fn schedule_maintenance_at_ms(&self, database_oid: u32, deadline_ms: i64) {
+        if deadline_ms <= 0 {
+            return;
+        }
+        let Some(entry) = self.entry_or_overflow(database_oid) else {
+            return;
+        };
+        atomic_min_nonzero(&entry.next_maintenance_due_at_ms, deadline_ms);
+    }
+
+    pub fn clear_maintenance_deadline(&self, database_oid: u32) {
+        if let Some(entry) = self.find(database_oid) {
+            entry
+                .next_maintenance_due_at_ms
+                .store(0, Ordering::Release);
+        }
+    }
+
+    pub fn consume_maintenance_deadline(&self, database_oid: u32, sampled_ms: i64) -> bool {
+        let Some(entry) = self.find(database_oid) else {
+            return false;
+        };
+        sampled_ms > 0
+            && entry
+                .next_maintenance_due_at_ms
+                .compare_exchange(sampled_ms, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+
     #[must_use]
     pub fn overflow_reconcile_required(&self) -> bool {
         self.overflow_reconcile_required.load(Ordering::Acquire) != 0
@@ -612,13 +646,18 @@ mod tests {
     }
 
     #[test]
-    fn future_deadline_keeps_earliest_value() {
+    fn future_deadlines_keep_earliest_values_independently() {
         let registry = SupervisorRegistry::<1>::default();
         registry.schedule_flush_at_ms(42, 5_000);
         registry.schedule_flush_at_ms(42, 7_000);
         registry.schedule_flush_at_ms(42, 3_000);
-        assert_eq!(registry.snapshot(42).unwrap().next_flush_due_at_ms, 3_000);
+        registry.schedule_maintenance_at_ms(42, 9_000);
+        registry.schedule_maintenance_at_ms(42, 4_000);
+        let snapshot = registry.snapshot(42).unwrap();
+        assert_eq!(snapshot.next_flush_due_at_ms, 3_000);
+        assert_eq!(snapshot.next_maintenance_due_at_ms, 4_000);
         assert!(registry.consume_flush_deadline(42, 3_000));
+        assert!(registry.consume_maintenance_deadline(42, 4_000));
     }
 
     #[test]
