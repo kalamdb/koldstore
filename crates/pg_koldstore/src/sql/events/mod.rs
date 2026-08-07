@@ -248,7 +248,7 @@ fn fetch_since_seq_page(
         };
 
         let need = limit - page.len();
-        let cold = read_cold_segment_page(
+        let mut cold = read_cold_segment_page(
             targets.table_oid,
             targets.snapshot,
             segment,
@@ -262,6 +262,9 @@ fn fetch_since_seq_page(
             cursor = segment.max_seq.get();
             continue;
         }
+        // Parquet batch order is not a cursor contract; advance by max seq and
+        // keep the page ascending so exclusive resume cannot skip/duplicate.
+        cold.sort_by_key(|row| row.seq);
         cursor = cold.last().map(|row| row.seq.get()).unwrap_or(cursor);
         page.extend(cold);
         if page.len() >= limit {
@@ -272,6 +275,7 @@ fn fetch_since_seq_page(
         // the same segment can continue, or the next catalog candidate / mirror.
     }
 
+    page.sort_by_key(|row| row.seq);
     Ok(page)
 }
 
