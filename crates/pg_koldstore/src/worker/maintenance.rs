@@ -80,6 +80,8 @@ fn run_maintenance_worker(database_oid: u32) {
         let target_maintenance_generation = snapshot.maintenance_generation;
         let recovery_requested =
             snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
+        let schedule_requested =
+            snapshot.event_flags & koldstore_worker::EVENT_SCHEDULE_DIRTY != 0;
         let wal_due =
             recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
 
@@ -110,7 +112,16 @@ fn run_maintenance_worker(database_oid: u32) {
                 }
                 super::flush_executor::reconcile_queue_after_recovery(database_oid)?;
             }
-            super::flush_task::run_flush_scheduler_tick()
+
+            // Full RowLimit scans are needed only when configuration/recovery may
+            // have changed eligibility without a fresh WAL counter bump. Normal
+            // WAL commits already evaluate touched RowLimit tables atomically in
+            // row_counter_cache, so their maintenance pass only scans OlderThan.
+            if recovery_requested || schedule_requested {
+                super::flush_task::run_flush_scheduler_tick()
+            } else {
+                super::flush_task::run_timed_flush_scheduler_tick()
+            }
         });
 
         match maintenance_result {
