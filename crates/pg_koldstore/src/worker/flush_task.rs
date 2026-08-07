@@ -105,10 +105,21 @@ fn select_due_auto_flush_tables(
             let policy = parsed.flush_policy();
             let (_, mirror_delta) = crate::row_counter_cache::pending_deltas(oid);
             let pending = catalog_pending.saturating_add(mirror_delta).max(0);
+
             let due = match policy.as_ref() {
-                Some(FlushPolicy::OlderThan { .. }) => {
-                    crate::sql::flush::spi::resolve_flush_stats(oid, false)
-                        .map(|selection| selection.stats.row_count > 0)?
+                Some(policy @ FlushPolicy::OlderThan { .. }) => {
+                    let evaluation = super::timed_policy::evaluate_older_than(oid, policy)?;
+                    if let Some(deadline_ms) = evaluation
+                        .next_due_at_ms
+                        .filter(|deadline_ms| *deadline_ms > now_ms)
+                    {
+                        next_timed_wake_at_ms = Some(
+                            next_timed_wake_at_ms
+                                .map(|current| current.min(deadline_ms))
+                                .unwrap_or(deadline_ms),
+                        );
+                    }
+                    evaluation.due
                 }
                 Some(FlushPolicy::RowLimit { .. }) if scan == SchedulerScan::Full => {
                     scheduler_should_flush_parsed(&parsed, pending)
@@ -122,29 +133,7 @@ fn select_due_auto_flush_tables(
                     break;
                 }
                 due_tables.push(oid.to_u32());
-                continue;
             }
-
-            let Some(policy @ FlushPolicy::OlderThan { .. }) = policy.as_ref() else {
-                continue;
-            };
-            let Some(deadline_ms) =
-                super::timed_policy::next_older_than_due_at_ms(oid, policy)?
-            else {
-                continue;
-            };
-            // A threshold already in the past but still not flushable means the
-            // row-count/file-size floor is not satisfied by the current mirror;
-            // time cannot fix it. Future DML will wake maintenance instead of a
-            // zero-delay supervisor spin.
-            if deadline_ms <= now_ms {
-                continue;
-            }
-            next_timed_wake_at_ms = Some(
-                next_timed_wake_at_ms
-                    .map(|current| current.min(deadline_ms))
-                    .unwrap_or(deadline_ms),
-            );
         }
         Ok((due_tables, more_due, next_timed_wake_at_ms))
     })
