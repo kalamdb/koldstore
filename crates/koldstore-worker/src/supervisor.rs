@@ -228,22 +228,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         snapshots
     }
 
-    /// Returns the current cluster-wide count of starting + running flush workers.
-    /// The supervisor samples this once per dispatch pass rather than rescanning
-    /// all entries for every individual reservation.
-    #[must_use]
-    pub fn flush_workers_total(&self) -> u32 {
-        self.entries
-            .iter()
-            .map(|entry| {
-                entry
-                    .flush_starting
-                    .load(Ordering::Acquire)
-                    .saturating_add(entry.flush_running.load(Ordering::Acquire))
-            })
-            .fold(0_u32, u32::saturating_add)
-    }
-
     pub fn try_reserve_maintenance(&self, database_oid: u32) -> bool {
         let Some(entry) = self.entry_or_overflow(database_oid) else {
             return false;
@@ -658,7 +642,6 @@ mod tests {
         assert!(registry.try_reserve_flush(42));
         assert!(!registry.try_reserve_flush(42));
         assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 2);
-        assert_eq!(registry.flush_workers_total(), 2);
     }
 
     #[test]
@@ -666,14 +649,14 @@ mod tests {
         let registry = SupervisorRegistry::<1>::default();
         registry.set_flush_limit(42, 2);
         assert!(!registry.flush_started(42, 2));
-        assert_eq!(registry.flush_workers_total(), 0);
+        assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 0);
         assert!(registry.try_reserve_flush(42));
-        assert_eq!(registry.flush_workers_total(), 1);
+        assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 1);
         assert!(registry.flush_started(42, 2));
         let snapshot = registry.snapshot(42).unwrap();
         assert_eq!(snapshot.flush_starting, 0);
         assert_eq!(snapshot.flush_running, 1);
-        assert_eq!(registry.flush_workers_total(), 1);
+        assert_eq!(snapshot.flush_workers(), 1);
     }
 
     #[test]
