@@ -93,23 +93,26 @@ pub fn flush_pending_deltas_in_transaction() -> Result<(), String> {
         }
     };
 
-    while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.first().copied() {
-        if hot_delta != 0 || mirror_delta != 0 {
-            if let Err(error) = crate::spi::update(
-                &statement,
-                &[
-                    DatumWithOid::from(pg_sys::Oid::from(table_oid)),
-                    DatumWithOid::from(hot_delta),
-                    DatumWithOid::from(mirror_delta),
-                ],
-            ) {
-                restore_pending_deltas(deltas);
-                return Err(format!(
-                    "bump row counters for table oid {table_oid}: {error}"
-                ));
-            }
+    // Pop from the tail instead of remove(0): transactions touching many managed
+    // tables stay O(n) instead of repeatedly shifting the remaining Vec.
+    while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.pop() {
+        if hot_delta == 0 && mirror_delta == 0 {
+            continue;
         }
-        deltas.remove(0);
+        if let Err(error) = crate::spi::update(
+            &statement,
+            &[
+                DatumWithOid::from(pg_sys::Oid::from(table_oid)),
+                DatumWithOid::from(hot_delta),
+                DatumWithOid::from(mirror_delta),
+            ],
+        ) {
+            deltas.push((table_oid, (hot_delta, mirror_delta)));
+            restore_pending_deltas(deltas);
+            return Err(format!(
+                "bump row counters for table oid {table_oid}: {error}"
+            ));
+        }
     }
     Ok(())
 }
@@ -137,24 +140,25 @@ pub fn flush_pending_deltas() {
         }
     };
 
-    while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.first().copied() {
-        if hot_delta != 0 || mirror_delta != 0 {
-            if let Err(error) = crate::spi::update_in_xact_callback(
-                &statement,
-                &[
-                    DatumWithOid::from(pg_sys::Oid::from(table_oid)),
-                    DatumWithOid::from(hot_delta),
-                    DatumWithOid::from(mirror_delta),
-                ],
-            ) {
-                restore_pending_deltas(deltas);
-                pgrx::warning!(
-                    "koldstore row counter flush failed for table oid {table_oid}: {error}"
-                );
-                return;
-            }
+    while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.pop() {
+        if hot_delta == 0 && mirror_delta == 0 {
+            continue;
         }
-        deltas.remove(0);
+        if let Err(error) = crate::spi::update_in_xact_callback(
+            &statement,
+            &[
+                DatumWithOid::from(pg_sys::Oid::from(table_oid)),
+                DatumWithOid::from(hot_delta),
+                DatumWithOid::from(mirror_delta),
+            ],
+        ) {
+            deltas.push((table_oid, (hot_delta, mirror_delta)));
+            restore_pending_deltas(deltas);
+            pgrx::warning!(
+                "koldstore row counter flush failed for table oid {table_oid}: {error}"
+            );
+            return;
+        }
     }
 }
 
