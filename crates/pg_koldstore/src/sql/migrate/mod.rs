@@ -82,6 +82,8 @@ pub fn manage_table_pg(
     target_file_size_mb: pgrx::default!(Option<i64>, "NULL"),
     auto_flush: pgrx::default!(bool, true),
     segment_order_column: pgrx::default!(Option<&str>, "NULL"),
+    pruning_columns: pgrx::default!(Option<Vec<String>>, "NULL"),
+    bloom_filter_columns: pgrx::default!(Option<Vec<String>>, "NULL"),
 ) -> pgrx::Uuid {
     manage::manage_table_pg_impl(
         table_name.0,
@@ -96,6 +98,8 @@ pub fn manage_table_pg(
         max_rows_per_file,
         auto_flush,
         segment_order_column,
+        pruning_columns,
+        bloom_filter_columns,
     )
 }
 

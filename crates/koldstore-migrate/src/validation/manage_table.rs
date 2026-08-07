@@ -64,6 +64,10 @@ pub struct ManageTableValidationContext<'a> {
     pub compression: Option<&'a str>,
     /// Raw numeric flush policy.
     pub policy: ManageTablePolicyInput,
+    /// Optional operator override for cold min/max stats columns.
+    pub pruning_columns: Option<&'a [String]>,
+    /// Optional operator override for Parquet Bloom filter columns.
+    pub bloom_filter_columns: Option<&'a [String]>,
 }
 
 /// Canonical data produced by successful manage-table validation.
@@ -187,6 +191,12 @@ pub fn validate_manage_table(
     if let Some(target_file_size_mb) = context.policy.target_file_size_mb {
         options = options
             .with_target_file_size_mb(positive_value(target_file_size_mb, "target_file_size_mb")?);
+    }
+    if let Some(columns) = context.pruning_columns {
+        options = options.with_pruning_columns(columns.iter().cloned());
+    }
+    if let Some(columns) = context.bloom_filter_columns {
+        options = options.with_bloom_filter_columns(columns.iter().cloned());
     }
     options.allow_fk_hot_only = Some(context.migration.allow_fk_hot_only);
     context.migration.flush_enabled = options.flush_enabled();

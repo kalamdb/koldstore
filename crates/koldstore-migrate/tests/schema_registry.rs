@@ -277,8 +277,14 @@ fn cold_metadata_honors_operator_pruning_and_bloom_overrides() {
             {"column_id": 2, "name": "title"}
         ])
     );
-    assert!(plan.metadata.options.get("pruning_columns").is_none());
-    assert!(plan.metadata.options.get("bloom_filter_columns").is_none());
+    assert_eq!(
+        plan.metadata.options["pruning_columns"],
+        serde_json::json!(["created_at"])
+    );
+    assert_eq!(
+        plan.metadata.options["bloom_filter_columns"],
+        serde_json::json!(["title"])
+    );
 }
 
 #[test]

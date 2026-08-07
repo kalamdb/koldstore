@@ -401,12 +401,6 @@ impl RegistrationMetadata {
         self.validate()?;
 
         let mut options = self.options.to_value();
-        // Drop operator list keys from the persisted options object once they are
-        // folded into cold_metadata (canonical effective set).
-        if let Some(object) = options.as_object_mut() {
-            object.remove("pruning_columns");
-            object.remove("bloom_filter_columns");
-        }
         let cold_metadata = cold_metadata_config_for_registration(
             &self.primary_key,
             &self.indexed_columns,

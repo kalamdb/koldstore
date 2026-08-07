@@ -31,6 +31,8 @@ pub(crate) fn manage_table_pg_impl(
     max_rows_per_file: i64,
     auto_flush: bool,
     segment_order_column: Option<&str>,
+    pruning_columns: Option<Vec<String>>,
+    bloom_filter_columns: Option<Vec<String>>,
 ) -> pgrx::Uuid {
     crate::preload::require_shared_preload();
     let min_max_rows_per_file = u64::try_from(crate::guc::min_max_rows_per_file())
@@ -78,6 +80,8 @@ pub(crate) fn manage_table_pg_impl(
             min_flush_rows,
             max_rows_per_file,
             auto_flush,
+            pruning_columns.as_deref(),
+            bloom_filter_columns.as_deref(),
             catalog.as_ref(),
             constraints,
         ))
@@ -368,6 +372,8 @@ fn manage_table_validation_context<'a>(
     min_flush_rows: i64,
     max_rows_per_file: i64,
     auto_flush: bool,
+    pruning_columns: Option<&'a [String]>,
+    bloom_filter_columns: Option<&'a [String]>,
     catalog: &'a koldstore_migrate::ExistingTableCatalog,
     constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
 ) -> koldstore_migrate::manage_table::ManageTableValidationContext<'a> {
@@ -451,6 +457,8 @@ fn manage_table_validation_context<'a>(
             min_max_rows_per_file,
             auto_flush,
         },
+        pruning_columns,
+        bloom_filter_columns,
     }
 }
 

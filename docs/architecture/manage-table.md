@@ -283,9 +283,11 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
   "allow_fk_hot_only": true,
   "migration_status": "active",
   "scope_column_id": 3,
+  "pruning_columns": ["created_at"],
+  "bloom_filter_columns": ["id", "tenant_id"],
   "cold_metadata": {
     "stats_columns": [{"column_id": 4, "name": "created_at"}],
-    "bloom_filter_columns": [{"column_id": 1, "name": "id"}],
+    "bloom_filter_columns": [{"column_id": 1, "name": "id"}, {"column_id": 3, "name": "tenant_id"}],
     "indexed_columns": [{
       "column_id": 4,
       "column": "created_at",
@@ -296,6 +298,13 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
   }
 }
 ```
+
+Optional operator lists `pruning_columns` and `bloom_filter_columns` are SQL
+column names accepted by `manage_table`. Registration resolves them into
+`cold_metadata` (stable `column_id`s). Primary-key columns are always forced into
+the effective Bloom set. Omitting the lists keeps auto-derived PK ∪ indexed
+behavior. Schema refresh fails closed if a listed column was dropped or renamed
+away.
 
 `FlushPolicy` is read back with `FlushPolicy::from_value(&options)` — not a
 separate column. Flat `hot_row_limit` keys are not accepted; only tagged
