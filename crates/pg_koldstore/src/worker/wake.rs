@@ -107,6 +107,12 @@ pub(crate) fn request_recovery(database_oid: u32) {
     }
 }
 
+/// Converts a reached queue deadline into a new flush generation immediately.
+/// The caller is the supervisor, so this does not need a transaction callback.
+pub(crate) fn publish_due_flush(database_oid: u32) {
+    let _ = SUPERVISOR_REGISTRY.get().publish_flush(database_oid);
+}
+
 #[must_use]
 pub(crate) fn supervisor_snapshots() -> Vec<DatabaseWorkSnapshot> {
     SUPERVISOR_REGISTRY.get().snapshots()
@@ -135,6 +141,12 @@ pub(crate) fn cancel_maintenance_start(database_oid: u32) {
         .cancel_maintenance_start(database_oid);
 }
 
+pub(crate) fn clear_stale_maintenance(database_oid: u32) {
+    SUPERVISOR_REGISTRY
+        .get()
+        .clear_stale_maintenance(database_oid);
+}
+
 pub(crate) fn maintenance_stopped(database_oid: u32) {
     SUPERVISOR_REGISTRY
         .get()
@@ -155,7 +167,9 @@ pub(crate) fn mark_maintenance_reconciled(database_oid: u32, generation: u64) {
 }
 
 pub(crate) fn set_flush_limit(database_oid: u32, limit: u32) {
-    SUPERVISOR_REGISTRY.get().set_flush_limit(database_oid, limit);
+    SUPERVISOR_REGISTRY
+        .get()
+        .set_flush_limit(database_oid, limit);
 }
 
 pub(crate) fn try_reserve_flush(database_oid: u32, cluster_limit: u32) -> bool {
@@ -177,6 +191,12 @@ pub(crate) fn cancel_flush_start(database_oid: u32) {
     SUPERVISOR_REGISTRY.get().cancel_flush_start(database_oid);
 }
 
+pub(crate) fn reconcile_flush_counts(database_oid: u32, running: u32) {
+    SUPERVISOR_REGISTRY
+        .get()
+        .reconcile_flush_counts(database_oid, running);
+}
+
 pub(crate) fn flush_stopped(database_oid: u32) {
     SUPERVISOR_REGISTRY.get().flush_stopped(database_oid);
     wake_supervisor();
@@ -186,6 +206,25 @@ pub(crate) fn mark_flush_processed(database_oid: u32, generation: u64) {
     SUPERVISOR_REGISTRY
         .get()
         .mark_flush_processed(database_oid, generation);
+}
+
+pub(crate) fn schedule_flush_at_ms(database_oid: u32, deadline_ms: i64) {
+    SUPERVISOR_REGISTRY
+        .get()
+        .schedule_flush_at_ms(database_oid, deadline_ms);
+    wake_supervisor();
+}
+
+pub(crate) fn clear_flush_deadline(database_oid: u32) {
+    SUPERVISOR_REGISTRY
+        .get()
+        .clear_flush_deadline(database_oid);
+}
+
+pub(crate) fn consume_flush_deadline(database_oid: u32, sampled_ms: i64) -> bool {
+    SUPERVISOR_REGISTRY
+        .get()
+        .consume_flush_deadline(database_oid, sampled_ms)
 }
 
 #[must_use]

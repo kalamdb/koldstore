@@ -1,17 +1,14 @@
 //! Ephemeral database-maintenance worker execution.
 //!
-//! A cluster supervisor starts at most one of these workers for a database when
+//! The cluster supervisor starts at most one of these workers per database when
 //! a committed WAL generation, recovery request, or scheduling event exists.
-//! The worker drains WAL through a fixed durable fence, reconciles local queue
-//! work, waits for a very short burst grace, and exits when caught up.
-//!
-//! There is no permanent per-database polling/watchdog loop. Lost latch wakeups
-//! cannot lose work because the logical slot and shared generations remain the
-//! durable/recoverable source of truth.
+//! The worker drains a fixed durable WAL fence, performs lightweight DB-local
+//! recovery/scheduling, waits briefly for burst coalescing, then exits.
 
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
+use koldstore_worker::EVENT_RECOVERY_REQUIRED;
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::PgTryBuilder;
@@ -20,7 +17,6 @@ use crate::mirror::apply::{apply_bounded, capture_durable_wal_fence, BoundedAppl
 
 const IDLE_GRACE: Duration = Duration::from_millis(200);
 
-/// Runs one ephemeral database-maintenance worker.
 pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     attach_applier_signal_handlers();
     BackgroundWorker::connect_worker_to_spi_by_oid(
@@ -42,16 +38,17 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
             .max(1),
     );
 
-    let mut first_pass = true;
     loop {
-        let snapshot = super::wake::supervisor_snapshot(database_oid);
-        let target_wal_generation = snapshot.map(|state| state.wal_generation).unwrap_or(0);
-        let target_maintenance_generation = snapshot
-            .map(|state| state.maintenance_generation)
-            .unwrap_or(0);
-        let maintenance_due = first_pass || snapshot.is_none_or(|state| state.maintenance_due());
+        let Some(snapshot) = super::wake::supervisor_snapshot(database_oid) else {
+            return;
+        };
+        let target_wal_generation = snapshot.wal_generation;
+        let target_maintenance_generation = snapshot.maintenance_generation;
+        let recovery_requested = snapshot.event_flags & EVENT_RECOVERY_REQUIRED != 0;
+        let wal_due = recovery_requested
+            || snapshot.wal_generation != snapshot.wal_processed_generation;
 
-        if maintenance_due {
+        if wal_due {
             if let Err(error) = drain_wal_through_fixed_fence() {
                 crate::observability::record_async_apply_error();
                 pgrx::warning!(
@@ -63,53 +60,69 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
             super::wake::mark_wal_processed(database_oid, target_wal_generation);
         }
 
-        // Queue recovery + automatic policy evaluation are database-local and
-        // happen only after WAL/counters are current. Any job enqueue publishes
-        // its queue generation from the transaction commit callback.
-        match worker_transaction_result(super::flush_task::run_flush_scheduler_tick) {
-            Ok(_) => super::wake::mark_maintenance_reconciled(
-                database_oid,
-                target_maintenance_generation,
-            ),
+        // Recovery is deliberately separate from the normal commit hot path.
+        // A SIGKILL/FATAL child cannot run Rust Drop; the supervisor marks this
+        // DB RECOVERY_REQUIRED after native child-exit notification and this
+        // transaction reclaims the same durable job before redispatch.
+        let maintenance_result = worker_transaction_result(|| {
+            if recovery_requested {
+                let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()
+                    .map_err(|error| error.to_string())?;
+                if reclaimed > 0 {
+                    pgrx::log!(
+                        "koldstore database maintenance db={database_oid}: reclaimed {reclaimed} orphan flush job(s)"
+                    );
+                    super::wake::mark_flush_queue_pending();
+                }
+                super::flush_executor::reconcile_queue_after_recovery(database_oid)?;
+            }
+            super::flush_task::run_flush_scheduler_tick()
+        });
+
+        match maintenance_result {
+            Ok(_) => {
+                super::wake::mark_maintenance_reconciled(
+                    database_oid,
+                    target_maintenance_generation,
+                );
+            }
             Err(error) => {
                 pgrx::warning!(
-                    "koldstore database maintenance db={database_oid} scheduler deferred: {error}"
+                    "koldstore database maintenance db={database_oid} scheduler/recovery deferred: {error}"
                 );
                 super::wake::request_recovery(database_oid);
                 return;
             }
         }
 
-        first_pass = false;
-        if super::wake::supervisor_snapshot(database_oid).is_some_and(|state| state.maintenance_due())
+        if super::wake::supervisor_snapshot(database_oid)
+            .is_some_and(|state| state.maintenance_due())
         {
             continue;
         }
 
-        // Short burst grace: interruptible latch wait, not a resident polling
-        // thread. A commit also wakes this live worker directly when possible.
+        // A short interruptible grace amortizes fork/exit cost across commit
+        // bursts. The live worker's latch is set directly by commit publication.
         if !BackgroundWorker::wait_latch(Some(IDLE_GRACE)) {
             return;
         }
         if BackgroundWorker::sighup_received() {
             unsafe { pgrx::pg_sys::ProcessConfigFile(pgrx::pg_sys::GucContext::PGC_SIGHUP) };
         }
-        if !super::wake::supervisor_snapshot(database_oid).is_some_and(|state| state.maintenance_due())
+        if !super::wake::supervisor_snapshot(database_oid)
+            .is_some_and(|state| state.maintenance_due())
         {
             return;
         }
     }
 }
 
-/// Drains all WAL visible at one durable fence while honoring the normal
-/// background row/time budgets. A generation sampled before the fence is not
-/// acknowledged until this fixed boundary is completely processed.
+/// Drains all WAL visible at one fixed durable fence while respecting the
+/// configured bounded apply budgets. synchronous_commit=off remains foreground
+/// asynchronous: this worker performs XLogFlush, not the application backend.
 fn drain_wal_through_fixed_fence() -> Result<(), String> {
-    // XLogFlush makes synchronous_commit=off commits decodeable without forcing
-    // foreground transactions to wait for KoldStore.
     let fence = capture_durable_wal_fence()?;
     loop {
-        let started = std::time::Instant::now();
         let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
         let outcome = worker_transaction_result(|| {
             let mut request = BoundedApplyRequest::available();
@@ -119,8 +132,7 @@ fn drain_wal_through_fixed_fence() -> Result<(), String> {
         });
         drop(decoding_log_guard);
         let outcome = outcome?;
-        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
-        crate::observability::record_async_apply_tick(outcome.row_changes, elapsed_ms);
+        crate::observability::record_async_apply_tick(outcome.row_changes, 0);
         if !outcome.budget_exhausted {
             return Ok(());
         }
@@ -173,7 +185,8 @@ unsafe extern "C-unwind" fn applier_sigterm(signal: std::os::raw::c_int) {
     unsafe { pgrx::pg_sys::die(signal) }
 }
 
-/// Runs `body` in a recoverable worker transaction.
+/// Runs `body` in a recoverable worker transaction. PostgreSQL ERROR/longjmp and
+/// Rust panic become a normal Result so durable generations remain retryable.
 pub(crate) fn worker_transaction_result<R>(
     body: impl FnOnce() -> Result<R, String>,
 ) -> Result<R, String> {

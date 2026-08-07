@@ -1,11 +1,11 @@
 //! PostgreSQL-free shared state for event-driven KoldStore worker supervision.
 //!
-//! Wakeups are deliberately hints, never the durable source of truth. Logical
-//! slots, async_mirror_state, and koldstore.jobs survive process/postmaster
-//! failure. Monotonic generations here make event coalescing race-safe across
-//! worker startup, execution, and exit windows.
+//! Wakeups are hints, never the durable source of truth. Logical slots,
+//! async_mirror_state, and koldstore.jobs survive process/postmaster failure.
+//! Monotonic generations make event coalescing race-safe across worker startup,
+//! execution, and exit windows.
 
-use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
 /// One entry is reserved per database that has published KoldStore work.
 pub const SUPERVISOR_REGISTRY_CAPACITY: usize = 256;
@@ -43,10 +43,14 @@ pub struct DatabaseWorkSnapshot {
     pub flush_generation: u64,
     pub flush_processed_generation: u64,
     pub event_flags: u32,
+    /// 0 = no worker, -1 = registration/start in progress, >0 = worker PID.
     pub maintenance_pid: i32,
     pub flush_starting: u32,
     pub flush_running: u32,
     pub flush_limit: u32,
+    /// Earliest future pending flush `available_at` as Unix epoch milliseconds.
+    /// Zero means no known future queue deadline.
+    pub next_flush_due_at_ms: i64,
 }
 
 impl DatabaseWorkSnapshot {
@@ -77,12 +81,12 @@ struct DatabaseWorkEntry {
     flush_generation: AtomicU64,
     flush_processed_generation: AtomicU64,
     event_flags: AtomicU32,
-    /// 0 = free, -1 = registration/start in progress, >0 = live worker PID.
     maintenance_pid: AtomicI32,
     flush_starting: AtomicU32,
     flush_running: AtomicU32,
     /// Effective per-database cap last reported by a worker. Unknown starts at 1.
     flush_limit: AtomicU32,
+    next_flush_due_at_ms: AtomicI64,
 }
 
 impl DatabaseWorkEntry {
@@ -100,6 +104,7 @@ impl DatabaseWorkEntry {
             flush_starting: AtomicU32::new(0),
             flush_running: AtomicU32::new(0),
             flush_limit: AtomicU32::new(1),
+            next_flush_due_at_ms: AtomicI64::new(0),
         }
     }
 
@@ -119,6 +124,7 @@ impl DatabaseWorkEntry {
             flush_starting: self.flush_starting.load(Ordering::Acquire),
             flush_running: self.flush_running.load(Ordering::Acquire),
             flush_limit: self.flush_limit.load(Ordering::Acquire).max(1),
+            next_flush_due_at_ms: self.next_flush_due_at_ms.load(Ordering::Acquire),
         }
     }
 }
@@ -262,6 +268,14 @@ impl<const N: usize> SupervisorRegistry<N> {
         );
     }
 
+    /// Clears stale Starting/Running maintenance ownership after an authoritative
+    /// PostgreSQL liveness check. Generations remain dirty, so work is retried.
+    pub fn clear_stale_maintenance(&self, database_oid: u32) {
+        if let Some(entry) = self.find(database_oid) {
+            entry.maintenance_pid.store(WORKER_FREE, Ordering::Release);
+        }
+    }
+
     pub fn mark_wal_processed(&self, database_oid: u32, generation: u64) {
         let Some(entry) = self.find(database_oid) else {
             return;
@@ -283,9 +297,10 @@ impl<const N: usize> SupervisorRegistry<N> {
         };
         atomic_max(&entry.maintenance_processed_generation, generation);
         if entry.maintenance_generation.load(Ordering::Acquire) == generation {
-            entry
-                .event_flags
-                .fetch_and(!(EVENT_RECOVERY_REQUIRED | EVENT_SCHEDULE_DIRTY), Ordering::AcqRel);
+            entry.event_flags.fetch_and(
+                !(EVENT_RECOVERY_REQUIRED | EVENT_SCHEDULE_DIRTY),
+                Ordering::AcqRel,
+            );
             if entry.maintenance_generation.load(Ordering::Acquire) != generation {
                 entry
                     .event_flags
@@ -298,7 +313,9 @@ impl<const N: usize> SupervisorRegistry<N> {
         let Some(entry) = self.entry_or_overflow(database_oid) else {
             return;
         };
-        entry.flush_limit.store(limit.max(1), Ordering::Release);
+        entry
+            .flush_limit
+            .store(limit.max(1), Ordering::Release);
     }
 
     pub fn try_reserve_flush(&self, database_oid: u32, cluster_limit: u32) -> bool {
@@ -335,7 +352,9 @@ impl<const N: usize> SupervisorRegistry<N> {
         };
         decrement_if_positive(&entry.flush_starting);
         entry.flush_running.fetch_add(1, Ordering::AcqRel);
-        entry.flush_limit.store(effective_limit.max(1), Ordering::Release);
+        entry
+            .flush_limit
+            .store(effective_limit.max(1), Ordering::Release);
     }
 
     pub fn cancel_flush_start(&self, database_oid: u32) {
@@ -350,6 +369,16 @@ impl<const N: usize> SupervisorRegistry<N> {
         }
     }
 
+    /// Authoritatively resets Starting/Running counts during rare lifecycle
+    /// reconciliation. Normal dispatch never queries pg_stat_activity.
+    pub fn reconcile_flush_counts(&self, database_oid: u32, running: u32) {
+        let Some(entry) = self.entry_or_overflow(database_oid) else {
+            return;
+        };
+        entry.flush_starting.store(0, Ordering::Release);
+        entry.flush_running.store(running, Ordering::Release);
+    }
+
     pub fn mark_flush_processed(&self, database_oid: u32, generation: u64) {
         let Some(entry) = self.find(database_oid) else {
             return;
@@ -361,6 +390,38 @@ impl<const N: usize> SupervisorRegistry<N> {
             &entry.event_flags,
             EVENT_FLUSH_QUEUE_DIRTY,
         );
+    }
+
+    /// Records the earliest known future `available_at` for pending flush work.
+    pub fn schedule_flush_at_ms(&self, database_oid: u32, deadline_ms: i64) {
+        if deadline_ms <= 0 {
+            return;
+        }
+        let Some(entry) = self.entry_or_overflow(database_oid) else {
+            return;
+        };
+        atomic_min_nonzero(&entry.next_flush_due_at_ms, deadline_ms);
+    }
+
+    /// Clears the current queue deadline after an authoritative empty/no-future
+    /// probe. A concurrent enqueue still advances `flush_generation` and cannot
+    /// be lost even if it races this store.
+    pub fn clear_flush_deadline(&self, database_oid: u32) {
+        if let Some(entry) = self.find(database_oid) {
+            entry.next_flush_due_at_ms.store(0, Ordering::Release);
+        }
+    }
+
+    /// Clears a due deadline only if it still matches the sampled value.
+    pub fn consume_flush_deadline(&self, database_oid: u32, sampled_ms: i64) -> bool {
+        let Some(entry) = self.find(database_oid) else {
+            return false;
+        };
+        sampled_ms > 0
+            && entry
+                .next_flush_due_at_ms
+                .compare_exchange(sampled_ms, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 
     #[must_use]
@@ -417,6 +478,19 @@ fn clear_flag_if_generation_current(
 fn atomic_max(target: &AtomicU64, value: u64) {
     let mut current = target.load(Ordering::Acquire);
     while current < value {
+        match target.compare_exchange_weak(current, value, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
+fn atomic_min_nonzero(target: &AtomicI64, value: i64) {
+    let mut current = target.load(Ordering::Acquire);
+    loop {
+        if current > 0 && current <= value {
+            return;
+        }
         match target.compare_exchange_weak(current, value, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => return,
             Err(actual) => current = actual,
@@ -508,6 +582,17 @@ mod tests {
         assert_eq!(snapshot.flush_generation, 2);
         assert_ne!(snapshot.event_flags & EVENT_FLUSH_QUEUE_DIRTY, 0);
         assert!(snapshot.flush_due());
+    }
+
+    #[test]
+    fn future_flush_deadline_keeps_earliest_value() {
+        let registry = SupervisorRegistry::<1>::default();
+        registry.schedule_flush_at_ms(42, 5_000);
+        registry.schedule_flush_at_ms(42, 7_000);
+        registry.schedule_flush_at_ms(42, 3_000);
+        assert_eq!(registry.snapshot(42).unwrap().next_flush_due_at_ms, 3_000);
+        assert!(registry.consume_flush_deadline(42, 3_000));
+        assert_eq!(registry.snapshot(42).unwrap().next_flush_due_at_ms, 0);
     }
 
     #[test]
