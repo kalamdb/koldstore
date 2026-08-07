@@ -113,6 +113,12 @@ pub(crate) fn publish_due_flush(database_oid: u32) {
     let _ = SUPERVISOR_REGISTRY.get().publish_flush(database_oid);
 }
 
+/// Converts a reached timed-policy deadline into a maintenance generation.
+/// The caller is the supervisor, so this does not need a transaction callback.
+pub(crate) fn publish_due_maintenance(database_oid: u32) {
+    let _ = SUPERVISOR_REGISTRY.get().publish_schedule(database_oid);
+}
+
 pub(crate) fn fill_supervisor_snapshots(out: &mut Vec<DatabaseWorkSnapshot>) {
     SUPERVISOR_REGISTRY.get().snapshots_into(out);
 }
@@ -225,6 +231,25 @@ pub(crate) fn consume_flush_deadline(database_oid: u32, sampled_ms: i64) -> bool
     SUPERVISOR_REGISTRY
         .get()
         .consume_flush_deadline(database_oid, sampled_ms)
+}
+
+pub(crate) fn schedule_maintenance_at_ms(database_oid: u32, deadline_ms: i64) {
+    SUPERVISOR_REGISTRY
+        .get()
+        .schedule_maintenance_at_ms(database_oid, deadline_ms);
+    wake_supervisor();
+}
+
+pub(crate) fn clear_maintenance_deadline(database_oid: u32) {
+    SUPERVISOR_REGISTRY
+        .get()
+        .clear_maintenance_deadline(database_oid);
+}
+
+pub(crate) fn consume_maintenance_deadline(database_oid: u32, sampled_ms: i64) -> bool {
+    SUPERVISOR_REGISTRY
+        .get()
+        .consume_maintenance_deadline(database_oid, sampled_ms)
 }
 
 #[must_use]
