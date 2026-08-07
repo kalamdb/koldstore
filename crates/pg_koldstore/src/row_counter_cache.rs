@@ -18,17 +18,6 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-/// Result of applying one backend-local counter delta in the current WAL-apply
-/// transaction. The returned mirror count is the *persisted post-bump value* and
-/// can be used immediately for O(1) RowLimit scheduling without re-reading the
-/// manifest or counting the mirror relation.
-#[cfg(feature = "pg")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct AppliedRowCounter {
-    pub table_oid: pg_sys::Oid,
-    pub mirror_row_count: i64,
-}
-
 /// Records hot/mirror counter deltas for one managed table in backend memory.
 #[cfg(feature = "pg")]
 pub fn record_delta(table_oid: pg_sys::Oid, hot_delta: i64, mirror_delta: i64) {
@@ -76,26 +65,25 @@ fn restore_pending_deltas(deltas: Vec<(u32, (i64, i64))>) {
     });
 }
 
-/// Flushes pending counter deltas with ordinary SPI while a transaction is open
-/// and returns the touched tables with their resulting mirror counts.
+/// Flushes pending counter deltas with ordinary SPI while a transaction is open.
 ///
-/// Async WAL apply calls this before returning. Besides keeping counters atomic
-/// with mirror writes, the returned values are the hand-off to event-driven
-/// RowLimit scheduling: the applier can enqueue a due job in this same
-/// transaction and avoid a later full managed-table scan.
+/// Async WAL apply calls this before returning. Each bump returns the resulting
+/// mirror count in the same SPI round trip; RowLimit eligibility for that exact
+/// table is then evaluated and, when due, the durable flush job is inserted in
+/// this *same transaction*. Counter state cannot commit without the matching due
+/// job, and unrelated managed tables are never scanned.
 ///
 /// # Errors
 ///
-/// Returns an error when SQL cannot be prepared, a bump statement fails, or the
-/// bump cannot return its post-update mirror count. On failure, unapplied pending
-/// deltas are restored so a later retry can flush them.
+/// Returns an error when SQL cannot be prepared, a bump statement fails, its
+/// post-update mirror count is missing, or targeted scheduling fails.
 #[cfg(feature = "pg")]
-pub fn flush_pending_deltas_in_transaction() -> Result<Vec<AppliedRowCounter>, String> {
+pub fn flush_pending_deltas_in_transaction() -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
 
     let mut deltas = take_pending_deltas();
     if deltas.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
 
     let statement = match koldstore_flush::plan_bump_table_row_counts() {
@@ -106,17 +94,17 @@ pub fn flush_pending_deltas_in_transaction() -> Result<Vec<AppliedRowCounter>, S
         }
     };
 
-    let mut applied = Vec::with_capacity(deltas.len());
     // Pop from the tail instead of remove(0): transactions touching many managed
     // tables stay O(n) instead of repeatedly shifting the remaining Vec.
     while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.pop() {
         if hot_delta == 0 && mirror_delta == 0 {
             continue;
         }
+        let oid = pg_sys::Oid::from(table_oid);
         let mirror_row_count = match crate::spi::update_one::<i64>(
             &statement,
             &[
-                DatumWithOid::from(pg_sys::Oid::from(table_oid)),
+                DatumWithOid::from(oid),
                 DatumWithOid::from(hot_delta),
                 DatumWithOid::from(mirror_delta),
             ],
@@ -137,12 +125,13 @@ pub fn flush_pending_deltas_in_transaction() -> Result<Vec<AppliedRowCounter>, S
                 ));
             }
         };
-        applied.push(AppliedRowCounter {
-            table_oid: pg_sys::Oid::from(table_oid),
-            mirror_row_count,
-        });
+
+        // This is still the WAL-apply transaction. A due RowLimit job is
+        // therefore committed atomically with the mirror/counter mutation, while
+        // the queue generation remains transaction-local until COMMIT.
+        crate::worker::schedule_row_limit_after_counter(oid, mirror_row_count)?;
     }
-    Ok(applied)
+    Ok(())
 }
 
 /// Applies pending counter deltas to `koldstore.manifest` at transaction pre-commit.
@@ -235,8 +224,8 @@ pub fn pending_deltas(_table_oid: u32) -> (i64, i64) {
 pub fn flush_pending_deltas() {}
 
 #[cfg(not(feature = "pg"))]
-pub fn flush_pending_deltas_in_transaction() -> Result<Vec<()>, String> {
-    Ok(Vec::new())
+pub fn flush_pending_deltas_in_transaction() -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(not(feature = "pg"))]
