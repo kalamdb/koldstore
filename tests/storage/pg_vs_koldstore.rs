@@ -689,11 +689,17 @@ async fn run_managed_only_body(
         DEFAULT_CHANGES_SINCE_BATCH,
     )
     .clamp(1, 10_000);
-    let changes_since_drain = {
+    let changes_since_drain = if env_flag("KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE") {
+        common::log_always(
+            "storage_cmp: skipping changes_since full drain \
+             (KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE=1)",
+        );
+        None
+    } else {
         let _step = common::log_step_always(format!(
             "storage_cmp: changes_since full drain (expect ~{rows} rows, batch={changes_batch})"
         ));
-        time_changes_since_full_drain(&db.client, managed, rows, changes_batch).await?
+        Some(time_changes_since_full_drain(&db.client, managed, rows, changes_batch).await?)
     };
 
     let vacuum = {
@@ -739,7 +745,7 @@ async fn run_managed_only_body(
             delete: delete_catchup,
             restore: restore_catchup,
         }),
-        changes_since_drain: Some(changes_since_drain),
+        changes_since_drain,
     };
 
     print_comparison_table(
@@ -973,11 +979,17 @@ async fn run_storage_comparison_body(
         DEFAULT_CHANGES_SINCE_BATCH,
     )
     .clamp(1, 10_000);
-    let managed_changes_since = {
+    let managed_changes_since = if env_flag("KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE") {
+        common::log_always(
+            "storage_cmp: skipping changes_since full drain \
+             (KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE=1)",
+        );
+        None
+    } else {
         let _step = common::log_step_always(format!(
             "storage_cmp: changes_since full drain (expect ~{rows} rows, batch={changes_batch})"
         ));
-        time_changes_since_full_drain(&db.client, managed, rows, changes_batch).await?
+        Some(time_changes_since_full_drain(&db.client, managed, rows, changes_batch).await?)
     };
 
     // After flush the managed heap is smaller; time VACUUM FULL as the
@@ -1040,7 +1052,7 @@ async fn run_storage_comparison_body(
             delete: delete_catchup,
             restore: restore_catchup,
         }),
-        changes_since_drain: Some(managed_changes_since),
+        changes_since_drain: managed_changes_since,
     };
 
     print_comparison_table(
@@ -1103,6 +1115,14 @@ fn env_i64(name: &str, default: i64) -> i64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+/// True when `name` is set to `1` / `true` / `yes` (case-insensitive).
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 /// Resolves warm-up row count: explicit env, else a scale-aware default, else 0.

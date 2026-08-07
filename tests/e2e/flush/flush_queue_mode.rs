@@ -5,7 +5,6 @@
 //! identity, orphan reclaim, and ordered reads after cold publish.
 
 use crate::common;
-use crate::flush::harness::wait_until_barrier_waiter;
 
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -277,6 +276,10 @@ async fn queue_flush_reclaims_orphan_running_job_and_completes() -> Result<()> {
 /// Second queue flush while the first job is still active returns the same UUID.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn queue_dual_flush_returns_same_active_job() -> Result<()> {
+    use crate::flush::harness::wait_until_barrier_waiter_deadline;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
     common::require_pgrx_server().await?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "queue_dual").await?;
@@ -302,7 +305,7 @@ async fn queue_dual_flush_returns_same_active_job() -> Result<()> {
             .await?;
         common::fence_async_mirror(&db.client).await?;
 
-        // Park the executor so the first job stays active while we dual-call.
+        // Arm after manage/fence so only the flush executor inherits the wait.
         db.client
             .batch_execute(&format!(
                 "ALTER DATABASE \"{dbname}\" SET koldstore.failpoint = 'wait:after_select_rows';"
@@ -315,9 +318,73 @@ async fn queue_dual_flush_returns_same_active_job() -> Result<()> {
         let first = common::flush_table_job_id(&db.client, &table.relation, true)
             .await?
             .context("first force flush must return a job id")?;
-        wait_until_barrier_waiter(&coordinator, || false)
+
+        // Under parallel CI, spawn can lag; require a live executor before the
+        // advisory wait row is expected.
+        common::wait_for_flush_executor_pids(&db.client, Duration::from_secs(45))
             .await
-            .context("queue executor should park at after_select_rows")?;
+            .context("queue dual-flush: wait for flush executor")?;
+
+        let job_left_running = Arc::new(AtomicBool::new(false));
+        let probe = common::connect_peer(&db).await?;
+        let probe_job = first.clone();
+        let left = Arc::clone(&job_left_running);
+        let probe_handle = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let status: Result<String, _> = probe
+                    .query_one(
+                        "SELECT status FROM koldstore.jobs WHERE id = $1::text::uuid",
+                        &[&probe_job],
+                    )
+                    .await
+                    .map(|row| row.get(0));
+                match status {
+                    Ok(status)
+                        if matches!(status.as_str(), "completed" | "error" | "cancelled") =>
+                    {
+                        left.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        left.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                }
+            }
+        });
+
+        let wait_result = wait_until_barrier_waiter_deadline(
+            &coordinator,
+            || job_left_running.load(Ordering::SeqCst),
+            Duration::from_secs(60),
+        )
+        .await;
+        probe_handle.abort();
+        if let Err(error) = wait_result {
+            let status: String = db
+                .client
+                .query_one(
+                    "SELECT status || ':' || coalesce(phase, '') || ':' || coalesce(error_trace, '') \
+                     FROM koldstore.jobs WHERE id = $1::text::uuid",
+                    &[&first],
+                )
+                .await
+                .map(|row| row.get(0))
+                .unwrap_or_else(|_| "<unreadable>".to_string());
+            common::barrier_unlock(&coordinator).await.ok();
+            let _ = db
+                .client
+                .batch_execute(&format!(
+                    "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
+                     RESET koldstore.failpoint;"
+                ))
+                .await;
+            return Err(error).context(format!(
+                "queue executor should park at after_select_rows (job={first} state={status})"
+            ));
+        }
 
         let second = common::flush_table_job_id(&db.client, &table.relation, true)
             .await?

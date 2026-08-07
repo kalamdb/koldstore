@@ -766,10 +766,41 @@ pub(crate) fn flush_table_pg_impl(
             else {
                 return Ok(None);
             };
-            if let Err(error) = crate::worker::spawn_flush_executor_if_needed() {
-                pgrx::warning!("koldstore flush_table: could not spawn flush executor: {error}");
-            }
+            spawn_queue_flush_executor_best_effort();
             Ok(Some(job_uuid))
+        }
+    }
+}
+
+/// Retries dynamic flush-executor registration under transient worker-slot pressure.
+///
+/// Parallel E2E / CI often exhausts `max_worker_processes` briefly. A single failed
+/// `load_dynamic` used to leave the job pending until the coordinator's next tick,
+/// which races failpoint barrier waits (`wait:after_select_rows`). Best-effort
+/// retries keep queue `flush_table` from silently parking work with no executor.
+fn spawn_queue_flush_executor_best_effort() {
+    const ATTEMPTS: u32 = 12;
+    for attempt in 1..=ATTEMPTS {
+        match crate::worker::spawn_flush_executor_if_needed() {
+            Ok(true) => return,
+            Ok(false) => {
+                // No pending work left to spawn for, or this database is already
+                // at max_parallel_flush_jobs with live executors.
+                return;
+            }
+            Err(error) => {
+                pgrx::warning!(
+                    "koldstore flush_table: spawn flush executor attempt {attempt}/{ATTEMPTS} failed: {error}"
+                );
+                if attempt == ATTEMPTS {
+                    return;
+                }
+                // Back off so other DBs' one-shot executors can exit and free slots.
+                let delay_us = 25_000_i64.saturating_mul(i64::from(attempt));
+                unsafe {
+                    pgrx::pg_sys::pg_usleep(delay_us);
+                }
+            }
         }
     }
 }

@@ -142,7 +142,6 @@ fn changes_since_pg_impl(
             cold_floor,
             scope_key.as_ref(),
             None,
-            &[],
         )?;
         let mut combined = hot;
         combined.extend(cold);
@@ -163,7 +162,6 @@ fn changes_since_pg_impl(
             since_seq,
             scope_key.as_ref(),
             Some(limit as usize),
-            &hot,
         )?;
         let mut combined = hot;
         combined.extend(cold);
@@ -341,7 +339,6 @@ fn fetch_cold_changes(
     since_seq: i64,
     scope_key: Option<&ScopeKey>,
     page_limit: Option<usize>,
-    hot_changes: &[MirrorChange],
 ) -> Result<(Vec<MirrorChange>, Option<i64>), String> {
     let Some(manifest) = crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?
     else {
@@ -458,12 +455,12 @@ fn fetch_cold_changes(
             }
         }
 
+        // Stop opening newer cold groups only once cold alone can fill the
+        // page. Mixing unbounded hot into this check pads the limit with high
+        // seqs and skips older cold — breaking since_seq=0 ASC delivery.
         if let Some(limit) = page_limit {
-            let mut loaded = Vec::with_capacity(hot_changes.len() + changes.len());
-            loaded.extend_from_slice(hot_changes);
-            loaded.extend(changes.iter().cloned());
             let page = events::changes_since(
-                &loaded,
+                &changes,
                 table_oid.to_u32(),
                 scope_key,
                 since_seq,

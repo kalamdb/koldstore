@@ -7,7 +7,8 @@ table.
 
 **Latest numbers:** [RESULTS.md](RESULTS.md) — columns are PostgreSQL only and
 PG + KoldStore (WAL-only). The file currently holds a **draft single-sample**
-10M refresh (2026-08-06, `flushed = 9.9M`). Refresh a publishable median with
+10M refresh (2026-08-07, `flushed = 9.9M`; `changes_since` full drain skipped).
+Refresh a publishable median with
 `scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results`
 (each sample gets a fresh pgrx PostgreSQL; publication requires a clean tree).
 
@@ -176,7 +177,9 @@ Useful flags:
 Env equivalents: `KOLDSTORE_STORAGE_ROWS`, `KOLDSTORE_STORAGE_HOT_LIMIT`,
 `KOLDSTORE_STORAGE_DML_SAMPLE`, `KOLDSTORE_STORAGE_CHANGES_SINCE_BATCH`
 (default `500` for the post-flush full-drain), and so on. Draft RESULTS
-updates on a dirty tree: `KOLDSTORE_STORAGE_DRAFT_RESULTS=1`.
+updates on a dirty tree: `KOLDSTORE_STORAGE_DRAFT_RESULTS=1`. Skip the
+multi-hour 10M `changes_since` full drain with
+`KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE=1` (cells stay TODO).
 
 Each side force-stops PostgreSQL, **wipes `~/.pgrx/data-<ver>`**, then initdb +
 prepare so leftover WAL cannot skew the next side. Before timed seeding the

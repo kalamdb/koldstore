@@ -1,9 +1,10 @@
 # Latest benchmark results
 
-> **Draft single-sample refresh (2026-08-06).** One isolated pg + async pair at
-> published 10M scale (`flushed = 9,900,000`). Not a 6-rep publication; treat
-> absolute query TPS as noisy. Re-run with `--repetitions 6 --update-results` on
-> a clean tree before marketing numbers.
+> **Draft single-sample refresh (2026-08-07).** One isolated pg + async pair at
+> published 10M scale (`flushed = 9,900,000`). Skipped the multi-hour
+> `changes_since` full drain (`KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE=1`). Not a
+> 6-rep publication; treat absolute query TPS as noisy. Re-run with
+> `--repetitions 6 --update-results` on a clean tree before marketing numbers.
 
 Published numbers from the most recent storage comparison run(s). Re-run
 `scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results` to refresh
@@ -11,9 +12,9 @@ this file. Each column is measured alone on a wiped + re-initdb pgrx PostgreSQL
 (stop → wipe `~/.pgrx/data-<ver>` → prepare → one side). Methodology:
 [README.md](README.md).
 
-**When:** 2026-08-06 UTC (pg 21:32:41Z, async 21:43:04Z)
-**Git:** `1ad22d841aa6` (`1ad22d841aa6580453e29dad333b3e1724f0ac99`) — draft stamp (`KOLDSTORE_STORAGE_DRAFT_RESULTS=1`)
-**Run:** 10000000 rows · `hot_row_limit = 100000` · `max_rows_per_file = 1000000` · `--dml-sample 50000` · `insert_batch_rows = 100000` · `warmup_rows = 1000000` · zstd Parquet · **counterbalanced sequential** isolated wiped server per sample (not parallel) · sides measured: **pg + async** · **single sample per side**
+**When:** 2026-08-07 UTC (pg 09:28:37Z, async 09:39:13Z)
+**Git:** `b220d79339ac` (`b220d79339ac08a20e3921125be2a7df8f7005a9`) — draft stamp (`KOLDSTORE_STORAGE_DRAFT_RESULTS=1`)
+**Run:** 10000000 rows · `hot_row_limit = 100000` · `max_rows_per_file = 1000000` · `--dml-sample 50000` · `insert_batch_rows = 100000` · `warmup_rows = 1000000` · zstd Parquet · **counterbalanced sequential** isolated wiped server per sample (not parallel) · sides measured: **pg + async** · **single sample per side** · `changes_since` drain skipped
 
 Managed PostgreSQL sizes include hot heap + `koldstore.<table>__cl` + mirror
 indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
@@ -23,28 +24,28 @@ indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
 
 | Metric | PostgreSQL only | PG + KoldStore |
 | --- | --- | --- |
-| foreground insert throughput | 90501 ops/s | 101861 ops/s |
+| foreground insert throughput | 100214 ops/s | 96867 ops/s |
 | sustainable insert throughput | TODO | TODO |
 | sustainable update throughput | TODO | TODO |
-| insert p99 latency | 1590.83 ms | 1220.24 ms |
-| update p99 latency | 44.7 ms | 130.47 ms |
-| hot-query p99 latency | 337 µs | 348 µs |
-| cold-query p99 latency | 301 µs | 2.98 ms |
-| hot+cold query throughput | 4095 ops/s | 632 ops/s |
-| cold-only query throughput | 4132 ops/s | 353 ops/s |
+| insert p99 latency | 1228.34 ms | 2802.8 ms |
+| update p99 latency | 35.1 ms | 107.17 ms |
+| hot-query p99 latency | 339 µs | 486 µs |
+| cold-query p99 latency | 283 µs | 3.02 ms |
+| hot+cold query throughput | 4024 ops/s | 854 ops/s |
+| cold-only query throughput | 4039 ops/s | 488 ops/s |
 | cold files fetched/query | — | TODO |
 | cold bytes fetched/query | — | TODO |
 | peak memory under workload | TODO | TODO |
-| peak RSS during flush | — | 842.84 MiB (before=339.44 MiB, after=842.84 MiB) |
-| flush duration | — | 140.28 s |
-| flush write throughput | — | TODO (re-run harness) |
-| flush write bandwidth | — | TODO (re-run harness) |
-| changes_since full-drain throughput | — | TODO (re-run harness) |
-| changes_since full-drain duration | — | TODO (re-run harness) |
+| peak RSS during flush | — | 816.2 MiB (before=338.38 MiB, after=816.20 MiB) |
+| flush duration | — | 138 s |
+| flush write throughput | — | 71741 rows/s |
+| flush write bandwidth | — | 4.34 MiB/s |
+| changes_since full-drain throughput | — | — |
+| changes_since full-drain duration | — | — |
 | CPU seconds per 1M operations | TODO | TODO |
 | WAL generated per 1M operations | TODO | TODO |
 | local bytes written | TODO | TODO |
-| VACUUM duration | 211.52 s | 3.57 s |
+| VACUUM duration | 142.22 s | 3.86 s |
 | local PostgreSQL storage | 5.85 GiB | 72.23 MiB |
 | total hot+cold storage | 5.85 GiB | 670.82 MiB |
 | peak open file descriptors | TODO | TODO |
@@ -64,17 +65,18 @@ PK lookup (`QUERY_LOOPS = 400` after 40 discarded warm-up lookups). See [README.
 
 | Operation | PostgreSQL only | PG + KoldStore |
 | --- | --- | --- |
-| insert speed† | 90501 ops/s (11 µs/op) | 101861 ops/s (10 µs/op) |
-| update speed† | 76902 ops/s (13 µs/op) | 54219 ops/s (18 µs/op) |
-| delete speed† | 124872 ops/s (8 µs/op) | 135288 ops/s (7 µs/op) |
-| └ async insert mirror catch-up | — | 34179 ops/s (29 µs/op) |
-| └ async update mirror catch-up | — | 1976 ops/s (506 µs/op) |
-| └ async delete mirror catch-up | — | 30157 ops/s (33 µs/op) |
-| └ async restore mirror catch-up | — | 28869 ops/s (35 µs/op) |
-| query hot only (before flush) | 3899 ops/s (256 µs/op) | 3737 ops/s (268 µs/op) |
-| query with hot+cold (after flush) | 4095 ops/s (244 µs/op) | 632 ops/s (1583 µs/op) |
-| query cold only (after flush) | 4132 ops/s (242 µs/op) | 353 ops/s (2835 µs/op) |
-| VACUUM time (after flush) | 211.52 s | 3.57 s |
+| insert speed† | 100214 ops/s (10 µs/op) | 96867 ops/s (10 µs/op) |
+| update speed† | 86487 ops/s (12 µs/op) | 57131 ops/s (18 µs/op) |
+| delete speed† | 37487 ops/s (27 µs/op) | 148369 ops/s (7 µs/op) |
+| └ async insert mirror catch-up | — | 34854 ops/s (29 µs/op) |
+| └ async update mirror catch-up | — | 2019 ops/s (495 µs/op) |
+| └ async delete mirror catch-up | — | 30078 ops/s (33 µs/op) |
+| └ async restore mirror catch-up | — | 29634 ops/s (34 µs/op) |
+| query hot only (before flush) | 3830 ops/s (261 µs/op) | 3768 ops/s (265 µs/op) |
+| query with hot+cold (after flush) | 4024 ops/s (249 µs/op) | 854 ops/s (1171 µs/op) |
+| query cold only (after flush) | 4039 ops/s (248 µs/op) | 488 ops/s (2047 µs/op) |
+| changes_since full drain‡ | — | — |
+| VACUUM time (after flush) | 142.22 s | 3.86 s |
 | dead tuples after workload | 99916 (live=10000000) | 99916 (live=10000000) |
 | index storage (hot + __cl) | 414.86 MiB | 11.45 MiB |
 | table storage (hot + __cl) | 5.45 GiB | 60.79 MiB |
@@ -101,7 +103,7 @@ Async column below (vs PostgreSQL-only).
 | └ hot in PostgreSQL (heap + `__cl`) | 5.85 GiB → 72.23 MiB | **99% smaller** |
 | └ cold Parquet | — → 599 MiB | outside the database |
 | Indexes (hot + `__cl`) | 414.86 MiB → 11.45 MiB | **97% smaller** |
-| `VACUUM (FULL, ANALYZE)` | 211.52 s → 3.57 s | **59× faster** |
+| `VACUUM (FULL, ANALYZE)` | 142.22 s → 3.86 s | **37× faster** |
 
 ### Why was delete reported faster before — and is it?
 

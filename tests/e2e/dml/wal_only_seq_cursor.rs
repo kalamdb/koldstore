@@ -1111,13 +1111,29 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_bounded", db.schema);
         let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
 
         db.client
             .batch_execute(&format!(
                 "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
             ))
             .await?;
-        manage_table(&db.client, &relation, &db.storage_name).await?;
+        db.client
+            .execute(
+                r#"
+                SELECT koldstore.manage_table(
+                  table_name => $1::text::regclass,
+                  storage => $2,
+                  hot_row_limit => 1000,
+                  min_flush_rows => 1,
+                  max_rows_per_file => 1000,
+                  migration_order_by => 'id',
+                  auto_flush => false
+                )
+                "#,
+                &[&relation, &db.storage_name],
+            )
+            .await?;
         common::wait_for_async_worker(&db.client).await?;
 
         for wave in 0..3_i64 {
@@ -1129,7 +1145,24 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
                      SELECT id, 'row-' || id FROM generate_series({start}, {end}) id"
                 ))
                 .await?;
-            common::wait_for_async_mirror(&db.client).await?;
+            // Prior waves may already be pruned from the mirror; wait for this
+            // wave's inserts only.
+            common::fence_async_mirror(&db.client).await?;
+            let wave_rows: i64 = db
+                .client
+                .query_one(
+                    &format!(
+                        "SELECT count(*)::bigint FROM {mirror} \
+                         WHERE op = 1 AND id BETWEEN {start} AND {end}"
+                    ),
+                    &[],
+                )
+                .await?
+                .get(0);
+            assert_eq!(
+                wave_rows, 1000,
+                "wave {wave} must be fully mirrored before flush, got {wave_rows}"
+            );
             let flushed = common::flush_table_job_id(&db.client, &relation, true)
                 .await?
                 .context("force flush must return a job id")?;
@@ -1147,7 +1180,7 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
                     JOIN pg_namespace n ON n.oid = c.relnamespace
                     WHERE cs.table_oid = $1::text::regclass::oid
                       AND cs.status = 'active'
-                    ORDER BY cs.min_seq
+                    ORDER BY cs.min_seq, cs.max_seq, cs.path
                     "#,
                     object = common::SQL_DEFAULT_COLD_OBJECT_KEY,
                 ),
@@ -1163,9 +1196,26 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
                 )
             })
             .collect::<Vec<_>>();
-        assert_eq!(cold_segments.len(), 3);
+        assert!(
+            cold_segments.len() >= 2,
+            "expected at least two cold segments after three flush waves, got {}",
+            cold_segments.len()
+        );
 
-        let unneeded = db.storage_root.join(&cold_segments[2].0);
+        // Park the newest segment by max_seq so a correct first page must not open it.
+        let newest_idx = cold_segments
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, segment)| (segment.2, segment.1))
+            .map(|(idx, _)| idx)
+            .context("cold segments must be non-empty")?;
+        let newest = &cold_segments[newest_idx];
+        let oldest_max = cold_segments
+            .iter()
+            .map(|segment| segment.2)
+            .min()
+            .context("cold segments must be non-empty")?;
+        let unneeded = db.storage_root.join(&newest.0);
         let parked = unneeded.with_extension("parquet.parked");
         std::fs::rename(&unneeded, &parked)?;
         let first_page = db
@@ -1177,7 +1227,7 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
                 &[&relation],
             )
             .await;
-        let cursor = cold_segments[0].2 - 10;
+        let cursor = oldest_max - 10;
         let spanning_page = db
             .client
             .query(
@@ -1203,9 +1253,173 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
         assert!(spanning_seqs.windows(2).all(|pair| pair[0] < pair[1]));
         assert!(spanning_seqs.iter().all(|seq| *seq > cursor));
         assert!(
-            spanning_seqs.iter().any(|seq| *seq > cold_segments[0].2),
-            "page should continue into the second segment"
+            spanning_seqs.iter().any(|seq| *seq > oldest_max),
+            "page should continue past the oldest segment max_seq={oldest_max}"
         );
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn changes_since_from_start_keeps_cold_before_hot_across_segments() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_cs_cold_then_hot").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_order", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL)"
+            ))
+            .await?;
+        db.client
+            .execute(
+                r#"
+                SELECT koldstore.manage_table(
+                  table_name => $1::text::regclass,
+                  storage => $2,
+                  hot_row_limit => 20,
+                  min_flush_rows => 1,
+                  max_rows_per_file => 1000,
+                  migration_order_by => 'id',
+                  auto_flush => false
+                )
+                "#,
+                &[&relation, &db.storage_name],
+            )
+            .await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        // Small first cold generation — historically enough for hot to pad a
+        // limit=25 page and skip later cold groups.
+        db.client
+            .batch_execute(&format!(
+                "INSERT INTO {relation} \
+                 SELECT id, 'cold-a-' || id FROM generate_series(1, 12) id"
+            ))
+            .await?;
+        common::wait_for_mirror_op_count(&db.client, &mirror, 1, 12).await?;
+        common::wait_for_async_mirror(&db.client).await?;
+        common::flush_table_job_id(&db.client, &relation, true)
+            .await?
+            .context("flush first cold wave")?;
+
+        db.client
+            .batch_execute(&format!(
+                "INSERT INTO {relation} \
+                 SELECT id, 'cold-b-' || id FROM generate_series(13, 80) id"
+            ))
+            .await?;
+        // First-wave mirror rows may already be pruned; wait until the new batch
+        // is visible (exact residual count is flush-dependent).
+        common::fence_async_mirror(&db.client).await?;
+        let second_wave: i64 = db
+            .client
+            .query_one(
+                &format!(
+                    "SELECT count(*)::bigint FROM {mirror} \
+                     WHERE op = 1 AND id BETWEEN 13 AND 80"
+                ),
+                &[],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            second_wave, 68,
+            "second cold wave must be mirrored before flush, got {second_wave}"
+        );
+        common::flush_table_job_id(&db.client, &relation, true)
+            .await?
+            .context("flush second cold wave")?;
+
+        db.client
+            .batch_execute(&format!(
+                "INSERT INTO {relation} \
+                 SELECT id, 'hot-' || id FROM generate_series(81, 120) id"
+            ))
+            .await?;
+        common::fence_async_mirror(&db.client).await?;
+
+        let hot_count = common::hot_row_count(&db.client, &relation).await?;
+        assert!(
+            hot_count > 0,
+            "expected a hot tail after post-flush inserts, got hot={hot_count}"
+        );
+        let cold_segments: i64 = db
+            .client
+            .query_one(
+                "SELECT count(*)::bigint FROM koldstore.cold_segments \
+                 WHERE table_oid = $1::text::regclass AND status = 'active'",
+                &[&relation],
+            )
+            .await?
+            .get(0);
+        assert!(
+            cold_segments >= 2,
+            "need multiple cold generations to exercise group early-exit, got {cold_segments}"
+        );
+
+        let page = db
+            .client
+            .query(
+                "SELECT seq, (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 25) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(page.len(), 25, "first page must be full");
+        let ids = page
+            .iter()
+            .map(|row| row.get::<_, i64>(1))
+            .collect::<Vec<_>>();
+        let sources = page
+            .iter()
+            .map(|row| row.get::<_, String>(2))
+            .collect::<Vec<_>>();
+        let seqs = page
+            .iter()
+            .map(|row| row.get::<_, i64>(0))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ids,
+            (1..=25).collect::<Vec<_>>(),
+            "since_seq=0 must deliver oldest retained rows first; got ids={ids:?} sources={sources:?}"
+        );
+        assert!(
+            sources.iter().all(|source| source == "cold"),
+            "first page must stay entirely in cold while older cold remains, got {sources:?}"
+        );
+        assert!(
+            seqs.windows(2).all(|pair| pair[0] < pair[1]),
+            "seq must be strictly ascending: {seqs:?}"
+        );
+
+        let full = drain_changes_since_feed(&db.client, &relation, 0, 40).await?;
+        assert_eq!(full.len(), 120, "full drain must cover every live PK");
+        assert!(
+            full.windows(2).all(|pair| pair[0].0 < pair[1].0),
+            "full drain must stay seq-ordered"
+        );
+        let first_hot = full
+            .iter()
+            .position(|row| row.2 == "hot")
+            .context("expected hot rows after cold")?;
+        assert!(
+            full[..first_hot].iter().all(|row| row.2 == "cold"),
+            "hot must not appear before all older cold latest-state rows"
+        );
+        assert!(
+            full[first_hot..].iter().all(|row| row.2 == "hot"),
+            "once hot starts, remaining rows should be the hot tail"
+        );
+        let full_ids: Vec<i64> = full.iter().map(|row| row.1).collect();
+        assert_eq!(full_ids, (1..=120).collect::<Vec<_>>());
 
         unmanage(&db.client, &relation).await?;
     }
@@ -1331,6 +1545,36 @@ async fn page_changes_since(
             op: row.get(2),
         })
         .collect())
+}
+
+/// Pages `koldstore.changes_since` until empty (seq, id, source).
+async fn drain_changes_since_feed(
+    client: &tokio_postgres::Client,
+    relation: &str,
+    since_seq: i64,
+    limit: i32,
+) -> Result<Vec<(i64, i64, String)>> {
+    let mut cursor = since_seq;
+    let mut out = Vec::new();
+    loop {
+        let rows = client
+            .query(
+                "SELECT seq, (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, $2, $3) \
+                 ORDER BY seq",
+                &[&relation, &cursor, &limit],
+            )
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let seq: i64 = row.get(0);
+            cursor = seq;
+            out.push((seq, row.get(1), row.get(2)));
+        }
+    }
+    Ok(out)
 }
 
 async fn page_all_changes_since(
