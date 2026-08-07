@@ -2,9 +2,11 @@
 
 use std::path::Path;
 
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{ArrowReaderOptions, ParquetRecordBatchReaderBuilder};
+use parquet::file::metadata::PageIndexPolicy;
 use parquet::file::reader::ChunkReader;
 
+use crate::page_prune::row_selection_for_equality_values;
 use crate::prune::{
     bloom_may_contain, column_index, prune_row_groups_by_seq_stats, select_row_groups_from_metadata,
 };
@@ -21,8 +23,8 @@ use super::types::CleanColdRow;
 /// appear in the projection or this function returns an error.
 ///
 /// When `options.row_groups` is set, only the selected row groups are scanned.
-/// When `options.pk_values` is set, footer min/max and native Parquet bloom
-/// filters refine any catalog-selected row groups on the same file handle.
+/// When `options.pk_values` is set, footer min/max, native Parquet bloom filters, and
+/// page indexes (when present) refine the scan on the same file handle.
 ///
 /// # Errors
 ///
@@ -47,8 +49,13 @@ fn read_clean_cold_rows_from_reader<R>(
 where
     R: ChunkReader + 'static,
 {
-    let mut builder =
-        ParquetRecordBatchReaderBuilder::try_new(reader).map_err(|error| error.to_string())?;
+    let reader_options = if options.pk_values.is_some() {
+        ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional)
+    } else {
+        ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Skip)
+    };
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new_with_options(reader, reader_options)
+        .map_err(|error| error.to_string())?;
     let application_columns = application_columns_for_read(columns, primary_key_columns, options)?;
 
     let mut effective = options.clone();
@@ -125,6 +132,22 @@ where
     }
     if let Some(row_groups) = &effective.row_groups {
         builder = builder.with_row_groups(row_groups.clone());
+    }
+    if let Some(pk) = &options.pk_values {
+        let selected = effective
+            .row_groups
+            .clone()
+            .unwrap_or_else(|| (0..builder.metadata().num_row_groups()).collect());
+        let page_prune = row_selection_for_equality_values(
+            builder.metadata(),
+            builder.parquet_schema(),
+            &selected,
+            &pk.column,
+            &pk.values,
+        )?;
+        if let Some(selection) = page_prune.selection {
+            builder = builder.with_row_selection(selection);
+        }
     }
     let reader = builder.build().map_err(|error| error.to_string())?;
     let pk_filter = effective.pk_values.as_ref();

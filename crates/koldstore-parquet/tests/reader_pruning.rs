@@ -398,20 +398,30 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         .format_bloom_summary()
         .contains("skipped_after_stats"));
 
+    // Non-PK reads use Skip footers and populate the cache.
+    let (_rows_full, profile_full) = read_clean_cold_rows_from_object_store_with_size(
+        client.store(),
+        key,
+        Some(file_size),
+        &[PgColumn::new("id", PgType::Int8, false)],
+        &["id".to_string()],
+        &ParquetReadOptions::new().with_columns(["id"]),
+    )
+    .unwrap();
+    assert!(!profile_full.footer_cache_hit);
+
     let (_rows2, profile2) = read_clean_cold_rows_from_object_store_with_size(
         client.store(),
         key,
         Some(file_size),
         &[PgColumn::new("id", PgType::Int8, false)],
         &["id".to_string()],
-        &ParquetReadOptions::new()
-            .with_columns(["id"])
-            .with_pk_values("id", ["4"]),
+        &ParquetReadOptions::new().with_columns(["id"]),
     )
     .unwrap();
     assert!(
         profile2.footer_cache_hit,
-        "second read of the same segment must reuse cached footer metadata"
+        "second non-PK read of the same segment must reuse cached Skip footer metadata"
     );
     assert!(profile2.format_io_summary().contains("footer_cache=hit"));
 
@@ -435,4 +445,90 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     );
     assert_eq!(missing_profile.row_groups_skipped, 3);
     assert!(missing_profile.stats_pruned);
+}
+
+#[test]
+fn object_store_pk_probe_applies_page_index_row_selection() {
+    use std::sync::Arc;
+
+    use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
+    use arrow_schema::{DataType, Field, Schema};
+    use koldstore_parquet::{
+        read_clean_cold_rows_from_object_store_with_size, PageIndexPruneMode, ParquetSegmentWriter,
+        PgColumn, PgType, WriterOptions,
+    };
+    use koldstore_storage::{ObjectStoreClient, StorageClient};
+
+    // One large row group with tiny data pages so page-index pruning can skip
+    // pages inside the surviving row group.
+    let ids: Vec<i64> = (1..=64).collect();
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("seq", DataType::Int64, false),
+        Field::new("op", DataType::Int16, false),
+        Field::new("deleted", DataType::Boolean, false),
+        Field::new("schema_version", DataType::UInt32, false),
+    ]));
+    let mut batches = Vec::new();
+    for chunk in ids.chunks(8) {
+        let chunk = chunk.to_vec();
+        batches.push(
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(chunk.clone())),
+                    Arc::new(Int64Array::from(chunk.clone())),
+                    Arc::new(Int16Array::from(vec![1_i16; chunk.len()])),
+                    Arc::new(BooleanArray::from(vec![false; chunk.len()])),
+                    Arc::new(UInt32Array::from(vec![1_u32; chunk.len()])),
+                ],
+            )
+            .unwrap(),
+        );
+    }
+    let writer = ParquetSegmentWriter::new(
+        WriterOptions {
+            row_group_size: 64,
+            data_page_row_count_limit: Some(8),
+            ..WriterOptions::default()
+        }
+        .with_statistics_columns(["id", "seq"])
+        .with_bloom_filter_columns(["id"]),
+    );
+    let mut encoded = Vec::new();
+    writer
+        .write_record_batches(&mut encoded, schema, batches)
+        .unwrap();
+    let file_size = encoded.len() as u64;
+    let client = ObjectStoreClient::in_memory();
+    let key = "segments/page-index.parquet";
+    client
+        .put(key, &encoded, koldstore_storage::PutPrecondition::Overwrite)
+        .unwrap();
+
+    let (rows, profile) = read_clean_cold_rows_from_object_store_with_size(
+        client.store(),
+        key,
+        Some(file_size),
+        &[PgColumn::new("id", PgType::Int8, false)],
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_pk_values("id", ["50"]),
+    )
+    .unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].pk_json["id"], json!(50));
+    assert_eq!(profile.page_index, PageIndexPruneMode::Applied);
+    assert!(profile.pages_total > 1, "expected multiple data pages");
+    assert!(
+        profile.pages_skipped > 0,
+        "page-index prune should skip non-matching pages (total={}, selected={}, skipped={})",
+        profile.pages_total,
+        profile.pages_selected,
+        profile.pages_skipped
+    );
+    assert!(profile.format_page_index_summary().contains("applied"));
+    assert!(profile.bytes_read < file_size);
 }
