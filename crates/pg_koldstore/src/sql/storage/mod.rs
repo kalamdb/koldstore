@@ -17,6 +17,7 @@ use koldstore_storage::registration::*;
 ///
 /// Errors when `name` already exists.
 #[cfg(feature = "pg")]
+#[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg(
     name: &str,
@@ -73,6 +74,7 @@ pub fn register_storage_pg_with_default_templates(
 }
 
 #[cfg(feature = "pg")]
+#[allow(clippy::too_many_arguments)]
 fn register_storage_pg_impl(
     name: &str,
     storage_type: &str,

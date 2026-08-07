@@ -3,6 +3,11 @@
 //! Registered from `_PG_init` only while `shared_preload_libraries` loads
 //! `koldstore`. Without preload, the first backend transaction that sees an
 //! async slot still calls ensure (see [`super::ensure`]).
+//!
+//! The launcher is restartable (`bgw_restart_time`). Latch close / SIGTERM must
+//! exit non-zero so `pg_terminate_backend` (and e2e slot cleanup) cannot leave
+//! the cluster without a launcher until the next postmaster restart. Soft
+//! apply errors stay inside each NEVER_RESTART applier with backoff.
 
 use std::time::Duration;
 
@@ -23,7 +28,8 @@ pub(crate) fn register_if_shared_preload() {
         .set_library(LIBRARY_NAME)
         .set_function(LAUNCHER_FUNCTION)
         .enable_spi_access()
-        // Static preload launcher may restart; dynamic ensure() path uses NEVER_RESTART.
+        // Restart after crash or admin SIGTERM (exit code 1). Appliers stay
+        // NEVER_RESTART so intentional slot drop leaves them stopped.
         .set_restart_time(Some(Duration::from_secs(1)))
         .load();
 }
@@ -32,8 +38,7 @@ pub(crate) fn register_if_shared_preload() {
 #[pgrx::pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::pg_sys::Datum) {
-    // SIGHUP + SIGTERM so postmaster stop does not leave an unhandled signal as
-    // a non-zero exit that ensure() then respawns in a tight loop.
+    // SIGHUP + SIGTERM so the latch wakes on admin terminate / config reload.
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     // Connect to the default database so we can read cluster-wide slot catalogs.
     BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
@@ -43,7 +48,15 @@ pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::p
             pgrx::log!("koldstore async mirror launcher: ensure failed: {error}");
         }
         if !BackgroundWorker::wait_latch(Some(poll)) {
-            break;
+            // Postgres treats bgworker exit 0 as "do not restart". Exit 1 so
+            // `bgw_restart_time` relaunches after pg_terminate_backend. During
+            // postmaster shutdown, `bgworker_should_start_now` refuses starts.
+            pgrx::log!(
+                "koldstore async mirror launcher: stopping (will restart unless postmaster is shutting down)"
+            );
+            unsafe {
+                pgrx::pg_sys::proc_exit(1);
+            }
         }
         if BackgroundWorker::sighup_received() {
             unsafe { pgrx::pg_sys::ProcessConfigFile(pgrx::pg_sys::GucContext::PGC_SIGHUP) };
@@ -77,12 +90,24 @@ fn ensure_appliers_for_async_slots() -> Result<(), String> {
         Ok(out)
     })?;
     for oid in oids {
+        if crate::worker::wake::ensure_paused(oid) {
+            continue;
+        }
         // Skip when a session ensure already holds the registration lock
         // (e.g. manage_table's open transaction). Blocking here wedged the
         // launcher under pg_test and led to ensure() respawn storms.
+        // Note: advisory locks are database-local; this only serializes against
+        // other sessions connected to the same database as the launcher
+        // (`postgres`). Cross-DB pause uses shared-memory [`wake::ensure_paused`].
         if !crate::mirror::lifecycle::try_lock_worker_registration(oid)? {
             continue;
         }
+        // Advisory lock above assigns an XID. ensure()'s in-xact + WORKER_ENSURED
+        // short-circuit would then skip forever after the first successful
+        // registration, so NEVER_RESTART applier death would never be healed.
+        // Clear the per-backend latch each poll; worker_running still no-ops
+        // when the applier is already up.
+        super::ensure::mark_worker_not_ensured();
         let _ = super::ensure::ensure_async_mirror_worker_for(DatabaseOid::new(oid));
     }
     Ok(())

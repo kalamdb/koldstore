@@ -9,14 +9,18 @@
 use std::cell::RefCell;
 
 use koldstore_worker::{
-    AtomicWakeRegistry, TransactionDirty, WakeGeneration, WorkerPid, WAKE_REGISTRY_CAPACITY,
+    AtomicWakeRegistry, EnsurePauseSet, TransactionDirty, WakeGeneration, WorkerPid,
+    WAKE_REGISTRY_CAPACITY,
 };
 use pgrx::{pg_guard, pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
 
 type SharedWakeRegistry = AssertPGRXSharedMemory<AtomicWakeRegistry<WAKE_REGISTRY_CAPACITY>>;
+type SharedEnsurePauseSet = AssertPGRXSharedMemory<EnsurePauseSet<WAKE_REGISTRY_CAPACITY>>;
 
 static WAKE_REGISTRY: PgAtomic<SharedWakeRegistry> =
     unsafe { PgAtomic::new(c"koldstore async wake registry") };
+static ENSURE_PAUSE_SET: PgAtomic<SharedEnsurePauseSet> =
+    unsafe { PgAtomic::new(c"koldstore async ensure pause set") };
 
 thread_local! {
     static MANAGED_DML_PENDING: RefCell<TransactionDirty> =
@@ -29,10 +33,29 @@ pub(crate) fn initialize() {
     pg_shmem_init!(
         WAKE_REGISTRY = unsafe { AssertPGRXSharedMemory::new(AtomicWakeRegistry::default()) }
     );
+    pg_shmem_init!(
+        ENSURE_PAUSE_SET = unsafe { AssertPGRXSharedMemory::new(EnsurePauseSet::default()) }
+    );
     unsafe {
         pg_sys::RegisterXactCallback(Some(wake_xact_callback), std::ptr::null_mut());
         pg_sys::RegisterSubXactCallback(Some(wake_subxact_callback), std::ptr::null_mut());
     }
+}
+
+/// Pauses ensure/register for `database_oid` across the whole postmaster.
+pub(crate) fn pause_ensure(database_oid: u32) -> bool {
+    ENSURE_PAUSE_SET.get().pause(database_oid)
+}
+
+/// Clears an ensure pause for `database_oid`.
+pub(crate) fn resume_ensure(database_oid: u32) {
+    ENSURE_PAUSE_SET.get().resume(database_oid);
+}
+
+/// Returns whether ensure must skip registration for `database_oid`.
+#[must_use]
+pub(crate) fn ensure_paused(database_oid: u32) -> bool {
+    ENSURE_PAUSE_SET.get().is_paused(database_oid)
 }
 
 /// Marks the current transaction as containing managed-table source DML.

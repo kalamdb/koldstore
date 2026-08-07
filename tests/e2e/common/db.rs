@@ -674,6 +674,14 @@ async fn reset_fixture_gucs(client: &Client, dbname: &str) -> Result<()> {
         ))
         .await
         .context("reset leftover GUC / schema state for fixture")?;
+    // Clear shared-memory ensure pauses left by force_stop on this pooled DB.
+    client
+        .query_one(
+            "SELECT koldstore.internal_set_async_mirror_ensure_paused(false)",
+            &[],
+        )
+        .await
+        .context("clear async mirror ensure pause for fixture")?;
     Ok(())
 }
 

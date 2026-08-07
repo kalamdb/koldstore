@@ -154,7 +154,7 @@ async fn track_parallel_flush_jobs(
             .context("poll concurrent flush jobs")?;
 
         let mut running = 0usize;
-        let mut line = String::from("flush_4x200k jobs:");
+        let mut line = String::from("flush_4xvol jobs:");
         for row in &rows {
             let oid = u32::try_from(row.get::<_, i64>(0)).context("job table_oid")?;
             let status: String = row.get(1);
@@ -562,33 +562,32 @@ async fn drop_table_while_mirror_capture_is_active() -> Result<()> {
     Ok(())
 }
 
-/// Four tables flush in parallel with ~200k seed rows each.
+/// Four tables flush in parallel with enough multi-batch volume to prove overlap.
 ///
-/// Uses a production-scale `max_rows_per_file` so the test measures concurrent
-/// flush overlap rather than thousands of tiny Parquet segments. A side task
-/// polls `koldstore.jobs` for live progress; concurrency is proven from
-/// overlapping `started_at`/`finished_at` intervals on the first wave.
+/// Kept well under the old 200k×4 seed so CI stays fast: 25k rows/table with
+/// `max_rows_per_file=1000` still yields ~25 segments/table and concurrent
+/// flush intervals. A side task polls `koldstore.jobs`; concurrency is proven
+/// from overlapping `started_at`/`finished_at` on the first wave.
 ///
-/// Finalize serializes on the database slot lock (~10s try-lock budget). Under
-/// 200k-row prune that is expected: some first-wave jobs may error with
-/// "slot lock" and are retried after the concurrent wave.
+/// Finalize serializes on the database slot lock (~10s try-lock budget). Some
+/// first-wave jobs may error with "slot lock" and are retried after the wave.
 #[tokio::test(flavor = "multi_thread", worker_threads = 5)]
-async fn four_tables_flush_200k_rows_in_parallel() -> Result<()> {
+async fn four_tables_flush_volume_in_parallel() -> Result<()> {
     common::require_pgrx_server().await?;
 
-    const SEED_ROWS: i64 = 200_000;
+    const SEED_ROWS: i64 = 25_000;
     const HOT_ROW_LIMIT: i64 = 100;
     const MAX_ROWS_PER_FILE: i64 = 1_000;
     // Policy flush leaves `hot_row_limit` rows hot.
     const MIN_FLUSHED_PER_TABLE: i64 = SEED_ROWS - HOT_ROW_LIMIT;
 
     for target in common::scenario_pg_matrix() {
-        let db = common::TestDb::start(target, "flush_4x200k").await?;
+        let db = common::TestDb::start(target, "flush_4xvol").await?;
         let mut relations = Vec::new();
         let mut table_oids = Vec::new();
-        for name in ["p200k_a", "p200k_b", "p200k_c", "p200k_d"] {
+        for name in ["pvol_a", "pvol_b", "pvol_c", "pvol_d"] {
             let table = db.create_indexed_items_table(name, SEED_ROWS).await?;
-            // 1000 rows/file ≈ 200 segments/table — multi-batch volume with
+            // 1000 rows/file ≈ 25 segments/table — multi-batch volume with
             // concurrent overlap, without the tiny-file tax of max_rows_per_file=8.
             manage_with_hot_limit(&db, &table.relation, HOT_ROW_LIMIT, MAX_ROWS_PER_FILE).await?;
             disable_auto_flush(&db.client, &table.relation).await?;
@@ -636,7 +635,7 @@ async fn four_tables_flush_200k_rows_in_parallel() -> Result<()> {
                 }
                 Err(error) if flush_failed_on_slot_lock(&error) => {
                     eprintln!(
-                        "flush_4x200k table {idx}: first-wave finalize hit slot lock (expected under volume); will retry: {error:#}"
+                        "flush_4xvol table {idx}: first-wave finalize hit slot lock (expected under volume); will retry: {error:#}"
                     );
                     need_retry.push(idx);
                 }
@@ -650,7 +649,7 @@ async fn four_tables_flush_200k_rows_in_parallel() -> Result<()> {
         let overlap = max_interval_overlap(&intervals);
         for interval in &intervals {
             eprintln!(
-                "flush_4x200k interval: oid={} rows={} batches={} start_ms={} finish_ms={} dur_ms={}",
+                "flush_4xvol interval: oid={} rows={} batches={} start_ms={} finish_ms={} dur_ms={}",
                 interval.table_oid,
                 interval.rows_flushed,
                 interval.batches_completed,
@@ -660,7 +659,7 @@ async fn four_tables_flush_200k_rows_in_parallel() -> Result<()> {
             );
         }
         eprintln!(
-            "flush_4x200k tracker: max_running={} samples={} tables_running={} tables_progress={} interval_overlap={} retries={}",
+            "flush_4xvol tracker: max_running={} samples={} tables_running={} tables_progress={} interval_overlap={} retries={}",
             tracker.max_concurrent_running,
             tracker.samples,
             tracker.tables_seen_running,
@@ -741,7 +740,7 @@ async fn retry_flush_after_slot_lock(db: &common::TestDb, relation: &str) -> Res
             Ok(rows) => return Ok(rows),
             Err(error) if flush_failed_on_slot_lock(&error) => {
                 eprintln!(
-                    "flush_4x200k retry {attempt} for {relation} still slot-lock busy; backing off"
+                    "flush_4xvol retry {attempt} for {relation} still slot-lock busy; backing off"
                 );
                 last_error = Some(error);
                 tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;

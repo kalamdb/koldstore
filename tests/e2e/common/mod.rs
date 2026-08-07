@@ -26,9 +26,11 @@ pub use assertions::{
 
 pub use async_mirror::{
     async_mirror_progress, async_worker_running, current_wal_lsn, fence_async_mirror,
-    mirror_op_count, terminate_async_worker, wait_for_async_mirror, wait_for_async_worker,
-    wait_for_confirmed_flush_at_least, wait_for_confirmed_flush_past, wait_for_mirror_op_count,
-    wal_lsn_diff_bytes, AsyncMirrorProgress,
+    force_stop_async_worker, mirror_op_count, release_async_worker_stop_lock,
+    terminate_async_worker, wait_for_async_mirror, wait_for_async_worker,
+    wait_for_async_worker_auto_restart, wait_for_confirmed_flush_at_least,
+    wait_for_confirmed_flush_past, wait_for_mirror_op_count, wal_lsn_diff_bytes,
+    AsyncMirrorProgress,
 };
 
 pub use catalog::{

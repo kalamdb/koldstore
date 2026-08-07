@@ -146,10 +146,17 @@ release_db_slots_and_backends() {
           FROM pg_stat_activity
           WHERE datname = '${db}' AND pid <> pg_backend_pid();" \
       >/dev/null || true
+    # Kill appliers / flush executors that hold slots — never the restartable
+    # cluster launcher (`koldstore async mirror launcher`).
     "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=0 \
       -c "SELECT pg_terminate_backend(pid)
           FROM pg_stat_activity
-          WHERE backend_type LIKE 'koldstore%' AND pid <> pg_backend_pid();" \
+          WHERE pid <> pg_backend_pid()
+            AND (
+              backend_type LIKE 'koldstore async mirror %'
+              OR backend_type LIKE 'koldstore flush executor %'
+            )
+            AND backend_type <> 'koldstore async mirror launcher';" \
       >/dev/null || true
     "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=0 \
       -c "SELECT pg_terminate_backend(active_pid)

@@ -8,10 +8,16 @@ const BACKGROUND_APPLY_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Waits until the async mirror database worker is visible in `pg_stat_activity`.
 ///
+/// Releases any [`force_stop_async_worker`] registration lock, then calls
+/// [`koldstore.internal_ensure_async_mirror_worker`] each poll so suites without
+/// a preload launcher still recover. Prefer
+/// [`wait_for_async_worker_auto_restart`] when asserting launcher-driven revive.
+///
 /// # Errors
 ///
 /// Returns an error when ensure fails or the worker is not visible in time.
 pub async fn wait_for_async_worker(client: &tokio_postgres::Client) -> Result<Duration> {
+    release_async_worker_stop_lock(client).await?;
     let started = Instant::now();
     loop {
         client
@@ -28,6 +34,32 @@ pub async fn wait_for_async_worker(client: &tokio_postgres::Client) -> Result<Du
             "async WAL applier did not become visible within {WORKER_START_DEADLINE:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Waits for the preload launcher (or another ensure path) to revive the applier.
+///
+/// Does **not** call `internal_ensure_async_mirror_worker`, so a pass proves the
+/// worker came back without this session forcing registration. Use after a
+/// hard kill when `shared_preload_libraries=koldstore` is loaded.
+///
+/// # Errors
+///
+/// Returns an error when the worker stays down past [`WORKER_START_DEADLINE`].
+pub async fn wait_for_async_worker_auto_restart(
+    client: &tokio_postgres::Client,
+) -> Result<Duration> {
+    let started = Instant::now();
+    loop {
+        if async_worker_running(client).await? {
+            return Ok(started.elapsed());
+        }
+        anyhow::ensure!(
+            started.elapsed() <= WORKER_START_DEADLINE,
+            "async WAL applier did not auto-restart within {WORKER_START_DEADLINE:?} \
+             (shared_preload launcher expected)"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -99,6 +131,54 @@ pub async fn terminate_async_worker(client: &tokio_postgres::Client) -> Result<b
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(terminated)
+}
+
+/// Releases a pause taken by [`force_stop_async_worker`].
+///
+/// # Errors
+///
+/// Returns an error when the resume SQL fails.
+pub async fn release_async_worker_stop_lock(client: &tokio_postgres::Client) -> Result<()> {
+    client
+        .query_one(
+            "SELECT koldstore.internal_set_async_mirror_ensure_paused(false)",
+            &[],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Terminates the applier and keeps it down until [`wait_for_async_worker`].
+///
+/// Sets a cluster-wide shared-memory pause so the shared-preload launcher
+/// (connected to `postgres`) cannot re-ensure. PostgreSQL advisory locks cannot
+/// do this because they are database-local. Call [`wait_for_async_worker`] (or
+/// [`release_async_worker_stop_lock`]) when the worker should run again.
+///
+/// # Errors
+///
+/// Returns an error when pause/terminate fails or the worker keeps coming back
+/// within 10s.
+pub async fn force_stop_async_worker(client: &tokio_postgres::Client) -> Result<()> {
+    client
+        .query_one(
+            "SELECT koldstore.internal_set_async_mirror_ensure_paused(true)",
+            &[],
+        )
+        .await?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let _ = terminate_async_worker(client).await?;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if !async_worker_running(client).await? {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "async worker did not stay stopped within 10s \
+             (ensure pause should suppress launcher re-ensure)"
+        );
+    }
 }
 
 /// Counts mirror rows with the given operation code.

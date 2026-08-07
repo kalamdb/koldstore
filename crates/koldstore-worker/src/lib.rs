@@ -6,6 +6,7 @@
 //! extension adapter in `pg_koldstore` wires those.
 
 mod ensure;
+mod ensure_pause;
 mod identity;
 mod policy;
 mod scheduler;
@@ -13,6 +14,7 @@ mod task;
 mod wake;
 
 pub use ensure::{ensure_action, EnsureAction};
+pub use ensure_pause::EnsurePauseSet;
 pub use identity::{async_mirror_worker_type, flush_executor_worker_type, DatabaseOid};
 pub use policy::{
     next_soft_fail_backoff_ms, LAUNCHER_POLL_INTERVAL_MS, LIBRARY_NAME,

@@ -26,10 +26,15 @@ flowchart TD
 ```
 
 The launcher discovers KoldStore logical slots after postmaster start and
-ensures one worker per database. `manage_table`, explicit consistency fences,
-and the worker itself also ensure the worker when necessary. A worker stays
-alive while the database has either a mirror slot or an automatic-flush-eligible
-managed table.
+ensures one worker per database on a sub-second poll. It is registered as a
+restartable static background worker: after a crash or `pg_terminate_backend`
+it comes back (exit code 1 + `bgw_restart_time`), so the cluster is not left
+without an always-on ensure loop until the next postmaster restart.
+`manage_table`, explicit consistency fences, and the worker itself also ensure
+the worker when necessary. A per-database applier stays alive while the database
+has either a mirror slot or an automatic-flush-eligible managed table; those
+appliers use `BGW_NEVER_RESTART` so intentional slot drop leaves them stopped
+until the launcher or session ensure re-registers them.
 
 ## `koldstore.jobs`
 
@@ -70,8 +75,11 @@ Concurrent commits therefore coalesce into one bounded WAL drain. If an
 asynchronous commit is not decodeable on the first wake, the worker retries with
 a 10–200 ms exponential delay for at most one second. A row or time budget that
 leaves work pending gets a bounded number of immediate retries before yielding
-to the latch. Errors soft-fail with backoff rather than permanently ending the
-applier; a 30-second watchdog recovers missed in-memory hints.
+to the latch. Soft SPI/apply errors stay in-process with exponential backoff
+(capped at a few seconds) rather than permanently ending the applier; hard
+process death is recovered by the shared-preload launcher on a sub-second poll
+(or by session ensure/fence). A 30-second watchdog recovers missed in-memory
+hints.
 
 The flush check is independent of the apply wake and runs only when
 `koldstore.flush_check_interval_seconds` is due. This avoids catalog scans on

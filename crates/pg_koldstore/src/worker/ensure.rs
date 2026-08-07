@@ -44,10 +44,11 @@ fn async_slot_exists_for_current_database() -> Result<bool, String> {
 /// Ensures one persistent WAL applier is running for the current database.
 ///
 /// Appliers use `BGW_NEVER_RESTART` so dropping the slot can leave them stopped.
-/// Session ensure (manage / fences / SQL) starts the applier directly. The
-/// cluster launcher is registered only from shared_preload (or a future
-/// explicit admin path) so a crashing launcher cannot starve worker slots
-/// under `cargo pgrx test`. The same worker also runs auto-flush scheduling.
+/// Soft SPI errors stay in-process with backoff; hard process death is recovered
+/// by the shared-preload launcher (sub-second poll) or by session ensure
+/// (manage / fences / SQL). The launcher is registered only from shared_preload
+/// so a crashing launcher cannot starve worker slots under `cargo pgrx test`.
+/// The same worker also runs auto-flush scheduling.
 ///
 /// # Errors
 ///
@@ -66,6 +67,11 @@ pub(crate) fn ensure_async_mirror_worker() -> Result<bool, String> {
 ///
 /// Returns an error when PostgreSQL cannot inspect or start the worker.
 pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Result<bool, String> {
+    // Shared-memory pause blocks both the launcher (on `postgres`) and session
+    // ensure — advisory locks cannot do that across databases.
+    if crate::worker::wake::ensure_paused(database_oid.get()) {
+        return Ok(false);
+    }
     if !crate::guc::async_mirror_worker_enabled() {
         return Ok(false);
     }
@@ -200,4 +206,30 @@ pub(crate) fn require_async_mirror_worker() -> Result<(), String> {
 pub fn ensure_async_mirror_worker_pg() -> bool {
     ensure_async_mirror_worker()
         .unwrap_or_else(|error| pgrx::error!("could not start async mirror worker: {error}"))
+}
+
+/// Pauses or resumes ensure/register for the current database (cluster-wide).
+///
+/// SQL contract: `koldstore.internal_set_async_mirror_ensure_paused(paused)`.
+/// When `paused` is true, the shared-preload launcher and session ensure skip
+/// registration so tests can keep the NEVER_RESTART applier stopped. Returns
+/// whether the pause set accepted the request (`false` only if the set is full).
+#[pgrx::pg_extern(
+    name = "internal_set_async_mirror_ensure_paused",
+    schema = "koldstore",
+    security_definer
+)]
+pub fn set_async_mirror_ensure_paused_pg(paused: bool) -> bool {
+    let oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    if paused {
+        if !crate::worker::wake::pause_ensure(oid) {
+            pgrx::error!("async mirror ensure pause set is full");
+        }
+        mark_worker_not_ensured();
+        true
+    } else {
+        crate::worker::wake::resume_ensure(oid);
+        mark_worker_not_ensured();
+        true
+    }
 }

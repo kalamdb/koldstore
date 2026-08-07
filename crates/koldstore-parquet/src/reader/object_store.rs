@@ -203,20 +203,19 @@ pub async fn read_clean_cold_rows_from_object_store_async(
             let (range_calls, bytes_read) = io.snapshot();
             return Ok((
                 Vec::new(),
-                empty_profile(
-                    object_path,
+                empty_read_profile(ParquetReadProfile {
+                    object_path: object_path.to_string(),
                     file_size,
-                    total_row_groups,
-                    bloom_mode,
-                    0,
-                    PagePruneDecision::not_requested(),
-                    application_columns,
-                    Some((pk.column.clone(), pk.values.clone())),
+                    row_groups_total: total_row_groups,
+                    stats_pruned: true,
+                    bloom: bloom_mode,
+                    projected_columns: application_columns,
+                    pk_probe: Some((pk.column.clone(), pk.values.clone())),
                     range_calls,
                     bytes_read,
                     footer_cache_hit,
-                    true,
-                ),
+                    ..Default::default()
+                }),
             ));
         }
         selected_row_groups = if stats_selected.len() <= 1 {
@@ -247,23 +246,27 @@ pub async fn read_clean_cold_rows_from_object_store_async(
             let (range_calls, bytes_read) = io.snapshot();
             return Ok((
                 Vec::new(),
-                empty_profile(
-                    object_path,
+                empty_read_profile(ParquetReadProfile {
+                    object_path: object_path.to_string(),
                     file_size,
-                    total_row_groups,
-                    bloom_mode,
+                    row_groups_total: total_row_groups,
+                    stats_pruned,
+                    bloom: bloom_mode,
                     bloom_filters_fetched,
-                    page_prune,
-                    application_columns,
-                    options
+                    page_index: page_prune.mode,
+                    pages_total: page_prune.pages_total,
+                    pages_selected: page_prune.pages_selected,
+                    pages_skipped: page_prune.pages_skipped,
+                    projected_columns: application_columns,
+                    pk_probe: options
                         .pk_values
                         .as_ref()
                         .map(|pk| (pk.column.clone(), pk.values.clone())),
                     range_calls,
                     bytes_read,
                     footer_cache_hit,
-                    stats_pruned,
-                ),
+                    ..Default::default()
+                }),
             ));
         }
         builder = builder.with_row_groups(selected_row_groups.clone());
@@ -341,40 +344,15 @@ pub async fn read_clean_cold_rows_from_object_store_async(
     Ok((rows, profile))
 }
 
-fn empty_profile(
-    object_path: &str,
-    file_size: Option<u64>,
-    total_row_groups: usize,
-    bloom: BloomPruneMode,
-    bloom_filters_fetched: usize,
-    page_prune: PagePruneDecision,
-    projected_columns: Vec<String>,
-    pk_probe: Option<(String, Vec<String>)>,
-    range_calls: u64,
-    bytes_read: u64,
-    footer_cache_hit: bool,
-    stats_pruned: bool,
-) -> ParquetReadProfile {
+/// Builds a zero-row profile after prune eliminated every row group.
+fn empty_read_profile(base: ParquetReadProfile) -> ParquetReadProfile {
+    let total = base.row_groups_total;
     ParquetReadProfile {
-        object_path: object_path.to_string(),
-        file_size,
         footer_first: true,
-        row_groups_total: total_row_groups,
         row_groups_selected: Vec::new(),
-        row_groups_skipped: total_row_groups,
-        stats_pruned,
-        bloom,
-        bloom_filters_fetched,
-        page_index: page_prune.mode,
-        pages_total: page_prune.pages_total,
-        pages_selected: page_prune.pages_selected,
-        pages_skipped: page_prune.pages_skipped,
-        projected_columns,
-        pk_probe,
-        range_calls,
-        bytes_read,
+        row_groups_skipped: total,
         rows_returned: 0,
-        footer_cache_hit,
+        ..base
     }
 }
 

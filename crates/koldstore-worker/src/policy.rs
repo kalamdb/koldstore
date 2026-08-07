@@ -1,9 +1,11 @@
 //! Library naming and fairness policy for database-scoped workers.
 //!
 //! Appliers use `BGW_NEVER_RESTART` so intentional slot drop leaves them stopped.
-//! A cluster launcher (auto-restarted) and the first backend query re-register
-//! appliers after crashes or postmaster restart. Managed commits wake their
-//! database worker through a coalescing shared generation.
+//! A cluster launcher (auto-restarted) and session ensure/fence re-register
+//! appliers after hard death or postmaster restart. Soft SPI errors stay
+//! in-process with exponential backoff — they must not take the process down.
+//! Managed commits wake their database worker through a coalescing shared
+//! generation.
 
 /// Shared library name loaded by dynamic background workers.
 pub const LIBRARY_NAME: &str = "koldstore";
@@ -16,9 +18,9 @@ pub const MAX_IMMEDIATE_PENDING_TICKS: u8 = 4;
 
 /// Launcher poll interval while discovering databases that need an applier.
 ///
-/// Kept in seconds-scale range: ensure is cheap when the oid set is unchanged,
-/// and NEVER_RESTART appliers only need re-registration after crashes.
-pub const LAUNCHER_POLL_INTERVAL_MS: u64 = 2_000;
+/// Sub-second so a NEVER_RESTART crash is re-ensured quickly without relying on
+/// client traffic. Ensure is cheap when the worker is already running.
+pub const LAUNCHER_POLL_INTERVAL_MS: u64 = 500;
 
 /// Shared-memory wake registry slots (one entry per database OID seen).
 ///
@@ -30,7 +32,10 @@ pub const WAKE_REGISTRY_CAPACITY: usize = 256;
 pub const SOFT_FAIL_BACKOFF_MIN_MS: u64 = 100;
 
 /// Cap on soft-fail exponential backoff so a sticky error still retries often.
-pub const SOFT_FAIL_BACKOFF_MAX_MS: u64 = 30_000;
+///
+/// Kept well under the old 30s ceiling so catch-up resumes quickly after
+/// transient SPI failures without process restart thrashing.
+pub const SOFT_FAIL_BACKOFF_MAX_MS: u64 = 5_000;
 
 /// First empty-wake peek retry delay (async commit / WALWriter race).
 pub const EMPTY_WAKE_RETRY_MIN_MS: u64 = 10;

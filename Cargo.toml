@@ -67,8 +67,8 @@ koldstore-flush = { path = "crates/koldstore-flush" }
 koldstore-migrate = { path = "crates/koldstore-migrate" }
 
 anyhow = "1.0.104"
-arrow-array = { version = "59.1.0", default-features = false }
-arrow-schema = { version = "59.1.0", default-features = false }
+arrow-array = { version = "59.2.0", default-features = false }
+arrow-schema = { version = "59.2.0", default-features = false }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde"] }
 futures-util = "0.3.33"
@@ -80,7 +80,7 @@ object_store = { version = "0.14.1", default-features = false }
 pgrx = { version = "0.19.2", default-features = false }
 pgrx-bench = { version = "0.19.2", default-features = false }
 pgrx-tests = { version = "0.19.2", default-features = false }
-parquet = { version = "59.1.0", default-features = false, features = ["arrow", "async", "zstd", "snap"] }
+parquet = { version = "59.2.0", default-features = false, features = ["arrow", "async", "zstd", "snap"] }
 # Shared with object_store's HTTP transport. `rustls-no-provider` + ring keeps
 # aws-lc and OpenSSL out of the extension (OpenSSL conflicts with PostgreSQL).
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream"] }

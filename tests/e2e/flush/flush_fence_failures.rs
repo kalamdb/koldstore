@@ -122,7 +122,7 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
                  SET koldstore.internal_async_mirror_worker = off"
             ))
             .await?;
-        let _ = common::terminate_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let flush_result = db.flush_table(&primary.relation).await;
@@ -132,6 +132,8 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
                  RESET koldstore.internal_async_mirror_worker"
             ))
             .await?;
+        // Allow the launcher / ensure path to revive the applier after flush.
+        common::release_async_worker_stop_lock(&db.client).await?;
         stop.store(true, Ordering::Relaxed);
         let noise_result = noise_handle.await?;
         let flushed = flush_result?;
@@ -175,7 +177,7 @@ async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
                  SET koldstore.internal_async_mirror_worker = off"
             ))
             .await?;
-        let _ = common::terminate_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
         db.client
@@ -216,6 +218,7 @@ async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
                  RESET koldstore.internal_async_mirror_worker"
             ))
             .await?;
+        common::release_async_worker_stop_lock(&db.client).await?;
         // `flush_table` returns the job UUID even when the attempt fails; the
         // durable job row carries terminal `error` (or remains non-completed)
         // when finalize apply hits the failpoint.
