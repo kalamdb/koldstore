@@ -1,24 +1,20 @@
 //! Cluster-wide KoldStore worker supervisor.
 //!
-//! This is the only permanent KoldStore maintenance process.  It sleeps on a
-//! PostgreSQL latch, owns dynamic flush-worker registration, and performs only a
-//! rare safety reconciliation.  Normal queue work is event driven: a committed
-//! job advances a shared generation and sets this process's latch.
-//!
-//! The legacy per-database WAL applier is still re-ensured during the rare
-//! safety pass while its execution is migrated to an ephemeral maintenance
-//! worker.  Importantly, the old 500ms catalog polling loop is gone.
+//! This is the only permanent KoldStore maintenance process. It sleeps on a
+//! PostgreSQL latch, owns all dynamic worker registration, and performs a rare
+//! safety reconciliation. Normal WAL and flush work is event driven by committed
+//! shared-memory generations; durable slots/jobs remain the source of truth.
 
 use std::time::{Duration, Instant};
 
-use koldstore_worker::{DatabaseOid, LIBRARY_NAME};
+use koldstore_worker::LIBRARY_NAME;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 
 const SUPERVISOR_FUNCTION: &str = "koldstore_async_mirror_launcher_main";
 const SUPERVISOR_NAME: &str = "koldstore supervisor";
 /// Correctness safety net, not a normal scheduling cadence.
 const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
-/// Resource-pressure retry while durable queue work is waiting for a worker slot.
+/// Resource-pressure retry only after dynamic registration itself fails.
 const DISPATCH_RETRY: Duration = Duration::from_millis(250);
 /// Conservative cluster-wide cap until a dedicated GUC is introduced.
 const CLUSTER_FLUSH_WORKER_LIMIT: u32 = 8;
@@ -58,19 +54,19 @@ impl Drop for SupervisorRegistration {
 #[no_mangle]
 pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::pg_sys::Datum) {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
-    // Cluster-wide slot discovery is available from the postgres database.
+    // Cluster-wide logical-slot discovery is available from the postgres DB.
     BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
     let _registration = SupervisorRegistration::new();
 
-    // One authoritative startup reconciliation reconstructs in-memory hints
-    // after postmaster restart. Durable slots/jobs remain the source of truth.
+    // Shared memory is empty after postmaster restart. Reconstruct only the
+    // durable database-level recovery hints once at startup.
     if let Err(error) = super::txn::run(reconcile_cluster_safety) {
         pgrx::warning!("koldstore supervisor startup reconciliation failed: {error}");
     }
 
     let mut last_safety = Instant::now();
     loop {
-        let pressure = dispatch_shared_work();
+        let registration_pressure = dispatch_shared_work();
 
         if last_safety.elapsed() >= SAFETY_RECONCILE_INTERVAL
             || super::wake::overflow_reconcile_required()
@@ -84,7 +80,7 @@ pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::p
         }
 
         let safety_wait = SAFETY_RECONCILE_INTERVAL.saturating_sub(last_safety.elapsed());
-        let wait = if pressure {
+        let wait = if registration_pressure {
             safety_wait.min(DISPATCH_RETRY)
         } else {
             safety_wait
@@ -102,54 +98,60 @@ pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::p
 
 /// Dispatches already-published shared work without opening a PostgreSQL transaction.
 ///
-/// Returns true when durable work exists but capacity/registration pressure
-/// requires a short retry rather than the normal safety deadline.
+/// Returns true only when RegisterDynamicBackgroundWorker itself failed and a
+/// bounded retry is useful. Existing Starting/Running workers wake the supervisor
+/// on normal exit, so capacity pressure does not create a polling loop.
 fn dispatch_shared_work() -> bool {
-    let mut pressure = false;
+    let mut registration_pressure = false;
     for snapshot in super::wake::supervisor_snapshots() {
+        if snapshot.maintenance_due()
+            && snapshot.maintenance_pid == 0
+            && !super::wake::ensure_paused(snapshot.database_oid)
+            && super::wake::try_reserve_maintenance(snapshot.database_oid)
+        {
+            if let Err(error) =
+                super::register_maintenance_from_supervisor(snapshot.database_oid)
+            {
+                super::wake::cancel_maintenance_start(snapshot.database_oid);
+                registration_pressure = true;
+                pgrx::log!(
+                    "koldstore supervisor: maintenance registration deferred for db={} ({error})",
+                    snapshot.database_oid
+                );
+            }
+        }
+
         if !snapshot.flush_due() {
             continue;
         }
-        if !super::wake::try_reserve_flush(snapshot.database_oid, CLUSTER_FLUSH_WORKER_LIMIT) {
-            pressure = true;
+        if snapshot.flush_workers() >= snapshot.flush_limit {
             continue;
         }
-        if let Err(error) =
-            super::register_flush_executor_from_supervisor(snapshot.database_oid)
-        {
+        if !super::wake::try_reserve_flush(snapshot.database_oid, CLUSTER_FLUSH_WORKER_LIMIT) {
+            // Another database may own the cluster capacity. Worker exits wake
+            // us; do not poll merely because the cap is currently full.
+            continue;
+        }
+        if let Err(error) = super::register_flush_executor_from_supervisor(snapshot.database_oid) {
             super::wake::cancel_flush_start(snapshot.database_oid);
-            pressure = true;
+            registration_pressure = true;
             pgrx::log!(
                 "koldstore supervisor: flush worker registration deferred for db={} ({error})",
                 snapshot.database_oid
             );
         }
     }
-    pressure
+    registration_pressure
 }
 
 /// Rare authoritative recovery pass.
 ///
-/// For now this retains legacy WAL-applier recovery while that worker is moved
-/// to the same ephemeral supervisor model. It is intentionally *not* a 500 ms
-/// scheduling loop. Each discovered slot also seeds shared recovery state so a
-/// lost in-memory wake cannot become permanent.
+/// Logical slots are cluster-visible, so one query can reconstruct all database
+/// recovery hints after postmaster restart and recover a truly lost latch event.
+/// This is intentionally not a sub-second scheduler.
 fn reconcile_cluster_safety() -> Result<(), String> {
-    let oids = discover_async_slot_databases()?;
-    for oid in oids {
+    for oid in discover_async_slot_databases()? {
         super::wake::request_recovery(oid);
-
-        // Migration bridge for WAL apply. Once the ephemeral DB maintenance
-        // worker lands, this ensure call and ensure.rs are removed completely.
-        if crate::worker::wake::ensure_paused(oid) {
-            continue;
-        }
-        super::ensure::mark_worker_not_ensured();
-        if let Err(error) = super::ensure::ensure_async_mirror_worker_for(DatabaseOid::new(oid)) {
-            pgrx::log!(
-                "koldstore supervisor: legacy WAL applier ensure deferred for db={oid}: {error}"
-            );
-        }
     }
     Ok(())
 }
