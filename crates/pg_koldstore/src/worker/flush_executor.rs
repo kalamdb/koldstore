@@ -27,8 +27,7 @@ pub(crate) fn notify_flush_queue() -> Result<bool, String> {
 /// Reconstructs queue dispatch hints after postmaster/worker recovery.
 /// Must run inside a database-local maintenance transaction.
 pub(crate) fn reconcile_queue_after_recovery(database_oid: u32) -> Result<(), String> {
-    let due = crate::sql::flush::jobs::count_pending_flush_jobs().map_err(|e| e.to_string())?;
-    if due > 0 {
+    if crate::sql::flush::jobs::has_due_pending_flush_jobs().map_err(|e| e.to_string())? {
         super::wake::mark_flush_queue_pending();
         return Ok(());
     }
