@@ -368,15 +368,26 @@ impl<const N: usize> SupervisorRegistry<N> {
         false
     }
 
-    pub fn flush_started(&self, database_oid: u32, effective_limit: u32) {
+    /// Converts one STARTING reservation to RUNNING.
+    ///
+    /// Running is incremented before consuming the starting token, so the total
+    /// never transiently dips below the real worker count while the supervisor
+    /// is concurrently deciding whether another process may start. If no
+    /// reservation exists, the increment is rolled back and the stale worker
+    /// must exit without touching the durable queue.
+    pub fn flush_started(&self, database_oid: u32, effective_limit: u32) -> bool {
         let Some(entry) = self.find(database_oid) else {
-            return;
+            return false;
         };
-        decrement_if_positive(&entry.flush_starting);
         entry.flush_running.fetch_add(1, Ordering::AcqRel);
+        if !take_one_if_positive(&entry.flush_starting) {
+            decrement_if_positive(&entry.flush_running);
+            return false;
+        }
         entry
             .flush_limit
             .store(effective_limit.max(1), Ordering::Release);
+        true
     }
 
     pub fn cancel_flush_start(&self, database_oid: u32) {
@@ -567,7 +578,7 @@ fn atomic_min_nonzero(target: &AtomicI64, value: i64) {
     }
 }
 
-fn decrement_if_positive(target: &AtomicU32) {
+fn take_one_if_positive(target: &AtomicU32) -> bool {
     let mut current = target.load(Ordering::Acquire);
     while current > 0 {
         match target.compare_exchange_weak(
@@ -576,10 +587,15 @@ fn decrement_if_positive(target: &AtomicU32) {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => return,
+            Ok(_) => return true,
             Err(actual) => current = actual,
         }
     }
+    false
+}
+
+fn decrement_if_positive(target: &AtomicU32) {
+    let _ = take_one_if_positive(target);
 }
 
 #[cfg(test)]
@@ -643,6 +659,21 @@ mod tests {
         assert!(!registry.try_reserve_flush(42));
         assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 2);
         assert_eq!(registry.flush_workers_total(), 2);
+    }
+
+    #[test]
+    fn flush_start_requires_reservation_and_preserves_total() {
+        let registry = SupervisorRegistry::<1>::default();
+        registry.set_flush_limit(42, 2);
+        assert!(!registry.flush_started(42, 2));
+        assert_eq!(registry.flush_workers_total(), 0);
+        assert!(registry.try_reserve_flush(42));
+        assert_eq!(registry.flush_workers_total(), 1);
+        assert!(registry.flush_started(42, 2));
+        let snapshot = registry.snapshot(42).unwrap();
+        assert_eq!(snapshot.flush_starting, 0);
+        assert_eq!(snapshot.flush_running, 1);
+        assert_eq!(registry.flush_workers_total(), 1);
     }
 
     #[test]
