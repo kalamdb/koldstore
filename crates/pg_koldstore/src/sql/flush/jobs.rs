@@ -5,12 +5,16 @@ use koldstore_flush::{
     flush_table_request, plan_cancel_jobs_for_drop, plan_clear_table_cancel_request,
     plan_enqueue_or_lookup_flush_job, plan_flush_cancel_requested, plan_insert_flush_job,
     plan_list_jobs, plan_mark_flush_job_cancelled, plan_mark_flush_job_completed,
-    plan_mark_flush_job_completed_after_cancel, plan_mark_flush_job_failed,
-    plan_mark_flush_job_running, plan_purge_old_jobs, plan_reclaim_running_flush_jobs,
-    plan_request_cancel_job, plan_request_cancel_table_jobs, plan_update_flush_job_progress,
+    plan_mark_flush_job_completed_after_cancel, plan_mark_flush_job_running, plan_purge_old_jobs,
+    plan_reclaim_running_flush_jobs, plan_request_cancel_job, plan_request_cancel_table_jobs,
+    plan_update_flush_job_progress,
 };
 
 const ORPHAN_RECOVERY_PAGE: i64 = 64;
+/// Queue executors retry transient failures on the same durable job before
+/// exposing a terminal error to operators. Attempts are already incremented at
+/// claim, so the fifth failed attempt becomes terminal.
+const MAX_QUEUE_FLUSH_ATTEMPTS: i32 = 5;
 
 #[derive(Debug, Clone, Copy)]
 struct ActiveFlushJob {
@@ -111,9 +115,11 @@ LIMIT 1
                 &[DatumWithOid::from(table_oid)],
             )
             .map_err(crate::error::PgAdapterError::from_display)?;
-        let Some(row) = table.first().get::<pgrx::Uuid>(1).map_err(
-            crate::error::PgAdapterError::from_display,
-        )? else {
+        let Some(row) = table
+            .first()
+            .get::<pgrx::Uuid>(1)
+            .map_err(crate::error::PgAdapterError::from_display)?
+        else {
             return Ok(None);
         };
         let first = table.first();
@@ -207,8 +213,6 @@ pub(crate) fn reclaim_orphan_running_flush_jobs() -> crate::error::PgResult<u64>
                  WHERE job_type = 'flush' AND status = 'running' \
                  ORDER BY table_oid \
                  LIMIT $1",
-                // The SQL LIMIT is the recovery bound. Some(1) here previously
-                // reduced every recovery pass to a single orphan table.
                 None,
                 &[DatumWithOid::from(ORPHAN_RECOVERY_PAGE)],
             )
@@ -323,30 +327,112 @@ pub(super) fn mark_flush_job_completed(
         ],
     )?;
     require_attempt_update("complete", updated.rows_affected)?;
-    clear_table_cancel_request(table_oid)
+    clear_table_cancel_request(table_oid)?;
+    // A successful flush changes the oldest remaining mirror row and may change
+    // both RowLimit and OlderThan eligibility. Reconcile once after COMMIT rather
+    // than retaining a stale pre-flush clock deadline in shared memory.
+    crate::worker::wake::mark_schedule_pending();
+    Ok(())
 }
 
+/// Records one failed flush attempt.
+///
+/// Queue workers treat ordinary execution failures as retryable for a bounded
+/// number of attempts. The *same job UUID* returns to `pending`, its attempt token
+/// is cleared, and `available_at` carries exponential backoff. The executor's
+/// queue reconciliation reads that timestamp after this transaction commits and
+/// arms the supervisor exactly once. Inline callers pass `retryable = false` and
+/// retain synchronous terminal-error behavior.
+///
+/// Returns the retry timestamp in epoch milliseconds when another attempt was
+/// scheduled, or `None` when the failure became terminal.
 pub(super) fn mark_flush_job_failed(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
     attempt_token: uuid::Uuid,
     error_trace: &str,
-) -> crate::error::PgResult<()> {
+    retryable: bool,
+) -> crate::error::PgResult<Option<i64>> {
     use pgrx::datum::DatumWithOid;
 
-    let statement =
-        plan_mark_flush_job_failed().map_err(crate::error::PgAdapterError::from_display)?;
-    let updated = crate::spi::update(
-        &statement,
+    let retry_at_ms = crate::spi::update_one::<i64>(
+        &koldstore_common::SqlStatement::write_with_params(
+            "record flush attempt failure",
+            r#"
+WITH updated AS (
+  UPDATE koldstore.jobs
+     SET status = CASE
+                    WHEN $5::boolean AND attempts < $6::integer THEN 'pending'
+                    ELSE 'error'
+                  END,
+         phase = CASE
+                   WHEN $5::boolean AND attempts < $6::integer THEN 'pending'
+                   ELSE 'failed'
+                 END,
+         attempt_token = CASE
+                           WHEN $5::boolean AND attempts < $6::integer THEN NULL
+                           ELSE attempt_token
+                         END,
+         available_at = CASE
+                          WHEN $5::boolean AND attempts < $6::integer
+                          THEN clock_timestamp() + make_interval(
+                                 secs => power(
+                                   2.0,
+                                   LEAST(GREATEST(attempts - 1, 0), 5)
+                                 )
+                               )
+                          ELSE available_at
+                        END,
+         error_trace = $4::text,
+         finished_at = CASE
+                         WHEN $5::boolean AND attempts < $6::integer THEN NULL
+                         ELSE clock_timestamp()
+                       END,
+         payload = payload || jsonb_build_object(
+                     'last_failed_at', clock_timestamp(),
+                     'retry_scheduled', ($5::boolean AND attempts < $6::integer)
+                   ),
+         updated_at = clock_timestamp()
+   WHERE id = $1::uuid
+     AND table_oid = $2::oid
+     AND job_type = 'flush'
+     AND status = 'running'
+     AND attempt_token = $3::uuid
+   RETURNING status, available_at
+)
+SELECT CASE
+         WHEN status = 'pending'
+         THEN (extract(epoch FROM available_at) * 1000)::bigint
+         ELSE 0::bigint
+       END
+FROM updated
+"#,
+            [
+                koldstore_common::SqlParamType::Uuid,
+                koldstore_common::SqlParamType::Oid,
+                koldstore_common::SqlParamType::Uuid,
+                koldstore_common::SqlParamType::Text,
+                koldstore_common::SqlParamType::Boolean,
+                koldstore_common::SqlParamType::Integer,
+            ],
+        )
+        .map_err(crate::error::PgAdapterError::from_display)?,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
             DatumWithOid::from(crate::spi::uuid_to_pgrx(attempt_token)),
             DatumWithOid::from(error_trace),
+            DatumWithOid::from(retryable),
+            DatumWithOid::from(MAX_QUEUE_FLUSH_ATTEMPTS),
         ],
-    )?;
-    require_attempt_update("fail", updated.rows_affected)?;
-    clear_table_cancel_request(table_oid)
+    )?
+    .ok_or_else(|| {
+        crate::error::PgAdapterError::from_display(
+            "flush job attempt lost ownership while recording failure",
+        )
+    })?;
+    clear_table_cancel_request(table_oid)?;
+    Ok((retry_at_ms > 0).then_some(retry_at_ms))
 }
 
 /// Lists jobs as a JSON array for `koldstore.list_jobs`.
