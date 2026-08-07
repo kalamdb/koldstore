@@ -1,62 +1,98 @@
-//! Cluster launcher that keeps async mirror appliers registered after boot.
+//! Cluster-wide KoldStore worker supervisor.
 //!
-//! Registered from `_PG_init` only while `shared_preload_libraries` loads
-//! `koldstore`. Without preload, the first backend transaction that sees an
-//! async slot still calls ensure (see [`super::ensure`]).
+//! This is the only permanent KoldStore maintenance process.  It sleeps on a
+//! PostgreSQL latch, owns dynamic flush-worker registration, and performs only a
+//! rare safety reconciliation.  Normal queue work is event driven: a committed
+//! job advances a shared generation and sets this process's latch.
 //!
-//! The launcher is restartable (`bgw_restart_time`). Latch close / SIGTERM must
-//! exit non-zero so `pg_terminate_backend` (and e2e slot cleanup) cannot leave
-//! the cluster without a launcher until the next postmaster restart. Soft
-//! apply errors stay inside each NEVER_RESTART applier with backoff.
+//! The legacy per-database WAL applier is still re-ensured during the rare
+//! safety pass while its execution is migrated to an ephemeral maintenance
+//! worker.  Importantly, the old 500ms catalog polling loop is gone.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use koldstore_worker::{DatabaseOid, LAUNCHER_POLL_INTERVAL_MS, LIBRARY_NAME};
+use koldstore_worker::{DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 
-const LAUNCHER_FUNCTION: &str = "koldstore_async_mirror_launcher_main";
-const LAUNCHER_NAME: &str = "koldstore async mirror launcher";
+const SUPERVISOR_FUNCTION: &str = "koldstore_async_mirror_launcher_main";
+const SUPERVISOR_NAME: &str = "koldstore supervisor";
+/// Correctness safety net, not a normal scheduling cadence.
+const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
+/// Resource-pressure retry while durable queue work is waiting for a worker slot.
+const DISPATCH_RETRY: Duration = Duration::from_millis(250);
+/// Conservative cluster-wide cap until a dedicated GUC is introduced.
+const CLUSTER_FLUSH_WORKER_LIMIT: u32 = 8;
 
-/// Registers the static launcher when the extension is shared-preloaded.
+/// Registers the static postmaster-supervised process from shared_preload.
 pub(crate) fn register_if_shared_preload() {
     let preloading = unsafe { pgrx::pg_sys::process_shared_preload_libraries_in_progress };
     if !preloading {
         return;
     }
-    BackgroundWorkerBuilder::new(LAUNCHER_NAME)
-        .set_type(LAUNCHER_NAME)
+    BackgroundWorkerBuilder::new(SUPERVISOR_NAME)
+        .set_type(SUPERVISOR_NAME)
         .set_library(LIBRARY_NAME)
-        .set_function(LAUNCHER_FUNCTION)
+        .set_function(SUPERVISOR_FUNCTION)
         .enable_spi_access()
-        // Restart after crash or admin SIGTERM (exit code 1). Appliers stay
-        // NEVER_RESTART so intentional slot drop leaves them stopped.
         .set_restart_time(Some(Duration::from_secs(1)))
         .load();
 }
 
-/// Discovers async logical slots and ensures one applier per database.
+struct SupervisorRegistration;
+
+impl SupervisorRegistration {
+    fn new() -> Self {
+        super::wake::register_supervisor();
+        Self
+    }
+}
+
+impl Drop for SupervisorRegistration {
+    fn drop(&mut self) {
+        super::wake::unregister_supervisor();
+    }
+}
+
+/// Static supervisor entry point.
 #[pgrx::pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::pg_sys::Datum) {
-    // SIGHUP + SIGTERM so the latch wakes on admin terminate / config reload.
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
-    // Connect to the default database so we can read cluster-wide slot catalogs.
+    // Cluster-wide slot discovery is available from the postgres database.
     BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
-    let poll = Duration::from_millis(LAUNCHER_POLL_INTERVAL_MS);
+    let _registration = SupervisorRegistration::new();
+
+    // One authoritative startup reconciliation reconstructs in-memory hints
+    // after postmaster restart. Durable slots/jobs remain the source of truth.
+    if let Err(error) = super::txn::run(reconcile_cluster_safety) {
+        pgrx::warning!("koldstore supervisor startup reconciliation failed: {error}");
+    }
+
+    let mut last_safety = Instant::now();
     loop {
-        if let Err(error) = super::txn::run(ensure_appliers_for_async_slots) {
-            pgrx::log!("koldstore async mirror launcher: ensure failed: {error}");
-        }
-        if !BackgroundWorker::wait_latch(Some(poll)) {
-            // Postgres treats bgworker exit 0 as "do not restart". Exit 1 so
-            // `bgw_restart_time` relaunches after pg_terminate_backend. During
-            // postmaster shutdown, `bgworker_should_start_now` refuses starts.
-            pgrx::log!(
-                "koldstore async mirror launcher: stopping (will restart unless postmaster is shutting down)"
-            );
-            unsafe {
-                pgrx::pg_sys::proc_exit(1);
+        let pressure = dispatch_shared_work();
+
+        if last_safety.elapsed() >= SAFETY_RECONCILE_INTERVAL
+            || super::wake::overflow_reconcile_required()
+        {
+            if let Err(error) = super::txn::run(reconcile_cluster_safety) {
+                pgrx::warning!("koldstore supervisor safety reconciliation failed: {error}");
+            } else {
+                super::wake::clear_overflow_reconcile_required();
             }
+            last_safety = Instant::now();
+        }
+
+        let safety_wait = SAFETY_RECONCILE_INTERVAL.saturating_sub(last_safety.elapsed());
+        let wait = if pressure {
+            safety_wait.min(DISPATCH_RETRY)
+        } else {
+            safety_wait
+        };
+        if !BackgroundWorker::wait_latch(Some(wait.max(Duration::from_millis(1)))) {
+            // Exit non-zero so bgw_restart_time relaunches after an admin
+            // terminate. During postmaster shutdown PostgreSQL suppresses restart.
+            unsafe { pgrx::pg_sys::proc_exit(1) };
         }
         if BackgroundWorker::sighup_received() {
             unsafe { pgrx::pg_sys::ProcessConfigFile(pgrx::pg_sys::GucContext::PGC_SIGHUP) };
@@ -64,8 +100,62 @@ pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::p
     }
 }
 
-fn ensure_appliers_for_async_slots() -> Result<(), String> {
-    let oids = pgrx::Spi::connect(|client| -> Result<Vec<u32>, String> {
+/// Dispatches already-published shared work without opening a PostgreSQL transaction.
+///
+/// Returns true when durable work exists but capacity/registration pressure
+/// requires a short retry rather than the normal safety deadline.
+fn dispatch_shared_work() -> bool {
+    let mut pressure = false;
+    for snapshot in super::wake::supervisor_snapshots() {
+        if !snapshot.flush_due() {
+            continue;
+        }
+        if !super::wake::try_reserve_flush(snapshot.database_oid, CLUSTER_FLUSH_WORKER_LIMIT) {
+            pressure = true;
+            continue;
+        }
+        if let Err(error) =
+            super::register_flush_executor_from_supervisor(snapshot.database_oid)
+        {
+            super::wake::cancel_flush_start(snapshot.database_oid);
+            pressure = true;
+            pgrx::log!(
+                "koldstore supervisor: flush worker registration deferred for db={} ({error})",
+                snapshot.database_oid
+            );
+        }
+    }
+    pressure
+}
+
+/// Rare authoritative recovery pass.
+///
+/// For now this retains legacy WAL-applier recovery while that worker is moved
+/// to the same ephemeral supervisor model. It is intentionally *not* a 500 ms
+/// scheduling loop. Each discovered slot also seeds shared recovery state so a
+/// lost in-memory wake cannot become permanent.
+fn reconcile_cluster_safety() -> Result<(), String> {
+    let oids = discover_async_slot_databases()?;
+    for oid in oids {
+        super::wake::request_recovery(oid);
+
+        // Migration bridge for WAL apply. Once the ephemeral DB maintenance
+        // worker lands, this ensure call and ensure.rs are removed completely.
+        if crate::worker::wake::ensure_paused(oid) {
+            continue;
+        }
+        super::ensure::mark_worker_not_ensured();
+        if let Err(error) = super::ensure::ensure_async_mirror_worker_for(DatabaseOid::new(oid)) {
+            pgrx::log!(
+                "koldstore supervisor: legacy WAL applier ensure deferred for db={oid}: {error}"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn discover_async_slot_databases() -> Result<Vec<u32>, String> {
+    pgrx::Spi::connect(|client| -> Result<Vec<u32>, String> {
         let table = client
             .select(
                 "SELECT d.oid::oid \
@@ -88,27 +178,5 @@ fn ensure_appliers_for_async_slots() -> Result<(), String> {
             }
         }
         Ok(out)
-    })?;
-    for oid in oids {
-        if crate::worker::wake::ensure_paused(oid) {
-            continue;
-        }
-        // Skip when a session ensure already holds the registration lock
-        // (e.g. manage_table's open transaction). Blocking here wedged the
-        // launcher under pg_test and led to ensure() respawn storms.
-        // Note: advisory locks are database-local; this only serializes against
-        // other sessions connected to the same database as the launcher
-        // (`postgres`). Cross-DB pause uses shared-memory [`wake::ensure_paused`].
-        if !crate::mirror::lifecycle::try_lock_worker_registration(oid)? {
-            continue;
-        }
-        // Advisory lock above assigns an XID. ensure()'s in-xact + WORKER_ENSURED
-        // short-circuit would then skip forever after the first successful
-        // registration, so NEVER_RESTART applier death would never be healed.
-        // Clear the per-backend latch each poll; worker_running still no-ops
-        // when the applier is already up.
-        super::ensure::mark_worker_not_ensured();
-        let _ = super::ensure::ensure_async_mirror_worker_for(DatabaseOid::new(oid));
-    }
-    Ok(())
+    })
 }
