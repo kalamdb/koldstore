@@ -27,7 +27,7 @@ pub(crate) use flush_executor::register_flush_executor_from_supervisor;
 #[cfg(feature = "pg")]
 pub use flush_task::run_flush_scheduler_tick_pg;
 #[cfg(feature = "pg")]
-pub(crate) use flush_task::schedule_row_limit_after_counter;
+pub(crate) use flush_task::schedule_policy_after_counter;
 #[cfg(feature = "pg")]
 pub(crate) use maintenance::register_maintenance_from_supervisor;
 #[cfg(feature = "pg")]
