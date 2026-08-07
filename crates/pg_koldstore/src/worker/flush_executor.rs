@@ -17,11 +17,11 @@ const FLUSH_EXECUTOR_FUNCTION: &str = "koldstore_flush_executor_main";
 const CANDIDATE_PAGE_SIZE: i64 = 16;
 const BUSY_RETRY: Duration = Duration::from_millis(200);
 
-/// Transitional queue notification used by the remaining foreground call site.
-/// It publishes post-commit work only; dynamic registration belongs exclusively
-/// to the supervisor.
-pub(crate) fn notify_flush_queue() {
+/// Compatibility wake for the remaining foreground helper. It never registers
+/// a process: durable enqueue + post-commit supervisor publication own dispatch.
+pub(crate) fn notify_flush_queue() -> Result<bool, String> {
     super::wake::mark_flush_queue_pending();
+    Ok(true)
 }
 
 /// Reconstructs queue dispatch hints after postmaster/worker recovery.
@@ -80,11 +80,14 @@ fn pending_candidates() -> Result<Vec<PendingCandidate>, String> {
                    AND available_at <= clock_timestamp() \
                  ORDER BY available_at, updated_at, id \
                  LIMIT $1",
-                Some(1),
+                // SQL already supplies the hard page bound. Do not pass Some(1)
+                // here: that silently collapsed the intended fair page to one
+                // candidate and reintroduced head-of-line blocking.
+                None,
                 &[DatumWithOid::from(CANDIDATE_PAGE_SIZE)],
             )
             .map_err(|error| error.to_string())?;
-        let mut candidates = Vec::new();
+        let mut candidates = Vec::with_capacity(CANDIDATE_PAGE_SIZE as usize);
         for row in table {
             let table_oid = row
                 .get::<pgrx::pg_sys::Oid>(1)
