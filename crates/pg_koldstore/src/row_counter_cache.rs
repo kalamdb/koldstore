@@ -68,10 +68,10 @@ fn restore_pending_deltas(deltas: Vec<(u32, (i64, i64))>) {
 /// Flushes pending counter deltas with ordinary SPI while a transaction is open.
 ///
 /// Async WAL apply calls this before returning. Each bump returns the resulting
-/// mirror count in the same SPI round trip; RowLimit eligibility for that exact
-/// table is then evaluated and, when due, the durable flush job is inserted in
-/// this *same transaction*. Counter state cannot commit without the matching due
-/// job, and unrelated managed tables are never scanned.
+/// mirror count in the same SPI round trip; the policy for that exact table is
+/// then evaluated in this *same transaction*. RowLimit can enqueue directly;
+/// OlderThan can enqueue or record a commit-aware exact clock deadline. Unrelated
+/// managed tables are never scanned.
 ///
 /// # Errors
 ///
@@ -126,10 +126,10 @@ pub fn flush_pending_deltas_in_transaction() -> Result<(), String> {
             }
         };
 
-        // This is still the WAL-apply transaction. A due RowLimit job is
-        // therefore committed atomically with the mirror/counter mutation, while
-        // the queue generation remains transaction-local until COMMIT.
-        crate::worker::schedule_row_limit_after_counter(oid, mirror_row_count)?;
+        // Still inside WAL apply. A due job and the counter mutation commit
+        // atomically; a future timed deadline remains transaction-local until
+        // COMMIT before reaching supervisor shared memory.
+        crate::worker::schedule_policy_after_counter(oid, mirror_row_count)?;
     }
     Ok(())
 }
