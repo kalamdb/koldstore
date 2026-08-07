@@ -1,10 +1,9 @@
 //! Lightweight database-local auto-flush scheduling.
 //!
-//! The ephemeral maintenance worker evaluates managed tables and durably
-//! enqueues every due table in a bounded page. Enqueue itself publishes the
-//! post-commit flush generation; only the cluster supervisor may register heavy
-//! one-shot flush executors. Time policies return an exact next clock deadline,
-//! so the database stays worker-free while idle instead of polling.
+//! RowLimit is scheduled directly from WAL-applied counter bumps for only the
+//! tables that changed. Broad scans are reserved for explicit configuration /
+//! recovery reconciliation and time policies. Enqueue publishes a post-commit
+//! flush generation; only the cluster supervisor may register heavy executors.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +18,45 @@ pub(crate) struct FlushTickResult {
     /// Exact earliest future `OlderThan` wake for the current database.
     /// `None` means time alone cannot make any current table flushable.
     pub next_timed_wake_at_ms: Option<i64>,
+}
+
+/// Evaluates one RowLimit table using the mirror count already produced by the
+/// WAL-apply counter bump and durably enqueues the job in the same transaction.
+///
+/// This is intentionally O(1) in database table count. It is called once per
+/// touched table, not once per managed table, and bypasses
+/// `enqueue_flush_job_if_due` because eligibility is already known from the
+/// post-bump counter. That avoids a duplicate progress/stat selection.
+pub(crate) fn schedule_row_limit_after_counter(
+    table_oid: pgrx::pg_sys::Oid,
+    mirror_row_count: i64,
+) -> Result<bool, String> {
+    let Some(options) = crate::sql::flush::spi::active_manage_options(table_oid)? else {
+        return Ok(false);
+    };
+    if !options.auto_flush_enabled() || !options.flush_enabled() {
+        return Ok(false);
+    }
+    if !matches!(options.flush_policy(), Some(FlushPolicy::RowLimit { .. })) {
+        return Ok(false);
+    }
+    if !scheduler_should_flush_parsed(&options, mirror_row_count.max(0)) {
+        return Ok(false);
+    }
+
+    let job_id = crate::sql::flush::jobs::enqueue_or_lookup_flush_job(table_oid, false)
+        .map_err(|error| error.to_string())?;
+    // Transaction-local dirty tracking publishes only if the apply transaction
+    // commits. Therefore counter bump + durable job + supervisor hint have no
+    // crash window where the counter commits but scheduling is forgotten.
+    crate::worker::wake::mark_flush_queue_pending();
+    pgrx::log!(
+        "koldstore auto-flush: touched RowLimit table_oid={} enqueued job={} mirror_rows={}",
+        table_oid.to_u32(),
+        crate::spi::uuid_from_pgrx(job_id),
+        mirror_row_count
+    );
+    Ok(true)
 }
 
 fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool, Option<i64>), String> {
@@ -107,9 +145,8 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
         .unwrap_or_else(|error| pgrx::error!("flush scheduler tick failed: {error}"))
 }
 
-/// Evaluates auto-flush eligibility and durably enqueues all due tables in one
-/// bounded page. Queue enqueue marks FLUSH_QUEUE_DIRTY transaction-locally, so
-/// there is intentionally no worker-spawn or retry logic in this function.
+/// Broad reconciliation used for configuration changes/startup/recovery.
+/// Normal WAL RowLimit scheduling does not come through this scan.
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     let (due_tables, more_due, next_timed_wake_at_ms) = select_due_auto_flush_tables()?;
     let mut completed = false;
