@@ -1473,7 +1473,7 @@ async fn time_changes_since_full_drain(
             "changes_since cursor did not advance (since_seq={since_seq}, page_max={page_max})"
         );
         since_seq = page_max;
-        if pages == 1 || pages % 200 == 0 {
+        if pages == 1 || pages.is_multiple_of(200) {
             common::log_always(format!(
                 "storage_cmp: changes_since progress pages={pages} fetched={fetched} cursor={since_seq} elapsed={}",
                 format_duration(started.elapsed()),
