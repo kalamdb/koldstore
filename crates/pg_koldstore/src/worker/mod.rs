@@ -14,6 +14,8 @@ mod maintenance;
 #[cfg(feature = "pg")]
 mod supervisor;
 #[cfg(feature = "pg")]
+mod timed_policy;
+#[cfg(feature = "pg")]
 pub(crate) mod txn;
 #[cfg(feature = "pg")]
 pub(crate) mod wake;
