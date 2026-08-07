@@ -263,16 +263,32 @@ pub async fn read_clean_cold_rows_from_object_store_async(
 
     let mut stream = builder.build().map_err(|error| error.to_string())?;
     let pk_filter = options.pk_values.as_ref();
+    let row_limit = options.row_limit;
+    let seq_min = options.seq_range.as_ref().map(|range| range.min.get());
+    let seq_max = options.seq_range.as_ref().map(|range| range.max.get());
     let mut rows = Vec::new();
     while let Some(batch) = stream.next().await {
         let batch = batch.map_err(|error| error.to_string())?;
-        rows.extend(clean_rows_from_batch(
+        let decoded = clean_rows_from_batch(
             &batch,
             columns,
             primary_key_columns,
             &application_columns,
             pk_filter,
-        )?);
+        )?;
+        for row in decoded {
+            if seq_min.is_some_and(|min| row.seq < min) || seq_max.is_some_and(|max| row.seq > max)
+            {
+                continue;
+            }
+            rows.push(row);
+            if row_limit.is_some_and(|limit| rows.len() >= limit) {
+                break;
+            }
+        }
+        if row_limit.is_some_and(|limit| rows.len() >= limit) {
+            break;
+        }
     }
 
     let selected = if pruning_applied {

@@ -24,7 +24,7 @@ fn change(
 }
 
 #[test]
-fn changes_since_filters_table_scope_orders_by_seq_and_keeps_latest_state() {
+fn changes_since_filters_table_scope_orders_by_seq() {
     let changes = vec![
         change(
             42,
@@ -70,10 +70,14 @@ fn changes_since_filters_table_scope_orders_by_seq_and_keeps_latest_state() {
     )
     .unwrap();
 
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].seq.get(), 20);
-    assert_eq!(result[0].operation, MirrorOperation::Update);
-    assert_eq!(result[0].source, ChangeSource::HotMirror);
+    // Scope filter only; both versions of id=1 are kept in seq order.
+    assert_eq!(
+        result
+            .iter()
+            .map(|change| change.seq.get())
+            .collect::<Vec<_>>(),
+        vec![10, 20]
+    );
 }
 
 #[test]

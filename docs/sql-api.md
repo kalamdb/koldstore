@@ -644,8 +644,11 @@ FROM koldstore.changes_since(
 );
 ```
 
-Returns latest-state changes ordered by `seq`, merging the hot `__cl` mirror and
-flushed cold Parquet metadata. Modes match KalamDB live subscribe options:
+Returns changes ordered by exclusive `seq`, catalog-routing to the oldest
+applicable cold Parquet segment (streamed until `limit_rows`) or the hot `__cl`
+mirror. The same primary key may appear again on a later page with a higher
+`seq` (no in-page latest-state collapse). Modes match KalamDB live subscribe
+options:
 
 | Mode | Args | Behavior |
 |------|------|----------|

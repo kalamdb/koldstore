@@ -1031,7 +1031,11 @@ async fn changes_since_merges_cold_oldest_and_hot_newest_with_mid_cursor() -> Re
                 &[&relation],
             )
             .await?;
-        assert_eq!(full.len(), 100, "latest-state feed must cover all PKs");
+        assert_eq!(
+            full.len(),
+            100,
+            "feed must cover cold + hot rows for all PKs"
+        );
         let sources: BTreeSet<String> = full.iter().map(|row| row.get(2)).collect();
         assert!(
             sources.contains("cold") && sources.contains("hot"),

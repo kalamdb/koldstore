@@ -19,7 +19,7 @@ fn change(id: i64, seq: i64, operation: MirrorOperation, source: ChangeSource) -
 }
 
 #[test]
-fn change_feed_merges_hot_mirror_and_cold_metadata_as_latest_state() {
+fn change_feed_orders_hot_and_cold_by_seq_without_collapsing_pk() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
 
@@ -38,11 +38,13 @@ fn change_feed_merges_hot_mirror_and_cold_metadata_as_latest_state() {
             .map(|change| (change.pk_json.clone(), change.seq.get(), change.operation))
             .collect::<Vec<_>>(),
         vec![
+            (json!({"id": 1}), 10, MirrorOperation::Insert),
+            (json!({"id": 1}), 20, MirrorOperation::Update),
             (json!({"id": 2}), 25, MirrorOperation::Insert),
             (json!({"id": 1}), 30, MirrorOperation::Delete),
         ]
     );
-    assert!(result[1].deleted);
+    assert!(result[3].deleted);
 }
 
 #[tokio::test]
@@ -97,7 +99,7 @@ async fn change_feed_reads_table_specific_mirror_without_row_events_on_pgrx() ->
 }
 
 #[test]
-fn user_scope_change_feed_filters_scope_before_latest_state_resolution() {
+fn user_scope_change_feed_filters_scope_before_seq_order() {
     let scoped = vec![
         MirrorChange {
             scope_key: Some(ScopeKey::new("user-a").unwrap()),

@@ -11,6 +11,8 @@ pub struct ParquetReadOptions {
     pub row_groups: Option<Vec<usize>>,
     pub seq_range: Option<SeqRange>,
     pub pk_values: Option<PkValues>,
+    /// Stop after collecting this many decoded rows (`None` = read all selected).
+    pub row_limit: Option<usize>,
     /// Outer wall-clock budget for one segment open/read (`None` = disabled).
     pub timeout: Option<Duration>,
 }
@@ -88,6 +90,13 @@ impl ParquetReadOptions {
             column: column.into(),
             values: values.into_iter().map(Into::into).collect(),
         });
+        self
+    }
+
+    /// Caps how many decoded rows are retained (early-stop the batch stream).
+    #[must_use]
+    pub fn with_row_limit(mut self, limit: usize) -> Self {
+        self.row_limit = Some(limit);
         self
     }
 
