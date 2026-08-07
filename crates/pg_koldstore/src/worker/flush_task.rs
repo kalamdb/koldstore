@@ -1,25 +1,21 @@
 //! Lightweight database-local auto-flush scheduling.
 //!
-//! The ephemeral maintenance worker evaluates a bounded page of managed tables,
-//! enqueues every due table in that page, and exits once no newer maintenance
-//! generation remains. Heavy Parquet/object-store work is always delegated to
-//! one-shot flush executors in production queue mode.
+//! The ephemeral maintenance worker evaluates a bounded page of managed tables
+//! and durably enqueues every due table in that page. Enqueue itself publishes
+//! the post-commit flush generation; only the cluster supervisor may register
+//! heavy one-shot flush executors.
 
 use koldstore_common::ManageTableOptions;
 use koldstore_flush::{plan_select_auto_flush_candidate_tables, scheduler_should_flush_parsed};
 
 const AUTO_FLUSH_PAGE_LIMIT: usize = 64;
 
-/// Outcome of one built-in flush-scheduler evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushTickResult {
-    /// True when one or more tables were due/enqueued in this tick.
     pub had_due_table: bool,
-    /// True when a flush job finished as `completed` in this tick (inline only).
     pub completed: bool,
 }
 
-/// Selects a bounded set of due auto-flush tables.
 fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool), String> {
     pgrx::Spi::connect(|client| -> Result<(Vec<u32>, bool), String> {
         let statement =
@@ -63,12 +59,8 @@ fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool), String> {
     })
 }
 
-/// Runs one scheduler tick in the current backend for tests/diagnostics.
-///
-/// This explicit diagnostic entry point also performs one bounded orphan
-/// recovery pass so existing `#[pg_test]` can validate recovery inside its
-/// single backend transaction. The production maintenance hot path below does
-/// NOT hide recovery inside ordinary scheduler evaluation.
+/// Explicit diagnostic hook used by in-server tests. Production recovery is
+/// owned by the maintenance worker, not hidden inside ordinary queue enqueue.
 #[pgrx::pg_extern(
     name = "internal_run_flush_scheduler_tick",
     schema = "koldstore",
@@ -86,8 +78,8 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
 }
 
 /// Evaluates auto-flush eligibility and durably enqueues all due tables in one
-/// bounded page. Recovery/retention are deliberately not hidden side effects of
-/// this production hot path; crash reconciliation belongs to DB maintenance.
+/// bounded page. Queue enqueue marks FLUSH_QUEUE_DIRTY transaction-locally, so
+/// there is intentionally no worker-spawn or retry logic in this function.
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     let (due_tables, more_due) = select_due_auto_flush_tables()?;
     let mut had_due_table = false;
@@ -102,7 +94,7 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
         };
         had_due_table = true;
         pgrx::log!(
-            "koldstore flush scheduler: enqueued table_oid={} job={}",
+            "koldstore auto-flush: enqueued table_oid={} job={}",
             table_oid,
             crate::spi::uuid_from_pgrx(job_id)
         );
@@ -110,7 +102,7 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
         if crate::guc::flush_execution_mode() == crate::settings::FlushExecutionMode::Inline {
             let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(oid)? else {
                 pgrx::log!(
-                    "koldstore flush scheduler: table_oid={} already owned; leaving durable job queued",
+                    "koldstore auto-flush: table_oid={} already owned; leaving durable job queued",
                     table_oid
                 );
                 continue;
@@ -122,17 +114,7 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     }
 
     if more_due {
-        // The current transaction found more than one bounded page. A
-        // post-commit generation guarantees the same DB is revisited promptly.
         crate::worker::wake::mark_schedule_pending();
-    }
-
-    if crate::guc::flush_execution_mode() == crate::settings::FlushExecutionMode::Queue
-        && had_due_table
-    {
-        // Compatibility helper only publishes FLUSH_QUEUE_DIRTY. The supervisor
-        // owns all dynamic-worker registration and concurrency.
-        let _ = super::spawn_flush_executors_for_pending_work()?;
     }
 
     Ok(FlushTickResult {
