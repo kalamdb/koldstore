@@ -1,8 +1,8 @@
-//! Foreground controls for the event-driven KoldStore supervisor.
+//! Foreground validation for event-driven KoldStore maintenance.
 //!
-//! Client backends never register or wait for maintenance processes. They only
-//! validate capture configuration and publish transaction-coalesced scheduling
-//! events that the cluster supervisor consumes after commit.
+//! Client backends never register, pause, inspect, or wait for maintenance
+//! processes. Capture activation only validates that automatic maintenance is
+//! enabled and publishes a transaction-coalesced scheduling event after commit.
 
 /// Requires automatic async maintenance before capture activation and records a
 /// post-commit scheduling event for the current database.
@@ -14,44 +14,4 @@ pub(crate) fn require_async_mirror_worker() -> Result<(), String> {
     }
     crate::worker::wake::mark_schedule_pending();
     Ok(())
-}
-
-/// Internal diagnostic SQL entry point. It publishes maintenance work but never
-/// registers a dynamic process or inspects `pg_stat_activity` from the client.
-#[pgrx::pg_extern(
-    name = "internal_ensure_async_mirror_worker",
-    schema = "koldstore",
-    security_definer
-)]
-pub fn request_async_mirror_maintenance_pg() -> bool {
-    if !crate::guc::async_mirror_worker_enabled() {
-        return false;
-    }
-    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    if crate::worker::wake::ensure_paused(database_oid) {
-        return false;
-    }
-    crate::worker::wake::mark_schedule_pending();
-    true
-}
-
-/// Test/benchmark control that pauses supervisor maintenance dispatch for the
-/// current database. Production scheduling does not use it.
-#[pgrx::pg_extern(
-    name = "internal_set_async_mirror_ensure_paused",
-    schema = "koldstore",
-    security_definer
-)]
-pub fn set_async_mirror_ensure_paused_pg(paused: bool) -> bool {
-    let oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    if paused {
-        if !crate::worker::wake::pause_ensure(oid) {
-            pgrx::error!("async mirror maintenance pause set is full");
-        }
-        true
-    } else {
-        crate::worker::wake::resume_ensure(oid);
-        crate::worker::wake::request_recovery(oid);
-        true
-    }
 }
