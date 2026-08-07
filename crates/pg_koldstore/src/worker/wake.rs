@@ -1,31 +1,23 @@
 //! Commit-driven, coalescing wakeups for KoldStore background work.
 //!
-//! Wakeups are latency hints only.  The durable sources of truth remain the
-//! logical slot / async_mirror_state and koldstore.jobs.  Transaction-local
-//! dirty bits publish monotonically increasing shared-memory generations only
-//! after top-level commit, then set the single cluster supervisor latch.
-//!
-//! The older per-database applier wake registry remains temporarily during the
-//! migration so existing WAL tests keep working while dispatch moves to the
-//! cluster supervisor. New queue dispatch must use [`mark_flush_queue_pending`]
-//! and the supervisor registry rather than registering workers from a client.
+//! Wakeups are latency hints only. The durable sources of truth remain the
+//! logical replication slot / async_mirror_state and koldstore.jobs. Foreground
+//! transactions publish monotonically increasing shared generations only after
+//! top-level commit, then wake the single postmaster-supervised cluster process.
 
 use std::cell::RefCell;
 
 use koldstore_worker::{
-    AtomicWakeRegistry, DatabaseWorkSnapshot, EnsurePauseSet, SupervisorPid, SupervisorRegistry,
-    TransactionDirty, WakeGeneration, WorkerPid, SUPERVISOR_REGISTRY_CAPACITY,
-    WAKE_REGISTRY_CAPACITY,
+    DatabaseWorkSnapshot, EnsurePauseSet, SupervisorPid, SupervisorRegistry, TransactionDirty,
+    SUPERVISOR_REGISTRY_CAPACITY, WAKE_REGISTRY_CAPACITY,
 };
 use pgrx::{pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
 
-type SharedWakeRegistry = AssertPGRXSharedMemory<AtomicWakeRegistry<WAKE_REGISTRY_CAPACITY>>;
 type SharedEnsurePauseSet = AssertPGRXSharedMemory<EnsurePauseSet<WAKE_REGISTRY_CAPACITY>>;
 type SharedSupervisorRegistry =
     AssertPGRXSharedMemory<SupervisorRegistry<SUPERVISOR_REGISTRY_CAPACITY>>;
 
-static WAKE_REGISTRY: PgAtomic<SharedWakeRegistry> =
-    unsafe { PgAtomic::new(c"koldstore async wake registry") };
+// Test/benchmark pause compatibility. Production scheduling does not depend on it.
 static ENSURE_PAUSE_SET: PgAtomic<SharedEnsurePauseSet> =
     unsafe { PgAtomic::new(c"koldstore async ensure pause set") };
 static SUPERVISOR_REGISTRY: PgAtomic<SharedSupervisorRegistry> =
@@ -40,12 +32,8 @@ thread_local! {
         RefCell::new(TransactionDirty::default());
 }
 
-/// Allocates shared registries and registers transaction callbacks.
-#[allow(unexpected_cfgs)] // pgrx's macro includes supported PG features this crate omits.
+#[allow(unexpected_cfgs)]
 pub(crate) fn initialize() {
-    pg_shmem_init!(
-        WAKE_REGISTRY = unsafe { AssertPGRXSharedMemory::new(AtomicWakeRegistry::default()) }
-    );
     pg_shmem_init!(
         ENSURE_PAUSE_SET = unsafe { AssertPGRXSharedMemory::new(EnsurePauseSet::default()) }
     );
@@ -58,29 +46,21 @@ pub(crate) fn initialize() {
     }
 }
 
-/// Pauses legacy ensure/register for `database_oid` across the postmaster.
-///
-/// Retained only while the old per-database worker lifecycle is being removed.
 pub(crate) fn pause_ensure(database_oid: u32) -> bool {
     ENSURE_PAUSE_SET.get().pause(database_oid)
 }
 
-/// Clears a legacy ensure pause for `database_oid`.
 pub(crate) fn resume_ensure(database_oid: u32) {
     ENSURE_PAUSE_SET.get().resume(database_oid);
 }
 
-/// Returns whether legacy ensure must skip registration for `database_oid`.
 #[must_use]
 pub(crate) fn ensure_paused(database_oid: u32) -> bool {
     ENSURE_PAUSE_SET.get().is_paused(database_oid)
 }
 
-/// Marks the current transaction as containing source WAL worth applying.
-///
-/// One transaction, regardless of row count/statements, publishes one WAL
-/// generation after commit. KoldStore's own background writes are excluded so
-/// the applier cannot create a self-wake loop.
+/// Marks one transaction as containing source WAL that may affect KoldStore.
+/// Multiple statements/rows collapse to one generation on successful commit.
 pub(crate) fn mark_managed_dml_pending() {
     if is_current_backend_background_worker() {
         return;
@@ -88,94 +68,73 @@ pub(crate) fn mark_managed_dml_pending() {
     if crate::sql::flush::spi::flush_replication_origin_is_armed() {
         return;
     }
-    let nesting_level = current_nesting_level();
-    MANAGED_DML_PENDING.with(|pending| pending.borrow_mut().mark(nesting_level));
+    MANAGED_DML_PENDING.with(|pending| pending.borrow_mut().mark(current_nesting_level()));
 }
 
-/// Marks a durable flush-queue mutation for post-commit supervisor dispatch.
-///
-/// Unlike WAL dirty state this is intentionally allowed from background workers:
-/// a maintenance worker may enqueue automatic flush work and must wake the
-/// supervisor only after that job row commits.
+/// Marks a durable flush queue mutation. Background maintenance workers may use
+/// this because auto-flush enqueue must wake the supervisor after its own commit.
 pub(crate) fn mark_flush_queue_pending() {
-    let nesting_level = current_nesting_level();
-    FLUSH_QUEUE_PENDING.with(|pending| pending.borrow_mut().mark(nesting_level));
+    FLUSH_QUEUE_PENDING.with(|pending| pending.borrow_mut().mark(current_nesting_level()));
 }
 
-/// Marks database scheduling metadata dirty for post-commit reconciliation.
+/// Marks database scheduling/recovery metadata dirty for post-commit dispatch.
 pub(crate) fn mark_schedule_pending() {
-    let nesting_level = current_nesting_level();
-    SCHEDULE_PENDING.with(|pending| pending.borrow_mut().mark(nesting_level));
+    SCHEDULE_PENDING.with(|pending| pending.borrow_mut().mark(current_nesting_level()));
 }
 
-/// Registers the single static cluster supervisor in shared memory.
 pub(crate) fn register_supervisor() {
     SUPERVISOR_REGISTRY
         .get()
         .register_supervisor(SupervisorPid::new(unsafe { pg_sys::MyProcPid }));
 }
 
-/// Clears the supervisor PID if it still belongs to this process.
 pub(crate) fn unregister_supervisor() {
     SUPERVISOR_REGISTRY
         .get()
         .unregister_supervisor(SupervisorPid::new(unsafe { pg_sys::MyProcPid }));
 }
 
-/// Wakes the current supervisor, if registered.
 pub(crate) fn wake_supervisor() {
     if let Some(pid) = SUPERVISOR_REGISTRY.get().supervisor_pid() {
         set_background_worker_latch(pid.get(), None);
     }
 }
 
-/// Requests durable crash/startup reconciliation for a database and wakes the supervisor.
+/// Direct recovery request used by crash/startup paths outside a client commit.
 pub(crate) fn request_recovery(database_oid: u32) {
-    let target = SUPERVISOR_REGISTRY.get().request_recovery(database_oid);
-    if let Some(pid) = target {
+    if let Some(pid) = SUPERVISOR_REGISTRY.get().request_recovery(database_oid) {
         set_background_worker_latch(pid.get(), None);
     }
 }
 
-/// Requests reconciliation for the current database.
-pub(crate) fn request_current_database_recovery() {
-    request_recovery(unsafe { pg_sys::MyDatabaseId }.to_u32());
-}
-
-/// Shared supervisor snapshots used only by the static dispatcher.
 #[must_use]
 pub(crate) fn supervisor_snapshots() -> Vec<DatabaseWorkSnapshot> {
     SUPERVISOR_REGISTRY.get().snapshots()
 }
 
-/// Shared snapshot for one database.
 #[must_use]
 pub(crate) fn supervisor_snapshot(database_oid: u32) -> Option<DatabaseWorkSnapshot> {
     SUPERVISOR_REGISTRY.get().snapshot(database_oid)
 }
 
-/// Reserves the single maintenance worker slot for a database.
 pub(crate) fn try_reserve_maintenance(database_oid: u32) -> bool {
     SUPERVISOR_REGISTRY
         .get()
         .try_reserve_maintenance(database_oid)
 }
 
-/// Marks the current maintenance worker live.
 pub(crate) fn maintenance_started(database_oid: u32) -> bool {
     SUPERVISOR_REGISTRY
         .get()
         .maintenance_started(database_oid, unsafe { pg_sys::MyProcPid })
 }
 
-/// Releases a maintenance registration reservation that failed before startup.
 pub(crate) fn cancel_maintenance_start(database_oid: u32) {
     SUPERVISOR_REGISTRY
         .get()
         .cancel_maintenance_start(database_oid);
 }
 
-/// Releases the current maintenance worker and wakes the supervisor.
 pub(crate) fn maintenance_stopped(database_oid: u32) {
     SUPERVISOR_REGISTRY
         .get()
@@ -183,91 +142,61 @@ pub(crate) fn maintenance_stopped(database_oid: u32) {
     wake_supervisor();
 }
 
-/// Marks a WAL generation safely processed.
 pub(crate) fn mark_wal_processed(database_oid: u32, generation: u64) {
     SUPERVISOR_REGISTRY
         .get()
         .mark_wal_processed(database_oid, generation);
 }
 
-/// Clears recovery/schedule flags after a successful DB-local pass.
-pub(crate) fn mark_maintenance_reconciled(database_oid: u32) {
+pub(crate) fn mark_maintenance_reconciled(database_oid: u32, generation: u64) {
     SUPERVISOR_REGISTRY
         .get()
-        .mark_maintenance_reconciled(database_oid);
+        .mark_maintenance_reconciled(database_oid, generation);
 }
 
-/// Sets the effective per-database flush concurrency limit.
 pub(crate) fn set_flush_limit(database_oid: u32, limit: u32) {
     SUPERVISOR_REGISTRY.get().set_flush_limit(database_oid, limit);
 }
 
-/// Reserves one flush worker slot, counting both Starting and Running workers.
 pub(crate) fn try_reserve_flush(database_oid: u32, cluster_limit: u32) -> bool {
     SUPERVISOR_REGISTRY
         .get()
         .try_reserve_flush(database_oid, cluster_limit)
 }
 
-/// Moves one flush reservation from Starting to Running.
 pub(crate) fn flush_started(database_oid: u32, effective_limit: u32) {
     SUPERVISOR_REGISTRY
         .get()
         .flush_started(database_oid, effective_limit);
+    // The first worker teaches the supervisor this DB's effective cap. Wake it
+    // immediately so a queue can fan out without waiting for that worker to exit.
+    wake_supervisor();
 }
 
-/// Cancels a flush worker registration that never started.
 pub(crate) fn cancel_flush_start(database_oid: u32) {
     SUPERVISOR_REGISTRY.get().cancel_flush_start(database_oid);
 }
 
-/// Releases one running flush worker and wakes the supervisor for immediate refill.
 pub(crate) fn flush_stopped(database_oid: u32) {
     SUPERVISOR_REGISTRY.get().flush_stopped(database_oid);
     wake_supervisor();
 }
 
-/// Marks a queue generation drained without clearing a newer enqueue race.
 pub(crate) fn mark_flush_processed(database_oid: u32, generation: u64) {
     SUPERVISOR_REGISTRY
         .get()
         .mark_flush_processed(database_oid, generation);
 }
 
-/// Returns whether the fixed registry overflowed and needs conservative recovery.
 #[must_use]
 pub(crate) fn overflow_reconcile_required() -> bool {
     SUPERVISOR_REGISTRY.get().overflow_reconcile_required()
 }
 
-/// Clears the overflow marker after an authoritative supervisor scan.
 pub(crate) fn clear_overflow_reconcile_required() {
     SUPERVISOR_REGISTRY
         .get()
         .clear_overflow_reconcile_required();
-}
-
-// ---- Legacy per-database applier wake helpers (temporary migration bridge). ----
-
-/// Registers the current legacy database worker and returns the current generation.
-pub(crate) fn register_worker(database_oid: u32) -> Option<WakeGeneration> {
-    let pid = WorkerPid::new(unsafe { pg_sys::MyProcPid });
-    WAKE_REGISTRY.get().register_worker(database_oid, pid)
-}
-
-/// Clears the legacy worker PID while retaining its generation.
-pub(crate) fn unregister_worker(database_oid: u32) {
-    let pid = WorkerPid::new(unsafe { pg_sys::MyProcPid });
-    WAKE_REGISTRY.get().unregister_worker(database_oid, pid);
-}
-
-/// Reads the latest legacy committed generation for a database.
-#[must_use]
-pub(crate) fn generation(database_oid: u32) -> WakeGeneration {
-    WAKE_REGISTRY
-        .get()
-        .generation(database_oid)
-        .unwrap_or_else(|| WakeGeneration::new(0))
 }
 
 #[pgrx::pg_guard]
@@ -305,18 +234,13 @@ fn publish_pending_commit() {
     let mut supervisor = None;
 
     if wal_pending && !is_current_backend_background_worker() {
-        // Publish the new supervisor generation first. Even if no supervisor is
-        // alive, the generation remains dirty for startup reconciliation.
         supervisor = SUPERVISOR_REGISTRY.get().publish_wal(database_oid);
-
-        // Migration bridge: also wake the old database worker until the
-        // ephemeral-maintenance phase replaces it completely.
-        if let Some(worker_pid) = WAKE_REGISTRY
-            .get()
-            .publish(database_oid)
-            .and_then(|wake| wake.worker_pid)
-        {
-            set_background_worker_latch(worker_pid.get(), Some(database_oid));
+        // If a burst worker is already alive, wake it too. The generation is
+        // still authoritative, so a stale PID or missed SetLatch cannot lose work.
+        if let Some(snapshot) = SUPERVISOR_REGISTRY.get().snapshot(database_oid) {
+            if snapshot.maintenance_pid > 0 {
+                set_background_worker_latch(snapshot.maintenance_pid, Some(database_oid));
+            }
         }
     }
     if flush_pending {
@@ -385,7 +309,6 @@ fn set_background_worker_latch(pid: i32, database_oid: Option<u32>) {
     }
 }
 
-/// PostgreSQL 18 renamed `isBackgroundWorker` to `isRegularBackend` (inverted).
 #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
 unsafe fn is_background_worker(process: *mut pg_sys::PGPROC) -> bool {
     unsafe { (*process).isBackgroundWorker }
