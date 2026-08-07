@@ -29,8 +29,7 @@ pub(crate) use ensure::{
 };
 #[cfg(feature = "pg")]
 pub(crate) use flush_executor::{
-    register_flush_executor_from_supervisor, spawn_flush_executor_if_needed,
-    spawn_flush_executors_for_pending_work,
+    notify_flush_queue as spawn_flush_executor_if_needed, register_flush_executor_from_supervisor,
 };
 #[cfg(feature = "pg")]
 pub use flush_task::run_flush_scheduler_tick_pg;
