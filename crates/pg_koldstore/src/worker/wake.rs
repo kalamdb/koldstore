@@ -8,18 +8,14 @@
 use std::cell::RefCell;
 
 use koldstore_worker::{
-    DatabaseWorkSnapshot, EnsurePauseSet, SupervisorPid, SupervisorRegistry, TransactionDirty,
+    DatabaseWorkSnapshot, SupervisorPid, SupervisorRegistry, TransactionDirty,
     SUPERVISOR_REGISTRY_CAPACITY,
 };
 use pgrx::{pg_guard, pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
 
-type SharedEnsurePauseSet = AssertPGRXSharedMemory<EnsurePauseSet<SUPERVISOR_REGISTRY_CAPACITY>>;
 type SharedSupervisorRegistry =
     AssertPGRXSharedMemory<SupervisorRegistry<SUPERVISOR_REGISTRY_CAPACITY>>;
 
-// Test/benchmark pause compatibility. Production scheduling does not depend on it.
-static ENSURE_PAUSE_SET: PgAtomic<SharedEnsurePauseSet> =
-    unsafe { PgAtomic::new(c"koldstore async ensure pause set") };
 static SUPERVISOR_REGISTRY: PgAtomic<SharedSupervisorRegistry> =
     unsafe { PgAtomic::new(c"koldstore supervisor registry") };
 
@@ -35,28 +31,12 @@ thread_local! {
 #[allow(unexpected_cfgs)]
 pub(crate) fn initialize() {
     pg_shmem_init!(
-        ENSURE_PAUSE_SET = unsafe { AssertPGRXSharedMemory::new(EnsurePauseSet::default()) }
-    );
-    pg_shmem_init!(
         SUPERVISOR_REGISTRY = unsafe { AssertPGRXSharedMemory::new(SupervisorRegistry::default()) }
     );
     unsafe {
         pg_sys::RegisterXactCallback(Some(wake_xact_callback), std::ptr::null_mut());
         pg_sys::RegisterSubXactCallback(Some(wake_subxact_callback), std::ptr::null_mut());
     }
-}
-
-pub(crate) fn pause_ensure(database_oid: u32) -> bool {
-    ENSURE_PAUSE_SET.get().pause(database_oid)
-}
-
-pub(crate) fn resume_ensure(database_oid: u32) {
-    ENSURE_PAUSE_SET.get().resume(database_oid);
-}
-
-#[must_use]
-pub(crate) fn ensure_paused(database_oid: u32) -> bool {
-    ENSURE_PAUSE_SET.get().is_paused(database_oid)
 }
 
 /// Marks one transaction as containing source WAL that may affect KoldStore.
