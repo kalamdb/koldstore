@@ -1,8 +1,7 @@
 //! PostgreSQL adapter for [`koldstore_worker`] background work.
 //!
-//! The static cluster supervisor owns dynamic worker registration.  Legacy
-//! per-database ensure exports remain temporarily while the WAL applier is moved
-//! to the same event-driven supervisor lifecycle.
+//! The static cluster supervisor owns dynamic worker registration. Database
+//! maintenance workers and heavy flush executors are both ephemeral.
 
 #[cfg(feature = "pg")]
 mod ensure;
@@ -14,6 +13,8 @@ mod flush_task;
 mod launcher;
 #[cfg(feature = "pg")]
 mod r#loop;
+#[cfg(feature = "pg")]
+mod maintenance;
 #[cfg(feature = "pg")]
 pub(crate) mod txn;
 #[cfg(feature = "pg")]
@@ -35,5 +36,7 @@ pub(crate) use flush_executor::{
 pub use flush_task::run_flush_scheduler_tick_pg;
 #[cfg(feature = "pg")]
 pub(crate) use launcher::register_if_shared_preload as register_launcher_if_shared_preload;
+#[cfg(feature = "pg")]
+pub(crate) use maintenance::register_maintenance_from_supervisor;
 #[cfg(feature = "pg")]
 pub(crate) use r#loop::run_async_mirror_applier;
