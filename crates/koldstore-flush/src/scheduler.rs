@@ -1,7 +1,7 @@
 //! Built-in auto-flush eligibility helpers (PostgreSQL-free).
 //!
-//! Owns the catalog SQL predicates and candidate-table plans used by the
-//! database worker flush tick. SPI execution stays in `pg_koldstore`.
+//! Owns the catalog SQL predicates and candidate-table plans used by ephemeral
+//! database maintenance workers. SPI execution stays in `pg_koldstore`.
 
 use koldstore_common::{FlushPolicy, ManageTableOptions, SqlParamType, SqlStatement};
 use serde_json::Value;
@@ -27,10 +27,12 @@ pub enum AutoFlushPlanError {
     Sql(String),
 }
 
-/// Plans a scan of auto-flush candidate tables with options and mirror counts.
+/// Plans a scan of plausible auto-flush tables with options and mirror counts.
 ///
-/// Callers evaluate [`scheduler_should_flush_parsed`] (or OlderThan SPI) per row
-/// and stop at the first due table.
+/// Row-limit tables that have not even crossed their hot-row threshold are
+/// rejected in SQL. Rust still applies min-flush/file-size policy details, while
+/// OlderThan candidates remain visible for their index-backed cutoff check.
+/// This avoids materializing every managed row-limit table in the worker.
 ///
 /// # Errors
 ///
@@ -48,6 +50,17 @@ LEFT JOIN koldstore.manifest m
   ON m.table_oid = s.table_oid
  AND m.scope_key = ''
 WHERE {AUTO_FLUSH_TABLE_PREDICATE}
+  AND (
+        s.options->'flush_policy'->>'type' = 'older_than'
+        OR (
+            COALESCE(s.options->'flush_policy'->>'type', 'row_limit') = 'row_limit'
+            AND COALESCE(m.mirror_row_count, 0) > COALESCE(
+                (s.options->'flush_policy'->>'hot_row_limit')::bigint,
+                (s.options->>'hot_row_limit')::bigint,
+                0
+            )
+        )
+      )
   AND NOT EXISTS (
         SELECT 1
         FROM koldstore.jobs j
@@ -220,10 +233,13 @@ mod tests {
     }
 
     #[test]
-    fn auto_flush_sql_plans_embed_shared_predicate() {
+    fn auto_flush_sql_plans_embed_shared_predicate_and_count_prefilter() {
         let candidates = plan_select_auto_flush_candidate_tables().unwrap();
         assert!(candidates.sql.contains("auto_flush"));
         assert!(candidates.sql.contains(AUTO_FLUSH_TABLE_PREDICATE.trim()));
+        assert!(candidates.sql.contains("m.mirror_row_count"));
+        assert!(candidates.sql.contains("hot_row_limit"));
+        assert!(candidates.sql.contains("older_than"));
         let exists = plan_database_has_auto_flush_tables().unwrap();
         assert!(exists.sql.contains(AUTO_FLUSH_TABLE_PREDICATE.trim()));
         let older = plan_older_than_eligible_mirror_rows("\"koldstore\".\"items__cl\"").unwrap();
