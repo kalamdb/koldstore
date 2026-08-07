@@ -66,7 +66,7 @@ struct RegistrationRetry {
 /// Supervisor-local retry state for dynamic-worker registration pressure.
 ///
 /// `max_worker_processes` exhaustion is not durable work failure, so retrying is
-/// correct, but a fixed 250ms cluster wake burns CPU indefinitely under sustained
+/// correct, but a fixed cluster wake burns CPU indefinitely under sustained
 /// pressure. Backoff lives only in the static supervisor; durable generations
 /// remain dirty and survive supervisor/postmaster restart independently.
 #[derive(Debug, Default)]
@@ -252,7 +252,6 @@ fn dispatch_shared_work(
             continue;
         }
         if snapshot.maintenance_pid != 0
-            || super::wake::ensure_paused(snapshot.database_oid)
             || !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Maintenance, now)
         {
             continue;
@@ -472,7 +471,7 @@ fn reconcile_worker_liveness() -> Result<(), String> {
             .select(
                 "SELECT datid::oid, pid::int4, backend_type \
                  FROM pg_catalog.pg_stat_activity \
-                 WHERE backend_type LIKE 'koldstore async mirror %' \
+                 WHERE backend_type LIKE 'koldstore maintenance %' \
                     OR backend_type LIKE 'koldstore flush executor %'",
                 None,
                 &[],
@@ -496,7 +495,7 @@ fn reconcile_worker_liveness() -> Result<(), String> {
                 .map_err(|error| error.to_string())?
                 .unwrap_or_default();
             let database_oid = datid.to_u32();
-            if backend_type.starts_with("koldstore async mirror ") {
+            if backend_type.starts_with("koldstore maintenance ") {
                 maintenance
                     .entry(database_oid)
                     .and_modify(|state| state.count = state.count.saturating_add(1))
