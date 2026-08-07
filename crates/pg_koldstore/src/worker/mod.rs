@@ -12,8 +12,6 @@ mod flush_task;
 #[cfg(feature = "pg")]
 mod launcher;
 #[cfg(feature = "pg")]
-mod r#loop;
-#[cfg(feature = "pg")]
 mod maintenance;
 #[cfg(feature = "pg")]
 pub(crate) mod txn;
@@ -37,5 +35,3 @@ pub use flush_task::run_flush_scheduler_tick_pg;
 pub(crate) use launcher::register_if_shared_preload as register_launcher_if_shared_preload;
 #[cfg(feature = "pg")]
 pub(crate) use maintenance::register_maintenance_from_supervisor;
-#[cfg(feature = "pg")]
-pub(crate) use r#loop::run_async_mirror_applier;
