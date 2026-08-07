@@ -6,14 +6,18 @@
 //! heavy one-shot flush executors.
 
 use koldstore_common::ManageTableOptions;
-use koldstore_flush::{plan_select_auto_flush_candidate_tables, scheduler_should_flush_parsed};
+use koldstore_flush::{
+    plan_database_has_timed_auto_flush_tables, plan_select_auto_flush_candidate_tables,
+    scheduler_should_flush_parsed,
+};
 
 const AUTO_FLUSH_PAGE_LIMIT: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushTickResult {
-    pub had_due_table: bool,
     pub completed: bool,
+    /// True only when a policy can become due without future source WAL.
+    pub timed_policy_present: bool,
 }
 
 fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool), String> {
@@ -24,7 +28,7 @@ fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool), String> {
             .select(&statement.sql, None, &[])
             .map_err(|error| error.to_string())?;
 
-        let mut due_tables = Vec::new();
+        let mut due_tables = Vec::with_capacity(AUTO_FLUSH_PAGE_LIMIT);
         let mut more_due = false;
         for row in table {
             let oid: pgrx::pg_sys::Oid = row
@@ -59,6 +63,14 @@ fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool), String> {
     })
 }
 
+fn database_has_timed_auto_flush_tables() -> Result<bool, String> {
+    let statement =
+        plan_database_has_timed_auto_flush_tables().map_err(|error| error.to_string())?;
+    pgrx::Spi::get_one::<bool>(&statement.sql)
+        .map(|value| value.unwrap_or(false))
+        .map_err(|error| error.to_string())
+}
+
 /// Explicit diagnostic hook used by in-server tests. Production recovery is
 /// owned by the maintenance worker, not hidden inside ordinary queue enqueue.
 #[pgrx::pg_extern(
@@ -82,7 +94,6 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
 /// there is intentionally no worker-spawn or retry logic in this function.
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     let (due_tables, more_due) = select_due_auto_flush_tables()?;
-    let mut had_due_table = false;
     let mut completed = false;
 
     for table_oid in due_tables {
@@ -92,7 +103,6 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
         else {
             continue;
         };
-        had_due_table = true;
         pgrx::log!(
             "koldstore auto-flush: enqueued table_oid={} job={}",
             table_oid,
@@ -118,8 +128,8 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     }
 
     Ok(FlushTickResult {
-        had_due_table,
         completed,
+        timed_policy_present: database_has_timed_auto_flush_tables()?,
     })
 }
 
