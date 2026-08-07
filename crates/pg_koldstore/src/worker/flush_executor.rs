@@ -168,18 +168,20 @@ struct FlushWorkerRegistration {
 }
 
 impl FlushWorkerRegistration {
-    fn start(database_oid: u32) -> Self {
+    fn start(database_oid: u32) -> Option<Self> {
         let effective_limit = u32::try_from(crate::guc::max_parallel_flush_jobs())
             .unwrap_or(1)
             .max(1);
-        super::wake::flush_started(database_oid, effective_limit);
+        if !super::wake::flush_started(database_oid, effective_limit) {
+            return None;
+        }
         let queue_generation = super::wake::supervisor_snapshot(database_oid)
             .map(|snapshot| snapshot.flush_generation)
             .unwrap_or(0);
-        Self {
+        Some(Self {
             database_oid,
             queue_generation,
-        }
+        })
     }
 
     fn reconcile_queue(&self, outcome: ClaimOutcome) {
@@ -222,7 +224,12 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         Some(pgrx::pg_sys::Oid::from(database_oid)),
         None,
     );
-    let registration = FlushWorkerRegistration::start(database_oid);
+    let Some(registration) = FlushWorkerRegistration::start(database_oid) else {
+        pgrx::log!(
+            "koldstore flush executor db={database_oid}: stale/unreserved start; exiting before queue access"
+        );
+        return;
+    };
 
     let (claim_outcome, claimed) = match txn::run(claim_one_flush_job) {
         Ok(claimed) => claimed,
