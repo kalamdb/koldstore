@@ -2,8 +2,8 @@
 //!
 //! The cluster supervisor owns registration. At most one maintenance worker is
 //! active per database. A worker drains committed WAL through a fixed durable
-//! fence, performs database-local recovery/auto-flush scheduling, waits briefly
-//! to coalesce a write burst, and exits when the database is caught up.
+//! fence, performs database-local recovery/reconciliation only when requested,
+//! waits briefly to coalesce a write burst, and exits when the database is caught up.
 
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
@@ -97,11 +97,12 @@ fn run_maintenance_worker(database_oid: u32) {
             super::wake::mark_wal_processed(database_oid, target_wal_generation);
         }
 
-        // A SIGKILL/FATAL executor cannot run Rust Drop. The supervisor marks
-        // the database RECOVERY_REQUIRED after native child-exit notification;
-        // this transaction reclaims the durable job before redispatch.
+        let needs_reconciliation = recovery_requested || schedule_requested;
         let maintenance_result = worker_transaction_result(|| {
             if recovery_requested {
+                // A SIGKILL/FATAL executor cannot run Rust Drop. The supervisor
+                // marks RECOVERY_REQUIRED after native lifecycle reconciliation;
+                // reclaim durable owners before redispatch.
                 let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()
                     .map_err(|error| error.to_string())?;
                 if reclaimed > 0 {
@@ -113,20 +114,22 @@ fn run_maintenance_worker(database_oid: u32) {
                 super::flush_executor::reconcile_queue_after_recovery(database_oid)?;
             }
 
-            // Full RowLimit scans are needed only when configuration/recovery may
-            // have changed eligibility without a fresh WAL counter bump. Normal
-            // WAL commits already evaluate touched RowLimit tables atomically in
-            // row_counter_cache, so their maintenance pass only scans OlderThan.
-            if recovery_requested || schedule_requested {
-                super::flush_task::run_flush_scheduler_tick()
+            if needs_reconciliation {
+                super::flush_task::run_flush_scheduler_tick().map(Some)
             } else {
-                super::flush_task::run_timed_flush_scheduler_tick()
+                // Ordinary WAL is deliberately catalog-scan free here. The apply
+                // transaction already scheduled every touched policy from its
+                // post-bump counters and published any OlderThan deadline only
+                // after COMMIT.
+                Ok(None)
             }
         });
 
         match maintenance_result {
             Ok(result) => {
-                update_timed_policy_deadline(database_oid, result.next_timed_wake_at_ms);
+                if let Some(result) = result {
+                    update_timed_policy_deadline(database_oid, result.next_timed_wake_at_ms);
+                }
                 super::wake::mark_maintenance_reconciled(
                     database_oid,
                     target_maintenance_generation,
@@ -163,9 +166,9 @@ fn run_maintenance_worker(database_oid: u32) {
     }
 }
 
-/// Arms the exact earliest clock-driven auto-flush wake discovered by the
-/// database-local scheduler. Row-limit policies never get a timer: their next
-/// possible eligibility change is source WAL, which already publishes a wake.
+/// Replaces database timed-policy state after a full configuration/recovery
+/// reconciliation. Normal WAL applies publish their touched-table deadlines
+/// transactionally and do not come through this function.
 fn update_timed_policy_deadline(database_oid: u32, next_due_at_ms: Option<i64>) {
     match next_due_at_ms.filter(|deadline| *deadline > 0) {
         Some(deadline_ms) => super::wake::schedule_maintenance_at_ms(database_oid, deadline_ms),
