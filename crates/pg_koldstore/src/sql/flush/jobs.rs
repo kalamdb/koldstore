@@ -3,9 +3,8 @@
 use koldstore_common::{SeqId, TableName};
 use koldstore_flush::{
     flush_table_request, plan_cancel_jobs_for_drop, plan_clear_table_cancel_request,
-    plan_count_pending_flush_jobs, plan_enqueue_or_lookup_flush_job, plan_flush_cancel_requested,
-    plan_insert_flush_job, plan_list_jobs, plan_lookup_active_flush_job,
-    plan_mark_flush_job_cancelled, plan_mark_flush_job_completed,
+    plan_enqueue_or_lookup_flush_job, plan_flush_cancel_requested, plan_insert_flush_job,
+    plan_list_jobs, plan_mark_flush_job_cancelled, plan_mark_flush_job_completed,
     plan_mark_flush_job_completed_after_cancel, plan_mark_flush_job_failed,
     plan_mark_flush_job_running, plan_purge_old_jobs, plan_reclaim_running_flush_jobs,
     plan_request_cancel_job, plan_request_cancel_table_jobs, plan_update_flush_job_progress,
@@ -14,10 +13,19 @@ use koldstore_flush::{
 const ORPHAN_RECOVERY_PAGE: i64 = 64;
 
 #[derive(serde::Deserialize)]
-struct PendingFlushJobWire {
+struct ActiveFlushJobWire {
     id: String,
     #[serde(default)]
     force: bool,
+    #[serde(default)]
+    running: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveFlushJob {
+    id: uuid::Uuid,
+    force: bool,
+    running: bool,
 }
 
 /// Enqueues a flush job or returns the existing active job UUID.
@@ -59,12 +67,12 @@ pub(crate) fn enqueue_flush_job_if_due(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> crate::error::PgResult<Option<pgrx::Uuid>> {
-    let job_id = if let Some((existing_id, existing_force)) = lookup_active_flush_job(table_oid)? {
-        if force && !existing_force {
+    let job_id = if let Some(existing) = lookup_active_flush_job(table_oid)? {
+        if force && !existing.force {
             // Upgrade pending force intent while preserving the same active UUID.
             Some(enqueue_or_lookup_flush_job(table_oid, true)?)
         } else {
-            Some(crate::spi::uuid_to_pgrx(existing_id))
+            Some(crate::spi::uuid_to_pgrx(existing.id))
         }
     } else {
         if !force {
@@ -84,34 +92,66 @@ pub(crate) fn enqueue_flush_job_if_due(
 }
 
 /// Looks up a committed active flush job without inserting.
+///
+/// Status is decoded in the same scalar query so a normal pending claim does not
+/// need a speculative reclaim UPDATE before discovering there is nothing to reclaim.
 fn lookup_active_flush_job(
     table_oid: pgrx::pg_sys::Oid,
-) -> crate::error::PgResult<Option<(uuid::Uuid, bool)>> {
+) -> crate::error::PgResult<Option<ActiveFlushJob>> {
     use pgrx::datum::DatumWithOid;
 
-    let lookup =
-        plan_lookup_active_flush_job().map_err(crate::error::PgAdapterError::from_display)?;
-    let existing = crate::spi::select_one::<String>(&lookup, &[DatumWithOid::from(table_oid)])?
-        .filter(|value| !value.is_empty());
+    let existing = pgrx::Spi::get_one_with_args::<String>(
+        r#"
+SELECT COALESCE((
+    SELECT jsonb_build_object(
+        'id', id::text,
+        'force', COALESCE((payload->>'force')::boolean, false),
+        'running', status = 'running'
+    )::text
+    FROM koldstore.jobs
+    WHERE table_oid = $1::oid
+      AND scope_key = ''
+      AND job_type = 'flush'
+      AND status IN ('pending', 'running')
+    ORDER BY updated_at, id
+    LIMIT 1
+), '')
+"#,
+        &[DatumWithOid::from(table_oid)],
+    )
+    .map_err(crate::error::PgAdapterError::from_display)?
+    .filter(|value| !value.is_empty());
     let Some(existing) = existing else {
         return Ok(None);
     };
-    let wire: PendingFlushJobWire = serde_json::from_str(&existing)?;
-    Ok(Some((uuid::Uuid::parse_str(&wire.id)?, wire.force)))
+    let wire: ActiveFlushJobWire = serde_json::from_str(&existing)?;
+    Ok(Some(ActiveFlushJob {
+        id: uuid::Uuid::parse_str(&wire.id)?,
+        force: wire.force,
+        running: wire.running,
+    }))
 }
 
 /// Looks up a committed active flush job UUID without inserting.
 pub(crate) fn lookup_active_flush_job_uuid(
     table_oid: pgrx::pg_sys::Oid,
 ) -> crate::error::PgResult<Option<pgrx::Uuid>> {
-    Ok(lookup_active_flush_job(table_oid)?.map(|(id, _)| crate::spi::uuid_to_pgrx(id)))
+    Ok(lookup_active_flush_job(table_oid)?.map(|job| crate::spi::uuid_to_pgrx(job.id)))
 }
 
-/// Counts due pending flush jobs for executor spawn budgeting.
-pub(crate) fn count_pending_flush_jobs() -> crate::error::PgResult<i64> {
-    let statement =
-        plan_count_pending_flush_jobs().map_err(crate::error::PgAdapterError::from_display)?;
-    Ok(crate::spi::select_one::<i64>(&statement, &[])?.unwrap_or(0))
+/// Returns whether any due pending flush job exists. Recovery only needs a
+/// boolean dispatch decision; avoid counting the entire due queue.
+pub(crate) fn has_due_pending_flush_jobs() -> crate::error::PgResult<bool> {
+    Ok(pgrx::Spi::get_one::<bool>(
+        "SELECT EXISTS (\
+           SELECT 1 FROM koldstore.jobs \
+           WHERE job_type = 'flush' \
+             AND status = 'pending' \
+             AND available_at <= clock_timestamp()\
+         )",
+    )
+    .map_err(crate::error::PgAdapterError::from_display)?
+    .unwrap_or(false))
 }
 
 pub(super) fn ensure_flush_job(
@@ -120,13 +160,14 @@ pub(super) fn ensure_flush_job(
 ) -> crate::error::PgResult<(uuid::Uuid, bool)> {
     use pgrx::datum::DatumWithOid;
 
-    // The caller already owns the session table-job lock. Therefore any durable
-    // `running` row for this table has no live executor owner and the SAME job
-    // may safely be returned to pending before claim/resume.
-    reclaim_running_flush_jobs(table_oid)?;
-
-    if let Some((existing_id, existing_force)) = lookup_active_flush_job(table_oid)? {
-        return Ok((existing_id, force || existing_force));
+    // The caller owns the session table-job lock. A `running` row therefore has
+    // no live executor owner and may be returned to pending. The overwhelmingly
+    // common `pending` path performs no reclaim write at all.
+    if let Some(existing) = lookup_active_flush_job(table_oid)? {
+        if existing.running {
+            reclaim_running_flush_jobs(table_oid)?;
+        }
+        return Ok((existing.id, force || existing.force));
     }
 
     let job_id = uuid::Uuid::new_v4();
@@ -165,11 +206,13 @@ pub(crate) fn reclaim_orphan_running_flush_jobs() -> crate::error::PgResult<u64>
                  WHERE job_type = 'flush' AND status = 'running' \
                  ORDER BY table_oid \
                  LIMIT $1",
-                Some(1),
+                // The SQL LIMIT is the recovery bound. Some(1) here previously
+                // reduced every recovery pass to a single orphan table.
+                None,
                 &[DatumWithOid::from(ORPHAN_RECOVERY_PAGE)],
             )
             .map_err(|error| error.to_string())?;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(ORPHAN_RECOVERY_PAGE as usize);
         for row in table {
             if let Some(oid) = row
                 .get::<pgrx::pg_sys::Oid>(1)
@@ -423,7 +466,7 @@ pub(crate) fn request_cancel_job(job_id: uuid::Uuid) -> crate::error::PgResult<b
     Ok(updated.is_some())
 }
 
-/// Requests cancel for all active jobs on a table. Returns affected row count.
+/// Requests cancel for all active jobs on one table. Returns affected row count.
 pub(crate) fn request_cancel_table_jobs(
     table_oid: pgrx::pg_sys::Oid,
 ) -> crate::error::PgResult<i64> {
