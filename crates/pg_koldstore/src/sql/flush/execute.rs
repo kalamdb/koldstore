@@ -406,6 +406,15 @@ fn build_manifest_and_finalize(
     client: &koldstore_storage::ObjectStoreClient,
     commit_style: FlushCommitStyle,
 ) -> Result<TableFlushBatchOutcome, String> {
+    let StreamedFlushPass {
+        total_rows_flushed,
+        last_max_seq,
+        bytes_written,
+        mirror_ops,
+        prune_max_seq,
+        pending_segment_ids,
+        manifest_path,
+    } = streamed;
     commit_style.run_spi(|| {
         // PERFORMANCE: catalog is the source of truth for publishable segments.
         let manifest = manifest_from_publishable_cold_segments(
@@ -414,15 +423,19 @@ fn build_manifest_and_finalize(
             &ctx.snapshot,
             ctx.storage.schema_version,
         )?;
+        // Move pass-owned vectors/strings directly into finalize. A pass can
+        // contain many pending segment ids or mirror-op markers; cloning them
+        // immediately before the slot-locked finalize doubles peak memory for no
+        // correctness benefit.
         let outcome = TableFlushBatchOutcome {
-            total_rows_flushed: streamed.total_rows_flushed,
-            last_max_seq: streamed.last_max_seq,
-            bytes_written: streamed.bytes_written,
-            mirror_ops: streamed.mirror_ops.clone(),
-            prune_max_seq: streamed.prune_max_seq,
+            total_rows_flushed,
+            last_max_seq,
+            bytes_written,
+            mirror_ops,
+            prune_max_seq,
             manifest,
-            manifest_path: streamed.manifest_path.clone(),
-            pending_segment_ids: streamed.pending_segment_ids.clone(),
+            manifest_path,
+            pending_segment_ids,
         };
         finalize_flush(table_oid, ctx, &outcome, client)?;
         Ok(outcome)
@@ -634,16 +647,14 @@ fn with_slot_lock_retry<T>(body: impl FnOnce() -> Result<T, String>) -> Result<T
     Err("flush finalize could not acquire slot lock before deadline".to_string())
 }
 
-/// Drops flush-scoped caches and asks the allocator to return free pages.
+/// Drops flush-scoped caches and requests allocator page release.
 ///
-/// Call after each pass and again when the job finishes so large Parquet /
-/// manifest allocations do not stay pinned in the backend RSS.
-///
+/// Calls are safe at pass boundaries: allocator trimming is coalesced in the
+/// memory module, so a multi-pass job does not walk glibc arenas on every pass.
 /// Relcache broadcast requires an open transaction; between Short SPI commits
 /// only the backend-local caches are cleared.
 pub(crate) fn release_flush_memory(table_oid: pgrx::pg_sys::Oid) {
     crate::catalog::cache::invalidate_table_globally(table_oid);
-    crate::memory::mark_heap_trim_pending();
     crate::memory::release_process_heap();
 }
 
@@ -923,7 +934,11 @@ pub(crate) fn flush_table_pg_impl(
             else {
                 return Ok(FlushTableResponse::not_due(force, execution));
             };
-            spawn_queue_flush_executor_best_effort();
+            // Foreground backends never register or wait for workers. Enqueue
+            // marks FLUSH_QUEUE_DIRTY transaction-locally and COMMIT publishes a
+            // generation to the static supervisor. If registration is under
+            // pressure the durable job remains pending and supervisor backoff
+            // retries without delaying this client transaction.
             let estimate = super::spi::flush_progress_total_estimate(table_oid, force).ok();
             Ok(FlushTableResponse {
                 ok: true,
@@ -932,7 +947,7 @@ pub(crate) fn flush_table_pg_impl(
                 force,
                 execution,
                 reason: Some(
-                    "job enqueued; poll koldstore.jobs / table_status for completion and errors"
+                    "job durably enqueued; supervisor dispatches a one-shot executor after commit"
                         .to_string(),
                 ),
                 error: None,
@@ -953,71 +968,39 @@ struct FlushJobSummary {
 fn load_flush_job_summary(job_id: pgrx::Uuid) -> Result<FlushJobSummary, String> {
     use pgrx::datum::DatumWithOid;
 
-    let row = pgrx::Spi::get_one_with_args::<String>(
-        "SELECT CAST(jsonb_build_object(\
-            'status', status,\
-            'rows_flushed', rows_flushed,\
-            'progress_total', progress_total,\
-            'error_trace', error_trace\
-         ) AS text) FROM koldstore.jobs WHERE id = $1",
-        &[DatumWithOid::from(job_id)],
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| format!("flush job {job_id} not found after flush"))?;
-    let value: serde_json::Value = serde_json::from_str(&row).map_err(|error| error.to_string())?;
-    Ok(FlushJobSummary {
-        status: value
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string(),
-        rows_flushed: value
-            .get("rows_flushed")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        progress_total: value
-            .get("progress_total")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0),
-        error_trace: value
-            .get("error_trace")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
+    pgrx::Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT status, rows_flushed, progress_total, error_trace \
+                 FROM koldstore.jobs WHERE id = $1::uuid LIMIT 1",
+                Some(1),
+                &[DatumWithOid::from(job_id)],
+            )
+            .map_err(|error| error.to_string())?;
+        let first = table.first();
+        let status = first
+            .get::<String>(1)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("flush job {job_id} not found after flush"))?;
+        let rows_flushed = first
+            .get::<i64>(2)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0);
+        let progress_total = first
+            .get::<i64>(3)
+            .map_err(|error| error.to_string())?
+            .unwrap_or(0);
+        let error_trace = first
+            .get::<String>(4)
+            .map_err(|error| error.to_string())?
+            .filter(|value| !value.is_empty());
+        Ok(FlushJobSummary {
+            status,
+            rows_flushed,
+            progress_total,
+            error_trace,
+        })
     })
-}
-
-/// Retries dynamic flush-executor registration under transient worker-slot pressure.
-///
-/// Parallel E2E / CI often exhausts `max_worker_processes` briefly. A single failed
-/// `load_dynamic` used to leave the job pending until the coordinator's next tick,
-/// which races failpoint barrier waits (`wait:after_select_rows`). Best-effort
-/// retries keep queue `flush_table` from silently parking work with no executor.
-fn spawn_queue_flush_executor_best_effort() {
-    const ATTEMPTS: u32 = 12;
-    for attempt in 1..=ATTEMPTS {
-        match crate::worker::spawn_flush_executor_if_needed() {
-            Ok(true) => return,
-            Ok(false) => {
-                // No pending work left to spawn for, or this database is already
-                // at max_parallel_flush_jobs with live executors.
-                return;
-            }
-            Err(error) => {
-                pgrx::warning!(
-                    "koldstore flush_table: spawn flush executor attempt {attempt}/{ATTEMPTS} failed: {error}"
-                );
-                if attempt == ATTEMPTS {
-                    return;
-                }
-                // Back off so other DBs' one-shot executors can exit and free slots.
-                let delay_us = 25_000_i64.saturating_mul(i64::from(attempt));
-                unsafe {
-                    pgrx::pg_sys::pg_usleep(delay_us);
-                }
-            }
-        }
-    }
 }
 
 fn flush_already_in_progress_message(table_oid: pgrx::pg_sys::Oid) -> String {
