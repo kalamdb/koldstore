@@ -194,7 +194,7 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
             .await;
         let _ = flush_peer
             .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
+                "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                 &[&flush_relation],
             )
             .await;
@@ -252,7 +252,7 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
     // flush_table returns uuid; cast to text like other E2E flush callers.
     let flushed = client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)::text",
+            "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
             &[&relation],
         )
         .await
@@ -368,7 +368,7 @@ async fn postmaster_restart_manual_queue_flush_after_inserts_completes() -> Resu
             .await;
         let _ = flush_peer
             .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
                 &[&flush_relation],
             )
             .await;
@@ -417,7 +417,7 @@ async fn postmaster_restart_manual_queue_flush_after_inserts_completes() -> Resu
     // Manual flush only — no recover_segments, no auto-flush wait.
     let job_id: String = client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+            "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
             &[&relation],
         )
         .await
@@ -458,7 +458,7 @@ async fn postmaster_restart_manual_queue_flush_after_inserts_completes() -> Resu
         .context("second-wave inserts")?;
     let second_job: String = client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+            "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
             &[&relation],
         )
         .await

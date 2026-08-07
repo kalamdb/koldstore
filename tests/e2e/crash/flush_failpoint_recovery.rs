@@ -1,4 +1,8 @@
 //! Crash/failpoint recovery: arm flush failpoints, recover, retry, validate rows.
+//!
+//! Takes [`crate::common::acquire_cluster_exclusive`] so assert-enabled Postgres
+//! does not abort the shared postmaster when sibling tests race logical decoding
+//! (`ReorderBufferInvalidate` / `txn->ninvalidations == 0`).
 use crate::common;
 
 use anyhow::{bail, Context, Result};
@@ -37,6 +41,10 @@ fn selected_failpoints() -> Vec<String> {
 
 #[tokio::test]
 async fn flush_failpoint_recovery_preserves_visible_rows() -> Result<()> {
+    // Serialize against async-mirror failpoint tests: a concurrent soft-fail
+    // apply + wait_for_async_mirror can trip a Postgres assert build and take
+    // down every parallel E2E connection with "connection closed".
+    let _cluster = common::acquire_cluster_exclusive()?;
     common::require_pgrx_server().await?;
 
     for target in common::scenario_pg_matrix() {
@@ -94,7 +102,7 @@ async fn run_one_failpoint(target: common::PgTarget, failpoint: &str) -> Result<
     let flush_result = db
         .client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)::text",
+            "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
             &[&table.relation],
         )
         .await;

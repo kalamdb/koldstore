@@ -68,7 +68,7 @@ semantics because flushed rows are not expected to leave the hot heap.
 ### What manifest metadata cannot do today
 
 Segment `row_count`, manifest generation state, and per-column min/max stats can
-help pruning and `koldstore.describe_table`, but they cannot reliably answer
+help pruning and `koldstore.table_status`, but they cannot reliably answer
 “does this unique value already exist in cold storage?” on the insert path.
 Min/max stats can only prove absence when a value falls outside every cold
 segment range; values inside the observed range still require a future dedicated
@@ -192,6 +192,19 @@ documents/user_id=123/year=2026/month=01/segment-0001.usearch
 ```
 
 That keeps rebuilds, compaction, deletes, and tenant-scoped search manageable.
+
+## Memory on small machines
+
+Flushing millions of rows is streaming: peak extension memory tracks
+**`max_rows_per_file`**, not total flush volume. Large demo/bench file sizes
+(hundreds of thousands to 1M rows per Parquet segment) intentionally raise RSS;
+product defaults (`max_rows_per_file = 1000`) keep the spike small. Idle
+container RSS near ~200 MiB after work is usually PostgreSQL `shared_buffers`
+(default 128 MB), which does not shrink while the postmaster is up.
+
+See [Memory and small machines](performance.md#memory-and-small-machines) for
+knobs (`max_parallel_flush_jobs`, async apply tick budgets, merge seen-key cap)
+and a small-host checklist.
 
 ## Behavior Summary
 

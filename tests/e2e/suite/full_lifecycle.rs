@@ -242,7 +242,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         let _step = common::log_step_always(format!(
             "pg{pg_version}: verify cold storage covers all {TOTAL_ROWS} flushed rows"
         ));
-        let status = common::describe_table(client, &relation).await?;
+        let status = common::table_status(client, &relation).await?;
         assert_eq!(status.hot_rows, 0);
         assert_eq!(status.mirror_rows, 0);
         assert!(
@@ -257,7 +257,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
             "pg{pg_version}: verify merged SELECT returns all {TOTAL_ROWS} rows"
         ));
         assert_sample_rows_readable(client, pg_version).await?;
-        let status = common::describe_table(client, &relation).await?;
+        let status = common::table_status(client, &relation).await?;
         assert_eq!(status.hot_rows, 0, "merged read should see pruned hot heap");
         assert_eq!(
             status.mirror_rows, 0,
@@ -265,7 +265,7 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
         );
         assert!(
             status.cold_row_count >= TOTAL_ROWS,
-            "describe_table cold rows should cover flushed data, got {:?}",
+            "table_status cold rows should cover flushed data, got {:?}",
             status
         );
     }

@@ -129,14 +129,14 @@ fn manage_describe_flush_unmanage_roundtrip_preserves_values() {
     assert_eq!(before, "alpha,beta");
 
     let described = Spi::get_one::<pgrx::JsonB>(&format!(
-        "SELECT koldstore.describe_table('{relation}'::regclass)"
+        "SELECT koldstore.table_status('{relation}'::regclass)"
     ))
-    .expect("describe_table")
-    .expect("describe_table non-null");
+    .expect("table_status")
+    .expect("table_status non-null");
     let described_json = described.0.to_string();
     assert!(
         described_json.contains("storage_binding") && described_json.contains("mirror_rows"),
-        "describe_table should report managed storage/mirror state: {described_json}"
+        "table_status should report managed storage/mirror state: {described_json}"
     );
 
     let flushed = flush_table_rows(&relation, true);

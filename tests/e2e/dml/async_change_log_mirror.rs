@@ -354,7 +354,7 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
             .query_one(
                 "SELECT \
                    EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'koldstore_async_mirror'), \
-                   EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = koldstore.async_mirror_slot_name())",
+                   EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = (koldstore.async_mirror_status()->>'slot_name'))",
                 &[],
             )
             .await?;
@@ -387,7 +387,7 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
             .query_one(
                 "SELECT \
                    EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'koldstore_async_mirror'), \
-                   EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = koldstore.async_mirror_slot_name())",
+                   EXISTS (SELECT 1 FROM pg_replication_slots WHERE slot_name = (koldstore.async_mirror_status()->>'slot_name'))",
                 &[],
             )
             .await?;

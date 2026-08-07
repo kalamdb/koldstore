@@ -52,7 +52,7 @@ Useful SQL entry points:
 
 | Entry point | Purpose |
 | --- | --- |
-| `koldstore.flush_table(table)` | Enqueue or reuse the active flush job, spawn an executor when needed, return its UUID. |
+| `koldstore.flush_table(table)` | Enqueue or reuse the active flush job, spawn an executor when needed, return a jsonb status object (`job_id`, `status`, `error`, …). |
 | `koldstore.enqueue_flush_job(table)` | Same durable enqueue/lookup without spawning executors. |
 | `koldstore.list_jobs(statuses, job_types, table)` | Read job status and progress as JSON. |
 | `koldstore.cancel_job(id)` | Request cooperative cancellation of one active job. |

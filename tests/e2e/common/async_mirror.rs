@@ -192,7 +192,7 @@ pub async fn async_mirror_progress(client: &tokio_postgres::Client) -> Result<As
              LEFT JOIN koldstore.async_mirror_state st \
                ON st.database_oid = (SELECT oid FROM pg_catalog.pg_database \
                                      WHERE datname = current_database()) \
-             WHERE s.slot_name = koldstore.async_mirror_slot_name()",
+             WHERE s.slot_name = (koldstore.async_mirror_status()->>'slot_name')",
             &[],
         )
         .await?;

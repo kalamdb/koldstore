@@ -45,7 +45,7 @@ async fn undersized_excess_below_max_rows_per_file_does_not_enqueue() -> Result<
         let job: Option<String> = db
             .client
             .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
+                "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                 &[&relation],
             )
             .await?
@@ -130,7 +130,7 @@ async fn min_flush_rows_blocks_enqueue_until_threshold() -> Result<()> {
         let job: Option<String> = db
             .client
             .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass)::text",
+                "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                 &[&relation],
             )
             .await?

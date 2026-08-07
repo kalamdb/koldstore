@@ -7,7 +7,7 @@
 //! Coverage (compare `plain_heap_*` vs `managed_hot_*` absolute times):
 //! - plain heap baselines (insert / count / PK lookup / update)
 //! - managed hot DML + scan (insert / count / PK / update / delete / ORDER BY LIMIT)
-//! - session + catalog (version, snowflake, GUC, describe_table, EXPLAIN)
+//! - session + catalog (version, snowflake, GUC, table_status, EXPLAIN)
 //! - lifecycle (`lifecycle_manage_table`, `lifecycle_unmanage_table`, `lifecycle_flush_table_force`)
 //! - change feed (`changes_since_hot_mirror`, cold first-page and cursor-page reads)
 //!

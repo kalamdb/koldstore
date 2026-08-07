@@ -286,7 +286,7 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
   "pruning_columns": ["created_at"],
   "bloom_filter_columns": ["id", "tenant_id"],
   "cold_metadata": {
-    "stats_columns": [{"column_id": 4, "name": "created_at"}],
+    "stats_columns": [{"column_id": 1, "name": "id"}, {"column_id": 4, "name": "created_at"}],
     "bloom_filter_columns": [{"column_id": 1, "name": "id"}, {"column_id": 3, "name": "tenant_id"}],
     "indexed_columns": [{
       "column_id": 4,
@@ -302,9 +302,9 @@ Persisted via `RegistrationMetadata::prepare` (`koldstore-migrate/catalog/regist
 Optional operator lists `pruning_columns` and `bloom_filter_columns` are SQL
 column names accepted by `manage_table`. Registration resolves them into
 `cold_metadata` (stable `column_id`s). Primary-key columns are always forced into
-the effective Bloom set. Omitting the lists keeps auto-derived PK ∪ indexed
-behavior. Schema refresh fails closed if a listed column was dropped or renamed
-away.
+the effective stats and Bloom sets so cold segment-index PK probes stay correct.
+Omitting the lists keeps auto-derived PK ∪ indexed behavior. Schema refresh fails
+closed if a listed column was dropped or renamed away.
 
 `FlushPolicy` is read back with `FlushPolicy::from_value(&options)` — not a
 separate column. Flat `hot_row_limit` keys are not accepted; only tagged
@@ -367,7 +367,7 @@ Serde: `#[serde(rename_all = "snake_case")]` on job phase enums.
 |----------|---------|-------|
 | `koldstore.unmanage_table` | deactivated schema count | Drops mirror, triggers, RLS |
 | `koldstore.register_storage` | storage UUID | Prerequisite |
-| `koldstore.describe_table` | jsonb | Post-manage diagnostics |
+| `koldstore.table_status` | jsonb | Post-manage diagnostics |
 | `koldstore.flush_table` | job UUID | First cold write (see [flushing-table.md](flushing-table.md)) |
 
 ---

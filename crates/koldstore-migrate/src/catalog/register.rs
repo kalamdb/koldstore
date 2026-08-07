@@ -801,11 +801,12 @@ pub fn cold_metadata_config(
 
 /// Builds cold metadata, applying optional operator pruning/Bloom column lists.
 ///
-/// When an operator list is `None`, candidates are auto-derived (indexed for
-/// stats; PK ∪ indexed for Bloom). When `Some`, the list replaces the
+/// When an operator list is `None`, candidates are auto-derived as
+/// PK ∪ indexed for both stats and Bloom. When `Some`, the list replaces the
 /// auto-derived set for that field after resolving names against `columns`
 /// (falling back to PK/indexed refs). Primary-key columns are always forced
-/// into the Bloom set.
+/// into both the stats and Bloom sets so cold segment-index PK / order-column
+/// probes remain correct after flush.
 ///
 /// # Errors
 ///
@@ -852,9 +853,11 @@ fn cold_metadata_config_with_overrides(
     pruning_columns: Option<&[ColumnRef]>,
     bloom_filter_columns: Option<&[ColumnRef]>,
 ) -> ColdMetadataConfig {
+    // PK must stay in stats_columns: flush writes `cold_segment_index` from this
+    // list, and Exact-PK / order-column segment prune looks up those bounds.
     let stats_columns = match pruning_columns {
-        Some(columns) => dedupe_column_refs(columns.iter()),
-        None => dedupe_column_refs(indexed_columns.iter()),
+        Some(columns) => dedupe_column_refs(primary_key.iter().chain(columns.iter())),
+        None => dedupe_column_refs(primary_key.iter().chain(indexed_columns.iter())),
     };
     let bloom_filter_columns = match bloom_filter_columns {
         Some(columns) => dedupe_column_refs(primary_key.iter().chain(columns.iter())),
@@ -871,14 +874,16 @@ fn cold_metadata_config_with_overrides(
             (index + 1) as u32,
         ));
     }
-    for (index, column) in stats_columns.iter().enumerate() {
+    let mut secondary_ordinal = 0u32;
+    for column in &stats_columns {
         if !primary_key
             .iter()
             .any(|pk| pk.column_id == column.column_id)
         {
+            secondary_ordinal += 1;
             indexed_metadata.push(IndexedColumnMetadata::secondary_index(
                 column,
-                (index + 1) as u32,
+                secondary_ordinal,
             ));
         }
     }

@@ -1012,7 +1012,12 @@ fn explain_cold_scan(
         }
         let pages_skipped = profile.pages_skipped_by_page_index();
         if pages_skipped > 0 {
-            explain_integer(es, "Pages Skipped by Page Index", None, pages_skipped as i64);
+            explain_integer(
+                es,
+                "Pages Skipped by Page Index",
+                None,
+                pages_skipped as i64,
+            );
         }
     }
 

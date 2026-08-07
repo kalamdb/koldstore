@@ -817,7 +817,7 @@ async fn dual_flush_same_table_fails_fast_while_busy() -> Result<()> {
         let second_err = tokio::time::timeout(Duration::from_secs(5), async {
             second
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&second_relation],
                 )
                 .await
@@ -907,7 +907,7 @@ async fn parked_flush_fails_fast_other_table_on_apply_lock() -> Result<()> {
         let job_b: String = tokio::time::timeout(Duration::from_secs(15), async {
             flush_b
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&relation_b],
                 )
                 .await

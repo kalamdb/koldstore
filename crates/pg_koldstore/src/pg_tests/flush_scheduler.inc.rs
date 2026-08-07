@@ -30,7 +30,7 @@ fn flush_job_records_segment_batches_completed() {
     .expect("manage_table");
 
     let job_id = spi_get_text(&format!(
-        "SELECT koldstore.flush_table('{relation}'::regclass, force => false)::text"
+        "SELECT (koldstore.flush_table('{relation}'::regclass, force => false)->>'job_id')"
     ));
     let batches = spi_get_i64(&format!(
         "SELECT batches_completed::bigint FROM koldstore.jobs WHERE id = '{job_id}'::uuid"
@@ -93,7 +93,7 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
     .expect("manage_table");
 
     let job_id = spi_get_text(&format!(
-        "SELECT koldstore.flush_table('{relation}'::regclass, force => false)::text"
+        "SELECT (koldstore.flush_table('{relation}'::regclass, force => false)->>'job_id')"
     ));
     let jobs = spi_get_i64(&format!(
         r#"
@@ -111,7 +111,7 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
         "SELECT batches_completed::bigint FROM koldstore.jobs WHERE id = '{job_id}'::uuid"
     ));
     let hot = spi_get_i64(&format!(
-        "SELECT (koldstore.describe_table(table_name => '{relation}'::regclass)->>'hot_rows')::bigint"
+        "SELECT (koldstore.table_status(table_name => '{relation}'::regclass)->>'hot_rows')::bigint"
     ));
 
     assert_eq!(jobs, 1, "expected one completed catch-up job, got {jobs}");

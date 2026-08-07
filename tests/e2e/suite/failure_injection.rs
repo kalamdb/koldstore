@@ -80,7 +80,7 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
             .context("blocking path must be valid utf-8")?;
         db.client
             .query_one(
-                "SELECT koldstore.alter_storage_location($1, $2, '{}'::jsonb)",
+                "SELECT koldstore.alter_storage_location($1, $2, '{}'::jsonb, false)",
                 &[&db.storage_name, &blocking_path],
             )
             .await?;

@@ -152,7 +152,7 @@ async fn queue_flush_exposes_live_job_progress_while_parked() -> Result<()> {
         let job_id: String = db
             .client
             .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
                 &[&table.relation],
             )
             .await

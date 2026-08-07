@@ -88,7 +88,7 @@ pub async fn row_count_from_sql(client: &Client, sql: &str) -> Result<i64> {
 
 /// Counts rows stored on the hot heap, bypassing merge-scan cold reads.
 ///
-/// Uses `koldstore.describe_table` because managed-table `SELECT count(*)`
+/// Uses `koldstore.table_status` because managed-table `SELECT count(*)`
 /// routes through KoldMergeScan even with `ONLY`.
 ///
 /// # Errors
@@ -98,7 +98,7 @@ pub async fn hot_row_count(client: &Client, relation: &str) -> Result<i64> {
     let row = client
         .query_one(
             r#"
-            SELECT (koldstore.describe_table(table_name => $1::text::regclass)::jsonb->>'hot_rows')::bigint
+            SELECT (koldstore.table_status(table_name => $1::text::regclass)::jsonb->>'hot_rows')::bigint
             "#,
             &[&relation],
         )

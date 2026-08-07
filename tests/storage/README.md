@@ -114,7 +114,7 @@ The database GUC is reset when the run finishes.
 An untimed `CHECKPOINT` precedes each compared DML side so writeback from the
 previous side is not charged to the next measurement.
 
-Visibility after flush is checked with point lookups plus `describe_table`
+Visibility after flush is checked with point lookups plus `table_status`
 hot+cold counters — not `SELECT count(*)` through `KoldMergeScan`, which still
 materializes the full result set and will OOM / drop the session at multi-million
 row scale.

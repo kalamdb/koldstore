@@ -103,7 +103,7 @@ async fn async_mixed_load_soak_keeps_invariants() -> Result<()> {
                 let relation = &flush_relations[i % flush_relations.len()];
                 let _ = flush_peer
                     .query_one(
-                        "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                        "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
                         &[relation],
                     )
                     .await;

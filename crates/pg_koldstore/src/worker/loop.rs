@@ -155,7 +155,7 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                     Err(error) => {
                         pending_drain_budget.reset();
                         crate::observability::record_async_apply_error();
-                        pgrx::log!(
+                        pgrx::warning!(
                             "koldstore async mirror apply soft-failed (will retry): {error}"
                         );
                         apply_backoff_ms = next_soft_fail_backoff_ms(apply_backoff_ms);

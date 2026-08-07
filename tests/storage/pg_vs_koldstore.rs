@@ -637,7 +637,7 @@ async fn run_managed_only_body(
         format_bytes(flush.peak_rss_bytes as i64),
     ));
 
-    let status = common::describe_table(&db.client, managed).await?;
+    let status = common::table_status(&db.client, managed).await?;
     anyhow::ensure!(
         status.hot_rows > 0,
         "expected hot rows to remain after policy flush, got {status:?}"
@@ -763,8 +763,8 @@ async fn run_managed_only_body(
 
     let final_status = {
         let _step =
-            common::log_step_always("storage_cmp: verify hot+cold coverage via describe_table");
-        common::describe_table(&db.client, managed).await?
+            common::log_step_always("storage_cmp: verify hot+cold coverage via table_status");
+        common::table_status(&db.client, managed).await?
     };
     anyhow::ensure!(
         final_status.hot_rows > 0,
@@ -913,7 +913,7 @@ async fn run_storage_comparison_body(
         format_bytes(flush.peak_rss_bytes as i64),
     ));
 
-    let status = common::describe_table(&db.client, managed).await?;
+    let status = common::table_status(&db.client, managed).await?;
     anyhow::ensure!(
         status.hot_rows > 0,
         "expected hot rows to remain after policy flush, got {status:?}"
@@ -1091,8 +1091,8 @@ async fn run_storage_comparison_body(
     // to confirm flush produced hot + cold coverage.
     let final_status = {
         let _step =
-            common::log_step_always("storage_cmp: verify hot+cold coverage via describe_table");
-        common::describe_table(&db.client, managed).await?
+            common::log_step_always("storage_cmp: verify hot+cold coverage via table_status");
+        common::table_status(&db.client, managed).await?
     };
     anyhow::ensure!(
         final_status.hot_rows > 0,
@@ -1435,7 +1435,7 @@ async fn checkpoint_before_timing(client: &Client, phase: &str) -> Result<()> {
 async fn flush_table(client: &Client, relation: &str) -> Result<i64> {
     let row = client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)::text",
+            "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
             &[&relation],
         )
         .await?;
@@ -1596,7 +1596,7 @@ async fn flush_until_hot_limit(
     let mut after_rss_bytes = 0_u64;
 
     for job in 1..=MAX_FLUSH_JOBS {
-        let status = common::describe_table(client, relation).await?;
+        let status = common::table_status(client, relation).await?;
         if status.hot_rows <= hot_limit {
             if job == 1 {
                 anyhow::bail!(
@@ -1627,7 +1627,7 @@ async fn flush_until_hot_limit(
         }
     }
 
-    let status = common::describe_table(client, relation).await?;
+    let status = common::table_status(client, relation).await?;
     anyhow::ensure!(
         status.hot_rows <= hot_limit,
         "flush did not drain to hot_limit (hot_rows={}, hot_limit={hot_limit}, cold={}, rows_flushed={total_rows})",

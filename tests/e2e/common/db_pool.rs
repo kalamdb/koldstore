@@ -12,6 +12,11 @@
 //! exclusive flock on a shared cluster lock file. Ordinary fixtures hold a
 //! shared lock on that same file, so SIGKILL / postmaster-restart coverage
 //! cannot run while sibling tests still hold live connections.
+//!
+//! The same exclusive lock is used for async-mirror / flush failpoint tests that
+//! stress logical decoding: on assert-enabled pgrx builds a `ReorderBuffer`
+//! assert abort restarts the whole cluster and surfaces as cascading
+//! `connection closed` failures under parallel nextest.
 
 use std::fs::File;
 use std::path::PathBuf;

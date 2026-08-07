@@ -26,7 +26,7 @@ fn sql_exposes_operational_functions() {
         "koldstore.enqueue_flush_job",
         "koldstore.flush_table",
         "koldstore.recover_segments",
-        "koldstore.describe_table",
+        "koldstore.table_status",
         "koldstore.manage_table",
         "koldstore.unmanage_table",
     ] {
@@ -45,7 +45,7 @@ fn operational_functions_build_parameterized_catalog_plans() {
     let table = TableName::parse("app.items").unwrap();
     let qualified = QualifiedTableName::parse("app.items").unwrap();
     let mirror = QualifiedTableName::parse("koldstore.items__cl").unwrap();
-    let status = koldstore_flush::ops::describe_table_plan(&qualified, &mirror).unwrap();
+    let status = koldstore_flush::ops::table_status_plan(&qualified, &mirror).unwrap();
     assert_eq!(status.table_name.as_str(), "app.items");
     assert!(status.statement.sql.contains("jsonb_build_object"));
     assert!(status.statement.sql.contains("'hot_rows'"));
@@ -57,7 +57,7 @@ fn operational_functions_build_parameterized_catalog_plans() {
     assert!(status.statement.sql.contains("'cold_row_count'"));
     assert!(
         status.statement.sql.contains("'duration_ms'"),
-        "describe_table jobs should expose duration_ms"
+        "table_status jobs should expose duration_ms"
     );
     assert!(status.statement.sql.contains("\"app\".\"items\""));
     assert!(status.statement.sql.contains("\"koldstore\".\"items__cl\""));

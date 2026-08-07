@@ -121,12 +121,16 @@ SELECT
   to_regclass('koldstore.row_events') IS NOT NULL AS global_row_events_exists;
 
 \echo '==> run flush jobs (force)'
-SELECT koldstore.flush_table(table_name => 'demo.conversations'::regclass, force => true) AS conversations_flush_job;
-SELECT koldstore.flush_table(table_name => 'demo.messages'::regclass, force => true) AS messages_flush_job;
+SELECT jsonb_pretty(koldstore.flush_table(
+  table_name => 'demo.conversations'::regclass, force => true
+)) AS conversations_flush;
+SELECT jsonb_pretty(koldstore.flush_table(
+  table_name => 'demo.messages'::regclass, force => true
+)) AS messages_flush;
 
 \echo '==> table status'
-SELECT 'demo.conversations' AS table_name, koldstore.describe_table(table_name => 'demo.conversations'::regclass);
-SELECT 'demo.messages' AS table_name, koldstore.describe_table(table_name => 'demo.messages'::regclass);
+SELECT 'demo.conversations' AS table_name, koldstore.table_status(table_name => 'demo.conversations'::regclass);
+SELECT 'demo.messages' AS table_name, koldstore.table_status(table_name => 'demo.messages'::regclass);
 
 \echo '==> queued flush jobs'
 SELECT

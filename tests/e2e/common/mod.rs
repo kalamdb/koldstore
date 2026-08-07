@@ -7,7 +7,6 @@ mod catalog;
 mod cluster;
 mod db;
 mod db_pool;
-mod describe_table;
 pub mod equality;
 mod flush_executor;
 mod log;
@@ -16,6 +15,7 @@ mod minio;
 mod oracle;
 mod peer;
 mod sql;
+mod table_status;
 
 pub use assertions::{
     assert_kold_merge_scan_cold_reads, assert_kold_merge_scan_executed_cold_reads,
@@ -43,13 +43,10 @@ pub use cluster::{
     PgrxServer,
 };
 pub use db::{
-    flush_table_job_id, is_flush_entry_lock_busy, wait_for_flush_job_terminal, FixtureStorage,
-    ManagedTable, TestDb,
+    flush_table_job_id, is_flush_entry_lock_busy, is_flush_slot_lock_contention,
+    wait_for_flush_job_terminal, FixtureStorage, ManagedTable, TestDb,
 };
 pub use db_pool::{acquire_cluster_exclusive, ClusterExclusiveGuard};
-pub use describe_table::{
-    assert_cold_rows_at_least, assert_flush_pruned_hot_storage, describe_table, TableStorageStatus,
-};
 pub use equality::{
     assert_pk_unique, assert_relations_equal, assert_row_counts_equal, relation_row_count,
 };
@@ -70,4 +67,7 @@ pub use sql::{
     assert_index_scan, explain, explain_analyze, explain_analyze_json,
     explain_with_seqscan_disabled, hot_row_count, relation_size, row_count, row_count_from_sql,
     RelationSize, SQL_DEFAULT_COLD_OBJECT_KEY, SQL_DEFAULT_MANIFEST_OBJECT_KEY,
+};
+pub use table_status::{
+    assert_cold_rows_at_least, assert_flush_pruned_hot_storage, table_status, TableStorageStatus,
 };

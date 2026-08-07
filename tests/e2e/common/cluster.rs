@@ -362,7 +362,7 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
               FROM pg_proc status_proc
               JOIN pg_namespace status_ns ON status_ns.oid = status_proc.pronamespace
               WHERE status_ns.nspname = 'koldstore'
-                AND status_proc.proname = 'describe_table'
+                AND status_proc.proname = 'table_status'
             )
             AND EXISTS (
               SELECT 1
@@ -382,7 +382,7 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
               JOIN pg_namespace flush_ns ON flush_ns.oid = flush_proc.pronamespace
               WHERE flush_ns.nspname = 'koldstore'
                 AND flush_proc.proname = 'flush_table'
-                AND flush_proc.prorettype = 'uuid'::regtype
+                AND flush_proc.prorettype = 'jsonb'::regtype
                 AND 'force' = ANY (flush_proc.proargnames)
             )
             AND EXISTS (

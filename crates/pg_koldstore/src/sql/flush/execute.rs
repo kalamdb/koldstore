@@ -150,7 +150,22 @@ fn load_flush_prepared_context(
         .transpose()?;
     if let Some(cold) = cold_metadata.as_ref() {
         if !cold.stats_columns.is_empty() {
+            // Start from catalog stats, then force PK + order column so Exact-PK
+            // / migration_order_by segment-index probes never lose their bounds
+            // when operators only listed secondary pruning columns.
             indexed_columns = cold.stats_columns.clone();
+            for column in catalog
+                .columns
+                .iter()
+                .filter(|column| column.is_primary_key)
+            {
+                if !indexed_columns
+                    .iter()
+                    .any(|existing| existing.column_id == column.column_id)
+                {
+                    indexed_columns.push(ColumnRef::new(column.column_id, column.name.clone()));
+                }
+            }
             if let Some(order_column_id) = snapshot.segment_order_column_id {
                 if let Some(column) = catalog
                     .columns
@@ -161,8 +176,7 @@ fn load_flush_prepared_context(
                         .iter()
                         .any(|existing| existing.column_id == column.column_id)
                     {
-                        indexed_columns
-                            .push(ColumnRef::new(column.column_id, column.name.clone()));
+                        indexed_columns.push(ColumnRef::new(column.column_id, column.name.clone()));
                     }
                 }
             }
@@ -764,10 +778,63 @@ fn run_async_prune_fence(
     Ok(())
 }
 
+/// Operator-facing `flush_table` result (JSON). Queue mode returns as soon as the
+/// job is durable; completion / storage errors appear later in `koldstore.jobs`
+/// and PostgreSQL WARNING logs.
+#[derive(Debug, Clone)]
+pub(crate) struct FlushTableResponse {
+    pub ok: bool,
+    pub job_id: Option<pgrx::Uuid>,
+    pub status: &'static str,
+    pub force: bool,
+    pub execution: &'static str,
+    pub reason: Option<String>,
+    pub error: Option<String>,
+    pub rows_flushed: Option<i64>,
+    pub estimated_rows: Option<i64>,
+}
+
+impl FlushTableResponse {
+    pub(crate) fn to_jsonb(&self) -> pgrx::JsonB {
+        pgrx::JsonB(serde_json::json!({
+            "ok": self.ok,
+            "job_id": self.job_id.map(|id| id.to_string()),
+            "status": self.status,
+            "force": self.force,
+            "execution": self.execution,
+            "reason": self.reason,
+            "error": self.error,
+            "rows_flushed": self.rows_flushed,
+            "estimated_rows": self.estimated_rows,
+        }))
+    }
+
+    fn not_due(force: bool, execution: &'static str) -> Self {
+        Self {
+            ok: true,
+            job_id: None,
+            status: "not_due",
+            force,
+            execution,
+            reason: Some(
+                "no flush work due (policy selection empty, or excess below max_rows_per_file)"
+                    .to_string(),
+            ),
+            error: None,
+            rows_flushed: None,
+            estimated_rows: Some(0),
+        }
+    }
+}
+
 pub(crate) fn flush_table_pg_impl(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
-) -> Result<Option<pgrx::Uuid>, String> {
+) -> Result<FlushTableResponse, String> {
+    let execution = match crate::guc::flush_execution_mode() {
+        crate::settings::FlushExecutionMode::Inline => "inline",
+        crate::settings::FlushExecutionMode::Queue => "queue",
+    };
     match crate::guc::flush_execution_mode() {
         crate::settings::FlushExecutionMode::Inline => {
             // Try-lock *before* enqueue. Nested inline holds an open transaction
@@ -780,10 +847,46 @@ pub(crate) fn flush_table_pg_impl(
                     .map_err(|error| error.to_string())?
             else {
                 drop(table_lock);
-                return Ok(None);
+                return Ok(FlushTableResponse::not_due(force, execution));
             };
-            flush_table_with_session_lock(table_oid, force, table_lock)?;
-            Ok(Some(job_uuid))
+            match flush_table_with_session_lock(table_oid, force, table_lock) {
+                Ok(_) => {
+                    let summary = load_flush_job_summary(job_uuid)?;
+                    Ok(FlushTableResponse {
+                        ok: summary.status != "error",
+                        job_id: Some(job_uuid),
+                        status: if summary.status == "error" {
+                            "error"
+                        } else {
+                            "completed"
+                        },
+                        force,
+                        execution,
+                        reason: None,
+                        error: summary.error_trace,
+                        rows_flushed: Some(summary.rows_flushed),
+                        estimated_rows: Some(summary.progress_total),
+                    })
+                }
+                Err(error) => {
+                    pgrx::warning!(
+                        "koldstore flush_table: inline flush failed table_oid={} job={} error={error}",
+                        table_oid.to_u32(),
+                        job_uuid
+                    );
+                    Ok(FlushTableResponse {
+                        ok: false,
+                        job_id: Some(job_uuid),
+                        status: "error",
+                        force,
+                        execution,
+                        reason: None,
+                        error: Some(error),
+                        rows_flushed: None,
+                        estimated_rows: None,
+                    })
+                }
+            }
         }
         crate::settings::FlushExecutionMode::Queue => {
             // Probe ownership without blocking on Nested jobs-row / unique-index
@@ -794,7 +897,20 @@ pub(crate) fn flush_table_pg_impl(
                     crate::sql::flush::jobs::lookup_active_flush_job_uuid(table_oid)
                         .map_err(|error| error.to_string())?
                 {
-                    return Ok(Some(existing));
+                    return Ok(FlushTableResponse {
+                        ok: true,
+                        job_id: Some(existing),
+                        status: "already_running",
+                        force,
+                        execution,
+                        reason: Some(
+                            "another backend already holds the flush lock; returning active job"
+                                .to_string(),
+                        ),
+                        error: None,
+                        rows_flushed: None,
+                        estimated_rows: None,
+                    });
                 }
                 return Err(flush_already_in_progress_message(table_oid));
             }
@@ -805,12 +921,70 @@ pub(crate) fn flush_table_pg_impl(
                 crate::sql::flush::jobs::enqueue_flush_job_if_due(table_oid, force)
                     .map_err(|error| error.to_string())?
             else {
-                return Ok(None);
+                return Ok(FlushTableResponse::not_due(force, execution));
             };
             spawn_queue_flush_executor_best_effort();
-            Ok(Some(job_uuid))
+            let estimate = super::spi::flush_progress_total_estimate(table_oid, force).ok();
+            Ok(FlushTableResponse {
+                ok: true,
+                job_id: Some(job_uuid),
+                status: "queued",
+                force,
+                execution,
+                reason: Some(
+                    "job enqueued; poll koldstore.jobs / table_status for completion and errors"
+                        .to_string(),
+                ),
+                error: None,
+                rows_flushed: None,
+                estimated_rows: estimate,
+            })
         }
     }
+}
+
+struct FlushJobSummary {
+    status: String,
+    rows_flushed: i64,
+    progress_total: i64,
+    error_trace: Option<String>,
+}
+
+fn load_flush_job_summary(job_id: pgrx::Uuid) -> Result<FlushJobSummary, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let row = pgrx::Spi::get_one_with_args::<String>(
+        "SELECT CAST(jsonb_build_object(\
+            'status', status,\
+            'rows_flushed', rows_flushed,\
+            'progress_total', progress_total,\
+            'error_trace', error_trace\
+         ) AS text) FROM koldstore.jobs WHERE id = $1",
+        &[DatumWithOid::from(job_id)],
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| format!("flush job {job_id} not found after flush"))?;
+    let value: serde_json::Value = serde_json::from_str(&row).map_err(|error| error.to_string())?;
+    Ok(FlushJobSummary {
+        status: value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        rows_flushed: value
+            .get("rows_flushed")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        progress_total: value
+            .get("progress_total")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        error_trace: value
+            .get("error_trace")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+    })
 }
 
 /// Retries dynamic flush-executor registration under transient worker-slot pressure.
@@ -941,8 +1115,10 @@ fn run_flush_after_claim(
     match flush_after_claim(table_oid, &claimed, started, table, commit_style) {
         Ok(()) => Ok(job_uuid),
         Err(error) => {
-            pgrx::log!(
-                "koldstore flush: failed table={table} job={job_id} attempt={attempt_token} duration={} error={error}",
+            // WARNING so Docker Desktop / default log viewers surface the
+            // failure (LOG is easy to miss). Job row also keeps error_trace.
+            pgrx::warning!(
+                "koldstore flush: FAILED table={table} job={job_id} attempt={attempt_token} duration={} error={error}",
                 format_flush_duration(started)
             );
             commit_style.run_spi(|| {

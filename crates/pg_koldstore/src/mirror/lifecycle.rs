@@ -491,19 +491,14 @@ fn try_lock_database(namespace: i32, database_oid: u32) -> Result<bool, String> 
     .ok_or_else(|| "database advisory try-lock returned no row".to_string())
 }
 
-/// Returns the current database's async slot name.
-#[must_use]
-pub(super) fn current_slot_name() -> String {
-    slot_name(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())
-}
-
 /// Returns the logical-slot name KoldStore creates for this database.
 ///
-/// SQL contract: `koldstore.async_mirror_slot_name()` returns text and does not
-/// mutate replication state.
-#[pgrx::pg_extern(name = "async_mirror_slot_name", schema = "koldstore")]
-pub fn async_mirror_slot_name() -> String {
-    current_slot_name()
+/// Not exposed as a public SQL function — use
+/// `koldstore.async_mirror_status()->>'slot_name'` or
+/// `koldstore.table_status(...)->'async_mirror'->>'slot_name'`.
+#[must_use]
+pub(crate) fn current_slot_name() -> String {
+    slot_name(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())
 }
 
 /// Removes automatic async-mirror infrastructure after async tables are gone.

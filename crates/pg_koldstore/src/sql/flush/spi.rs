@@ -112,7 +112,9 @@ pub(super) fn active_cold_metadata(
     if value.is_null() {
         return Ok(None);
     }
-    serde_json::from_value(value.clone()).map(Some).map_err(|error| error.to_string())
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 fn active_options_json(table_oid: pgrx::pg_sys::Oid) -> Result<Option<serde_json::Value>, String> {

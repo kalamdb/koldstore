@@ -120,6 +120,9 @@ async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Re
 
 #[tokio::test]
 async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Result<()> {
+    // Soft-fail apply leaves the slot mid-decode; concurrent wait_for_async_mirror
+    // on sibling DBs has aborted assert-enabled postmasters (connection closed).
+    let _cluster = common::acquire_cluster_exclusive()?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mirror_failpoint").await?;
         clear_async_failpoint(&db.client).await?;
@@ -335,6 +338,10 @@ async fn async_worker_survives_truncate_noise_in_slot() -> Result<()> {
 /// mirror rows together (one PostgreSQL transaction per apply tick).
 #[tokio::test]
 async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
+    // After-batch failpoint + wait_for_async_mirror ERROR path stresses logical
+    // decoding; keep exclusive so assert-enabled postmasters do not SIGABRT
+    // siblings mid-suite.
+    let _cluster = common::acquire_cluster_exclusive()?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mid_tick_abort").await?;
         clear_async_failpoint(&db.client).await?;
@@ -702,11 +709,14 @@ async fn clear_async_failpoint(client: &tokio_postgres::Client) -> Result<()> {
         .query_one("SELECT current_database()::text", &[])
         .await?
         .get(0);
+    // ALTER DATABASE RESET only affects *new* sessions. Session RESET restores
+    // the value from connect time, so clear with an explicit SET '' after the
+    // database default is removed.
     client
         .batch_execute(&format!(
             "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
              ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
-             RESET koldstore.failpoint; \
+             SET koldstore.failpoint = ''; \
              RESET koldstore.internal_async_mirror_worker"
         ))
         .await?;

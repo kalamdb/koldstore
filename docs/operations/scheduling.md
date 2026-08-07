@@ -130,7 +130,8 @@ SELECT koldstore.set_table_auto_flush('app.messages'::regclass, false);
 ## Manual start (queue job)
 
 ```sql
-SELECT koldstore.flush_table(table_name => 'app.messages') AS flush_job_id;
+SELECT jsonb_pretty(koldstore.flush_table(table_name => 'app.messages'));
+-- Returns jsonb: { ok, job_id, status, error, ... }. status=not_due → nothing to do.
 ```
 
 With `flush_execution = queue` (default):

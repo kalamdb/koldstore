@@ -30,11 +30,11 @@ pub use encode::{
     stream_flush_chunks, MirrorFlushPageCursor, StreamEncodeInput, StreamEncodeOutcome,
 };
 pub use ops::{
-    classify_command, describe_table_plan, flush_table_request, plan_count_pending_flush_jobs,
+    classify_command, flush_table_request, plan_count_pending_flush_jobs,
     plan_enqueue_or_lookup_flush_job, plan_koldstore_exec, plan_mirror_flush_selection_batch,
     plan_mirror_flush_selection_batch_with_order_key, plan_select_pending_flush_candidate,
-    sql_param_cast, FlushJobEnqueuePlan, FlushRequest, KoldstoreExecPlan, MirrorFlushSelectionPlan,
-    OpsCommand, OpsError,
+    sql_param_cast, table_status_plan, FlushJobEnqueuePlan, FlushRequest, KoldstoreExecPlan,
+    MirrorFlushSelectionPlan, OpsCommand, OpsError,
 };
 pub use policy::{policy_flush_row_count, selected_rows_meet_file_minimum};
 pub use retention::{plan_purge_old_jobs, JobRetentionError, DEFAULT_PURGE_BATCH_LIMIT};

@@ -832,10 +832,7 @@ mod tests {
             decoded.bloom_filter_columns.as_deref(),
             Some(["id".to_string(), "tenant_id".to_string()].as_slice())
         );
-        assert_eq!(
-            ManageTableOptions::try_from_value(&value).unwrap(),
-            decoded
-        );
+        assert_eq!(ManageTableOptions::try_from_value(&value).unwrap(), decoded);
         assert!(ManageTableOptions::default().pruning_columns.is_none());
         assert!(ManageTableOptions::default().bloom_filter_columns.is_none());
     }

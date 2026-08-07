@@ -29,6 +29,9 @@ SELECT
 \echo '━━━ 3. Put the existing table under KoldStore management ━━━━━'
 \! sleep 0.5
 
+-- Large max_rows_per_file is a throughput demo (fewer Parquet objects), not a
+-- small-machine default. Peak flush RSS scales with max_rows_per_file; keep
+-- 1000–5000 on low-RAM hosts. See docs/performance.md#memory-and-small-machines.
 ALTER TABLE app.messages SET (
   koldstore_enabled = true,
   koldstore_storage = 'local-dev',
@@ -51,8 +54,8 @@ SELECT koldstore.flush_table(
 \! sleep 0.5
 
 SELECT
-  (koldstore.describe_table(table_name => 'app.messages'::regclass)->>'hot_rows')::int AS hot_rows,
-  (koldstore.describe_table(table_name => 'app.messages'::regclass)->>'cold_row_count')::int AS cold_rows;
+  (koldstore.table_status(table_name => 'app.messages'::regclass)->>'hot_rows')::int AS hot_rows,
+  (koldstore.table_status(table_name => 'app.messages'::regclass)->>'cold_row_count')::int AS cold_rows;
 
 \! sleep 4
 

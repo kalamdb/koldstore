@@ -40,7 +40,7 @@ async fn async_flush_fence_waits_on_writer_without_pruning_early() -> Result<()>
         let flush_handle = tokio::spawn(async move {
             flush_client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
                     &[&relation],
                 )
                 .await
@@ -204,7 +204,7 @@ async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
         let first = db
             .client
             .query_one(
-                "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
                 &[&table.relation],
             )
             .await;

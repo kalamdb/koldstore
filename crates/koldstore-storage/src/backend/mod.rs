@@ -10,8 +10,10 @@ mod s3;
 mod util;
 
 pub use config::BackendConfig;
+pub use fs::ensure_filesystem_base_prepared;
 pub use kind::StorageBackendKind;
 pub use open::{
-    open_client_from_catalog_fields, open_client_from_catalog_fields_with_timeout,
-    open_filesystem_client, open_storage_client, open_storage_client_with_timeout,
+    ensure_storage_backend_writable, open_client_from_catalog_fields,
+    open_client_from_catalog_fields_with_timeout, open_filesystem_client, open_storage_client,
+    open_storage_client_with_timeout, STORAGE_WRITE_PROBE_KEY,
 };

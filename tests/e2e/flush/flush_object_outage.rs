@@ -17,9 +17,11 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
         let blocking_path = blocking_file
             .to_str()
             .context("blocking path must be valid utf-8")?;
+        // Skip the register-time writability probe so we can point at a plain
+        // file and force the failure into flush (status=error), not alter.
         db.client
             .query_one(
-                "SELECT koldstore.alter_storage_location($1, $2, '{}'::jsonb)",
+                "SELECT koldstore.alter_storage_location($1, $2, '{}'::jsonb, false)",
                 &[&db.storage_name, &blocking_path],
             )
             .await?;
