@@ -12,15 +12,6 @@ use koldstore_flush::{
 
 const ORPHAN_RECOVERY_PAGE: i64 = 64;
 
-#[derive(serde::Deserialize)]
-struct ActiveFlushJobWire {
-    id: String,
-    #[serde(default)]
-    force: bool,
-    #[serde(default)]
-    running: bool,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct ActiveFlushJob {
     id: uuid::Uuid,
@@ -93,43 +84,53 @@ pub(crate) fn enqueue_flush_job_if_due(
 
 /// Looks up a committed active flush job without inserting.
 ///
-/// Status is decoded in the same scalar query so a normal pending claim does not
-/// need a speculative reclaim UPDATE before discovering there is nothing to reclaim.
+/// Keep this path typed end-to-end. It runs for ordinary queue enqueue/claim, so
+/// building JSON in PostgreSQL, converting it to text, parsing JSON in Rust, and
+/// then parsing the UUID is unnecessary allocator/CPU work.
 fn lookup_active_flush_job(
     table_oid: pgrx::pg_sys::Oid,
 ) -> crate::error::PgResult<Option<ActiveFlushJob>> {
     use pgrx::datum::DatumWithOid;
 
-    let existing = pgrx::Spi::get_one_with_args::<String>(
-        r#"
-SELECT COALESCE((
-    SELECT jsonb_build_object(
-        'id', id::text,
-        'force', COALESCE((payload->>'force')::boolean, false),
-        'running', status = 'running'
-    )::text
-    FROM koldstore.jobs
-    WHERE table_oid = $1::oid
-      AND scope_key = ''
-      AND job_type = 'flush'
-      AND status IN ('pending', 'running')
-    ORDER BY updated_at, id
-    LIMIT 1
-), '')
+    pgrx::Spi::connect(|client| {
+        let table = client
+            .select(
+                r#"
+SELECT id,
+       COALESCE((payload->>'force')::boolean, false) AS force,
+       status = 'running' AS running
+FROM koldstore.jobs
+WHERE table_oid = $1::oid
+  AND scope_key = ''
+  AND job_type = 'flush'
+  AND status IN ('pending', 'running')
+ORDER BY updated_at, id
+LIMIT 1
 "#,
-        &[DatumWithOid::from(table_oid)],
-    )
-    .map_err(crate::error::PgAdapterError::from_display)?
-    .filter(|value| !value.is_empty());
-    let Some(existing) = existing else {
-        return Ok(None);
-    };
-    let wire: ActiveFlushJobWire = serde_json::from_str(&existing)?;
-    Ok(Some(ActiveFlushJob {
-        id: uuid::Uuid::parse_str(&wire.id)?,
-        force: wire.force,
-        running: wire.running,
-    }))
+                Some(1),
+                &[DatumWithOid::from(table_oid)],
+            )
+            .map_err(crate::error::PgAdapterError::from_display)?;
+        let Some(row) = table.first().get::<pgrx::Uuid>(1).map_err(
+            crate::error::PgAdapterError::from_display,
+        )? else {
+            return Ok(None);
+        };
+        let first = table.first();
+        let force = first
+            .get::<bool>(2)
+            .map_err(crate::error::PgAdapterError::from_display)?
+            .unwrap_or(false);
+        let running = first
+            .get::<bool>(3)
+            .map_err(crate::error::PgAdapterError::from_display)?
+            .unwrap_or(false);
+        Ok(Some(ActiveFlushJob {
+            id: crate::spi::uuid_from_pgrx(row),
+            force,
+            running,
+        }))
+    })
 }
 
 /// Looks up a committed active flush job UUID without inserting.
