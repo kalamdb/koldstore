@@ -20,6 +20,8 @@ use koldstore_storage::{
 /// Each cloud client may retain an HTTP connection pool. Keep this small so
 /// credential rotation and multi-storage setups stay memory-bounded.
 const OBJECT_STORE_CLIENT_CACHE_LIMIT: usize = 8;
+const _: () = assert!(OBJECT_STORE_CLIENT_CACHE_LIMIT >= 1);
+const _: () = assert!(OBJECT_STORE_CLIENT_CACHE_LIMIT <= 16);
 
 /// Identity for one catalog-configured ObjectStore client.
 ///
@@ -128,7 +130,7 @@ pub fn cached_object_store_client_count() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{json_fingerprint, timeout_ms, OBJECT_STORE_CLIENT_CACHE_LIMIT};
+    use super::{json_fingerprint, timeout_ms};
     use std::time::Duration;
 
     #[test]
@@ -150,11 +152,5 @@ mod tests {
         assert_eq!(timeout_ms(None), 0);
         assert_eq!(timeout_ms(Some(Duration::ZERO)), 0);
         assert_eq!(timeout_ms(Some(Duration::from_millis(1500))), 1500);
-    }
-
-    #[test]
-    fn client_cache_limit_stays_small() {
-        assert!(OBJECT_STORE_CLIENT_CACHE_LIMIT <= 16);
-        assert!(OBJECT_STORE_CLIENT_CACHE_LIMIT >= 1);
     }
 }
