@@ -252,6 +252,7 @@ fn dispatch_shared_work(
             continue;
         }
         if snapshot.maintenance_pid != 0
+            || super::wake::ensure_paused(snapshot.database_oid)
             || !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Maintenance, now)
         {
             continue;
@@ -263,11 +264,8 @@ fn dispatch_shared_work(
             Ok(()) => backoff.succeeded(snapshot.database_oid, DynamicWorkerKind::Maintenance),
             Err(error) => {
                 super::wake::cancel_maintenance_start(snapshot.database_oid);
-                let delay = backoff.failed(
-                    snapshot.database_oid,
-                    DynamicWorkerKind::Maintenance,
-                    now,
-                );
+                let delay =
+                    backoff.failed(snapshot.database_oid, DynamicWorkerKind::Maintenance, now);
                 pgrx::log!(
                     "koldstore supervisor: maintenance registration deferred for db={} retry_in={}ms ({error})",
                     snapshot.database_oid,

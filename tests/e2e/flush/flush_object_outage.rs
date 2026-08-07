@@ -10,6 +10,15 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
             .create_indexed_items_table("object_outage_items", 20)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
+        db.client
+            .execute(
+                "SELECT koldstore.set_table_auto_flush($1::text::regclass, false)",
+                &[&table.relation],
+            )
+            .await
+            .context(
+                "disable auto-flush so the outage path is not raced by a background executor",
+            )?;
 
         let blocking_file = db.storage_root.join("blocked");
         std::fs::write(&blocking_file, b"not a directory")

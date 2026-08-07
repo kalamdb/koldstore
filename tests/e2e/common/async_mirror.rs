@@ -73,7 +73,7 @@ pub async fn async_worker_running(client: &tokio_postgres::Client) -> Result<boo
         .query_one(
             "SELECT EXISTS (\
                SELECT 1 FROM pg_catalog.pg_stat_activity \
-               WHERE backend_type = 'koldstore async mirror ' \
+               WHERE backend_type = 'koldstore maintenance ' \
                  || (SELECT oid::text FROM pg_catalog.pg_database \
                      WHERE datname = current_database())\
              )",
@@ -99,7 +99,7 @@ pub async fn terminate_async_worker(client: &tokio_postgres::Client) -> Result<b
             "SELECT COALESCE((\
                SELECT pg_terminate_backend(pid) \
                FROM pg_catalog.pg_stat_activity \
-               WHERE backend_type = 'koldstore async mirror ' \
+               WHERE backend_type = 'koldstore maintenance ' \
                  || (SELECT oid::text FROM pg_catalog.pg_database \
                      WHERE datname = current_database()) \
                LIMIT 1\
@@ -120,7 +120,7 @@ pub async fn terminate_async_worker(client: &tokio_postgres::Client) -> Result<b
                 "SELECT COALESCE((\
                    SELECT pg_terminate_backend(pid) \
                    FROM pg_catalog.pg_stat_activity \
-                   WHERE backend_type = 'koldstore async mirror ' \
+                   WHERE backend_type = 'koldstore maintenance ' \
                      || (SELECT oid::text FROM pg_catalog.pg_database \
                          WHERE datname = current_database()) \
                    LIMIT 1\

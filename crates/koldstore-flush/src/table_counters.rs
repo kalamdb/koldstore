@@ -178,7 +178,9 @@ SELECT koldstore.internal_refresh_row_counts(
 
 #[cfg(test)]
 mod tests {
-    use super::{flush_mirror_fetch_limit, plan_bump_table_row_counts, FLUSH_MIRROR_FETCH_BATCH_SIZE};
+    use super::{
+        flush_mirror_fetch_limit, plan_bump_table_row_counts, FLUSH_MIRROR_FETCH_BATCH_SIZE,
+    };
 
     #[test]
     fn fetch_limit_caps_to_max_rows_per_file() {

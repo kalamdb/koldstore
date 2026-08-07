@@ -171,9 +171,7 @@ pub fn flush_pending_deltas() {
         ) {
             deltas.push((table_oid, (hot_delta, mirror_delta)));
             restore_pending_deltas(deltas);
-            pgrx::warning!(
-                "koldstore row counter flush failed for table oid {table_oid}: {error}"
-            );
+            pgrx::warning!("koldstore row counter flush failed for table oid {table_oid}: {error}");
             return;
         }
     }

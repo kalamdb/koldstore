@@ -151,12 +151,9 @@ impl<const N: usize> SupervisorRegistry<N> {
     }
 
     pub fn unregister_supervisor(&self, pid: SupervisorPid) {
-        let _ = self.supervisor_pid.compare_exchange(
-            pid.get(),
-            0,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let _ =
+            self.supervisor_pid
+                .compare_exchange(pid.get(), 0, Ordering::AcqRel, Ordering::Acquire);
     }
 
     #[must_use]
@@ -446,9 +443,7 @@ impl<const N: usize> SupervisorRegistry<N> {
 
     pub fn clear_maintenance_deadline(&self, database_oid: u32) {
         if let Some(entry) = self.find(database_oid) {
-            entry
-                .next_maintenance_due_at_ms
-                .store(0, Ordering::Release);
+            entry.next_maintenance_due_at_ms.store(0, Ordering::Release);
         }
     }
 

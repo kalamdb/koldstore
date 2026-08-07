@@ -80,8 +80,7 @@ fn run_maintenance_worker(database_oid: u32) {
         let target_maintenance_generation = snapshot.maintenance_generation;
         let recovery_requested =
             snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
-        let schedule_requested =
-            snapshot.event_flags & koldstore_worker::EVENT_SCHEDULE_DIRTY != 0;
+        let schedule_requested = snapshot.event_flags & koldstore_worker::EVENT_SCHEDULE_DIRTY != 0;
         let wal_due =
             recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
 

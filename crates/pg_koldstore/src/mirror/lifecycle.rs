@@ -386,7 +386,7 @@ pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
 /// Terminate by `backend_type` (not only `active_pid`) so a worker blocked
 /// before acquiring the slot is also cleared.
 fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
-    let worker_type = koldstore_worker::async_mirror_worker_type(DatabaseOid::new(database_oid));
+    let worker_type = koldstore_worker::maintenance_worker_type(DatabaseOid::new(database_oid));
     // Always return a row: an empty SELECT through Spi::run_with_args errors with
     // "SpiTupleTable positioned before the start or after the end" when no
     // maintenance worker is running.

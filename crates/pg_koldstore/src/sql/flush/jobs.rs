@@ -115,14 +115,16 @@ LIMIT 1
                 &[DatumWithOid::from(table_oid)],
             )
             .map_err(crate::error::PgAdapterError::from_display)?;
-        let Some(row) = table
-            .first()
+        if table.is_empty() {
+            return Ok(None);
+        }
+        let first = table.first();
+        let Some(row) = first
             .get::<pgrx::Uuid>(1)
             .map_err(crate::error::PgAdapterError::from_display)?
         else {
             return Ok(None);
         };
-        let first = table.first();
         let force = first
             .get::<bool>(2)
             .map_err(crate::error::PgAdapterError::from_display)?

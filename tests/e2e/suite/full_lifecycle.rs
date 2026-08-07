@@ -18,6 +18,9 @@ const MAX_FLUSH_SECONDS: f64 = 120.0;
 async fn full_lifecycle_wide_table_migrates_flushes_in_batches_and_queries_all_rows() -> Result<()>
 {
     common::require_pgrx_server().await?;
+    // Multi-wave force flush + prune is sensitive to cross-database slot/apply
+    // contention from the parallel suite; serialize like crash gates.
+    let _cluster = common::acquire_cluster_exclusive()?;
 
     for target in common::scenario_pg_matrix() {
         common::log_always(format!(
@@ -50,6 +53,21 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
     {
         let _step = common::log_step_always(format!("pg{pg_version}: install extension"));
         install_extension(client).await?;
+    }
+    {
+        let _step = common::log_step_always(format!(
+            "pg{pg_version}: pin flush_execution=inline for deterministic flush ownership"
+        ));
+        let dbname: String = client
+            .query_one("SELECT current_database()::text", &[])
+            .await?
+            .get(0);
+        client
+            .batch_execute(&format!(
+                "ALTER DATABASE \"{dbname}\" SET koldstore.flush_execution = 'inline'; \
+                 SET koldstore.flush_execution = 'inline'"
+            ))
+            .await?;
     }
     {
         let _step = common::log_step_always(format!(
@@ -92,10 +110,6 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
     }
 
     let first_flush_started = Instant::now();
-    {
-        let _step = common::log_step_always(format!("pg{pg_version}: enqueue first flush job"));
-        enqueue_flush_job(client, pg_version).await?;
-    }
     {
         let _step = common::log_step_always(format!("pg{pg_version}: run first flush"));
         let flushed = flush_table(client, pg_version).await?;
@@ -175,10 +189,6 @@ async fn run_full_lifecycle(client: &Client, pg_version: u16, storage_root: &Pat
     }
 
     let second_flush_started = Instant::now();
-    {
-        let _step = common::log_step_always(format!("pg{pg_version}: enqueue second flush job"));
-        enqueue_flush_job(client, pg_version).await?;
-    }
     {
         let _step = common::log_step_always(format!("pg{pg_version}: run second flush"));
         let flushed = flush_table(client, pg_version).await?;
@@ -518,29 +528,14 @@ async fn manage_table(client: &Client, pg_version: u16) -> Result<()> {
     Ok(())
 }
 
-async fn enqueue_flush_job(client: &Client, pg_version: u16) -> Result<()> {
-    let job_id = client
-        .query_one(
-            "SELECT koldstore.enqueue_flush_job(table_name => $1::text::regclass, force => true)::text",
-            &[&relation(pg_version)],
-        )
-        .await?
-        .get::<_, String>(0);
-    assert!(!job_id.is_empty(), "expected a flush job UUID");
-    Ok(())
-}
-
 async fn flush_table(client: &Client, pg_version: u16) -> Result<i64> {
-    let job_id = common::flush_table_job_id(client, &relation(pg_version), false)
+    // Force + wait for terminal status. full_lifecycle does not go through
+    // TestDb::start's flush_execution=inline fixture GUC, so queue executors may
+    // own the job; reading rows_flushed immediately races finalize/prune.
+    let job_id = common::flush_table_job_id(client, &relation(pg_version), true)
         .await?
         .context("flush_table must return a job id")?;
-    let progress = client
-        .query_one(
-            "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
-            &[&job_id],
-        )
-        .await?;
-    Ok(progress.get(0))
+    common::wait_for_flush_job_terminal(client, &job_id).await
 }
 
 async fn wait_for_jobs_to_finish(client: &Client, pg_version: u16) -> Result<()> {

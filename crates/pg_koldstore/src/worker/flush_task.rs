@@ -56,6 +56,8 @@ pub(crate) fn schedule_policy_after_counter(
             }
             evaluation.due
         }
+        // Reserved policy; execution fails closed elsewhere — never auto-enqueue.
+        FlushPolicy::Filter { .. } => false,
     };
     if !due {
         return Ok(false);

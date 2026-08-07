@@ -5,9 +5,7 @@
 //! index-ordered scan computes both current eligibility and the timestamp when
 //! the minimum viable batch will become old enough.
 
-use koldstore_common::{
-    minimum_id_at_unix_millis, quote_qualified_ident, unix_millis_from_id, FlushPolicy, MoveAfter,
-};
+use koldstore_common::{minimum_id_at_unix_millis, unix_millis_from_id, FlushPolicy, MoveAfter};
 use pgrx::datum::DatumWithOid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +62,7 @@ pub(crate) fn evaluate_older_than(
     let snapshot = crate::catalog::cache::managed_table_snapshot(table_oid)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "managed schema has no change-log mirror".to_string())?;
-    let mirror = quote_qualified_ident(&snapshot.mirror_relation);
+    let mirror = snapshot.mirror_relation.quoted();
 
     let (eligible_count, threshold_count, threshold_seq) = pgrx::Spi::connect(|client| {
         let sql = format!(

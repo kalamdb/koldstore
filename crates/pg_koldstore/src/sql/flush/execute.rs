@@ -1104,8 +1104,10 @@ fn run_flush_after_claim(
                 "koldstore flush: FAILED table={table} job={job_id} attempt={attempt_token} duration={} error={error}",
                 format_flush_duration(started)
             );
+            // Queue executors retry with backoff; inline/pg_test stays terminal.
+            let retryable = matches!(commit_style, FlushCommitStyle::Short);
             commit_style.run_spi(|| {
-                mark_flush_job_failed(job_id, table_oid, attempt_token, &error)
+                mark_flush_job_failed(job_id, table_oid, attempt_token, &error, retryable)
                     .map_err(|err| err.to_string())?;
                 // Broadcast under the same short txn; CacheInvalidate asserts
                 // IsTransactionState (queue executor is otherwise idle).

@@ -54,35 +54,65 @@ mod live {
     #[pgrx::pg_guard]
     unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
         unsafe {
-            // Be deliberately conservative once async capture exists. Executor
-            // hooks also see nested SPI/trigger work; publishing one transaction
-            // generation for any successful DML avoids missing trigger, cascade,
-            // or indirect writes to managed tables. The post-commit publisher
-            // performs a native logical-slot existence check, so databases with
-            // no KoldStore capture pay no supervisor wake cost.
-            let source_dml = is_source_dml(query_desc);
+            // Only managed result relations publish a WAL generation. Nested
+            // trigger/cascade DML still fires ExecutorEnd with the managed
+            // relation as the result target, so those writes are not missed.
+            // Unmanaged DML in a database that happens to have a capture slot
+            // must not wake maintenance or advance the logical slot.
+            let changed_managed_relation = changed_managed_relation(query_desc);
             if let Some(previous) = PREVIOUS {
                 previous(query_desc);
             } else {
                 pg_sys::standard_ExecutorEnd(query_desc);
             }
-            if source_dml {
+            if changed_managed_relation {
                 crate::worker::wake::mark_managed_dml_pending();
             }
             crate::memory::release_process_heap_if_pending();
         }
     }
 
-    unsafe fn is_source_dml(query_desc: *mut pg_sys::QueryDesc) -> bool {
+    unsafe fn changed_managed_relation(query_desc: *mut pg_sys::QueryDesc) -> bool {
         unsafe {
-            !query_desc.is_null()
-                && matches!(
-                    (*query_desc).operation,
-                    pg_sys::CmdType::CMD_INSERT
-                        | pg_sys::CmdType::CMD_UPDATE
-                        | pg_sys::CmdType::CMD_DELETE
-                        | pg_sys::CmdType::CMD_MERGE
-                )
+            if query_desc.is_null()
+                || (*query_desc).plannedstmt.is_null()
+                || (*query_desc).estate.is_null()
+                || (*(*query_desc).estate).es_processed == 0
+            {
+                return false;
+            }
+            if !matches!(
+                (*query_desc).operation,
+                pg_sys::CmdType::CMD_INSERT
+                    | pg_sys::CmdType::CMD_UPDATE
+                    | pg_sys::CmdType::CMD_DELETE
+                    | pg_sys::CmdType::CMD_MERGE
+            ) {
+                return false;
+            }
+
+            let planned = (*query_desc).plannedstmt;
+            let result_relations = (*planned).resultRelations;
+            let rtable = (*planned).rtable;
+            if result_relations.is_null() || rtable.is_null() {
+                return false;
+            }
+            for index in 0..(*result_relations).length as usize {
+                let range_table_index = (*(*result_relations).elements.add(index)).int_value;
+                if range_table_index <= 0 || range_table_index > (*rtable).length {
+                    continue;
+                }
+                let rte = (*(*rtable).elements.add((range_table_index - 1) as usize))
+                    .ptr_value
+                    .cast::<pg_sys::RangeTblEntry>();
+                if !rte.is_null()
+                    && (*rte).rtekind == pg_sys::RTEKind::RTE_RELATION
+                    && crate::catalog::cache::is_managed_relation((*rte).relid)
+                {
+                    return true;
+                }
+            }
+            false
         }
     }
 }

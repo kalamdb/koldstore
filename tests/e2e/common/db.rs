@@ -636,6 +636,8 @@ pub fn is_flush_entry_lock_busy(error: &tokio_postgres::Error) -> bool {
     text.contains("apply lock")
         || text.contains("retry shortly")
         || text.contains("flush unavailable")
+        || text.contains("flush already in progress")
+        || text.contains("retry after it completes")
 }
 
 /// True when a flush *job* failed because finalize could not take the slot lock.

@@ -11,7 +11,7 @@ use super::schema_registry::register_schema_version;
 #[cfg(feature = "pg")]
 use super::schema_registry::SchemaRegistrationInput;
 #[cfg(feature = "pg")]
-use koldstore_common::{ManageTableOptions, MigrationStatus};
+use koldstore_common::MigrationStatus;
 #[cfg(feature = "pg")]
 use koldstore_migrate::{introspection, MigrateTableRequest};
 #[cfg(feature = "pg")]

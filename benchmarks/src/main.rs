@@ -231,7 +231,7 @@ async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Clie
                 "SELECT COALESCE((\
                    SELECT pg_terminate_backend(pid) \
                    FROM pg_catalog.pg_stat_activity \
-                   WHERE backend_type = 'koldstore async mirror ' \
+                   WHERE backend_type = 'koldstore maintenance ' \
                      || (SELECT oid::text FROM pg_catalog.pg_database \
                          WHERE datname = current_database()) \
                    LIMIT 1\
@@ -243,7 +243,7 @@ async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Clie
             .query_one(
                 "SELECT EXISTS (\
                    SELECT 1 FROM pg_catalog.pg_stat_activity \
-                   WHERE backend_type = 'koldstore async mirror ' \
+                   WHERE backend_type = 'koldstore maintenance ' \
                      || (SELECT oid::text FROM pg_catalog.pg_database \
                          WHERE datname = current_database())\
                  )",

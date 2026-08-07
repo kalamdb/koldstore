@@ -71,6 +71,13 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
         let db = common::TestDb::start(target, "failure_injection").await?;
         let table = db.create_indexed_items_table("failure_items", 32).await?;
         db.manage_shared(&table.relation, "id").await?;
+        db.client
+            .execute(
+                "SELECT koldstore.set_table_auto_flush($1::text::regclass, false)",
+                &[&table.relation],
+            )
+            .await
+            .context("disable auto-flush before outage flush")?;
 
         let blocking_file = db.storage_root.join("not-a-directory");
         std::fs::write(&blocking_file, b"blocks create_dir_all")

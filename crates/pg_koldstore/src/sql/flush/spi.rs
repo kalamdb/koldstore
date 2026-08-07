@@ -89,7 +89,7 @@ pub(super) fn active_flush_policy(
     Ok(active_manage_options(table_oid)?.and_then(|options| options.flush_policy()))
 }
 
-pub(super) fn active_manage_options(
+pub(crate) fn active_manage_options(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<Option<koldstore_common::ManageTableOptions>, String> {
     let Some(options) = active_options_json(table_oid)? else {
