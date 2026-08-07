@@ -19,6 +19,24 @@ s.active
   AND COALESCE((s.options->>'auto_flush')::boolean, true)
 "#;
 
+const ACTIVE_FLUSH_JOB_EXCLUSION: &str = r#"
+  AND NOT EXISTS (
+        SELECT 1
+        FROM koldstore.jobs j
+        WHERE j.table_oid = s.table_oid
+          AND j.job_type = 'flush'
+          AND j.status IN ('pending', 'running')
+      )
+  AND NOT EXISTS (
+        SELECT 1
+        FROM koldstore.jobs j
+        WHERE j.table_oid = s.table_oid
+          AND j.job_type = 'flush'
+          AND j.status = 'error'
+          AND j.updated_at > now() - interval '60 seconds'
+      )
+"#;
+
 /// Auto-flush SQL planning error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AutoFlushPlanError {
@@ -27,13 +45,14 @@ pub enum AutoFlushPlanError {
     Sql(String),
 }
 
-/// Plans a scan of plausible auto-flush tables with options and mirror counts.
+/// Plans a full scheduler reconciliation.
 ///
-/// Row-limit tables that have not even crossed their hot-row threshold are
-/// rejected in SQL. Rust still applies min-flush/file-size policy details, while
-/// OlderThan candidates remain visible for their index-backed cutoff/deadline
-/// checks. Tables that already own an active pending/running flush job are
-/// excluded so a large queue does not repeatedly occupy the first scheduler page.
+/// This is intentionally *not* the normal WAL path anymore. WAL-applied
+/// RowLimit tables are evaluated O(1) from their post-bump counters. The broad
+/// plan remains for configuration changes, startup, recovery, and diagnostics.
+/// Row-limit tables that have not crossed their hot-row threshold are rejected
+/// in SQL. Tables with an active job are excluded so a large queue cannot
+/// repeatedly occupy the first scheduler page.
 ///
 /// # Errors
 ///
@@ -62,21 +81,41 @@ WHERE {AUTO_FLUSH_TABLE_PREDICATE}
             )
         )
       )
-  AND NOT EXISTS (
-        SELECT 1
-        FROM koldstore.jobs j
-        WHERE j.table_oid = s.table_oid
-          AND j.job_type = 'flush'
-          AND j.status IN ('pending', 'running')
-      )
-  AND NOT EXISTS (
-        SELECT 1
-        FROM koldstore.jobs j
-        WHERE j.table_oid = s.table_oid
-          AND j.job_type = 'flush'
-          AND j.status = 'error'
-          AND j.updated_at > now() - interval '60 seconds'
-      )
+{ACTIVE_FLUSH_JOB_EXCLUSION}
+ORDER BY s.created_at DESC, s.table_oid DESC
+"#
+        ),
+    )
+    .map_err(|error| AutoFlushPlanError::Sql(error.to_string()))
+}
+
+/// Plans the normal clock-policy reconciliation path.
+///
+/// Only `OlderThan` tables are returned. RowLimit tables cannot become due from
+/// the passage of time and are already scheduled directly by WAL-applied counter
+/// bumps, so scanning them on every maintenance wake is wasted database work.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_select_timed_auto_flush_candidate_tables(
+) -> Result<SqlStatement, AutoFlushPlanError> {
+    SqlStatement::read(
+        "select timed auto-flush candidate tables",
+        &format!(
+            r#"
+SELECT s.table_oid::oid,
+       COALESCE(s.options, '{{}}'::jsonb)::text,
+       COALESCE(m.mirror_row_count, 0)::bigint
+FROM koldstore.schemas s
+LEFT JOIN koldstore.manifest m
+  ON m.table_oid = s.table_oid
+ AND m.scope_key = ''
+WHERE s.active
+  AND s.options->'flush_policy'->>'type' = 'older_than'
+  AND COALESCE((s.options->>'auto_flush')::boolean, true)
+  AND COALESCE(m.mirror_row_count, 0) > 0
+{ACTIVE_FLUSH_JOB_EXCLUSION}
 ORDER BY s.created_at DESC, s.table_oid DESC
 "#
         ),
@@ -155,7 +194,8 @@ fn policy_needs_flush(policy: &FlushPolicy, pending_rows: i64) -> bool {
 mod tests {
     use super::{
         plan_database_has_auto_flush_tables, plan_older_than_eligible_mirror_rows,
-        plan_select_auto_flush_candidate_tables, scheduler_should_flush, AUTO_FLUSH_TABLE_PREDICATE,
+        plan_select_auto_flush_candidate_tables, plan_select_timed_auto_flush_candidate_tables,
+        scheduler_should_flush, AUTO_FLUSH_TABLE_PREDICATE,
     };
     use serde_json::json;
 
@@ -241,6 +281,14 @@ mod tests {
         assert!(candidates.sql.contains("hot_row_limit"));
         assert!(candidates.sql.contains("older_than"));
         assert!(candidates.sql.contains("IN ('pending', 'running')"));
+
+        let timed = plan_select_timed_auto_flush_candidate_tables().unwrap();
+        assert!(timed
+            .sql
+            .contains("flush_policy'->>'type' = 'older_than'"));
+        assert!(!timed.sql.contains("= 'row_limit'"));
+        assert!(timed.sql.contains("IN ('pending', 'running')"));
+
         let exists = plan_database_has_auto_flush_tables().unwrap();
         assert!(exists.sql.contains(AUTO_FLUSH_TABLE_PREDICATE.trim()));
         let older = plan_older_than_eligible_mirror_rows("\"koldstore\".\"items__cl\"").unwrap();
