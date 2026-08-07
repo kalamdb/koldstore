@@ -1,33 +1,26 @@
-//! Commit-wakeup latch loop and signal handling for the shared database worker.
+//! Ephemeral database-maintenance worker execution.
 //!
-//! Managed commits advance a shared generation and set this worker's latch.
-//! Each wake drains all generations observed before the apply pass, then on
-//! `koldstore.flush_check_interval_seconds` evaluate auto-flush tables.
+//! A cluster supervisor starts at most one of these workers for a database when
+//! a committed WAL generation, recovery request, or scheduling event exists.
+//! The worker drains WAL through a fixed durable fence, reconciles local queue
+//! work, waits for a very short burst grace, and exits when caught up.
 //!
-//! A timeout remains as a correctness watchdog for missed notifications. The
-//! auto-flush catalog probe is not run on every latch wake — only when a flush
-//! check is due (or when deciding whether a slot-less worker should exit).
-//!
-//! Apply failures soft-fail with exponential backoff instead of FATAL so a
-//! transient SPI error does not permanently stop catch-up.
+//! There is no permanent per-database polling/watchdog loop. Lost latch wakeups
+//! cannot lose work because the logical slot and shared generations remain the
+//! durable/recoverable source of truth.
 
-use std::ffi::CString;
 use std::panic::AssertUnwindSafe;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use koldstore_worker::{
-    flush_check_due, millis_until_flush_check, next_soft_fail_backoff_ms, EmptyWakeRetry,
-    PendingDrainBudget, TickResult, WakeCursor, WakeGeneration, MAX_IMMEDIATE_PENDING_TICKS,
-};
 use pgrx::bgworkers::{BackgroundWorker, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::PgTryBuilder;
 
-use crate::mirror::task::AsyncMirrorTask;
+use crate::mirror::apply::{apply_bounded, capture_durable_wal_fence, BoundedApplyRequest};
 
-use super::flush_task::{database_has_auto_flush_tables, run_flush_scheduler_tick};
+const IDLE_GRACE: Duration = Duration::from_millis(200);
 
-/// Runs the persistent database worker until neither async nor auto-flush work remains.
+/// Runs one ephemeral database-maintenance worker.
 pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     attach_applier_signal_handlers();
     BackgroundWorker::connect_worker_to_spi_by_oid(
@@ -35,226 +28,115 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
         None,
     );
 
-    let async_task = AsyncMirrorTask::new();
-    let slot = crate::mirror::lifecycle::slot_name(database_oid);
-    let slot_c = CString::new(slot.as_str()).expect("deterministic slot name contains no NUL");
-    let registered_generation =
-        super::wake::register_worker(database_oid).unwrap_or_else(|| WakeGeneration::new(0));
-    let _wake_registration = WakeRegistration { database_oid };
-    let mut wake_cursor = WakeCursor::new(registered_generation);
-
-    let mut last_flush_check_secs: Option<i64> = None;
-    // Cached so the latch path does not open an SPI transaction every wake.
-    let mut auto_flush_cached = true;
-    let mut apply_backoff_ms = 0_u64;
-    let mut apply_retry_at = None::<Instant>;
-    let mut startup_apply = true;
-    let mut last_watchdog = Instant::now();
-    let mut pending_drain_budget = PendingDrainBudget::new(MAX_IMMEDIATE_PENDING_TICKS);
-    let worker_started = Instant::now();
-    let mut empty_wake_retry = EmptyWakeRetry::default_policy();
-    let mut empty_wake_retry_at = None::<Instant>;
-
-    loop {
-        let mut should_wait = true;
-        let watchdog = Duration::from_millis(crate::guc::async_apply_watchdog_interval_ms());
-        let slot_exists = crate::mirror::lifecycle::native_slot_exists_cstr(&slot_c);
-        let now_secs = unix_now_secs();
-        let interval = crate::guc::flush_check_interval_seconds();
-        let flush_due = flush_check_due(last_flush_check_secs, now_secs, interval);
-
-        if slot_exists {
-            let generation = super::wake::generation(database_oid);
-            let now = Instant::now();
-            let watchdog_due = last_watchdog.elapsed() >= watchdog;
-            let wake_pending = wake_cursor.is_pending(generation);
-            let wake_retry_due = empty_wake_retry_at.is_none_or(|deadline| now >= deadline);
-            let error_retry_due = apply_retry_at.is_some_and(|deadline| now >= deadline);
-            let needs_apply = startup_apply
-                || error_retry_due
-                || (apply_retry_at.is_none() && (watchdog_due || (wake_pending && wake_retry_due)));
-            if needs_apply {
-                // One PostgreSQL transaction per apply tick: peek batches,
-                // mirror SPI writes, and applied_lsn commit together. Soft-fail
-                // logs and backs off instead of FATAL.
-                // PostgreSQL emits `LOG` for every logical-decoding context
-                // startup/consistent point. Reconnects, watchdogs, and commit
-                // bursts would otherwise add routine noise. Scope the
-                // threshold only around decoding; worker warnings and errors
-                // remain visible after the guard restores the session value.
-                //
-                // Wake-driven empty peeks must not advance confirmed_flush:
-                // otherwise unrelated WAL (and empty-wake retries) move the
-                // slot before the watchdog. Watchdog/startup idle ticks still
-                // advance so retained non-publication WAL can be skipped.
-                let advance_slot_on_empty = startup_apply || watchdog_due || !wake_pending;
-                let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
-                let apply_result =
-                    worker_transaction_result(|| async_task.tick_with(advance_slot_on_empty));
-                drop(decoding_log_guard);
-                match apply_result {
-                    Ok(result @ TickResult::Continue) => {
-                        apply_backoff_ms = 0;
-                        apply_retry_at = None;
-                        startup_apply = false;
-                        // This tick can only cover the generation sampled before
-                        // it began. A commit published during the tick may land
-                        // after its decode boundary and must remain pending.
-                        wake_cursor.observe(generation);
-                        empty_wake_retry.reset();
-                        empty_wake_retry_at = None;
-                        last_watchdog = Instant::now();
-                        should_wait = pending_drain_budget.should_wait(result);
-                    }
-                    Ok(result @ TickResult::ContinueIdle) => {
-                        apply_backoff_ms = 0;
-                        apply_retry_at = None;
-                        startup_apply = false;
-                        if wake_pending {
-                            // Retry briefly: sync_commit=off can make the first
-                            // peek empty even after flush has caught up, and the
-                            // insert>flush lag check races with WALWriter.
-                            // advance_slot_on_empty=false keeps these retries
-                            // from moving confirmed_flush through unrelated WAL.
-                            match empty_wake_retry.after_empty(worker_started.elapsed()) {
-                                Some(delay) => {
-                                    empty_wake_retry_at = Some(Instant::now() + delay);
-                                }
-                                None => {
-                                    wake_cursor.observe(generation);
-                                    empty_wake_retry.reset();
-                                    empty_wake_retry_at = None;
-                                }
-                            }
-                        } else {
-                            wake_cursor.observe(generation);
-                            empty_wake_retry.reset();
-                            empty_wake_retry_at = None;
-                        }
-                        last_watchdog = Instant::now();
-                        should_wait = pending_drain_budget.should_wait(result);
-                    }
-                    Ok(result @ TickResult::ContinuePending) => {
-                        apply_backoff_ms = 0;
-                        apply_retry_at = None;
-                        startup_apply = false;
-                        empty_wake_retry.reset();
-                        empty_wake_retry_at = None;
-                        should_wait = pending_drain_budget.should_wait(result);
-                    }
-                    Ok(result @ TickResult::Stop) => {
-                        apply_backoff_ms = 0;
-                        apply_retry_at = None;
-                        startup_apply = false;
-                        wake_cursor.observe(generation);
-                        empty_wake_retry.reset();
-                        empty_wake_retry_at = None;
-                        last_watchdog = Instant::now();
-                        should_wait = pending_drain_budget.should_wait(result);
-                    }
-                    Err(error) => {
-                        pending_drain_budget.reset();
-                        crate::observability::record_async_apply_error();
-                        pgrx::warning!(
-                            "koldstore async mirror apply soft-failed (will retry): {error}"
-                        );
-                        apply_backoff_ms = next_soft_fail_backoff_ms(apply_backoff_ms);
-                        apply_retry_at =
-                            Some(Instant::now() + Duration::from_millis(apply_backoff_ms));
-                    }
-                }
-            }
-        } else {
-            pending_drain_budget.reset();
-            startup_apply = true;
-            apply_backoff_ms = 0;
-            apply_retry_at = None;
-            empty_wake_retry.reset();
-            empty_wake_retry_at = None;
-        }
-
-        if flush_due {
-            // Single transaction: flush when due; skip EXISTS when a due table ran.
-            // Soft-fail the whole flush tick on Postgres ERROR so a NEVER_RESTART
-            // applier is not taken down by a transient SPI failure.
-            match worker_transaction_result(|| {
-                let has_auto = match run_flush_scheduler_tick() {
-                    Ok(result) if result.had_due_table => true,
-                    Ok(_) => match database_has_auto_flush_tables() {
-                        Ok(value) => value,
-                        Err(error) => {
-                            pgrx::log!(
-                                "koldstore database worker: auto_flush probe failed: {error}"
-                            );
-                            false
-                        }
-                    },
-                    Err(error) => {
-                        pgrx::log!("koldstore flush scheduler tick failed: {error}");
-                        database_has_auto_flush_tables().unwrap_or_default()
-                    }
-                };
-                Ok(has_auto)
-            }) {
-                Ok(value) => auto_flush_cached = value,
-                Err(error) => {
-                    pgrx::log!("koldstore database worker: flush tick soft-failed: {error}");
-                    auto_flush_cached = true;
-                }
-            }
-            last_flush_check_secs = Some(now_secs);
-        }
-
-        if !slot_exists && !auto_flush_cached {
-            break;
-        }
-        let watchdog_wait_ms =
-            u64::try_from(watchdog.saturating_sub(last_watchdog.elapsed()).as_millis())
-                .unwrap_or(u64::MAX)
-                .max(1);
-        let flush_wait_ms = millis_until_flush_check(
-            last_flush_check_secs,
-            unix_now_secs(),
-            crate::guc::flush_check_interval_seconds(),
+    // A dynamic worker may run only when the supervisor reserved this database.
+    // Stale/duplicate starts fail closed before logical decoding or catalog work.
+    if !super::wake::maintenance_started(database_oid) {
+        pgrx::log!(
+            "koldstore maintenance worker db={database_oid}: stale/unreserved start; exiting"
         );
-        let mut wait_ms = watchdog_wait_ms.min(flush_wait_ms);
-        if let Some(deadline) = apply_retry_at {
-            wait_ms = wait_ms.min(millis_until(deadline));
+        return;
+    }
+    let _registration = MaintenanceRegistration { database_oid };
+    super::wake::set_flush_limit(
+        database_oid,
+        u32::try_from(crate::guc::max_parallel_flush_jobs())
+            .unwrap_or(1)
+            .max(1),
+    );
+
+    let mut first_pass = true;
+    loop {
+        let snapshot = super::wake::supervisor_snapshot(database_oid);
+        let target_generation = snapshot.map(|state| state.wal_generation).unwrap_or(0);
+        let maintenance_due = first_pass || snapshot.is_none_or(|state| state.maintenance_due());
+
+        if maintenance_due {
+            if let Err(error) = drain_wal_through_fixed_fence() {
+                crate::observability::record_async_apply_error();
+                pgrx::warning!(
+                    "koldstore database maintenance db={database_oid} WAL apply deferred: {error}"
+                );
+                super::wake::request_recovery(database_oid);
+                return;
+            }
+            super::wake::mark_wal_processed(database_oid, target_generation);
         }
-        if let Some(deadline) = empty_wake_retry_at {
-            wait_ms = wait_ms.min(millis_until(deadline));
+
+        // Queue recovery + automatic policy evaluation are database-local and
+        // happen only after WAL/counters are current. run_flush_scheduler_tick
+        // may enqueue a durable job; its transaction callback publishes the
+        // queue generation after commit, never before.
+        match worker_transaction_result(super::flush_task::run_flush_scheduler_tick) {
+            Ok(_) => super::wake::mark_maintenance_reconciled(database_oid),
+            Err(error) => {
+                pgrx::warning!(
+                    "koldstore database maintenance db={database_oid} scheduler deferred: {error}"
+                );
+                super::wake::request_recovery(database_oid);
+                return;
+            }
         }
-        let wait = Duration::from_millis(wait_ms);
-        if should_wait && !BackgroundWorker::wait_latch(Some(wait)) {
-            break;
+
+        first_pass = false;
+        if super::wake::supervisor_snapshot(database_oid).is_some_and(|state| state.maintenance_due())
+        {
+            continue;
+        }
+
+        // A short burst grace avoids fork/exit churn during commit bursts. It is
+        // an interruptible PostgreSQL latch wait, not a polling thread. New
+        // commits wake the supervisor; the timeout guarantees this live worker
+        // rechecks its generation even if it was not the direct wake target.
+        if !BackgroundWorker::wait_latch(Some(IDLE_GRACE)) {
+            return;
         }
         if BackgroundWorker::sighup_received() {
             unsafe { pgrx::pg_sys::ProcessConfigFile(pgrx::pg_sys::GucContext::PGC_SIGHUP) };
         }
+        if !super::wake::supervisor_snapshot(database_oid).is_some_and(|state| state.maintenance_due())
+        {
+            return;
+        }
     }
 }
 
-fn millis_until(deadline: Instant) -> u64 {
-    u64::try_from(
-        deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis(),
-    )
-    .unwrap_or(u64::MAX)
-    .max(1)
+/// Drains all WAL visible at one durable fence while honoring the normal
+/// background row/time budgets. A generation sampled before the fence is not
+/// acknowledged until this fixed boundary is completely processed.
+fn drain_wal_through_fixed_fence() -> Result<(), String> {
+    // XLogFlush makes synchronous_commit=off commits decodeable without forcing
+    // foreground transactions to wait for KoldStore. This replaces the old
+    // 10..200ms repeated empty-peek retry loop.
+    let fence = capture_durable_wal_fence()?;
+    loop {
+        let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
+        let outcome = worker_transaction_result(|| {
+            let mut request = BoundedApplyRequest::available();
+            request.upper_bound = Some(fence);
+            request.advance_slot_on_empty = true;
+            apply_bounded(request)
+        });
+        drop(decoding_log_guard);
+        let outcome = outcome?;
+        crate::observability::record_async_apply_tick(outcome.row_changes, 0);
+        if !outcome.budget_exhausted {
+            return Ok(());
+        }
+    }
 }
 
-struct WakeRegistration {
+struct MaintenanceRegistration {
     database_oid: u32,
 }
 
-impl Drop for WakeRegistration {
+impl Drop for MaintenanceRegistration {
     fn drop(&mut self) {
-        super::wake::unregister_worker(self.database_oid);
+        super::wake::maintenance_stopped(self.database_oid);
     }
 }
 
-/// Temporarily hides PostgreSQL's routine logical-decoding `LOG` messages.
+/// Temporarily hides PostgreSQL's routine logical-decoding LOG messages while
+/// the decoder starts. Worker warnings/errors remain visible after the guard.
 struct DecodingLogGuard {
     previous: std::os::raw::c_int,
 }
@@ -263,10 +145,6 @@ impl DecodingLogGuard {
     fn suppress_routine_log_messages() -> Self {
         unsafe {
             let previous = pgrx::pg_sys::log_min_messages;
-            // PostgreSQL ranks server-only `LOG` specially: WARNING and ERROR
-            // thresholds still emit it. FATAL is the first level that hides
-            // routine decoder LOG records. Caught failures are reported by the
-            // worker after this guard restores the original threshold.
             pgrx::pg_sys::log_min_messages = pgrx::pg_sys::FATAL as std::os::raw::c_int;
             Self { previous }
         }
@@ -283,9 +161,6 @@ impl Drop for DecodingLogGuard {
 
 fn attach_applier_signal_handlers() {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP);
-    // Use PostgreSQL's standard SIGTERM handler while logical decoding is in
-    // C code. It marks interrupts pending, allowing decoding and SPI safe
-    // points to abort the transaction promptly during shutdown.
     unsafe {
         #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
         pgrx::pg_sys::pqsignal(pgrx::pg_sys::SIGTERM as i32, Some(applier_sigterm));
@@ -300,12 +175,9 @@ unsafe extern "C-unwind" fn applier_sigterm(signal: std::os::raw::c_int) {
 
 /// Runs `body` in a recoverable worker transaction.
 ///
-/// Soft-fail uses an internal subtransaction so a failpoint / SPI apply error
-/// does not `AbortCurrentTransaction` the top-level worker txn (that path can
-/// FATAL a `BGW_NEVER_RESTART` applier after logical-decoding portals).
-///
-/// Uncaught PostgreSQL `ERROR` longjmps are converted to `Err` via
-/// [`PgTryBuilder`] so they also soft-fail instead of exiting the applier.
+/// PostgreSQL ERROR/longjmp and Rust panic are converted to a normal Result so
+/// a failed attempt leaves the shared generation dirty and lets the supervisor
+/// dispatch a fresh process rather than depending on one process staying alive.
 pub(crate) fn worker_transaction_result<R>(
     body: impl FnOnce() -> Result<R, String>,
 ) -> Result<R, String> {
@@ -316,14 +188,14 @@ pub(crate) fn worker_transaction_result<R>(
         pgrx::pg_sys::BeginInternalSubTransaction(std::ptr::null());
     }
     let result = PgTryBuilder::new(AssertUnwindSafe(body))
-        .catch_others(|error| Err(format_caught_error("async worker", error)))
-        .catch_rust_panic(|error| Err(format_caught_error("async worker panic", error)))
+        .catch_others(|error| Err(format_caught_error("maintenance worker", error)))
+        .catch_rust_panic(|error| Err(format_caught_error("maintenance worker panic", error)))
         .execute();
     finish_subtransaction(result.is_ok());
     if unsafe { pgrx::pg_sys::IsAbortedTransactionBlockState() } {
         finish_outer_transaction(false);
         return Err(result.err().unwrap_or_else(|| {
-            "async worker transaction aborted after postgres error".to_string()
+            "maintenance worker transaction aborted after postgres error".to_string()
         }));
     }
     finish_outer_transaction(true);
@@ -371,11 +243,4 @@ fn format_caught_error(context: &str, error: CaughtError) -> String {
             format!("{context}: {} ({detail})", ereport.message())
         }
     }
-}
-
-fn unix_now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
