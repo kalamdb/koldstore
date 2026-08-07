@@ -6,7 +6,7 @@
 //! to coalesce a write burst, and exits when the database is caught up.
 
 use std::panic::AssertUnwindSafe;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use koldstore_worker::{async_mirror_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
@@ -114,7 +114,8 @@ fn run_maintenance_worker(database_oid: u32) {
         });
 
         match maintenance_result {
-            Ok(_) => {
+            Ok(result) => {
+                update_timed_policy_deadline(database_oid, result.timed_policy_present);
                 super::wake::mark_maintenance_reconciled(
                     database_oid,
                     target_maintenance_generation,
@@ -149,6 +150,30 @@ fn run_maintenance_worker(database_oid: u32) {
             return;
         }
     }
+}
+
+/// Row-limit policies are fully event-driven by source WAL. Only OlderThan
+/// policies need a clock wake because they can become eligible while no backend
+/// commits. Keep that deadline in shared supervisor state rather than parking a
+/// per-database worker or polling from a client backend.
+fn update_timed_policy_deadline(database_oid: u32, timed_policy_present: bool) {
+    if !timed_policy_present {
+        super::wake::clear_maintenance_deadline(database_oid);
+        return;
+    }
+    let interval_ms = i64::from(crate::guc::flush_check_interval_seconds().max(1))
+        .saturating_mul(1_000);
+    super::wake::schedule_maintenance_at_ms(
+        database_oid,
+        unix_now_ms().saturating_add(interval_ms),
+    );
+}
+
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 /// Drains all WAL visible at one fixed durable fence while respecting bounded
