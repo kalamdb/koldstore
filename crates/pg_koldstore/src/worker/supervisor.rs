@@ -282,7 +282,13 @@ fn dispatch_shared_work(
         return;
     }
 
-    let mut cluster_flush_workers = super::wake::flush_workers_total();
+    // The supervisor already owns a current registry snapshot. Count reservations
+    // from that buffer instead of rescanning shared memory solely for a cluster
+    // total on every wake.
+    let mut cluster_flush_workers = snapshots
+        .iter()
+        .map(|snapshot| snapshot.flush_workers())
+        .fold(0_u32, u32::saturating_add);
     if cluster_flush_workers >= CLUSTER_FLUSH_WORKER_LIMIT {
         return;
     }
