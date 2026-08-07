@@ -59,7 +59,6 @@ pub(crate) fn register_flush_executor_from_supervisor(database_oid: u32) -> Resu
         .enable_spi_access()
         .set_restart_time(None)
         .set_argument(Some(pgrx::pg_sys::Datum::from(database_oid.get())))
-        // PostgreSQL notifies the registering supervisor on child start/exit.
         .set_notify_pid(unsafe { pgrx::pg_sys::MyProcPid })
         .load_dynamic()
         .map(|_| ())
@@ -77,8 +76,6 @@ struct PendingCandidate {
     force: bool,
 }
 
-/// Reads a small fair page. Table locking happens after this query, so a busy
-/// first table cannot head-of-line block unrelated flush work.
 fn pending_candidates() -> Result<Vec<PendingCandidate>, String> {
     pgrx::Spi::connect(|client| {
         let table = client
@@ -110,7 +107,6 @@ fn pending_candidates() -> Result<Vec<PendingCandidate>, String> {
     })
 }
 
-/// Earliest pending `available_at`, including jobs that are not due yet.
 fn next_pending_due_ms() -> Result<Option<i64>, String> {
     pgrx::Spi::get_one::<i64>(
         "SELECT (extract(epoch FROM min(available_at)) * 1000)::bigint \
@@ -159,7 +155,6 @@ fn claim_one_flush_job() -> Result<(ClaimOutcome, Option<ClaimedWork>), String> 
                 ));
             }
             Err(error) => {
-                // Candidate state may change between page read and exact claim.
                 pgrx::log!(
                     "koldstore flush executor: candidate table_oid={} changed before claim: {error}",
                     candidate.table_oid.to_u32()
@@ -192,14 +187,10 @@ impl FlushWorkerRegistration {
         }
     }
 
-    /// Reconciles the queue after a no-claim or completed attempt. It
-    /// acknowledges only the generation this worker started for; a concurrent
-    /// enqueue advances the generation and therefore cannot be cleared here.
     fn reconcile_queue(&self, outcome: ClaimOutcome) {
         let next_due = match outcome {
             ClaimOutcome::Busy => Some(
-                unix_now_ms()
-                    .saturating_add(i64::try_from(BUSY_RETRY.as_millis()).unwrap_or(200)),
+                unix_now_ms().saturating_add(i64::try_from(BUSY_RETRY.as_millis()).unwrap_or(200)),
             ),
             ClaimOutcome::Empty | ClaimOutcome::Claimed => {
                 txn::run(next_pending_due_ms).unwrap_or(None)
@@ -264,8 +255,6 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         return;
     }
 
-    // Avoid spawning an extra no-op executor merely to acknowledge a drained
-    // queue. A concurrent enqueue remains protected by the generation check.
     registration.reconcile_queue(ClaimOutcome::Claimed);
 }
 

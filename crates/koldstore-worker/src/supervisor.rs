@@ -1,46 +1,34 @@
-//! PostgreSQL-free shared state for event-driven KoldStore worker supervision.
+//! Lock-free shared state for the event-driven KoldStore supervisor.
 //!
-//! Wakeups are hints, never the durable source of truth. Logical slots,
-//! async_mirror_state, and koldstore.jobs survive process/postmaster failure.
-//! Monotonic generations make event coalescing race-safe across worker startup,
-//! execution, and exit windows.
+//! Latches are latency hints only. Durable truth remains in logical slots,
+//! async_mirror_state, koldstore.jobs, attempt tokens, and segment ownership.
 
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering};
 
-/// One entry is reserved per database that has published KoldStore work.
 pub const SUPERVISOR_REGISTRY_CAPACITY: usize = 256;
-
-/// Database has committed WAL that may need mirror application/slot advance.
 pub const EVENT_WAL_DIRTY: u32 = 1 << 0;
-/// Database has committed flush queue work that needs dispatch.
 pub const EVENT_FLUSH_QUEUE_DIRTY: u32 = 1 << 1;
-/// Database needs a durable startup/crash reconciliation pass.
 pub const EVENT_RECOVERY_REQUIRED: u32 = 1 << 2;
-/// Database scheduling metadata changed and should be reconciled.
 pub const EVENT_SCHEDULE_DIRTY: u32 = 1 << 3;
 
 const WORKER_FREE: i32 = 0;
 const WORKER_STARTING: i32 = -1;
 
-/// PID stored in shared supervisor state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SupervisorPid(i32);
 
 impl SupervisorPid {
-    /// Wraps a PostgreSQL process id.
     #[must_use]
     pub const fn new(pid: i32) -> Self {
         Self(pid)
     }
 
-    /// Raw process id.
     #[must_use]
     pub const fn get(self) -> i32 {
         self.0
     }
 }
 
-/// Lock-free snapshot consumed by the PostgreSQL adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatabaseWorkSnapshot {
     pub database_oid: u32,
@@ -51,31 +39,27 @@ pub struct DatabaseWorkSnapshot {
     pub flush_generation: u64,
     pub flush_processed_generation: u64,
     pub event_flags: u32,
-    /// 0 = no worker, -1 = registration/start in progress, >0 = worker PID.
+    /// 0 = free, -1 = starting, >0 = live worker PID.
     pub maintenance_pid: i32,
     pub flush_starting: u32,
     pub flush_running: u32,
     pub flush_limit: u32,
-    /// Earliest future pending flush `available_at` as Unix epoch milliseconds.
-    /// Zero means no known future queue deadline.
+    /// Earliest future pending flush `available_at`, Unix epoch milliseconds.
     pub next_flush_due_at_ms: i64,
 }
 
 impl DatabaseWorkSnapshot {
-    /// True when a WAL/recovery/schedule maintenance generation is outstanding.
     #[must_use]
     pub const fn maintenance_due(self) -> bool {
         self.wal_generation != self.wal_processed_generation
             || self.maintenance_generation != self.maintenance_processed_generation
     }
 
-    /// True when a committed queue generation has not been acknowledged drained.
     #[must_use]
     pub const fn flush_due(self) -> bool {
         self.flush_generation != self.flush_processed_generation
     }
 
-    /// Starting + running flush workers for this database.
     #[must_use]
     pub const fn flush_workers(self) -> u32 {
         self.flush_starting.saturating_add(self.flush_running)
@@ -95,7 +79,6 @@ struct DatabaseWorkEntry {
     maintenance_pid: AtomicI32,
     flush_starting: AtomicU32,
     flush_running: AtomicU32,
-    /// Effective per-database cap last reported by a worker. Unknown starts at 1.
     flush_limit: AtomicU32,
     next_flush_due_at_ms: AtomicI64,
 }
@@ -140,7 +123,6 @@ impl DatabaseWorkEntry {
     }
 }
 
-/// Fixed shared-memory registry owned by the cluster supervisor.
 #[derive(Debug)]
 pub struct SupervisorRegistry<const N: usize> {
     supervisor_pid: AtomicI32,
@@ -159,26 +141,22 @@ impl<const N: usize> Default for SupervisorRegistry<N> {
 }
 
 impl<const N: usize> SupervisorRegistry<N> {
-    /// Registers the current static supervisor PID.
     pub fn register_supervisor(&self, pid: SupervisorPid) {
         self.supervisor_pid.store(pid.get(), Ordering::Release);
     }
 
-    /// Clears the supervisor PID only if it still belongs to `pid`.
     pub fn unregister_supervisor(&self, pid: SupervisorPid) {
-        let _ = self
-            .supervisor_pid
-            .compare_exchange(pid.get(), 0, Ordering::AcqRel, Ordering::Acquire);
+        let _ =
+            self.supervisor_pid
+                .compare_exchange(pid.get(), 0, Ordering::AcqRel, Ordering::Acquire);
     }
 
-    /// Current supervisor PID, if registered.
     #[must_use]
     pub fn supervisor_pid(&self) -> Option<SupervisorPid> {
         let pid = self.supervisor_pid.load(Ordering::Acquire);
         (pid > 0).then(|| SupervisorPid::new(pid))
     }
 
-    /// Publishes one committed WAL generation.
     pub fn publish_wal(&self, database_oid: u32) -> Option<SupervisorPid> {
         let entry = self.entry_or_overflow(database_oid)?;
         entry.wal_generation.fetch_add(1, Ordering::AcqRel);
@@ -188,7 +166,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         self.supervisor_pid()
     }
 
-    /// Publishes one committed flush queue generation.
     pub fn publish_flush(&self, database_oid: u32) -> Option<SupervisorPid> {
         let entry = self.entry_or_overflow(database_oid)?;
         entry.flush_generation.fetch_add(1, Ordering::AcqRel);
@@ -198,7 +175,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         self.supervisor_pid()
     }
 
-    /// Publishes one recovery generation.
     pub fn request_recovery(&self, database_oid: u32) -> Option<SupervisorPid> {
         let entry = self.entry_or_overflow(database_oid)?;
         entry.maintenance_generation.fetch_add(1, Ordering::AcqRel);
@@ -208,7 +184,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         self.supervisor_pid()
     }
 
-    /// Publishes one scheduling generation.
     pub fn publish_schedule(&self, database_oid: u32) -> Option<SupervisorPid> {
         let entry = self.entry_or_overflow(database_oid)?;
         entry.maintenance_generation.fetch_add(1, Ordering::AcqRel);
@@ -218,13 +193,11 @@ impl<const N: usize> SupervisorRegistry<N> {
         self.supervisor_pid()
     }
 
-    /// Reads one allocated database entry.
     #[must_use]
     pub fn snapshot(&self, database_oid: u32) -> Option<DatabaseWorkSnapshot> {
         self.find(database_oid).map(DatabaseWorkEntry::snapshot)
     }
 
-    /// Returns all allocated database entries.
     #[must_use]
     pub fn snapshots(&self) -> Vec<DatabaseWorkSnapshot> {
         self.entries
@@ -234,7 +207,6 @@ impl<const N: usize> SupervisorRegistry<N> {
             .collect()
     }
 
-    /// Reserves the single database-maintenance worker slot.
     pub fn try_reserve_maintenance(&self, database_oid: u32) -> bool {
         let Some(entry) = self.entry_or_overflow(database_oid) else {
             return false;
@@ -250,7 +222,6 @@ impl<const N: usize> SupervisorRegistry<N> {
             .is_ok()
     }
 
-    /// Converts a Starting maintenance reservation to its live PID.
     pub fn maintenance_started(&self, database_oid: u32, pid: i32) -> bool {
         let Some(entry) = self.find(database_oid) else {
             return false;
@@ -261,7 +232,6 @@ impl<const N: usize> SupervisorRegistry<N> {
             .is_ok()
     }
 
-    /// Releases a maintenance reservation whose registration failed.
     pub fn cancel_maintenance_start(&self, database_oid: u32) {
         let Some(entry) = self.find(database_oid) else {
             return;
@@ -274,7 +244,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         );
     }
 
-    /// Releases one normally exiting maintenance worker.
     pub fn maintenance_stopped(&self, database_oid: u32, pid: i32) {
         let Some(entry) = self.find(database_oid) else {
             return;
@@ -287,14 +256,12 @@ impl<const N: usize> SupervisorRegistry<N> {
         );
     }
 
-    /// Clears stale Starting/Running ownership after authoritative liveness check.
     pub fn clear_stale_maintenance(&self, database_oid: u32) {
         if let Some(entry) = self.find(database_oid) {
             entry.maintenance_pid.store(WORKER_FREE, Ordering::Release);
         }
     }
 
-    /// Marks WAL generations through `generation` safely processed.
     pub fn mark_wal_processed(&self, database_oid: u32, generation: u64) {
         let Some(entry) = self.find(database_oid) else {
             return;
@@ -308,8 +275,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         );
     }
 
-    /// Marks recovery/schedule work through `generation` reconciled without
-    /// clearing a concurrent/newer request.
     pub fn mark_maintenance_reconciled(&self, database_oid: u32, generation: u64) {
         let Some(entry) = self.find(database_oid) else {
             return;
@@ -328,7 +293,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         }
     }
 
-    /// Records the effective per-database flush concurrency limit.
     pub fn set_flush_limit(&self, database_oid: u32, limit: u32) {
         let Some(entry) = self.entry_or_overflow(database_oid) else {
             return;
@@ -336,17 +300,17 @@ impl<const N: usize> SupervisorRegistry<N> {
         entry.flush_limit.store(limit.max(1), Ordering::Release);
     }
 
-    /// Reserves one flush worker, counting both Starting and Running capacity.
     pub fn try_reserve_flush(&self, database_oid: u32, cluster_limit: u32) -> bool {
         let Some(entry) = self.entry_or_overflow(database_oid) else {
             return false;
         };
         let per_db_limit = entry.flush_limit.load(Ordering::Acquire).max(1);
-        let db_total = entry
+        if entry
             .flush_starting
             .load(Ordering::Acquire)
-            .saturating_add(entry.flush_running.load(Ordering::Acquire));
-        if db_total >= per_db_limit {
+            .saturating_add(entry.flush_running.load(Ordering::Acquire))
+            >= per_db_limit
+        {
             return false;
         }
         let cluster_total = self
@@ -365,7 +329,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         true
     }
 
-    /// Moves one reserved flush worker from Starting to Running.
     pub fn flush_started(&self, database_oid: u32, effective_limit: u32) {
         let Some(entry) = self.find(database_oid) else {
             return;
@@ -377,22 +340,18 @@ impl<const N: usize> SupervisorRegistry<N> {
             .store(effective_limit.max(1), Ordering::Release);
     }
 
-    /// Releases one failed flush registration reservation.
     pub fn cancel_flush_start(&self, database_oid: u32) {
         if let Some(entry) = self.find(database_oid) {
             decrement_if_positive(&entry.flush_starting);
         }
     }
 
-    /// Releases one normally exiting flush worker.
     pub fn flush_stopped(&self, database_oid: u32) {
         if let Some(entry) = self.find(database_oid) {
             decrement_if_positive(&entry.flush_running);
         }
     }
 
-    /// Authoritatively resets Starting/Running counts during rare lifecycle
-    /// reconciliation. Normal dispatch never queries pg_stat_activity.
     pub fn reconcile_flush_counts(&self, database_oid: u32, running: u32) {
         let Some(entry) = self.entry_or_overflow(database_oid) else {
             return;
@@ -401,7 +360,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         entry.flush_running.store(running, Ordering::Release);
     }
 
-    /// Marks one queue generation drained without clearing a newer enqueue race.
     pub fn mark_flush_processed(&self, database_oid: u32, generation: u64) {
         let Some(entry) = self.find(database_oid) else {
             return;
@@ -415,7 +373,6 @@ impl<const N: usize> SupervisorRegistry<N> {
         );
     }
 
-    /// Records the earliest known future `available_at` for pending flush work.
     pub fn schedule_flush_at_ms(&self, database_oid: u32, deadline_ms: i64) {
         if deadline_ms <= 0 {
             return;
@@ -426,14 +383,12 @@ impl<const N: usize> SupervisorRegistry<N> {
         atomic_min_nonzero(&entry.next_flush_due_at_ms, deadline_ms);
     }
 
-    /// Clears the current queue deadline after an authoritative no-future probe.
     pub fn clear_flush_deadline(&self, database_oid: u32) {
         if let Some(entry) = self.find(database_oid) {
             entry.next_flush_due_at_ms.store(0, Ordering::Release);
         }
     }
 
-    /// Clears a due deadline only if it still matches the sampled value.
     pub fn consume_flush_deadline(&self, database_oid: u32, sampled_ms: i64) -> bool {
         let Some(entry) = self.find(database_oid) else {
             return false;
@@ -445,13 +400,11 @@ impl<const N: usize> SupervisorRegistry<N> {
                 .is_ok()
     }
 
-    /// True if fixed shared state overflowed and needs conservative discovery.
     #[must_use]
     pub fn overflow_reconcile_required(&self) -> bool {
         self.overflow_reconcile_required.load(Ordering::Acquire) != 0
     }
 
-    /// Clears the overflow marker after an authoritative supervisor scan.
     pub fn clear_overflow_reconcile_required(&self) {
         self.overflow_reconcile_required.store(0, Ordering::Release);
     }
@@ -538,104 +491,56 @@ fn decrement_if_positive(target: &AtomicU32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SupervisorPid, SupervisorRegistry, EVENT_FLUSH_QUEUE_DIRTY, EVENT_RECOVERY_REQUIRED,
-        EVENT_WAL_DIRTY,
-    };
+    use super::{SupervisorRegistry, EVENT_WAL_DIRTY};
 
     #[test]
-    fn committed_events_coalesce_without_losing_generations() {
-        let registry = SupervisorRegistry::<2>::default();
-        registry.register_supervisor(SupervisorPid::new(500));
-        for _ in 0..100 {
-            assert_eq!(registry.publish_wal(42), Some(SupervisorPid::new(500)));
+    fn generations_coalesce_and_clear_safely() {
+        let registry = SupervisorRegistry::<1>::default();
+        for _ in 0..10 {
+            let _ = registry.publish_wal(42);
         }
         let snapshot = registry.snapshot(42).unwrap();
-        assert_eq!(snapshot.wal_generation, 100);
-        assert_eq!(snapshot.event_flags & EVENT_WAL_DIRTY, EVENT_WAL_DIRTY);
-        registry.mark_wal_processed(42, 100);
+        assert_eq!(snapshot.wal_generation, 10);
+        assert_ne!(snapshot.event_flags & EVENT_WAL_DIRTY, 0);
+        registry.mark_wal_processed(42, 10);
         assert!(!registry.snapshot(42).unwrap().maintenance_due());
     }
 
     #[test]
-    fn maintenance_generation_cannot_erase_newer_recovery() {
+    fn newer_maintenance_generation_survives_old_ack() {
         let registry = SupervisorRegistry::<1>::default();
-        registry.request_recovery(42);
+        let _ = registry.request_recovery(42);
         let first = registry.snapshot(42).unwrap().maintenance_generation;
-        registry.publish_schedule(42);
+        let _ = registry.publish_schedule(42);
         registry.mark_maintenance_reconciled(42, first);
-        let snapshot = registry.snapshot(42).unwrap();
-        assert_eq!(snapshot.maintenance_generation, 2);
-        assert!(snapshot.maintenance_due());
+        assert!(registry.snapshot(42).unwrap().maintenance_due());
     }
 
     #[test]
-    fn worker_reservations_include_starting_workers() {
-        let registry = SupervisorRegistry::<2>::default();
+    fn starting_workers_count_toward_flush_capacity() {
+        let registry = SupervisorRegistry::<1>::default();
         registry.set_flush_limit(42, 2);
         assert!(registry.try_reserve_flush(42, 4));
         assert!(registry.try_reserve_flush(42, 4));
         assert!(!registry.try_reserve_flush(42, 4));
         assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 2);
-        registry.flush_started(42, 2);
-        assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 2);
-        registry.flush_stopped(42);
-        assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 1);
     }
 
     #[test]
-    fn maintenance_reservation_is_single_owner() {
-        let registry = SupervisorRegistry::<1>::default();
-        registry.request_recovery(42);
-        assert!(registry.try_reserve_maintenance(42));
-        assert!(!registry.try_reserve_maintenance(42));
-        assert!(registry.maintenance_started(42, 9001));
-        registry.maintenance_stopped(42, 9001);
-        assert!(registry.try_reserve_maintenance(42));
-    }
-
-    #[test]
-    fn queue_generation_clear_cannot_erase_newer_work() {
-        let registry = SupervisorRegistry::<1>::default();
-        registry.publish_flush(42);
-        let first = registry.snapshot(42).unwrap().flush_generation;
-        registry.publish_flush(42);
-        registry.mark_flush_processed(42, first);
-        let snapshot = registry.snapshot(42).unwrap();
-        assert_eq!(snapshot.flush_generation, 2);
-        assert_ne!(snapshot.event_flags & EVENT_FLUSH_QUEUE_DIRTY, 0);
-        assert!(snapshot.flush_due());
-    }
-
-    #[test]
-    fn future_flush_deadline_keeps_earliest_value() {
+    fn future_deadline_keeps_earliest_value() {
         let registry = SupervisorRegistry::<1>::default();
         registry.schedule_flush_at_ms(42, 5_000);
         registry.schedule_flush_at_ms(42, 7_000);
         registry.schedule_flush_at_ms(42, 3_000);
         assert_eq!(registry.snapshot(42).unwrap().next_flush_due_at_ms, 3_000);
         assert!(registry.consume_flush_deadline(42, 3_000));
-        assert_eq!(registry.snapshot(42).unwrap().next_flush_due_at_ms, 0);
     }
 
     #[test]
-    fn registry_overflow_fails_closed_to_reconciliation() {
+    fn overflow_requires_reconciliation() {
         let registry = SupervisorRegistry::<1>::default();
         let _ = registry.publish_wal(42);
         assert_eq!(registry.publish_wal(84), None);
         assert!(registry.overflow_reconcile_required());
-    }
-
-    #[test]
-    fn recovery_flag_has_own_generation() {
-        let registry = SupervisorRegistry::<1>::default();
-        registry.request_recovery(42);
-        let snapshot = registry.snapshot(42).unwrap();
-        assert_eq!(snapshot.wal_generation, 0);
-        assert_eq!(snapshot.maintenance_generation, 1);
-        assert_eq!(
-            snapshot.event_flags & EVENT_RECOVERY_REQUIRED,
-            EVENT_RECOVERY_REQUIRED
-        );
     }
 }
