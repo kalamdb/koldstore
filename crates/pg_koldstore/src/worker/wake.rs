@@ -13,8 +13,7 @@ use koldstore_worker::{
 };
 use pgrx::{pg_guard, pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
 
-type SharedEnsurePauseSet =
-    AssertPGRXSharedMemory<EnsurePauseSet<SUPERVISOR_REGISTRY_CAPACITY>>;
+type SharedEnsurePauseSet = AssertPGRXSharedMemory<EnsurePauseSet<SUPERVISOR_REGISTRY_CAPACITY>>;
 type SharedSupervisorRegistry =
     AssertPGRXSharedMemory<SupervisorRegistry<SUPERVISOR_REGISTRY_CAPACITY>>;
 
