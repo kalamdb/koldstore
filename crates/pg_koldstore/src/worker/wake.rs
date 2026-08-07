@@ -186,13 +186,14 @@ pub(crate) fn try_reserve_flush(database_oid: u32) -> bool {
     SUPERVISOR_REGISTRY.get().try_reserve_flush(database_oid)
 }
 
-pub(crate) fn flush_started(database_oid: u32, effective_limit: u32) {
-    SUPERVISOR_REGISTRY
+pub(crate) fn flush_started(database_oid: u32, effective_limit: u32) -> bool {
+    let started = SUPERVISOR_REGISTRY
         .get()
         .flush_started(database_oid, effective_limit);
-    // The first worker teaches the supervisor this DB's effective cap. Wake it
-    // immediately so a queue can fan out without waiting for that worker to exit.
+    // A successful start may free a per-database STARTING slot for additional
+    // fan-out. A stale/unreserved start also wakes reconciliation immediately.
     wake_supervisor();
+    started
 }
 
 pub(crate) fn cancel_flush_start(database_oid: u32) {
