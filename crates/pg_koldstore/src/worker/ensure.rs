@@ -1,18 +1,18 @@
 //! Compatibility shims for the former session-side WAL-worker ensure API.
 //!
-//! Production backends must never call RegisterDynamicBackgroundWorker. They
-//! publish durable/shared work and wake the single cluster supervisor, which is
-//! the sole owner of maintenance/executor registration.
+//! Production backends never call RegisterDynamicBackgroundWorker. They mark
+//! transaction-local maintenance intent; a successful top-level commit publishes
+//! the shared event and wakes the single cluster supervisor.
 
 use koldstore_worker::DatabaseOid;
 
 /// Legacy compatibility hook; there is no backend-local WORKER_ENSURED state anymore.
 pub(crate) fn mark_worker_not_ensured() {}
 
-/// Requests maintenance for the current database.
+/// Requests maintenance for the current database after the surrounding commit.
 ///
-/// Returns true when a request was published. The function deliberately does
-/// not wait for process startup and does not inspect pg_stat_activity.
+/// The function deliberately does not wait for process startup and does not
+/// inspect pg_stat_activity. If the caller rolls back, no worker is dispatched.
 pub(crate) fn ensure_async_mirror_worker() -> Result<bool, String> {
     if !crate::guc::async_mirror_worker_enabled() {
         return Ok(false);
@@ -21,11 +21,15 @@ pub(crate) fn ensure_async_mirror_worker() -> Result<bool, String> {
     if crate::worker::wake::ensure_paused(database_oid) {
         return Ok(false);
     }
-    crate::worker::wake::request_recovery(database_oid);
+    crate::worker::wake::mark_schedule_pending();
     Ok(true)
 }
 
-/// Compatibility form used by older internal callers.
+/// Compatibility form used by old callers that already know a database OID.
+///
+/// Cross-database calls cannot be represented by a current-backend transaction
+/// dirty bit, so this form is only safe for supervisor/recovery code and directly
+/// publishes a durable recovery hint. Normal client code uses the no-argument form.
 pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Result<bool, String> {
     if !crate::guc::async_mirror_worker_enabled()
         || crate::worker::wake::ensure_paused(database_oid.get())
@@ -37,29 +41,29 @@ pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Resul
 }
 
 /// Former once-per-backend ensure path.
-///
-/// It is now intentionally cheap and idempotent: publish a recovery hint and
-/// return. Shared generations/reservations coalesce repeated calls.
 pub(crate) fn ensure_async_mirror_worker_once_if_needed() {
     let _ = ensure_async_mirror_worker();
 }
 
 /// Requires automatic async maintenance to be enabled before capture activation.
+///
+/// The activation transaction marks scheduling dirty. The worker is dispatched
+/// only after publication/catalog activation commits, so it cannot race ahead of
+/// an uncommitted manage_table transaction.
 pub(crate) fn require_async_mirror_worker() -> Result<(), String> {
     if !crate::guc::async_mirror_worker_enabled() {
         return Err(
             "async mirror capture requires koldstore.internal_async_mirror_worker=on".to_string(),
         );
     }
-    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    crate::worker::wake::request_recovery(database_oid);
+    crate::worker::wake::mark_schedule_pending();
     Ok(())
 }
 
 /// Internal compatibility SQL entry point used by existing tests/diagnostics.
 ///
-/// It now wakes the supervisor rather than registering a process in this client
-/// backend. New tests should assert supervisor/shared state directly.
+/// It now requests supervisor maintenance at transaction commit rather than
+/// registering a process in this client backend.
 #[pgrx::pg_extern(
     name = "internal_ensure_async_mirror_worker",
     schema = "koldstore",
@@ -86,7 +90,7 @@ pub fn set_async_mirror_ensure_paused_pg(paused: bool) -> bool {
         true
     } else {
         crate::worker::wake::resume_ensure(oid);
-        crate::worker::wake::request_recovery(oid);
+        crate::worker::wake::mark_schedule_pending();
         true
     }
 }
