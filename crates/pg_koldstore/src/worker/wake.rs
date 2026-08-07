@@ -11,7 +11,7 @@ use koldstore_worker::{
     DatabaseWorkSnapshot, EnsurePauseSet, SupervisorPid, SupervisorRegistry, TransactionDirty,
     SUPERVISOR_REGISTRY_CAPACITY, WAKE_REGISTRY_CAPACITY,
 };
-use pgrx::{pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
+use pgrx::{pg_guard, pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
 
 type SharedEnsurePauseSet = AssertPGRXSharedMemory<EnsurePauseSet<WAKE_REGISTRY_CAPACITY>>;
 type SharedSupervisorRegistry =
