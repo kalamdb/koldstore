@@ -139,17 +139,22 @@ CREATE TABLE IF NOT EXISTS koldstore.jobs (
   rows_flushed bigint NOT NULL DEFAULT 0,
   progress_current bigint NOT NULL DEFAULT 0,
   progress_total bigint NOT NULL DEFAULT 0,
-  progress_unit text NOT NULL DEFAULT '',
   attempts integer NOT NULL DEFAULT 0,
+  -- Fences job progress mutations across reclaim: a stale executor cannot
+  -- mutate a job after a new attempt_token is claimed.
+  attempt_token uuid,
   error_trace text,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   cancel_requested_at timestamptz,
+  available_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  finished_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
 );
--- SCALABILITY: completed/cancelled/error jobs are retained forever today. Add a
--- retention/purge policy before high-frequency flush in production, or this
--- table grows without bound (one row per flush/migrate).
+-- Terminal jobs (completed/cancelled/error) are purged by the flush coordinator
+-- (and koldstore.purge_old_jobs) after koldstore.job_retention_days (default 30;
+-- 0 disables). Jobs still referenced by pending cold segments are never deleted.
 
 CREATE INDEX IF NOT EXISTS jobs_pending_idx
   ON koldstore.jobs (table_oid, scope_key, status, updated_at)
@@ -167,8 +172,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active_table_work_idx
   ON koldstore.jobs (table_oid)
   WHERE job_type IN ('flush', 'migrate_backfill') AND status IN ('pending', 'running');
 
--- Cross-session cancel signal that does not contend with the flush transaction's
--- row lock on koldstore.jobs (inline flush holds that lock for the whole statement).
+-- Cross-session cancel signal for session-owned flush / cooperative cancel.
+-- Peers write here instead of contending for the jobs row lock held by the
+-- owning flush executor while a job is running.
 CREATE TABLE IF NOT EXISTS koldstore.table_cancel_requests (
   table_oid oid PRIMARY KEY,
   requested_at timestamptz NOT NULL DEFAULT now()
@@ -193,6 +199,11 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   -- Object identity from publish (sha256 hex + backend etag). Set at pending insert.
   checksum text NOT NULL,
   object_etag text,
+  -- Writer identity for interrupted-pass recovery (job → attempt → pass → ordinal).
+  writer_job_id uuid,
+  writer_attempt_token uuid,
+  pass_id uuid,
+  segment_ordinal integer,
   created_at timestamptz NOT NULL DEFAULT now(),
   CHECK (min_seq > 0 AND min_seq <= max_seq),
   CHECK (row_count > 0),
@@ -203,7 +214,11 @@ CREATE TABLE IF NOT EXISTS koldstore.cold_segments (
   CHECK (array_position(row_group_row_counts, NULL) IS NULL),
   CHECK (array_position(row_group_min_seqs, NULL) IS NULL),
   CHECK (array_position(row_group_max_seqs, NULL) IS NULL),
-  CHECK (0 < ALL (row_group_row_counts))
+  CHECK (0 < ALL (row_group_row_counts)),
+  CHECK (
+    (writer_job_id IS NULL AND writer_attempt_token IS NULL AND pass_id IS NULL AND segment_ordinal IS NULL)
+    OR (writer_job_id IS NOT NULL AND writer_attempt_token IS NOT NULL AND pass_id IS NOT NULL AND segment_ordinal IS NOT NULL AND segment_ordinal >= 0)
+  )
 );
 
 CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx
@@ -215,6 +230,15 @@ CREATE INDEX IF NOT EXISTS cold_segments_active_scope_seq_idx
 CREATE INDEX IF NOT EXISTS cold_segments_pending_created_idx
   ON koldstore.cold_segments (table_oid, created_at)
   WHERE status = 'pending';
+
+-- Deterministic interrupted-pass recovery: one ordinal per job/pass.
+CREATE UNIQUE INDEX IF NOT EXISTS cold_segments_writer_pass_ordinal_uidx
+  ON koldstore.cold_segments (writer_job_id, pass_id, segment_ordinal)
+  WHERE writer_job_id IS NOT NULL AND pass_id IS NOT NULL AND segment_ordinal IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS cold_segments_writer_job_pending_idx
+  ON koldstore.cold_segments (writer_job_id, pass_id, status)
+  WHERE status = 'pending' AND writer_job_id IS NOT NULL;
 
 -- Query-path bounds use the persisted KoldStore Sort Key V1 bytea codec.
 CREATE TABLE IF NOT EXISTS koldstore.cold_segment_index (

@@ -6,8 +6,10 @@
 //! lookups also run before `VACUUM FULL`** so they are not compared against a
 //! freshly rewritten 10M heap. Managed sides flush older rows to zstd Parquet
 //! (timing + peak RSS), time **cold-only** and **hot+cold (50/50)** after flush
-//! (before hot-heap VACUUM), then VACUUM for the maintenance metric and compare
-//! PostgreSQL heap/index sizes versus total hot+cold footprint.
+//! (before hot-heap VACUUM), drain **`changes_since`** over the full latest-state
+//! set (paged cursor), then VACUUM for the maintenance metric and compare
+//! PostgreSQL heap/index sizes versus total hot+cold footprint. Flush report
+//! rows include write throughput (rows/s) and cold-Parquet bandwidth (MiB/s).
 //!
 //! Timed INSERT always seeds into an empty table growing to `rows` on every
 //! side — `hot_row_limit` does **not** make managed INSERT faster (flush has
@@ -57,6 +59,8 @@ const QUERY_LOOPS: usize = 400;
 const QUERY_WARMUP_DISCARD: usize = 40;
 /// Update/delete latency sample size when splitting the DML sample into batches.
 const DEFAULT_DML_LATENCY_BATCH_ROWS: i64 = 1_000;
+/// Default `changes_since` page size for the post-flush full-cursor drain.
+const DEFAULT_CHANGES_SINCE_BATCH: i64 = 500;
 
 #[derive(Debug, Clone, Copy)]
 struct Timing {
@@ -155,6 +159,8 @@ struct SideMetrics {
     heap_after_workload: HeapStats,
     sizes: Sizes,
     async_catchup: Option<AsyncCatchup>,
+    /// Post-flush `changes_since` full cursor drain (managed only).
+    changes_since_drain: Option<Timing>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -505,6 +511,7 @@ async fn run_pg_only_body(
         heap_after_workload: heap,
         sizes,
         async_catchup: None,
+        changes_since_drain: None,
     };
 
     print_comparison_table(
@@ -677,6 +684,24 @@ async fn run_managed_only_body(
         time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
     };
 
+    let changes_batch = env_i64(
+        "KOLDSTORE_STORAGE_CHANGES_SINCE_BATCH",
+        DEFAULT_CHANGES_SINCE_BATCH,
+    )
+    .clamp(1, 10_000);
+    let changes_since_drain = if env_flag("KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE") {
+        common::log_always(
+            "storage_cmp: skipping changes_since full drain \
+             (KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE=1)",
+        );
+        None
+    } else {
+        let _step = common::log_step_always(format!(
+            "storage_cmp: changes_since full drain (expect ~{rows} rows, batch={changes_batch})"
+        ));
+        Some(time_changes_since_full_drain(&db.client, managed, rows, changes_batch).await?)
+    };
+
     let vacuum = {
         let _step = common::log_step_always("storage_cmp: VACUUM FULL managed (hot heap)");
         time_vacuum_full(&db.client, managed).await?
@@ -720,6 +745,7 @@ async fn run_managed_only_body(
             delete: delete_catchup,
             restore: restore_catchup,
         }),
+        changes_since_drain,
     };
 
     print_comparison_table(
@@ -948,6 +974,24 @@ async fn run_storage_comparison_body(
         time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
     };
 
+    let changes_batch = env_i64(
+        "KOLDSTORE_STORAGE_CHANGES_SINCE_BATCH",
+        DEFAULT_CHANGES_SINCE_BATCH,
+    )
+    .clamp(1, 10_000);
+    let managed_changes_since = if env_flag("KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE") {
+        common::log_always(
+            "storage_cmp: skipping changes_since full drain \
+             (KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE=1)",
+        );
+        None
+    } else {
+        let _step = common::log_step_always(format!(
+            "storage_cmp: changes_since full drain (expect ~{rows} rows, batch={changes_batch})"
+        ));
+        Some(time_changes_since_full_drain(&db.client, managed, rows, changes_batch).await?)
+    };
+
     // After flush the managed heap is smaller; time VACUUM FULL as the
     // maintenance-cost comparison, then REINDEX so size numbers are clean.
     let baseline_vacuum = {
@@ -990,6 +1034,7 @@ async fn run_storage_comparison_body(
         heap_after_workload: baseline_heap,
         sizes: baseline_sizes,
         async_catchup: None,
+        changes_since_drain: None,
     };
     let managed_metrics = SideMetrics {
         insert: managed_insert,
@@ -1007,6 +1052,7 @@ async fn run_storage_comparison_body(
             delete: delete_catchup,
             restore: restore_catchup,
         }),
+        changes_since_drain: managed_changes_since,
     };
 
     print_comparison_table(
@@ -1069,6 +1115,14 @@ fn env_i64(name: &str, default: i64) -> i64 {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
+}
+
+/// True when `name` is set to `1` / `true` / `yes` (case-insensitive).
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref().map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("YES")
+    )
 }
 
 /// Resolves warm-up row count: explicit env, else a scale-aware default, else 0.
@@ -1393,6 +1447,88 @@ async fn flush_table(client: &Client, relation: &str) -> Result<i64> {
         )
         .await?;
     Ok(progress.get(0))
+}
+
+/// Pages `koldstore.changes_since` from `since_seq = 0` until empty, advancing
+/// the exclusive cursor with each page's max `seq`.
+///
+/// Measures post-flush latest-state catch-up cost for the full seeded row set
+/// (hot mirror + cold Parquet). `ops` is the number of change rows returned.
+async fn time_changes_since_full_drain(
+    client: &Client,
+    relation: &str,
+    expected_rows: i64,
+    batch_size: i64,
+) -> Result<Timing> {
+    let limit = i32::try_from(batch_size).unwrap_or(i32::MAX);
+    let started = Instant::now();
+    let mut since_seq = 0_i64;
+    let mut fetched = 0_i64;
+    let mut pages = 0_u64;
+    loop {
+        let rows = client
+            .query(
+                "SELECT seq, op, pk, deleted, row_image, source \
+                 FROM koldstore.changes_since($1::text::regclass, $2::bigint, $3::integer)",
+                &[&relation, &since_seq, &limit],
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "changes_since page failed for {relation} since_seq={since_seq} limit={limit}"
+                )
+            })?;
+        if rows.is_empty() {
+            break;
+        }
+        pages = pages.saturating_add(1);
+        fetched = fetched.saturating_add(rows.len() as i64);
+        let page_max = rows
+            .iter()
+            .map(|row| row.get::<_, i64>(0))
+            .max()
+            .expect("non-empty page has seq values");
+        anyhow::ensure!(
+            page_max > since_seq,
+            "changes_since cursor did not advance (since_seq={since_seq}, page_max={page_max})"
+        );
+        since_seq = page_max;
+        if pages == 1 || pages.is_multiple_of(200) {
+            common::log_always(format!(
+                "storage_cmp: changes_since progress pages={pages} fetched={fetched} cursor={since_seq} elapsed={}",
+                format_duration(started.elapsed()),
+            ));
+        }
+        // Defensive: a stuck feed must not run forever on a broken cursor.
+        anyhow::ensure!(
+            fetched
+                <= expected_rows
+                    .saturating_mul(2)
+                    .max(expected_rows + batch_size),
+            "changes_since drain fetched {fetched} rows (expected ~{expected_rows}); aborting"
+        );
+    }
+    let elapsed = started.elapsed();
+    anyhow::ensure!(
+        fetched >= expected_rows,
+        "changes_since full drain expected >= {expected_rows} latest-state rows, got {fetched} \
+         (pages={pages}, last_cursor={since_seq})"
+    );
+    common::log_always(format!(
+        "storage_cmp: changes_since full drain fetched={fetched} pages={pages} batch={batch_size} \
+         duration={} ({:.0} rows/s)",
+        format_duration(elapsed),
+        if elapsed.is_zero() {
+            0.0
+        } else {
+            fetched as f64 / elapsed.as_secs_f64()
+        },
+    ));
+    Ok(Timing {
+        elapsed,
+        ops: fetched,
+        p99_us: None,
+    })
 }
 
 /// Runs `flush_table` while polling cluster RSS so peak memory during Parquet
@@ -2444,6 +2580,14 @@ fn build_comparison_report(
         .filter(|f| !f.duration.is_zero() && f.rows_flushed > 0)
         .map(|f| f.rows_flushed as f64 / f.duration.as_secs_f64())
         .unwrap_or(0.0);
+    let flush_mib_per_sec = match (flush, managed) {
+        (Some(f), Some(m))
+            if !f.duration.is_zero() && f.rows_flushed > 0 && m.sizes.cold_bytes > 0 =>
+        {
+            (m.sizes.cold_bytes as f64 / (1024.0 * 1024.0)) / f.duration.as_secs_f64()
+        }
+        _ => 0.0,
+    };
     let flushed_rows = flush.map(|f| f.rows_flushed).unwrap_or(0);
 
     let pg_ops = |t: Option<Timing>| t.map(format_ops_per_sec).unwrap_or_else(|| missing.clone());
@@ -2516,11 +2660,45 @@ fn build_comparison_report(
             "flush duration",
             "—",
             flush
-                .map(|f| {
+                .map(|f| format_duration(f.duration))
+                .unwrap_or_else(|| missing.clone()),
+        ),
+        row(
+            "flush write throughput",
+            "—",
+            if flush_rows_per_sec > 0.0 {
+                format!("{flush_rows_per_sec:.0} rows/s")
+            } else {
+                missing.clone()
+            },
+        ),
+        row(
+            "flush write bandwidth",
+            "—",
+            if flush_mib_per_sec > 0.0 {
+                format!("{flush_mib_per_sec:.2} MiB/s")
+            } else {
+                missing.clone()
+            },
+        ),
+        row(
+            "changes_since full-drain throughput",
+            "—",
+            managed
+                .and_then(|m| m.changes_since_drain)
+                .map(|t| format!("{:.0} rows/s", t.ops_per_sec()))
+                .unwrap_or_else(|| missing.clone()),
+        ),
+        row(
+            "changes_since full-drain duration",
+            "—",
+            managed
+                .and_then(|m| m.changes_since_drain)
+                .map(|t| {
                     format!(
-                        "{} ({:.0} rows/s)",
-                        format_duration(f.duration),
-                        flush_rows_per_sec
+                        "{} ({} rows)",
+                        format_duration(t.elapsed),
+                        format_count(t.ops)
                     )
                 })
                 .unwrap_or_else(|| missing.clone()),
@@ -2606,6 +2784,21 @@ fn build_comparison_report(
             mg_speed(managed.map(|m| m.query_cold_only)),
         ),
         row(
+            "changes_since full drain‡",
+            "—",
+            managed
+                .and_then(|m| m.changes_since_drain)
+                .map(|t| {
+                    format!(
+                        "{} rows · {} · {:.0} rows/s",
+                        format_count(t.ops),
+                        format_duration(t.elapsed),
+                        t.ops_per_sec()
+                    )
+                })
+                .unwrap_or_else(|| missing.clone()),
+        ),
+        row(
             "VACUUM time (after flush)",
             pg_dur(baseline.map(|m| m.vacuum.elapsed)),
             mg_dur(managed.map(|m| m.vacuum.elapsed)),
@@ -2673,13 +2866,25 @@ fn build_comparison_report(
     let mut notes = Vec::new();
     if let Some(f) = flush {
         notes.push(format!(
-            "flush: duration={} rows={} ({:.0} rows/s) peak_rss={} (before={}, after={})",
+            "flush: duration={} rows={} ({:.0} rows/s, {:.2} MiB/s cold Parquet) peak_rss={} (before={}, after={})",
             format_duration(f.duration),
             f.rows_flushed,
             flush_rows_per_sec,
+            flush_mib_per_sec,
             format_bytes(f.peak_rss_bytes as i64),
             format_bytes(f.before_rss_bytes as i64),
             format_bytes(f.after_rss_bytes as i64),
+        ));
+    }
+    if let Some(drain) = managed.and_then(|m| m.changes_since_drain) {
+        notes.push(format!(
+            "‡ changes_since full drain: pages exclusive `seq` cursor from 0 after flush \
+             (default batch={DEFAULT_CHANGES_SINCE_BATCH}; override \
+             KOLDSTORE_STORAGE_CHANGES_SINCE_BATCH). Fetched {} latest-state rows in {} \
+             ({:.0} rows/s).",
+            format_count(drain.ops),
+            format_duration(drain.elapsed),
+            drain.ops_per_sec(),
         ));
     }
     notes.push(

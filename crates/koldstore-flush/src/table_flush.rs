@@ -13,7 +13,7 @@ pub struct TableFlushBatchOutcome {
     pub total_rows_flushed: i64,
     /// Last flushed `_seq`.
     pub last_max_seq: i64,
-    /// Sum of published Parquet object sizes for segments written this wave.
+    /// Sum of published Parquet object sizes for segments written this pass.
     pub bytes_written: i64,
     /// Mirror operations used to select and later prune this flush.
     pub mirror_ops: Option<Vec<i16>>,

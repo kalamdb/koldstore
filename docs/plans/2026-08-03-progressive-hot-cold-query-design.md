@@ -1,8 +1,19 @@
 # Progressive Hot–Cold Query Architecture
 
 Date: 2026-08-03  
-Status: Phases 0–5 implemented on `feature/progressive-hot-cold-query` (Phase 6+ open; late materialization design: [2026-08-03-late-materialization-design.md](2026-08-03-late-materialization-design.md))  
-Branch context: `feature/progressive-hot-cold-query` (from `wal-only-capture-71` lineage)
+**Status (as of 2026-08-06):** Architecture **implemented for Phases 0–5** (on `main` via PR #74). Phase 6+ still open.
+
+| Area | State |
+| --- | --- |
+| `KoldPathStrategy` portfolio + pathkeys | **Done** |
+| Native hot child for Ordered / UnorderedHotFirst | **Done** |
+| Bound-gated ordered frontier + `cold_segment_order_index` | **Done** |
+| Competitive RG expand; deferred mirror | **Done (lean)** |
+| SPI JSON only for `GeneralMerge` | **Done** |
+| Late materialization (compete-then-body) | **Done** — [design](2026-08-03-late-materialization-design.md) |
+| Aggregates / joins / page-index Bloom / multi-scope product | **Not done** (deferred) |
+
+This design doc remains accurate for shipped progressive scan behavior. Branch context at writing: `feature/progressive-hot-cold-query` (from `wal-only-capture-71` lineage); now merged.
 
 ## Purpose
 

@@ -176,43 +176,81 @@ pub const fn flush_table_request(
     }
 }
 
-/// Plans enqueueing a flush job for a table/scope and optional `_seq` watermark.
+/// Plans INSERT … ON CONFLICT DO NOTHING then lookup of the active flush job id.
+///
+/// Inserts a pending flush job when none is active. On conflict with an existing
+/// pending/running flush job, returns that job's id. When `force = true`, upgrades
+/// an existing **pending** job's payload force intent.
+///
+/// Bind parameters:
+/// - `$1` table oid (`regclass::oid`)
+/// - `$2` scope key text (NULL → `''`)
+/// - `$3` optional `flush_seq_upper_bound`
+/// - `$4` force boolean
 ///
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
-pub fn enqueue_flush_job_plan(
+pub fn plan_enqueue_or_lookup_flush_job(
     request: FlushRequest,
     seq_upper_bound: Option<SeqId>,
 ) -> Result<FlushJobEnqueuePlan, OpsError> {
     let statement = SqlStatement::write(
-        "enqueue flush job",
+        "enqueue or lookup flush job",
         &format!(
             r#"
-INSERT INTO koldstore.jobs (
-    id,
-    table_oid,
-    scope_key,
-    job_type,
-    status,
-    phase,
-    flush_seq_upper_bound,
-    payload
+WITH inserted AS (
+    INSERT INTO koldstore.jobs (
+        id,
+        table_oid,
+        scope_key,
+        job_type,
+        status,
+        phase,
+        flush_seq_upper_bound,
+        payload
+    )
+    VALUES (
+        gen_random_uuid(),
+        $1::regclass::oid,
+        COALESCE($2::text, ''),
+        'flush',
+        'pending',
+        'pending',
+        $3::bigint,
+        jsonb_build_object('force', $4::boolean)
+    )
+    ON CONFLICT (table_oid, scope_key)
+    WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
+    DO NOTHING
+    RETURNING id
+),
+force_upgrade AS (
+    UPDATE koldstore.jobs j
+    SET payload = j.payload || jsonb_build_object('force', true),
+        updated_at = now()
+    WHERE $4::boolean
+      AND NOT EXISTS (SELECT 1 FROM inserted)
+      AND j.table_oid = $1::regclass::oid
+      AND j.scope_key = COALESCE($2::text, '')
+      AND j.job_type = 'flush'
+      AND j.status = 'pending'
+      AND COALESCE((j.payload->>'force')::boolean, false) IS DISTINCT FROM true
+    RETURNING j.id
 )
-VALUES (
-    gen_random_uuid(),
-    $1::regclass::oid,
-    COALESCE($2::text, ''),
-    'flush',
-    'pending',
-    'pending',
-    $3::bigint,
-    jsonb_build_object('force', $4::boolean)
+SELECT COALESCE(
+    (SELECT id FROM inserted LIMIT 1),
+    (SELECT id FROM force_upgrade LIMIT 1),
+    (
+        SELECT id
+        FROM koldstore.jobs
+        WHERE table_oid = $1::regclass::oid
+          AND scope_key = COALESCE($2::text, '')
+          AND {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
+        ORDER BY updated_at, id
+        LIMIT 1
+    )
 )
-ON CONFLICT (table_oid, scope_key)
-WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
-DO NOTHING
-RETURNING id
 "#
         ),
     )
@@ -225,7 +263,55 @@ RETURNING id
     })
 }
 
-/// Plans one keyset-batched page of mirror-backed flush rows.
+/// Plans selection of one due pending flush job for a one-shot executor.
+///
+/// Returns JSON `{"table_oid":…,"force":…}` or empty string when the queue is
+/// empty. Does not lock the jobs row; session table ownership serializes claim.
+///
+/// # Errors
+///
+/// Returns an error when SPI statement metadata cannot be prepared.
+pub fn plan_select_pending_flush_candidate() -> Result<SqlStatement, OpsError> {
+    SqlStatement::read(
+        "select pending flush candidate",
+        r#"
+SELECT COALESCE((
+    SELECT jsonb_build_object(
+        'table_oid', table_oid::bigint,
+        'force', COALESCE((payload->>'force')::boolean, false)
+    )::text
+    FROM koldstore.jobs
+    WHERE job_type = 'flush'
+      AND status = 'pending'
+      AND available_at <= now()
+    ORDER BY available_at, updated_at, id
+    LIMIT 1
+), '')
+"#,
+    )
+    .map_err(|error| OpsError::Sql(error.to_string()))
+}
+
+/// Plans a count of due pending flush jobs (for executor spawn budget).
+///
+/// # Errors
+///
+/// Returns an error when SPI statement metadata cannot be prepared.
+pub fn plan_count_pending_flush_jobs() -> Result<SqlStatement, OpsError> {
+    SqlStatement::read(
+        "count pending flush jobs",
+        r#"
+SELECT count(*)::bigint
+FROM koldstore.jobs
+WHERE job_type = 'flush'
+  AND status = 'pending'
+  AND available_at <= now()
+"#,
+    )
+    .map_err(|error| OpsError::Sql(error.to_string()))
+}
+
+/// Plans one keyset-batched page of mirror-backed flush rows (seq order).
 ///
 /// PERFORMANCE: Used by the streaming flush path. Returns one page of rows as a plain
 /// `SELECT` (no `jsonb_agg`); `pg_koldstore` decodes SPI heap tuples directly.
@@ -254,14 +340,32 @@ pub fn plan_mirror_flush_selection_batch(
         scope_column,
         mirror_ops,
         false,
+        &[],
     )
 }
 
-/// Plans one keyset page and optionally returns the mirror's encoded order key.
+/// Plans one keyset page and optionally returns rows in segment order-key order.
+///
+/// When `sort_by_order_key` is false, bind parameters match
+/// [`plan_mirror_flush_selection_batch`].
+///
+/// When `sort_by_order_key` is true, PostgreSQL sorts by
+/// `(order_key, primary key…, seq)` and pages with a matching keyset:
+/// - `$1` mirror `seq` upper bound (`max_seq`)
+/// - `$2` first-page flag (`true` skips the keyset predicate)
+/// - `$3` exclusive lower `order_key` (`bytea`)
+/// - `$4..$(3+N)` exclusive lower primary-key values
+/// - `$(4+N)` exclusive lower `seq`
+/// - `$(5+N)` page size limit
+/// - optional scope text after the limit
+///
+/// `primary_key_param_types` must align with `primary_key_columns` when sorting.
 ///
 /// # Errors
 ///
-/// Returns an error when identifiers are unsafe or statement metadata cannot be prepared.
+/// Returns an error when identifiers are unsafe, parameter metadata is incomplete,
+/// or statement metadata cannot be prepared.
+#[allow(clippy::too_many_arguments)]
 pub fn plan_mirror_flush_selection_batch_with_order_key(
     table: &QualifiedTableName,
     mirror_table: &QualifiedTableName,
@@ -269,7 +373,8 @@ pub fn plan_mirror_flush_selection_batch_with_order_key(
     base_columns: &[String],
     scope_column: Option<&str>,
     mirror_ops: Option<&[i16]>,
-    include_order_key: bool,
+    sort_by_order_key: bool,
+    primary_key_param_types: &[SqlParamType],
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     plan_mirror_flush_selection_inner(
         table,
@@ -278,8 +383,27 @@ pub fn plan_mirror_flush_selection_batch_with_order_key(
         base_columns,
         scope_column,
         mirror_ops,
-        include_order_key,
+        sort_by_order_key,
+        primary_key_param_types,
     )
+}
+
+/// SQL cast fragment for a one-based bind parameter.
+#[must_use]
+pub fn sql_param_cast(param_index: usize, param_type: SqlParamType) -> String {
+    let cast = match param_type {
+        SqlParamType::BigInt => "bigint",
+        SqlParamType::Integer => "integer",
+        SqlParamType::Text => "text",
+        SqlParamType::Jsonb => "jsonb",
+        SqlParamType::Bytea => "bytea",
+        SqlParamType::Oid => "oid",
+        SqlParamType::Uuid => "uuid",
+        SqlParamType::UuidArray => "uuid[]",
+        SqlParamType::SmallIntArray => "smallint[]",
+        SqlParamType::Boolean => "boolean",
+    };
+    format!("${param_index}::{cast}")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -290,11 +414,17 @@ fn plan_mirror_flush_selection_inner(
     base_columns: &[String],
     scope_column: Option<&str>,
     mirror_ops: Option<&[i16]>,
-    include_order_key: bool,
+    sort_by_order_key: bool,
+    primary_key_param_types: &[SqlParamType],
 ) -> Result<MirrorFlushSelectionPlan, OpsError> {
     if primary_key_columns.is_empty() {
         return Err(OpsError::Sql(
             "flush selection requires primary key".to_string(),
+        ));
+    }
+    if sort_by_order_key && primary_key_param_types.len() != primary_key_columns.len() {
+        return Err(OpsError::Sql(
+            "ordered flush selection requires one SqlParamType per primary-key column".to_string(),
         ));
     }
     let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
@@ -304,7 +434,7 @@ fn plan_mirror_flush_selection_inner(
         .iter()
         .map(|column| validate_identifier(column))
         .collect::<Result<Vec<_>, _>>()?;
-    // Tombstone-only waves only need PK + seq/op from the mirror; joining hot
+    // Tombstone-only passes only need PK + seq/op from the mirror; joining hot
     // would pull TOAST payloads that parquet nulls for deletes anyway.
     let delete_only = mirror_ops.is_some_and(|ops| ops == [3]);
     let mut select_columns = base_columns
@@ -329,20 +459,55 @@ fn plan_mirror_flush_selection_inner(
             koldstore_mirror::MirrorColumn::Op.quoted_name()
         ),
     ]);
-    if include_order_key {
+    if sort_by_order_key {
         select_columns.push("mirror.\"order_key\" AS order_key".to_string());
     }
 
-    let mut where_clauses = vec![
-        "mirror.\"seq\" <= $1::bigint".to_string(),
-        "mirror.\"seq\" > $2::bigint".to_string(),
-    ];
-    let mut param_types = vec![
-        SqlParamType::BigInt,
-        SqlParamType::BigInt,
-        SqlParamType::BigInt,
-    ];
-    let scope_param = 4_usize;
+    let mut where_clauses = vec!["mirror.\"seq\" <= $1::bigint".to_string()];
+    let mut param_types = vec![SqlParamType::BigInt];
+    let limit_param;
+    let order_by;
+    if sort_by_order_key {
+        // $2 = first page; $3 = after order_key; $4.. = after PK; then after seq + limit.
+        let after_order_key_param = 3_usize;
+        let mut keyset_left = vec!["mirror.\"order_key\"".to_string()];
+        let mut keyset_right = vec![sql_param_cast(after_order_key_param, SqlParamType::Bytea)];
+        param_types.push(SqlParamType::Boolean);
+        param_types.push(SqlParamType::Bytea);
+        for (index, (pk_column, pk_type)) in pk_columns
+            .iter()
+            .zip(primary_key_param_types.iter().copied())
+            .enumerate()
+        {
+            let param_index = after_order_key_param + 1 + index;
+            keyset_left.push(format!("mirror.{pk_column}"));
+            keyset_right.push(sql_param_cast(param_index, pk_type));
+            param_types.push(pk_type);
+        }
+        let after_seq_param = after_order_key_param + 1 + pk_columns.len();
+        keyset_left.push("mirror.\"seq\"".to_string());
+        keyset_right.push(sql_param_cast(after_seq_param, SqlParamType::BigInt));
+        param_types.push(SqlParamType::BigInt);
+        where_clauses.push(format!(
+            "($2::boolean OR ({left}) > ({right}))",
+            left = keyset_left.join(", "),
+            right = keyset_right.join(", "),
+        ));
+        limit_param = after_seq_param + 1;
+        param_types.push(SqlParamType::BigInt);
+        let mut order_parts = vec!["mirror.\"order_key\" ASC NULLS LAST".to_string()];
+        for pk_column in &pk_columns {
+            order_parts.push(format!("mirror.{pk_column} ASC"));
+        }
+        order_parts.push("mirror.\"seq\" ASC".to_string());
+        order_by = order_parts.join(", ");
+    } else {
+        where_clauses.push("mirror.\"seq\" > $2::bigint".to_string());
+        param_types.push(SqlParamType::BigInt);
+        limit_param = 3_usize;
+        param_types.push(SqlParamType::BigInt);
+        order_by = "mirror.\"seq\" ASC".to_string();
+    }
     if let Some(ops) = mirror_ops {
         if !ops.is_empty() {
             where_clauses
@@ -350,6 +515,7 @@ fn plan_mirror_flush_selection_inner(
         }
     }
     if let Some(scope_column) = scope_column {
+        let scope_param = param_types.len() + 1;
         let predicate =
             koldstore_common::scope::scope_predicate_sql("mirror", scope_column, scope_param)
                 .map_err(|error| OpsError::Sql(error.to_string()))?;
@@ -375,11 +541,12 @@ fn plan_mirror_flush_selection_inner(
 SELECT {select_columns}
 {from_clause}
 WHERE {where_clause}
-ORDER BY mirror."seq" ASC
-LIMIT $3::bigint
+ORDER BY {order_by}
+LIMIT {limit_cast}
 "#,
         select_columns = select_columns.join(", "),
         where_clause = where_clauses.join(" AND "),
+        limit_cast = sql_param_cast(limit_param, SqlParamType::BigInt),
     );
     let statement =
         SqlStatement::read_with_params("select mirror-backed flush rows batch", &sql, param_types)
@@ -476,7 +643,6 @@ LEFT JOIN LATERAL (
             'batches_completed', job_snapshot.batches_completed,
             'progress_current', job_snapshot.progress_current,
             'progress_total', job_snapshot.progress_total,
-            'progress_unit', job_snapshot.progress_unit,
             'checkpoint_seq', job_snapshot.checkpoint_seq,
             'duration_ms', COALESCE(
                 (job_snapshot.payload->>'duration_ms')::bigint,
@@ -512,7 +678,6 @@ LEFT JOIN LATERAL (
             batches_completed,
             progress_current,
             progress_total,
-            progress_unit,
             checkpoint_seq,
             payload,
             created_at,
@@ -580,7 +745,7 @@ pub fn validate_cold_storage_plan(
 
 /// Builds a recovery request plan for library callers / contract tests.
 ///
-/// Live execution is inline in the extension (`LIST` orphans, expire pending
+/// Live recovery is executed by extension SPI (`LIST` orphans, expire pending
 /// catalog rows, quarantine/delete objects). This helper does not enqueue jobs.
 ///
 /// # Errors

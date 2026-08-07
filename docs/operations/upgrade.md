@@ -62,7 +62,9 @@ Prefer `ALTER DATABASE` / `ALTER SYSTEM` for background-worker GUCs (session
 | `shared_preload_libraries` | include `koldstore` (**required**) | Merge-scan hooks + workers; removing preload after manage is unsupported |
 | `wal_level` | `logical` | Required for async mirror |
 | `koldstore.async_mirror_max_retained_bytes` | `1073741824` (default) | Retained-WAL health threshold; exceeding it alerts but never stops apply. Use PostgreSQL disk/slot safeguards independently; `0` disables this threshold. |
-| `koldstore.flush_check_interval_seconds` | `30` (default) or tuned | Built-in auto-flush cadence |
+| `koldstore.flush_check_interval_seconds` | `30` (default) or tuned | Built-in auto-flush enqueue cadence |
+| `koldstore.flush_execution` | `queue` (default) | Production enqueue-and-return; `inline` is SPI tests only |
+| `koldstore.max_parallel_flush_jobs` | `2` (default) or tuned | Concurrent one-shot flush executors per database |
 | `koldstore.async_apply_watchdog_interval_ms` | `30000` (default) | Safety recovery for missed commit wakeups |
 
 `koldstore.async_apply_poll_interval_ms` was removed. Managed commits wake the

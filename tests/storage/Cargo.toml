@@ -7,7 +7,7 @@ repository.workspace = true
 
 [package.metadata.cargo-machete]
 # These are referenced by the shared e2e module included through `#[path]`.
-ignored = ["koldstore-common", "koldstore-storage"]
+ignored = ["koldstore-common", "koldstore-storage", "koldstore-worker"]
 
 [[test]]
 name = "pg_vs_koldstore"
@@ -20,6 +20,7 @@ koldstore-common.workspace = true
 koldstore-memory-tests = { path = "../memory" }
 # Shared via `#[path = "../e2e/common/mod.rs"]`.
 koldstore-storage = { workspace = true, features = ["s3"] }
+koldstore-worker.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros"] }

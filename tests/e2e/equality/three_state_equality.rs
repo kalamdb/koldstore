@@ -45,6 +45,20 @@ async fn three_state_baseline_equality_with_curated_queries() -> Result<()> {
                 .await?;
         }
 
+        // Seed before manage: activation backfill fills `__cl` so the first
+        // policy flush is not dependent solely on post-manage WAL apply timing.
+        for relation in [&baseline, &managed] {
+            db.client
+                .batch_execute(&format!(
+                    r#"
+                    INSERT INTO {relation} (id, body, qty)
+                    SELECT gs, 'row-' || gs::text, (gs % 5)::integer
+                    FROM generate_series(1, 24) AS gs;
+                    "#
+                ))
+                .await?;
+        }
+
         db.client
             .batch_execute("SET koldstore.min_max_rows_per_file = 1;")
             .await?;
@@ -64,21 +78,18 @@ async fn three_state_baseline_equality_with_curated_queries() -> Result<()> {
                 &[&managed, &db.storage_name],
             )
             .await?;
-
-        for relation in [&baseline, &managed] {
-            db.client
-                .batch_execute(&format!(
-                    r#"
-                    INSERT INTO {relation} (id, body, qty)
-                    SELECT gs, 'row-' || gs::text, (gs % 5)::integer
-                    FROM generate_series(1, 24) AS gs;
-                    "#
-                ))
-                .await?;
+        // Existing-row manage runs activation backfill as a job; wait before flush.
+        for _ in 0..120 {
+            if common::active_job_count(&db.client, &managed).await? == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+        common::assert_no_active_jobs(&db.client, &managed).await?;
 
         assert_state(&db, &baseline, &managed, "hot").await?;
 
+        common::fence_async_mirror(&db.client).await?;
         let flushed_mixed = db.flush_table(&managed).await?;
         assert!(
             flushed_mixed > 0,
@@ -98,6 +109,7 @@ async fn three_state_baseline_equality_with_curated_queries() -> Result<()> {
                 ))
                 .await?;
         }
+        common::fence_async_mirror(&db.client).await?;
         let flushed_cold = db.flush_table(&managed).await?;
         assert!(
             flushed_cold >= 0,

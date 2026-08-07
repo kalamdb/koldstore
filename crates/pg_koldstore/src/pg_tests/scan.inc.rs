@@ -316,11 +316,12 @@ fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
             .0
             .to_string()
     });
-    // Native hot child owns `Plans` under KoldMergeScan. Cold/hot diagnostics
-    // live in Scan Sources property groups (visual KoldStore Internal nodes
-    // are only emitted when no native child is present).
+    // Native hot child still owns `Plans`; Internal nodes live under the distinct
+    // `KoldStore Pipeline` key so JSON parsers keep both. `pgrx::Json` →
+    // `serde_json::Value::to_string()` is compact (no spaces after `:`).
     for expected in [
         "\"Custom Plan Provider\":\"KoldMergeScan\"",
+        "\"KoldStore Pipeline\"",
         "\"Scan Sources\"",
         "\"Hot Scan\"",
         "\"Planned Access\"",
@@ -331,6 +332,15 @@ fn explain_json_exposes_koldstore_read_pipeline_as_plan_nodes() {
         "\"Parquet Segments\"",
         "\"Mirror Scan\"",
         "\"Actual Rows\":1",
+        "\"Node Type\":\"KoldStore Hot Scan\"",
+        "\"Node Type\":\"KoldStore Cold Storage Scan\"",
+        "\"Node Type\":\"KoldStore Segment Catalog Scan\"",
+        "\"Node Type\":\"KoldStore Catalog Query\"",
+        "\"Node Type\":\"KoldStore Parquet Scan\"",
+        "\"Node Type\":\"KoldStore Parquet Footer\"",
+        "\"Node Type\":\"KoldStore Parquet Row Group Prune\"",
+        "\"Node Type\":\"KoldStore Parquet Column Fetch\"",
+        "\"KoldStore Internal\":true",
     ] {
         assert!(
             plan.contains(expected),
@@ -451,7 +461,12 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
         "Strategy: Ordered Progressive",
         "Seen Keys: 4",
         "Hot Rows: 1",
-        "Rows Scanned: 3",
+        // Late materialization: compete pass + body hydrate each decode the
+        // three cold rows (EXPLAIN Rows Scanned is decoded-row I/O, not unique).
+        "Rows Scanned: 6",
+        "Cold Compete Opens: 1",
+        "Cold Body Opens: 1",
+        "Parquet Segments Opened: 2",
         "Input Rows: 4",
         "Output Rows: 4",
         "Rows Removed by Merge: 0",
@@ -963,6 +978,73 @@ fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
 }
 
 #[pg_test]
+fn repeated_cold_pk_lookups_reuse_segment_index_and_object_store_client() {
+    let suffix = unique_suffix("cold_pk_cache");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b')"
+    ))
+    .expect("insert cold rows");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 1);
+
+    crate::catalog::cache::invalidate_all();
+    crate::catalog::cache::reset_segment_index_candidate_spi_load_count();
+
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 1")),
+        "cold-a"
+    );
+    assert_eq!(
+        crate::catalog::cache::segment_index_candidate_spi_load_count(),
+        1,
+        "first cold PK miss must load segment-index candidates once"
+    );
+    assert_eq!(
+        crate::object_store::cached_object_store_client_count(),
+        1,
+        "first cold open must cache one ObjectStore client"
+    );
+
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 1")),
+        "cold-a"
+    );
+    assert_eq!(
+        crate::catalog::cache::segment_index_candidate_spi_load_count(),
+        1,
+        "repeated cold PK with the same bounds must reuse the segment-index cache"
+    );
+    assert_eq!(
+        crate::object_store::cached_object_store_client_count(),
+        1,
+        "repeated cold opens must reuse the same ObjectStore client"
+    );
+
+    crate::catalog::cache::invalidate_all();
+    assert_eq!(
+        crate::object_store::cached_object_store_client_count(),
+        0,
+        "global invalidation must drop cached ObjectStore clients"
+    );
+    crate::catalog::cache::reset_segment_index_candidate_spi_load_count();
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 1")),
+        "cold-a"
+    );
+    assert_eq!(
+        crate::catalog::cache::segment_index_candidate_spi_load_count(),
+        1,
+        "after invalidate, the next cold PK must reload segment-index candidates"
+    );
+}
+
+#[pg_test]
 fn hot_only_and_mixed_hot_cold_results_match_expected_values() {
     let suffix = unique_suffix("scan");
     let schema = format!("pgtest_{suffix}");
@@ -1217,6 +1299,10 @@ fn ordered_limit_does_not_drain_full_hot_heap() {
         "hot-dominant ordered LIMIT must not open Parquet: {plan}"
     );
     assert!(
+        plan.contains("Cold Compete Opens: 0") && plan.contains("Cold Body Opens: 0"),
+        "hot-dominant ordered LIMIT must not compete or hydrate body: {plan}"
+    );
+    assert!(
         plan.contains("Cold Skip Reason:")
             || plan.contains("hot satisfied parent Limit without cold expansion"),
         "EXPLAIN should report why cold was skipped: {plan}"
@@ -1260,7 +1346,7 @@ fn ordered_limit_cold_wins_returns_cold_first() {
 
     let plan = spi_get_explain(&format!(
         "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
-         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+         SELECT id, body FROM {relation} ORDER BY id DESC LIMIT 5"
     ));
     assert!(
         plan.contains("Emit Path: ordered_merge_native")
@@ -1271,6 +1357,17 @@ fn ordered_limit_cold_wins_returns_cold_first() {
         plan.contains("Parquet Segments Opened:")
             && !plan.contains("Parquet Segments Opened: 0"),
         "cold-wins ordered LIMIT must open competitive Parquet: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Compete Opens:")
+            && !plan.contains("Cold Compete Opens: 0")
+            && plan.contains("Cold Body Opens:")
+            && !plan.contains("Cold Body Opens: 0"),
+        "cold emit must compete then hydrate body columns: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Body Columns:") && plan.contains("body"),
+        "late materialization must list body as a body column: {plan}"
     );
     assert_eq!(
         spi_get_text(&format!(
@@ -1321,6 +1418,13 @@ fn ordered_limit_asc_cold_wins_after_hot_prune() {
             && !plan.contains("Parquet Segments Opened: 0"),
         "ASC LIMIT after hot prune must open cold for lower ids: {plan}"
     );
+    assert!(
+        plan.contains("Cold Compete Opens:")
+            && !plan.contains("Cold Compete Opens: 0")
+            && plan.contains("Cold Body Opens:")
+            && !plan.contains("Cold Body Opens: 0"),
+        "ASC cold emit must use compete-then-body late materialization: {plan}"
+    );
     assert_eq!(
         spi_get_text(&format!(
             "SELECT string_agg(body, ',' ORDER BY id) FROM (\
@@ -1329,6 +1433,118 @@ fn ordered_limit_asc_cold_wins_after_hot_prune() {
         )),
         "cold-1,cold-2,cold-3,cold-4,cold-5",
         "ORDER BY id ASC LIMIT 5 must emit cold winners when they outrank hot"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_late_mat_skips_body_when_limit_is_hot_only() {
+    let suffix = unique_suffix("ordered_late_mat_hot_only");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1, 30) AS id"
+    ))
+    .expect("insert cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 30);
+    // Flush prune frees the heap PK slots; re-insert newer hot versions of the
+    // lowest ids so ASC LIMIT can stop on hot after compete expands cold.
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 8) AS id"
+    ))
+    .expect("re-insert hot overrides for low ids");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT id, body FROM {relation} ORDER BY id ASC LIMIT 3"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive"),
+        "late-mat hot-only LIMIT must stay on ordered progressive: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Compete Opens:")
+            && !plan.contains("Cold Compete Opens: 0"),
+        "hot/cold overlap must compete so sort can prefer hot: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Body Opens: 0"),
+        "parent LIMIT satisfied from hot after compete must skip body hydrate: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Body Columns:") && plan.contains("body"),
+        "wide projection must arm late materialization body columns: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(body, ',' ORDER BY id) FROM (\
+             SELECT id, body FROM {relation} ORDER BY id ASC LIMIT 3\
+             ) topn"
+        )),
+        "hot-1,hot-2,hot-3",
+        "ASC LIMIT after hot updates must return hot bodies without body opens"
+    );
+}
+
+#[pg_test]
+fn ordered_limit_narrow_select_fail_opens_to_full() {
+    let suffix = unique_suffix("ordered_late_mat_narrow");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'cold-' || id::text FROM generate_series(1000, 1010) AS id"
+    ))
+    .expect("insert high-id cold seed");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 11);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) \
+         SELECT id, 'hot-' || id::text FROM generate_series(1, 10) AS id"
+    ))
+    .expect("insert low-id hot rows");
+
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) \
+         SELECT id FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        plan.contains("Emit Path: ordered_merge_native")
+            && plan.contains("Strategy: Ordered Progressive"),
+        "narrow ordered LIMIT must stay on ordered progressive: {plan}"
+    );
+    assert!(
+        plan.contains("Parquet Segments Opened:")
+            && !plan.contains("Parquet Segments Opened: 0"),
+        "narrow cold-wins LIMIT must still open Parquet: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Compete Opens: 0") && plan.contains("Cold Body Opens: 0"),
+        "narrow SELECT id must fail-open to a single Full open (no compete/body split): {plan}"
+    );
+    assert!(
+        !plan.contains("Cold Body Columns:"),
+        "fail-open narrow projection must not advertise body columns: {plan}"
+    );
+    assert_eq!(
+        spi_get_text(&format!(
+            "SELECT string_agg(id::text, ',' ORDER BY id DESC) FROM (\
+             SELECT id FROM {relation} ORDER BY id DESC LIMIT 5\
+             ) topn"
+        )),
+        "1010,1009,1008,1007,1006",
+        "narrow ordered LIMIT must still return cold-winning ids"
     );
 }
 
@@ -1378,6 +1594,10 @@ fn unordered_limit_uses_hot_first_and_defers_cold() {
     assert!(
         plan.contains("Parquet Segments Opened: 0"),
         "LIMIT satisfied from hot must defer cold Parquet: {plan}"
+    );
+    assert!(
+        plan.contains("Cold Compete Opens: 0") && plan.contains("Cold Body Opens: 0"),
+        "unordered hot-first must not use ordered late materialization: {plan}"
     );
     let bodies = spi_get_text(&format!(
         "SELECT string_agg(body, ',') FROM (SELECT body FROM {relation} LIMIT 5) t"

@@ -1,0 +1,39 @@
+CREATE TABLE
+INSERT 0 10
+             manage_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+             flush_table
+--------------------------------------
+ <UUID>
+(1 row)
+
+ cold_segments_before
+----------------------
+                    1
+(1 row)
+
+ unmanage_table
+----------------
+              1
+(1 row)
+
+ active_schemas_after
+----------------------
+                    0
+(1 row)
+
+ visible_rows
+--------------
+           10
+(1 row)
+
+ id | body
+----+------
+  1 | v1
+  2 | v2
+  3 | v3
+(3 rows)
+

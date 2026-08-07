@@ -75,11 +75,16 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.user_id` | string | empty | Active user-scope id for user-scoped managed tables. Required for scoped reads and writes. |
 | `koldstore.cold_reads` | string | `auto` | `auto`: cold eligible by catalog/cost; `on`: cold eligible without forcing unnecessary object reads; `off`: hot-only and ERROR when correctness requires cold segments. |
 | `koldstore.enable_merge_scan` | bool | `on` | Required for managed-table SELECT. When `off`, `KoldMergeScan` errors at execution instead of allowing an incorrect heap-only read. |
+| `koldstore.explain_pipeline` | bool | `off` | When `on`, `EXPLAIN (FORMAT JSON)` includes the nested `KoldStore Pipeline` diagnostic tree. `EXPLAIN … VERBOSE` also enables it for JSON. Default keeps concise Custom Scan properties plus real `Plans` children. |
 | `koldstore.max_open_parquet_readers` | int | `32` | Per-backend open Parquet reader cap for cold scans (fail-fast when exceeded). Clamped to `1..=1024`. |
 | `koldstore.max_merge_seen_keys` | int | `1000000` | Per-scan cap on exact PK identities retained by `KoldMergeScan` (fail-closed when exceeded). Protects backends from accidental full-table scans. `0` disables the cap. Clamped to `0..=100000000`. |
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
-| `koldstore.flush_check_interval_seconds` | int | `30` | How often the database worker evaluates `auto_flush` tables and runs at most one needed flush. Clamped to `1..=86400`. |
+| `koldstore.flush_check_interval_seconds` | int | `30` | How often the database worker evaluates `auto_flush` tables, enqueues at most one due flush job, and spawns flush executors. Clamped to `1..=86400`. Independent of PostgreSQL autovacuum. |
+| `koldstore.max_parallel_flush_jobs` | int | `2` | Max concurrent one-shot flush executor workers per database. Clamped to `1..=16`. |
+| `koldstore.flush_job_max_runtime_seconds` | int | `1800` | Wall-clock budget for one flush job attempt. Checked between passes and between streamed batches within a pass (so one oversized force-flush pass cannot outrun the budget); exceeded attempts fail with an error so a stuck worker cannot run forever. `0` disables. Clamped to `0..=86400`. |
+| `koldstore.flush_execution` | string | `queue` | `queue`: `flush_table` enqueues a durable job and returns its UUID; a one-shot executor runs the work. `inline`: enqueue then run in the calling backend (SPI / `#[pg_test]` only). |
+| `koldstore.job_retention_days` | int | `30` | Days to retain terminal jobs before purge; `0` disables. Jobs still referenced by pending cold segments are never deleted. |
 | `koldstore.async_apply_watchdog_interval_ms` | int | `30000` | Safety watchdog for missed commit wakeups. Managed commits normally set the database worker latch immediately. Clamped to `1000..=300000`. |
 | `koldstore.async_apply_max_rows_per_tick` | int | `0` | Max source row changes per apply tick (`0` = unlimited / drain available WAL). |
 | `koldstore.async_apply_max_ms_per_tick` | int | `0` | Max wall-clock ms per apply tick (`0` = unlimited). When exhausted, commit `applied_lsn` and continue next wake. |
@@ -116,8 +121,8 @@ Every SQL-callable function the extension installs today:
 | `koldstore.async_mirror_status()` | `jsonb` | Slot lag, retained bytes, apply rates, health |
 | `koldstore.async_mirror_slot_name()` | `text` | Deterministic logical-slot name for the current database |
 | `koldstore.disable_async_mirror()` | `boolean` | Whether async publication or slot infrastructure was removed |
-| `koldstore.enqueue_flush_job(...)` | `bigint` | `1` if a job was inserted, else `0` |
-| `koldstore.flush_table(...)` | `uuid` | Flush job id |
+| `koldstore.enqueue_flush_job(...)` | `uuid` | Flush job id, or `NULL` when nothing is due |
+| `koldstore.flush_table(...)` | `uuid` | Flush job id (enqueue / reuse and start), or `NULL` when nothing is due |
 | `koldstore.describe_table(...)` | `jsonb` | Table status object (see below) |
 | `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
 
@@ -242,15 +247,15 @@ also available.
 | `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
 | `compression` | `NULL` | Optional Parquet compression name |
 | `target_file_size_mb` | `NULL` | Optional target Parquet segment size in MiB; stored for future size-aware flushing |
-| `auto_flush` | `true` | When `true`, the built-in database worker may enqueue and run flushes for this table; set `false` to reserve flushes for cron / manual `flush_table` |
+| `auto_flush` | `true` | When `true`, the built-in database worker may enqueue flush jobs for this table; set `false` to reserve flushes for cron / manual `flush_table` |
 
 **Returns:** `uuid` — the migration job id written to `koldstore.jobs` (empty
 tables get a completed migrate job; populated tables run mirror initialization
 inline and return that job id).
 
-Non-forced flush selection keeps the newest rows hot by mirror `seq` and always
-flushes the oldest eligible excess first. Example with `hot_row_limit = 10000`
-and `min_flush_rows = 1000`:
+Flush selection keeps the newest rows hot by mirror `seq` and always flushes the
+oldest eligible excess first. Example with `hot_row_limit = 10000` and
+`min_flush_rows = 1000`:
 
 **Constraint note:** when `hot_row_limit` is set, `manage_table` rejects tables
 with non-primary-key `UNIQUE` constraints or foreign keys. Koldstore enforces
@@ -327,10 +332,12 @@ tables (WAL-only committed-WAL mirror capture).
 SELECT koldstore.wait_for_async_mirror();
 ```
 
-Applies committed source changes available at the fence boundary and waits
-until the mirror has reached that boundary. This provides a strong consistency
-point for an async table. The background worker normally performs the same work
-without an explicit call, and `flush_table` fences automatically.
+Applies committed source changes available at the fence boundary and returns
+when the mirror has reached that boundary. The fence LSN is captured at call
+time (and forced durable), so concurrent writers after that point do not extend
+the wait. This is an **optional** strong-consistency API for reads/benchmarks —
+`flush_table` and auto-flush do **not** call it (they enqueue/spawn and return).
+The background worker normally keeps the mirror caught up without an explicit call.
 
 **Returns:** `bigint` — the number of source row-change messages applied by
 this invocation. A return value of `0` can mean the worker had already caught
@@ -368,22 +375,17 @@ removed, otherwise `false`.
 SELECT koldstore.enqueue_flush_job(
   table_name => 'chat.messages'
 );
-
-SELECT koldstore.enqueue_flush_job(
-  table_name => 'chat.messages',
-  force      => true
-);
 ```
 
-Inserts a pending flush job when none is already active for the table.
-`force => true` stores `force` in the job payload so the next `flush_table`
-call flushes all pending mirror rows instead of applying the table flush
-policy. `force` defaults to `false`. Flush jobs are table-wide; user-scope
-partitioning uses the managed table's `scope_column` and session
+Inserts a pending flush job when none is already active for the table, or
+returns the existing active job UUID. Returns `NULL` when no flush work is due
+(same eligibility rules as `flush_table`). Does **not** spawn flush executors —
+use `flush_table` when you want work to start. Flush jobs are table-wide;
+user-scope partitioning uses the managed table's `scope_column` and session
 `koldstore.user_id`, not an enqueue argument.
 
-**Returns:** `bigint` — `1` when a new job was inserted, `0` when an active
-flush job already exists.
+**Returns:** `uuid` — the flush job id (`koldstore.jobs.id`), or `NULL` when
+nothing is due.
 
 ### `koldstore.flush_table`
 
@@ -391,34 +393,40 @@ flush job already exists.
 SELECT koldstore.flush_table(
   table_name => 'chat.messages'
 );
-
-SELECT koldstore.flush_table(
-  table_name => 'chat.messages',
-  force      => true
-);
 ```
 
-Ensures a flush job exists and runs the current flush path synchronously.
-Progress is visible in `koldstore.jobs` and `koldstore.describe_table(...)`.
+Ensures a durable flush job exists and starts queue execution (production
+default `koldstore.flush_execution = queue`):
 
-If another backend already holds this table's flush lock or the database apply
-lock (background auto-flush, WAL apply after restart, or another `flush_table`),
-the call fails immediately with an error such as `flush already in progress`
-instead of waiting.
+1. Inserts a pending job or returns the existing active job UUID
+2. Spawns a one-shot flush executor when capacity allows
+3. Returns the UUID immediately — progress is visible in `koldstore.jobs` and
+   `koldstore.list_jobs` / `koldstore.describe_table`
 
-`force` defaults to `false`. Row selection behavior:
+Returns `NULL` (no job row) when policy selection is empty — including when
+mirror excess is positive but below `max_rows_per_file` — so undersized Parquet
+segments are never queued. Cron callers should treat `NULL` as “nothing to do”.
 
-- If `force => true` is passed, or the pending/running job payload has
-  `force = true`, all pending mirror rows are flushed.
-- Otherwise, when a table flush policy is configured, only policy-selected rows
-  are flushed. Tables managed through `manage_table` honor `hot_row_limit`,
-  `min_flush_rows`, and `max_rows_per_file`.
+With `flush_execution = inline` (SPI tests only), the calling backend also runs
+the flush before returning.
+
+If another backend already holds this table's flush lock while no active job
+row is visible yet, the call fails immediately with an error such as
+`flush already in progress` instead of waiting. When an active job already
+exists, `flush_table` returns that job UUID.
+
+Row selection always follows the table flush policy:
+
+- Tables managed through `manage_table` honor `hot_row_limit`,
+  `min_flush_rows`, and `max_rows_per_file` (newest rows stay hot by mirror
+  `seq`; oldest eligible excess moves cold). A selection smaller than
+  `max_rows_per_file` is treated as not due.
 - When no flush policy is configured, all pending mirror rows are flushed.
+- `progress_total` is the selected flush row count at claim time (not the full
+  mirror backlog).
 
-`enqueue_flush_job(..., force => true)` remains available when enqueueing and
-executing the flush are intentionally separate operations.
-
-**Returns:** `uuid` — the flush job id (`koldstore.jobs.id`).
+**Returns:** `uuid` — the flush job id (`koldstore.jobs.id`), or `NULL` when
+nothing is due.
 
 ### `koldstore.list_jobs`
 
@@ -636,8 +644,11 @@ FROM koldstore.changes_since(
 );
 ```
 
-Returns latest-state changes ordered by `seq`, merging the hot `__cl` mirror and
-flushed cold Parquet metadata. Modes match KalamDB live subscribe options:
+Returns changes ordered by exclusive `seq`, catalog-routing to the oldest
+applicable cold Parquet segment (streamed until `limit_rows`) or the hot `__cl`
+mirror. The same primary key may appear again on a later page with a higher
+`seq` (no in-page latest-state collapse). Modes match KalamDB live subscribe
+options:
 
 | Mode | Args | Behavior |
 |------|------|----------|

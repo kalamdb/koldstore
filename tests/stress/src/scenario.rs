@@ -158,11 +158,13 @@ pub async fn run_chat_penetration() -> Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 metrics.worker_errors.fetch_add(1, Ordering::Relaxed);
-                control.note_db_error("worker task", &err);
+                if !control.note_db_error("worker task", &err) {
+                    control.trip_fatal(format!("worker task failed: {err}"));
+                }
             }
             Err(err) => {
                 metrics.worker_errors.fetch_add(1, Ordering::Relaxed);
-                log_always(format!("worker join error: {err}"));
+                control.trip_fatal(format!("worker join error: {err}"));
             }
         }
     }

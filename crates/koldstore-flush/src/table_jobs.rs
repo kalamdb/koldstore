@@ -1,8 +1,10 @@
-//! SQL plans for synchronous `koldstore.flush_table` job lifecycle.
+//! SQL plans for `koldstore.flush_table` job lifecycle.
 //!
-//! Inline flush runs in the caller's SPI transaction. Cross-session cancel uses
+//! Job mutations are fenced by `attempt_token` so a reclaimed job cannot be
+//! mutated by a stale executor. Cross-session cancel uses
 //! `koldstore.table_cancel_requests` so peers do not block on the jobs row lock
-//! held for the duration of the flush statement.
+//! held during an in-flight flush. Enqueue-and-return lives in `ops`; executors
+//! claim via session table locks and these plans.
 
 use koldstore_common::SqlStatement;
 use thiserror::Error;
@@ -15,7 +17,7 @@ pub mod flush_phase {
     pub const PENDING: &str = "pending";
     /// Job claimed; preparing / selecting work.
     pub const CLAIMED: &str = "claimed";
-    /// Selecting mirror rows for a wave.
+    /// Selecting mirror rows for a pass.
     pub const SELECTING: &str = "selecting";
     /// Encoding and uploading cold segments.
     pub const WRITING: &str = "writing";
@@ -29,7 +31,7 @@ pub mod flush_phase {
     pub const FAILED: &str = "failed";
 }
 
-/// Inline flush job planning error.
+/// Flush job planning error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TableFlushJobError {
     /// SQL statement metadata could not be prepared.
@@ -37,15 +39,14 @@ pub enum TableFlushJobError {
     Sql(String),
 }
 
-/// Plans lookup of the active pending/running inline flush job for a table.
+/// Plans lookup of the active pending/running flush job for a table.
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_lookup_active_inline_flush_job() -> std::result::Result<SqlStatement, TableFlushJobError>
-{
+pub fn plan_lookup_active_flush_job() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::read_with_params(
-        "lookup active inline flush job",
+        "lookup active flush job",
         &format!(
             r#"
 SELECT COALESCE((
@@ -67,21 +68,47 @@ SELECT COALESCE((
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
 }
 
-/// Plans abandonment of a stuck `running` flush job when this backend holds the
-/// table-job lock (previous owner crashed or left without a terminal status).
+/// Plans a boolean check that a flush job UUID is in terminal `completed` status.
+///
+/// Bind parameters:
+/// - `$1` job id (`uuid`)
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_abandon_running_flush_jobs() -> std::result::Result<SqlStatement, TableFlushJobError> {
+pub fn plan_flush_job_is_completed() -> std::result::Result<SqlStatement, TableFlushJobError> {
+    SqlStatement::read_with_params(
+        "flush job is completed",
+        r#"
+SELECT EXISTS (
+    SELECT 1 FROM koldstore.jobs
+    WHERE id = $1::uuid AND status = 'completed'
+)
+"#,
+        [koldstore_common::SqlParamType::Uuid],
+    )
+    .map_err(|error| TableFlushJobError::Sql(error.to_string()))
+}
+
+/// Plans reclaim of a stuck `running` flush job when this backend holds the
+/// session table-job lock (previous owner crashed or left without a terminal
+/// status). The same durable job returns to `pending` so a later claim resumes
+/// it instead of inserting a replacement row.
+///
+/// # Errors
+///
+/// Returns an error when SQL statement metadata cannot be prepared.
+pub fn plan_reclaim_running_flush_jobs() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
-        "abandon running flush jobs",
+        "reclaim running flush jobs",
         r#"
 UPDATE koldstore.jobs
-SET status = 'error',
-    phase = 'failed',
-    error_trace = 'abandoned: left running without an owner',
-    payload = payload || jsonb_build_object('abandoned', true),
+SET status = 'pending',
+    phase = 'pending',
+    attempt_token = NULL,
+    available_at = now(),
+    error_trace = COALESCE(error_trace, 'reclaimed: left running without an owner'),
+    payload = payload || jsonb_build_object('reclaimed', true),
     updated_at = now()
 WHERE table_oid = $1::oid
   AND scope_key = ''
@@ -117,14 +144,14 @@ FROM (
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
 }
 
-/// Plans insertion of a new inline flush job with a caller-provided id.
+/// Plans insertion of a new flush job with a caller-provided id.
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_insert_inline_flush_job() -> std::result::Result<SqlStatement, TableFlushJobError> {
+pub fn plan_insert_flush_job() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
-        "insert inline flush job",
+        "insert flush job",
         r#"
 INSERT INTO koldstore.jobs (
     id,
@@ -149,27 +176,29 @@ VALUES (
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
 }
 
-/// Plans the running transition for an inline flush job.
+/// Plans the running transition for a flush job.
 ///
-/// `$3` is the fixed `progress_total` estimate for the job (rows at catch-up
-/// watermark). Pass `0` when unknown.
+/// `$3` is the new `attempt_token`. `$4` is the fixed `progress_total` estimate.
+/// `$5` is the fixed job watermark (`flush_seq_upper_bound` / target_seq).
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_inline_flush_job_running() -> std::result::Result<SqlStatement, TableFlushJobError>
-{
+pub fn plan_mark_flush_job_running() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
-        "mark inline flush job running",
+        "mark flush job running",
         r#"
 UPDATE koldstore.jobs
 SET status = 'running',
     phase = 'claimed',
-    attempts = CASE WHEN attempts = 0 THEN 1 ELSE attempts END,
+    attempts = attempts + 1,
+    attempt_token = $3::uuid,
     progress_current = 0,
-    progress_total = $3::bigint,
-    progress_unit = 'rows',
-    payload = payload || jsonb_build_object('started_at', COALESCE(payload->'started_at', to_jsonb(now()))),
+    progress_total = $4::bigint,
+    flush_seq_upper_bound = COALESCE(flush_seq_upper_bound, $5::bigint),
+    started_at = COALESCE(started_at, clock_timestamp()),
+    available_at = now(),
+    payload = payload || jsonb_build_object('started_at', COALESCE(payload->'started_at', to_jsonb(clock_timestamp()))),
     updated_at = now()
 WHERE id = $1::uuid
   AND table_oid = $2::oid
@@ -180,67 +209,66 @@ WHERE id = $1::uuid
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
 }
 
-/// Plans a running-progress update for an inline flush job.
+/// Plans a running-progress update for a flush job.
 ///
-/// `$3` rows flushed, `$4` batches, `$5` checkpoint, `$6` phase,
-/// `$7` progress_total (unchanged estimate).
+/// `$3` attempt_token, `$4` rows flushed, `$5` batches, `$6` checkpoint,
+/// `$7` phase, `$8` progress_total (unchanged estimate).
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_update_inline_flush_job_progress(
-) -> std::result::Result<SqlStatement, TableFlushJobError> {
+pub fn plan_update_flush_job_progress() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
-        "update inline flush job progress",
+        "update flush job progress",
         r#"
 UPDATE koldstore.jobs
-SET phase = $6::text,
-    rows_processed = $3::bigint,
-    rows_flushed = $3::bigint,
-    batches_completed = $4::integer,
-    checkpoint_seq = $5::bigint,
-    progress_current = $3::bigint,
-    progress_total = GREATEST($7::bigint, $3::bigint),
-    progress_unit = 'rows',
+SET phase = $7::text,
+    rows_processed = $4::bigint,
+    rows_flushed = $4::bigint,
+    batches_completed = $5::integer,
+    checkpoint_seq = $6::bigint,
+    progress_current = $4::bigint,
+    progress_total = GREATEST($8::bigint, $4::bigint),
     updated_at = now()
 WHERE id = $1::uuid
   AND table_oid = $2::oid
   AND job_type = 'flush'
   AND status = 'running'
+  AND attempt_token = $3::uuid
 "#,
     )
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
 }
 
-/// Plans completion of an inline flush job.
+/// Plans completion of a flush job.
 ///
-/// `$3` is total rows flushed, `$4` is the checkpoint seq watermark, and
-/// `$5` is the number of Parquet segment batches written in this job.
+/// `$3` is attempt_token, `$4` total rows flushed, `$5` checkpoint seq
+/// watermark, and `$6` is the number of Parquet segment batches written.
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_inline_flush_job_completed(
-) -> std::result::Result<SqlStatement, TableFlushJobError> {
+pub fn plan_mark_flush_job_completed() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
-        "mark inline flush job completed",
+        "mark flush job completed",
         r#"
 UPDATE koldstore.jobs
 SET status = 'completed',
     phase = 'finished',
-    rows_processed = $3::bigint,
-    rows_flushed = $3::bigint,
-    checkpoint_seq = $4::bigint,
-    batches_completed = $5::integer,
-    progress_current = $3::bigint,
-    progress_total = GREATEST(progress_total, $3::bigint),
-    progress_unit = 'rows',
+    rows_processed = $4::bigint,
+    rows_flushed = $4::bigint,
+    checkpoint_seq = $5::bigint,
+    batches_completed = $6::integer,
+    progress_current = $4::bigint,
+    progress_total = GREATEST(progress_total, $4::bigint),
+    finished_at = clock_timestamp(),
     payload = payload || jsonb_build_object(
         'duration_ms',
         GREATEST(
             0,
             (EXTRACT(EPOCH FROM (
-                now() - COALESCE(
+                clock_timestamp() - COALESCE(
+                    started_at,
                     (payload->>'started_at')::timestamptz,
                     created_at
                 )
@@ -251,32 +279,36 @@ SET status = 'completed',
 WHERE id = $1::uuid
   AND table_oid = $2::oid
   AND job_type = 'flush'
-  AND status IN ('pending', 'running')
+  AND status = 'running'
+  AND attempt_token = $3::uuid
 "#,
     )
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
 }
 
-/// Plans failure recording for an inline flush job.
+/// Plans failure recording for a flush job.
+///
+/// `$3` is attempt_token, `$4` is the error trace.
 ///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_inline_flush_job_failed() -> std::result::Result<SqlStatement, TableFlushJobError>
-{
+pub fn plan_mark_flush_job_failed() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
-        "mark inline flush job failed",
+        "mark flush job failed",
         r#"
 UPDATE koldstore.jobs
 SET status = 'error',
     phase = 'failed',
-    error_trace = $3::text,
+    error_trace = $4::text,
+    finished_at = clock_timestamp(),
     payload = payload || jsonb_build_object(
         'duration_ms',
         GREATEST(
             0,
             (EXTRACT(EPOCH FROM (
-                now() - COALESCE(
+                clock_timestamp() - COALESCE(
+                    started_at,
                     (payload->>'started_at')::timestamptz,
                     created_at
                 )
@@ -287,7 +319,8 @@ SET status = 'error',
 WHERE id = $1::uuid
   AND table_oid = $2::oid
   AND job_type = 'flush'
-  AND status IN ('pending', 'running')
+  AND status = 'running'
+  AND attempt_token = $3::uuid
 "#,
     )
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
@@ -322,11 +355,14 @@ SELECT COALESCE(
                 'batches_completed', batches_completed,
                 'progress_current', progress_current,
                 'progress_total', progress_total,
-                'progress_unit', progress_unit,
                 'checkpoint_seq', checkpoint_seq,
                 'attempts', attempts,
+                'attempt_token', attempt_token,
                 'error_trace', error_trace,
                 'payload', payload,
+                'available_at', available_at,
+                'started_at', started_at,
+                'finished_at', finished_at,
                 'created_at', created_at,
                 'updated_at', updated_at
             ) AS job_row
@@ -575,23 +611,26 @@ pub fn plan_clear_table_cancel_request() -> std::result::Result<SqlStatement, Ta
 
 /// Plans terminal cancel for a flush that stopped before publish.
 ///
+/// `$3` is attempt_token.
+///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_inline_flush_job_cancelled(
-) -> std::result::Result<SqlStatement, TableFlushJobError> {
+pub fn plan_mark_flush_job_cancelled() -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
-        "mark inline flush job cancelled",
+        "mark flush job cancelled",
         r#"
 UPDATE koldstore.jobs
 SET status = 'cancelled',
     phase = 'cancelled',
+    finished_at = clock_timestamp(),
     payload = payload || jsonb_build_object(
         'duration_ms',
         GREATEST(
             0,
             (EXTRACT(EPOCH FROM (
-                now() - COALESCE(
+                clock_timestamp() - COALESCE(
+                    started_at,
                     (payload->>'started_at')::timestamptz,
                     created_at
                 )
@@ -602,7 +641,8 @@ SET status = 'cancelled',
 WHERE id = $1::uuid
   AND table_oid = $2::oid
   AND job_type = 'flush'
-  AND status IN ('pending', 'running')
+  AND status = 'running'
+  AND attempt_token = $3::uuid
 "#,
     )
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
@@ -610,31 +650,34 @@ WHERE id = $1::uuid
 
 /// Plans completion after a late cancel (publish already happened).
 ///
+/// `$3` is attempt_token, `$4` rows, `$5` checkpoint, `$6` batches.
+///
 /// # Errors
 ///
 /// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_mark_inline_flush_job_completed_after_cancel(
+pub fn plan_mark_flush_job_completed_after_cancel(
 ) -> std::result::Result<SqlStatement, TableFlushJobError> {
     SqlStatement::write(
-        "mark inline flush completed after cancel",
+        "mark flush completed after cancel",
         r#"
 UPDATE koldstore.jobs
 SET status = 'completed',
     phase = 'finished',
-    rows_processed = $3::bigint,
-    rows_flushed = $3::bigint,
-    checkpoint_seq = $4::bigint,
-    batches_completed = $5::integer,
-    progress_current = $3::bigint,
-    progress_total = GREATEST(progress_total, $3::bigint),
-    progress_unit = 'rows',
+    rows_processed = $4::bigint,
+    rows_flushed = $4::bigint,
+    checkpoint_seq = $5::bigint,
+    batches_completed = $6::integer,
+    progress_current = $4::bigint,
+    progress_total = GREATEST(progress_total, $4::bigint),
+    finished_at = clock_timestamp(),
     payload = payload || jsonb_build_object(
         'cancel_requested_after_publish', true,
         'duration_ms',
         GREATEST(
             0,
             (EXTRACT(EPOCH FROM (
-                now() - COALESCE(
+                clock_timestamp() - COALESCE(
+                    started_at,
                     (payload->>'started_at')::timestamptz,
                     created_at
                 )
@@ -645,7 +688,8 @@ SET status = 'completed',
 WHERE id = $1::uuid
   AND table_oid = $2::oid
   AND job_type = 'flush'
-  AND status IN ('pending', 'running')
+  AND status = 'running'
+  AND attempt_token = $3::uuid
 "#,
     )
     .map_err(|error| TableFlushJobError::Sql(error.to_string()))
@@ -654,15 +698,14 @@ WHERE id = $1::uuid
 #[cfg(test)]
 mod tests {
     use super::{
-        flush_phase, plan_abandon_running_flush_jobs, plan_insert_inline_flush_job, plan_list_jobs,
-        plan_mark_inline_flush_job_cancelled, plan_mark_inline_flush_job_completed,
-        plan_mark_inline_flush_job_failed, plan_mark_inline_flush_job_running,
-        plan_request_cancel_job, plan_update_inline_flush_job_progress,
+        flush_phase, plan_insert_flush_job, plan_list_jobs, plan_mark_flush_job_cancelled,
+        plan_mark_flush_job_completed, plan_mark_flush_job_failed, plan_mark_flush_job_running,
+        plan_reclaim_running_flush_jobs, plan_request_cancel_job, plan_update_flush_job_progress,
     };
 
     #[test]
-    fn inline_flush_job_insert_persists_requested_force_value() {
-        let statement = plan_insert_inline_flush_job().unwrap();
+    fn flush_job_insert_persists_requested_force_value() {
+        let statement = plan_insert_flush_job().unwrap();
 
         assert!(statement
             .sql
@@ -670,27 +713,31 @@ mod tests {
     }
 
     #[test]
-    fn inline_flush_job_running_stamps_started_at_and_progress_total() {
-        let statement = plan_mark_inline_flush_job_running().unwrap();
+    fn flush_job_running_stamps_attempt_token_and_progress_total() {
+        let statement = plan_mark_flush_job_running().unwrap();
 
         assert!(
-            statement.sql.contains(
-                "jsonb_build_object('started_at', COALESCE(payload->'started_at', to_jsonb(now())))"
-            ),
-            "expected idempotent started_at stamp, got:\n{}",
+            statement.sql.contains("attempt_token = $3::uuid"),
+            "expected attempt_token stamp, got:\n{}",
             statement.sql
         );
-        assert!(statement.sql.contains("progress_total = $3::bigint"));
+        assert!(statement.sql.contains("progress_total = $4::bigint"));
+        assert!(statement
+            .sql
+            .contains("flush_seq_upper_bound = COALESCE(flush_seq_upper_bound, $5::bigint)"));
+        assert!(statement
+            .sql
+            .contains("started_at = COALESCE(started_at, clock_timestamp())"));
         assert!(statement
             .sql
             .contains(&format!("phase = '{}'", flush_phase::CLAIMED)));
     }
 
     #[test]
-    fn inline_flush_job_terminal_states_persist_duration_ms() {
+    fn flush_job_terminal_states_persist_duration_ms() {
         for statement in [
-            plan_mark_inline_flush_job_completed().unwrap(),
-            plan_mark_inline_flush_job_failed().unwrap(),
+            plan_mark_flush_job_completed().unwrap(),
+            plan_mark_flush_job_failed().unwrap(),
         ] {
             assert!(
                 statement.sql.contains("'duration_ms'"),
@@ -698,30 +745,36 @@ mod tests {
                 statement.operation
             );
             assert!(
-                statement.sql.contains("payload->>'started_at'"),
-                "expected started_at-based duration in {}",
+                statement.sql.contains("attempt_token = $3::uuid"),
+                "expected attempt fencing in {}",
+                statement.operation
+            );
+            assert!(
+                statement.sql.contains("finished_at = clock_timestamp()"),
+                "expected finished_at in {}",
                 statement.operation
             );
         }
     }
 
     #[test]
-    fn inline_flush_job_completed_persists_batches_completed() {
-        let statement = plan_mark_inline_flush_job_completed().unwrap();
+    fn flush_job_completed_persists_batches_completed() {
+        let statement = plan_mark_flush_job_completed().unwrap();
         assert!(
-            statement.sql.contains("batches_completed = $5::integer"),
+            statement.sql.contains("batches_completed = $6::integer"),
             "expected batches_completed bind in {}",
             statement.sql
         );
     }
 
     #[test]
-    fn inline_flush_job_progress_updates_batches_and_phase_while_running() {
-        let statement = plan_update_inline_flush_job_progress().unwrap();
-        assert!(statement.sql.contains("batches_completed = $4::integer"));
-        assert!(statement.sql.contains("phase = $6::text"));
-        assert!(statement.sql.contains("progress_current = $3::bigint"));
+    fn flush_job_progress_updates_batches_and_phase_while_running() {
+        let statement = plan_update_flush_job_progress().unwrap();
+        assert!(statement.sql.contains("batches_completed = $5::integer"));
+        assert!(statement.sql.contains("phase = $7::text"));
+        assert!(statement.sql.contains("progress_current = $4::bigint"));
         assert!(statement.sql.contains("status = 'running'"));
+        assert!(statement.sql.contains("attempt_token = $3::uuid"));
         assert!(!statement.sql.contains("checkpoint_commit_seq"));
     }
 
@@ -736,6 +789,7 @@ mod tests {
             .contains("jsonb_array_elements_text($2::jsonb)"));
         assert!(statement.sql.contains("table_oid = $3::oid"));
         assert!(statement.sql.contains("progress_current"));
+        assert!(statement.sql.contains("'attempt_token', attempt_token"));
     }
 
     #[test]
@@ -748,16 +802,19 @@ mod tests {
 
     #[test]
     fn cancelled_flush_plan_sets_cancelled_status() {
-        let statement = plan_mark_inline_flush_job_cancelled().unwrap();
+        let statement = plan_mark_flush_job_cancelled().unwrap();
         assert!(statement.sql.contains("status = 'cancelled'"));
         assert!(statement.sql.contains("phase = 'cancelled'"));
+        assert!(statement.sql.contains("attempt_token = $3::uuid"));
     }
 
     #[test]
-    fn abandon_running_flush_plan_marks_error() {
-        let statement = plan_abandon_running_flush_jobs().unwrap();
-        assert!(statement.sql.contains("status = 'error'"));
-        assert!(statement.sql.contains("abandoned"));
+    fn reclaim_running_flush_plan_returns_to_pending() {
+        let statement = plan_reclaim_running_flush_jobs().unwrap();
+        assert!(statement.sql.contains("status = 'pending'"));
+        assert!(statement.sql.contains("attempt_token = NULL"));
+        assert!(statement.sql.contains("reclaimed"));
         assert!(statement.sql.contains("status = 'running'"));
+        assert!(!statement.sql.contains("status = 'error'"));
     }
 }

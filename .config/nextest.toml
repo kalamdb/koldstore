@@ -9,6 +9,16 @@ success-output = "immediate"
 # Stress soaks are intentionally long; allow up to ~3h wall before terminate.
 slow-timeout = { period = "300s", terminate-after = 36, grace-period = "30s" }
 
+# Postmaster-killing crash tests: at most one at a time (SIGKILL / immediate
+# restart takes down the whole shared pgrx cluster). Fixtures also take a
+# cluster flock; this group avoids two killers racing each other.
+[test-groups]
+pg-cluster-killer = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(crash::flush_executor_kill) | test(crash::flush_long_crash) | test(crash::postmaster_restart)'
+test-group = 'pg-cluster-killer'
+
 # CI profile: JUnit XML for GitHub Actions test-result publishing.
 [profile.ci]
 retries = 0
@@ -21,6 +31,10 @@ success-output = "immediate"
 filter = 'package(stress)'
 success-output = "immediate"
 slow-timeout = { period = "300s", terminate-after = 36, grace-period = "30s" }
+
+[[profile.ci.overrides]]
+filter = 'test(crash::flush_executor_kill) | test(crash::flush_long_crash) | test(crash::postmaster_restart)'
+test-group = 'pg-cluster-killer'
 
 [profile.ci.junit]
 path = "junit.xml"

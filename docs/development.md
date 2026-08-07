@@ -101,8 +101,13 @@ scripts/readiness/run-hammerdb.sh 16
 scripts/readiness/run-readiness-report.sh 16
 ```
 
-Nightly workflow: `.github/workflows/nightly-readiness.yml` (isolation, crash,
-postmaster restart, SQLsmith, differential compare, integrity).
+Nightly workflow: `.github/workflows/nightly-readiness.yml` (isolation, crash
+with executor SIGKILL, postmaster restart, SQLsmith, differential compare,
+integrity).
+Weekly long tests: `.github/workflows/weekly-long-tests.yml` (full crash
+matrix, toxiproxy, soak, longer SQLsmith — suites PR CI skips). Scheduled
+runs use PostgreSQL 16; manual `workflow_dispatch` exposes checkboxes to
+multi-select PostgreSQL 15–18.
 Weekly HammerDB: `.github/workflows/weekly-hammerdb.yml`.
 External-tool layout: `docs/plans/2026-07-21-testing-gaps-external-tools.md`.
 Script layout: `scripts/README.md` (everyday runners at top level; readiness/CI/build in subfolders).

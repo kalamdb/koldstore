@@ -178,6 +178,13 @@ async fn flushed_table_prunes_hot_rows_and_keeps_cold_payload_for_merge_reads() 
         .await?;
         common::assert_kold_merge_scan_executed_cold_reads(&analyzed, 1)?;
 
+        let analyzed_json = common::explain_analyze_json(
+            &db.client,
+            &format!("SELECT count(*) FROM {} WHERE id >= 1", table.relation),
+        )
+        .await?;
+        common::assert_kold_merge_scan_explain_json_tracing(&analyzed_json)?;
+
         common::assert_cold_metadata_present(&db.client, &table.relation).await?;
 
         let status = common::describe_table(&db.client, &table.relation).await?;

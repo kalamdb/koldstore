@@ -1,9 +1,41 @@
 //! SPI mirror-row fetch and typed tuple decode for flush.
 
-use koldstore_common::SqlStatement;
+use koldstore_common::{CellValue, SqlParamType, SqlStatement};
+use koldstore_flush::MirrorFlushPageCursor;
 use koldstore_migrate::order::CatalogColumn;
-use koldstore_parquet::{jsonb_cell_to_utf8, pg_bytea_hex, CellValue, FlushMirrorRow};
+use koldstore_parquet::{jsonb_cell_to_utf8, pg_bytea_hex, FlushMirrorRow};
 use koldstore_schema::PgType;
+use pgrx::datum::DatumWithOid;
+
+/// Maps a catalog column type onto a flush keyset [`SqlParamType`].
+///
+/// # Errors
+///
+/// Returns an error when the type cannot be bound for ordered flush keyset paging.
+pub(super) fn flush_keyset_param_type(pg_type: PgType) -> Result<SqlParamType, String> {
+    match pg_type {
+        PgType::Bool => Ok(SqlParamType::Boolean),
+        PgType::Int2 | PgType::Int4 => Ok(SqlParamType::Integer),
+        PgType::Int8 => Ok(SqlParamType::BigInt),
+        PgType::Text | PgType::Numeric | PgType::Jsonb | PgType::Bytea | PgType::TextArray => {
+            Ok(SqlParamType::Text)
+        }
+        PgType::Uuid => Ok(SqlParamType::Uuid),
+        PgType::Timestamptz | PgType::Float4 | PgType::Float8 => Err(format!(
+            "ordered flush keyset does not support primary-key type {pg_type:?}"
+        )),
+    }
+}
+
+/// Owned SPI bind values so [`DatumWithOid`] can borrow without temporary drop.
+enum OwnedBind {
+    Bool(bool),
+    Int32(i32),
+    Int64(i64),
+    Text(String),
+    Bytes(Vec<u8>),
+    Uuid(pgrx::Uuid),
+}
 
 /// Fetches one keyset page of mirror rows selected for flush.
 ///
@@ -16,14 +48,13 @@ use koldstore_schema::PgType;
 /// Returns an error when SPI preparation or execution fails.
 pub(super) fn fetch_mirror_batch(
     columns: &[CatalogColumn],
+    primary_key_columns: &[String],
     statement: &SqlStatement,
     max_seq: i64,
-    after_seq: i64,
+    cursor: &MirrorFlushPageCursor,
     fetch_limit: i64,
     include_order_key: bool,
 ) -> Result<Vec<FlushMirrorRow>, String> {
-    use pgrx::datum::DatumWithOid;
-
     let limit = fetch_limit.max(1);
     let spi_statement = crate::spi::SpiStatement::read_with_params(
         statement.operation.as_str(),
@@ -31,16 +62,138 @@ pub(super) fn fetch_mirror_batch(
         statement.param_types.clone(),
     )
     .map_err(|error| error.to_string())?;
-    crate::spi::execute_prepared(
-        &spi_statement,
-        &[
-            DatumWithOid::from(max_seq),
-            DatumWithOid::from(after_seq),
-            DatumWithOid::from(limit),
-        ],
-        |tuples| decode_mirror_batch(tuples, columns, include_order_key),
-    )
+
+    let owned = build_owned_binds(columns, primary_key_columns, max_seq, cursor, limit)?;
+    let args = owned_binds_to_datums(&owned);
+    crate::spi::execute_prepared(&spi_statement, &args, |tuples| {
+        decode_mirror_batch(tuples, columns, include_order_key)
+    })
     .map_err(|error| error.to_string())
+}
+
+fn build_owned_binds(
+    columns: &[CatalogColumn],
+    primary_key_columns: &[String],
+    max_seq: i64,
+    cursor: &MirrorFlushPageCursor,
+    limit: i64,
+) -> Result<Vec<OwnedBind>, String> {
+    match cursor {
+        MirrorFlushPageCursor::AfterSeq { after_seq } => Ok(vec![
+            OwnedBind::Int64(max_seq),
+            OwnedBind::Int64(*after_seq),
+            OwnedBind::Int64(limit),
+        ]),
+        MirrorFlushPageCursor::AfterOrderKey {
+            after_order_key,
+            after_pk_values,
+            after_seq,
+        } => {
+            let first_page = after_order_key.is_none();
+            if !first_page && after_pk_values.len() != primary_key_columns.len() {
+                return Err(format!(
+                    "ordered flush cursor has {} pk values but table has {}",
+                    after_pk_values.len(),
+                    primary_key_columns.len()
+                ));
+            }
+            let mut binds = Vec::with_capacity(4 + primary_key_columns.len());
+            binds.push(OwnedBind::Int64(max_seq));
+            binds.push(OwnedBind::Bool(first_page));
+            binds.push(OwnedBind::Bytes(
+                after_order_key.clone().unwrap_or_default(),
+            ));
+            for (index, pk_name) in primary_key_columns.iter().enumerate() {
+                let column = columns
+                    .iter()
+                    .find(|column| column.name == *pk_name)
+                    .ok_or_else(|| {
+                        format!("primary-key column `{pk_name}` missing from catalog")
+                    })?;
+                let value = if first_page {
+                    default_cell_value(column.pg_type)
+                } else {
+                    after_pk_values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(CellValue::Null)
+                };
+                binds.push(cell_value_to_owned_bind(&value, column.pg_type)?);
+            }
+            binds.push(OwnedBind::Int64(*after_seq));
+            binds.push(OwnedBind::Int64(limit));
+            Ok(binds)
+        }
+    }
+}
+
+fn owned_binds_to_datums(binds: &[OwnedBind]) -> Vec<DatumWithOid<'_>> {
+    binds
+        .iter()
+        .map(|bind| match bind {
+            OwnedBind::Bool(flag) => DatumWithOid::from(*flag),
+            OwnedBind::Int32(n) => DatumWithOid::from(*n),
+            OwnedBind::Int64(n) => DatumWithOid::from(*n),
+            OwnedBind::Text(text) => DatumWithOid::from(text.as_str()),
+            OwnedBind::Bytes(bytes) => DatumWithOid::from(bytes.as_slice()),
+            OwnedBind::Uuid(uuid) => DatumWithOid::from(*uuid),
+        })
+        .collect()
+}
+
+fn default_cell_value(pg_type: PgType) -> CellValue {
+    match pg_type {
+        PgType::Bool => CellValue::Bool(false),
+        PgType::Int2 => CellValue::Int16(0),
+        PgType::Int4 => CellValue::Int32(0),
+        PgType::Int8 | PgType::Timestamptz => CellValue::Int64(0),
+        PgType::Float4 => CellValue::Float32(0.0),
+        PgType::Float8 => CellValue::Float64(0.0),
+        PgType::Text
+        | PgType::Uuid
+        | PgType::Jsonb
+        | PgType::Bytea
+        | PgType::Numeric
+        | PgType::TextArray => CellValue::Utf8(String::new()),
+    }
+}
+
+fn cell_value_to_owned_bind(value: &CellValue, pg_type: PgType) -> Result<OwnedBind, String> {
+    match (pg_type, value) {
+        (PgType::Bool, CellValue::Bool(flag)) => Ok(OwnedBind::Bool(*flag)),
+        (PgType::Int2, CellValue::Int16(n)) => Ok(OwnedBind::Int32(i32::from(*n))),
+        (PgType::Int2, CellValue::Int32(n)) => Ok(OwnedBind::Int32(*n)),
+        (PgType::Int2, CellValue::Int64(n)) => {
+            Ok(OwnedBind::Int32(i32::try_from(*n).map_err(|_| {
+                "int2 keyset value out of range".to_string()
+            })?))
+        }
+        (PgType::Int4, CellValue::Int32(n)) => Ok(OwnedBind::Int32(*n)),
+        (PgType::Int4, CellValue::Int16(n)) => Ok(OwnedBind::Int32(i32::from(*n))),
+        (PgType::Int4, CellValue::Int64(n)) => {
+            Ok(OwnedBind::Int32(i32::try_from(*n).map_err(|_| {
+                "int4 keyset value out of range".to_string()
+            })?))
+        }
+        (PgType::Int8, CellValue::Int64(n)) => Ok(OwnedBind::Int64(*n)),
+        (PgType::Int8, CellValue::Int32(n)) => Ok(OwnedBind::Int64(i64::from(*n))),
+        (PgType::Int8, CellValue::Int16(n)) => Ok(OwnedBind::Int64(i64::from(*n))),
+        (
+            PgType::Text | PgType::Numeric | PgType::Jsonb | PgType::TextArray | PgType::Bytea,
+            CellValue::Utf8(text),
+        ) => Ok(OwnedBind::Text(text.clone())),
+        (PgType::Uuid, CellValue::Utf8(text)) => {
+            let uuid = uuid::Uuid::parse_str(text)
+                .map_err(|error| format!("invalid uuid keyset value: {error}"))?;
+            Ok(OwnedBind::Uuid(crate::spi::uuid_to_pgrx(uuid)))
+        }
+        (_, CellValue::Null) => {
+            Err("ordered flush keyset primary key must not be null".to_string())
+        }
+        (pg_type, value) => Err(format!(
+            "unsupported ordered flush keyset bind for {pg_type:?} value {value:?}"
+        )),
+    }
 }
 
 fn decode_mirror_batch(

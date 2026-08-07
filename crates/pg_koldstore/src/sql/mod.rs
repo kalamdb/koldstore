@@ -8,6 +8,8 @@
 pub mod events;
 pub mod flush;
 #[cfg(feature = "pg")]
+pub mod integrity;
+#[cfg(feature = "pg")]
 pub mod job_lock;
 pub mod migrate;
 pub mod ops;

@@ -62,8 +62,13 @@ jobs:
           set -euo pipefail
           # shellcheck disable=SC1091
           source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
+          # Match scripts/readiness/run-crash-recovery.sh: cover queue executor
+          # SIGKILL reclaim (including long-flush data-plane checks).
+          export KOLDSTORE_CRASH_FLUSH_EXECUTOR=1
           # Exclude postmaster restart (separate serial step that stops the cluster).
-          cargo nextest run -p e2e -E 'test(crash::) & not test(postmaster_restart::)' --test-threads "${KOLDSTORE_E2E_THREADS:-1}"
+          # Always --test-threads 1: SIGKILL of a flush bgworker restarts the
+          # postmaster and would drop sibling crash tests under parallel load.
+          cargo nextest run -p e2e -E 'test(crash::) & not test(postmaster_restart::)' --test-threads 1
 
       - name: Postmaster immediate restart recovery
         run: |

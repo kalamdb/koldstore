@@ -57,8 +57,9 @@ prepare_cluster() {
     --postgresql-conf shared_preload_libraries=koldstore
 
   echo "recreating SQL regression database ${PG_DATABASE}"
+  # WITH (FORCE) drops leftover async-mirror workers still attached to the DB.
   "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d postgres -v ON_ERROR_STOP=1 \
-    -c "DROP DATABASE IF EXISTS ${PG_DATABASE}" \
+    -c "DROP DATABASE IF EXISTS ${PG_DATABASE} WITH (FORCE)" \
     -c "CREATE DATABASE ${PG_DATABASE}"
   "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -d "$PG_DATABASE" -v ON_ERROR_STOP=1 \
     -c "CREATE EXTENSION IF NOT EXISTS koldstore;"

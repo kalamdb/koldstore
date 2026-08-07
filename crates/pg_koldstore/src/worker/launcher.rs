@@ -39,7 +39,7 @@ pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::p
     BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
     let poll = Duration::from_millis(LAUNCHER_POLL_INTERVAL_MS);
     loop {
-        if let Err(error) = worker_transaction(ensure_appliers_for_async_slots) {
+        if let Err(error) = super::txn::run(ensure_appliers_for_async_slots) {
             pgrx::log!("koldstore async mirror launcher: ensure failed: {error}");
         }
         if !BackgroundWorker::wait_latch(Some(poll)) {
@@ -86,38 +86,4 @@ fn ensure_appliers_for_async_slots() -> Result<(), String> {
         let _ = super::ensure::ensure_async_mirror_worker_for(DatabaseOid::new(oid));
     }
     Ok(())
-}
-
-fn worker_transaction<R>(body: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
-    unsafe {
-        pgrx::pg_sys::SetCurrentStatementStartTimestamp();
-        pgrx::pg_sys::StartTransactionCommand();
-        pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
-    }
-    let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(body))
-        .catch_others(|error| {
-            let message = match error {
-                pgrx::pg_sys::panic::CaughtError::PostgresError(report)
-                | pgrx::pg_sys::panic::CaughtError::ErrorReport(report) => {
-                    report.message().to_string()
-                }
-                pgrx::pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
-                    ereport.message().to_string()
-                }
-            };
-            Err(format!("async mirror launcher: {message}"))
-        })
-        .execute();
-    unsafe {
-        if !pgrx::pg_sys::IsTransactionOrTransactionBlock() {
-            return result;
-        }
-        if result.is_err() || pgrx::pg_sys::IsAbortedTransactionBlockState() {
-            pgrx::pg_sys::AbortCurrentTransaction();
-        } else {
-            pgrx::pg_sys::PopActiveSnapshot();
-            pgrx::pg_sys::CommitTransactionCommand();
-        }
-    }
-    result
 }

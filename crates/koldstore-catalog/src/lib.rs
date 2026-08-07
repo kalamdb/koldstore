@@ -15,6 +15,7 @@
 pub mod cache;
 pub mod cold_segments;
 pub mod decode;
+pub mod integrity;
 pub mod manifest_row;
 pub mod queries;
 pub mod segment_index;
@@ -30,6 +31,7 @@ pub use decode::{
     async_managed_relation, column_stats_from_index_bounds, AsyncManagedRelationMeta,
     AsyncOrderColumnMeta,
 };
+pub use integrity::plan_verify_table_integrity;
 pub use koldstore_common::FlushPolicy;
 pub use manifest_row::{CatalogManifestSegmentRow, CatalogSegmentIndexBound};
 pub use segment_index::{

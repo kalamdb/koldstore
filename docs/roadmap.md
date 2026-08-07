@@ -76,9 +76,9 @@ changes. `since_seq = 0` with no `last_rows` means from the start of retained
 history. A positive cursor older than the retained floor raises a retention-gap
 error.
 
-Note: today’s feed is **latest-state**, not an append-only WAL.
-`changes_since` targets “catch me up to current state since this cursor,” not
-full temporal audit replay.
+Note: today’s feed pages by exclusive `seq`. The same PK may appear again on a
+later page with a higher `seq` (cold then hot). It is not an append-only WAL of
+every intermediate update within a single page.
 
 ## Compaction
 
@@ -136,8 +136,9 @@ than embedding large values in row storage.
   [performance](performance.md).
 
 Built-in row-limit auto-flush scheduling is available on the database worker
-(`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Time-based
-`max_flush_interval` and predicate move policies remain deferred. See
+(`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Auto-flush
+enqueues durable jobs for one-shot executors; it is not PostgreSQL autovacuum.
+Time-based `max_flush_interval` and predicate move policies remain deferred. See
 [operations/scheduling.md](operations/scheduling.md).
 
 ## Storage layout and pruning

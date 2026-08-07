@@ -44,56 +44,35 @@ pub async fn wait_for_jobs(client: &Client, relation: &str) -> Result<()> {
 /// Returns an error when enqueue/flush/job lookup fails or the job failed.
 pub async fn force_flush_table(client: &Client, relation: &str) -> Result<i64> {
     wait_for_jobs(client, relation).await?;
-    let row = client
-        .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
-            &[&relation],
-        )
-        .await?;
-    let job_id: String = row.get(0);
-    let progress = client
-        .query_one(
-            r#"
-            SELECT
-              COALESCE(rows_flushed, 0)::bigint,
-              COALESCE(status::text, ''),
-              COALESCE(error_trace, '')
-            FROM koldstore.jobs
-            WHERE id = $1::text::uuid
-            "#,
-            &[&job_id],
-        )
-        .await?;
-    let flushed: i64 = progress.get(0);
-    let status: String = progress.get(1);
-    let error: String = progress.get(2);
+    e2e::fence_async_mirror(client).await?;
+    let job_id = e2e::flush_table_job_id(client, relation, true)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "flush_table returned NULL for {relation} (force=true); \
+                 expected force flush to enqueue work"
+            )
+        })?;
+    let flushed = e2e::wait_for_flush_job_terminal(client, &job_id).await?;
     wait_for_jobs(client, relation).await?;
-    if status.eq_ignore_ascii_case("failed") || !error.is_empty() {
-        anyhow::bail!("force flush of {relation} failed status={status} error={error}");
-    }
     Ok(flushed)
 }
 
 /// Policy flush (non-force) returning rows_flushed.
 ///
+/// Returns `0` when policy has no due work (`flush_table` returns NULL).
+///
 /// # Errors
 ///
 /// Returns an error when flush or job lookup fails.
 pub async fn flush_table(client: &Client, relation: &str) -> Result<i64> {
-    let row = client
-        .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass)::text",
-            &[&relation],
-        )
-        .await?;
-    let job_id: String = row.get(0);
-    let progress = client
-        .query_one(
-            "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
-            &[&job_id],
-        )
-        .await?;
-    Ok(progress.get(0))
+    // Policy flush decides from mirror pending counts; catch up WAL apply so
+    // recently committed DML is visible to the due check.
+    e2e::fence_async_mirror(client).await?;
+    let Some(job_id) = e2e::flush_table_job_id(client, relation, false).await? else {
+        return Ok(0);
+    };
+    e2e::wait_for_flush_job_terminal(client, &job_id).await
 }
 
 /// Registers a user-scoped managed table with aggressive small-file flush policy.

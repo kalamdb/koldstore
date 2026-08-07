@@ -29,8 +29,16 @@ It fails when absolute or per-cycle retained growth exceeds
 | `KOLDSTORE_MEMORY_MAX_RSS_GROWTH_BYTES` | absolute RSS budget |
 | `KOLDSTORE_MEMORY_MAX_CONTEXT_BYTES_PER_CYCLE` | context slope budget |
 | `KOLDSTORE_MEMORY_MAX_RSS_BYTES_PER_CYCLE` | RSS slope budget |
+| `KOLDSTORE_MEMORY_MAX_FLUSH_RSS_SPIKE_BYTES` | peak RSS above baseline during flush / large query |
+| `KOLDSTORE_MEMORY_MAX_FLUSH_CONTEXT_SPIKE_BYTES` | peak context above baseline |
+| `KOLDSTORE_MEMORY_MAX_FLUSH_RSS_RETAINED_BYTES` | retained RSS after cool-down |
+| `KOLDSTORE_MEMORY_MAX_FLUSH_CONTEXT_RETAINED_BYTES` | retained context after cool-down |
+| `KOLDSTORE_MEMORY_LARGE_QUERY_ROWS` | rows for large merge-scan memory gate (default 20000) |
 | `KOLDSTORE_MINIO=1` | enable MinIO flush + parquet GET path |
 | `KOLDSTORE_MEMORY_SKIP_E2E=1` | unit probes only |
+
+Peak-during-operation gates live in `suite::flush_memory_spike` and poll cluster
+RSS while flush / large SELECTs run (not only post-cycle retained growth).
 
 ## Plain Postgres vs koldstore comparison table
 

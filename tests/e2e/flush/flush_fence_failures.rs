@@ -107,6 +107,10 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
         // Continuous noise keeps the async applier on the database apply lock.
         // Pause the worker so flush can take the lock and fence WAL (including
         // noise) in phase-0; the DML stream itself stays live.
+        //
+        // `flush_table` first calls `wait_for_async_mirror`, which must complete
+        // under continuous writers by fencing to the call-time WAL LSN (not
+        // waiting for the stream to go idle forever).
         let dbname: String = db
             .client
             .query_one("SELECT current_database()", &[])
@@ -128,10 +132,11 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
                  RESET koldstore.internal_async_mirror_worker"
             ))
             .await?;
-        let flushed = flush_result?;
-        assert_eq!(flushed, 40);
         stop.store(true, Ordering::Relaxed);
-        noise_handle.await??;
+        let noise_result = noise_handle.await?;
+        let flushed = flush_result?;
+        noise_result?;
+        assert_eq!(flushed, 40);
 
         common::assert_flush_pruned_hot_storage(&db.client, &primary.relation, 40).await?;
         common::assert_pk_unique(&db.client, &primary.relation, &["id"]).await?;
@@ -146,7 +151,8 @@ async fn multi_table_wal_during_async_flush_keeps_target_correct() -> Result<()>
     Ok(())
 }
 
-/// Apply failpoint during flush phase-0 must leave retryable state and succeed later.
+/// Apply failpoint during flush finalize catch-up must leave retryable state
+/// and succeed later.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
     common::require_pgrx_server().await?;
@@ -210,9 +216,22 @@ async fn async_apply_failpoint_during_flush_recovers_on_retry() -> Result<()> {
                  RESET koldstore.internal_async_mirror_worker"
             ))
             .await?;
+        // `flush_table` returns the job UUID even when the attempt fails; the
+        // durable job row carries terminal `error` (or remains non-completed)
+        // when finalize apply hits the failpoint.
+        let job_id = first.context("flush_table should return a job UUID")?;
+        let job_id: String = job_id.get(0);
+        let status: String = db
+            .client
+            .query_one(
+                "SELECT status FROM koldstore.jobs WHERE id = $1::text::uuid",
+                &[&job_id],
+            )
+            .await?
+            .get(0);
         assert!(
-            first.is_err(),
-            "flush must fail closed when phase-0 apply hit failpoint"
+            status != "completed",
+            "flush must fail closed when finalize apply hit failpoint (status={status})"
         );
 
         common::wait_for_async_worker(&db.client).await?;

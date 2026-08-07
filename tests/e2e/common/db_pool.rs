@@ -7,18 +7,30 @@
 //! Nextest runs process-per-test, so coordination uses filesystem locks under
 //! the temp directory. When `NEXTEST_TEST_GLOBAL_SLOT` is set, that slot is tried
 //! first (fast path); otherwise the free list is scanned.
+//!
+//! Postmaster-killing crash tests also take [`ClusterExclusiveGuard`]: an
+//! exclusive flock on a shared cluster lock file. Ordinary fixtures hold a
+//! shared lock on that same file, so SIGKILL / postmaster-restart coverage
+//! cannot run while sibling tests still hold live connections.
 
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+
+/// Set while this process holds [`ClusterExclusiveGuard`] so nested
+/// [`claim_database`] skips re-taking the shared cluster lock (would deadlock).
+static CLUSTER_EXCLUSIVE_HELD: AtomicBool = AtomicBool::new(false);
 
 /// Lease of one pooled E2E database index; the flock is released on drop.
 #[derive(Debug)]
 pub struct DatabaseLease {
     /// Pool index when the pool is enabled.
     index: Option<usize>,
+    /// Shared cluster flock (blocks exclusive crash tests while this fixture lives).
+    _cluster_shared: Option<File>,
     /// Held exclusive flock for the leased worker DB (cross-process).
     _lock: Option<File>,
 }
@@ -28,6 +40,21 @@ impl DatabaseLease {
     #[must_use]
     pub fn index(&self) -> Option<usize> {
         self.index
+    }
+}
+
+/// Exclusive ownership of the shared pgrx cluster for postmaster-killing tests.
+///
+/// Held across setup → SIGKILL/restart → reconnect. Dropping releases the lock
+/// so waiting fixtures can proceed.
+#[derive(Debug)]
+pub struct ClusterExclusiveGuard {
+    _lock: File,
+}
+
+impl Drop for ClusterExclusiveGuard {
+    fn drop(&mut self) {
+        CLUSTER_EXCLUSIVE_HELD.store(false, Ordering::SeqCst);
     }
 }
 
@@ -80,15 +107,26 @@ fn lock_path(index: usize) -> PathBuf {
     ))
 }
 
-fn try_lock_index(index: usize) -> Result<Option<File>> {
-    let path = lock_path(index);
-    let file = File::options()
+fn cluster_lock_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "koldstore-e2e-{}-cluster.lock",
+        e2e_database_prefix()
+    ))
+}
+
+fn open_lock_file(path: &PathBuf) -> Result<File> {
+    File::options()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
-        .open(&path)
-        .with_context(|| format!("open E2E DB lock {}", path.display()))?;
+        .open(path)
+        .with_context(|| format!("open E2E lock {}", path.display()))
+}
+
+fn try_lock_index(index: usize) -> Result<Option<File>> {
+    let path = lock_path(index);
+    let file = open_lock_file(&path)?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
         Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -96,20 +134,55 @@ fn try_lock_index(index: usize) -> Result<Option<File>> {
     }
 }
 
+fn take_cluster_shared_lock() -> Result<Option<File>> {
+    // Same-process exclusive holders skip shared (posix flock would deadlock).
+    if CLUSTER_EXCLUSIVE_HELD.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let path = cluster_lock_path();
+    let file = open_lock_file(&path)?;
+    file.lock_shared()
+        .with_context(|| format!("shared-lock {}", path.display()))?;
+    Ok(Some(file))
+}
+
+/// Blocks until no other E2E fixture holds the shared cluster lock, then takes
+/// exclusive ownership for postmaster-killing crash coverage.
+///
+/// Call before [`crate::common::TestDb::start`] in SIGKILL / postmaster-restart
+/// tests. Drop the guard only after reconnect + assertions finish.
+///
+/// # Errors
+///
+/// Returns an error when the lock file cannot be opened or locked.
+pub fn acquire_cluster_exclusive() -> Result<ClusterExclusiveGuard> {
+    let path = cluster_lock_path();
+    let file = open_lock_file(&path)?;
+    // Blocking exclusive: waits for every ordinary fixture's shared lock.
+    file.lock()
+        .with_context(|| format!("exclusive-lock {}", path.display()))?;
+    CLUSTER_EXCLUSIVE_HELD.store(true, Ordering::SeqCst);
+    Ok(ClusterExclusiveGuard { _lock: file })
+}
+
 /// Claims a worker database for the duration of one fixture.
 ///
 /// Uses an exclusive flock so concurrent nextest processes cannot share a DB.
-/// Prefers `NEXTEST_TEST_GLOBAL_SLOT % N` when set.
+/// Prefers `NEXTEST_TEST_GLOBAL_SLOT % N` when set. Also holds a shared cluster
+/// flock so postmaster-killing tests wait until this fixture ends.
 ///
 /// # Errors
 ///
 /// Returns an error when pool size is zero or no lock can be acquired in time.
 pub fn claim_database() -> Result<(String, DatabaseLease)> {
+    let cluster_shared = take_cluster_shared_lock()?;
+
     if !e2e_db_pool_enabled() {
         return Ok((
             shared_database_name(),
             DatabaseLease {
                 index: None,
+                _cluster_shared: cluster_shared,
                 _lock: None,
             },
         ));
@@ -133,6 +206,7 @@ pub fn claim_database() -> Result<(String, DatabaseLease)> {
                     worker_database_name(index),
                     DatabaseLease {
                         index: Some(index),
+                        _cluster_shared: cluster_shared,
                         _lock: Some(lock),
                     },
                 ));

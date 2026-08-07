@@ -12,7 +12,8 @@ SELECT koldstore.manage_table(
   hot_row_limit => 100,
   min_flush_rows => 1,
   max_rows_per_file => 50,
-  migration_order_by => 'id'
+  migration_order_by => 'id',
+  auto_flush => false
 );
 
 INSERT INTO sqlreg.dml_t (id, body, qty) VALUES

@@ -1,101 +1,148 @@
-//! Test-only failpoints for crash-recovery and isolation suites.
+//! SPI/GUC adapter for flush failpoints.
 //!
-//! Armed via GUC `koldstore.failpoint` (empty default). Release builds are inert
-//! unless an operator explicitly sets the GUC. Supported values:
+//! Typed names and action-prefix parsing live in [`koldstore_flush::failpoints`].
+//! This module arms via GUC `koldstore.failpoint` and runs wait barriers over SPI.
+//!
+//! Supported GUC values:
 //!
 //! - `<name>` or `error:<name>` — abort with an error at that phase
-//! - `wait:<name>` — block on the advisory barrier lock until another session unlocks
+//! - `wait:<name>` — block on the advisory barrier until another session unlocks
+//!   (**requires `test-failpoints`**; production builds treat this as an error so
+//!   a mistaken `SET` cannot park a backend forever)
+//! - `panic:<name>` — hard-abort the backend (`std::process::abort`; SIGKILL-equivalent
+//!   for harnesses; requires `test-failpoints`)
+//! - `sleep:<name>` — sleep ~5s then continue (requires `test-failpoints`)
 //!
-//! Failpoint names include the flush crash points used by E2E recovery
-//! tests plus `async_mirror_apply` for async WAL applier crash injection.
+//! Prefer [`hit_typed`] with [`FlushFailpoint`] at call sites. [`hit`] remains for
+//! string-compatible callers (mirror apply constants, older tests).
 
-/// Advisory lock key shared with E2E isolation/crash harnesses (`"KOLD"`).
-pub const FAILPOINT_BARRIER_KEY: i64 = 0x4B4F_4C44;
+pub use koldstore_flush::{FailpointAction, FlushFailpoint, FAILPOINT_NAMES};
 
-/// Canonical failpoint names (flush crash points + async apply).
-pub const FAILPOINT_NAMES: &[&str] = &[
-    "after_claim",
-    "after_select_rows",
-    "after_pending_segment",
-    "during_parquet_write",
-    "after_temp_object",
-    "after_checksum_metadata",
-    "before_manifest_publish",
-    "before_activate",
-    "after_manifest_publish",
-    "before_hot_cleanup",
-    "during_hot_cleanup",
-    "after_cleanup_before_job_complete",
-    "after_job_complete_before_temp_cleanup",
-    "after_wave_progress",
-    "async_mirror_apply",
-    "async_mirror_apply_after_batch",
-];
+/// Advisory-lock namespace for `wait:` failpoints (`"KOLD"` as i32).
+///
+/// Paired with [`pgrx::pg_sys::MyDatabaseId`] so parallel E2E worker databases
+/// do not share one cluster-wide barrier (bigint `pg_advisory_lock` keyed only
+/// on `"KOLD"` previously let one test steal another's unlock).
+pub const FAILPOINT_BARRIER_NAMESPACE: i32 = 0x4B4F_4C44;
+
+/// Fixed sleep duration for `sleep:` failpoints (v1; optional duration parse later).
+#[cfg(feature = "test-failpoints")]
+const FAILPOINT_SLEEP: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Hits a named failpoint if the session GUC arms it.
+///
+/// Borrows the armed GUC text in place (no owned-`String` conversion) so the
+/// disarmed fast path — the overwhelming majority of calls in production —
+/// costs no more than the unavoidable GUC read.
 ///
 /// # Errors
 ///
 /// Returns an error when the failpoint is armed for abort, or when the wait
 /// barrier / SPI call fails.
 pub fn hit(name: &str) -> Result<(), String> {
-    let armed = current_failpoint();
+    let Some(armed) = current_failpoint() else {
+        return Ok(());
+    };
+    let Ok(armed) = armed.to_str() else {
+        return Ok(());
+    };
     if armed.is_empty() {
         return Ok(());
     }
 
-    let (mode, target) = parse_armed(&armed);
+    let (action, target) = FailpointAction::parse_prefix(armed);
     if target != name {
         return Ok(());
     }
 
-    match mode {
-        FailMode::Error => Err(format!("koldstore failpoint hit: {name}")),
-        FailMode::Wait => wait_barrier(name),
+    dispatch_action(action, name)
+}
+
+/// Hits a typed failpoint if the session GUC arms it.
+///
+/// # Errors
+///
+/// Returns an error when the failpoint is armed for abort, or when the wait
+/// barrier / SPI call fails.
+pub fn hit_typed(point: FlushFailpoint) -> Result<(), String> {
+    hit(point.as_str())
+}
+
+fn dispatch_action(action: FailpointAction, name: &str) -> Result<(), String> {
+    match action {
+        FailpointAction::Error => Err(format!("koldstore failpoint hit: {name}")),
+        #[cfg(feature = "test-failpoints")]
+        FailpointAction::Wait => wait_barrier(name),
+        #[cfg(feature = "test-failpoints")]
+        FailpointAction::Panic => {
+            // Immediate hard exit — documents SIGKILL-equivalent for process-kill
+            // harnesses. Prefer external SIGKILL from the test process in e2e.
+            pgrx::log!("koldstore failpoint panic: aborting process at {name}");
+            std::process::abort();
+        }
+        #[cfg(feature = "test-failpoints")]
+        FailpointAction::Sleep => {
+            pgrx::log!("koldstore failpoint sleep: {name} for {FAILPOINT_SLEEP:?}");
+            std::thread::sleep(FAILPOINT_SLEEP);
+            Ok(())
+        }
+        #[cfg(not(feature = "test-failpoints"))]
+        FailpointAction::Wait | FailpointAction::Panic | FailpointAction::Sleep => {
+            // Production builds refuse parking / destructive prefixes so a
+            // mistaken SET cannot pin a flush executor forever.
+            Err(format!(
+                "koldstore failpoint '{name}' requires the test-failpoints build \
+                 (wait/panic/sleep are disabled in production installs)"
+            ))
+        }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FailMode {
-    Error,
-    Wait,
-}
-
-fn parse_armed(armed: &str) -> (FailMode, &str) {
-    if let Some(rest) = armed.strip_prefix("wait:") {
-        (FailMode::Wait, rest)
-    } else if let Some(rest) = armed.strip_prefix("error:") {
-        (FailMode::Error, rest)
-    } else {
-        (FailMode::Error, armed)
-    }
-}
-
-fn current_failpoint() -> String {
+fn current_failpoint() -> Option<std::ffi::CString> {
     #[cfg(feature = "pg")]
     {
         crate::guc::failpoint_value()
     }
     #[cfg(not(feature = "pg"))]
     {
-        String::new()
+        None
     }
 }
 
+/// Parks until the coordinator releases the barrier.
+///
+/// Uses a genuine blocking `pg_advisory_lock`, not a `pg_try_advisory_lock`
+/// poll loop: PostgreSQL's own lock-wait machinery (`ProcSleep`) already
+/// honors `pg_cancel_backend` / statement timeout / postmaster death while
+/// parked, so no manual interrupt-check loop is needed. Just as important,
+/// only a genuine blocking wait registers as a `granted = false` row in
+/// `pg_locks` — the signal E2E harnesses poll for to detect "flush is
+/// parked at the barrier". A `pg_try_advisory_lock` loop never blocks long
+/// enough to be observed there, so harnesses would see the flush as never
+/// having reached the wait and time out instead.
+#[cfg(feature = "test-failpoints")]
 fn wait_barrier(name: &str) -> Result<(), String> {
     #[cfg(feature = "pg")]
     {
         use pgrx::datum::DatumWithOid;
-        // Block until the coordinating session releases the barrier lock.
-        // pg_advisory_lock/unlock return void — use Spi::run, not bool decode.
+        // Per-database two-key lock: parallel E2E worker DBs must not share one
+        // cluster-wide barrier. pg_advisory_lock/unlock return void — use
+        // Spi::run, not bool decode.
+        let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32() as i32;
         pgrx::Spi::run_with_args(
-            "SELECT pg_advisory_lock($1)",
-            &[DatumWithOid::from(FAILPOINT_BARRIER_KEY)],
+            "SELECT pg_advisory_lock($1, $2)",
+            &[
+                DatumWithOid::from(FAILPOINT_BARRIER_NAMESPACE),
+                DatumWithOid::from(database_oid),
+            ],
         )
         .map_err(|error| error.to_string())?;
         pgrx::Spi::run_with_args(
-            "SELECT pg_advisory_unlock($1)",
-            &[DatumWithOid::from(FAILPOINT_BARRIER_KEY)],
+            "SELECT pg_advisory_unlock($1, $2)",
+            &[
+                DatumWithOid::from(FAILPOINT_BARRIER_NAMESPACE),
+                DatumWithOid::from(database_oid),
+            ],
         )
         .map_err(|error| error.to_string())?;
         pgrx::log!("koldstore failpoint wait released: {name}");

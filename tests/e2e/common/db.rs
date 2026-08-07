@@ -89,23 +89,7 @@ impl TestDb {
             .await
             .context("read current database")?
             .get(0);
-        server
-            .client
-            .batch_execute(&format!(
-                "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
-                 ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
-                 ALTER DATABASE \"{dbname}\" RESET koldstore.flush_check_interval_seconds; \
-                 ALTER DATABASE \"{dbname}\" RESET koldstore.async_apply_watchdog_interval_ms; \
-                 RESET koldstore.failpoint; \
-                 RESET koldstore.internal_async_mirror_worker; \
-                 RESET koldstore.flush_check_interval_seconds; \
-                 RESET koldstore.async_apply_watchdog_interval_ms; \
-                 UPDATE koldstore.schemas \
-                   SET active = false \
-                 WHERE active"
-            ))
-            .await
-            .context("reset leftover async GUC / schema state for fixture")?;
+        reset_fixture_gucs(&server.client, &dbname).await?;
         // Running workers keep prior ALTER DATABASE GUCs until restart; bounce any
         // leftover applier so the next test inherits the reset defaults.
         let _ = super::async_mirror::terminate_async_worker(&server.client).await;
@@ -146,6 +130,13 @@ impl TestDb {
             .batch_execute(&format!("CREATE SCHEMA {schema};"))
             .await
             .with_context(|| format!("create schema {schema}"))?;
+        let dbname: String = server
+            .client
+            .query_one("SELECT current_database()::text", &[])
+            .await
+            .context("read current database")?
+            .get(0);
+        reset_fixture_gucs(&server.client, &dbname).await?;
         register_minio_storage(&server.client, &storage_name, &object_prefix, &config).await?;
 
         Ok(Self {
@@ -331,15 +322,13 @@ impl TestDb {
     ///
     /// Returns an error when flush fails after apply-lock retries.
     pub async fn flush_table_with_force(&self, relation: &str, force: bool) -> Result<i64> {
-        let job_id = flush_table_job_id(&self.client, relation, force).await?;
-        let progress = self
-            .client
-            .query_one(
-                "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
-                &[&job_id],
-            )
-            .await?;
-        Ok(progress.get(0))
+        // Policy flush decides from mirror pending counts; catch up WAL apply so
+        // recently committed DML is visible to the due check.
+        super::async_mirror::fence_async_mirror(&self.client).await?;
+        let Some(job_id) = flush_table_job_id(&self.client, relation, force).await? else {
+            return Ok(0);
+        };
+        wait_for_flush_job_terminal(&self.client, &job_id).await
     }
 
     /// Creates a user-scoped notes table and seeds rows for two tenants.
@@ -376,25 +365,31 @@ impl TestDb {
         })
     }
 
-    /// Inserts one pending flush job for a relation.
+    /// Enqueues a flush job (or returns the existing active job UUID as text).
+    ///
+    /// Uses `force => true` so a pending job is created even when policy flush
+    /// would skip (no excess / undersized segment).
     ///
     /// # Errors
     ///
-    /// Returns an error when the insert fails.
-    pub async fn insert_pending_flush_job(&self, relation: &str) -> Result<i64> {
+    /// Returns an error when the enqueue fails or returns NULL.
+    pub async fn insert_pending_flush_job(&self, relation: &str) -> Result<String> {
         let row = self
             .client
             .query_one(
                 r#"
                 SELECT koldstore.enqueue_flush_job(
                   table_name => $1::text::regclass,
-                  force      => false
-                )
+                  force      => true
+                )::text
                 "#,
                 &[&relation],
             )
             .await?;
-        Ok(row.get(0))
+        let job_id: Option<String> = row.get(0);
+        job_id
+            .filter(|value| !value.is_empty() && value != "null")
+            .ok_or_else(|| anyhow::anyhow!("enqueue_flush_job returned NULL for {relation}"))
     }
 
     /// Opens an object-store client for this fixture's MinIO prefix.
@@ -603,12 +598,12 @@ fn unique_identifier(label: &str) -> String {
 
 /// True when flush failed because a fail-fast entry lock is busy.
 ///
-/// Covers the database apply/slot lock and the per-table job lock. Both return
+/// Covers the database slot lock and the per-table job lock. Both return
 /// immediately from `flush_table` so callers can retry instead of hanging.
 #[must_use]
-pub fn is_flush_apply_lock_busy(error: &tokio_postgres::Error) -> bool {
+pub fn is_flush_entry_lock_busy(error: &tokio_postgres::Error) -> bool {
     // `Display` for tokio_postgres is often just "db error"; inspect the DB
-    // message / debug form so fail-fast apply-lock text is visible.
+    // message / debug form so fail-fast lock text is visible.
     let mut text = format!("{error:?}");
     if let Some(db) = error.as_db_error() {
         text.push(' ');
@@ -621,16 +616,92 @@ pub fn is_flush_apply_lock_busy(error: &tokio_postgres::Error) -> bool {
     text.contains("apply lock")
         || text.contains("retry shortly")
         || text.contains("flush unavailable")
-        || text.contains("flush already in progress")
+}
+
+/// Clears leftover per-database GUCs and forces synchronous flush for E2E.
+///
+/// Production default is `flush_execution=queue`. Session-armed failpoints and
+/// most E2E assertions need the calling backend to run flush (`inline`), and
+/// peer connections inherit the database-level setting.
+async fn reset_fixture_gucs(client: &Client, dbname: &str) -> Result<()> {
+    client
+        .batch_execute(&format!(
+            "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
+             ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
+             ALTER DATABASE \"{dbname}\" RESET koldstore.flush_check_interval_seconds; \
+             ALTER DATABASE \"{dbname}\" RESET koldstore.async_apply_watchdog_interval_ms; \
+             ALTER DATABASE \"{dbname}\" SET koldstore.flush_execution = 'inline'; \
+             RESET koldstore.failpoint; \
+             RESET koldstore.internal_async_mirror_worker; \
+             RESET koldstore.flush_check_interval_seconds; \
+             RESET koldstore.async_apply_watchdog_interval_ms; \
+             SET koldstore.flush_execution = 'inline'; \
+             UPDATE koldstore.schemas \
+               SET active = false \
+             WHERE active"
+        ))
+        .await
+        .context("reset leftover GUC / schema state for fixture")?;
+    Ok(())
+}
+
+/// Polls until a flush job reaches a terminal status; returns `rows_flushed`.
+///
+/// # Errors
+///
+/// Returns an error when the job ends in `error`/`cancelled`, or times out while
+/// still `pending`/`running` (queue mode without a live executor).
+pub async fn wait_for_flush_job_terminal(client: &Client, job_id: &str) -> Result<i64> {
+    for attempt in 1..=200 {
+        let row = client
+            .query_one(
+                r#"
+                SELECT rows_flushed, status, coalesce(error_trace, '')
+                FROM koldstore.jobs
+                WHERE id = $1::text::uuid
+                "#,
+                &[&job_id],
+            )
+            .await
+            .with_context(|| format!("lookup flush job {job_id}"))?;
+        let rows_flushed: i64 = row.get(0);
+        let status: String = row.get(1);
+        let error_trace: String = row.get(2);
+        match status.as_str() {
+            "completed" => return Ok(rows_flushed),
+            "error" | "cancelled" => {
+                anyhow::bail!(
+                    "flush job {job_id} finished status={status} rows_flushed={rows_flushed}: {error_trace}"
+                );
+            }
+            "pending" | "running" => {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    25 * attempt.min(20) as u64,
+                ))
+                .await;
+            }
+            other => {
+                anyhow::bail!("flush job {job_id} unexpected status={other}");
+            }
+        }
+    }
+    anyhow::bail!("flush job {job_id} still active after wait budget")
 }
 
 /// Runs `koldstore.flush_table` and returns the job id, retrying apply-lock busy.
+///
+/// When `force` is false and the policy has no due work, returns `Ok(None)` —
+/// a no-op flush is success, not an error.
 ///
 /// # Errors
 ///
 /// Returns an error when flush fails for a non-lock reason, or the lock stays
 /// busy across the retry budget.
-pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) -> Result<String> {
+pub async fn flush_table_job_id(
+    client: &Client,
+    relation: &str,
+    force: bool,
+) -> Result<Option<String>> {
     for attempt in 1..=40 {
         let result = if force {
             client
@@ -648,8 +719,18 @@ pub async fn flush_table_job_id(client: &Client, relation: &str, force: bool) ->
                 .await
         };
         match result {
-            Ok(row) => return Ok(row.get(0)),
-            Err(error) if is_flush_apply_lock_busy(&error) => {
+            Ok(row) => {
+                let job_id: Option<String> = row.get(0);
+                match job_id.filter(|value| !value.is_empty() && value != "null") {
+                    Some(job_id) => return Ok(Some(job_id)),
+                    None if !force => return Ok(None),
+                    None => anyhow::bail!(
+                        "flush_table returned NULL for {relation} (force=true); \
+                         expected force flush to enqueue work"
+                    ),
+                }
+            }
+            Err(error) if is_flush_entry_lock_busy(&error) => {
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
             }
             Err(error) => {

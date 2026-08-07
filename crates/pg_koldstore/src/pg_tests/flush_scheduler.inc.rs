@@ -63,7 +63,7 @@ fn flush_job_records_segment_batches_completed() {
 
 #[pg_test]
 fn flush_table_drains_multiple_policy_waves_in_one_job() {
-    // Policy waves are capped at max_rows_per_flush (default 10k). A single
+    // Policy passes are capped at max_rows_per_flush (default 10k). A single
     // flush_table call must keep draining until under hot_row_limit so catch-up
     // does not wait for many scheduler ticks / job rows.
     let suffix = unique_suffix("flush_multiwave");
@@ -117,11 +117,11 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
     assert_eq!(jobs, 1, "expected one completed catch-up job, got {jobs}");
     assert!(
         rows >= 15000,
-        "expected one job to drain past the 10k wave cap, got rows_flushed={rows}"
+        "expected one job to drain past the 10k pass cap, got rows_flushed={rows}"
     );
     assert!(
         batches >= 15,
-        "expected many segment batches from multi-wave catch-up, got {batches}"
+        "expected many segment batches from multi-pass catch-up, got {batches}"
     );
     assert!(
         hot <= 1,
@@ -135,10 +135,11 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
 }
 
 #[pg_test]
-fn flush_scheduler_skips_table_with_running_flush_job() {
-    // A durable `running` flush means another backend owns the work. The next
-    // tick must ignore that table instead of waiting or starting a second job.
-    let suffix = unique_suffix("flush_skip_running");
+fn flush_scheduler_reclaims_orphan_running_flush_job() {
+    // A durable `running` row with no session table-job lock is an orphan (owner
+    // crashed). The tick reclaims it to pending and may flush. Live owners are
+    // skipped via try_lock in the same tick (covered by e2e dual-flush).
+    let suffix = unique_suffix("flush_reclaim_orphan");
     let schema = format!("pgtest_{suffix}");
     let table = "msgs";
     let relation = format!("{schema}.{table}");
@@ -151,6 +152,9 @@ fn flush_scheduler_skips_table_with_running_flush_job() {
         ))
         .expect("insert");
     }
+    // Excess after reclaim is 5 rows; keep max_rows_per_file at that floor so the
+    // undersized-segment gate does not skip the follow-on auto-flush.
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -158,7 +162,7 @@ fn flush_scheduler_skips_table_with_running_flush_job() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => true
         )
@@ -181,14 +185,14 @@ fn flush_scheduler_skips_table_with_running_flush_job() {
         )
         "#
     ))
-    .expect("insert running flush job");
+    .expect("insert orphan running flush job");
 
     let ran = Spi::get_one::<bool>("SELECT koldstore.internal_run_flush_scheduler_tick()")
         .expect("scheduler tick")
         .expect("non-null");
     assert!(
-        !ran,
-        "scheduler must skip while a flush job is already running"
+        ran,
+        "orphan running job must be reclaimed so auto-flush can proceed"
     );
 
     let completed = spi_get_i64(&format!(
@@ -200,9 +204,22 @@ fn flush_scheduler_skips_table_with_running_flush_job() {
           AND status = 'completed'
         "#
     ));
+    assert!(
+        completed >= 1,
+        "reclaimed orphan must allow a completed flush, got {completed}"
+    );
+    let leftover_running = spi_get_i64(&format!(
+        r#"
+        SELECT count(*)::bigint
+        FROM koldstore.jobs
+        WHERE table_oid = '{relation}'::regclass::oid
+          AND job_type = 'flush'
+          AND status = 'running'
+        "#
+    ));
     assert_eq!(
-        completed, 0,
-        "skipped tick must not create a completed flush job"
+        leftover_running, 0,
+        "orphan running row must not remain after the tick"
     );
 }
 
@@ -221,6 +238,8 @@ fn flush_scheduler_tick_enqueues_and_flushes_when_over_hot_limit() {
         ))
         .expect("insert");
     }
+    // Excess is 5 rows; file floor must match or the undersized gate skips flush.
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -228,7 +247,7 @@ fn flush_scheduler_tick_enqueues_and_flushes_when_over_hot_limit() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => true
         )
@@ -271,6 +290,7 @@ fn flush_scheduler_skips_auto_flush_disabled_tables() {
         ))
         .expect("insert");
     }
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -278,7 +298,7 @@ fn flush_scheduler_skips_auto_flush_disabled_tables() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => false
         )
@@ -351,6 +371,7 @@ fn flush_scheduler_skips_table_with_recent_error_job() {
         ))
         .expect("insert");
     }
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -358,7 +379,7 @@ fn flush_scheduler_skips_table_with_recent_error_job() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => true
         )
@@ -415,6 +436,7 @@ fn flush_scheduler_retries_after_error_cooldown() {
         ))
         .expect("insert");
     }
+    Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
         SELECT koldstore.manage_table(
@@ -422,7 +444,7 @@ fn flush_scheduler_retries_after_error_cooldown() {
           storage => '{storage}',
           hot_row_limit => 5,
           min_flush_rows => 1,
-          max_rows_per_file => 1000,
+          max_rows_per_file => 5,
           migration_order_by => 'id',
           auto_flush => true
         )
@@ -482,6 +504,7 @@ fn flush_scheduler_tick_processes_only_one_due_table() {
             ))
             .expect("insert");
         }
+        Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
         Spi::run(&format!(
             r#"
             SELECT koldstore.manage_table(
@@ -489,7 +512,7 @@ fn flush_scheduler_tick_processes_only_one_due_table() {
               storage => '{storage}',
               hot_row_limit => 5,
               min_flush_rows => 1,
-              max_rows_per_file => 1000,
+              max_rows_per_file => 5,
               migration_order_by => 'id',
               auto_flush => true
             )

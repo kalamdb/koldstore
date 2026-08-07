@@ -128,16 +128,29 @@ where
     }
     let reader = builder.build().map_err(|error| error.to_string())?;
     let pk_filter = effective.pk_values.as_ref();
+    let row_limit = effective.row_limit;
+    let seq_min = effective.seq_range.as_ref().map(|range| range.min.get());
+    let seq_max = effective.seq_range.as_ref().map(|range| range.max.get());
     let mut rows = Vec::new();
     for batch in reader {
         let batch = batch.map_err(|error| error.to_string())?;
-        rows.extend(clean_rows_from_batch(
+        let decoded = clean_rows_from_batch(
             &batch,
             columns,
             primary_key_columns,
             &application_columns,
             pk_filter,
-        )?);
+        )?;
+        for row in decoded {
+            if seq_min.is_some_and(|min| row.seq < min) || seq_max.is_some_and(|max| row.seq > max)
+            {
+                continue;
+            }
+            rows.push(row);
+            if row_limit.is_some_and(|limit| rows.len() >= limit) {
+                return Ok(rows);
+            }
+        }
     }
     Ok(rows)
 }

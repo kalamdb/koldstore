@@ -299,16 +299,20 @@ The current storage comparison uses:
 - Approximately 9.9 million flushed rows
 - zstd-compressed Parquet
 
+Draft single-sample refresh (2026-08-07). Storage wins match the prior published
+shape; cold point-lookup recovered vs the 2026-08-06 draft but remains below
+the Aug 1 baseline — see [RESULTS.md](docs/benchmarks/RESULTS.md).
+
 | Metric | PostgreSQL only | PostgreSQL + KoldStore |
 |---|---:|---:|
-| Total hot + cold footprint | 5.85 GiB | 670.75 MiB |
+| Total hot + cold footprint | 5.85 GiB | 670.82 MiB |
 | PostgreSQL-resident footprint | 5.85 GiB | 72.23 MiB |
 | Index footprint | 414.86 MiB | 11.45 MiB |
-| `VACUUM (FULL, ANALYZE)` | 158.7 s | 3.24 s |
-| Foreground insert throughput | 100,809 rows/s | 100,818 rows/s |
-| Foreground update throughput | 81,791 rows/s | 55,164 rows/s |
-| Hot point-query p99 | 355 µs | 438 µs |
-| Cold point-query p99 | 306 µs | 1.71 ms |
+| `VACUUM (FULL, ANALYZE)` | 142.2 s | 3.86 s |
+| Foreground insert throughput | 100,214 rows/s | 96,867 rows/s |
+| Foreground update throughput | 86,487 rows/s | 57,131 rows/s |
+| Hot point-query p99 | 339 µs | 486 µs |
+| Cold point-query p99 | 283 µs | 3.02 ms |
 
 The storage and maintenance reductions are the intended benefit.
 

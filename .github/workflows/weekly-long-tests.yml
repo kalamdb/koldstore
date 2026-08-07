@@ -1,0 +1,233 @@
+name: weekly-long-tests
+
+# Consolidates slow / gated suites that PR CI intentionally skips or soft-skips.
+# Does not re-run the full PR correctness matrix beyond the selected PG majors.
+#
+# Covers:
+#   - crash recovery with executor SIGKILL + full failpoint matrix
+#   - postmaster immediate restart mid-flush
+#   - Toxiproxy network-fault E2E (MinIO)
+#   - longer SQLsmith / differential fuzz
+#   - optional soak
+#
+# Sibling weekly jobs (left separate for artifacts / independent failure):
+#   benchmarks.yml, weekly-hammerdb.yml, upstream-pg-regress.yml
+
+on:
+  schedule:
+    # Mondays 02:00 UTC — before benchmarks (04:00) and HammerDB (05:00).
+    # Scheduled runs always use PostgreSQL 16 only.
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      pg15:
+        description: PostgreSQL 15
+        type: boolean
+        default: false
+      pg16:
+        description: PostgreSQL 16
+        type: boolean
+        default: true
+      pg17:
+        description: PostgreSQL 17
+        type: boolean
+        default: false
+      pg18:
+        description: PostgreSQL 18
+        type: boolean
+        default: false
+      full_crash_matrix:
+        description: Run KOLDSTORE_CRASH_FULL_MATRIX=1
+        type: boolean
+        default: true
+      soak:
+        description: Run KOLDSTORE_E2E_SOAK=1 endurance
+        type: boolean
+        default: true
+      sqlsmith_seconds:
+        description: SQLsmith / differential duration (seconds)
+        type: string
+        default: "300"
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+
+jobs:
+  resolve-matrix:
+    name: Resolve PostgreSQL matrix
+    runs-on: ubuntu-latest
+    outputs:
+      pg: ${{ steps.set.outputs.pg }}
+    steps:
+      - id: set
+        name: Build PG major JSON array
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo 'pg=[16]' >> "$GITHUB_OUTPUT"
+            echo "schedule → PostgreSQL [16]"
+            exit 0
+          fi
+
+          versions=()
+          [[ "${{ inputs.pg15 }}" == "true" ]] && versions+=(15)
+          [[ "${{ inputs.pg16 }}" == "true" ]] && versions+=(16)
+          [[ "${{ inputs.pg17 }}" == "true" ]] && versions+=(17)
+          [[ "${{ inputs.pg18 }}" == "true" ]] && versions+=(18)
+
+          if [[ ${#versions[@]} -eq 0 ]]; then
+            echo "error: select at least one PostgreSQL version (15–18)" >&2
+            exit 1
+          fi
+
+          # Compact JSON array without requiring jq.
+          json="["
+          for i in "${!versions[@]}"; do
+            [[ "$i" -gt 0 ]] && json+=","
+            json+="${versions[$i]}"
+          done
+          json+="]"
+          echo "pg=${json}" >> "$GITHUB_OUTPUT"
+          echo "workflow_dispatch → PostgreSQL ${json}"
+
+  long-tests:
+    name: Long tests (PG ${{ matrix.pg }})
+    needs: resolve-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ${{ fromJSON(needs.resolve-matrix.outputs.pg) }}
+    env:
+      PG_VER: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGVERSION: ${{ matrix.pg }}
+      KOLDSTORE_E2E_PGPORT: ${{ format('288{0}', matrix.pg) }}
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+      KOLDSTORE_CRASH_FLUSH_EXECUTOR: "1"
+      KOLDSTORE_SQLSMITH_SECONDS: ${{ inputs.sqlsmith_seconds || '300' }}
+      KOLDSTORE_DIFF_SQLSMITH_SECONDS: ${{ inputs.sqlsmith_seconds || '300' }}
+      KOLDSTORE_MINIO: "1"
+      KOLDSTORE_MINIO_ENDPOINT: http://127.0.0.1:9000
+      KOLDSTORE_MINIO_ACCESS_KEY: minioadmin
+      KOLDSTORE_MINIO_SECRET_KEY: minioadmin
+      KOLDSTORE_MINIO_BUCKET: koldstore-test
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Separate caches per PG major (different feature builds).
+          key: long-tests-pg${{ matrix.pg }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Install PostgreSQL ${{ matrix.pg }} development packages
+        run: bash scripts/ci/install-pgdg-dev.sh "${PG_VER}"
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL ${{ matrix.pg }}
+        run: cargo pgrx init --pg${PG_VER} "${PGRX_PG_CONFIG}"
+
+      - name: Start MinIO
+        run: bash scripts/ci/start-minio.sh
+
+      - name: Start Toxiproxy
+        run: bash scripts/ci/start-toxiproxy.sh
+
+      - name: Prepare pgrx cluster + install koldstore
+        run: bash scripts/run-pg-e2e.sh "${PG_VER}"
+        env:
+          KOLDSTORE_E2E_PREPARE_ONLY: "1"
+
+      - name: Crash recovery (executor SIGKILL + failpoints)
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
+          export KOLDSTORE_CRASH_FLUSH_EXECUTOR=1
+          # Schedule always runs the full matrix; dispatch honors the input.
+          if [[ "${{ github.event_name }}" == "schedule" || "${{ inputs.full_crash_matrix }}" == "true" ]]; then
+            export KOLDSTORE_CRASH_FULL_MATRIX=1
+          fi
+          cargo nextest run -p e2e \
+            -E 'test(crash::) & not test(postmaster_restart::)' \
+            --test-threads 1
+
+      - name: Postmaster immediate restart mid-flush
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
+          export KOLDSTORE_CRASH_POSTMASTER_RESTART=1
+          cargo nextest run -p e2e \
+            -E 'test(crash::postmaster_restart::)' \
+            --test-threads 1
+
+      - name: Toxiproxy network-fault + cold-read cancel
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
+          export KOLDSTORE_TOXIPROXY=1
+          export KOLDSTORE_MINIO=1
+          cargo nextest run -p e2e \
+            -E 'test(failure_injection::) + test(query_cancel::)' \
+            --test-threads 1
+
+      - name: Optional soak
+        if: ${{ github.event_name == 'schedule' || inputs.soak }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1091
+          source "${KOLDSTORE_E2E_ENV_FILE:-.e2e-env}"
+          export KOLDSTORE_E2E_SOAK=1
+          export KOLDSTORE_E2E_SOAK_SECONDS="${KOLDSTORE_E2E_SOAK_SECONDS:-45}"
+          cargo nextest run -p e2e -E 'test(endurance::)' --test-threads 1
+
+      - name: Install SQLsmith
+        run: bash scripts/ci/install-sqlsmith.sh
+
+      - name: SQLsmith (long fuzz)
+        run: bash scripts/readiness/run-sqlsmith.sh "${PG_VER}"
+        env:
+          SQLSMITH_BIN: ${{ github.workspace }}/target/tools/sqlsmith/bin/sqlsmith
+
+      - name: Differential SQLsmith compare (long)
+        run: bash scripts/readiness/run-differential-sqlsmith.sh "${PG_VER}"
+        env:
+          KOLDSTORE_DIFF_STATE: mixed
+          SQLSMITH_BIN: ${{ github.workspace }}/target/tools/sqlsmith/bin/sqlsmith
+
+      - name: Integrity checks
+        run: bash scripts/readiness/run-integrity-checks.sh "${PG_VER}"
+        env:
+          KOLDSTORE_INTEGRITY_PREPARE: "0"
+
+      - name: Emit long-tests report
+        if: always()
+        run: |
+          export KOLDSTORE_REPORT_CATEGORY=weekly-long-tests-pg${PG_VER}
+          export KOLDSTORE_REPORT_PASSED=true
+          export KOLDSTORE_REPORT_SQLSMITH=ran
+          export KOLDSTORE_REPORT_DIFFERENTIAL=ran
+          export KOLDSTORE_REPORT_CRASH=ran
+          export KOLDSTORE_REPORT_POSTMASTER_RESTART=ran
+          export KOLDSTORE_REPORT_INTEGRITY=ran
+          bash scripts/readiness/run-readiness-report.sh "${PG_VER}"
+
+      - name: Upload long-tests artifacts
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: weekly-long-tests-report-pg${{ matrix.pg }}
+          path: target/readiness
+          if-no-files-found: warn

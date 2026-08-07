@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::os::raw::{c_char, c_int, c_void};
 #[cfg(feature = "pg_test")]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use koldstore_merge::scan::CUSTOM_PATH_NAME;
@@ -855,7 +856,7 @@ unsafe fn initialize_fallback_scan(
         relation_owner,
         relation: &relation,
         snapshot: &snapshot,
-        catalog: catalog.as_ref(),
+        catalog: Arc::clone(&catalog),
         qual,
         params,
         projection: &scan_projection,
@@ -1240,11 +1241,12 @@ unsafe extern "C-unwind" fn explain_custom_scan(
         }
     }
 
-    if !hot_label.is_empty() && hot_child_planstate(node).is_none() {
-        // Fallback when the hot child was not initialized into custom_ps (cold
-        // emit paths). Graph clients that walk custom_ps still see nested Plans
-        // when the child was initialized for hot-only streaming.
-        profile::explain_text(es, "Hot Planned Access", &hot_label);
+    if !hot_label.is_empty() {
+        // Always emit the JSON tracing diagram under `KoldStore Pipeline`
+        // (not `Plans`) so it coexists with a native hot child.
+        if hot_child_planstate(node).is_none() {
+            profile::explain_text(es, "Hot Planned Access", &hot_label);
+        }
         profile::explain_visual_pipeline(
             es,
             &cold_profile,

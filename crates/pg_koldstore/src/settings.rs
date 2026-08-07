@@ -61,6 +61,38 @@ pub const MIN_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 1;
 /// Maximum flush-check interval (1 day).
 pub const MAX_FLUSH_CHECK_INTERVAL_SECONDS: i32 = 24 * 3600;
 
+/// Cap on concurrent one-shot flush executor background workers per database.
+pub const MAX_PARALLEL_FLUSH_JOBS_GUC: &str = "koldstore.max_parallel_flush_jobs";
+/// Default parallel flush executors (keep at 2 until failure-sweep coverage lands).
+pub const DEFAULT_MAX_PARALLEL_FLUSH_JOBS: i32 = 2;
+/// Minimum parallel flush executors.
+pub const MIN_MAX_PARALLEL_FLUSH_JOBS: i32 = 1;
+/// Hard cap on parallel flush executors.
+pub const MAX_MAX_PARALLEL_FLUSH_JOBS: i32 = 16;
+
+/// Wall-clock budget for one flush job attempt (`0` disables).
+pub const FLUSH_JOB_MAX_RUNTIME_SECONDS_GUC: &str = "koldstore.flush_job_max_runtime_seconds";
+/// Default flush job wall-clock budget (30 minutes).
+pub const DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS: i32 = 30 * 60;
+/// Minimum flush job runtime (`0` = disabled).
+pub const MIN_FLUSH_JOB_MAX_RUNTIME_SECONDS: i32 = 0;
+/// Hard cap for flush job runtime (24 hours).
+pub const MAX_FLUSH_JOB_MAX_RUNTIME_SECONDS: i32 = 24 * 3600;
+
+/// Days to retain terminal (`completed` / `cancelled` / `error`) jobs before purge.
+pub const JOB_RETENTION_DAYS_GUC: &str = "koldstore.job_retention_days";
+/// Default retention window (30 days).
+pub const DEFAULT_JOB_RETENTION_DAYS: i32 = 30;
+/// `0` disables automatic purge.
+pub const MIN_JOB_RETENTION_DAYS: i32 = 0;
+/// Hard cap (~10 years).
+pub const MAX_JOB_RETENTION_DAYS: i32 = 3650;
+
+/// Whether `flush_table` runs in the calling backend or enqueues for executors.
+pub const FLUSH_EXECUTION_GUC: &str = "koldstore.flush_execution";
+/// Production default: enqueue and return UUID; one-shot executors run the work.
+pub const DEFAULT_FLUSH_EXECUTION: &str = "queue";
+
 /// Safety watchdog for commit-driven async mirror wakeups (milliseconds).
 pub const ASYNC_APPLY_WATCHDOG_INTERVAL_MS_GUC: &str = "koldstore.async_apply_watchdog_interval_ms";
 /// Default watchdog cadence (30 seconds).
@@ -123,6 +155,77 @@ pub const MAX_MIN_MAX_ROWS_PER_FILE: i32 = 1_000_000;
 /// Kept in sync with [`koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE`].
 pub const DEFAULT_MIN_MAX_ROWS_PER_FILE_SETTING: i32 =
     koldstore_common::DEFAULT_MIN_MAX_ROWS_PER_FILE as i32;
+
+/// How `koldstore.flush_table` executes after enqueueing a durable job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlushExecutionMode {
+    /// Enqueue (or reuse) a pending/running job and return its UUID immediately.
+    ///
+    /// One-shot flush executors claim and run the work.
+    Queue,
+    /// Enqueue then run flush in the calling backend (SPI tests).
+    ///
+    /// Required for `#[pg_test]` SPI transactions that cannot commit for
+    /// cross-backend job visibility. Not a legacy product API.
+    Inline,
+}
+
+impl FlushExecutionMode {
+    /// Parses flush execution mode from GUC text.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "queue" => Some(Self::Queue),
+            "inline" => Some(Self::Inline),
+            _ => None,
+        }
+    }
+
+    /// Returns the canonical GUC text.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queue => "queue",
+            Self::Inline => "inline",
+        }
+    }
+}
+
+/// Validates and clamps `koldstore.max_parallel_flush_jobs`.
+#[must_use]
+pub const fn bounded_max_parallel_flush_jobs(value: i32) -> i32 {
+    if value < MIN_MAX_PARALLEL_FLUSH_JOBS {
+        MIN_MAX_PARALLEL_FLUSH_JOBS
+    } else if value > MAX_MAX_PARALLEL_FLUSH_JOBS {
+        MAX_MAX_PARALLEL_FLUSH_JOBS
+    } else {
+        value
+    }
+}
+
+/// Validates and clamps `koldstore.flush_job_max_runtime_seconds` (`0` disables).
+#[must_use]
+pub const fn bounded_flush_job_max_runtime_seconds(value: i32) -> i32 {
+    if value < MIN_FLUSH_JOB_MAX_RUNTIME_SECONDS {
+        MIN_FLUSH_JOB_MAX_RUNTIME_SECONDS
+    } else if value > MAX_FLUSH_JOB_MAX_RUNTIME_SECONDS {
+        MAX_FLUSH_JOB_MAX_RUNTIME_SECONDS
+    } else {
+        value
+    }
+}
+
+/// Validates and clamps `koldstore.job_retention_days` (`0` disables purge).
+#[must_use]
+pub const fn bounded_job_retention_days(value: i32) -> i32 {
+    if value < MIN_JOB_RETENTION_DAYS {
+        MIN_JOB_RETENTION_DAYS
+    } else if value > MAX_JOB_RETENTION_DAYS {
+        MAX_JOB_RETENTION_DAYS
+    } else {
+        value
+    }
+}
 
 /// Runtime mode for cold reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

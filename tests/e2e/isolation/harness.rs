@@ -3,55 +3,12 @@
 //! Two `tokio-postgres` clients coordinate with PostgreSQL advisory locks.
 //! Correctness must not depend on sleeps.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio_postgres::Client;
 
 use crate::common::{self, TestDb};
 
-/// Well-known advisory lock used as a barrier between sessions.
-pub const BARRIER_LOCK_KEY: i64 = 0x4B4F_4C44; // "KOLD"
-
-/// Opens a second client against the same pgrx database as `db`.
-///
-/// # Errors
-///
-/// Returns an error when the connection fails.
-pub async fn connect_peer(db: &TestDb) -> Result<Client> {
-    let (client, connection) =
-        tokio_postgres::connect(&db.target.connection_string(), tokio_postgres::NoTls)
-            .await
-            .context("connect peer client")?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            eprintln!("peer connection error: {error}");
-        }
-    });
-    Ok(client)
-}
-
-/// Acquires the shared isolation barrier lock (blocks until available).
-///
-/// # Errors
-///
-/// Returns an error when PostgreSQL rejects the lock call.
-pub async fn barrier_lock(client: &Client) -> Result<()> {
-    client
-        .execute("SELECT pg_advisory_lock($1)", &[&BARRIER_LOCK_KEY])
-        .await?;
-    Ok(())
-}
-
-/// Releases the shared isolation barrier lock.
-///
-/// # Errors
-///
-/// Returns an error when unlock fails.
-pub async fn barrier_unlock(client: &Client) -> Result<()> {
-    client
-        .execute("SELECT pg_advisory_unlock($1)", &[&BARRIER_LOCK_KEY])
-        .await?;
-    Ok(())
-}
+pub use common::{barrier_lock, barrier_unlock, connect_peer};
 
 /// Seeds a managed items table and returns its relation name.
 ///

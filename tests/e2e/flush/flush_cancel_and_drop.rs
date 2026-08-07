@@ -26,34 +26,18 @@ async fn cancel_pending_flush_job_marks_cancelled() -> Result<()> {
             .await
             .context("set_table_auto_flush(false)")?;
 
-        let inserted = db
+        let job_id = db
             .client
             .query_one(
-                "SELECT koldstore.enqueue_flush_job($1::text::regclass)",
+                "SELECT koldstore.enqueue_flush_job($1::text::regclass, true)::text",
                 &[&table.relation],
             )
             .await
             .context("enqueue_flush_job")?
-            .get::<_, i64>(0);
-        assert_eq!(inserted, 1);
-
-        let job_id = db
-            .client
-            .query_one(
-                r#"
-                SELECT id::text
-                FROM koldstore.jobs
-                WHERE table_oid = $1::text::regclass::oid
-                  AND job_type = 'flush'
-                  AND status = 'pending'
-                ORDER BY created_at DESC
-                LIMIT 1
-                "#,
-                &[&table.relation],
-            )
-            .await
-            .context("lookup pending job")?
-            .get::<_, String>(0);
+            .get::<_, Option<String>>(0)
+            .filter(|value| !value.is_empty() && value != "null")
+            .context("enqueue_flush_job returned NULL")?;
+        assert!(!job_id.is_empty());
 
         let cancelled = db
             .client
@@ -159,7 +143,7 @@ async fn drop_table_cancels_jobs_and_deletes_cold_objects() -> Result<()> {
             .await
             .ok();
 
-        let _ = db.flush_table(&table.relation).await?;
+        let _ = db.flush_table_with_force(&table.relation, true).await?;
 
         let prefix = {
             let parts: Vec<&str> = table.relation.split('.').collect();
@@ -178,7 +162,10 @@ async fn drop_table_cancels_jobs_and_deletes_cold_objects() -> Result<()> {
             .get::<_, i64>(0);
 
         let pending = db.insert_pending_flush_job(&table.relation).await?;
-        assert_eq!(pending, 1);
+        assert!(
+            !pending.is_empty(),
+            "expected an active flush job UUID before DROP"
+        );
 
         db.client
             .batch_execute(&format!("DROP TABLE {}", table.relation))

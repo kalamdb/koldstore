@@ -2,6 +2,18 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
+**Status (as of 2026-08-06):** **Mostly done / residual optional.** Phase 0 delete targets are gone from the tree. Later phases landed partially; remaining work is optional hygiene, not a blocking feature plan.
+
+| Phase | State |
+| --- | --- |
+| 0 Delete unused scaffolding (`SpiExecutor`, `MemoryOwner` labels, span stubs, C `custom_scan` shim, dead forwarders) | **Done** |
+| 1 Error / SPI collapse (`PgAdapterError`, less String soup) | **Partial** — adapter exists; many `Result<_, String>` remain |
+| 2 Cut needless clones (cold plan / hot cursor) | **Partial / unclear** — not a tracked todo |
+| 3 Split oversized modules (migrate split exists under `sql/migrate/`) | **Partial** — migrate split **done**; `profile.rs` / apply still large |
+| Explicitly deferred (workspace-wide cleanup, ScanProfileSink de-genericize, SQLSTATE) | **Still deferred** — correct |
+
+**Verdict:** Do **not** treat this plan as a must-implement feature backlog. Revisit only if doing a dedicated cleanup PR; skip items already deleted.
+
 **Goal:** Make `crates/pg_koldstore` lighter and easier to maintain in **one PR**: delete unused scaffolding, collapse error/SPI boilerplate, cut needless clones, and split oversized modules — without changing merge-scan behavior or the locked hot-only path.
 
 **Architecture:** Cleanup is layered delete → normalize → thin → split. Every phase must leave the crate compiling and behavior-identical. Prefer removing code over adding abstractions. Domain logic stays in `koldstore-*`; `pg_koldstore` remains the SPI/hooks/`pg_sys` adapter.

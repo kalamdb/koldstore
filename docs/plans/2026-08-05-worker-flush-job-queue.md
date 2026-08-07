@@ -1,7 +1,29 @@
 # Worker-Owned Flush Queue and Production-Grade Failure Testing
 
 **Date:** 2026-08-05  
-**Status:** Proposed — architecture accepted; lock, recovery, and fault-injection contracts required before implementation  
+**Status (as of 2026-08-06):** **Core queue shipped; production hardening incomplete.**  
+Supersedes ADR-006 inline-only model for the default path. Related hardening detail: [2026-08-07-improvements-to-jobs-lifecycle.md](2026-08-07-improvements-to-jobs-lifecycle.md).
+
+### Shipped vs open (audit)
+
+| Area | State |
+| --- | --- |
+| `flush_execution=queue` default; enqueue-and-return UUID | **Done** |
+| One-shot `NEVER_RESTART` flush executors | **Done** |
+| Session table advisory lock + `attempt_token` fencing | **Done** (fencing partial on “0-row stop” discipline) |
+| Short txns; encode/upload outside open SPI where Short mode | **Done** |
+| Crash / failpoint e2e coverage (substantial) | **Partial / substantial** |
+| **Client still spawns executors** (not coordinator-only) | **Open** |
+| Durable `flush_passes` + true pass resume | **Open** |
+| Manifest object I/O **outside** slot lock | **Open** (still under `with_slot_lock_retry`) |
+| Fair claim index + candidate page (not LIMIT 1) | **Open / partial** (ORDER BY exists; index / page claim missing) |
+| Typed retryable vs permanent + backoff requeue | **Open** |
+| Cluster-wide shmem worker reservation | **Open** |
+| Ordered flush unbounded Rust `Vec` sort | **Done** (2026-08-06 MVP: PG `ORDER BY` + keyset stream) |
+| Full production failure matrix / foreground gates | **Open** |
+
+**Verdict:** Plan remains the architecture source of truth for the queue. Treat remaining rows as the active backlog (overlap with the Aug-7 lifecycle plan). Not outdated.
+
 **Supersedes:** ADR-006 inline flush execution model  
 **Related:** ADR-004 segment publication protocol, async flush prune race, jobs platform design, crate architecture
 

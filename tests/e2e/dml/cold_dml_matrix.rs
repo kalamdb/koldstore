@@ -9,20 +9,6 @@ use koldstore_merge::dml::{
 use serde_json::json;
 
 #[test]
-fn cold_dml_matrix_targets_active_pgrx_versions() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    assert_eq!(
-        common::local_pg_matrix()
-            .into_iter()
-            .map(|target| target.version)
-            .collect::<Vec<_>>(),
-        common::expected_pg_versions()
-    );
-}
-
-#[test]
 fn cold_dml_plans_cover_hydrate_update_delete_and_no_default_object_reads() {
     common::require_pgrx_server_sync()
         .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");

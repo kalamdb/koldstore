@@ -17,6 +17,7 @@ SKIP_STORAGE=0
 SKIP_SQL=0
 SKIP_MEMORY=0
 SKIP_BENCHMARKS=0
+SKIP_STRESS=0
 
 usage() {
   cat <<'EOF'
@@ -28,7 +29,8 @@ Usage:
 Runs (in order):
   fmt, clippy, workspace unit tests (nextest), pgrx feature compile/install,
   #[pg_test] via nextest, E2E (WAL-async, nextest), examples (WAL-async),
-  storage comparison, SQL regression, memory checks, short benchmarks.
+  storage comparison, SQL regression, memory checks, short stress smoke,
+  short benchmarks.
 
 Options:
   --pg-versions LIST   Comma-separated PostgreSQL majors (default: 16)
@@ -42,12 +44,15 @@ Options:
   --skip-storage       Skip storage comparison harness
   --skip-sql           Skip KoldStore SQL regression
   --skip-memory        Skip memory checks
+  --skip-stress        Skip short chat-penetration stress smoke
   --skip-benchmarks    Skip benchmark runner
   -h, --help           Show this help text
 
 Environment (optional overrides for heavy suites; CI-friendly defaults apply):
   KOLDSTORE_EXAMPLE_ROWS / CLIENTS / SCOPES / TIMEOUT_SECS
   KOLDSTORE_STORAGE_ROWS / HOT_LIMIT / DML_SAMPLE
+  KOLDSTORE_STRESS_SOAK_SECONDS / CLIENTS / LATENCY_MULTIPLIER
+                           (defaults: 30s smoke, 4 clients, multiplier 8)
 
 Examples:
   scripts/run-all-tests.sh
@@ -72,6 +77,7 @@ while [[ $# -gt 0 ]]; do
     --skip-storage) SKIP_STORAGE=1; shift ;;
     --skip-sql) SKIP_SQL=1; shift ;;
     --skip-memory) SKIP_MEMORY=1; shift ;;
+    --skip-stress) SKIP_STRESS=1; shift ;;
     --skip-benchmarks) SKIP_BENCHMARKS=1; shift ;;
     -h|--help)
       usage
@@ -157,7 +163,7 @@ ensure_pgrx_postgres() {
 # require `cshim`; include it everywhere so the same feature set works locally.
 pgrx_extension_features() {
   local base="$1"
-  echo "${base} s3 cshim"
+  echo "${base} s3 cshim test-failpoints"
 }
 
 cargo_pgrx_install_koldstore() {
@@ -403,7 +409,27 @@ fi
 
 if [[ "${SKIP_MEMORY}" -eq 0 ]]; then
   step "memory checks"
-  tests/memory/run_memory_checks.sh
+  # E2E already ran suite::memory_leak::* and suite::flush_memory_spike::* in
+  # the e2e step; only re-run the deep gates when e2e was skipped.
+  if [[ "${SKIP_E2E}" -eq 0 ]]; then
+    KOLDSTORE_MEMORY_SKIP_E2E=1 tests/memory/run_memory_checks.sh
+  else
+    tests/memory/run_memory_checks.sh
+  fi
+fi
+
+if [[ "${SKIP_STRESS}" -eq 0 ]]; then
+  step "stress smoke (chat penetration)"
+  # Short default so all-tests stays local-friendly; full soaks use
+  # scripts/run-chat-penetration.sh / the manual CI workflow.
+  # Multiplier 8 (vs full-soak 4): 30s smoke has few history samples, so flush
+  # prune / cold-publish tails dominate p95 without being a product regression.
+  KOLDSTORE_STRESS_SOAK_SECONDS="${KOLDSTORE_STRESS_SOAK_SECONDS:-30}" \
+    KOLDSTORE_STRESS_CLIENTS="${KOLDSTORE_STRESS_CLIENTS:-4}" \
+    KOLDSTORE_STRESS_HISTORY_CLIENTS="${KOLDSTORE_STRESS_HISTORY_CLIENTS:-2}" \
+    KOLDSTORE_STRESS_LATENCY_MULTIPLIER="${KOLDSTORE_STRESS_LATENCY_MULTIPLIER:-8}" \
+    KOLDSTORE_STRESS_PGVERSION="$(first_pg_version)" \
+    scripts/run-chat-penetration.sh --packs chat,cold_dml
 fi
 
 if [[ "${SKIP_BENCHMARKS}" -eq 0 ]]; then

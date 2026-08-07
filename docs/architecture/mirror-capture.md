@@ -72,11 +72,36 @@ active managed table still depends on it.
 ## Consistency boundaries
 
 - A normal heap query sees its committed write immediately.
-- A managed-table merge scan needs the mirror for an unflushed update or
-  tombstone to mask an older cold row. Call `wait_for_async_mirror()` before a
-  read that requires this boundary.
-- `flush_table` applies available WAL before selecting work, then runs a second
-  bounded fence while holding its short final table lock before pruning rows.
+- `koldstore.changes_since` and merge scans that need latest-state overlays read
+  the mirror (and cold), **not** the heap. A committed heap mutation is visible
+  there only after WAL apply has written `__cl`.
+- Call `wait_for_async_mirror()` before a read that requires an exact catch-up
+  boundary. Background apply is normally wake-driven and sub-second; the fence
+  is the strong consistency API.
+- Automatic flush is optional (`auto_flush`). Latency-sensitive change-feed
+  consumers often manage tables with `auto_flush => false` and call
+  `flush_table` deliberately so finalize windows are predictable. Auto-flush
+  enqueues durable jobs on KoldStore's check interval; it is not PostgreSQL
+  autovacuum.
+
+## Flush concurrency (apply stays live during Parquet)
+
+One database has **one** logical slot and **one** apply advisory lock. Flush and
+the background applier therefore cannot decode/apply the same slot at the same
+time. That does **not** mean flush pauses mirror apply for the whole job.
+
+| Flush phase | Apply lock / slot | Background mirror apply | Typical `changes_since` lag |
+| --- | --- | --- | --- |
+| Select + Parquet encode/upload | **Not held** | Continues (commit latch wake) | Sub-second under normal load |
+| Finalize (pre-lock catch-up + prune fence) | **Held briefly** | Blocked until unlock | Pauses only for that short window |
+| After job completes | Free | Continues | Sub-second again |
+
+Rationale: prune deletes `mirror WHERE seq <= max_seq` then matching hot rows by
+PK. Concurrent apply into those keys during prune can drop a newer hot version
+while cold keeps an older image (see
+[async-flush-prune-race](../cases/async-flush-prune-race.md)). Exclusive apply
+during the short finalize window closes that race. The expensive object-store
+work stays concurrent with DML and mirror apply.
 
 See [DML](dml-table.md), [jobs and scheduler](jobs-and-scheduler.md), and
 [flushing](flushing-table.md) for the consumers of the mirror.

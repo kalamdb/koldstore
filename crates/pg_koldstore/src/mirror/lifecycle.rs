@@ -126,6 +126,11 @@ fn require_no_assigned_xid_for_slot_provision() -> Result<(), String> {
 }
 
 fn native_publication_exists() -> bool {
+    native_publication_exists_for_provision()
+}
+
+/// Native publication probe for pre-SPI provisioning paths (no XID assigned).
+pub(super) fn native_publication_exists_for_provision() -> bool {
     let name = std::ffi::CString::new(PUBLICATION_NAME).expect("publication name contains no NUL");
     unsafe { pgrx::pg_sys::get_publication_oid(name.as_ptr(), true) != pgrx::pg_sys::InvalidOid }
 }
@@ -300,27 +305,24 @@ fn validate_slot(slot: &str) -> Result<(), String> {
     }
 }
 
-/// Serializes logical decoding and explicit cleanup for one database.
+/// Serializes logical decoding and explicit cleanup for one database (slot lock).
 ///
-/// Uses a transaction-scoped advisory lock. Releasing during Parquet upload
-/// requires ending the flush transaction first (session locks deadlock with
-/// logical decoding waiting on the flush XID); that multi-txn redesign is
-/// deferred. Phase-5.5 still drains WAL before the relation lock.
-pub(crate) fn lock_apply(database_oid: u32) -> Result<(), String> {
+/// Transaction-scoped advisory lock. Flush must not hold this during Parquet
+/// encode/upload — only during claim-time watermark reads (optional) and the
+/// finalize fence. Prefer [`try_lock_slot`] from flush finalize paths.
+pub(crate) fn lock_slot(database_oid: u32) -> Result<(), String> {
     lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 
-/// Non-blocking variant of [`lock_apply`] for fail-fast callers such as
-/// `flush_table`.
+/// Non-blocking variant of [`lock_slot`] for fail-fast flush finalize.
 ///
 /// Returns `true` when this transaction now holds the lock (including when the
-/// same backend already held it). Returns `false` when another backend holds
-/// it (background apply tick, auto-flush, or another fence).
+/// same backend already held it). Returns `false` when another backend holds it.
 ///
 /// # Errors
 ///
 /// Returns an error when PostgreSQL cannot evaluate the advisory lock query.
-pub(crate) fn try_lock_apply(database_oid: u32) -> Result<bool, String> {
+pub(crate) fn try_lock_slot(database_oid: u32) -> Result<bool, String> {
     try_lock_database(APPLY_LOCK_NAMESPACE, database_oid)
 }
 
@@ -345,7 +347,7 @@ fn slot_active_pid(slot: &str) -> Result<Option<i32>, String> {
 /// PostgreSQL's SQL slot APIs (`pg_logical_slot_peek_*`,
 /// `pg_replication_slot_advance`, `pg_drop_replication_slot`) acquire with
 /// `nowait=true` and ERROR immediately when another PID holds the slot. Callers
-/// must already hold [`lock_apply`] so only abort/exit windows (locks released
+/// must already hold [`lock_slot`] so only abort/exit windows (locks released
 /// before `ReplicationSlotRelease`) can still show an active PID. Also used by
 /// apply before peek/advance after a worker terminate.
 ///
@@ -378,7 +380,7 @@ pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
     }
 }
 
-/// Stops the database WAL applier so disable cannot deadlock on [`lock_apply`].
+/// Stops the database WAL applier so disable cannot deadlock on [`lock_slot`].
 ///
 /// The applier may hold the apply lock inside a peek that waits for concurrent
 /// XIDs — including this backend's open transaction (common under `#[pg_test]`).
@@ -531,12 +533,12 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         );
     }
     let slot = slot_name(database_oid);
-    // Stop the applier before lock_apply: a peek blocked on concurrent XIDs
+    // Stop the applier before lock_slot: a peek blocked on concurrent XIDs
     // (including this backend's open transaction) holds the apply lock and
     // would otherwise deadlock with disable.
     stop_async_mirror_applier(database_oid, &slot)
         .map_err(|error| format!("stop applier: {error}"))?;
-    lock_apply(database_oid).map_err(|error| format!("lock apply: {error}"))?;
+    lock_slot(database_oid).map_err(|error| format!("lock apply: {error}"))?;
     let slot_exists = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)",
         &[DatumWithOid::from(slot.as_str())],

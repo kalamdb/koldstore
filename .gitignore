@@ -5,6 +5,9 @@ release/
 *.rlib
 *.prof*
 
+# CI scratch (storage-bench JSON outside Cargo target/)
+ci-artifacts/
+
 # PostgreSQL/pgrx local state
 .pgrx/
 pgdata*/

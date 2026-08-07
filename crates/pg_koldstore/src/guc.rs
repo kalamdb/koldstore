@@ -43,6 +43,18 @@ static PENDING_SEGMENT_TTL_SECONDS: GucSetting<i32> =
 static FLUSH_CHECK_INTERVAL_SECONDS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS);
 #[cfg(feature = "pg")]
+static MAX_PARALLEL_FLUSH_JOBS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_MAX_PARALLEL_FLUSH_JOBS);
+#[cfg(feature = "pg")]
+static FLUSH_JOB_MAX_RUNTIME_SECONDS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS);
+#[cfg(feature = "pg")]
+static JOB_RETENTION_DAYS: GucSetting<i32> =
+    GucSetting::<i32>::new(settings::DEFAULT_JOB_RETENTION_DAYS);
+#[cfg(feature = "pg")]
+static FLUSH_EXECUTION: GucSetting<Option<CString>> =
+    GucSetting::<Option<CString>>::new(Some(c"queue"));
+#[cfg(feature = "pg")]
 static ASYNC_APPLY_WATCHDOG_INTERVAL_MS: GucSetting<i32> =
     GucSetting::<i32>::new(settings::DEFAULT_ASYNC_APPLY_WATCHDOG_INTERVAL_MS);
 #[cfg(feature = "pg")]
@@ -154,7 +166,7 @@ pub fn define_gucs() {
     GucRegistry::define_int_guc(
         c"koldstore.min_max_rows_per_file",
         c"Minimum allowed max_rows_per_file for managed tables.",
-        c"Rejects manage_table and flush settings below this floor. Lower temporarily for tests with SET koldstore.min_max_rows_per_file = <value>.",
+        c"Rejects manage_table (and ALTER) settings below this floor. Already-persisted catalog policies are trusted at flush time so queue executors need not inherit the managing session's SET. Lower temporarily for tests with SET / ALTER DATABASE koldstore.min_max_rows_per_file = <value>.",
         &MIN_MAX_ROWS_PER_FILE,
         settings::MIN_MIN_MAX_ROWS_PER_FILE,
         settings::MAX_MIN_MAX_ROWS_PER_FILE,
@@ -162,10 +174,11 @@ pub fn define_gucs() {
         flags,
     );
     // Test-only: empty default keeps production paths inert unless explicitly armed.
+    // wait/panic/sleep require the test-failpoints build so production cannot park.
     GucRegistry::define_string_guc(
         c"koldstore.failpoint",
         c"Test-only KoldStore flush failpoint.",
-        c"Arms a named flush failpoint (error:<name> or wait:<name>). Empty disables. For crash-recovery and isolation suites only.",
+        c"Arms a named flush failpoint (error:<name>, wait:<name>, panic:<name>, or sleep:<name>). Empty disables. wait/panic/sleep require a test-failpoints build. For crash-recovery and isolation suites only.",
         &FAILPOINT,
         GucContext::Userset,
         flags,
@@ -183,10 +196,48 @@ pub fn define_gucs() {
     GucRegistry::define_int_guc(
         c"koldstore.flush_check_interval_seconds",
         c"Interval between built-in auto-flush eligibility checks.",
-        c"Database worker wakes on this cadence to evaluate auto_flush managed tables, enqueue flush jobs when needed, and run one flush. SET / ALTER SYSTEM + reload; workers pick up changes on SIGHUP.",
+        c"Database worker wakes on this cadence to evaluate auto_flush managed tables, enqueue flush jobs when needed, and spawn flush executors. SET / ALTER SYSTEM + reload; workers pick up changes on SIGHUP.",
         &FLUSH_CHECK_INTERVAL_SECONDS,
         settings::MIN_FLUSH_CHECK_INTERVAL_SECONDS,
         settings::MAX_FLUSH_CHECK_INTERVAL_SECONDS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.max_parallel_flush_jobs",
+        c"Maximum concurrent one-shot flush executor workers per database.",
+        c"Caps how many koldstore flush executor background workers may run at once. Default stays at 2 until broader failure-sweep coverage lands. Clamped to 1..=16.",
+        &MAX_PARALLEL_FLUSH_JOBS,
+        settings::MIN_MAX_PARALLEL_FLUSH_JOBS,
+        settings::MAX_MAX_PARALLEL_FLUSH_JOBS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.flush_job_max_runtime_seconds",
+        c"Wall-clock budget for one flush job attempt.",
+        c"Flush aborts with an error when a single attempt exceeds this many seconds (checked between passes and between streamed batches within a pass). 0 disables. Default 1800 (30 minutes). Clamped to 0..=86400.",
+        &FLUSH_JOB_MAX_RUNTIME_SECONDS,
+        settings::MIN_FLUSH_JOB_MAX_RUNTIME_SECONDS,
+        settings::MAX_FLUSH_JOB_MAX_RUNTIME_SECONDS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_int_guc(
+        c"koldstore.job_retention_days",
+        c"Days to retain terminal KoldStore jobs before purge.",
+        c"Coordinator ticks delete completed/cancelled/error jobs whose finished_at is older than this many days. 0 disables purge. Jobs still referenced by pending cold segments are never deleted. Clamped to 0..=3650.",
+        &JOB_RETENTION_DAYS,
+        settings::MIN_JOB_RETENTION_DAYS,
+        settings::MAX_JOB_RETENTION_DAYS,
+        GucContext::Userset,
+        flags,
+    );
+    GucRegistry::define_string_guc(
+        c"koldstore.flush_execution",
+        c"How flush_table runs after enqueueing a durable job.",
+        c"queue (default): enqueue UUID and spawn a one-shot flush executor. inline: enqueue then run flush in the calling backend (required for pg_test SPI transactions).",
+        &FLUSH_EXECUTION,
         GucContext::Userset,
         flags,
     );
@@ -340,6 +391,26 @@ pub const fn definitions() -> &'static [GucDefinition] {
             name: settings::FLUSH_CHECK_INTERVAL_SECONDS_GUC,
             internal: false,
             default_value: "30",
+        },
+        GucDefinition {
+            name: settings::MAX_PARALLEL_FLUSH_JOBS_GUC,
+            internal: false,
+            default_value: "2",
+        },
+        GucDefinition {
+            name: settings::FLUSH_JOB_MAX_RUNTIME_SECONDS_GUC,
+            internal: false,
+            default_value: "1800",
+        },
+        GucDefinition {
+            name: settings::JOB_RETENTION_DAYS_GUC,
+            internal: false,
+            default_value: "30",
+        },
+        GucDefinition {
+            name: settings::FLUSH_EXECUTION_GUC,
+            internal: false,
+            default_value: settings::DEFAULT_FLUSH_EXECUTION,
         },
         GucDefinition {
             name: settings::ASYNC_APPLY_WATCHDOG_INTERVAL_MS_GUC,
@@ -535,20 +606,22 @@ pub fn min_max_rows_per_file() -> i32 {
     }
 }
 
-/// Current test-only failpoint arming value (empty when disabled).
+/// Current test-only failpoint arming value, owned but unparsed.
+///
+/// Returns the raw `CString` rather than an allocated `String` so the hot
+/// `failpoints::hit` call sites (invoked at every flush phase and mirror
+/// apply tick) can borrow the text with zero extra allocations instead of
+/// paying for a fresh UTF-8 copy on every disarmed check.
 #[must_use]
-pub fn failpoint_value() -> String {
+pub fn failpoint_value() -> Option<std::ffi::CString> {
     #[cfg(feature = "pg")]
     {
-        FAILPOINT
-            .get()
-            .and_then(|value| value.to_str().ok().map(str::to_string))
-            .unwrap_or_default()
+        FAILPOINT.get()
     }
 
     #[cfg(not(feature = "pg"))]
     {
-        String::new()
+        None
     }
 }
 
@@ -585,6 +658,66 @@ pub fn flush_check_interval_seconds() -> i64 {
     #[cfg(not(feature = "pg"))]
     {
         i64::from(settings::DEFAULT_FLUSH_CHECK_INTERVAL_SECONDS)
+    }
+}
+
+/// Maximum concurrent one-shot flush executor workers for this database.
+#[must_use]
+pub fn max_parallel_flush_jobs() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_max_parallel_flush_jobs(MAX_PARALLEL_FLUSH_JOBS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_MAX_PARALLEL_FLUSH_JOBS
+    }
+}
+
+/// Wall-clock budget for one flush job attempt (`0` = disabled).
+#[must_use]
+pub fn flush_job_max_runtime_seconds() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_flush_job_max_runtime_seconds(FLUSH_JOB_MAX_RUNTIME_SECONDS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_FLUSH_JOB_MAX_RUNTIME_SECONDS
+    }
+}
+
+/// Days to retain terminal jobs before coordinator purge (`0` = disabled).
+#[must_use]
+pub fn job_retention_days() -> i32 {
+    #[cfg(feature = "pg")]
+    {
+        settings::bounded_job_retention_days(JOB_RETENTION_DAYS.get())
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::DEFAULT_JOB_RETENTION_DAYS
+    }
+}
+
+/// Whether `flush_table` should run inline or enqueue for background executors.
+#[must_use]
+pub fn flush_execution_mode() -> settings::FlushExecutionMode {
+    #[cfg(feature = "pg")]
+    {
+        let value = FLUSH_EXECUTION
+            .get()
+            .and_then(|value| value.to_str().ok().map(str::to_string))
+            .unwrap_or_else(|| settings::DEFAULT_FLUSH_EXECUTION.to_string());
+        settings::FlushExecutionMode::parse(&value).unwrap_or(settings::FlushExecutionMode::Queue)
+    }
+
+    #[cfg(not(feature = "pg"))]
+    {
+        settings::FlushExecutionMode::Queue
     }
 }
 

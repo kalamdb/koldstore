@@ -80,6 +80,21 @@ fn guc_definitions_include_public_and_internal_settings() {
     ));
     assert!(gucs
         .iter()
+        .any(|guc| guc.name == "koldstore.max_parallel_flush_jobs"
+            && !guc.internal
+            && guc.default_value == "2"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.flush_job_max_runtime_seconds"
+            && !guc.internal
+            && guc.default_value == "1800"));
+    assert!(gucs
+        .iter()
+        .any(|guc| guc.name == "koldstore.job_retention_days"
+            && !guc.internal
+            && guc.default_value == "30"));
+    assert!(gucs
+        .iter()
         .any(|guc| guc.name == "koldstore.internal_system_write" && guc.internal));
     assert!(gucs
         .iter()

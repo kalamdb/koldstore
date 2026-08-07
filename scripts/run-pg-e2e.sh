@@ -95,7 +95,7 @@ else
   INSTALL_ARGS=(
     -p pg_koldstore
     --no-default-features
-    --features "$PG_FEATURE s3 cshim"
+    --features "$PG_FEATURE s3 cshim test-failpoints"
     --pg-config "$PG_CONFIG"
   )
   if [[ "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "1" || "${KOLDSTORE_PGRX_INSTALL_RELEASE:-}" == "true" ]]; then
@@ -299,6 +299,18 @@ if [[ "${KOLDSTORE_MINIO:-}" == "1" || -n "${KOLDSTORE_MINIO_ENDPOINT:-}" ]]; th
   echo "MinIO-backed E2E enabled (KOLDSTORE_MINIO / KOLDSTORE_MINIO_ENDPOINT)"
 else
   echo "MinIO-backed E2E skipped (set KOLDSTORE_MINIO=1 to enable flush_minio)"
+fi
+
+# Postmaster-killing crash gates belong in an isolated nextest invocation
+# (nightly/weekly crash steps). Clear inherited flags on a full parallel suite
+# so a leftover shell export cannot SIGKILL the shared postmaster under load.
+# Opt back in with KOLDSTORE_E2E_ALLOW_INLINE_CRASH=1 (still uses cluster flock).
+if [[ "${KOLDSTORE_E2E_ALLOW_INLINE_CRASH:-}" != "1" && "${KOLDSTORE_E2E_ALLOW_INLINE_CRASH:-}" != "true" ]]; then
+  if [[ -n "${KOLDSTORE_CRASH_FLUSH_EXECUTOR:-}" || -n "${KOLDSTORE_CRASH_POSTMASTER_RESTART:-}" ]]; then
+    echo "note: clearing KOLDSTORE_CRASH_* for full-suite run (set KOLDSTORE_E2E_ALLOW_INLINE_CRASH=1 to keep)"
+  fi
+  unset KOLDSTORE_CRASH_FLUSH_EXECUTOR
+  unset KOLDSTORE_CRASH_POSTMASTER_RESTART
 fi
 
 if ! cargo nextest --version >/dev/null 2>&1; then

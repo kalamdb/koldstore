@@ -2,24 +2,6 @@ use crate::common;
 
 use anyhow::Result;
 
-#[test]
-fn endurance_cycle_contract_covers_repeated_lifecycle_operations() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let cycle = [
-        "migrate",
-        "DML",
-        "flush",
-        "query",
-        "cold metadata validation",
-        "size check",
-        "repeat",
-    ];
-
-    assert_eq!(cycle.len(), 7);
-}
-
 #[tokio::test]
 async fn repeated_flush_and_hot_dml_cycles_remain_bounded_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {

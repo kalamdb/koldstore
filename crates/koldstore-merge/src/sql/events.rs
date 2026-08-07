@@ -1,4 +1,4 @@
-//! Latest-state change-feed SQL helpers.
+//! Seq-ordered change-feed SQL helpers.
 
 use koldstore_common::{
     scope::scope_predicate_sql, MirrorChange, QualifiedTableName, ScopeKey, SeqId, SqlStatement,

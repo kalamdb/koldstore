@@ -3,12 +3,15 @@
 //! SPI fetch stays in `pg_koldstore`; this module owns the PG-free encode loop.
 //! Post-flush cleanup uses a seq-range DELETE (see `cleanup::plan_seq_range_cleanup`)
 //! so this path no longer materializes per-row cleanup JSON.
+//!
+//! Ordered flush relies on PostgreSQL `ORDER BY order_key, PK…, seq` plus a matching
+//! keyset page cursor so this crate never accumulates the full pass in a `Vec`.
 
-use koldstore_common::{ColumnRef, QualifiedTableName, SqlStatement};
+use koldstore_common::{CellValue, ColumnRef, QualifiedTableName, SqlParamType, SqlStatement};
 use koldstore_parquet::{
     extract_packed_segment_metadata, CleanColdRecordBatchBuilder, ColdMetadataColumn,
-    ColdRecordBatch, FlushMirrorRow, PgColumn, SegmentSplitPolicy, StreamingParquetSegmentWriter,
-    WriterOptions,
+    ColdRecordBatch, FlushMirrorRow, PgColumn, SegmentSplitPolicy, SortingColumnSpec,
+    StreamingParquetSegmentWriter, WriterOptions,
 };
 
 use crate::write::FlushWriteChunk;
@@ -22,6 +25,8 @@ pub struct StreamEncodeInput {
     pub mirror: QualifiedTableName,
     /// Primary-key column names.
     pub primary_key_columns: Vec<String>,
+    /// SPI bind types aligned with [`Self::primary_key_columns`] (ordered keyset).
+    pub primary_key_param_types: Vec<SqlParamType>,
     /// Application column names in catalog order.
     pub base_column_names: Vec<String>,
     /// Parquet schema columns.
@@ -44,8 +49,29 @@ pub struct StreamEncodeInput {
     pub row_group_size: usize,
     /// When set, mirror fetch is restricted to these operation codes.
     pub mirror_ops: Option<Vec<i16>>,
-    /// Collects the bounded flush selection and sorts by mirror `order_key`, then PK.
+    /// Ask PostgreSQL to return rows ordered by mirror `order_key`, then PK, then seq.
     pub sort_by_order_key: bool,
+    /// Application column name for [`Self::sort_by_order_key`] (Parquet sort metadata).
+    pub order_key_column: Option<String>,
+}
+
+/// Exclusive lower-bound cursor for one mirror flush page fetch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirrorFlushPageCursor {
+    /// Unordered / seq-ordered path: continue after this mirror `seq`.
+    AfterSeq {
+        /// Exclusive lower bound on `seq` (`0` starts the scan).
+        after_seq: i64,
+    },
+    /// Ordered path: continue after `(order_key, primary key…, seq)`.
+    AfterOrderKey {
+        /// When `None`, fetch the first page (SQL first-page flag).
+        after_order_key: Option<Vec<u8>>,
+        /// Primary-key values from the previous page's last row (catalog PK order).
+        after_pk_values: Vec<CellValue>,
+        /// `seq` from the previous page's last row (ignored on the first page).
+        after_seq: i64,
+    },
 }
 
 struct SegmentBuilder {
@@ -60,6 +86,25 @@ struct SegmentBuilder {
 
 impl SegmentBuilder {
     fn new(input: &StreamEncodeInput) -> Self {
+        let mut sorting_columns = Vec::new();
+        if input.sort_by_order_key {
+            if let Some(order_key) = input.order_key_column.as_deref() {
+                sorting_columns.push(SortingColumnSpec::ascending(order_key));
+            }
+            for pk in &input.primary_key_columns {
+                if input
+                    .order_key_column
+                    .as_deref()
+                    .is_none_or(|order_key| order_key != pk)
+                {
+                    sorting_columns.push(SortingColumnSpec::ascending(pk));
+                }
+            }
+        }
+        // Mirror fetch / encode always writes ascending `seq` for unsorted passes,
+        // and still records seq as a trailing sort key for ordered passes.
+        sorting_columns.push(SortingColumnSpec::ascending(ColdMetadataColumn::Seq.name()));
+
         let options = WriterOptions {
             compression: input.compression.clone(),
             row_group_size: input.row_group_size.max(1),
@@ -76,7 +121,8 @@ impl SegmentBuilder {
                         .map(|column| column.name.as_str()),
                 ),
         )
-        .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str));
+        .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str))
+        .with_sorting_columns(sorting_columns);
         Self {
             options,
             split_policy: SegmentSplitPolicy::new(
@@ -189,6 +235,9 @@ impl ChunkBuilder {
 
 /// Streams mirror rows through `fetch_batch` and invokes `write_chunk` per segment.
 ///
+/// Ordered mode never buffers the full selection in Rust: PostgreSQL returns pages
+/// already sorted, and each page is encoded immediately.
+///
 /// # Errors
 ///
 /// Returns an error when selection planning, encoding, or a chunk write fails.
@@ -198,7 +247,7 @@ pub fn stream_flush_chunks<F, W>(
     mut write_chunk: W,
 ) -> Result<StreamEncodeOutcome, String>
 where
-    F: FnMut(&SqlStatement, i64, i64) -> Result<Vec<FlushMirrorRow>, String>,
+    F: FnMut(&SqlStatement, i64, &MirrorFlushPageCursor) -> Result<Vec<FlushMirrorRow>, String>,
     W: FnMut(FlushWriteChunk) -> Result<(), String>,
 {
     let selection = crate::ops::plan_mirror_flush_selection_batch_with_order_key(
@@ -209,59 +258,38 @@ where
         None,
         input.mirror_ops.as_deref(),
         input.sort_by_order_key,
+        &input.primary_key_param_types,
     )
     .map_err(|error| error.to_string())?;
 
-    let mut after_seq = 0_i64;
+    let pk_indices =
+        koldstore_parquet::pk_column_indices(&input.base_column_names, &input.primary_key_columns)?;
+    let mut cursor = if input.sort_by_order_key {
+        MirrorFlushPageCursor::AfterOrderKey {
+            after_order_key: None,
+            after_pk_values: Vec::new(),
+            after_seq: 0,
+        }
+    } else {
+        MirrorFlushPageCursor::AfterSeq { after_seq: 0 }
+    };
     let mut rows_written = 0_usize;
     let mut max_seq = 0_i64;
     let mut chunk_builder = ChunkBuilder::new(&input.parquet_columns)?;
     let mut segment_builder = SegmentBuilder::new(input);
-    let pk_indices =
-        koldstore_parquet::pk_column_indices(&input.base_column_names, &input.primary_key_columns)?;
-    let mut ordered_rows = Vec::new();
 
     loop {
-        let batch = fetch_batch(&selection.statement, input.max_seq, after_seq)?;
+        let batch = fetch_batch(&selection.statement, input.max_seq, &cursor)?;
         if batch.is_empty() {
             break;
         }
-        after_seq = batch.last().map(|row| row.seq).unwrap_or(after_seq);
-        max_seq = after_seq;
         let batch_len = batch.len();
-        if input.sort_by_order_key {
-            ordered_rows.extend(batch);
-        } else {
-            for row in batch {
-                chunk_builder.push_row(&row, &input.primary_key_columns, input.schema_version)?;
-                rows_written += 1;
-                let row_group_limit = input.row_group_size.max(1).min(
-                    segment_builder
-                        .remaining_rows(input.max_rows_per_file)
-                        .max(1),
-                );
-                if chunk_builder.len() >= row_group_limit {
-                    let cold_batch = chunk_builder.take_batch()?;
-                    if segment_builder.push_batch(cold_batch)? {
-                        if let Some(chunk) = segment_builder.finish_segment()? {
-                            write_chunk(chunk)?;
-                        }
-                    }
-                }
-            }
-        }
-        if (batch_len as i64) < input.fetch_batch_size {
-            break;
-        }
-    }
-
-    if input.sort_by_order_key {
-        if ordered_rows.iter().any(|row| row.order_key.is_none()) {
+        if input.sort_by_order_key && batch.iter().any(|row| row.order_key.is_none()) {
             return Err("configured segment order key is missing from a mirror row".to_string());
         }
-        sort_flush_rows(&mut ordered_rows, &pk_indices);
-        for row in ordered_rows {
-            chunk_builder.push_row(&row, &input.primary_key_columns, input.schema_version)?;
+        for row in &batch {
+            max_seq = max_seq.max(row.seq);
+            chunk_builder.push_row(row, &input.primary_key_columns, input.schema_version)?;
             rows_written += 1;
             let row_group_limit = input.row_group_size.max(1).min(
                 segment_builder
@@ -276,6 +304,27 @@ where
                     }
                 }
             }
+        }
+        let Some(last) = batch.last() else {
+            break;
+        };
+        cursor = if input.sort_by_order_key {
+            let after_pk_values = pk_indices
+                .iter()
+                .map(|index| last.values.get(*index).cloned().unwrap_or(CellValue::Null))
+                .collect();
+            MirrorFlushPageCursor::AfterOrderKey {
+                after_order_key: last.order_key.clone(),
+                after_pk_values,
+                after_seq: last.seq,
+            }
+        } else {
+            MirrorFlushPageCursor::AfterSeq {
+                after_seq: last.seq,
+            }
+        };
+        if (batch_len as i64) < input.fetch_batch_size {
+            break;
         }
     }
 
@@ -293,47 +342,6 @@ where
     })
 }
 
-fn sort_flush_rows(rows: &mut [FlushMirrorRow], primary_key_indices: &[usize]) {
-    rows.sort_by(|left, right| {
-        left.order_key
-            .as_deref()
-            .cmp(&right.order_key.as_deref())
-            .then_with(|| {
-                for index in primary_key_indices {
-                    let ordering =
-                        compare_flush_values(left.values.get(*index), right.values.get(*index));
-                    if !ordering.is_eq() {
-                        return ordering;
-                    }
-                }
-                left.seq.cmp(&right.seq)
-            })
-    });
-}
-
-fn compare_flush_values(
-    left: Option<&koldstore_common::CellValue>,
-    right: Option<&koldstore_common::CellValue>,
-) -> std::cmp::Ordering {
-    use koldstore_common::CellValue;
-    match (left, right) {
-        (Some(CellValue::Bool(left)), Some(CellValue::Bool(right))) => left.cmp(right),
-        (Some(CellValue::Int16(left)), Some(CellValue::Int16(right))) => left.cmp(right),
-        (Some(CellValue::Int32(left)), Some(CellValue::Int32(right))) => left.cmp(right),
-        (Some(CellValue::Int64(left)), Some(CellValue::Int64(right))) => left.cmp(right),
-        (Some(CellValue::Float32(left)), Some(CellValue::Float32(right))) => left.total_cmp(right),
-        (Some(CellValue::Float64(left)), Some(CellValue::Float64(right))) => left.total_cmp(right),
-        (Some(CellValue::Utf8(left)), Some(CellValue::Utf8(right))) => left.cmp(right),
-        (Some(CellValue::TimestamptzMicros(left)), Some(CellValue::TimestamptzMicros(right))) => {
-            left.cmp(right)
-        }
-        (Some(CellValue::Null), Some(CellValue::Null)) | (None, None) => std::cmp::Ordering::Equal,
-        (Some(CellValue::Null) | None, _) => std::cmp::Ordering::Less,
-        (_, Some(CellValue::Null) | None) => std::cmp::Ordering::Greater,
-        (Some(left), Some(right)) => format!("{left:?}").cmp(&format!("{right:?}")),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +354,7 @@ mod tests {
             table: QualifiedTableName::parse("app.items").unwrap(),
             mirror: QualifiedTableName::parse("koldstore.items__cl").unwrap(),
             primary_key_columns: vec!["id".to_string()],
+            primary_key_param_types: vec![SqlParamType::BigInt],
             base_column_names: vec!["id".to_string(), "body".to_string()],
             parquet_columns: vec![
                 PgColumn::new("id", PgType::Int8, false),
@@ -361,6 +370,7 @@ mod tests {
             row_group_size: 1,
             mirror_ops: None,
             sort_by_order_key: false,
+            order_key_column: None,
         }
     }
 
@@ -460,32 +470,100 @@ mod tests {
     }
 
     #[test]
-    fn segment_order_sort_uses_primary_key_as_tie_breaker() {
-        let mut rows = vec![
+    fn ordered_flush_streams_pages_without_buffering_all_rows() {
+        let mut encode_input = input(None, 100);
+        encode_input.sort_by_order_key = true;
+        encode_input.order_key_column = Some("body".to_string());
+        encode_input.fetch_batch_size = 1;
+        encode_input.max_seq = 3;
+
+        // Postgres-ordered pages of size 1: order_key 5 then 10/pk2 then 10/pk3.
+        let pages = [
             FlushMirrorRow {
-                seq: 1,
+                seq: 3,
                 op: 1,
-                values: vec![CellValue::Int64(3), CellValue::Int64(10)],
-                order_key: Some(vec![10]),
+                values: vec![CellValue::Int64(1), CellValue::Utf8("a".into())],
+                order_key: Some(vec![5]),
             },
             FlushMirrorRow {
                 seq: 2,
                 op: 1,
-                values: vec![CellValue::Int64(2), CellValue::Int64(10)],
+                values: vec![CellValue::Int64(2), CellValue::Utf8("b".into())],
                 order_key: Some(vec![10]),
             },
             FlushMirrorRow {
-                seq: 3,
+                seq: 1,
                 op: 1,
-                values: vec![CellValue::Int64(1), CellValue::Int64(5)],
-                order_key: Some(vec![5]),
+                values: vec![CellValue::Int64(3), CellValue::Utf8("c".into())],
+                order_key: Some(vec![10]),
             },
         ];
+        let mut page_idx = 0_usize;
+        let mut seen_cursors = Vec::new();
+        let mut peak_batch = 0_usize;
 
-        sort_flush_rows(&mut rows, &[0]);
-        assert_eq!(
-            rows.iter().map(|row| row.seq).collect::<Vec<_>>(),
-            vec![3, 2, 1]
-        );
+        let outcome = stream_flush_chunks(
+            &encode_input,
+            |statement, max_seq, cursor| {
+                assert_eq!(max_seq, 3);
+                assert!(statement.sql.contains("ORDER BY mirror.\"order_key\""));
+                assert!(statement
+                    .sql
+                    .contains("($2::boolean OR (mirror.\"order_key\""));
+                seen_cursors.push(cursor.clone());
+                let batch = pages
+                    .get(page_idx)
+                    .cloned()
+                    .map(|row| vec![row])
+                    .unwrap_or_default();
+                page_idx += 1;
+                peak_batch = peak_batch.max(batch.len());
+                Ok(batch)
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.rows_written, 3);
+        assert_eq!(outcome.max_seq, 3);
+        assert_eq!(peak_batch, 1, "ordered path must stream one page at a time");
+        assert!(seen_cursors.len() >= 3);
+        assert!(matches!(
+            seen_cursors.first(),
+            Some(MirrorFlushPageCursor::AfterOrderKey {
+                after_order_key: None,
+                ..
+            })
+        ));
+        assert!(matches!(
+            seen_cursors.get(1),
+            Some(MirrorFlushPageCursor::AfterOrderKey {
+                after_order_key: Some(key),
+                after_seq: 3,
+                ..
+            }) if key.as_slice() == [5]
+        ));
+    }
+
+    #[test]
+    fn ordered_flush_rejects_missing_order_key() {
+        let mut encode_input = input(None, 100);
+        encode_input.sort_by_order_key = true;
+        encode_input.order_key_column = Some("body".to_string());
+
+        let error = stream_flush_chunks(
+            &encode_input,
+            |_, _, _| {
+                Ok(vec![FlushMirrorRow {
+                    seq: 1,
+                    op: 1,
+                    values: vec![CellValue::Int64(1), CellValue::Utf8("x".into())],
+                    order_key: None,
+                }])
+            },
+            |_| Ok(()),
+        )
+        .unwrap_err();
+        assert!(error.contains("order key is missing"));
     }
 }

@@ -1,6 +1,6 @@
 //! Shared SQL fragments for flush job rows in `koldstore.jobs`.
 //!
-//! Keeps enqueue (`ops`) and inline `flush_table` (`table_jobs`) aligned on the
+//! Keeps enqueue (`ops`) and flush job lifecycle (`table_jobs`) aligned on the
 //! same active-job status / conflict predicates without merging their APIs.
 
 macro_rules! active_flush_job_statuses_sql {

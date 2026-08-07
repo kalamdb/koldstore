@@ -60,18 +60,21 @@ pub struct SegmentStatsHint {
 /// (callers materialize NULL). Prefer this over falling back to the logical
 /// name on historical schemas — renames keep the same `column_id` with a
 /// different physical name.
+///
+/// Borrowed from `hint.physical_names` or `logical_name` so callers that need
+/// an owned `String` clone once at the use site.
 #[must_use]
-pub fn physical_name_for_segment_column(
+pub fn physical_name_for_segment_column<'a>(
     column_id: i16,
-    logical_name: &str,
-    hint: &SegmentStatsHint,
+    logical_name: &'a str,
+    hint: &'a SegmentStatsHint,
     current_schema_version: i32,
-) -> Option<String> {
+) -> Option<&'a str> {
     if let Some(name) = hint.physical_names.get(&column_id) {
-        return Some(name.clone());
+        return Some(name.as_str());
     }
     if hint.schema_version == current_schema_version {
-        return Some(logical_name.to_string());
+        return Some(logical_name);
     }
     None
 }

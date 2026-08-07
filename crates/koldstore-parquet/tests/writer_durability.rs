@@ -65,6 +65,7 @@ fn encode_validate_roundtrip_across_compression_and_row_group_sizes() {
                         statistics_columns: vec!["id".to_string()],
                         bloom_filter_columns: vec!["id".to_string()],
                         bloom_filter_false_positive_rate: Some(0.01),
+                        ..WriterOptions::default()
                     });
                     let bytes = writer.encode_record_batch(&batch).unwrap();
                     let validation = validate_parquet_bytes(&bytes).unwrap();
@@ -201,6 +202,7 @@ fn large_batch_splits_into_configured_row_groups_without_manual_flush() {
         statistics_columns: vec!["id".to_string()],
         bloom_filter_columns: vec!["id".to_string()],
         bloom_filter_false_positive_rate: Some(0.01),
+        ..WriterOptions::default()
     });
     let bytes = writer.encode_record_batch(&batch).unwrap();
     let validation = validate_parquet_bytes(&bytes).unwrap();

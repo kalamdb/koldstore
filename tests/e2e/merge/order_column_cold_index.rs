@@ -466,21 +466,7 @@ fn explain_counter(plan: &str, label: &str) -> Result<usize> {
 }
 
 async fn force_flush(db: &common::TestDb, relation: &str) -> Result<i64> {
-    let job_id = common::flush_table_job_id(&db.client, relation, true).await?;
-    let progress = db
-        .client
-        .query_one(
-            "SELECT rows_flushed, status, error_trace FROM koldstore.jobs WHERE id = $1::text::uuid",
-            &[&job_id],
-        )
-        .await?;
-    let rows_flushed: i64 = progress.get(0);
-    let status: String = progress.get(1);
-    let error_trace: Option<String> = progress.get(2);
-    anyhow::ensure!(
-        status == "completed",
-        "force flush ended as {status}: {}",
-        error_trace.unwrap_or_default()
-    );
-    Ok(rows_flushed)
+    // Nested inline skips pre-select apply; drain WAL before selecting rows.
+    common::fence_async_mirror(&db.client).await?;
+    db.flush_table_with_force(relation, true).await
 }

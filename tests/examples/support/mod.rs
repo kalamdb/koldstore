@@ -367,6 +367,9 @@ pub async fn flush_table(
     let label = ctx
         .map(|ctx| ctx.label.to_string())
         .unwrap_or_else(|| format!("flush_table {relation}"));
+    // Policy flush reads mirror pending counts; catch up WAL apply after concurrent
+    // writers before deciding whether a flush is due.
+    fence_mirror_if_needed(client).await?;
     log_flush_inputs(client, relation, &label).await?;
     let job_id = timed_async(
         ctx.map(|ctx| format!("{}: koldstore.flush_table", ctx.label))
@@ -374,6 +377,12 @@ pub async fn flush_table(
         e2e::flush_table_job_id(client, relation, false),
     )
     .await?;
+    let Some(job_id) = job_id else {
+        if let Some(ctx) = ctx {
+            log_always(format!("{}: flush skipped (no due policy work)", ctx.label));
+        }
+        return Ok(0);
+    };
     let progress = timed_async(
         format!("flush job rows_flushed lookup ({job_id})"),
         client.query_one(
@@ -446,16 +455,23 @@ pub async fn force_flush_table(
         wait_for_jobs(client, relation),
     )
     .await?;
-    timed_async(
-        ctx.map(|ctx| format!("{}: enqueue force flush", ctx.label))
-            .unwrap_or_else(|| format!("enqueue force flush {relation}")),
-        client.execute(
-            "SELECT koldstore.enqueue_flush_job(table_name => $1::text::regclass, force => true)",
-            &[&relation],
+    fence_mirror_if_needed(client).await?;
+    let job_id = timed_async(
+        ctx.map(|ctx| format!("{}: koldstore.flush_table(force)", ctx.label))
+            .unwrap_or_else(|| format!("force flush_table {relation}")),
+        e2e::flush_table_job_id(client, relation, true),
+    )
+    .await?
+    .with_context(|| format!("force flush_table returned NULL for {relation}"))?;
+    let progress = timed_async(
+        format!("force flush job rows_flushed lookup ({job_id})"),
+        client.query_one(
+            "SELECT rows_flushed FROM koldstore.jobs WHERE id = $1::text::uuid",
+            &[&job_id],
         ),
     )
     .await?;
-    let flushed = flush_table(client, relation, None).await?;
+    let flushed: i64 = progress.get(0);
     timed_async(
         ctx.map(|ctx| format!("{}: wait_for_jobs after flush", ctx.label))
             .unwrap_or_else(|| format!("wait_for_jobs after flush {relation}")),

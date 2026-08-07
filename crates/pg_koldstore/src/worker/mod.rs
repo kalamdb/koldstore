@@ -6,11 +6,15 @@
 #[cfg(feature = "pg")]
 mod ensure;
 #[cfg(feature = "pg")]
+mod flush_executor;
+#[cfg(feature = "pg")]
 mod flush_task;
 #[cfg(feature = "pg")]
 mod launcher;
 #[cfg(feature = "pg")]
 mod r#loop;
+#[cfg(feature = "pg")]
+pub(crate) mod txn;
 #[cfg(feature = "pg")]
 pub(crate) mod wake;
 
@@ -20,6 +24,10 @@ pub use ensure::ensure_async_mirror_worker_pg;
 pub(crate) use ensure::{
     ensure_async_mirror_worker, ensure_async_mirror_worker_once_if_needed, mark_worker_not_ensured,
     require_async_mirror_worker,
+};
+#[cfg(feature = "pg")]
+pub(crate) use flush_executor::{
+    spawn_flush_executor_if_needed, spawn_flush_executors_for_pending_work,
 };
 #[cfg(feature = "pg")]
 pub use flush_task::run_flush_scheduler_tick_pg;

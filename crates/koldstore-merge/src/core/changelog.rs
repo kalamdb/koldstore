@@ -1,8 +1,10 @@
-//! Latest-state change-feed cursor helpers.
+//! Seq-ordered change-feed cursor helpers.
+//!
+//! Pages advance by exclusive mirror/cold `seq`. Callers may see an older cold
+//! version of a PK and a newer hot version on a later page — there is no
+//! in-page latest-state collapse across sources.
 
-use std::collections::BTreeMap;
-
-use koldstore_common::{ChangeSource, MirrorChange, SeqId};
+use koldstore_common::{MirrorChange, SeqId};
 use thiserror::Error;
 
 /// Change cursor.
@@ -19,7 +21,7 @@ pub struct ChangeGap {
     pub oldest_available: i64,
 }
 
-/// Returns latest-state changes after the cursor in mirror-sequence order.
+/// Returns changes after the cursor in ascending `seq` order (no per-PK collapse).
 pub fn changes_since(
     changes: &[MirrorChange],
     cursor: ChangeCursor,
@@ -35,13 +37,17 @@ pub fn changes_since(
         }
     }
 
-    let mut selected = latest_state_after(changes, cursor.since_seq);
+    let mut selected: Vec<MirrorChange> = changes
+        .iter()
+        .filter(|change| change.seq.get() > cursor.since_seq)
+        .cloned()
+        .collect();
     selected.sort_by_key(|change| change.seq);
     selected.truncate(cursor.limit);
     Ok(selected)
 }
 
-/// Returns the newest `limit` latest-state changes in ascending seq order.
+/// Returns the newest `limit` changes in ascending seq order.
 ///
 /// Matches KalamDB `last_rows`: select by descending seq, then deliver
 /// oldest→newest. Does not paginate into older history.
@@ -49,35 +55,10 @@ pub fn changes_last(changes: &[MirrorChange], limit: usize) -> Vec<MirrorChange>
     if limit == 0 {
         return Vec::new();
     }
-    let mut selected = latest_state_after(changes, 0);
+    let mut selected = changes.to_vec();
     selected.sort_by_key(|change| change.seq);
     if selected.len() > limit {
         selected = selected.split_off(selected.len() - limit);
     }
     selected
-}
-
-fn latest_state_after(changes: &[MirrorChange], since_seq: i64) -> Vec<MirrorChange> {
-    let mut latest_by_pk = BTreeMap::<String, MirrorChange>::new();
-    for change in changes.iter().filter(|change| change.seq.get() > since_seq) {
-        let key = format!(
-            "{}:{}",
-            change.scope_key.as_ref().map_or("", |scope| scope.as_str()),
-            change.pk_json
-        );
-        match latest_by_pk.get(&key) {
-            Some(existing) if !change_beats(change, existing) => {}
-            _ => {
-                latest_by_pk.insert(key, change.clone());
-            }
-        }
-    }
-    latest_by_pk.into_values().collect()
-}
-
-fn change_beats(candidate: &MirrorChange, existing: &MirrorChange) -> bool {
-    candidate.seq > existing.seq
-        || (candidate.seq == existing.seq
-            && candidate.source == ChangeSource::HotMirror
-            && existing.source == ChangeSource::ColdRecord)
 }

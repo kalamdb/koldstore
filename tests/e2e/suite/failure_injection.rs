@@ -1,53 +1,12 @@
+//! Fault injection E2E: filesystem/object outages, corrupt cold, credentials,
+//! and Toxiproxy latency on flush (`toxiproxy_latency_fails_flush_*`).
+//! Read-path Toxiproxy cancel lives in `query_cancel.rs`.
+
 use crate::common;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
-
-#[test]
-fn failure_injection_matrix_lists_required_faults() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    // Each entry must have a named #[tokio::test] in this module.
-    let faults = [
-        (
-            "filesystem outage",
-            "filesystem_outage_during_flush_keeps_hot_rows_authoritative",
-        ),
-        (
-            "corrupt Parquet footer",
-            "corrupt_parquet_footer_fails_merge_scan_closed",
-        ),
-        (
-            "stale manifest generation",
-            "stale_manifest_generation_fails_merge_scan_closed",
-        ),
-        (
-            "missing manifest",
-            "missing_manifest_after_flush_fails_merge_scan_closed",
-        ),
-        (
-            "orphan final object",
-            "orphan_final_object_does_not_become_visible",
-        ),
-        ("credential failure", "bad_credentials_fail_flush_closed"),
-        (
-            "network timeout",
-            "toxiproxy_latency_fails_flush_without_corrupt_catalog",
-        ),
-        (
-            "partial multi-segment outage",
-            "partial_multi_segment_outage_fails_merge_scan_closed",
-        ),
-    ];
-
-    assert_eq!(faults.len(), 8);
-    for (name, test_fn) in faults {
-        assert!(!name.is_empty());
-        assert!(!test_fn.is_empty());
-    }
-}
 
 fn toxiproxy_enabled() -> bool {
     matches!(
@@ -127,7 +86,17 @@ async fn filesystem_outage_during_flush_keeps_hot_rows_authoritative() -> Result
             .await?;
 
         db.insert_pending_flush_job(&table.relation).await?;
-        assert_eq!(db.flush_table(&table.relation).await?, 0);
+        // Path is a plain file so mkdir fails; terminal status=error → Err.
+        let flush_err = db
+            .flush_table(&table.relation)
+            .await
+            .expect_err("filesystem outage must fail the flush job");
+        assert!(
+            flush_err.to_string().contains("status=error")
+                || flush_err.to_string().contains("File exists")
+                || flush_err.to_string().contains("create storage root"),
+            "unexpected outage error: {flush_err:#}"
+        );
 
         assert_eq!(common::row_count(&db.client, &table.relation).await?, 32);
         assert_eq!(

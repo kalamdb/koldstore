@@ -7,6 +7,13 @@ This package is excluded from the default workspace `cargo nextest` run (same as
 `e2e` / `examples`) because it needs a prepared pgrx PostgreSQL. Use
 `scripts/run-storage-comparison.sh`.
 
+**CI:** GitHub Actions runs a dedicated PG 16 job matrix with **10k rows** /
+`hot_limit=2000`, sides `pg` and `async` **in parallel on separate runners**
+(each wipes its own `~/.pgrx`). A follow-up job compares JSON artifacts against
+the previous successful CI run on the base branch and posts one sticky PR
+comment (markdown table) plus an HTML report artifact. Local `--all-sides`
+remains **sequential** on one machine.
+
 Schema: [`schema.sql`](schema.sql)
 
 Order of measurement (isolated `--side` / `--all-sides`):
@@ -21,12 +28,14 @@ Order of measurement (isolated `--side` / `--all-sides`):
 2. Time a separate mirror catch-up after each DML phase on the managed side
 3. Snapshot dead tuples (`pg_stat_user_tables`, pre-flush)
 4. **Hot-only PK lookups before flush** (full heap still present)
-5. Flush older managed rows to zstd Parquet (duration + peak cluster RSS) —
-   skipped for PostgreSQL-only
-6. Time `VACUUM (FULL, ANALYZE)`, then REINDEX
-7. **Cold-only** PK lookups (`id = 1`) + **hot+cold 50/50 mix** + heap/index
-   size snapshot
-8. Report p99 from the same phases (insert batch / 1k-row update / PK lookup)
+5. Flush older managed rows to zstd Parquet (duration, peak cluster RSS,
+   rows/s, cold-Parquet MiB/s) — skipped for PostgreSQL-only
+6. **Cold-only** PK lookups (`id = 1`) + **hot+cold 50/50 mix**
+7. **`changes_since` full drain** — page exclusive `seq` cursor from 0 in
+   batches of 500 (override `KOLDSTORE_STORAGE_CHANGES_SINCE_BATCH`) until the
+   feed is empty; report duration + rows/s for the full latest-state set
+8. Time `VACUUM (FULL, ANALYZE)`, then REINDEX + heap/index size snapshot
+9. Report p99 from the same phases (insert batch / 1k-row update / PK lookup)
 
 Published RESULTS.md use `--all-sides`: stop PostgreSQL, **wipe the pgrx data
 directory**, recreate empty worker DBs, measure `pg`, then `async` — once each,

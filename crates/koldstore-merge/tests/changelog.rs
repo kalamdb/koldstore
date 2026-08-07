@@ -58,7 +58,7 @@ fn changelog_orders_by_mirror_seq_and_reports_retention_gap() {
 }
 
 #[test]
-fn changelog_returns_latest_state_per_primary_key() {
+fn changelog_keeps_multiple_versions_of_same_pk_in_seq_order() {
     let columns = vec![PkColumn::new("id").unwrap()];
     let pk = LogicalPk::from_json_object(&json!({"id": 1}), &columns).unwrap();
     let change = |seq, operation, source| MirrorChange {
@@ -88,10 +88,12 @@ fn changelog_returns_latest_state_per_primary_key() {
     )
     .unwrap();
 
-    assert_eq!(result.len(), 1);
-    assert_eq!(result[0].seq.get(), 5);
-    assert_eq!(result[0].operation, MirrorOperation::Delete);
-    assert!(result[0].deleted);
+    assert_eq!(
+        result.iter().map(|row| row.seq.get()).collect::<Vec<_>>(),
+        vec![1, 3]
+    );
+    assert_eq!(result[0].operation, MirrorOperation::Insert);
+    assert_eq!(result[1].operation, MirrorOperation::Update);
 }
 
 #[test]

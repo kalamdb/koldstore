@@ -69,7 +69,7 @@ pub(super) fn drop_captured_mirrors(mirrors: &[QualifiedTableName]) {
 fn cleanup_one_managed_table_before_drop(
     table_oid: pg_sys::Oid,
 ) -> Result<Option<QualifiedTableName>, String> {
-    // Cancel first so a concurrent flush can stop at its next wave check, then
+    // Cancel first so a concurrent flush can stop at its next pass check, then
     // wait for the same advisory lock flush holds for the whole statement. That
     // serializes DROP cleanup after flush releases relation locks — no deadlock
     // between DROP AccessExclusive and flush AccessShare on heap/mirror.
@@ -79,7 +79,7 @@ fn cleanup_one_managed_table_before_drop(
         table_oid.to_u32(),
         cancelled
     );
-    crate::sql::job_lock::lock_table_job(table_oid)?;
+    let _table_lock = crate::sql::job_lock::TableJobLockGuard::lock(table_oid)?;
 
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;

@@ -1,7 +1,7 @@
 //! Shared helpers for concurrent flush E2E coverage.
 //!
-//! Peer connections, advisory-lock barriers (same key as flush failpoint waits),
-//! mixed DML/query workers, and rich-types table fixtures.
+//! Peer connections, per-database advisory-lock barriers (same namespace + db oid
+//! as flush `wait:` failpoints), mixed DML/query workers, and rich-types fixtures.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,8 +12,7 @@ use tokio_postgres::Client;
 
 use crate::common::{self, ManagedTable, TestDb};
 
-/// Advisory lock key shared with flush `wait:` failpoints (`"KOLD"`).
-pub const BARRIER_LOCK_KEY: i64 = 0x4B4F_4C44;
+pub use common::{barrier_lock, barrier_unlock, BARRIER_LOCK_NAMESPACE};
 
 /// Concurrent connections exercising mixed DML + queries during flush.
 pub const WORKER_COUNT: usize = 10;
@@ -21,46 +20,13 @@ pub const WORKER_COUNT: usize = 10;
 /// Fixed iteration budget for barrier-synchronized workers.
 pub const BARRIER_WORKER_LOOPS: usize = 20;
 
-/// Opens a second client against the same pgrx database as `db`.
+/// Opens a peer that runs Nested/`inline` flush in the calling backend.
 ///
 /// # Errors
 ///
 /// Returns an error when the connection fails.
 pub async fn connect_peer(db: &TestDb) -> Result<Client> {
-    let (client, connection) =
-        tokio_postgres::connect(&db.target.connection_string(), tokio_postgres::NoTls)
-            .await
-            .context("connect peer client")?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            eprintln!("peer connection error: {error}");
-        }
-    });
-    Ok(client)
-}
-
-/// Acquires the shared flush/isolation barrier lock (blocks until available).
-///
-/// # Errors
-///
-/// Returns an error when PostgreSQL rejects the lock call.
-pub async fn barrier_lock(client: &Client) -> Result<()> {
-    client
-        .execute("SELECT pg_advisory_lock($1)", &[&BARRIER_LOCK_KEY])
-        .await?;
-    Ok(())
-}
-
-/// Releases the shared flush/isolation barrier lock.
-///
-/// # Errors
-///
-/// Returns an error when unlock fails.
-pub async fn barrier_unlock(client: &Client) -> Result<()> {
-    client
-        .execute("SELECT pg_advisory_unlock($1)", &[&BARRIER_LOCK_KEY])
-        .await?;
-    Ok(())
+    common::connect_flush_peer(db).await
 }
 
 /// Polls until a live backend (not `coordinator`) waits on the failpoint barrier.
@@ -75,14 +41,36 @@ pub async fn wait_until_barrier_waiter(
     coordinator: &Client,
     flush_finished: impl Fn() -> bool,
 ) -> Result<()> {
+    wait_until_barrier_waiter_deadline(
+        coordinator,
+        flush_finished,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+}
+
+/// Like [`wait_until_barrier_waiter`] with an explicit deadline.
+///
+/// Queue flush executors can take longer to reach `after_select_rows` under
+/// parallel E2E load than Nested session flushes.
+///
+/// # Errors
+///
+/// Returns an error when the wait query fails or the deadline elapses.
+pub async fn wait_until_barrier_waiter_deadline(
+    coordinator: &Client,
+    flush_finished: impl Fn() -> bool,
+    deadline: std::time::Duration,
+) -> Result<()> {
     let coordinator_pid: i32 = coordinator
         .query_one("SELECT pg_backend_pid()", &[])
         .await?
         .get(0);
-    for _ in 0..400 {
+    let started = std::time::Instant::now();
+    loop {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        // pg_locks is cluster-wide; filter by this database so parallel worker
-        // DBs cannot see each other's shared failpoint barrier waiters.
+        // Two-key advisory lock is already per-database (namespace + db oid);
+        // still join activity so a dying peer cannot look like a live waiter.
         let waiting = coordinator
             .query_one(
                 "SELECT EXISTS (\
@@ -90,13 +78,16 @@ pub async fn wait_until_barrier_waiter(
                    FROM pg_catalog.pg_locks l \
                    JOIN pg_catalog.pg_stat_activity a ON a.pid = l.pid \
                    WHERE l.locktype = 'advisory' \
-                     AND l.classid = 0 \
-                     AND l.objid = $1::bigint \
+                     AND l.classid = $1::int \
+                     AND l.objid = (\
+                       SELECT oid::int4 FROM pg_catalog.pg_database \
+                       WHERE datname = current_database()\
+                     ) \
                      AND l.granted = false \
                      AND l.pid IS DISTINCT FROM $2::int \
                      AND a.datname = current_database()\
                  )",
-                &[&BARRIER_LOCK_KEY, &coordinator_pid],
+                &[&BARRIER_LOCK_NAMESPACE, &coordinator_pid],
             )
             .await?
             .get::<_, bool>(0);
@@ -104,6 +95,9 @@ pub async fn wait_until_barrier_waiter(
             return Ok(());
         }
         if flush_finished() {
+            break;
+        }
+        if started.elapsed() >= deadline {
             break;
         }
     }
@@ -222,7 +216,7 @@ pub async fn flush_table_retrying_entry_locks(
         };
         match result {
             Ok(row) => return Ok(row),
-            Err(error) if common::is_flush_apply_lock_busy(&error) => {
+            Err(error) if common::is_flush_entry_lock_busy(&error) => {
                 last_busy = Some(error);
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
             }
@@ -502,26 +496,11 @@ pub async fn connect_workers(db: &TestDb, count: usize) -> Result<Vec<Client>> {
 pub async fn flush_table_on(client: &Client, relation: &str) -> Result<i64> {
     let job_id = crate::common::flush_table_job_id(client, relation, false)
         .await
-        .with_context(|| format!("flush_table {relation}"))?;
-    let progress = client
-        .query_one(
-            r#"
-            SELECT rows_flushed, status, coalesce(error_trace, '')
-            FROM koldstore.jobs
-            WHERE id = $1::text::uuid
-            "#,
-            &[&job_id],
-        )
+        .with_context(|| format!("flush_table {relation}"))?
+        .with_context(|| format!("expected flush job for {relation}"))?;
+    crate::common::wait_for_flush_job_terminal(client, &job_id)
         .await
-        .with_context(|| format!("lookup flush job {job_id}"))?;
-    let rows_flushed: i64 = progress.get(0);
-    let status: String = progress.get(1);
-    let error_trace: String = progress.get(2);
-    anyhow::ensure!(
-        status == "completed",
-        "flush_table {relation} job {job_id} status={status} rows_flushed={rows_flushed}: {error_trace}"
-    );
-    Ok(rows_flushed)
+        .with_context(|| format!("wait for flush_table {relation} job {job_id}"))
 }
 
 /// Asserts common post-flush invariants for concurrent scenarios.

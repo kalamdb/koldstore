@@ -2,46 +2,6 @@ use crate::common;
 
 use anyhow::Result;
 
-#[test]
-fn flush_matrix_targets_active_pgrx_versions() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let versions = common::local_pg_matrix()
-        .iter()
-        .map(|target| target.version)
-        .collect::<Vec<_>>();
-
-    assert_eq!(versions, common::expected_pg_versions());
-}
-
-#[test]
-fn flush_matrix_covers_flush_manifest_metadata_and_hot_cleanup() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let workflow = [
-        "koldstore.flush_table",
-        "001/segment-0001.parquet",
-        "manifest.json",
-        "koldstore.cold_segments",
-        "koldstore.cold_segment_index",
-        "koldstore.cold_segment_order_index",
-        "hot cleanup after manifest commit",
-    ];
-
-    for required_step in [
-        "koldstore.flush_table",
-        "manifest.json",
-        "koldstore.cold_segments",
-        "koldstore.cold_segment_index",
-        "koldstore.cold_segment_order_index",
-        "hot cleanup after manifest commit",
-    ] {
-        assert!(workflow.contains(&required_step));
-    }
-}
-
 #[tokio::test]
 async fn flush_matrix_covers_small_and_larger_batches_on_pgrx() -> Result<()> {
     for target in common::scenario_pg_matrix() {

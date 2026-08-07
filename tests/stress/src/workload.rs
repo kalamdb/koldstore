@@ -393,6 +393,9 @@ async fn flush_loop(
     while !control.should_stop() {
         let relation = &relations[i % relations.len()];
         match flush_table(&client, relation).await {
+            Ok(0) => {
+                // Policy had no due work; try again after the interval.
+            }
             Ok(_) => {
                 metrics.flushes.fetch_add(1, Ordering::Relaxed);
                 let _ = wait_for_jobs(&client, relation).await;

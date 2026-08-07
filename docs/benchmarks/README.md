@@ -6,7 +6,9 @@ leave the PostgreSQL heap for Parquet while applications keep querying the same
 table.
 
 **Latest numbers:** [RESULTS.md](RESULTS.md) — columns are PostgreSQL only and
-PG + KoldStore (WAL-only). Refresh with
+PG + KoldStore (WAL-only). The file currently holds a **draft single-sample**
+10M refresh (2026-08-07, `flushed = 9.9M`; `changes_since` full drain skipped).
+Refresh a publishable median with
 `scripts/run-storage-comparison.sh --all-sides --repetitions 6 --update-results`
 (each sample gets a fresh pgrx PostgreSQL; publication requires a clean tree).
 
@@ -80,6 +82,15 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
   update/delete sample, **before flush** — so both sides match here. The
   maintenance win shows up in post-flush VACUUM time / heap size, not in that
   pre-flush counter.
+- **Flush write throughput / bandwidth** — managed only. Rows flushed ÷ wall
+  time of `flush_table` (aggregated if multiple jobs), and cold Parquet bytes
+  written ÷ the same wall time (`MiB/s`).
+- **`changes_since` full drain** — managed only, after flush and cold PK timing.
+  Pages `koldstore.changes_since` from `since_seq = 0` with
+  `limit_rows = 500` (override `KOLDSTORE_STORAGE_CHANGES_SINCE_BATCH`),
+  advancing the exclusive cursor until the feed is empty. Reports duration and
+  rows/s for the full latest-state set (~seeded `rows`). This is a catch-up
+  feed cost, not a point-lookup cost.
 - Autovacuum counters are **not** shown: autovacuum is disabled on both source
   tables and the generated mirror so the longer async catch-up cannot launch
   maintenance during a following timed phase. Explicit VACUUM is timed after
@@ -164,8 +175,11 @@ Useful flags:
 | `--pg-version N` | pgrx major (lab uses **16**) | `16` |
 
 Env equivalents: `KOLDSTORE_STORAGE_ROWS`, `KOLDSTORE_STORAGE_HOT_LIMIT`,
-`KOLDSTORE_STORAGE_DML_SAMPLE`, and so on. Draft RESULTS updates on a dirty
-tree: `KOLDSTORE_STORAGE_DRAFT_RESULTS=1`.
+`KOLDSTORE_STORAGE_DML_SAMPLE`, `KOLDSTORE_STORAGE_CHANGES_SINCE_BATCH`
+(default `500` for the post-flush full-drain), and so on. Draft RESULTS
+updates on a dirty tree: `KOLDSTORE_STORAGE_DRAFT_RESULTS=1`. Skip the
+multi-hour 10M `changes_since` full drain with
+`KOLDSTORE_STORAGE_SKIP_CHANGES_SINCE=1` (cells stay TODO).
 
 Each side force-stops PostgreSQL, **wipes `~/.pgrx/data-<ver>`**, then initdb +
 prepare so leftover WAL cannot skew the next side. Before timed seeding the

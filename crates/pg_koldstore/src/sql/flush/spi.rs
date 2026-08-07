@@ -19,19 +19,19 @@ pub(crate) fn resolve_flush_stats(
     force: bool,
 ) -> Result<ResolvedFlushSelection, String> {
     use koldstore_flush::{
-        apply_force_flush_wave_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
-        FORCE_FLUSH_WAVE_ROW_CAP,
+        apply_force_flush_pass_cap, resolve_force_flush_selection, resolve_policy_flush_selection,
+        FORCE_FLUSH_PASS_ROW_CAP,
     };
 
     if force {
         let (all, delete_stats) = mirror_force_flush_stats(table_oid)?;
         let selection = resolve_force_flush_selection(all, delete_stats);
-        // Cap large force mirrors into waves so encode/publish peak stays bounded.
-        if selection.mirror_ops.is_none() && selection.stats.row_count > FORCE_FLUSH_WAVE_ROW_CAP {
-            let cutoff = mirror_oldest_rows_cutoff(table_oid, FORCE_FLUSH_WAVE_ROW_CAP)?;
-            return Ok(apply_force_flush_wave_cap(
+        // Cap large force mirrors into passes so encode/publish peak stays bounded.
+        if selection.mirror_ops.is_none() && selection.stats.row_count > FORCE_FLUSH_PASS_ROW_CAP {
+            let cutoff = mirror_oldest_rows_cutoff(table_oid, FORCE_FLUSH_PASS_ROW_CAP)?;
+            return Ok(apply_force_flush_pass_cap(
                 selection,
-                FORCE_FLUSH_WAVE_ROW_CAP,
+                FORCE_FLUSH_PASS_ROW_CAP,
                 Some(cutoff),
             ));
         }
@@ -54,9 +54,15 @@ pub(crate) fn resolve_flush_stats(
             FlushPolicy::OlderThan {
                 age,
                 min_flush_rows,
+                max_rows_per_file,
                 max_rows_per_flush,
-                ..
-            } => older_than_cutoff(table_oid, *age, *min_flush_rows, *max_rows_per_flush)?,
+            } => older_than_cutoff(
+                table_oid,
+                *age,
+                *min_flush_rows,
+                *max_rows_per_file,
+                *max_rows_per_flush,
+            )?,
             FlushPolicy::Filter { .. } => {
                 return Err("filter flush policy is not supported yet".into())
             }
@@ -105,6 +111,7 @@ fn older_than_cutoff(
     table_oid: pgrx::pg_sys::Oid,
     age: koldstore_common::MoveAfter,
     min_flush_rows: u64,
+    max_rows_per_file: u64,
     max_rows_per_flush: u64,
 ) -> Result<Option<(i64, i64)>, String> {
     use pgrx::datum::DatumWithOid;
@@ -143,6 +150,9 @@ fn older_than_cutoff(
     if count < min_flush_rows as i64 {
         return Ok(None);
     }
+    if !koldstore_flush::selected_rows_meet_file_minimum(count.max(0) as u64, max_rows_per_file) {
+        return Ok(None);
+    }
     Ok(max_seq.map(|seq| (count, seq)))
 }
 
@@ -174,47 +184,10 @@ pub(crate) fn lock_source_table_share_row_exclusive(
 
 /// Captures the end of inserted WAL and forces it durable on disk.
 ///
-/// Required so logical decoding with `upto_lsn = F1` can see commits that used
-/// `synchronous_commit = off`.
-///
-/// Uses `XLogFlush` directly rather than SPI-polling `pg_current_wal_flush_lsn`
-/// with `pg_sleep`: during `flush_table` the apply advisory lock blocks the
-/// async worker, so that poll can sit for the full ~10s budget per flush.
-///
-/// The fence LSN must be the end of inserted WAL ([`inserted_wal_end_lsn`]), not
-/// a raw [`GetXLogInsertRecPtr`]: at page boundaries the latter points past the
-/// next page header and `XLogFlush` fails with "xlog flush request … is not
-/// satisfied".
+/// Delegates to [`crate::mirror::apply::capture_durable_wal_fence`] so flush
+/// prune fences and `wait_for_async_mirror` share one LSN capture path.
 pub(super) fn capture_durable_wal_fence() -> Result<crate::mirror::apply::WalFenceLsn, String> {
-    let fence = inserted_wal_end_lsn();
-    unsafe { pgrx::pg_sys::XLogFlush(fence) };
-    Ok(crate::mirror::apply::WalFenceLsn::new(fence))
-}
-
-/// Latest inserted WAL end pointer that is safe to pass to [`XLogFlush`].
-///
-/// Prefer `GetXLogInsertEndRecPtr` when the running PostgreSQL exports it.
-/// PG 16.13 does not; emulate the page-boundary correction instead.
-fn inserted_wal_end_lsn() -> pgrx::pg_sys::XLogRecPtr {
-    #[cfg(not(feature = "pg16"))]
-    {
-        unsafe { pgrx::pg_sys::GetXLogInsertEndRecPtr() }
-    }
-    #[cfg(feature = "pg16")]
-    {
-        // Same correction as GetXLogInsertEndRecPtr / XLogBytePosToEndRecPtr:
-        // at a page boundary GetXLogInsertRecPtr sits just after the page header
-        // (e.g. …/018 or …/028) while no WAL exists there yet.
-        let insert = unsafe { pgrx::pg_sys::GetXLogInsertRecPtr() };
-        let page_off = insert % u64::from(pgrx::pg_sys::XLOG_BLCKSZ);
-        let short_phd = std::mem::size_of::<pgrx::pg_sys::XLogPageHeaderData>() as u64;
-        let long_phd = std::mem::size_of::<pgrx::pg_sys::XLogLongPageHeaderData>() as u64;
-        if page_off == short_phd || page_off == long_phd {
-            insert - page_off
-        } else {
-            insert
-        }
-    }
+    crate::mirror::apply::capture_durable_wal_fence()
 }
 
 pub(super) fn next_flush_batch_number(table_oid: pgrx::pg_sys::Oid) -> Result<i32, String> {
@@ -264,6 +237,21 @@ pub(super) fn manifest_generation(table_oid: pgrx::pg_sys::Oid) -> Result<i64, S
     )
 }
 
+/// Catalog identity for a flush writer attempt/pass.
+///
+/// UUIDs identify job / attempt / pass. Per-segment ordinals remain `i32` in
+/// the batch insert path (catalog column `segment_ordinal`) until a shared
+/// ordinal newtype exists.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FlushSegmentWriterIdentity {
+    pub job_id: uuid::Uuid,
+    pub attempt_token: uuid::Uuid,
+    pub pass_id: uuid::Uuid,
+    /// `cold_segment_order_index.sort_order_id` that matches Parquet physical sort,
+    /// or `0` when segments are only seq-sorted (default flush).
+    pub physically_sorted_sort_order_id: i32,
+}
+
 /// Catalogs every segment written by one `flush_table` call.
 ///
 /// Segment rows + packed `cold_segment_index` bounds go in one SPI insert.
@@ -276,6 +264,7 @@ pub(super) fn manifest_generation(table_oid: pgrx::pg_sys::Oid) -> Result<i64, S
 /// execution fails.
 pub(super) fn persist_flush_segments_batch(
     table_oid: pgrx::pg_sys::Oid,
+    writer: FlushSegmentWriterIdentity,
     segments: &[WrittenFlushSegment],
 ) -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
@@ -404,6 +393,10 @@ pub(super) fn persist_flush_segments_batch(
             DatumWithOid::from(row_group_min_values),
             DatumWithOid::from(row_group_max_values),
             DatumWithOid::from(row_group_null_counts),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.job_id)),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.attempt_token)),
+            DatumWithOid::from(crate::spi::uuid_to_pgrx(writer.pass_id)),
+            DatumWithOid::from(writer.physically_sorted_sort_order_id),
         ],
     )
     .map_err(|error| error.to_string())?;
@@ -415,9 +408,10 @@ pub(super) fn persist_flush_segments_batch(
 /// Prefer this during streaming flush so catalog work tracks Parquet publish.
 pub(super) fn persist_flush_segment(
     table_oid: pgrx::pg_sys::Oid,
+    writer: FlushSegmentWriterIdentity,
     segment: &WrittenFlushSegment,
 ) -> Result<(), String> {
-    persist_flush_segments_batch(table_oid, std::slice::from_ref(segment))
+    persist_flush_segments_batch(table_oid, writer, std::slice::from_ref(segment))
 }
 
 /// Activates pending flush segments and CAS-bumps `manifest.generation`.
@@ -809,7 +803,7 @@ fn mirror_force_flush_stats(
     Ok((all.into(), delete_stats.into()))
 }
 
-/// Mirror `max(seq)` at flush-job start, used to pin multi-wave catch-up.
+/// Mirror `max(seq)` at flush-job start, used to pin multi-pass catch-up.
 pub(super) fn mirror_catchup_watermark(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<Option<i64>, String> {
@@ -821,7 +815,20 @@ pub(super) fn mirror_catchup_watermark(
     }
 }
 
-/// Row count for the flush progress bar at claim time (mirror backlog size).
-pub(super) fn mirror_catchup_row_estimate(table_oid: pgrx::pg_sys::Oid) -> Result<i64, String> {
-    Ok(mirror_flush_stats(table_oid)?.row_count.max(0))
+/// Row count for the flush progress bar at claim time.
+///
+/// Policy flushes use the selected flush count (not the full mirror backlog).
+/// Force / no-policy flushes use the O(1) pending mirror counter.
+pub(super) fn flush_progress_total_estimate(
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+) -> Result<i64, String> {
+    let pending = mirror_pending_row_count(table_oid)?.max(0);
+    if force {
+        return Ok(pending);
+    }
+    match active_flush_policy(table_oid)? {
+        Some(policy) => Ok(policy_flush_row_count(pending, &policy)),
+        None => Ok(pending),
+    }
 }

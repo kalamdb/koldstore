@@ -1,24 +1,6 @@
 use crate::common;
 
-use anyhow::Result;
-
-#[test]
-fn jobs_and_recovery_contract_covers_status_retries_and_idempotence() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let recovery = koldstore_flush::ops::recover_segments_plan(
-        Some(koldstore_common::TableName::parse("app.items").unwrap()),
-        false,
-    )
-    .unwrap();
-
-    assert!(!recovery.request.dry_run);
-    assert_eq!(
-        recovery.request.table_name.as_ref().map(|t| t.to_string()),
-        Some("app.items".to_string())
-    );
-}
+use anyhow::{Context, Result};
 
 #[tokio::test]
 async fn jobs_are_durable_idempotent_and_use_active_indexes_on_pgrx() -> Result<()> {
@@ -29,8 +11,10 @@ async fn jobs_are_durable_idempotent_and_use_active_indexes_on_pgrx() -> Result<
 
         let first_insert = db.insert_pending_flush_job(&table.relation).await?;
         let duplicate_insert = db.insert_pending_flush_job(&table.relation).await?;
-        assert_eq!(first_insert, 1);
-        assert_eq!(duplicate_insert, 0);
+        assert_eq!(
+            first_insert, duplicate_insert,
+            "duplicate enqueue must return the same active job UUID"
+        );
         assert_eq!(
             common::active_job_count(&db.client, &table.relation).await?,
             1
@@ -228,7 +212,9 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
         let mirror_rows = common::row_count(&db.client, &mirror_relation).await?;
         assert_eq!(mirror_rows, base_rows);
 
-        let flush_job_id = common::flush_table_job_id(&db.client, &table.relation, false).await?;
+        let flush_job_id = common::flush_table_job_id(&db.client, &table.relation, false)
+            .await?
+            .context("flush_table must return a uuid job id")?;
         assert_eq!(
             flush_job_id.len(),
             36,

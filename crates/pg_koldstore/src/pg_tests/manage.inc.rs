@@ -71,9 +71,7 @@ fn alter_table_manages_and_replaces_flush_policy() {
 
 #[pg_test]
 fn alter_table_manages_a_populated_table() {
-    // #[pg_test] is one transaction; INSERT assigns an XID. Provision the async
-    // slot first or manage_table's slot create deadlocks with this backend.
-    preprovision_async_mirror();
+    // register_temp_storage pre-provisions the async slot before any SPI write.
     let suffix = unique_suffix("alterpopulated");
     let schema = format!("pgtest_{suffix}");
     let relation = format!("{schema}.messages");

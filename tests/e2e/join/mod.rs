@@ -2,7 +2,7 @@
 
 mod fixtures;
 
-mod join_targets;
+mod explain_json;
 mod koldstore_koldstore_join;
 mod koldstore_pg_join;
 mod pg_driver_join;

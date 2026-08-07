@@ -2,38 +2,6 @@ use crate::common;
 
 use anyhow::Result;
 
-#[test]
-fn greenfield_matrix_targets_active_pgrx_versions() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let versions: Vec<u16> = common::local_pg_matrix()
-        .into_iter()
-        .map(|target| target.version)
-        .collect();
-
-    assert_eq!(versions, common::expected_pg_versions());
-}
-
-#[test]
-fn greenfield_matrix_covers_shared_and_user_scoped_workflows() {
-    common::require_pgrx_server_sync()
-        .expect("E2E tests require a running pgrx PostgreSQL server with koldstore installed");
-
-    let scenarios = greenfield_scenarios();
-
-    assert_eq!(scenarios.len(), 2);
-    assert!(scenarios
-        .iter()
-        .any(|scenario| scenario.table_type == "shared"));
-    assert!(scenarios
-        .iter()
-        .any(|scenario| scenario.table_type == "user"));
-    assert!(scenarios
-        .iter()
-        .any(|scenario| scenario.scope_column == Some("user_id")));
-}
-
 #[tokio::test]
 async fn greenfield_shared_and_user_scoped_tables_work_on_pg_matrix() -> Result<()> {
     for target in common::scenario_pg_matrix() {
