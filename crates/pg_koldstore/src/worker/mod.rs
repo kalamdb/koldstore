@@ -1,7 +1,8 @@
-//! PostgreSQL adapter for [`koldstore_worker`] database-scoped background work.
+//! PostgreSQL adapter for [`koldstore_worker`] background work.
 //!
-//! Owns `pgrx` background-worker registration, latch wakeups, and SPI connection.
-//! Ensure decisions and naming come from the PostgreSQL-free library crate.
+//! The static cluster supervisor owns dynamic worker registration.  Legacy
+//! per-database ensure exports remain temporarily while the WAL applier is moved
+//! to the same event-driven supervisor lifecycle.
 
 #[cfg(feature = "pg")]
 mod ensure;
@@ -27,7 +28,8 @@ pub(crate) use ensure::{
 };
 #[cfg(feature = "pg")]
 pub(crate) use flush_executor::{
-    spawn_flush_executor_if_needed, spawn_flush_executors_for_pending_work,
+    register_flush_executor_from_supervisor, spawn_flush_executor_if_needed,
+    spawn_flush_executors_for_pending_work,
 };
 #[cfg(feature = "pg")]
 pub use flush_task::run_flush_scheduler_tick_pg;
