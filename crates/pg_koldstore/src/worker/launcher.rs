@@ -20,12 +20,15 @@ const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 const SAFETY_WAL_LAG_BYTES: i64 = 16 * 1024 * 1024;
 /// Retry only after RegisterDynamicBackgroundWorker itself reports pressure.
 const DISPATCH_RETRY: Duration = Duration::from_millis(250);
+/// Give a newly forked child time to publish its own Starting -> Running state
+/// before an authoritative process scan interprets a native SIGUSR1 wake.
+const CHILD_LIFECYCLE_GRACE: Duration = Duration::from_secs(1);
 /// Conservative cluster-wide cap until a dedicated cluster GUC lands.
 const CLUSTER_FLUSH_WORKER_LIMIT: u32 = 8;
 
 /// PostgreSQL sends `bgw_notify_pid` SIGUSR1 when a dynamic child starts/exits.
-/// Its normal procsignal handler sets MyLatch; this flag tells the main loop that
-/// the wake specifically requires an authoritative child-liveness reconciliation.
+/// The signal handler only marks this bit and delegates to PostgreSQL's normal
+/// ProcSignal handler, which sets MyLatch. Reconciliation remains in normal code.
 static CHILD_LIFECYCLE_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn register_if_shared_preload() {
@@ -33,6 +36,15 @@ pub(crate) fn register_if_shared_preload() {
     if !preloading {
         return;
     }
+
+    // These legacy helpers no longer execute in production. Referencing the
+    // function items keeps upgrade-compatibility code linkable while their SQL
+    // callers/tests are removed in the final catalog cleanup phase.
+    let _ = crate::mirror::lifecycle::lock_worker_registration;
+    let _ = crate::mirror::lifecycle::try_lock_worker_registration;
+    let _ = crate::sql::flush::jobs::select_pending_flush_candidate;
+    let _ = crate::sql::flush::jobs::purge_old_jobs_tick;
+
     BackgroundWorkerBuilder::new(SUPERVISOR_NAME)
         .set_type(SUPERVISOR_NAME)
         .set_library(LIBRARY_NAME)
@@ -65,8 +77,9 @@ pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::p
     BackgroundWorker::connect_worker_to_spi(Some("postgres"), None);
     let _registration = SupervisorRegistration::new();
 
-    // Shared memory is reconstructed after postmaster restart. Recover worker
-    // reservations and seed every durable KoldStore slot exactly once at startup.
+    // Shared memory is reconstructed after postmaster restart. Seed every
+    // durable KoldStore slot exactly once; supervisor-only restarts preserve
+    // shared worker reservations and are reconciled after a short grace.
     let mut has_slots = match super::txn::run(reconcile_cluster_startup) {
         Ok(has_slots) => has_slots,
         Err(error) => {
@@ -75,11 +88,22 @@ pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::p
         }
     };
     let mut last_safety = Instant::now();
+    let mut lifecycle_reconcile_at = Some(Instant::now() + CHILD_LIFECYCLE_GRACE);
 
     loop {
         if CHILD_LIFECYCLE_PENDING.swap(false, Ordering::AcqRel) {
+            // Start and exit notifications use the same PostgreSQL signal. Do
+            // not scan immediately: a start notification can precede the child
+            // publishing pg_stat_activity/shared Running state.
+            lifecycle_reconcile_at = Some(Instant::now() + CHILD_LIFECYCLE_GRACE);
+        }
+
+        if lifecycle_reconcile_at.is_some_and(|deadline| Instant::now() >= deadline) {
             if let Err(error) = super::txn::run(reconcile_worker_liveness) {
                 pgrx::log!("koldstore supervisor child reconciliation deferred: {error}");
+                lifecycle_reconcile_at = Some(Instant::now() + CHILD_LIFECYCLE_GRACE);
+            } else {
+                lifecycle_reconcile_at = None;
             }
         }
 
@@ -101,10 +125,15 @@ pub extern "C-unwind" fn koldstore_async_mirror_launcher_main(_argument: pgrx::p
             last_safety = Instant::now();
         }
 
-        let wait = next_wait_duration(has_slots, last_safety, registration_pressure);
+        let wait = next_wait_duration(
+            has_slots,
+            last_safety,
+            registration_pressure,
+            lifecycle_reconcile_at,
+        );
         if !BackgroundWorker::wait_latch(wait) {
             // A bgworker that exits 0 is not restarted. Exit non-zero so the
-            // postmaster's bgw_restart_time remains our only permanent supervisor.
+            // postmaster's bgw_restart_time remains our permanent supervisor.
             unsafe { pgrx::pg_sys::proc_exit(1) };
         }
         if BackgroundWorker::sighup_received() {
@@ -130,7 +159,7 @@ fn install_sigusr1_lifecycle_handler() {
 
 unsafe extern "C-unwind" fn supervisor_sigusr1_handler(signal: std::os::raw::c_int) {
     CHILD_LIFECYCLE_PENDING.store(true, Ordering::Release);
-    // Preserve PostgreSQL's ProcSignal processing and, importantly, SetLatch(MyLatch).
+    // Preserve PostgreSQL's ProcSignal processing and SetLatch(MyLatch).
     unsafe { pgrx::pg_sys::procsignal_sigusr1_handler(signal) }
 }
 
@@ -191,6 +220,7 @@ fn next_wait_duration(
     has_slots: bool,
     last_safety: Instant,
     registration_pressure: bool,
+    lifecycle_reconcile_at: Option<Instant>,
 ) -> Option<Duration> {
     let mut wait = registration_pressure.then_some(DISPATCH_RETRY);
 
@@ -198,6 +228,13 @@ fn next_wait_duration(
         wait = min_optional_duration(
             wait,
             Some(SAFETY_RECONCILE_INTERVAL.saturating_sub(last_safety.elapsed())),
+        );
+    }
+
+    if let Some(deadline) = lifecycle_reconcile_at {
+        wait = min_optional_duration(
+            wait,
+            Some(deadline.saturating_duration_since(Instant::now())),
         );
     }
 
@@ -217,7 +254,7 @@ fn next_wait_duration(
     }
 
     // None intentionally means WaitLatch without a timeout: zero polling when
-    // there are no logical slots, retries, or real queue deadlines.
+    // there are no slots, retries, lifecycle checks, or real queue deadlines.
     wait.map(|duration| duration.max(Duration::from_millis(1)))
 }
 
@@ -229,9 +266,9 @@ fn min_optional_duration(left: Option<Duration>, right: Option<Duration>) -> Opt
     }
 }
 
-/// Startup is authoritative because shared hints disappear on postmaster restart.
+/// Startup is authoritative for durable slots because shared event hints vanish
+/// on a full postmaster restart.
 fn reconcile_cluster_startup() -> Result<bool, String> {
-    reconcile_worker_liveness()?;
     let slots = discover_async_slots()?;
     for (oid, _) in &slots {
         super::wake::request_recovery(*oid);
@@ -240,8 +277,7 @@ fn reconcile_cluster_startup() -> Result<bool, String> {
 }
 
 /// Rare safety pass: repair dead dynamic workers and prevent unrelated WAL from
-/// accumulating forever. A DB worker is launched only after the slot gap becomes
-/// meaningful; managed commits themselves use immediate generation wakeups.
+/// accumulating forever. Managed commits use immediate generation wakeups.
 fn reconcile_cluster_safety() -> Result<bool, String> {
     reconcile_worker_liveness()?;
     let slots = discover_async_slots()?;
@@ -254,7 +290,7 @@ fn reconcile_cluster_safety() -> Result<bool, String> {
 }
 
 /// Repairs shared worker reservations from PostgreSQL's authoritative process list.
-/// This runs at startup, on native bgw_notify_pid SIGUSR1, and on the rare safety pass.
+/// Normal dispatch never queries pg_stat_activity.
 fn reconcile_worker_liveness() -> Result<(), String> {
     let (maintenance, flush_counts) = pgrx::Spi::connect(|client| {
         let table = client
@@ -322,7 +358,7 @@ fn reconcile_worker_liveness() -> Result<(), String> {
             .copied()
             .unwrap_or(0);
         if snapshot.flush_workers() != actual_flush {
-            let lost_owner = snapshot.flush_workers() > actual_flush;
+            let lost_owner = snapshot.flush_running > actual_flush;
             super::wake::reconcile_flush_counts(snapshot.database_oid, actual_flush);
             if lost_owner {
                 // A SIGKILL/FATAL executor cannot run Rust Drop. DB recovery will

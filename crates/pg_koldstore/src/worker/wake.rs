@@ -216,9 +216,7 @@ pub(crate) fn schedule_flush_at_ms(database_oid: u32, deadline_ms: i64) {
 }
 
 pub(crate) fn clear_flush_deadline(database_oid: u32) {
-    SUPERVISOR_REGISTRY
-        .get()
-        .clear_flush_deadline(database_oid);
+    SUPERVISOR_REGISTRY.get().clear_flush_deadline(database_oid);
 }
 
 pub(crate) fn consume_flush_deadline(database_oid: u32, sampled_ms: i64) -> bool {
@@ -273,12 +271,19 @@ fn publish_pending_commit() {
     let mut supervisor = None;
 
     if wal_pending && !is_current_backend_background_worker() {
-        supervisor = SUPERVISOR_REGISTRY.get().publish_wal(database_oid);
-        // If a burst worker is already alive, wake it too. The generation is
-        // still authoritative, so a stale PID or missed SetLatch cannot lose work.
-        if let Some(snapshot) = SUPERVISOR_REGISTRY.get().snapshot(database_oid) {
-            if snapshot.maintenance_pid > 0 {
-                set_background_worker_latch(snapshot.maintenance_pid, Some(database_oid));
+        // Filtering happens after commit and uses PostgreSQL's native replication
+        // slot shared-memory lookup, never SPI/catalog SQL. This lets ExecutorEnd
+        // conservatively mark nested/trigger/cascade DML without waking KoldStore
+        // in databases that have no async capture slot.
+        let slot = crate::mirror::lifecycle::slot_name(database_oid);
+        if crate::mirror::lifecycle::native_slot_exists(&slot) {
+            supervisor = SUPERVISOR_REGISTRY.get().publish_wal(database_oid);
+            // If a burst worker is already alive, wake it too. The generation is
+            // authoritative, so a stale PID or missed SetLatch cannot lose work.
+            if let Some(snapshot) = SUPERVISOR_REGISTRY.get().snapshot(database_oid) {
+                if snapshot.maintenance_pid > 0 {
+                    set_background_worker_latch(snapshot.maintenance_pid, Some(database_oid));
+                }
             }
         }
     }

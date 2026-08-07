@@ -200,15 +200,18 @@ impl FlushWorkerRegistration {
         }
     }
 
-    /// A no-work executor acknowledges only the generation it started for.
-    /// Future jobs install an exact shared deadline so they need no polling.
-    fn reconcile_no_claim(&self, outcome: ClaimOutcome) {
+    /// Reconciles the queue after a no-claim or completed attempt. It
+    /// acknowledges only the generation this worker started for; a concurrent
+    /// enqueue advances the generation and therefore cannot be cleared here.
+    fn reconcile_queue(&self, outcome: ClaimOutcome) {
         let next_due = match outcome {
-            ClaimOutcome::Busy => Some(unix_now_ms().saturating_add(
-                i64::try_from(BUSY_RETRY.as_millis()).unwrap_or(200),
-            )),
-            ClaimOutcome::Empty => txn::run(next_pending_due_ms).unwrap_or(None),
-            ClaimOutcome::Claimed => return,
+            ClaimOutcome::Busy => Some(
+                unix_now_ms()
+                    .saturating_add(i64::try_from(BUSY_RETRY.as_millis()).unwrap_or(200)),
+            ),
+            ClaimOutcome::Empty | ClaimOutcome::Claimed => {
+                txn::run(next_pending_due_ms).unwrap_or(None)
+            }
         };
 
         let Some(snapshot) = super::wake::supervisor_snapshot(self.database_oid) else {
@@ -257,7 +260,7 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         claimed,
     }) = claimed
     else {
-        registration.reconcile_no_claim(claim_outcome);
+        registration.reconcile_queue(claim_outcome);
         return;
     };
 
@@ -266,7 +269,12 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
     {
         pgrx::warning!("koldstore flush executor failed: {error}");
         super::wake::request_recovery(database_oid);
+        return;
     }
+
+    // Avoid spawning an extra no-op executor merely to acknowledge a drained
+    // queue. A concurrent enqueue remains protected by the generation check.
+    registration.reconcile_queue(ClaimOutcome::Claimed);
 }
 
 fn unix_now_ms() -> i64 {

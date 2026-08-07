@@ -45,8 +45,8 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
         let target_wal_generation = snapshot.wal_generation;
         let target_maintenance_generation = snapshot.maintenance_generation;
         let recovery_requested = snapshot.event_flags & EVENT_RECOVERY_REQUIRED != 0;
-        let wal_due = recovery_requested
-            || snapshot.wal_generation != snapshot.wal_processed_generation;
+        let wal_due =
+            recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
 
         if wal_due {
             if let Err(error) = drain_wal_through_fixed_fence() {
