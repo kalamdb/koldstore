@@ -10,7 +10,7 @@ mod policy;
 mod supervisor;
 mod wake;
 
-pub use identity::{async_mirror_worker_type, flush_executor_worker_type, DatabaseOid};
+pub use identity::{flush_executor_worker_type, maintenance_worker_type, DatabaseOid};
 pub use policy::LIBRARY_NAME;
 pub use supervisor::{
     DatabaseWorkSnapshot, SupervisorPid, SupervisorRegistry, EVENT_FLUSH_QUEUE_DIRTY,
