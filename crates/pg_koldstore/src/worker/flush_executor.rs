@@ -17,13 +17,6 @@ const FLUSH_EXECUTOR_FUNCTION: &str = "koldstore_flush_executor_main";
 const CANDIDATE_PAGE_SIZE: i64 = 16;
 const BUSY_RETRY: Duration = Duration::from_millis(200);
 
-/// Compatibility wake for the remaining foreground helper. It never registers
-/// a process: durable enqueue + post-commit supervisor publication own dispatch.
-pub(crate) fn notify_flush_queue() -> Result<bool, String> {
-    super::wake::mark_flush_queue_pending();
-    Ok(true)
-}
-
 /// Reconstructs queue dispatch hints after postmaster/worker recovery.
 /// Must run inside a database-local maintenance transaction.
 pub(crate) fn reconcile_queue_after_recovery(database_oid: u32) -> Result<(), String> {
