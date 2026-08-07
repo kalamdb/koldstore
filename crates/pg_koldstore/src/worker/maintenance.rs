@@ -8,7 +8,7 @@
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
-use koldstore_worker::{async_mirror_worker_type, DatabaseOid, LIBRARY_NAME};
+use koldstore_worker::{maintenance_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::PgTryBuilder;
@@ -25,7 +25,7 @@ const IDLE_GRACE: Duration = Duration::from_millis(200);
 /// while PostgreSQL is still starting the first process.
 pub(crate) fn register_maintenance_from_supervisor(database_oid: u32) -> Result<(), String> {
     let database_oid = DatabaseOid::new(database_oid);
-    let worker_type = async_mirror_worker_type(database_oid);
+    let worker_type = maintenance_worker_type(database_oid);
     BackgroundWorkerBuilder::new(&worker_type)
         .set_type(&worker_type)
         .set_library(LIBRARY_NAME)
