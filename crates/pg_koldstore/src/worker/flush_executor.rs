@@ -1,121 +1,76 @@
 //! One-shot flush executor background workers.
 //!
-//! The database coordinator (and `flush_table` in queue mode) spawns at most
-//! `koldstore.max_parallel_flush_jobs` of these workers. Each worker claims one
-//! pending flush job under session table ownership, runs it, then exits so
-//! PostgreSQL releases the session advisory lock automatically.
-//!
-//! ## Transaction boundaries (queue / Short)
-//!
-//! Claim commits in its own short transaction. Encode + object upload then run
-//! **outside** any PostgreSQL transaction. Catalog work (mirror fetch, pending
-//! segment insert, finalize, progress, cancel, job complete/fail) uses short
-//! transactions via [`super::txn`] and [`crate::sql::flush::execute::FlushCommitStyle::Short`].
-//!
-//! Inline `flush_table` / `#[pg_test]` keep [`FlushCommitStyle::Nested`] so the
-//! caller's SPI transaction is not mid-committed.
+//! Queue callers never register workers directly. They commit durable jobs and
+//! publish a queue generation; the single cluster supervisor owns dynamic
+//! worker registration and shared Starting/Running reservations. Each executor
+//! claims one table under the existing session advisory lock, runs one job, and
+//! exits so PostgreSQL releases all session ownership automatically.
 
 use koldstore_worker::{flush_executor_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder};
-use pgrx::datum::DatumWithOid;
 
 use super::txn;
 
 const FLUSH_EXECUTOR_FUNCTION: &str = "koldstore_flush_executor_main";
 
-/// Counts live flush executor backends for `database_oid`.
-fn flush_executor_count(worker_type: &str) -> Result<i64, String> {
-    pgrx::Spi::get_one_with_args::<i64>(
-        "SELECT count(*)::bigint FROM pg_catalog.pg_stat_activity WHERE backend_type = $1",
-        &[DatumWithOid::from(worker_type)],
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "flush executor activity query returned no row".to_string())
-}
-
-/// Spawns one flush executor when under the parallel cap and pending work exists.
+/// Compatibility entry point used by queue callers while call sites migrate.
 ///
-/// Only waits for postmaster startup notification (same deadlock avoidance as
-/// async-mirror ensure: the worker cannot finish connecting until this
-/// transaction commits).
-///
-/// # Errors
-///
-/// Returns an error when activity probes or dynamic registration fail.
+/// IMPORTANT: this function no longer registers a background worker. It merely
+/// records a post-commit queue wake. The supervisor is the only production code
+/// allowed to call [`register_flush_executor_from_supervisor`].
 pub(crate) fn spawn_flush_executor_if_needed() -> Result<bool, String> {
     let pending = crate::sql::flush::jobs::count_pending_flush_jobs().map_err(|e| e.to_string())?;
     if pending <= 0 {
         return Ok(false);
     }
-    spawn_flush_executors_upto(1).map(|spawned| spawned > 0)
+    super::wake::mark_flush_queue_pending();
+    Ok(true)
 }
 
-/// Spawns flush executors until `max_parallel_flush_jobs` or pending work is met.
+/// Compatibility entry point for the old scheduler.
 ///
-/// # Errors
-///
-/// Returns an error when activity probes or dynamic registration fail.
+/// It now publishes one queue wake rather than creating N workers itself.
+/// Capacity and fan-out belong to the supervisor.
 pub(crate) fn spawn_flush_executors_for_pending_work() -> Result<u32, String> {
     let pending = crate::sql::flush::jobs::count_pending_flush_jobs().map_err(|e| e.to_string())?;
     if pending <= 0 {
         return Ok(0);
     }
-    let max = i64::from(crate::guc::max_parallel_flush_jobs());
-    let to_spawn = pending.min(max).max(0);
-    let Ok(to_spawn) = u32::try_from(to_spawn) else {
-        return Ok(0);
-    };
-    spawn_flush_executors_upto(to_spawn)
+    super::wake::mark_flush_queue_pending();
+    Ok(1)
 }
 
-fn spawn_flush_executors_upto(limit: u32) -> Result<u32, String> {
-    if limit == 0 {
-        return Ok(0);
-    }
-    let database_oid = DatabaseOid::new(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
+/// Registers one already-reserved flush executor.
+///
+/// This is called only by the static cluster supervisor. The shared reservation
+/// must be acquired before this function so STARTING workers count toward all
+/// capacity limits. Registration is intentionally non-blocking: the worker
+/// changes Starting -> Running after it connects.
+pub(crate) fn register_flush_executor_from_supervisor(database_oid: u32) -> Result<(), String> {
+    let database_oid = DatabaseOid::new(database_oid);
     let worker_type = flush_executor_worker_type(database_oid);
-    let max = i64::from(crate::guc::max_parallel_flush_jobs());
-    let running = flush_executor_count(&worker_type)?;
-    let available = u32::try_from((max - running).max(0)).unwrap_or(0);
-    let to_spawn = limit.min(available);
-    let mut spawned = 0_u32;
-    while spawned < to_spawn {
-        if !register_one_flush_executor(database_oid, &worker_type)? {
-            break;
-        }
-        spawned = spawned.saturating_add(1);
-    }
-    Ok(spawned)
-}
-
-fn register_one_flush_executor(
-    database_oid: DatabaseOid,
-    worker_type: &str,
-) -> Result<bool, String> {
-    // Dynamic NEVER_RESTART workers: crash recovery is a new spawn from the
-    // coordinator or the next flush_table call.
-    let worker = BackgroundWorkerBuilder::new(worker_type)
-        .set_type(worker_type)
+    BackgroundWorkerBuilder::new(&worker_type)
+        .set_type(&worker_type)
         .set_library(LIBRARY_NAME)
         .set_function(FLUSH_EXECUTOR_FUNCTION)
         .enable_spi_access()
         .set_restart_time(None)
         .set_argument(Some(pgrx::pg_sys::Datum::from(database_oid.get())))
+        // PostgreSQL notifies the supervisor process when this child starts or
+        // exits; the worker also best-effort wakes the current supervisor on
+        // normal exit so supervisor replacement is safe.
         .set_notify_pid(unsafe { pgrx::pg_sys::MyProcPid })
         .load_dynamic()
+        .map(|_| ())
         .map_err(|_| {
             format!(
-                "could not register flush executor \
-                 (worker_type={worker_type}; usually max_worker_processes exhausted)"
+                "could not register flush executor (worker_type={worker_type}; \
+                 usually max_worker_processes exhausted)"
             )
-        })?;
-    worker
-        .wait_for_startup()
-        .map_err(|status| format!("flush executor did not start: {status:?}"))?;
-    Ok(true)
+        })
 }
 
-/// Claim outcome that keeps session ownership across the claim→work commit.
+/// Claim outcome that keeps session ownership across the claim -> work commit.
 struct ClaimedWork {
     table_oid: pgrx::pg_sys::Oid,
     guard: crate::sql::job_lock::TableJobLockGuard,
@@ -123,12 +78,8 @@ struct ClaimedWork {
 }
 
 fn claim_one_flush_job() -> Result<Option<ClaimedWork>, String> {
-    let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()
-        .map_err(|error| error.to_string())?;
-    if reclaimed > 0 {
-        pgrx::log!("koldstore flush executor: reclaimed {reclaimed} stuck running flush job(s)");
-    }
-
+    // Orphan recovery belongs to the database maintenance/recovery worker, not
+    // every heavy executor. An executor should only inspect runnable queue work.
     let Some((table_oid, force)) = crate::sql::flush::jobs::select_pending_flush_candidate()
         .map_err(|error| error.to_string())?
     else {
@@ -137,8 +88,10 @@ fn claim_one_flush_job() -> Result<Option<ClaimedWork>, String> {
     let table_oid = pgrx::pg_sys::Oid::from(table_oid.get());
 
     let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(table_oid)? else {
+        // Leave the queue generation dirty. The supervisor/recovery pass will
+        // retry without converting normal table contention into a terminal job.
         pgrx::log!(
-            "koldstore flush executor: skipping table_oid={} (lock busy)",
+            "koldstore flush executor: table_oid={} busy; yielding queue ownership",
             table_oid.to_u32()
         );
         return Ok(None);
@@ -152,6 +105,46 @@ fn claim_one_flush_job() -> Result<Option<ClaimedWork>, String> {
     }))
 }
 
+struct FlushWorkerRegistration {
+    database_oid: u32,
+    queue_generation: u64,
+}
+
+impl FlushWorkerRegistration {
+    fn start(database_oid: u32) -> Self {
+        let effective_limit = u32::try_from(crate::guc::max_parallel_flush_jobs())
+            .unwrap_or(1)
+            .max(1);
+        super::wake::flush_started(database_oid, effective_limit);
+        let queue_generation = super::wake::supervisor_snapshot(database_oid)
+            .map(|snapshot| snapshot.flush_generation)
+            .unwrap_or(0);
+        Self {
+            database_oid,
+            queue_generation,
+        }
+    }
+
+    fn mark_drained_if_empty(&self) {
+        let empty = txn::run(|| {
+            crate::sql::flush::jobs::count_pending_flush_jobs()
+                .map(|count| count <= 0)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap_or(false);
+        if empty {
+            super::wake::mark_flush_processed(self.database_oid, self.queue_generation);
+        }
+    }
+}
+
+impl Drop for FlushWorkerRegistration {
+    fn drop(&mut self) {
+        self.mark_drained_if_empty();
+        super::wake::flush_stopped(self.database_oid);
+    }
+}
+
 /// One-shot flush executor entry point (`NEVER_RESTART`).
 ///
 /// SQL / C contract: `koldstore_flush_executor_main(database_oid)`.
@@ -163,12 +156,14 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         Some(pgrx::pg_sys::Oid::from(database_oid)),
         None,
     );
+    let _registration = FlushWorkerRegistration::start(database_oid);
 
     // Short claim transaction: durable running + attempt_token before any I/O.
     let claimed = match txn::run(claim_one_flush_job) {
         Ok(claimed) => claimed,
         Err(error) => {
             pgrx::warning!("koldstore flush executor claim failed: {error}");
+            super::wake::request_recovery(database_oid);
             return;
         }
     };
@@ -187,5 +182,6 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         crate::sql::flush::execute::run_claimed_flush_with_session_lock(table_oid, guard, claimed)
     {
         pgrx::warning!("koldstore flush executor failed: {error}");
+        super::wake::request_recovery(database_oid);
     }
 }
