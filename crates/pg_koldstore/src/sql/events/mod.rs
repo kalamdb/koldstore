@@ -119,29 +119,20 @@ fn changes_since_pg_impl(
     let scope_column = scope.as_ref().map(|(_, column)| column.as_str());
 
     // Positive since_seq wins over last_rows (KalamDB precedence).
+    let targets = ChangeFeedTargets {
+        table_oid,
+        snapshot: &snapshot,
+        mirror: &mirror,
+        pk_names: &pk_names,
+        scope_column,
+        scope_key: scope_key.as_ref(),
+    };
     let use_last_rows = since_seq == 0 && last_rows.is_some();
     let selected = if use_last_rows {
         let last_rows = last_rows.expect("checked above");
-        fetch_last_rows_page(
-            table_oid,
-            &snapshot,
-            &mirror,
-            &pk_names,
-            last_rows,
-            scope_column,
-            scope_key.as_ref(),
-        )?
+        fetch_last_rows_page(&targets, last_rows)?
     } else {
-        fetch_since_seq_page(
-            table_oid,
-            &snapshot,
-            &mirror,
-            &pk_names,
-            since_seq,
-            limit as usize,
-            scope_column,
-            scope_key.as_ref(),
-        )?
+        fetch_since_seq_page(&targets, since_seq, limit as usize)?
     };
 
     Ok(selected
@@ -191,19 +182,25 @@ fn resolve_changes_since_scope(
     Ok(Some((active, scope_column.clone())))
 }
 
+/// Shared targets for one `changes_since` page (table + mirror + optional scope).
+#[cfg(feature = "pg")]
+struct ChangeFeedTargets<'a> {
+    table_oid: pgrx::pg_sys::Oid,
+    snapshot: &'a koldstore_catalog::ManagedTableSnapshot,
+    mirror: &'a QualifiedTableName,
+    pk_names: &'a [String],
+    scope_column: Option<&'a str>,
+    scope_key: Option<&'a ScopeKey>,
+}
+
 /// Catalog-routed page for `since_seq` + `limit_rows`.
 #[cfg(feature = "pg")]
 fn fetch_since_seq_page(
-    table_oid: pgrx::pg_sys::Oid,
-    snapshot: &koldstore_catalog::ManagedTableSnapshot,
-    mirror: &QualifiedTableName,
-    pk_names: &[String],
+    targets: &ChangeFeedTargets<'_>,
     since_seq: i64,
     limit: usize,
-    scope_column: Option<&str>,
-    scope_key: Option<&ScopeKey>,
 ) -> Result<Vec<MirrorChange>, String> {
-    let manifest = crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?;
+    let manifest = crate::catalog::cache::cached_manifest_scan_context(targets.table_oid, &[])?;
     let segments = manifest
         .as_ref()
         .map(|ctx| ctx.segments.as_slice())
@@ -222,13 +219,13 @@ fn fetch_since_seq_page(
     let past_cold = segments.is_empty() || newest_cold.is_some_and(|max| since_seq >= max);
     if past_cold {
         return fetch_hot_mirror_changes(
-            table_oid.to_u32(),
-            mirror,
-            pk_names,
+            targets.table_oid.to_u32(),
+            targets.mirror,
+            targets.pk_names,
             since_seq,
             limit,
-            scope_column,
-            scope_key,
+            targets.scope_column,
+            targets.scope_key,
         );
     }
 
@@ -238,20 +235,27 @@ fn fetch_since_seq_page(
         let Some(segment) = next_cold_segment(segments, cursor) else {
             let rest = limit - page.len();
             let hot = fetch_hot_mirror_changes(
-                table_oid.to_u32(),
-                mirror,
-                pk_names,
+                targets.table_oid.to_u32(),
+                targets.mirror,
+                targets.pk_names,
                 cursor,
                 rest,
-                scope_column,
-                scope_key,
+                targets.scope_column,
+                targets.scope_key,
             )?;
             page.extend(hot);
             break;
         };
 
         let need = limit - page.len();
-        let cold = read_cold_segment_page(table_oid, snapshot, segment, cursor, need, scope_key)?;
+        let cold = read_cold_segment_page(
+            targets.table_oid,
+            targets.snapshot,
+            segment,
+            cursor,
+            need,
+            targets.scope_key,
+        )?;
         if cold.is_empty() {
             // Stats prune / scope filter emptied this segment for the cursor —
             // advance past it and try the next catalog candidate.
@@ -274,30 +278,28 @@ fn fetch_since_seq_page(
 /// Newest-N rewind: mirror first, then one newest cold segment if shortfall.
 #[cfg(feature = "pg")]
 fn fetch_last_rows_page(
-    table_oid: pgrx::pg_sys::Oid,
-    snapshot: &koldstore_catalog::ManagedTableSnapshot,
-    mirror: &QualifiedTableName,
-    pk_names: &[String],
+    targets: &ChangeFeedTargets<'_>,
     last_rows: i32,
-    scope_column: Option<&str>,
-    scope_key: Option<&ScopeKey>,
 ) -> Result<Vec<MirrorChange>, String> {
     let hot = fetch_hot_mirror_last_rows(
-        table_oid.to_u32(),
-        mirror,
-        pk_names,
+        targets.table_oid.to_u32(),
+        targets.mirror,
+        targets.pk_names,
         last_rows,
-        scope_column,
-        scope_key,
+        targets.scope_column,
+        targets.scope_key,
     )?;
     if hot.len() as i32 >= last_rows {
-        return Ok(
-            events::changes_last(&hot, table_oid.to_u32(), scope_key, last_rows)
-                .map_err(|error| error.to_string())?,
-        );
+        return events::changes_last(
+            &hot,
+            targets.table_oid.to_u32(),
+            targets.scope_key,
+            last_rows,
+        )
+        .map_err(|error| error.to_string());
     }
 
-    let manifest = crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?;
+    let manifest = crate::catalog::cache::cached_manifest_scan_context(targets.table_oid, &[])?;
     let segments = manifest
         .as_ref()
         .map(|ctx| ctx.segments.as_slice())
@@ -309,28 +311,39 @@ fn fetch_last_rows_page(
             &segment.object_path,
         )
     }) else {
-        return Ok(
-            events::changes_last(&hot, table_oid.to_u32(), scope_key, last_rows)
-                .map_err(|error| error.to_string())?,
-        );
+        return events::changes_last(
+            &hot,
+            targets.table_oid.to_u32(),
+            targets.scope_key,
+            last_rows,
+        )
+        .map_err(|error| error.to_string());
     };
 
     let need = (last_rows as usize).saturating_sub(hot.len());
     // Stream the newest segment with an ascending seq read, keep a bounded
     // newest-N window (O(last_rows) memory, not O(segment)).
-    let cold = read_cold_segment_newest_window(table_oid, snapshot, newest, need, scope_key)?;
+    let cold = read_cold_segment_newest_window(
+        targets.table_oid,
+        targets.snapshot,
+        newest,
+        need,
+        targets.scope_key,
+    )?;
     let mut combined = cold;
     combined.extend(hot);
-    events::changes_last(&combined, table_oid.to_u32(), scope_key, last_rows)
-        .map_err(|error| error.to_string())
+    events::changes_last(
+        &combined,
+        targets.table_oid.to_u32(),
+        targets.scope_key,
+        last_rows,
+    )
+    .map_err(|error| error.to_string())
 }
 
 /// Oldest published segment that can still contribute rows after `since_seq`.
 #[cfg(feature = "pg")]
-fn next_cold_segment<'a>(
-    segments: &'a [SegmentStatsHint],
-    since_seq: i64,
-) -> Option<&'a SegmentStatsHint> {
+fn next_cold_segment(segments: &[SegmentStatsHint], since_seq: i64) -> Option<&SegmentStatsHint> {
     segments
         .iter()
         .filter(|segment| segment.max_seq.get() > since_seq)
@@ -473,8 +486,7 @@ fn read_cold_segment_page(
     }
 
     let catalog = crate::catalog::cache::cached_migration_catalog(table_oid)?;
-    let (pg_columns, physical_names, physical_pk_names) =
-        cold_projection_for_segment(snapshot, &catalog, segment)?;
+    let projection = cold_projection_for_segment(snapshot, &catalog, segment)?;
 
     let Some(manifest) = crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?
     else {
@@ -491,7 +503,7 @@ fn read_cold_segment_page(
 
     let min_seq = SeqId::new(since_seq.saturating_add(1).max(1)).map_err(|e| e.to_string())?;
     let options = ParquetReadOptions::new()
-        .with_columns(physical_names.clone())
+        .with_columns(projection.physical_names.clone())
         .with_clean_seq_range(min_seq, segment.max_seq)
         .with_row_limit(limit)
         .with_timeout(client.timeout());
@@ -503,8 +515,8 @@ fn read_cold_segment_page(
         std::sync::Arc::clone(&store),
         &segment.object_path,
         segment.byte_size,
-        &pg_columns,
-        &physical_pk_names,
+        &projection.pg_columns,
+        &projection.physical_pk_names,
         &options,
     )?;
 
@@ -513,8 +525,8 @@ fn read_cold_segment_page(
         let change = cold_row_to_mirror_change(
             table_oid.to_u32(),
             &snapshot.primary_key_columns,
-            &physical_pk_names,
-            &physical_names,
+            &projection.physical_pk_names,
+            &projection.physical_names,
             &catalog.columns,
             row,
             snapshot.scope_column.as_deref(),
@@ -549,8 +561,7 @@ fn read_cold_segment_newest_window(
     }
 
     let catalog = crate::catalog::cache::cached_migration_catalog(table_oid)?;
-    let (pg_columns, physical_names, physical_pk_names) =
-        cold_projection_for_segment(snapshot, &catalog, segment)?;
+    let projection = cold_projection_for_segment(snapshot, &catalog, segment)?;
 
     let Some(manifest) = crate::catalog::cache::cached_manifest_scan_context(table_oid, &[])?
     else {
@@ -566,7 +577,7 @@ fn read_cold_segment_newest_window(
     let store = client.store();
 
     let options = ParquetReadOptions::new()
-        .with_columns(physical_names.clone())
+        .with_columns(projection.physical_names.clone())
         .with_timeout(client.timeout());
     let _permit = crate::merge_scan::reader_pool::try_acquire_parquet_reader_permit(
         crate::guc::max_open_parquet_readers(),
@@ -575,8 +586,8 @@ fn read_cold_segment_newest_window(
         std::sync::Arc::clone(&store),
         &segment.object_path,
         segment.byte_size,
-        &pg_columns,
-        &physical_pk_names,
+        &projection.pg_columns,
+        &projection.physical_pk_names,
         &options,
     )?;
 
@@ -585,8 +596,8 @@ fn read_cold_segment_newest_window(
         let change = cold_row_to_mirror_change(
             table_oid.to_u32(),
             &snapshot.primary_key_columns,
-            &physical_pk_names,
-            &physical_names,
+            &projection.physical_pk_names,
+            &projection.physical_names,
             &catalog.columns,
             row,
             snapshot.scope_column.as_deref(),
@@ -607,12 +618,20 @@ fn read_cold_segment_newest_window(
     Ok(window)
 }
 
+/// Physical column projection for one cold segment read.
+#[cfg(feature = "pg")]
+struct ColdSegmentProjection {
+    pg_columns: Vec<PgColumn>,
+    physical_names: Vec<String>,
+    physical_pk_names: Vec<String>,
+}
+
 #[cfg(feature = "pg")]
 fn cold_projection_for_segment(
     snapshot: &koldstore_catalog::ManagedTableSnapshot,
     catalog: &koldstore_migrate::ExistingTableCatalog,
     segment: &SegmentStatsHint,
-) -> Result<(Vec<PgColumn>, Vec<String>, Vec<String>), String> {
+) -> Result<ColdSegmentProjection, String> {
     let physical_pk_names: Vec<String> = snapshot
         .primary_key_columns
         .iter()
@@ -661,7 +680,11 @@ fn cold_projection_for_segment(
             physical_names.push(physical.clone());
         }
     }
-    Ok((pg_columns, physical_names, physical_pk_names))
+    Ok(ColdSegmentProjection {
+        pg_columns,
+        physical_names,
+        physical_pk_names,
+    })
 }
 
 #[cfg(feature = "pg")]
@@ -724,7 +747,7 @@ fn cold_row_to_mirror_change(
         operation,
         seq,
         deleted: row.deleted,
-        row_image_json: (!row.deleted).then(|| serde_json::Value::Object(logical_image)),
+        row_image_json: (!row.deleted).then_some(serde_json::Value::Object(logical_image)),
         source: ChangeSource::ColdRecord,
     })
 }
