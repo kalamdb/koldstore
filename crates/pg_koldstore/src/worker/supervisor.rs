@@ -88,9 +88,9 @@ pub extern "C-unwind" fn koldstore_supervisor_main(_argument: pgrx::pg_sys::Datu
         }
 
         super::wake::fill_supervisor_snapshots(&mut snapshots);
-        if publish_reached_queue_deadlines(&snapshots) {
-            // Deadline publication mutates flush generations. Refresh before
-            // dispatch so due work can start in this same supervisor iteration.
+        if publish_reached_deadlines(&snapshots) {
+            // Deadline publication mutates generations. Refresh before dispatch
+            // so due maintenance/flush work starts in this same iteration.
             super::wake::fill_supervisor_snapshots(&mut snapshots);
         }
         let registration_pressure = dispatch_shared_work(&snapshots);
@@ -206,18 +206,33 @@ fn dispatch_shared_work(snapshots: &[DatabaseWorkSnapshot]) -> bool {
     registration_pressure
 }
 
-/// Publishes flush generations for queue deadlines reached since the last wake.
-/// Returns true when shared state changed and the caller should refresh snapshots.
-fn publish_reached_queue_deadlines(snapshots: &[DatabaseWorkSnapshot]) -> bool {
+/// Publishes generations for deadlines reached since the last wake.
+///
+/// Queue retry deadlines dispatch flush executors directly. Timed auto-flush
+/// policies publish maintenance work so eligibility is re-evaluated without a
+/// permanently running per-database worker.
+fn publish_reached_deadlines(snapshots: &[DatabaseWorkSnapshot]) -> bool {
     let now_ms = unix_now_ms();
     let mut published = false;
     for snapshot in snapshots {
-        let deadline = snapshot.next_flush_due_at_ms;
-        if deadline > 0
-            && deadline <= now_ms
-            && super::wake::consume_flush_deadline(snapshot.database_oid, deadline)
+        let flush_deadline = snapshot.next_flush_due_at_ms;
+        if flush_deadline > 0
+            && flush_deadline <= now_ms
+            && super::wake::consume_flush_deadline(snapshot.database_oid, flush_deadline)
         {
             super::wake::publish_due_flush(snapshot.database_oid);
+            published = true;
+        }
+
+        let maintenance_deadline = snapshot.next_maintenance_due_at_ms;
+        if maintenance_deadline > 0
+            && maintenance_deadline <= now_ms
+            && super::wake::consume_maintenance_deadline(
+                snapshot.database_oid,
+                maintenance_deadline,
+            )
+        {
+            super::wake::publish_due_maintenance(snapshot.database_oid);
             published = true;
         }
     }
@@ -247,21 +262,26 @@ fn next_wait_duration(
 
     let now_ms = unix_now_ms();
     for snapshot in snapshots {
-        if snapshot.next_flush_due_at_ms <= 0 {
-            continue;
-        }
-        let delay_ms = snapshot.next_flush_due_at_ms.saturating_sub(now_ms).max(1);
+        wait = min_optional_duration(wait, deadline_delay(snapshot.next_flush_due_at_ms, now_ms));
         wait = min_optional_duration(
             wait,
-            Some(Duration::from_millis(
-                u64::try_from(delay_ms).unwrap_or(u64::MAX),
-            )),
+            deadline_delay(snapshot.next_maintenance_due_at_ms, now_ms),
         );
     }
 
     // None means an infinite latch wait: when no slot/deadline/retry exists,
     // KoldStore has zero polling wakeups.
     wait.map(|duration| duration.max(Duration::from_millis(1)))
+}
+
+fn deadline_delay(deadline_ms: i64, now_ms: i64) -> Option<Duration> {
+    if deadline_ms <= 0 {
+        return None;
+    }
+    let delay_ms = deadline_ms.saturating_sub(now_ms).max(1);
+    Some(Duration::from_millis(
+        u64::try_from(delay_ms).unwrap_or(u64::MAX),
+    ))
 }
 
 fn min_optional_duration(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
