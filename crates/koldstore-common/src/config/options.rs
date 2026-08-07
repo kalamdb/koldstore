@@ -278,6 +278,18 @@ pub struct ManageTableOptions {
     /// Missing or `true` means enabled; `false` reserves the table for manual/cron flush.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_flush: Option<bool>,
+    /// Operator override for columns that participate in cold min/max stats.
+    ///
+    /// When omitted, registration derives stats candidates from indexes/PK.
+    /// Names are SQL column names; migrate resolves them to stable `column_id`s.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruning_columns: Option<Vec<String>>,
+    /// Operator override for columns that get Parquet Bloom filters at flush.
+    ///
+    /// When omitted, registration derives Bloom candidates (PK ∪ indexed).
+    /// Primary-key columns are always forced into the effective Bloom set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bloom_filter_columns: Option<Vec<String>>,
 }
 
 impl ManageTableOptions {
@@ -310,6 +322,11 @@ impl ManageTableOptions {
                 FlushPolicy::RowLimit { .. } => {}
             }
         }
+        validate_column_name_list("pruning_columns", decoded.pruning_columns.as_deref())?;
+        validate_column_name_list(
+            "bloom_filter_columns",
+            decoded.bloom_filter_columns.as_deref(),
+        )?;
         Ok(decoded)
     }
 
@@ -452,6 +469,68 @@ impl ManageTableOptions {
         self.auto_flush = if enabled { None } else { Some(false) };
         self
     }
+
+    /// Sets operator-configured cold pruning (stats) columns.
+    #[must_use]
+    pub fn with_pruning_columns<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let columns = normalize_column_name_list(columns);
+        self.pruning_columns = if columns.is_empty() {
+            None
+        } else {
+            Some(columns)
+        };
+        self
+    }
+
+    /// Sets operator-configured Bloom filter columns.
+    #[must_use]
+    pub fn with_bloom_filter_columns<I, S>(mut self, columns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let columns = normalize_column_name_list(columns);
+        self.bloom_filter_columns = if columns.is_empty() {
+            None
+        } else {
+            Some(columns)
+        };
+        self
+    }
+}
+
+fn normalize_column_name_list<I, S>(columns: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut seen = std::collections::BTreeSet::new();
+    columns
+        .into_iter()
+        .map(Into::into)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .filter(|name| seen.insert(name.clone()))
+        .collect()
+}
+
+fn validate_column_name_list(field: &str, columns: Option<&[String]>) -> Result<(), String> {
+    let Some(columns) = columns else {
+        return Ok(());
+    };
+    if columns.is_empty() {
+        return Err(format!("{field} must not be an empty list"));
+    }
+    for name in columns {
+        if name.trim().is_empty() {
+            return Err(format!("{field} entries must be non-blank column names"));
+        }
+    }
+    Ok(())
 }
 
 /// Returns whether schema options configure automatic flush.
@@ -728,5 +807,48 @@ mod tests {
             decoded.migration_status,
             Some(MigrationStatus::MirrorInitializing)
         );
+    }
+
+    #[test]
+    fn manage_table_options_round_trip_pruning_and_bloom_columns() {
+        let options = ManageTableOptions::default()
+            .with_pruning_columns(["created_at", " id ", "created_at"])
+            .with_bloom_filter_columns(["id", "tenant_id"]);
+        let value = options.to_value();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "pruning_columns": ["created_at", "id"],
+                "bloom_filter_columns": ["id", "tenant_id"],
+            })
+        );
+
+        let decoded = ManageTableOptions::from_value(&value);
+        assert_eq!(
+            decoded.pruning_columns.as_deref(),
+            Some(["created_at".to_string(), "id".to_string()].as_slice())
+        );
+        assert_eq!(
+            decoded.bloom_filter_columns.as_deref(),
+            Some(["id".to_string(), "tenant_id".to_string()].as_slice())
+        );
+        assert_eq!(
+            ManageTableOptions::try_from_value(&value).unwrap(),
+            decoded
+        );
+        assert!(ManageTableOptions::default().pruning_columns.is_none());
+        assert!(ManageTableOptions::default().bloom_filter_columns.is_none());
+    }
+
+    #[test]
+    fn strict_decode_rejects_blank_pruning_and_bloom_column_names() {
+        assert!(ManageTableOptions::try_from_value(&serde_json::json!({
+            "pruning_columns": []
+        }))
+        .is_err());
+        assert!(ManageTableOptions::try_from_value(&serde_json::json!({
+            "bloom_filter_columns": ["id", "  "]
+        }))
+        .is_err());
     }
 }
