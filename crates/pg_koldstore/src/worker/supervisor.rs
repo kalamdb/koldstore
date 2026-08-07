@@ -14,7 +14,8 @@ use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags
 const SUPERVISOR_FUNCTION: &str = "koldstore_supervisor_main";
 const SUPERVISOR_NAME: &str = "koldstore supervisor";
 const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
-const DISPATCH_RETRY: Duration = Duration::from_millis(250);
+const REGISTRATION_RETRY_MIN: Duration = Duration::from_millis(100);
+const REGISTRATION_RETRY_MAX: Duration = Duration::from_secs(5);
 const CHILD_LIFECYCLE_GRACE: Duration = Duration::from_secs(1);
 const CLUSTER_FLUSH_WORKER_LIMIT: u32 = 8;
 
@@ -50,6 +51,74 @@ impl Drop for SupervisorRegistration {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum DynamicWorkerKind {
+    Maintenance,
+    Flush,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RegistrationRetry {
+    failures: u8,
+    next_attempt_at: Instant,
+}
+
+/// Supervisor-local retry state for dynamic-worker registration pressure.
+///
+/// `max_worker_processes` exhaustion is not durable work failure, so retrying is
+/// correct, but a fixed 250ms cluster wake burns CPU indefinitely under sustained
+/// pressure. Backoff lives only in the static supervisor; durable generations
+/// remain dirty and survive supervisor/postmaster restart independently.
+#[derive(Debug, Default)]
+struct RegistrationBackoff {
+    entries: HashMap<(u32, DynamicWorkerKind), RegistrationRetry>,
+}
+
+impl RegistrationBackoff {
+    fn ready(&self, database_oid: u32, kind: DynamicWorkerKind, now: Instant) -> bool {
+        self.entries
+            .get(&(database_oid, kind))
+            .is_none_or(|retry| now >= retry.next_attempt_at)
+    }
+
+    fn succeeded(&mut self, database_oid: u32, kind: DynamicWorkerKind) {
+        self.entries.remove(&(database_oid, kind));
+    }
+
+    fn failed(&mut self, database_oid: u32, kind: DynamicWorkerKind, now: Instant) -> Duration {
+        let failures = self
+            .entries
+            .get(&(database_oid, kind))
+            .map(|retry| retry.failures.saturating_add(1))
+            .unwrap_or(1)
+            .min(16);
+        let shift = u32::from(failures.saturating_sub(1)).min(6);
+        let multiplier = 1_u32 << shift;
+        let delay = REGISTRATION_RETRY_MIN
+            .saturating_mul(multiplier)
+            .min(REGISTRATION_RETRY_MAX);
+        self.entries.insert(
+            (database_oid, kind),
+            RegistrationRetry {
+                failures,
+                next_attempt_at: now + delay,
+            },
+        );
+        delay
+    }
+
+    fn clear_if_idle(&mut self, database_oid: u32, kind: DynamicWorkerKind) {
+        self.entries.remove(&(database_oid, kind));
+    }
+
+    fn next_wait(&self, now: Instant) -> Option<Duration> {
+        self.entries
+            .values()
+            .map(|retry| retry.next_attempt_at.saturating_duration_since(now))
+            .min()
+    }
+}
+
 #[pgrx::pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn koldstore_supervisor_main(_argument: pgrx::pg_sys::Datum) {
@@ -67,6 +136,8 @@ pub extern "C-unwind" fn koldstore_supervisor_main(_argument: pgrx::pg_sys::Datu
     };
     let mut last_safety = Instant::now();
     let mut lifecycle_reconcile_at = Some(Instant::now() + CHILD_LIFECYCLE_GRACE);
+    let mut registration_backoff = RegistrationBackoff::default();
+    let mut flush_dispatch_cursor = 0_usize;
     // Permanent process: allocate the registry view once and reuse it for every
     // wake/deadline calculation instead of creating several short-lived Vecs.
     let mut snapshots = Vec::with_capacity(SUPERVISOR_REGISTRY_CAPACITY);
@@ -93,7 +164,11 @@ pub extern "C-unwind" fn koldstore_supervisor_main(_argument: pgrx::pg_sys::Datu
             // so due maintenance/flush work starts in this same iteration.
             super::wake::fill_supervisor_snapshots(&mut snapshots);
         }
-        let registration_pressure = dispatch_shared_work(&snapshots);
+        dispatch_shared_work(
+            &snapshots,
+            &mut registration_backoff,
+            &mut flush_dispatch_cursor,
+        );
 
         if super::wake::overflow_reconcile_required()
             || (has_slots && last_safety.elapsed() >= SAFETY_RECONCILE_INTERVAL)
@@ -116,7 +191,7 @@ pub extern "C-unwind" fn koldstore_supervisor_main(_argument: pgrx::pg_sys::Datu
         let wait = next_wait_duration(
             has_slots,
             last_safety,
-            registration_pressure,
+            &registration_backoff,
             lifecycle_reconcile_at,
             &snapshots,
         );
@@ -160,50 +235,118 @@ unsafe extern "C-unwind" fn supervisor_sigusr1_handler(signal: std::os::raw::c_i
 }
 
 /// Dispatches published shared work without opening a PostgreSQL transaction.
-fn dispatch_shared_work(snapshots: &[DatabaseWorkSnapshot]) -> bool {
-    let mut registration_pressure = false;
-    // Cluster capacity is sampled once. The supervisor is the only process that
-    // reserves new flush workers, so a local counter avoids an O(N) registry scan
-    // for each database while still counting live/start-in-progress workers.
-    let mut cluster_flush_workers = super::wake::flush_workers_total();
+///
+/// Maintenance registration is single-owner. Flush registration fills every
+/// currently available per-database/cluster slot in fair rounds, so a burst of
+/// queued jobs does not require one supervisor wake per executor.
+fn dispatch_shared_work(
+    snapshots: &[DatabaseWorkSnapshot],
+    backoff: &mut RegistrationBackoff,
+    flush_dispatch_cursor: &mut usize,
+) {
+    let now = Instant::now();
 
     for snapshot in snapshots {
-        if snapshot.maintenance_due()
-            && snapshot.maintenance_pid == 0
-            && !super::wake::ensure_paused(snapshot.database_oid)
-            && super::wake::try_reserve_maintenance(snapshot.database_oid)
+        if !snapshot.maintenance_due() {
+            backoff.clear_if_idle(snapshot.database_oid, DynamicWorkerKind::Maintenance);
+            continue;
+        }
+        if snapshot.maintenance_pid != 0
+            || super::wake::ensure_paused(snapshot.database_oid)
+            || !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Maintenance, now)
         {
-            if let Err(error) = super::register_maintenance_from_supervisor(snapshot.database_oid) {
+            continue;
+        }
+        if !super::wake::try_reserve_maintenance(snapshot.database_oid) {
+            continue;
+        }
+        match super::register_maintenance_from_supervisor(snapshot.database_oid) {
+            Ok(()) => backoff.succeeded(snapshot.database_oid, DynamicWorkerKind::Maintenance),
+            Err(error) => {
                 super::wake::cancel_maintenance_start(snapshot.database_oid);
-                registration_pressure = true;
+                let delay = backoff.failed(
+                    snapshot.database_oid,
+                    DynamicWorkerKind::Maintenance,
+                    now,
+                );
                 pgrx::log!(
-                    "koldstore supervisor: maintenance registration deferred for db={} ({error})",
-                    snapshot.database_oid
+                    "koldstore supervisor: maintenance registration deferred for db={} retry_in={}ms ({error})",
+                    snapshot.database_oid,
+                    delay.as_millis()
                 );
             }
         }
+    }
 
-        if !snapshot.flush_due()
-            || snapshot.flush_workers() >= snapshot.flush_limit
-            || cluster_flush_workers >= CLUSTER_FLUSH_WORKER_LIMIT
-        {
-            continue;
-        }
-        if !super::wake::try_reserve_flush(snapshot.database_oid) {
-            continue;
-        }
-        cluster_flush_workers = cluster_flush_workers.saturating_add(1);
-        if let Err(error) = super::register_flush_executor_from_supervisor(snapshot.database_oid) {
-            super::wake::cancel_flush_start(snapshot.database_oid);
-            cluster_flush_workers = cluster_flush_workers.saturating_sub(1);
-            registration_pressure = true;
-            pgrx::log!(
-                "koldstore supervisor: flush registration deferred for db={} ({error})",
-                snapshot.database_oid
-            );
+    if snapshots.is_empty() {
+        *flush_dispatch_cursor = 0;
+        return;
+    }
+
+    let mut cluster_flush_workers = super::wake::flush_workers_total();
+    if cluster_flush_workers >= CLUSTER_FLUSH_WORKER_LIMIT {
+        return;
+    }
+
+    let len = snapshots.len();
+    let start = *flush_dispatch_cursor % len;
+    let mut made_progress = true;
+    while made_progress && cluster_flush_workers < CLUSTER_FLUSH_WORKER_LIMIT {
+        made_progress = false;
+        for offset in 0..len {
+            if cluster_flush_workers >= CLUSTER_FLUSH_WORKER_LIMIT {
+                break;
+            }
+            let snapshot = snapshots[(start + offset) % len];
+            if !snapshot.flush_due() {
+                backoff.clear_if_idle(snapshot.database_oid, DynamicWorkerKind::Flush);
+                continue;
+            }
+            if !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Flush, now) {
+                continue;
+            }
+
+            // Refresh this one lock-free entry because earlier rounds in this
+            // same dispatch pass may already have reserved workers for it.
+            let Some(current) = super::wake::supervisor_snapshot(snapshot.database_oid) else {
+                continue;
+            };
+            if !current.flush_due() || current.flush_workers() >= current.flush_limit {
+                continue;
+            }
+            if !super::wake::try_reserve_flush(snapshot.database_oid) {
+                continue;
+            }
+
+            cluster_flush_workers = cluster_flush_workers.saturating_add(1);
+            match super::register_flush_executor_from_supervisor(snapshot.database_oid) {
+                Ok(()) => {
+                    backoff.succeeded(snapshot.database_oid, DynamicWorkerKind::Flush);
+                    made_progress = true;
+                }
+                Err(error) => {
+                    super::wake::cancel_flush_start(snapshot.database_oid);
+                    cluster_flush_workers = cluster_flush_workers.saturating_sub(1);
+                    let delay =
+                        backoff.failed(snapshot.database_oid, DynamicWorkerKind::Flush, now);
+                    pgrx::log!(
+                        "koldstore supervisor: flush registration deferred for db={} retry_in={}ms ({error})",
+                        snapshot.database_oid,
+                        delay.as_millis()
+                    );
+                    // Registration pressure is process-wide in practice. Do not
+                    // hammer every remaining database in this round after one
+                    // load_dynamic failure; wait for a child exit/backoff wake.
+                    break;
+                }
+            }
         }
     }
-    registration_pressure
+
+    // Rotate first-served database across dispatches so a cluster cap smaller
+    // than the number of busy databases cannot permanently favor low registry
+    // slots. Additional workers are still assigned one-per-database per round.
+    *flush_dispatch_cursor = (start + 1) % len;
 }
 
 /// Publishes generations for deadlines reached since the last wake.
@@ -242,11 +385,12 @@ fn publish_reached_deadlines(snapshots: &[DatabaseWorkSnapshot]) -> bool {
 fn next_wait_duration(
     has_slots: bool,
     last_safety: Instant,
-    registration_pressure: bool,
+    registration_backoff: &RegistrationBackoff,
     lifecycle_reconcile_at: Option<Instant>,
     snapshots: &[DatabaseWorkSnapshot],
 ) -> Option<Duration> {
-    let mut wait = registration_pressure.then_some(DISPATCH_RETRY);
+    let now = Instant::now();
+    let mut wait = registration_backoff.next_wait(now);
     if has_slots {
         wait = min_optional_duration(
             wait,
@@ -254,10 +398,7 @@ fn next_wait_duration(
         );
     }
     if let Some(deadline) = lifecycle_reconcile_at {
-        wait = min_optional_duration(
-            wait,
-            Some(deadline.saturating_duration_since(Instant::now())),
-        );
+        wait = min_optional_duration(wait, Some(deadline.saturating_duration_since(now)));
     }
 
     let now_ms = unix_now_ms();
