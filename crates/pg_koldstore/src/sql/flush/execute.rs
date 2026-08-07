@@ -65,6 +65,7 @@ pub(super) struct FlushPreparedContext {
     snapshot: Arc<ManagedTableSnapshot>,
     catalog: Arc<koldstore_migrate::ExistingTableCatalog>,
     indexed_columns: Vec<ColumnRef>,
+    bloom_filter_columns: Vec<String>,
     max_rows_per_file: usize,
     target_file_size_bytes: Option<u64>,
 }
@@ -130,6 +131,7 @@ fn load_flush_prepared_context(
         }
     }
     let options = super::spi::active_manage_options(table_oid)?.unwrap_or_default();
+    let cold_metadata = super::spi::active_cold_metadata(table_oid)?;
     let policy = options.flush_policy();
     let configured = policy.as_ref().map(FlushPolicy::max_rows_per_file);
     // Trust the catalog value: `manage_table` already validated against the
@@ -146,6 +148,43 @@ fn load_flush_prepared_context(
                 .ok_or_else(|| format!("target_file_size_mb {megabytes} is too large"))
         })
         .transpose()?;
+    if let Some(cold) = cold_metadata.as_ref() {
+        if !cold.stats_columns.is_empty() {
+            indexed_columns = cold.stats_columns.clone();
+            if let Some(order_column_id) = snapshot.segment_order_column_id {
+                if let Some(column) = catalog
+                    .columns
+                    .iter()
+                    .find(|column| column.column_id == order_column_id)
+                {
+                    if !indexed_columns
+                        .iter()
+                        .any(|existing| existing.column_id == column.column_id)
+                    {
+                        indexed_columns
+                            .push(ColumnRef::new(column.column_id, column.name.clone()));
+                    }
+                }
+            }
+        }
+    }
+    let bloom_filter_columns = cold_metadata
+        .as_ref()
+        .map(|cold| {
+            cold.bloom_filter_columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>()
+        })
+        .filter(|columns| !columns.is_empty())
+        .unwrap_or_else(|| {
+            catalog
+                .columns
+                .iter()
+                .filter(|column| column.is_primary_key)
+                .map(|column| column.name.clone())
+                .collect()
+        });
     Ok(FlushPreparedContext {
         job_id,
         attempt_token,
@@ -155,6 +194,7 @@ fn load_flush_prepared_context(
         snapshot,
         catalog,
         indexed_columns,
+        bloom_filter_columns,
         max_rows_per_file,
         target_file_size_bytes,
     })
@@ -262,6 +302,7 @@ fn stream_write_flush_batches(
             })
             .collect(),
         indexed_columns: ctx.indexed_columns.clone(),
+        bloom_filter_columns: ctx.bloom_filter_columns.clone(),
         schema_version,
         max_seq: stats.max_seq,
         max_rows_per_file: ctx.max_rows_per_file,

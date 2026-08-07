@@ -16,6 +16,34 @@ use koldstore_parquet::{
 
 use crate::write::FlushWriteChunk;
 
+/// Builds Parquet writer options (stats + Bloom) for one encode pass.
+#[must_use]
+pub fn writer_options_from_encode_input(input: &StreamEncodeInput) -> WriterOptions {
+    WriterOptions {
+        compression: input.compression.clone(),
+        row_group_size: input.row_group_size.max(1),
+        ..WriterOptions::default()
+    }
+    .with_statistics_columns(
+        [ColdMetadataColumn::Seq.name()]
+            .into_iter()
+            .chain(input.primary_key_columns.iter().map(String::as_str))
+            .chain(
+                input
+                    .indexed_columns
+                    .iter()
+                    .map(|column| column.name.as_str()),
+            ),
+    )
+    .with_bloom_filter_columns(
+        input
+            .bloom_filter_columns
+            .iter()
+            .cloned()
+            .chain(input.primary_key_columns.iter().cloned()),
+    )
+}
+
 /// Input for one streaming flush encode pass.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamEncodeInput {
@@ -33,6 +61,8 @@ pub struct StreamEncodeInput {
     pub parquet_columns: Vec<PgColumn>,
     /// Indexed columns tracked for segment stats.
     pub indexed_columns: Vec<ColumnRef>,
+    /// Columns that receive native Parquet Bloom filters (must include PK).
+    pub bloom_filter_columns: Vec<String>,
     /// Active cold schema version.
     pub schema_version: u32,
     /// Maximum selected mirror `seq`.
@@ -105,24 +135,7 @@ impl SegmentBuilder {
         // and still records seq as a trailing sort key for ordered passes.
         sorting_columns.push(SortingColumnSpec::ascending(ColdMetadataColumn::Seq.name()));
 
-        let options = WriterOptions {
-            compression: input.compression.clone(),
-            row_group_size: input.row_group_size.max(1),
-            ..WriterOptions::default()
-        }
-        .with_statistics_columns(
-            [ColdMetadataColumn::Seq.name()]
-                .into_iter()
-                .chain(input.primary_key_columns.iter().map(String::as_str))
-                .chain(
-                    input
-                        .indexed_columns
-                        .iter()
-                        .map(|column| column.name.as_str()),
-                ),
-        )
-        .with_bloom_filter_columns(input.primary_key_columns.iter().map(String::as_str))
-        .with_sorting_columns(sorting_columns);
+        let options = writer_options_from_encode_input(input).with_sorting_columns(sorting_columns);
         Self {
             options,
             split_policy: SegmentSplitPolicy::new(
@@ -361,6 +374,7 @@ mod tests {
                 PgColumn::new("body", PgType::Text, true),
             ],
             indexed_columns: vec![ColumnRef::new(ColumnId::from_attnum(1), "id")],
+            bloom_filter_columns: vec!["id".to_string()],
             schema_version: 1,
             max_seq: 5,
             max_rows_per_file,
@@ -413,6 +427,16 @@ mod tests {
 
         assert_eq!(outcome.rows_written, 5);
         assert_eq!(segment_rows, vec![2, 2, 1]);
+    }
+
+    #[test]
+    fn writer_options_include_configured_bloom_columns_and_force_pk() {
+        let mut encode_input = input(None, 10);
+        encode_input.bloom_filter_columns = vec!["body".to_string()];
+        let options = writer_options_from_encode_input(&encode_input);
+        assert_eq!(options.bloom_filter_columns, vec!["body", "id"]);
+        assert!(options.statistics_columns.contains(&"seq".to_string()));
+        assert!(options.statistics_columns.contains(&"id".to_string()));
     }
 
     #[test]
