@@ -31,8 +31,9 @@ pub enum AutoFlushPlanError {
 ///
 /// Row-limit tables that have not even crossed their hot-row threshold are
 /// rejected in SQL. Rust still applies min-flush/file-size policy details, while
-/// OlderThan candidates remain visible for their index-backed cutoff check.
-/// This avoids materializing every managed row-limit table in the worker.
+/// OlderThan candidates remain visible for their index-backed cutoff/deadline
+/// checks. Tables that already own an active pending/running flush job are
+/// excluded so a large queue does not repeatedly occupy the first scheduler page.
 ///
 /// # Errors
 ///
@@ -66,7 +67,7 @@ WHERE {AUTO_FLUSH_TABLE_PREDICATE}
         FROM koldstore.jobs j
         WHERE j.table_oid = s.table_oid
           AND j.job_type = 'flush'
-          AND j.status = 'running'
+          AND j.status IN ('pending', 'running')
       )
   AND NOT EXISTS (
         SELECT 1
@@ -97,32 +98,6 @@ SELECT EXISTS (
     SELECT 1
     FROM koldstore.schemas s
     WHERE {AUTO_FLUSH_TABLE_PREDICATE}
-)
-"#
-        ),
-    )
-    .map_err(|error| AutoFlushPlanError::Sql(error.to_string()))
-}
-
-/// Plans whether this database needs a clock-driven auto-flush wake.
-///
-/// Row-limit policies are entirely event-driven by source WAL and do not need a
-/// periodic wake when the database is idle. OlderThan policies can become due
-/// without any new DML, so only those keep a supervisor deadline armed.
-///
-/// # Errors
-///
-/// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_database_has_timed_auto_flush_tables() -> Result<SqlStatement, AutoFlushPlanError> {
-    SqlStatement::read(
-        "database has timed auto-flush tables",
-        &format!(
-            r#"
-SELECT EXISTS (
-    SELECT 1
-    FROM koldstore.schemas s
-    WHERE {AUTO_FLUSH_TABLE_PREDICATE}
-      AND s.options->'flush_policy'->>'type' = 'older_than'
 )
 "#
         ),
@@ -179,9 +154,8 @@ fn policy_needs_flush(policy: &FlushPolicy, pending_rows: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        plan_database_has_auto_flush_tables, plan_database_has_timed_auto_flush_tables,
-        plan_older_than_eligible_mirror_rows, plan_select_auto_flush_candidate_tables,
-        scheduler_should_flush, AUTO_FLUSH_TABLE_PREDICATE,
+        plan_database_has_auto_flush_tables, plan_older_than_eligible_mirror_rows,
+        plan_select_auto_flush_candidate_tables, scheduler_should_flush, AUTO_FLUSH_TABLE_PREDICATE,
     };
     use serde_json::json;
 
@@ -259,18 +233,16 @@ mod tests {
     }
 
     #[test]
-    fn auto_flush_sql_plans_embed_shared_predicate_and_count_prefilter() {
+    fn auto_flush_sql_plans_embed_shared_predicate_and_active_job_exclusion() {
         let candidates = plan_select_auto_flush_candidate_tables().unwrap();
         assert!(candidates.sql.contains("auto_flush"));
         assert!(candidates.sql.contains(AUTO_FLUSH_TABLE_PREDICATE.trim()));
         assert!(candidates.sql.contains("m.mirror_row_count"));
         assert!(candidates.sql.contains("hot_row_limit"));
         assert!(candidates.sql.contains("older_than"));
+        assert!(candidates.sql.contains("IN ('pending', 'running')"));
         let exists = plan_database_has_auto_flush_tables().unwrap();
         assert!(exists.sql.contains(AUTO_FLUSH_TABLE_PREDICATE.trim()));
-        let timed = plan_database_has_timed_auto_flush_tables().unwrap();
-        assert!(timed.sql.contains("older_than"));
-        assert!(timed.sql.contains(AUTO_FLUSH_TABLE_PREDICATE.trim()));
         let older = plan_older_than_eligible_mirror_rows("\"koldstore\".\"items__cl\"").unwrap();
         assert!(older.sql.contains("seq < $1"));
         assert!(older.sql.contains("LIMIT $2"));
