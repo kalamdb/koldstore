@@ -39,9 +39,10 @@ pub use ops::{
 pub use policy::{policy_flush_row_count, selected_rows_meet_file_minimum};
 pub use retention::{plan_purge_old_jobs, JobRetentionError, DEFAULT_PURGE_BATCH_LIMIT};
 pub use scheduler::{
-    plan_database_has_auto_flush_tables, plan_older_than_eligible_mirror_rows,
-    plan_select_auto_flush_candidate_tables, scheduler_should_flush, scheduler_should_flush_parsed,
-    AutoFlushPlanError, AUTO_FLUSH_TABLE_PREDICATE,
+    plan_database_has_auto_flush_tables, plan_database_has_timed_auto_flush_tables,
+    plan_older_than_eligible_mirror_rows, plan_select_auto_flush_candidate_tables,
+    scheduler_should_flush, scheduler_should_flush_parsed, AutoFlushPlanError,
+    AUTO_FLUSH_TABLE_PREDICATE,
 };
 pub use segment_catalog::{
     plan_activate_flush_segments, plan_flush_segments_batch_insert, SegmentCatalogError,
