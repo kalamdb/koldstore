@@ -17,18 +17,11 @@ const FLUSH_EXECUTOR_FUNCTION: &str = "koldstore_flush_executor_main";
 const CANDIDATE_PAGE_SIZE: i64 = 16;
 const BUSY_RETRY: Duration = Duration::from_millis(200);
 
-/// Compatibility entry point used by queue callers while call sites migrate.
-/// It only publishes a post-commit queue wake; it never registers a process.
-pub(crate) fn spawn_flush_executor_if_needed() -> Result<bool, String> {
+/// Transitional queue notification used by the remaining foreground call site.
+/// It publishes post-commit work only; dynamic registration belongs exclusively
+/// to the supervisor.
+pub(crate) fn notify_flush_queue() {
     super::wake::mark_flush_queue_pending();
-    Ok(true)
-}
-
-/// Compatibility entry point for the scheduler. Capacity/fan-out belong to the
-/// supervisor; this function only publishes one coalesced queue event.
-pub(crate) fn spawn_flush_executors_for_pending_work() -> Result<u32, String> {
-    super::wake::mark_flush_queue_pending();
-    Ok(1)
 }
 
 /// Reconstructs queue dispatch hints after postmaster/worker recovery.
