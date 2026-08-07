@@ -2,15 +2,28 @@
 //!
 //! RowLimit is scheduled directly from WAL-applied counter bumps for only the
 //! tables that changed. Broad scans are reserved for explicit configuration /
-//! recovery reconciliation and time policies. Enqueue publishes a post-commit
-//! flush generation; only the cluster supervisor may register heavy executors.
+//! recovery reconciliation. Normal maintenance wakes scan only `OlderThan`
+//! policies because those are the only policies whose eligibility changes with
+//! wall-clock time. Enqueue publishes after COMMIT; only the cluster supervisor
+//! registers heavy one-shot executors.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use koldstore_common::{FlushPolicy, ManageTableOptions};
-use koldstore_flush::{plan_select_auto_flush_candidate_tables, scheduler_should_flush_parsed};
+use koldstore_flush::{
+    plan_select_auto_flush_candidate_tables, plan_select_timed_auto_flush_candidate_tables,
+    scheduler_should_flush_parsed,
+};
 
 const AUTO_FLUSH_PAGE_LIMIT: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SchedulerScan {
+    /// Configuration/startup/recovery reconciliation: inspect both supported policies.
+    Full,
+    /// Ordinary WAL/time wake: inspect only `OlderThan` tables.
+    TimedOnly,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushTickResult {
@@ -59,10 +72,17 @@ pub(crate) fn schedule_row_limit_after_counter(
     Ok(true)
 }
 
-fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool, Option<i64>), String> {
+fn select_due_auto_flush_tables(
+    scan: SchedulerScan,
+) -> Result<(Vec<u32>, bool, Option<i64>), String> {
     pgrx::Spi::connect(|client| -> Result<(Vec<u32>, bool, Option<i64>), String> {
-        let statement =
-            plan_select_auto_flush_candidate_tables().map_err(|error| error.to_string())?;
+        let statement = match scan {
+            SchedulerScan::Full => {
+                plan_select_auto_flush_candidate_tables().map_err(|error| error.to_string())?
+            }
+            SchedulerScan::TimedOnly => plan_select_timed_auto_flush_candidate_tables()
+                .map_err(|error| error.to_string())?,
+        };
         let table = client
             .select(&statement.sql, None, &[])
             .map_err(|error| error.to_string())?;
@@ -90,7 +110,10 @@ fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool, Option<i64>), Strin
                     crate::sql::flush::spi::resolve_flush_stats(oid, false)
                         .map(|selection| selection.stats.row_count > 0)?
                 }
-                _ => scheduler_should_flush_parsed(&parsed, pending),
+                Some(FlushPolicy::RowLimit { .. }) if scan == SchedulerScan::Full => {
+                    scheduler_should_flush_parsed(&parsed, pending)
+                }
+                _ => false,
             };
 
             if due {
@@ -148,7 +171,17 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
 /// Broad reconciliation used for configuration changes/startup/recovery.
 /// Normal WAL RowLimit scheduling does not come through this scan.
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
-    let (due_tables, more_due, next_timed_wake_at_ms) = select_due_auto_flush_tables()?;
+    run_scheduler_scan(SchedulerScan::Full)
+}
+
+/// Normal post-WAL/time maintenance path. Only clock-driven policies are read;
+/// RowLimit eligibility was already handled atomically by touched-table counters.
+pub(crate) fn run_timed_flush_scheduler_tick() -> Result<FlushTickResult, String> {
+    run_scheduler_scan(SchedulerScan::TimedOnly)
+}
+
+fn run_scheduler_scan(scan: SchedulerScan) -> Result<FlushTickResult, String> {
+    let (due_tables, more_due, next_timed_wake_at_ms) = select_due_auto_flush_tables(scan)?;
     let mut completed = false;
 
     for table_oid in due_tables {
