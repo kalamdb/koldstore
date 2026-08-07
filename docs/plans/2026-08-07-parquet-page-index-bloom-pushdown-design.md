@@ -2,7 +2,7 @@
 
 **Issues:** [#95](https://github.com/kalamdb/koldstore/issues/95) (page-index / Bloom pushdown), [#99](https://github.com/kalamdb/koldstore/issues/99) (operator `pruning_columns` / `bloom_filter_columns`)
 
-**Status:** Design approved 2026-08-07; implementation in progress on `feature/parquet-page-index-bloom-pushdown`. Approach: extend footer-first reader + operator lists in `cold_metadata` (not catalog-mirrored page bounds, not DataFusion-only `RowFilter`).
+**Status:** Implemented on `feature/parquet-page-index-bloom-pushdown` (2026-08-07). Approach: extend footer-first reader + operator lists in `cold_metadata` (not catalog-mirrored page bounds, not DataFusion-only `RowFilter`).
 
 **Related (out of scope):** [#70](https://github.com/kalamdb/koldstore/issues/70) row-group catalog stats, [#78](https://github.com/kalamdb/koldstore/issues/78) async filter-before-materialize.
 
