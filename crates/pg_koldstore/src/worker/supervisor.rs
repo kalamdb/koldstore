@@ -148,8 +148,15 @@ fn install_sigusr1_lifecycle_handler() {
 
 unsafe extern "C-unwind" fn supervisor_sigusr1_handler(signal: std::os::raw::c_int) {
     CHILD_LIFECYCLE_PENDING.store(true, Ordering::Release);
-    // Preserve PostgreSQL's normal ProcSignal processing and MyLatch wakeup.
-    unsafe { pgrx::pg_sys::procsignal_sigusr1_handler(signal) }
+    // bgw_notify_pid delivers SIGUSR1 on child lifecycle changes. Explicitly
+    // set the process latch before delegating so an infinite WaitLatch wakes even
+    // if the generic ProcSignal handler has no reason to set it for this signal.
+    unsafe {
+        if !pgrx::pg_sys::MyLatch.is_null() {
+            pgrx::pg_sys::SetLatch(pgrx::pg_sys::MyLatch);
+        }
+        pgrx::pg_sys::procsignal_sigusr1_handler(signal);
+    }
 }
 
 /// Dispatches published shared work without opening a PostgreSQL transaction.
@@ -290,6 +297,12 @@ fn reconcile_cluster_safety() -> Result<bool, String> {
     Ok(!slots.is_empty())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MaintenanceLiveness {
+    first_pid: i32,
+    count: u32,
+}
+
 /// Repairs worker reservations from PostgreSQL's authoritative process list.
 /// This SQL path runs only after child lifecycle events/startup/safety checks.
 fn reconcile_worker_liveness() -> Result<(), String> {
@@ -304,7 +317,7 @@ fn reconcile_worker_liveness() -> Result<(), String> {
                 &[],
             )
             .map_err(|error| error.to_string())?;
-        let mut maintenance = HashMap::<u32, Vec<i32>>::new();
+        let mut maintenance = HashMap::<u32, MaintenanceLiveness>::new();
         let mut flush_counts = HashMap::<u32, u32>::new();
         for row in table {
             let Some(datid) = row
@@ -323,7 +336,13 @@ fn reconcile_worker_liveness() -> Result<(), String> {
                 .unwrap_or_default();
             let database_oid = datid.to_u32();
             if backend_type.starts_with("koldstore async mirror ") {
-                maintenance.entry(database_oid).or_default().push(pid);
+                maintenance
+                    .entry(database_oid)
+                    .and_modify(|state| state.count = state.count.saturating_add(1))
+                    .or_insert(MaintenanceLiveness {
+                        first_pid: pid,
+                        count: 1,
+                    });
             } else if backend_type.starts_with("koldstore flush executor ") {
                 *flush_counts.entry(database_oid).or_default() += 1;
             }
@@ -334,14 +353,11 @@ fn reconcile_worker_liveness() -> Result<(), String> {
     let mut snapshots = Vec::with_capacity(SUPERVISOR_REGISTRY_CAPACITY);
     super::wake::fill_supervisor_snapshots(&mut snapshots);
     for snapshot in snapshots {
-        let live_maintenance = maintenance
-            .get(&snapshot.database_oid)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
+        let live_maintenance = maintenance.get(&snapshot.database_oid).copied();
         let maintenance_stale = if snapshot.maintenance_pid > 0 {
-            !live_maintenance.contains(&snapshot.maintenance_pid)
+            live_maintenance.is_none_or(|state| state.first_pid != snapshot.maintenance_pid)
         } else if snapshot.maintenance_pid < 0 {
-            live_maintenance.is_empty()
+            live_maintenance.is_none()
         } else {
             false
         };
@@ -349,10 +365,11 @@ fn reconcile_worker_liveness() -> Result<(), String> {
             super::wake::clear_stale_maintenance(snapshot.database_oid);
             super::wake::request_recovery(snapshot.database_oid);
         }
-        if live_maintenance.len() > 1 {
+        if live_maintenance.is_some_and(|state| state.count > 1) {
             pgrx::warning!(
-                "koldstore supervisor: multiple maintenance workers for db={} pids={live_maintenance:?}",
-                snapshot.database_oid
+                "koldstore supervisor: multiple maintenance workers for db={} count={}",
+                snapshot.database_oid,
+                live_maintenance.map(|state| state.count).unwrap_or(0)
             );
         }
 
