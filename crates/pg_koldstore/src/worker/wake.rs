@@ -113,14 +113,18 @@ pub(crate) fn publish_due_flush(database_oid: u32) {
     let _ = SUPERVISOR_REGISTRY.get().publish_flush(database_oid);
 }
 
-#[must_use]
-pub(crate) fn supervisor_snapshots() -> Vec<DatabaseWorkSnapshot> {
-    SUPERVISOR_REGISTRY.get().snapshots()
+pub(crate) fn fill_supervisor_snapshots(out: &mut Vec<DatabaseWorkSnapshot>) {
+    SUPERVISOR_REGISTRY.get().snapshots_into(out);
 }
 
 #[must_use]
 pub(crate) fn supervisor_snapshot(database_oid: u32) -> Option<DatabaseWorkSnapshot> {
     SUPERVISOR_REGISTRY.get().snapshot(database_oid)
+}
+
+#[must_use]
+pub(crate) fn flush_workers_total() -> u32 {
+    SUPERVISOR_REGISTRY.get().flush_workers_total()
 }
 
 pub(crate) fn try_reserve_maintenance(database_oid: u32) -> bool {
@@ -172,10 +176,8 @@ pub(crate) fn set_flush_limit(database_oid: u32, limit: u32) {
         .set_flush_limit(database_oid, limit);
 }
 
-pub(crate) fn try_reserve_flush(database_oid: u32, cluster_limit: u32) -> bool {
-    SUPERVISOR_REGISTRY
-        .get()
-        .try_reserve_flush(database_oid, cluster_limit)
+pub(crate) fn try_reserve_flush(database_oid: u32) -> bool {
+    SUPERVISOR_REGISTRY.get().try_reserve_flush(database_oid)
 }
 
 pub(crate) fn flush_started(database_oid: u32, effective_limit: u32) {
