@@ -67,15 +67,16 @@ fn restore_pending_deltas(deltas: Vec<(u32, (i64, i64))>) {
 
 /// Flushes pending counter deltas with ordinary SPI while a transaction is open.
 ///
-/// Async WAL apply must call this before returning: the background worker uses a
-/// custom `StartTransactionCommand` / `CommitTransactionCommand` path where
-/// relying solely on `XACT_EVENT_PRE_COMMIT` can leave counters at zero after the
-/// worker wins the apply race against `wait_for_async_mirror`.
+/// Async WAL apply calls this before returning. Each bump returns the resulting
+/// mirror count in the same SPI round trip; the policy for that exact table is
+/// then evaluated in this *same transaction*. RowLimit can enqueue directly;
+/// OlderThan can enqueue or record a commit-aware exact clock deadline. Unrelated
+/// managed tables are never scanned.
 ///
 /// # Errors
 ///
-/// Returns an error when SQL cannot be prepared or a bump statement fails. On
-/// failure, unapplied pending deltas are restored so a later retry can flush them.
+/// Returns an error when SQL cannot be prepared, a bump statement fails, its
+/// post-update mirror count is missing, or targeted scheduling fails.
 #[cfg(feature = "pg")]
 pub fn flush_pending_deltas_in_transaction() -> Result<(), String> {
     use pgrx::datum::DatumWithOid;
@@ -93,23 +94,42 @@ pub fn flush_pending_deltas_in_transaction() -> Result<(), String> {
         }
     };
 
-    while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.first().copied() {
-        if hot_delta != 0 || mirror_delta != 0 {
-            if let Err(error) = crate::spi::update(
-                &statement,
-                &[
-                    DatumWithOid::from(pg_sys::Oid::from(table_oid)),
-                    DatumWithOid::from(hot_delta),
-                    DatumWithOid::from(mirror_delta),
-                ],
-            ) {
+    // Pop from the tail instead of remove(0): transactions touching many managed
+    // tables stay O(n) instead of repeatedly shifting the remaining Vec.
+    while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.pop() {
+        if hot_delta == 0 && mirror_delta == 0 {
+            continue;
+        }
+        let oid = pg_sys::Oid::from(table_oid);
+        let mirror_row_count = match crate::spi::update_one::<i64>(
+            &statement,
+            &[
+                DatumWithOid::from(oid),
+                DatumWithOid::from(hot_delta),
+                DatumWithOid::from(mirror_delta),
+            ],
+        ) {
+            Ok(Some(count)) => count.max(0),
+            Ok(None) => {
+                deltas.push((table_oid, (hot_delta, mirror_delta)));
+                restore_pending_deltas(deltas);
+                return Err(format!(
+                    "bump row counters for table oid {table_oid} returned no mirror count"
+                ));
+            }
+            Err(error) => {
+                deltas.push((table_oid, (hot_delta, mirror_delta)));
                 restore_pending_deltas(deltas);
                 return Err(format!(
                     "bump row counters for table oid {table_oid}: {error}"
                 ));
             }
-        }
-        deltas.remove(0);
+        };
+
+        // Still inside WAL apply. A due job and the counter mutation commit
+        // atomically; a future timed deadline remains transaction-local until
+        // COMMIT before reaching supervisor shared memory.
+        crate::worker::schedule_policy_after_counter(oid, mirror_row_count)?;
     }
     Ok(())
 }
@@ -137,24 +157,25 @@ pub fn flush_pending_deltas() {
         }
     };
 
-    while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.first().copied() {
-        if hot_delta != 0 || mirror_delta != 0 {
-            if let Err(error) = crate::spi::update_in_xact_callback(
-                &statement,
-                &[
-                    DatumWithOid::from(pg_sys::Oid::from(table_oid)),
-                    DatumWithOid::from(hot_delta),
-                    DatumWithOid::from(mirror_delta),
-                ],
-            ) {
-                restore_pending_deltas(deltas);
-                pgrx::warning!(
-                    "koldstore row counter flush failed for table oid {table_oid}: {error}"
-                );
-                return;
-            }
+    while let Some((table_oid, (hot_delta, mirror_delta))) = deltas.pop() {
+        if hot_delta == 0 && mirror_delta == 0 {
+            continue;
         }
-        deltas.remove(0);
+        if let Err(error) = crate::spi::update_in_xact_callback(
+            &statement,
+            &[
+                DatumWithOid::from(pg_sys::Oid::from(table_oid)),
+                DatumWithOid::from(hot_delta),
+                DatumWithOid::from(mirror_delta),
+            ],
+        ) {
+            deltas.push((table_oid, (hot_delta, mirror_delta)));
+            restore_pending_deltas(deltas);
+            pgrx::warning!(
+                "koldstore row counter flush failed for table oid {table_oid}: {error}"
+            );
+            return;
+        }
     }
 }
 

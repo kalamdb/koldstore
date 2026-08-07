@@ -175,7 +175,6 @@ pub(crate) fn manage_table_pg_impl(
             order_column_name,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-        ensure_async_mirror_worker_for_managed_options(&request.options);
         return crate::spi::uuid_to_pgrx(job_id);
     }
 
@@ -298,16 +297,8 @@ pub(crate) fn manage_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     refresh_managed_table_row_counters(table_oid_u32, &plan.table, &mirror_plan.mirror_table)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    ensure_async_mirror_worker_for_managed_options(&request.options);
 
     crate::spi::uuid_to_pgrx(job_id)
-}
-
-#[cfg(feature = "pg")]
-fn ensure_async_mirror_worker_for_managed_options(options: &ManageTableOptions) {
-    if options.auto_flush_enabled() && options.flush_enabled() {
-        let _ = crate::worker::ensure_async_mirror_worker();
-    }
 }
 
 #[cfg(feature = "pg")]
@@ -502,7 +493,9 @@ pub(super) fn set_table_auto_flush_pg_impl(
     }
     crate::catalog::cache::invalidate_table_globally(table_oid);
     if enabled {
-        let _ = crate::worker::ensure_async_mirror_worker();
+        // Auto-flush policy changed in this transaction. Publish one scheduling
+        // generation after commit instead of invoking the old worker ensure API.
+        crate::worker::wake::mark_schedule_pending();
     }
     Ok(true)
 }

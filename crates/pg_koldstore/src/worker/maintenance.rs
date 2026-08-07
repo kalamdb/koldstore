@@ -2,13 +2,13 @@
 //!
 //! The cluster supervisor owns registration. At most one maintenance worker is
 //! active per database. A worker drains committed WAL through a fixed durable
-//! fence, performs database-local recovery/auto-flush scheduling, waits briefly
-//! to coalesce a write burst, and exits when the database is caught up.
+//! fence, performs database-local recovery/reconciliation only when requested,
+//! waits briefly to coalesce a write burst, and exits when the database is caught up.
 
 use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
-use koldstore_worker::{async_mirror_worker_type, DatabaseOid, LIBRARY_NAME};
+use koldstore_worker::{maintenance_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::pg_sys::panic::CaughtError;
 use pgrx::PgTryBuilder;
@@ -25,7 +25,7 @@ const IDLE_GRACE: Duration = Duration::from_millis(200);
 /// while PostgreSQL is still starting the first process.
 pub(crate) fn register_maintenance_from_supervisor(database_oid: u32) -> Result<(), String> {
     let database_oid = DatabaseOid::new(database_oid);
-    let worker_type = async_mirror_worker_type(database_oid);
+    let worker_type = maintenance_worker_type(database_oid);
     BackgroundWorkerBuilder::new(&worker_type)
         .set_type(&worker_type)
         .set_library(LIBRARY_NAME)
@@ -80,6 +80,8 @@ fn run_maintenance_worker(database_oid: u32) {
         let target_maintenance_generation = snapshot.maintenance_generation;
         let recovery_requested =
             snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
+        let schedule_requested =
+            snapshot.event_flags & koldstore_worker::EVENT_SCHEDULE_DIRTY != 0;
         let wal_due =
             recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
 
@@ -95,11 +97,12 @@ fn run_maintenance_worker(database_oid: u32) {
             super::wake::mark_wal_processed(database_oid, target_wal_generation);
         }
 
-        // A SIGKILL/FATAL executor cannot run Rust Drop. The supervisor marks
-        // the database RECOVERY_REQUIRED after native child-exit notification;
-        // this transaction reclaims the durable job before redispatch.
+        let needs_reconciliation = recovery_requested || schedule_requested;
         let maintenance_result = worker_transaction_result(|| {
             if recovery_requested {
+                // A SIGKILL/FATAL executor cannot run Rust Drop. The supervisor
+                // marks RECOVERY_REQUIRED after native lifecycle reconciliation;
+                // reclaim durable owners before redispatch.
                 let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()
                     .map_err(|error| error.to_string())?;
                 if reclaimed > 0 {
@@ -110,11 +113,23 @@ fn run_maintenance_worker(database_oid: u32) {
                 }
                 super::flush_executor::reconcile_queue_after_recovery(database_oid)?;
             }
-            super::flush_task::run_flush_scheduler_tick()
+
+            if needs_reconciliation {
+                super::flush_task::run_flush_scheduler_tick().map(Some)
+            } else {
+                // Ordinary WAL is deliberately catalog-scan free here. The apply
+                // transaction already scheduled every touched policy from its
+                // post-bump counters and published any OlderThan deadline only
+                // after COMMIT.
+                Ok(None)
+            }
         });
 
         match maintenance_result {
-            Ok(_) => {
+            Ok(result) => {
+                if let Some(result) = result {
+                    update_timed_policy_deadline(database_oid, result.next_timed_wake_at_ms);
+                }
                 super::wake::mark_maintenance_reconciled(
                     database_oid,
                     target_maintenance_generation,
@@ -148,6 +163,16 @@ fn run_maintenance_worker(database_oid: u32) {
         {
             return;
         }
+    }
+}
+
+/// Replaces database timed-policy state after a full configuration/recovery
+/// reconciliation. Normal WAL applies publish their touched-table deadlines
+/// transactionally and do not come through this function.
+fn update_timed_policy_deadline(database_oid: u32, next_due_at_ms: Option<i64>) {
+    match next_due_at_ms.filter(|deadline| *deadline > 0) {
+        Some(deadline_ms) => super::wake::schedule_maintenance_at_ms(database_oid, deadline_ms),
+        None => super::wake::clear_maintenance_deadline(database_oid),
     }
 }
 

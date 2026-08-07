@@ -46,6 +46,8 @@ pub struct DatabaseWorkSnapshot {
     pub flush_limit: u32,
     /// Earliest future pending flush `available_at`, Unix epoch milliseconds.
     pub next_flush_due_at_ms: i64,
+    /// Earliest future time-policy maintenance wake, Unix epoch milliseconds.
+    pub next_maintenance_due_at_ms: i64,
 }
 
 impl DatabaseWorkSnapshot {
@@ -81,6 +83,7 @@ struct DatabaseWorkEntry {
     flush_running: AtomicU32,
     flush_limit: AtomicU32,
     next_flush_due_at_ms: AtomicI64,
+    next_maintenance_due_at_ms: AtomicI64,
 }
 
 impl DatabaseWorkEntry {
@@ -99,6 +102,7 @@ impl DatabaseWorkEntry {
             flush_running: AtomicU32::new(0),
             flush_limit: AtomicU32::new(1),
             next_flush_due_at_ms: AtomicI64::new(0),
+            next_maintenance_due_at_ms: AtomicI64::new(0),
         }
     }
 
@@ -119,6 +123,7 @@ impl DatabaseWorkEntry {
             flush_running: self.flush_running.load(Ordering::Acquire),
             flush_limit: self.flush_limit.load(Ordering::Acquire).max(1),
             next_flush_due_at_ms: self.next_flush_due_at_ms.load(Ordering::Acquire),
+            next_maintenance_due_at_ms: self.next_maintenance_due_at_ms.load(Ordering::Acquire),
         }
     }
 }
@@ -146,9 +151,12 @@ impl<const N: usize> SupervisorRegistry<N> {
     }
 
     pub fn unregister_supervisor(&self, pid: SupervisorPid) {
-        let _ =
-            self.supervisor_pid
-                .compare_exchange(pid.get(), 0, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self.supervisor_pid.compare_exchange(
+            pid.get(),
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 
     #[must_use]
@@ -198,13 +206,26 @@ impl<const N: usize> SupervisorRegistry<N> {
         self.find(database_oid).map(DatabaseWorkEntry::snapshot)
     }
 
+    /// Copies allocated database entries into a caller-owned reusable buffer.
+    /// The permanent supervisor can keep this Vec for its lifetime, avoiding a
+    /// fresh allocation on every latch wake/deadline check.
+    pub fn snapshots_into(&self, out: &mut Vec<DatabaseWorkSnapshot>) {
+        out.clear();
+        if out.capacity() < N {
+            out.reserve(N - out.capacity());
+        }
+        for entry in &self.entries {
+            if entry.database_oid.load(Ordering::Acquire) != 0 {
+                out.push(entry.snapshot());
+            }
+        }
+    }
+
     #[must_use]
     pub fn snapshots(&self) -> Vec<DatabaseWorkSnapshot> {
-        self.entries
-            .iter()
-            .filter(|entry| entry.database_oid.load(Ordering::Acquire) != 0)
-            .map(DatabaseWorkEntry::snapshot)
-            .collect()
+        let mut snapshots = Vec::with_capacity(N);
+        self.snapshots_into(&mut snapshots);
+        snapshots
     }
 
     pub fn try_reserve_maintenance(&self, database_oid: u32) -> bool {
@@ -300,44 +321,57 @@ impl<const N: usize> SupervisorRegistry<N> {
         entry.flush_limit.store(limit.max(1), Ordering::Release);
     }
 
-    pub fn try_reserve_flush(&self, database_oid: u32, cluster_limit: u32) -> bool {
+    /// Reserves one per-database flush slot. Cluster capacity is owned by the
+    /// single supervisor and is sampled once per dispatch pass.
+    pub fn try_reserve_flush(&self, database_oid: u32) -> bool {
         let Some(entry) = self.entry_or_overflow(database_oid) else {
             return false;
         };
         let per_db_limit = entry.flush_limit.load(Ordering::Acquire).max(1);
-        if entry
+        let mut current = entry
             .flush_starting
             .load(Ordering::Acquire)
-            .saturating_add(entry.flush_running.load(Ordering::Acquire))
-            >= per_db_limit
-        {
-            return false;
+            .saturating_add(entry.flush_running.load(Ordering::Acquire));
+        while current < per_db_limit {
+            let starting = entry.flush_starting.load(Ordering::Acquire);
+            let running = entry.flush_running.load(Ordering::Acquire);
+            current = starting.saturating_add(running);
+            if current >= per_db_limit {
+                return false;
+            }
+            match entry.flush_starting.compare_exchange_weak(
+                starting,
+                starting.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(_) => continue,
+            }
         }
-        let cluster_total = self
-            .entries
-            .iter()
-            .map(|item| {
-                item.flush_starting
-                    .load(Ordering::Acquire)
-                    .saturating_add(item.flush_running.load(Ordering::Acquire))
-            })
-            .fold(0_u32, u32::saturating_add);
-        if cluster_total >= cluster_limit.max(1) {
-            return false;
-        }
-        entry.flush_starting.fetch_add(1, Ordering::AcqRel);
-        true
+        false
     }
 
-    pub fn flush_started(&self, database_oid: u32, effective_limit: u32) {
+    /// Converts one STARTING reservation to RUNNING.
+    ///
+    /// Running is incremented before consuming the starting token, so the total
+    /// never transiently dips below the real worker count while the supervisor
+    /// is concurrently deciding whether another process may start. If no
+    /// reservation exists, the increment is rolled back and the stale worker
+    /// must exit without touching the durable queue.
+    pub fn flush_started(&self, database_oid: u32, effective_limit: u32) -> bool {
         let Some(entry) = self.find(database_oid) else {
-            return;
+            return false;
         };
-        decrement_if_positive(&entry.flush_starting);
         entry.flush_running.fetch_add(1, Ordering::AcqRel);
+        if !take_one_if_positive(&entry.flush_starting) {
+            decrement_if_positive(&entry.flush_running);
+            return false;
+        }
         entry
             .flush_limit
             .store(effective_limit.max(1), Ordering::Release);
+        true
     }
 
     pub fn cancel_flush_start(&self, database_oid: u32) {
@@ -400,6 +434,35 @@ impl<const N: usize> SupervisorRegistry<N> {
                 .is_ok()
     }
 
+    pub fn schedule_maintenance_at_ms(&self, database_oid: u32, deadline_ms: i64) {
+        if deadline_ms <= 0 {
+            return;
+        }
+        let Some(entry) = self.entry_or_overflow(database_oid) else {
+            return;
+        };
+        atomic_min_nonzero(&entry.next_maintenance_due_at_ms, deadline_ms);
+    }
+
+    pub fn clear_maintenance_deadline(&self, database_oid: u32) {
+        if let Some(entry) = self.find(database_oid) {
+            entry
+                .next_maintenance_due_at_ms
+                .store(0, Ordering::Release);
+        }
+    }
+
+    pub fn consume_maintenance_deadline(&self, database_oid: u32, sampled_ms: i64) -> bool {
+        let Some(entry) = self.find(database_oid) else {
+            return false;
+        };
+        sampled_ms > 0
+            && entry
+                .next_maintenance_due_at_ms
+                .compare_exchange(sampled_ms, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+    }
+
     #[must_use]
     pub fn overflow_reconcile_required(&self) -> bool {
         self.overflow_reconcile_required.load(Ordering::Acquire) != 0
@@ -409,31 +472,56 @@ impl<const N: usize> SupervisorRegistry<N> {
         self.overflow_reconcile_required.store(0, Ordering::Release);
     }
 
+    /// Open-addressed lookup. Entries are never deleted during postmaster life,
+    /// so the first empty slot terminates the probe safely. This replaces an
+    /// O(N) scan on every managed-transaction commit wake publication.
     fn find(&self, database_oid: u32) -> Option<&DatabaseWorkEntry> {
-        self.entries
-            .iter()
-            .find(|entry| entry.database_oid.load(Ordering::Acquire) == database_oid)
+        if N == 0 || database_oid == 0 {
+            return None;
+        }
+        let start = registry_start_index::<N>(database_oid);
+        for offset in 0..N {
+            let entry = &self.entries[(start + offset) % N];
+            match entry.database_oid.load(Ordering::Acquire) {
+                current if current == database_oid => return Some(entry),
+                0 => return None,
+                _ => {}
+            }
+        }
+        None
     }
 
     fn entry_or_overflow(&self, database_oid: u32) -> Option<&DatabaseWorkEntry> {
-        if let Some(entry) = self.find(database_oid) {
-            return Some(entry);
+        if N == 0 || database_oid == 0 {
+            self.overflow_reconcile_required.store(1, Ordering::Release);
+            return None;
         }
-        for entry in &self.entries {
-            match entry.database_oid.compare_exchange(
-                0,
-                database_oid,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => return Some(entry),
-                Err(current) if current == database_oid => return Some(entry),
-                Err(_) => {}
+        let start = registry_start_index::<N>(database_oid);
+        for offset in 0..N {
+            let entry = &self.entries[(start + offset) % N];
+            match entry.database_oid.load(Ordering::Acquire) {
+                current if current == database_oid => return Some(entry),
+                0 => match entry.database_oid.compare_exchange(
+                    0,
+                    database_oid,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return Some(entry),
+                    Err(current) if current == database_oid => return Some(entry),
+                    Err(_) => continue,
+                },
+                _ => {}
             }
         }
         self.overflow_reconcile_required.store(1, Ordering::Release);
         None
     }
+}
+
+fn registry_start_index<const N: usize>(database_oid: u32) -> usize {
+    debug_assert!(N > 0);
+    (database_oid as usize).wrapping_mul(0x9E37_79B1usize) % N
 }
 
 fn clear_flag_if_generation_current(
@@ -474,7 +562,7 @@ fn atomic_min_nonzero(target: &AtomicI64, value: i64) {
     }
 }
 
-fn decrement_if_positive(target: &AtomicU32) {
+fn take_one_if_positive(target: &AtomicU32) -> bool {
     let mut current = target.load(Ordering::Acquire);
     while current > 0 {
         match target.compare_exchange_weak(
@@ -483,10 +571,15 @@ fn decrement_if_positive(target: &AtomicU32) {
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
-            Ok(_) => return,
+            Ok(_) => return true,
             Err(actual) => current = actual,
         }
     }
+    false
+}
+
+fn decrement_if_positive(target: &AtomicU32) {
+    let _ = take_one_if_positive(target);
 }
 
 #[cfg(test)]
@@ -507,6 +600,31 @@ mod tests {
     }
 
     #[test]
+    fn colliding_database_oids_probe_without_losing_entries() {
+        let registry = SupervisorRegistry::<4>::default();
+        // For a power-of-two capacity these OIDs collide modulo the registry.
+        let _ = registry.publish_wal(1);
+        let _ = registry.publish_wal(5);
+        let _ = registry.publish_wal(9);
+        assert_eq!(registry.snapshot(1).unwrap().wal_generation, 1);
+        assert_eq!(registry.snapshot(5).unwrap().wal_generation, 1);
+        assert_eq!(registry.snapshot(9).unwrap().wal_generation, 1);
+        assert_eq!(registry.snapshots().len(), 3);
+    }
+
+    #[test]
+    fn reusable_snapshot_buffer_does_not_accumulate_stale_entries() {
+        let registry = SupervisorRegistry::<4>::default();
+        let _ = registry.publish_wal(42);
+        let mut snapshots = Vec::new();
+        registry.snapshots_into(&mut snapshots);
+        assert_eq!(snapshots.len(), 1);
+        registry.snapshots_into(&mut snapshots);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].database_oid, 42);
+    }
+
+    #[test]
     fn newer_maintenance_generation_survives_old_ack() {
         let registry = SupervisorRegistry::<1>::default();
         let _ = registry.request_recovery(42);
@@ -520,20 +638,40 @@ mod tests {
     fn starting_workers_count_toward_flush_capacity() {
         let registry = SupervisorRegistry::<1>::default();
         registry.set_flush_limit(42, 2);
-        assert!(registry.try_reserve_flush(42, 4));
-        assert!(registry.try_reserve_flush(42, 4));
-        assert!(!registry.try_reserve_flush(42, 4));
+        assert!(registry.try_reserve_flush(42));
+        assert!(registry.try_reserve_flush(42));
+        assert!(!registry.try_reserve_flush(42));
         assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 2);
     }
 
     #[test]
-    fn future_deadline_keeps_earliest_value() {
+    fn flush_start_requires_reservation_and_preserves_total() {
+        let registry = SupervisorRegistry::<1>::default();
+        registry.set_flush_limit(42, 2);
+        assert!(!registry.flush_started(42, 2));
+        assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 0);
+        assert!(registry.try_reserve_flush(42));
+        assert_eq!(registry.snapshot(42).unwrap().flush_workers(), 1);
+        assert!(registry.flush_started(42, 2));
+        let snapshot = registry.snapshot(42).unwrap();
+        assert_eq!(snapshot.flush_starting, 0);
+        assert_eq!(snapshot.flush_running, 1);
+        assert_eq!(snapshot.flush_workers(), 1);
+    }
+
+    #[test]
+    fn future_deadlines_keep_earliest_values_independently() {
         let registry = SupervisorRegistry::<1>::default();
         registry.schedule_flush_at_ms(42, 5_000);
         registry.schedule_flush_at_ms(42, 7_000);
         registry.schedule_flush_at_ms(42, 3_000);
-        assert_eq!(registry.snapshot(42).unwrap().next_flush_due_at_ms, 3_000);
+        registry.schedule_maintenance_at_ms(42, 9_000);
+        registry.schedule_maintenance_at_ms(42, 4_000);
+        let snapshot = registry.snapshot(42).unwrap();
+        assert_eq!(snapshot.next_flush_due_at_ms, 3_000);
+        assert_eq!(snapshot.next_maintenance_due_at_ms, 4_000);
         assert!(registry.consume_flush_deadline(42, 3_000));
+        assert!(registry.consume_maintenance_deadline(42, 4_000));
     }
 
     #[test]

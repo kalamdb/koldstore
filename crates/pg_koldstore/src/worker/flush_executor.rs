@@ -17,18 +17,10 @@ const FLUSH_EXECUTOR_FUNCTION: &str = "koldstore_flush_executor_main";
 const CANDIDATE_PAGE_SIZE: i64 = 16;
 const BUSY_RETRY: Duration = Duration::from_millis(200);
 
-/// Transitional queue notification used by the remaining foreground call site.
-/// It publishes post-commit work only; dynamic registration belongs exclusively
-/// to the supervisor.
-pub(crate) fn notify_flush_queue() {
-    super::wake::mark_flush_queue_pending();
-}
-
 /// Reconstructs queue dispatch hints after postmaster/worker recovery.
 /// Must run inside a database-local maintenance transaction.
 pub(crate) fn reconcile_queue_after_recovery(database_oid: u32) -> Result<(), String> {
-    let due = crate::sql::flush::jobs::count_pending_flush_jobs().map_err(|e| e.to_string())?;
-    if due > 0 {
+    if crate::sql::flush::jobs::has_due_pending_flush_jobs().map_err(|e| e.to_string())? {
         super::wake::mark_flush_queue_pending();
         return Ok(());
     }
@@ -80,11 +72,14 @@ fn pending_candidates() -> Result<Vec<PendingCandidate>, String> {
                    AND available_at <= clock_timestamp() \
                  ORDER BY available_at, updated_at, id \
                  LIMIT $1",
-                Some(1),
+                // SQL already supplies the hard page bound. Do not pass Some(1)
+                // here: that silently collapsed the intended fair page to one
+                // candidate and reintroduced head-of-line blocking.
+                None,
                 &[DatumWithOid::from(CANDIDATE_PAGE_SIZE)],
             )
             .map_err(|error| error.to_string())?;
-        let mut candidates = Vec::new();
+        let mut candidates = Vec::with_capacity(CANDIDATE_PAGE_SIZE as usize);
         for row in table {
             let table_oid = row
                 .get::<pgrx::pg_sys::Oid>(1)
@@ -166,18 +161,20 @@ struct FlushWorkerRegistration {
 }
 
 impl FlushWorkerRegistration {
-    fn start(database_oid: u32) -> Self {
+    fn start(database_oid: u32) -> Option<Self> {
         let effective_limit = u32::try_from(crate::guc::max_parallel_flush_jobs())
             .unwrap_or(1)
             .max(1);
-        super::wake::flush_started(database_oid, effective_limit);
+        if !super::wake::flush_started(database_oid, effective_limit) {
+            return None;
+        }
         let queue_generation = super::wake::supervisor_snapshot(database_oid)
             .map(|snapshot| snapshot.flush_generation)
             .unwrap_or(0);
-        Self {
+        Some(Self {
             database_oid,
             queue_generation,
-        }
+        })
     }
 
     fn reconcile_queue(&self, outcome: ClaimOutcome) {
@@ -220,7 +217,12 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         Some(pgrx::pg_sys::Oid::from(database_oid)),
         None,
     );
-    let registration = FlushWorkerRegistration::start(database_oid);
+    let Some(registration) = FlushWorkerRegistration::start(database_oid) else {
+        pgrx::log!(
+            "koldstore flush executor db={database_oid}: stale/unreserved start; exiting before queue access"
+        );
+        return;
+    };
 
     let (claim_outcome, claimed) = match txn::run(claim_one_flush_job) {
         Ok(claimed) => claimed,

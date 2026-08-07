@@ -1,7 +1,8 @@
 //! Built-in auto-flush eligibility helpers (PostgreSQL-free).
 //!
-//! Owns the catalog SQL predicates and candidate-table plans used by the
-//! database worker flush tick. SPI execution stays in `pg_koldstore`.
+//! Owns the catalog SQL predicates and broad reconciliation plan used by the
+//! ephemeral database maintenance worker. Normal WAL scheduling is touched-table
+//! driven in `pg_koldstore`; this module no longer exposes polling/watchdog plans.
 
 use koldstore_common::{FlushPolicy, ManageTableOptions, SqlParamType, SqlStatement};
 use serde_json::Value;
@@ -19,6 +20,24 @@ s.active
   AND COALESCE((s.options->>'auto_flush')::boolean, true)
 "#;
 
+const ACTIVE_FLUSH_JOB_EXCLUSION: &str = r#"
+  AND NOT EXISTS (
+        SELECT 1
+        FROM koldstore.jobs j
+        WHERE j.table_oid = s.table_oid
+          AND j.job_type = 'flush'
+          AND j.status IN ('pending', 'running')
+      )
+  AND NOT EXISTS (
+        SELECT 1
+        FROM koldstore.jobs j
+        WHERE j.table_oid = s.table_oid
+          AND j.job_type = 'flush'
+          AND j.status = 'error'
+          AND j.updated_at > now() - interval '60 seconds'
+      )
+"#;
+
 /// Auto-flush SQL planning error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum AutoFlushPlanError {
@@ -27,10 +46,13 @@ pub enum AutoFlushPlanError {
     Sql(String),
 }
 
-/// Plans a scan of auto-flush candidate tables with options and mirror counts.
+/// Plans a full scheduler reconciliation.
 ///
-/// Callers evaluate [`scheduler_should_flush_parsed`] (or OlderThan SPI) per row
-/// and stop at the first due table.
+/// This is intentionally *not* the normal WAL path. WAL-applied tables are
+/// evaluated immediately from their post-bump counters, while this broad plan is
+/// reserved for configuration changes, startup, recovery, and diagnostics.
+/// Tables that already own an active job are excluded so a large queue cannot
+/// repeatedly occupy the first reconciliation page.
 ///
 /// # Errors
 ///
@@ -48,21 +70,18 @@ LEFT JOIN koldstore.manifest m
   ON m.table_oid = s.table_oid
  AND m.scope_key = ''
 WHERE {AUTO_FLUSH_TABLE_PREDICATE}
-  AND NOT EXISTS (
-        SELECT 1
-        FROM koldstore.jobs j
-        WHERE j.table_oid = s.table_oid
-          AND j.job_type = 'flush'
-          AND j.status = 'running'
+  AND (
+        s.options->'flush_policy'->>'type' = 'older_than'
+        OR (
+            COALESCE(s.options->'flush_policy'->>'type', 'row_limit') = 'row_limit'
+            AND COALESCE(m.mirror_row_count, 0) > COALESCE(
+                (s.options->'flush_policy'->>'hot_row_limit')::bigint,
+                (s.options->>'hot_row_limit')::bigint,
+                0
+            )
+        )
       )
-  AND NOT EXISTS (
-        SELECT 1
-        FROM koldstore.jobs j
-        WHERE j.table_oid = s.table_oid
-          AND j.job_type = 'flush'
-          AND j.status = 'error'
-          AND j.updated_at > now() - interval '60 seconds'
-      )
+{ACTIVE_FLUSH_JOB_EXCLUSION}
 ORDER BY s.created_at DESC, s.table_oid DESC
 "#
         ),
@@ -70,28 +89,11 @@ ORDER BY s.created_at DESC, s.table_oid DESC
     .map_err(|error| AutoFlushPlanError::Sql(error.to_string()))
 }
 
-/// Plans whether this database still has any auto-flush-eligible managed table.
-///
-/// # Errors
-///
-/// Returns an error when SQL statement metadata cannot be prepared.
-pub fn plan_database_has_auto_flush_tables() -> Result<SqlStatement, AutoFlushPlanError> {
-    SqlStatement::read(
-        "database has auto-flush tables",
-        &format!(
-            r#"
-SELECT EXISTS (
-    SELECT 1
-    FROM koldstore.schemas s
-    WHERE {AUTO_FLUSH_TABLE_PREDICATE}
-)
-"#
-        ),
-    )
-    .map_err(|error| AutoFlushPlanError::Sql(error.to_string()))
-}
-
 /// Plans OlderThan eligibility: count and max seq among mirror rows below a cutoff.
+///
+/// This lower-level plan is retained for the flush selection path itself. Clock
+/// scheduling uses `worker::timed_policy`, which evaluates due state + next
+/// deadline together in one bounded index walk.
 ///
 /// Bind parameters:
 /// - `$1` exclusive upper `seq` bound (snowflake cutoff)
@@ -140,9 +142,8 @@ fn policy_needs_flush(policy: &FlushPolicy, pending_rows: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        plan_database_has_auto_flush_tables, plan_older_than_eligible_mirror_rows,
-        plan_select_auto_flush_candidate_tables, scheduler_should_flush,
-        AUTO_FLUSH_TABLE_PREDICATE,
+        plan_older_than_eligible_mirror_rows, plan_select_auto_flush_candidate_tables,
+        scheduler_should_flush, AUTO_FLUSH_TABLE_PREDICATE,
     };
     use serde_json::json;
 
@@ -220,12 +221,15 @@ mod tests {
     }
 
     #[test]
-    fn auto_flush_sql_plans_embed_shared_predicate() {
+    fn reconciliation_plan_excludes_active_jobs() {
         let candidates = plan_select_auto_flush_candidate_tables().unwrap();
         assert!(candidates.sql.contains("auto_flush"));
         assert!(candidates.sql.contains(AUTO_FLUSH_TABLE_PREDICATE.trim()));
-        let exists = plan_database_has_auto_flush_tables().unwrap();
-        assert!(exists.sql.contains(AUTO_FLUSH_TABLE_PREDICATE.trim()));
+        assert!(candidates.sql.contains("m.mirror_row_count"));
+        assert!(candidates.sql.contains("hot_row_limit"));
+        assert!(candidates.sql.contains("older_than"));
+        assert!(candidates.sql.contains("IN ('pending', 'running')"));
+
         let older = plan_older_than_eligible_mirror_rows("\"koldstore\".\"items__cl\"").unwrap();
         assert!(older.sql.contains("seq < $1"));
         assert!(older.sql.contains("LIMIT $2"));

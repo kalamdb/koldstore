@@ -25,6 +25,20 @@ pub fn minimum_id_at_unix_millis(unix_millis: i64) -> Option<i64> {
     i64::try_from(elapsed.checked_shl(TIMESTAMP_SHIFT as u32)?).ok()
 }
 
+/// Returns the wall-clock millisecond encoded in a generated Snowflake id.
+///
+/// KoldStore mirror sequence ids are monotonic Snowflakes whose high bits are
+/// elapsed milliseconds from [`KOLDSTORE_EPOCH_MILLIS`].  This inverse helper
+/// lets the scheduler arm an exact `OlderThan` wake without polling.  Negative
+/// or otherwise non-representable ids return `None` rather than wrapping.
+#[must_use]
+pub fn unix_millis_from_id(id: i64) -> Option<i64> {
+    let id = u64::try_from(id).ok()?;
+    let elapsed = id >> TIMESTAMP_SHIFT;
+    let unix_millis = KOLDSTORE_EPOCH_MILLIS.checked_add(elapsed)?;
+    i64::try_from(unix_millis).ok()
+}
+
 /// Snowflake generation error.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SnowflakeError {
@@ -240,5 +254,16 @@ mod tests {
             minimum_id_at_unix_millis(KOLDSTORE_EPOCH_MILLIS as i64 - 1),
             None
         );
+    }
+
+    #[test]
+    fn inverse_timestamp_ignores_worker_and_sequence_bits() {
+        let timestamp = 42_u64;
+        let id = compose_id(timestamp, MAX_WORKER_ID, MAX_SEQUENCE).unwrap();
+        assert_eq!(
+            unix_millis_from_id(id),
+            Some(KOLDSTORE_EPOCH_MILLIS as i64 + timestamp as i64)
+        );
+        assert_eq!(unix_millis_from_id(-1), None);
     }
 }
