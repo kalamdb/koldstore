@@ -1,12 +1,7 @@
 #[pg_test]
-fn async_manage_starts_database_worker() {
-    // #[pg_test] runs the whole body inside one SQL-function transaction.
-    // Logical slot creation waits for concurrent XIDs, so provision before any
-    // SPI write (CREATE TABLE) or the provisioner deadlocks with this backend.
-    //
-    // The WAL applier finishes database connect only after this transaction
-    // commits, so we cannot assert pg_stat_activity visibility here. E2E tests
-    // cover post-commit visibility; this test covers registration + cleanup.
+fn async_manage_schedules_database_maintenance() {
+    // #[pg_test] runs the body inside one SQL-function transaction. Provision
+    // the logical slot before CREATE TABLE assigns the parent transaction an XID.
     preprovision_async_mirror();
 
     let suffix = unique_suffix("async_worker");
@@ -27,15 +22,13 @@ fn async_manage_starts_database_worker() {
     ))
     .expect("manage_table async");
 
-    // manage_table required the applier (wait_for_startup). A second ensure in
-    // this same open transaction must not try to register another worker.
-    let ensured_again = Spi::get_one::<bool>("SELECT koldstore.internal_ensure_async_mirror_worker()")
-        .expect("second ensure")
+    // The new architecture has no permanent per-database worker to "ensure".
+    // This compatibility call only publishes a coalesced maintenance request;
+    // it must never block on or register a dynamic worker from this backend.
+    let requested = Spi::get_one::<bool>("SELECT koldstore.internal_ensure_async_mirror_worker()")
+        .expect("request maintenance")
         .expect("non-null");
-    assert!(
-        !ensured_again,
-        "second ensure must be an idempotent no-op after manage registered the applier"
-    );
+    assert!(requested, "maintenance request should be accepted while enabled");
 
     Spi::run(&format!(
         "SELECT koldstore.unmanage_table('{relation}'::regclass, true, true)"
@@ -50,14 +43,14 @@ fn async_manage_starts_database_worker() {
 }
 
 #[pg_test]
-fn async_worker_guc_off_skips_registration() {
+fn async_worker_guc_off_skips_maintenance_request() {
     Spi::run("SET koldstore.internal_async_mirror_worker = off").expect("set guc");
-    let registered = Spi::get_one::<bool>("SELECT koldstore.internal_ensure_async_mirror_worker()")
-        .expect("ensure with guc off")
+    let requested = Spi::get_one::<bool>("SELECT koldstore.internal_ensure_async_mirror_worker()")
+        .expect("request with guc off")
         .expect("non-null");
     assert!(
-        !registered,
-        "ensure must be a no-op when the worker GUC is off"
+        !requested,
+        "maintenance request must be a no-op when the worker GUC is off"
     );
     Spi::run("RESET koldstore.internal_async_mirror_worker").expect("reset guc");
 }

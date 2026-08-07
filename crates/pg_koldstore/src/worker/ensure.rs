@@ -1,18 +1,16 @@
 //! Compatibility shims for the former session-side WAL-worker ensure API.
 //!
-//! Production backends never call RegisterDynamicBackgroundWorker. They mark
-//! transaction-local maintenance intent; a successful top-level commit publishes
-//! the shared event and wakes the single cluster supervisor.
-
-use koldstore_worker::DatabaseOid;
+//! Production backends never register a persistent WAL worker. They publish
+//! durable/shared work and wake the single cluster supervisor, which owns all
+//! maintenance/executor registration.
 
 /// Legacy compatibility hook; there is no backend-local WORKER_ENSURED state anymore.
 pub(crate) fn mark_worker_not_ensured() {}
 
-/// Requests maintenance for the current database after the surrounding commit.
+/// Requests maintenance for the current database.
 ///
-/// The function deliberately does not wait for process startup and does not
-/// inspect pg_stat_activity. If the caller rolls back, no worker is dispatched.
+/// Returns true when a request was accepted. The function deliberately does
+/// not wait for process startup and does not inspect pg_stat_activity.
 pub(crate) fn ensure_async_mirror_worker() -> Result<bool, String> {
     if !crate::guc::async_mirror_worker_enabled() {
         return Ok(false);
@@ -25,45 +23,31 @@ pub(crate) fn ensure_async_mirror_worker() -> Result<bool, String> {
     Ok(true)
 }
 
-/// Compatibility form used by old callers that already know a database OID.
-///
-/// Cross-database calls cannot be represented by a current-backend transaction
-/// dirty bit, so this form is only safe for supervisor/recovery code and directly
-/// publishes a durable recovery hint. Normal client code uses the no-argument form.
-pub(crate) fn ensure_async_mirror_worker_for(database_oid: DatabaseOid) -> Result<bool, String> {
-    if !crate::guc::async_mirror_worker_enabled()
-        || crate::worker::wake::ensure_paused(database_oid.get())
-    {
-        return Ok(false);
-    }
-    crate::worker::wake::request_recovery(database_oid.get());
-    Ok(true)
-}
-
 /// Former once-per-backend ensure path.
+///
+/// It is now intentionally cheap and idempotent: publish a maintenance hint and
+/// return. Shared generations/reservations coalesce repeated calls.
 pub(crate) fn ensure_async_mirror_worker_once_if_needed() {
     let _ = ensure_async_mirror_worker();
 }
 
 /// Requires automatic async maintenance to be enabled before capture activation.
-///
-/// The activation transaction marks scheduling dirty. The worker is dispatched
-/// only after publication/catalog activation commits, so it cannot race ahead of
-/// an uncommitted manage_table transaction.
 pub(crate) fn require_async_mirror_worker() -> Result<(), String> {
     if !crate::guc::async_mirror_worker_enabled() {
         return Err(
             "async mirror capture requires koldstore.internal_async_mirror_worker=on".to_string(),
         );
     }
+    // Publication/slot activation is transactional. Request supervisor work only
+    // after that transaction commits; abort/prepare clears this dirty bit.
     crate::worker::wake::mark_schedule_pending();
     Ok(())
 }
 
 /// Internal compatibility SQL entry point used by existing tests/diagnostics.
 ///
-/// It now requests supervisor maintenance at transaction commit rather than
-/// registering a process in this client backend.
+/// It now wakes/schedules the supervisor rather than registering a process in
+/// this client backend. New background-progress tests should be passive.
 #[pgrx::pg_extern(
     name = "internal_ensure_async_mirror_worker",
     schema = "koldstore",
@@ -90,7 +74,7 @@ pub fn set_async_mirror_ensure_paused_pg(paused: bool) -> bool {
         true
     } else {
         crate::worker::wake::resume_ensure(oid);
-        crate::worker::wake::mark_schedule_pending();
+        crate::worker::wake::request_recovery(oid);
         true
     }
 }

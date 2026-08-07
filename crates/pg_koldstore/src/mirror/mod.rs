@@ -2,10 +2,9 @@
 //!
 //! Ownership:
 //! - `lifecycle` — slot / publication / advisory locks
-//! - `apply` — SPI peek/apply/advance (idempotent latest-state upserts)
+//! - `apply` — fixed-fence SPI peek/apply/advance (idempotent latest-state upserts)
 //! - `provision` — one-shot slot provisioner worker
-//! - `task` — async-mirror apply tick for the shared DB worker
-//! - `worker` — C entry point for the persistent applier
+//! - `worker` — C entry point for the ephemeral database-maintenance worker
 //!
 //! The PostgreSQL-free `pgoutput` decoder lives in [`koldstore_mirror::pgoutput`].
 
@@ -17,7 +16,5 @@ pub mod lifecycle;
 pub mod provision;
 #[cfg(feature = "pg")]
 pub mod status;
-#[cfg(feature = "pg")]
-pub(crate) mod task;
 #[cfg(feature = "pg")]
 pub mod worker;

@@ -22,8 +22,7 @@ pub use policy::{
 pub use scheduler::{flush_check_due, millis_until_flush_check, PendingDrainBudget};
 pub use supervisor::{
     DatabaseWorkSnapshot, SupervisorPid, SupervisorRegistry, EVENT_FLUSH_QUEUE_DIRTY,
-    EVENT_RECOVERY_REQUIRED, EVENT_SCHEDULE_DIRTY, EVENT_WAL_DIRTY,
-    SUPERVISOR_REGISTRY_CAPACITY,
+    EVENT_RECOVERY_REQUIRED, EVENT_SCHEDULE_DIRTY, EVENT_WAL_DIRTY, SUPERVISOR_REGISTRY_CAPACITY,
 };
 pub use task::TickResult;
 pub use wake::{
