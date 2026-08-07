@@ -37,13 +37,12 @@ pub(crate) fn register_if_shared_preload() {
         return;
     }
 
-    // These legacy helpers no longer execute in production. Referencing the
-    // function items keeps upgrade-compatibility code linkable while their SQL
-    // callers/tests are removed in the final catalog cleanup phase.
+    // These old advisory registration helpers are retained temporarily for
+    // extension-upgrade compatibility but no longer participate in production
+    // worker dispatch. Referencing them avoids dead-code drift until the final
+    // catalog/upgrade cleanup commit removes them together.
     let _ = crate::mirror::lifecycle::lock_worker_registration;
     let _ = crate::mirror::lifecycle::try_lock_worker_registration;
-    let _ = crate::sql::flush::jobs::select_pending_flush_candidate;
-    let _ = crate::sql::flush::jobs::purge_old_jobs_tick;
 
     BackgroundWorkerBuilder::new(SUPERVISOR_NAME)
         .set_type(SUPERVISOR_NAME)
@@ -172,9 +171,7 @@ fn dispatch_shared_work() -> bool {
             && !super::wake::ensure_paused(snapshot.database_oid)
             && super::wake::try_reserve_maintenance(snapshot.database_oid)
         {
-            if let Err(error) =
-                super::register_maintenance_from_supervisor(snapshot.database_oid)
-            {
+            if let Err(error) = super::register_maintenance_from_supervisor(snapshot.database_oid) {
                 super::wake::cancel_maintenance_start(snapshot.database_oid);
                 registration_pressure = true;
                 pgrx::log!(

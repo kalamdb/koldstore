@@ -18,12 +18,8 @@ const CANDIDATE_PAGE_SIZE: i64 = 16;
 const BUSY_RETRY: Duration = Duration::from_millis(200);
 
 /// Compatibility entry point used by queue callers while call sites migrate.
-/// It publishes a post-commit queue wake; it never registers a process itself.
+/// It only publishes a post-commit queue wake; it never registers a process.
 pub(crate) fn spawn_flush_executor_if_needed() -> Result<bool, String> {
-    let pending = crate::sql::flush::jobs::count_pending_flush_jobs().map_err(|e| e.to_string())?;
-    if pending <= 0 {
-        return Ok(false);
-    }
     super::wake::mark_flush_queue_pending();
     Ok(true)
 }
@@ -31,10 +27,6 @@ pub(crate) fn spawn_flush_executor_if_needed() -> Result<bool, String> {
 /// Compatibility entry point for the scheduler. Capacity/fan-out belong to the
 /// supervisor; this function only publishes one coalesced queue event.
 pub(crate) fn spawn_flush_executors_for_pending_work() -> Result<u32, String> {
-    let pending = crate::sql::flush::jobs::count_pending_flush_jobs().map_err(|e| e.to_string())?;
-    if pending <= 0 {
-        return Ok(0);
-    }
     super::wake::mark_flush_queue_pending();
     Ok(1)
 }

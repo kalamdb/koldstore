@@ -166,9 +166,9 @@ impl<const N: usize> SupervisorRegistry<N> {
 
     /// Clears the supervisor PID only if it still belongs to `pid`.
     pub fn unregister_supervisor(&self, pid: SupervisorPid) {
-        let _ =
-            self.supervisor_pid
-                .compare_exchange(pid.get(), 0, Ordering::AcqRel, Ordering::Acquire);
+        let _ = self
+            .supervisor_pid
+            .compare_exchange(pid.get(), 0, Ordering::AcqRel, Ordering::Acquire);
     }
 
     /// Current supervisor PID, if registered.

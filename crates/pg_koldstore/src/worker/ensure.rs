@@ -25,11 +25,12 @@ pub(crate) fn ensure_async_mirror_worker() -> Result<bool, String> {
 
 /// Former once-per-backend ensure path.
 ///
-/// It is now intentionally cheap and idempotent: publish a maintenance hint and
-/// return. Shared generations/reservations coalesce repeated calls.
-pub(crate) fn ensure_async_mirror_worker_once_if_needed() {
-    let _ = ensure_async_mirror_worker();
-}
+/// This is intentionally a no-op. In particular, explicit synchronous fence
+/// operations call this legacy hook from older code paths; scheduling a fresh
+/// maintenance worker from there would make unrelated WAL advance immediately
+/// after the explicit fence. Normal source commits and manage activation already
+/// publish their own transactional supervisor generations.
+pub(crate) fn ensure_async_mirror_worker_once_if_needed() {}
 
 /// Requires automatic async maintenance to be enabled before capture activation.
 pub(crate) fn require_async_mirror_worker() -> Result<(), String> {
@@ -46,8 +47,8 @@ pub(crate) fn require_async_mirror_worker() -> Result<(), String> {
 
 /// Internal compatibility SQL entry point used by existing tests/diagnostics.
 ///
-/// It now wakes/schedules the supervisor rather than registering a process in
-/// this client backend. New background-progress tests should be passive.
+/// It now schedules the supervisor rather than registering a process in this
+/// client backend. New background-progress tests should be passive.
 #[pgrx::pg_extern(
     name = "internal_ensure_async_mirror_worker",
     schema = "koldstore",

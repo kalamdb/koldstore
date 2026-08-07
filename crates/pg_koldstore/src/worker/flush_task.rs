@@ -20,11 +20,6 @@ pub(crate) struct FlushTickResult {
 }
 
 /// Selects a bounded set of due auto-flush tables.
-///
-/// A single WAL apply can make several tables due. Returning only the first one
-/// used to leave the remainder dependent on the next periodic scheduler wake.
-/// This bounded page keeps the transaction finite while ensuring all discovered
-/// due tables receive durable jobs in the same maintenance pass.
 fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool), String> {
     pgrx::Spi::connect(|client| -> Result<(Vec<u32>, bool), String> {
         let statement =
@@ -68,16 +63,23 @@ fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool), String> {
     })
 }
 
-/// Runs one flush-scheduler tick in the current backend (tests / diagnostics).
+/// Runs one scheduler tick in the current backend for tests/diagnostics.
 ///
-/// SQL contract: `koldstore.internal_run_flush_scheduler_tick() -> boolean`
-/// (`true` when a flush job completed inline; normally `false` in queue mode).
+/// This explicit diagnostic entry point also performs one bounded orphan
+/// recovery pass so existing `#[pg_test]` can validate recovery inside its
+/// single backend transaction. The production maintenance hot path below does
+/// NOT hide recovery inside ordinary scheduler evaluation.
 #[pgrx::pg_extern(
     name = "internal_run_flush_scheduler_tick",
     schema = "koldstore",
     security_definer
 )]
 pub fn run_flush_scheduler_tick_pg() -> bool {
+    let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()
+        .unwrap_or_else(|error| pgrx::error!("flush recovery tick failed: {error}"));
+    if reclaimed > 0 {
+        pgrx::log!("koldstore diagnostic scheduler reclaimed {reclaimed} orphan job(s)");
+    }
     run_flush_scheduler_tick()
         .map(|result| result.completed)
         .unwrap_or_else(|error| pgrx::error!("flush scheduler tick failed: {error}"))
@@ -85,7 +87,7 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
 
 /// Evaluates auto-flush eligibility and durably enqueues all due tables in one
 /// bounded page. Recovery/retention are deliberately not hidden side effects of
-/// this hot path; crash reconciliation belongs to the recovery worker path.
+/// this production hot path; crash reconciliation belongs to DB maintenance.
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     let (due_tables, more_due) = select_due_auto_flush_tables()?;
     let mut had_due_table = false;
@@ -128,8 +130,8 @@ pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
     if crate::guc::flush_execution_mode() == crate::settings::FlushExecutionMode::Queue
         && had_due_table
     {
-        // Compatibility helper now only publishes FLUSH_QUEUE_DIRTY. The
-        // supervisor owns all dynamic-worker registration and concurrency.
+        // Compatibility helper only publishes FLUSH_QUEUE_DIRTY. The supervisor
+        // owns all dynamic-worker registration and concurrency.
         let _ = super::spawn_flush_executors_for_pending_work()?;
     }
 
