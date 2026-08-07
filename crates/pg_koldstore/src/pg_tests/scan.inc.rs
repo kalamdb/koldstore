@@ -461,7 +461,12 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
         "Strategy: Ordered Progressive",
         "Seen Keys: 4",
         "Hot Rows: 1",
-        "Rows Scanned: 3",
+        // Late materialization: compete pass + body hydrate each decode the
+        // three cold rows (EXPLAIN Rows Scanned is decoded-row I/O, not unique).
+        "Rows Scanned: 6",
+        "Cold Compete Opens: 1",
+        "Cold Body Opens: 1",
+        "Parquet Segments Opened: 2",
         "Input Rows: 4",
         "Output Rows: 4",
         "Rows Removed by Merge: 0",
@@ -969,6 +974,73 @@ fn packed_row_group_arrays_skip_parquet_when_scalar_segment_bounds_overlap() {
         crate::catalog::cache::packed_row_group_spi_load_count(),
         0,
         "one-column lookup must not execute a secondary packed-metadata query"
+    );
+}
+
+#[pg_test]
+fn repeated_cold_pk_lookups_reuse_segment_index_and_object_store_client() {
+    let suffix = unique_suffix("cold_pk_cache");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body) VALUES (1, 'cold-a'), (2, 'cold-b')"
+    ))
+    .expect("insert cold rows");
+    manage_for_cold_flush(&relation, &storage);
+    assert!(flush_table_rows(&relation, true) >= 1);
+
+    crate::catalog::cache::invalidate_all();
+    crate::catalog::cache::reset_segment_index_candidate_spi_load_count();
+
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 1")),
+        "cold-a"
+    );
+    assert_eq!(
+        crate::catalog::cache::segment_index_candidate_spi_load_count(),
+        1,
+        "first cold PK miss must load segment-index candidates once"
+    );
+    assert_eq!(
+        crate::object_store::cached_object_store_client_count(),
+        1,
+        "first cold open must cache one ObjectStore client"
+    );
+
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 1")),
+        "cold-a"
+    );
+    assert_eq!(
+        crate::catalog::cache::segment_index_candidate_spi_load_count(),
+        1,
+        "repeated cold PK with the same bounds must reuse the segment-index cache"
+    );
+    assert_eq!(
+        crate::object_store::cached_object_store_client_count(),
+        1,
+        "repeated cold opens must reuse the same ObjectStore client"
+    );
+
+    crate::catalog::cache::invalidate_all();
+    assert_eq!(
+        crate::object_store::cached_object_store_client_count(),
+        0,
+        "global invalidation must drop cached ObjectStore clients"
+    );
+    crate::catalog::cache::reset_segment_index_candidate_spi_load_count();
+    assert_eq!(
+        spi_get_text(&format!("SELECT body FROM {relation} WHERE id = 1")),
+        "cold-a"
+    );
+    assert_eq!(
+        crate::catalog::cache::segment_index_candidate_spi_load_count(),
+        1,
+        "after invalidate, the next cold PK must reload segment-index candidates"
     );
 }
 

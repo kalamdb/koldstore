@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[cfg(feature = "pg")]
 use koldstore_catalog::{
     decode::InSyncManifestScanContext, decode_managed_table_snapshot_str, BoundedOidCache,
-    ManagedTableSnapshot, ManagedTableSnapshotCache, OptionalLookupCache,
+    ManagedTableSnapshot, ManagedTableSnapshotCache, OptionalLookupCache, SegmentIndexLookupShape,
 };
 #[cfg(feature = "pg")]
 use koldstore_common::ColumnRef;
@@ -29,6 +29,13 @@ type ManifestScanCache = OptionalLookupCache<ManifestScanCacheKey, Arc<CachedMan
 const PACKED_ROW_GROUP_CACHE_LIMIT: usize = 128;
 #[cfg(feature = "pg")]
 const COLD_COLUMN_BOUNDS_CACHE_LIMIT: usize = 128;
+/// Cap for refined cold_segment_index candidate lookups.
+///
+/// Point-PK traffic can produce many distinct bound keys; LRU eviction keeps
+/// residency bounded while still amortizing repeated cold PK probes (bench /
+/// hot keys). Values are `Arc<[SegmentStatsHint]>` after row-group refine.
+#[cfg(feature = "pg")]
+const SEGMENT_INDEX_CANDIDATE_CACHE_LIMIT: usize = 64;
 
 /// Cache identity for aggregate bounds of one indexed cold column.
 #[cfg(feature = "pg")]
@@ -116,6 +123,61 @@ pub struct CachedPackedRowGroupIndex {
 type PackedRowGroupCache =
     OptionalLookupCache<PackedRowGroupCacheKey, Arc<CachedPackedRowGroupIndex>>;
 
+/// Cache identity for one refined `cold_segment_index` candidate lookup.
+///
+/// Bounds are Sort Key V1 bytea (`Arc<[u8]>`). Generation scopes entries to one
+/// published manifest; table invalidation also drops them.
+#[cfg(feature = "pg")]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SegmentIndexCandidateCacheKey {
+    table_oid: u32,
+    generation: u64,
+    column_id: i16,
+    type_oid: u32,
+    codec_version: i16,
+    lower: Option<Arc<[u8]>>,
+    upper: Option<Arc<[u8]>>,
+}
+
+#[cfg(feature = "pg")]
+impl SegmentIndexCandidateCacheKey {
+    /// Builds a generation-scoped key for one encodeable prune-column lookup.
+    #[must_use]
+    pub fn new(
+        table_oid: u32,
+        generation: u64,
+        column_id: i16,
+        type_oid: u32,
+        codec_version: i16,
+        lower: Option<Arc<[u8]>>,
+        upper: Option<Arc<[u8]>>,
+    ) -> Self {
+        Self {
+            table_oid,
+            generation,
+            column_id,
+            type_oid,
+            codec_version,
+            lower,
+            upper,
+        }
+    }
+}
+
+/// Refined segment candidates for one segment-index SPI lookup.
+#[cfg(feature = "pg")]
+#[derive(Debug, Clone)]
+pub struct CachedSegmentIndexCandidates {
+    /// Bound shape that produced the SPI statement.
+    pub shape: SegmentIndexLookupShape,
+    /// Post-refine hints (`selected_row_groups` already applied).
+    pub candidates: Arc<[SegmentStatsHint]>,
+}
+
+#[cfg(feature = "pg")]
+type SegmentIndexCandidateCache =
+    OptionalLookupCache<SegmentIndexCandidateCacheKey, Arc<CachedSegmentIndexCandidates>>;
+
 /// Counts SPI loads of managed-table snapshots (test / diagnostics).
 #[cfg(feature = "pg")]
 static MANAGED_TABLE_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
@@ -123,6 +185,10 @@ static MANAGED_TABLE_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
 /// Counts packed row-group SPI loads (test / diagnostics).
 #[cfg(feature = "pg")]
 static PACKED_ROW_GROUP_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
+
+/// Counts cold_segment_index candidate SPI loads (test / diagnostics).
+#[cfg(feature = "pg")]
+static SEGMENT_INDEX_CANDIDATE_SPI_LOADS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "pg")]
 type ManifestPlannerHintCache = OptionalLookupCache<u32, (usize, u64)>;
@@ -142,6 +208,10 @@ thread_local! {
         std::cell::RefCell::new(OptionalLookupCache::with_limit(PACKED_ROW_GROUP_CACHE_LIMIT));
     static COLD_COLUMN_BOUNDS_CACHE: std::cell::RefCell<ColdColumnBoundsCache> =
         std::cell::RefCell::new(OptionalLookupCache::with_limit(COLD_COLUMN_BOUNDS_CACHE_LIMIT));
+    static SEGMENT_INDEX_CANDIDATE_CACHE: std::cell::RefCell<SegmentIndexCandidateCache> =
+        std::cell::RefCell::new(OptionalLookupCache::with_limit(
+            SEGMENT_INDEX_CANDIDATE_CACHE_LIMIT,
+        ));
 }
 
 /// Cached cold-segment listing + storage context for one managed table.
@@ -262,6 +332,11 @@ pub fn invalidate_table(table_oid: pgrx::pg_sys::Oid) {
             .borrow_mut()
             .retain(|cache_key| cache_key.table_oid != key);
     });
+    SEGMENT_INDEX_CANDIDATE_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .retain(|cache_key| cache_key.table_oid != key);
+    });
     // Footers are path-keyed across tables; drop them on any managed-table change.
     koldstore_parquet::parquet_footer_cache::clear();
 }
@@ -287,7 +362,11 @@ pub fn invalidate_all() {
     COLD_COLUMN_BOUNDS_CACHE.with(|cache| {
         cache.borrow_mut().clear();
     });
+    SEGMENT_INDEX_CANDIDATE_CACHE.with(|cache| {
+        cache.borrow_mut().clear();
+    });
     koldstore_parquet::parquet_footer_cache::clear();
+    crate::object_store::invalidate_cached_object_store_clients();
 }
 
 /// Loads complete aggregate bounds for one indexed cold column.
@@ -404,6 +483,50 @@ pub fn packed_row_group_spi_load_count() -> u64 {
 #[cfg(feature = "pg")]
 pub fn reset_packed_row_group_spi_load_count() {
     PACKED_ROW_GROUP_SPI_LOADS.store(0, Ordering::Relaxed);
+}
+
+/// Returns a cached refined segment-index candidate list.
+///
+/// Outer `Option` is a cache miss; inner `Option` is unused today (absent
+/// lookups fall through to the full active segment list without caching).
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn cached_segment_index_candidates(
+    key: &SegmentIndexCandidateCacheKey,
+) -> Option<Arc<CachedSegmentIndexCandidates>> {
+    SEGMENT_INDEX_CANDIDATE_CACHE
+        .with(|cache| cache.borrow_mut().get(key))
+        .and_then(std::convert::identity)
+}
+
+/// Stores refined segment-index candidates for a generation-scoped lookup key.
+#[cfg(feature = "pg")]
+pub fn cache_segment_index_candidates(
+    key: SegmentIndexCandidateCacheKey,
+    value: Arc<CachedSegmentIndexCandidates>,
+) {
+    SEGMENT_INDEX_CANDIDATE_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, Some(value));
+    });
+}
+
+/// Records one cold_segment_index candidate SPI load.
+#[cfg(feature = "pg")]
+pub fn record_segment_index_candidate_spi_load() {
+    SEGMENT_INDEX_CANDIDATE_SPI_LOADS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Returns how many segment-index candidate SPI loads ran in this backend.
+#[cfg(feature = "pg")]
+#[must_use]
+pub fn segment_index_candidate_spi_load_count() -> u64 {
+    SEGMENT_INDEX_CANDIDATE_SPI_LOADS.load(Ordering::Relaxed)
+}
+
+/// Resets the segment-index candidate SPI counter.
+#[cfg(feature = "pg")]
+pub fn reset_segment_index_candidate_spi_load_count() {
+    SEGMENT_INDEX_CANDIDATE_SPI_LOADS.store(0, Ordering::Relaxed);
 }
 
 /// Loads the migration catalog (columns / PK / indexed) from cache or SPI.

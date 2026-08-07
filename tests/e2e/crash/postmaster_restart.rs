@@ -2,6 +2,10 @@
 //!
 //! Gated by `KOLDSTORE_CRASH_POSTMASTER_RESTART=1` because it stops the shared
 //! pgrx cluster. Nightly crash readiness enables the gate with `--test-threads 1`.
+//!
+//! Covers the production regression: mid-flush crash → restart → insert more →
+//! manual `flush_table` (queue) must complete, not terminal-error on slot lock,
+//! and a later flush must still be able to run.
 
 use crate::common;
 
@@ -290,4 +294,263 @@ async fn postmaster_immediate_restart_mid_flush_recovers() -> Result<()> {
     .await
     .context("postmaster restart data-plane checks")?;
     Ok(())
+}
+
+/// Production-shaped path: crash mid-flush, restart, insert without waiting for
+/// auto-flush, then manual `flush_table` in queue mode.
+///
+/// Must not leave the table stuck after a job that erred with
+/// `could not acquire slot lock` — a second flush after more inserts must work.
+#[tokio::test]
+async fn postmaster_restart_manual_queue_flush_after_inserts_completes() -> Result<()> {
+    if !postmaster_restart_enabled() {
+        common::log_always(
+            "skipping postmaster restart crash test (set KOLDSTORE_CRASH_POSTMASTER_RESTART=1)",
+        );
+        return Ok(());
+    }
+    let _cluster = common::acquire_cluster_exclusive()?;
+    common::require_pgrx_server().await?;
+
+    let target = common::scenario_pg_matrix()
+        .into_iter()
+        .next()
+        .context("no pgrx target")?;
+    let version = target.version;
+
+    let initial_rows = 48_i64;
+    let post_restart_rows = 200_i64;
+    let second_wave_rows = 50_i64;
+    let total_rows = initial_rows + post_restart_rows + second_wave_rows;
+
+    let db = common::TestDb::start(target.clone(), "crash_pm_queue").await?;
+    let dbname = db.target.dbname.clone();
+    let port = db.target.port;
+    let table = db
+        .create_indexed_items_table("pm_queue_items", initial_rows)
+        .await?;
+    let relation = table.relation.clone();
+
+    db.client
+        .batch_execute("SET koldstore.min_max_rows_per_file = 1;")
+        .await?;
+    db.client
+        .execute(
+            r#"
+            SELECT koldstore.manage_table(
+              table_name => $1::text::regclass,
+              storage => $2,
+              hot_row_limit => 8,
+              min_flush_rows => 1,
+              max_rows_per_file => 64,
+              migration_order_by => 'id',
+              auto_flush => false
+            )
+            "#,
+            &[&relation, &db.storage_name],
+        )
+        .await
+        .context("manage_table")?;
+
+    // Park an in-flight flush, then crash the postmaster (same shape as the
+    // older system: flush started, then PG went away).
+    common::barrier_lock(&db.client).await?;
+    let flush_peer = common::connect(&common::PgTarget {
+        version,
+        port,
+        dbname: dbname.clone(),
+    })
+    .await?;
+    let flush_relation = relation.clone();
+    let flush_handle = tokio::spawn(async move {
+        let _ = flush_peer
+            .batch_execute("SET koldstore.failpoint = 'wait:after_select_rows';")
+            .await;
+        let _ = flush_peer
+            .query_one(
+                "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                &[&flush_relation],
+            )
+            .await;
+    });
+    sleep(Duration::from_millis(750)).await;
+    immediate_stop_and_start(version)?;
+    let _ = flush_handle.await;
+
+    let client = common::wait_for_postgres(&common::PgTarget {
+        version,
+        port,
+        dbname: dbname.clone(),
+    })
+    .await?;
+    assert_post_restart_runtime(&client).await?;
+    client
+        .batch_execute(&format!(
+            "ALTER DATABASE \"{dbname}\" SET koldstore.failpoint = ''; \
+             ALTER DATABASE \"{dbname}\" SET koldstore.flush_execution = 'queue'; \
+             SET koldstore.failpoint = ''; \
+             SET koldstore.flush_execution = 'queue'; \
+             SELECT pg_advisory_unlock_all();"
+        ))
+        .await
+        .context("disarm failpoint / enable queue flush after restart")?;
+
+    // Insert more without waiting for any background flush (operator path).
+    let insert_start = initial_rows + 1;
+    let insert_end = initial_rows + post_restart_rows;
+    client
+        .batch_execute(&format!(
+            r#"
+            INSERT INTO {relation} (id, account_id, title, qty, category)
+            SELECT
+              gs::bigint,
+              (gs % 17)::bigint,
+              'post-' || lpad(gs::text, 6, '0'),
+              (gs % 100)::integer,
+              'post'
+            FROM generate_series({insert_start}, {insert_end}) AS gs;
+            "#
+        ))
+        .await
+        .context("post-restart inserts")?;
+
+    // Manual flush only — no recover_segments, no auto-flush wait.
+    let job_id: String = client
+        .query_one(
+            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+            &[&relation],
+        )
+        .await
+        .context("manual flush_table after restart")?
+        .get(0);
+    anyhow::ensure!(!job_id.is_empty(), "flush_table must return a job uuid");
+
+    let rows_flushed = common::wait_for_flush_job_terminal(&client, &job_id)
+        .await
+        .with_context(|| {
+            format!(
+                "manual post-restart flush job {job_id} must complete \
+                 (not terminal error / slot-lock failure)"
+            )
+        })?;
+    common::log_always(format!(
+        "postmaster+queue: first manual flush job={job_id} rows_flushed={rows_flushed}"
+    ));
+    assert_no_slot_lock_job_errors(&client, &relation).await?;
+
+    // Prove the table is not permanently stuck after the first post-restart flush.
+    let second_start = insert_end + 1;
+    let second_end = insert_end + second_wave_rows;
+    client
+        .batch_execute(&format!(
+            r#"
+            INSERT INTO {relation} (id, account_id, title, qty, category)
+            SELECT
+              gs::bigint,
+              (gs % 17)::bigint,
+              'wave2-' || lpad(gs::text, 6, '0'),
+              (gs % 100)::integer,
+              'wave2'
+            FROM generate_series({second_start}, {second_end}) AS gs;
+            "#
+        ))
+        .await
+        .context("second-wave inserts")?;
+    let second_job: String = client
+        .query_one(
+            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+            &[&relation],
+        )
+        .await
+        .context("second manual flush_table")?
+        .get(0);
+    let _ = common::wait_for_flush_job_terminal(&client, &second_job)
+        .await
+        .with_context(|| {
+            format!("second flush job {second_job} must complete (table not stuck)")
+        })?;
+    assert_no_slot_lock_job_errors(&client, &relation).await?;
+
+    common::fence_async_mirror(&client).await?;
+    let visible = common::relation_row_count(&client, &relation).await?;
+    assert_eq!(
+        visible, total_rows,
+        "expected {total_rows} visible rows after restart+manual flushes, got {visible}"
+    );
+    crate::crash::invariants::assert_recovered_flush_data_plane(
+        &client,
+        &relation,
+        &db.storage_root,
+        crate::crash::invariants::RecoveredFlushExpect {
+            visible_rows: total_rows,
+            expect_hot_fully_pruned: false,
+            min_cold_segments: 1,
+            reference: None,
+        },
+    )
+    .await
+    .context("postmaster+queue data-plane checks")?;
+    Ok(())
+}
+
+async fn assert_post_restart_runtime(client: &tokio_postgres::Client) -> Result<()> {
+    let wal_level: String = client
+        .query_one("SHOW wal_level", &[])
+        .await
+        .context("SHOW wal_level after restart")?
+        .get(0);
+    anyhow::ensure!(
+        wal_level == "logical",
+        "post-restart wal_level must be logical (got {wal_level})"
+    );
+    let preload: String = client
+        .query_one("SHOW shared_preload_libraries", &[])
+        .await
+        .context("SHOW shared_preload_libraries after restart")?
+        .get(0);
+    anyhow::ensure!(
+        preload
+            .split(',')
+            .map(str::trim)
+            .any(|entry| entry == "koldstore"),
+        "post-restart shared_preload_libraries must include koldstore (got {preload})"
+    );
+    Ok(())
+}
+
+async fn assert_no_slot_lock_job_errors(
+    client: &tokio_postgres::Client,
+    relation: &str,
+) -> Result<()> {
+    let rows = client
+        .query(
+            r#"
+            SELECT id::text, status, coalesce(error_trace, '')
+            FROM koldstore.jobs
+            WHERE table_oid = $1::text::regclass::oid
+              AND job_type = 'flush'
+              AND (
+                status = 'error'
+                OR coalesce(error_trace, '') ILIKE '%slot lock%'
+                OR coalesce(error_trace, '') ILIKE '%acquire slot%'
+              )
+            "#,
+            &[&relation],
+        )
+        .await
+        .context("scan flush jobs for slot-lock failures")?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let details = rows
+        .iter()
+        .map(|row| {
+            let id: String = row.get(0);
+            let status: String = row.get(1);
+            let trace: String = row.get(2);
+            format!("{id} status={status} error={trace}")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    bail!("unexpected slot-lock / errored flush job(s): {details}");
 }

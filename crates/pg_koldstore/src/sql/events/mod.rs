@@ -548,4 +548,5 @@ fn physical_name_for_pk(
         segment,
         current_schema_version,
     )
+    .map(str::to_string)
 }

@@ -5,7 +5,7 @@
 //! an index (no HINT / BitmapAnd); the planner may still choose seq_scan.
 
 /// Bound shape used for `koldstore.cold_segment_index` candidate SQL.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SegmentIndexLookupShape {
     /// Both lower and upper bounds present (`closed` statement).
     BoundedRange,

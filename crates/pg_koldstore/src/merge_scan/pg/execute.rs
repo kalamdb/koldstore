@@ -43,7 +43,7 @@ pub(super) struct ScanSourceInputs<'a> {
     pub(super) relation_owner: pg_sys::Oid,
     pub(super) relation: &'a str,
     pub(super) snapshot: &'a koldstore_catalog::ManagedTableSnapshot,
-    pub(super) catalog: &'a ExistingTableCatalog,
+    pub(super) catalog: std::sync::Arc<ExistingTableCatalog>,
     pub(super) qual: *mut pg_sys::List,
     pub(super) params: pg_sys::ParamListInfo,
     pub(super) projection: &'a ScanProjection,
@@ -716,6 +716,10 @@ fn probe_hot_point_hit<P: ScanProfileSink>(
     if !inputs.pk_point_lookup {
         return None;
     }
+    // Always SPI-probe as relation owner (`SECURITY_NOFORCE_RLS`). The native
+    // Index/Seq child applies session RLS, so a child miss can hide a newer hot
+    // PK winner; skipping this probe would let a superseded cold row reappear
+    // (user-scope / FORCE RLS point lookups).
     let started = profiler.start_timer();
     let rows = load_native_hot_rows(inputs, memory, "hot probe");
     profiler.record_hot_scan(started);
@@ -767,7 +771,7 @@ fn prepare_cold_stream(inputs: &ScanSourceInputs<'_>) -> (ColdReadProfile, Optio
         inputs.table_oid,
         inputs.scanrelid,
         inputs.snapshot,
-        inputs.catalog,
+        &inputs.catalog,
         inputs.qual,
         inputs.image_columns,
         inputs.params,

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::os::raw::{c_char, c_int, c_void};
 #[cfg(feature = "pg_test")]
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use koldstore_merge::scan::CUSTOM_PATH_NAME;
@@ -855,7 +856,7 @@ unsafe fn initialize_fallback_scan(
         relation_owner,
         relation: &relation,
         snapshot: &snapshot,
-        catalog: catalog.as_ref(),
+        catalog: Arc::clone(&catalog),
         qual,
         params,
         projection: &scan_projection,
