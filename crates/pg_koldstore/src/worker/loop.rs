@@ -28,8 +28,6 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
         None,
     );
 
-    // A dynamic worker may run only when the supervisor reserved this database.
-    // Stale/duplicate starts fail closed before logical decoding or catalog work.
     if !super::wake::maintenance_started(database_oid) {
         pgrx::log!(
             "koldstore maintenance worker db={database_oid}: stale/unreserved start; exiting"
@@ -47,7 +45,10 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
     let mut first_pass = true;
     loop {
         let snapshot = super::wake::supervisor_snapshot(database_oid);
-        let target_generation = snapshot.map(|state| state.wal_generation).unwrap_or(0);
+        let target_wal_generation = snapshot.map(|state| state.wal_generation).unwrap_or(0);
+        let target_maintenance_generation = snapshot
+            .map(|state| state.maintenance_generation)
+            .unwrap_or(0);
         let maintenance_due = first_pass || snapshot.is_none_or(|state| state.maintenance_due());
 
         if maintenance_due {
@@ -59,15 +60,17 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
                 super::wake::request_recovery(database_oid);
                 return;
             }
-            super::wake::mark_wal_processed(database_oid, target_generation);
+            super::wake::mark_wal_processed(database_oid, target_wal_generation);
         }
 
         // Queue recovery + automatic policy evaluation are database-local and
-        // happen only after WAL/counters are current. run_flush_scheduler_tick
-        // may enqueue a durable job; its transaction callback publishes the
-        // queue generation after commit, never before.
+        // happen only after WAL/counters are current. Any job enqueue publishes
+        // its queue generation from the transaction commit callback.
         match worker_transaction_result(super::flush_task::run_flush_scheduler_tick) {
-            Ok(_) => super::wake::mark_maintenance_reconciled(database_oid),
+            Ok(_) => super::wake::mark_maintenance_reconciled(
+                database_oid,
+                target_maintenance_generation,
+            ),
             Err(error) => {
                 pgrx::warning!(
                     "koldstore database maintenance db={database_oid} scheduler deferred: {error}"
@@ -83,10 +86,8 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
             continue;
         }
 
-        // A short burst grace avoids fork/exit churn during commit bursts. It is
-        // an interruptible PostgreSQL latch wait, not a polling thread. New
-        // commits wake the supervisor; the timeout guarantees this live worker
-        // rechecks its generation even if it was not the direct wake target.
+        // Short burst grace: interruptible latch wait, not a resident polling
+        // thread. A commit also wakes this live worker directly when possible.
         if !BackgroundWorker::wait_latch(Some(IDLE_GRACE)) {
             return;
         }
@@ -105,10 +106,10 @@ pub(crate) fn run_async_mirror_applier(database_oid: u32) {
 /// acknowledged until this fixed boundary is completely processed.
 fn drain_wal_through_fixed_fence() -> Result<(), String> {
     // XLogFlush makes synchronous_commit=off commits decodeable without forcing
-    // foreground transactions to wait for KoldStore. This replaces the old
-    // 10..200ms repeated empty-peek retry loop.
+    // foreground transactions to wait for KoldStore.
     let fence = capture_durable_wal_fence()?;
     loop {
+        let started = std::time::Instant::now();
         let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
         let outcome = worker_transaction_result(|| {
             let mut request = BoundedApplyRequest::available();
@@ -118,7 +119,8 @@ fn drain_wal_through_fixed_fence() -> Result<(), String> {
         });
         drop(decoding_log_guard);
         let outcome = outcome?;
-        crate::observability::record_async_apply_tick(outcome.row_changes, 0);
+        let elapsed_ms = i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX);
+        crate::observability::record_async_apply_tick(outcome.row_changes, elapsed_ms);
         if !outcome.budget_exhausted {
             return Ok(());
         }
@@ -135,8 +137,6 @@ impl Drop for MaintenanceRegistration {
     }
 }
 
-/// Temporarily hides PostgreSQL's routine logical-decoding LOG messages while
-/// the decoder starts. Worker warnings/errors remain visible after the guard.
 struct DecodingLogGuard {
     previous: std::os::raw::c_int,
 }
@@ -174,10 +174,6 @@ unsafe extern "C-unwind" fn applier_sigterm(signal: std::os::raw::c_int) {
 }
 
 /// Runs `body` in a recoverable worker transaction.
-///
-/// PostgreSQL ERROR/longjmp and Rust panic are converted to a normal Result so
-/// a failed attempt leaves the shared generation dirty and lets the supervisor
-/// dispatch a fresh process rather than depending on one process staying alive.
 pub(crate) fn worker_transaction_result<R>(
     body: impl FnOnce() -> Result<R, String>,
 ) -> Result<R, String> {
