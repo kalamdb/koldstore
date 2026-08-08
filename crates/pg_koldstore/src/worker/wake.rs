@@ -3,7 +3,8 @@
 //! Wakeups are latency hints only. The durable sources of truth remain the
 //! logical replication slot / async_mirror_state and koldstore.jobs. Foreground
 //! transactions publish monotonically increasing shared generations only after
-//! top-level commit, then wake the single postmaster-supervised cluster process.
+//! top-level commit, wake the persistent database WAL applier directly when it
+//! exists, and always wake the cluster supervisor for lifecycle recovery.
 
 use std::cell::RefCell;
 
@@ -266,9 +267,7 @@ pub(crate) fn schedule_maintenance_at_ms(database_oid: u32, deadline_ms: i64) {
 }
 
 pub(crate) fn clear_maintenance_deadline(database_oid: u32) {
-    SUPERVISOR_REGISTRY
-        .get()
-        .clear_maintenance_deadline(database_oid);
+    SUPERVISOR_REGISTRY.get().clear_maintenance_deadline(database_oid);
 }
 
 pub(crate) fn consume_maintenance_deadline(database_oid: u32, sampled_ms: i64) -> bool {
@@ -342,13 +341,10 @@ fn publish_pending_commit() {
         let slot = crate::mirror::lifecycle::slot_name(database_oid);
         if crate::mirror::lifecycle::native_slot_exists(&slot) {
             supervisor = registry.publish_wal(database_oid);
-            // If a burst worker is already alive, wake it too. The generation is
-            // authoritative, so a stale PID or missed SetLatch cannot lose work.
-            if let Some(snapshot) = registry.snapshot(database_oid) {
-                if snapshot.maintenance_pid > 0 {
-                    set_background_worker_latch(snapshot.maintenance_pid, Some(database_oid));
-                }
-            }
+            // The persistent applier is the sub-second path. The supervisor is
+            // still woken below so a missing/stale process is recreated without
+            // making worker startup part of steady-state commit latency.
+            let _ = crate::worker::wal::wake(database_oid);
         }
     }
     if flush_pending {
