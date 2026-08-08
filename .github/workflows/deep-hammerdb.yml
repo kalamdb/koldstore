@@ -54,6 +54,9 @@ on:
         required: false
         default: "10"
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   PGRX_VERSION: "0.19.1"
