@@ -31,6 +31,8 @@ pub fn wal_applier_worker_type(database_oid: u32) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalApplierSnapshot {
     pub database_oid: u32,
+    /// Whether the database still owns KoldStore async-capture infrastructure.
+    pub required: bool,
     /// `0 = stopped`, `-1 = starting`, `>0 = live PostgreSQL PID`.
     pub pid: i32,
 }
@@ -50,6 +52,7 @@ impl WalApplierSnapshot {
 #[derive(Debug)]
 struct WalApplierEntry {
     database_oid: AtomicU32,
+    required: AtomicU32,
     pid: AtomicI32,
 }
 
@@ -57,6 +60,7 @@ impl WalApplierEntry {
     const fn empty() -> Self {
         Self {
             database_oid: AtomicU32::new(0),
+            required: AtomicU32::new(0),
             pid: AtomicI32::new(WORKER_FREE),
         }
     }
@@ -64,6 +68,7 @@ impl WalApplierEntry {
     fn snapshot(&self) -> WalApplierSnapshot {
         WalApplierSnapshot {
             database_oid: self.database_oid.load(Ordering::Acquire),
+            required: self.required.load(Ordering::Acquire) != 0,
             pid: self.pid.load(Ordering::Acquire),
         }
     }
@@ -71,9 +76,11 @@ impl WalApplierEntry {
 
 /// Fixed-capacity shared registry for persistent database WAL appliers.
 ///
-/// Entries are never removed during a postmaster lifetime. This keeps all
-/// foreground and supervisor operations lock-free and bounded; the capacity is
-/// aligned with the cluster supervisor registry.
+/// Database identity entries remain allocated during a postmaster lifetime,
+/// while [`Self::require`] and [`Self::disable`] toggle whether the supervisor
+/// must keep the service resident. This keeps foreground and supervisor
+/// operations lock-free and bounded without respawning an applier after its
+/// logical slot was deliberately removed.
 #[derive(Debug)]
 pub struct WalApplierRegistry<const N: usize> {
     overflow_reconcile_required: AtomicU32,
@@ -90,11 +97,30 @@ impl<const N: usize> Default for WalApplierRegistry<N> {
 }
 
 impl<const N: usize> WalApplierRegistry<N> {
-    /// Reserves the one applier slot for `database_oid`.
-    pub fn try_reserve(&self, database_oid: u32) -> bool {
+    /// Marks the database as requiring a permanently registered WAL service.
+    pub fn require(&self, database_oid: u32) -> bool {
         let Some(entry) = self.entry_or_overflow(database_oid) else {
             return false;
         };
+        entry.required.store(1, Ordering::Release);
+        true
+    }
+
+    /// Stops future supervisor restarts after deliberate capture teardown.
+    pub fn disable(&self, database_oid: u32) {
+        if let Some(entry) = self.find(database_oid) {
+            entry.required.store(0, Ordering::Release);
+        }
+    }
+
+    /// Reserves the one applier slot for `database_oid`.
+    pub fn try_reserve(&self, database_oid: u32) -> bool {
+        let Some(entry) = self.find(database_oid) else {
+            return false;
+        };
+        if entry.required.load(Ordering::Acquire) == 0 {
+            return false;
+        }
         entry
             .pid
             .compare_exchange(
@@ -112,6 +138,7 @@ impl<const N: usize> WalApplierRegistry<N> {
             return false;
         };
         pid > 0
+            && entry.required.load(Ordering::Acquire) != 0
             && entry
                 .pid
                 .compare_exchange(WORKER_STARTING, pid, Ordering::AcqRel, Ordering::Acquire)
@@ -229,19 +256,35 @@ mod tests {
     use super::{WalApplierRegistry, WAL_APPLY_BATCH_ROWS};
 
     #[test]
-    fn registry_allows_exactly_one_applier_per_database() {
+    fn registry_allows_exactly_one_required_applier_per_database() {
         let registry = WalApplierRegistry::<2>::default();
+        assert!(!registry.try_reserve(42));
+        assert!(registry.require(42));
         assert!(registry.try_reserve(42));
         assert!(!registry.try_reserve(42));
         assert!(registry.started(42, 1001));
-        assert_eq!(registry.snapshot(42).unwrap().pid, 1001);
+        let snapshot = registry.snapshot(42).unwrap();
+        assert!(snapshot.required);
+        assert_eq!(snapshot.pid, 1001);
         registry.stopped(42, 1001);
         assert_eq!(registry.snapshot(42).unwrap().pid, 0);
     }
 
     #[test]
+    fn disabled_service_cannot_restart() {
+        let registry = WalApplierRegistry::<1>::default();
+        assert!(registry.require(42));
+        assert!(registry.try_reserve(42));
+        registry.cancel_start(42);
+        registry.disable(42);
+        assert!(!registry.snapshot(42).unwrap().required);
+        assert!(!registry.try_reserve(42));
+    }
+
+    #[test]
     fn stale_pid_cannot_release_replacement() {
         let registry = WalApplierRegistry::<1>::default();
+        assert!(registry.require(42));
         assert!(registry.try_reserve(42));
         assert!(registry.started(42, 1001));
         registry.stopped(42, 999);
@@ -251,9 +294,9 @@ mod tests {
     #[test]
     fn colliding_databases_probe_to_distinct_entries() {
         let registry = WalApplierRegistry::<4>::default();
-        assert!(registry.try_reserve(1));
-        assert!(registry.try_reserve(5));
-        assert!(registry.try_reserve(9));
+        assert!(registry.require(1));
+        assert!(registry.require(5));
+        assert!(registry.require(9));
         assert!(registry.snapshot(1).is_some());
         assert!(registry.snapshot(5).is_some());
         assert!(registry.snapshot(9).is_some());
