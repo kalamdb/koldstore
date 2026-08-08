@@ -38,7 +38,33 @@ async fn reset_flush_execution(db: &common::TestDb, dbname: &str) -> Result<()> 
 }
 
 /// Plants a durable `running` flush row with no session lock holder (crash orphan).
+///
+/// Converts an existing active job in place when WAL/auto-flush already enqueued
+/// one, so planting never violates `jobs_one_active_flush_per_scope_idx`.
 async fn plant_orphan_running_flush(client: &tokio_postgres::Client, relation: &str) -> Result<()> {
+    let updated = client
+        .execute(
+            r#"
+            UPDATE koldstore.jobs
+            SET status = 'running',
+                phase = 'writing',
+                attempt_token = NULL,
+                available_at = clock_timestamp(),
+                error_trace = NULL,
+                payload = '{"force":false}'::jsonb,
+                updated_at = clock_timestamp()
+            WHERE table_oid = $1::text::regclass::oid
+              AND scope_key = ''
+              AND job_type = 'flush'
+              AND status IN ('pending', 'running')
+            "#,
+            &[&relation],
+        )
+        .await
+        .context("convert active flush job into orphan running")?;
+    if updated > 0 {
+        return Ok(());
+    }
     client
         .execute(
             r#"
