@@ -19,6 +19,12 @@ pub(crate) fn require_async_mirror_worker() -> Result<(), String> {
         );
     }
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    let slot = crate::mirror::lifecycle::slot_name(database_oid);
+    if !crate::mirror::lifecycle::native_slot_exists(&slot) {
+        return Err(format!(
+            "async mirror WAL service requires logical slot {slot}"
+        ));
+    }
     if !crate::worker::wal::require(database_oid) {
         return Err("KoldStore WAL-applier registry is full".to_string());
     }
@@ -40,7 +46,9 @@ pub fn request_async_mirror_maintenance_pg() -> bool {
         return false;
     }
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    let slot = crate::mirror::lifecycle::slot_name(database_oid);
     if crate::worker::wake::ensure_paused(database_oid)
+        || !crate::mirror::lifecycle::native_slot_exists(&slot)
         || !crate::worker::wal::require(database_oid)
     {
         return false;
@@ -58,16 +66,19 @@ pub fn request_async_mirror_maintenance_pg() -> bool {
     security_definer
 )]
 pub fn set_async_mirror_ensure_paused_pg(paused: bool) -> bool {
-    let oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
     if paused {
-        if !crate::worker::wake::pause_ensure(oid) {
+        if !crate::worker::wake::pause_ensure(database_oid) {
             pgrx::error!("async mirror maintenance pause set is full");
         }
         true
     } else {
-        crate::worker::wake::resume_ensure(oid);
-        let _ = crate::worker::wal::require(oid);
-        crate::worker::wake::request_recovery(oid);
+        crate::worker::wake::resume_ensure(database_oid);
+        let slot = crate::mirror::lifecycle::slot_name(database_oid);
+        if crate::mirror::lifecycle::native_slot_exists(&slot) {
+            let _ = crate::worker::wal::require(database_oid);
+            crate::worker::wake::request_recovery(database_oid);
+        }
         true
     }
 }
