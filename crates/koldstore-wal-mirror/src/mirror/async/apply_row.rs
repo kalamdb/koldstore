@@ -101,10 +101,42 @@ pub fn pg_value_json(value: &PgOutputValue, column: &str) -> Result<Value, Strin
     Ok(Value::String(pg_value_text(value, column, "primary-key")?))
 }
 
+/// Parses primary-key text cells into typed integers for SPI array binds.
+///
+/// # Errors
+///
+/// Returns an error when any cell fails to parse as `T`.
+pub fn parse_pk_ints<T>(cells: &[String], type_name: &str) -> Result<Vec<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    cells
+        .iter()
+        .map(|cell| {
+            cell.parse::<T>()
+                .map_err(|error| format!("async mirror PK {type_name} value `{cell}`: {error}"))
+        })
+        .collect()
+}
+
+/// Parses one PostgreSQL boolean text form used by pgoutput / SPI binds.
+///
+/// # Errors
+///
+/// Returns an error when the cell is not a recognized boolean literal.
+pub fn parse_pk_bool(cell: &str) -> Result<bool, String> {
+    match cell.trim().to_ascii_lowercase().as_str() {
+        "t" | "true" | "1" | "yes" | "on" => Ok(true),
+        "f" | "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(format!("async mirror PK boolean value `{other}`")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{pk_identity, primary_key_json};
-    use crate::r#async::pgoutput::{
+    use super::{parse_pk_bool, parse_pk_ints, pk_identity, primary_key_json};
+    use crate::mirror::r#async::pgoutput::{
         PgOutputColumn, PgOutputRelation, PgOutputTuple, PgOutputValue,
     };
     use serde_json::{json, Map};
@@ -145,5 +177,16 @@ mod tests {
         };
         let row = primary_key_json(&relation, &["id".into()], &tuple).unwrap();
         assert_eq!(row.get("id"), Some(&json!("42")));
+    }
+
+    #[test]
+    fn parse_pk_bool_accepts_pg_forms() {
+        assert!(parse_pk_bool("t").unwrap());
+        assert!(!parse_pk_bool("FALSE").unwrap());
+        assert!(parse_pk_bool("maybe").is_err());
+        assert_eq!(
+            parse_pk_ints::<i32>(&["1".into(), "2".into()], "int4").unwrap(),
+            vec![1, 2]
+        );
     }
 }

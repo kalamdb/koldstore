@@ -106,9 +106,9 @@ yourself: `CREATE EXTENSION` ensures the empty publication, and the first
 KoldStore catalogs. Provisioning is idempotent.
 
 Source transactions commit before mirror work. A managed-table commit wakes the
-database worker immediately; concurrent commits coalesce into one drain rather
-than queueing one task per transaction. Use the explicit fence before work that
-must observe every source commit visible at the start of the call:
+persistent WAL applier immediately; concurrent commits coalesce into one drain
+rather than queueing one task per transaction. Use the explicit fence before
+work that must observe every source commit visible at the start of the call:
 
 ```sql
 SELECT koldstore.wait_for_async_mirror();

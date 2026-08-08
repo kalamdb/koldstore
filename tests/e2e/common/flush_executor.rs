@@ -10,7 +10,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use tokio_postgres::Client;
 
-use koldstore_worker::flush_executor_worker_type;
+use koldstore_supervisor::flush_executor_worker_type;
 
 /// Backend-type prefix shared with [`flush_executor_worker_type`].
 pub const FLUSH_EXECUTOR_BACKEND_PREFIX: &str = "koldstore flush executor ";
@@ -18,7 +18,7 @@ pub const FLUSH_EXECUTOR_BACKEND_PREFIX: &str = "koldstore flush executor ";
 /// Builds the `pg_stat_activity.backend_type` string for a database OID.
 #[must_use]
 pub fn flush_executor_backend_type(database_oid: u32) -> String {
-    flush_executor_worker_type(koldstore_worker::DatabaseOid::new(database_oid))
+    flush_executor_worker_type(koldstore_supervisor::DatabaseOid::new(database_oid))
 }
 
 /// Returns live flush executor PIDs for the current database.

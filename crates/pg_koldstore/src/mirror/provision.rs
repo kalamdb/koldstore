@@ -5,7 +5,7 @@
 
 use std::{ffi::CString, ptr};
 
-use koldstore_worker::LIBRARY_NAME;
+use koldstore_supervisor::LIBRARY_NAME;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder};
 
 use super::lifecycle::{slot_name, PUBLICATION_NAME};

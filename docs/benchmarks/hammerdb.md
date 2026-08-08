@@ -2,9 +2,13 @@
 
 ## Claim wording (use this)
 
-**Allowed:** “KoldStore survived HammerDB TPROC-C with selective `HISTORY`
-manage, and post-run flush/`EXPLAIN` proved `KoldMergeScan` opened cold
-Parquet.”
+**Allowed (weekly smoke):** “KoldStore survived HammerDB TPROC-C with selective
+`HISTORY` manage, and post-run flush/`EXPLAIN` proved `KoldMergeScan` opened
+cold Parquet.”
+
+**Allowed (deep):** “KoldStore survived deep selective-manage HammerDB TPROC-C
+(profile / manage set / optional CH), with mid-run and post-run cold-open
+proofs.”
 
 **Not allowed:** “TPC-C certified”, “passes official HammerDB/TPC”, or
 “production safe”. Weekly CI uses a small warehouse/VU/duration config for
@@ -13,6 +17,11 @@ regression, not a published performance claim.
 Weekly path: `scripts/readiness/run-hammerdb.sh` → manage `HISTORY` → timed
 run → flush → fail closed unless HISTORY PK opens ≥1 cold segment and
 `customer` stays on a native plan. Artifact: `target/hammerdb/summary.json`.
+
+Deep path (opt-in, **not** default CI): `scripts/hammerdb/run-deep.sh` or
+Actions → **Deep HammerDB** (`workflow_dispatch` only). See
+[`scripts/hammerdb/README.md`](../../scripts/hammerdb/README.md) and
+[`docs/plans/2026-08-08-deep-hammerdb-design.md`](../plans/2026-08-08-deep-hammerdb-design.md).
 
 ## Important: what HammerDB does (and does not) prove
 
@@ -30,6 +39,15 @@ This harness therefore runs **three arms** and, after each arm, an explicit
 | **hot_cold** | managed + **flushed** | `KoldMergeScan`, `Parquet Segments Opened ≥ 1` |
 
 Unmanaged hot tables (`customer`, …) must keep ordinary index plans in every arm.
+
+Deep runs additionally support:
+
+| Knob | Purpose |
+| --- | --- |
+| Profiles `smoke`/`standard`/`heavy`/`custom` | Choose WH / VU / duration |
+| Manage sets `history`/`append`/`broad` | HISTORY-only vs best-effort `order_line` / `orders` |
+| CH modes `off`/`after`/`concurrent`/`only` | Optional CH-benCHmark-style Q1–Q22 |
+| Mid-run flush proof | Cold open while OLTP is still running |
 
 ## Latest compare (this machine)
 
@@ -129,10 +147,13 @@ that hot+cold merge works.
 
 | Table | Manage? | Why |
 | --- | --- | --- |
-| `customer`, `orders`, `stock`, … | **No** | Hot mutable OLTP |
+| `customer`, `stock`, … | **No** (smoke) | Hot mutable OLTP |
 | `history` | **Yes** | Append / archive candidate |
+| `order_line` / `orders` | Optional in deep `append`/`broad` | Best-effort; skip if PK/types block manage |
 
 ## Reproduce
+
+Smoke compare:
 
 ```bash
 KOLDSTORE_HAMMERDB_WAREHOUSES=2 \
@@ -142,11 +163,16 @@ KOLDSTORE_HAMMERDB_READ_ITERS=200 \
   scripts/hammerdb/compare.sh 16
 ```
 
+Deep (local):
+
+```bash
+scripts/hammerdb/run-deep.sh --profile standard --manage-set append --ch after 16
+```
+
 Artifacts:
 
-- `target/hammerdb/compare/results.json`
-- `target/hammerdb/compare/explain_{baseline,hot_only,hot_cold}.txt`
-- `docs/benchmarks/assets/hammerdb-{nopm,history-reads,customer-reads}.svg`
+- Smoke compare: `target/hammerdb/compare/results.json`
+- Deep: `target/hammerdb-deep/summary.json`
 
 On macOS, compare uses Docker `tpcorg/hammerdb:v4.12` against pgrx. Each compare
 run uses a fresh cold-storage temp dir so leftover Parquet cannot fail flush
@@ -157,3 +183,4 @@ validation.
 - Storage / query trade-offs: [README](README.md)
 - pgbench suites: [`benchmarks/`](../../benchmarks/)
 - Scripts: [`scripts/hammerdb/`](../../scripts/hammerdb/)
+- Design: [`docs/plans/2026-08-08-deep-hammerdb-design.md`](../plans/2026-08-08-deep-hammerdb-design.md)

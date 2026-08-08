@@ -1,17 +1,17 @@
-//! Async mirror status SQL surface for lag, scheduling, and apply-rate observability.
+//! Async mirror status SQL surface for lag, WAL service, scheduling, and apply rates.
 
+use koldstore_supervisor::EVENT_RECOVERY_REQUIRED;
+use koldstore_wal_mirror::{
+    build_async_mirror_status, ApplyMetricsSnapshot, AsyncMirrorStatusInput,
+    StatusSupervisorSnapshot, StatusWalApplierSnapshot,
+};
 use pgrx::datum::DatumWithOid;
 use serde_json::json;
 
 use super::lifecycle::current_slot_name;
 
-/// Returns async mirror lag, WAL watermarks, maintenance state, slot identity,
-/// and apply rates.
-///
-/// SQL contract: `koldstore.async_mirror_status()` -> `jsonb`. Database-scoped
-/// health (no table required). Prefer `koldstore.table_status(table)` when you
-/// already have a managed table - it embeds this under `async_mirror`. Slot name
-/// is included as top-level `slot_name`.
+/// Returns async mirror lag, WAL watermarks, worker state, slot identity, and
+/// apply rates.
 #[pgrx::pg_extern(name = "async_mirror_status", schema = "koldstore")]
 pub fn async_mirror_status() -> pgrx::JsonB {
     pgrx::JsonB(
@@ -22,16 +22,13 @@ pub fn async_mirror_status() -> pgrx::JsonB {
 
 /// Builds the async mirror status JSON (shared by SQL and `table_status`).
 pub(crate) fn async_mirror_status_value() -> Result<serde_json::Value, String> {
-    async_mirror_status_impl()
-}
-
-fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
     use koldstore_catalog::queries::{
         plan_async_mirror_slot_status, plan_async_mirror_state_status,
     };
 
     let slot = current_slot_name();
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
+    let database_oid_u32 = database_oid.to_u32();
     let metrics = crate::observability::async_apply_metrics();
 
     let slot_plan = plan_async_mirror_slot_status().map_err(|error| error.to_string())?;
@@ -61,98 +58,48 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
     let state_json: serde_json::Value =
         serde_json::from_str(&state_row).map_err(|error| error.to_string())?;
 
-    let current_wal_lsn = slot_json
-        .get("current_wal_lsn")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let confirmed_flush_lsn = slot_json
-        .get("confirmed_flush_lsn")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let applied_lsn = state_json
-        .get("applied_lsn")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let retained_bytes = slot_json
-        .get("retained_bytes")
-        .and_then(|value| value.as_i64())
-        .unwrap_or(0);
-    let max_retained = crate::guc::async_mirror_max_retained_bytes();
-    let retained_wal_within_threshold = max_retained <= 0 || retained_bytes <= max_retained;
-    let retention_health = json!({
-        "max_retained_bytes": max_retained,
-        "retained_bytes": retained_bytes,
-        "ok": retained_wal_within_threshold,
+    let shared = crate::worker::wake::supervisor_snapshot(database_oid_u32).map(|snapshot| {
+        StatusSupervisorSnapshot {
+            wal_generation: snapshot.wal_generation,
+            wal_processed_generation: snapshot.wal_processed_generation,
+            maintenance_generation: snapshot.maintenance_generation,
+            maintenance_processed_generation: snapshot.maintenance_processed_generation,
+            maintenance_pid: snapshot.maintenance_pid,
+            next_maintenance_due_at_ms: snapshot.next_maintenance_due_at_ms,
+            recovery_requested: snapshot.event_flags & EVENT_RECOVERY_REQUIRED != 0,
+            schedule_dirty: snapshot.event_flags & koldstore_supervisor::EVENT_SCHEDULE_DIRTY != 0,
+        }
     });
-
-    // The database maintenance worker is intentionally ephemeral. Expose the
-    // authoritative shared generations as well as the transient PID so callers
-    // can distinguish "idle and caught up" from "worker missing while work is
-    // pending" without relying on pg_stat_activity timing.
-    let maintenance = crate::worker::wake::supervisor_snapshot(database_oid.to_u32())
-        .map(|snapshot| {
-            json!({
-                "registered": true,
-                "pid": (snapshot.maintenance_pid > 0).then_some(snapshot.maintenance_pid),
-                "running": snapshot.maintenance_pid > 0,
-                "starting": snapshot.maintenance_pid < 0,
-                "pending": snapshot.maintenance_due(),
-                "wal_generation": snapshot.wal_generation,
-                "wal_processed_generation": snapshot.wal_processed_generation,
-                "maintenance_generation": snapshot.maintenance_generation,
-                "maintenance_processed_generation": snapshot.maintenance_processed_generation,
-                "recovery_requested": snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0,
-                "schedule_dirty": snapshot.event_flags & koldstore_worker::EVENT_SCHEDULE_DIRTY != 0,
-                "next_due_at_ms": snapshot.next_maintenance_due_at_ms,
-            })
-        })
-        .unwrap_or_else(|| {
-            json!({
-                "registered": false,
-                "pid": serde_json::Value::Null,
-                "running": false,
-                "starting": false,
-                "pending": false,
-                "wal_generation": 0,
-                "wal_processed_generation": 0,
-                "maintenance_generation": 0,
-                "maintenance_processed_generation": 0,
-                "recovery_requested": false,
-                "schedule_dirty": false,
-                "next_due_at_ms": 0,
-            })
-        });
-
-    // Compact WAL cursor view: "latest commit" ~= current WAL tip; "latest read"
-    // ~= durable applied_lsn (mirror catch-up watermark). Slot confirmed_flush is
-    // the decoded/ack frontier used for retention.
-    let wal = json!({
-        "current_lsn": current_wal_lsn,
-        "applied_lsn": applied_lsn,
-        "confirmed_flush_lsn": confirmed_flush_lsn,
-        "restart_lsn": slot_json.get("restart_lsn").cloned().unwrap_or(serde_json::Value::Null),
-        "lag_bytes": retained_bytes,
+    let applier = crate::worker::wal::snapshot(database_oid_u32);
+    let wal_required = applier.is_some_and(|state| state.required);
+    let wal_live = applier.is_some_and(|state| {
+        state.required && crate::worker::wal::process_alive(database_oid_u32, state.pid)
     });
+    let wal_starting = applier.is_some_and(|state| state.required && state.starting());
+    let wal_applier = StatusWalApplierSnapshot {
+        required: wal_required,
+        pid: applier.and_then(|state| {
+            (state.required && (wal_live || state.starting())).then_some(state.pid)
+        }),
+        running: wal_live,
+        starting: wal_starting,
+    };
 
-    Ok(json!({
-        "slot_name": slot,
-        "slot": slot_json,
-        "state": state_json,
-        "wal": wal,
-        "maintenance": maintenance,
-        "apply": {
-            "rows_total": metrics.rows_total,
-            "ticks_total": metrics.ticks_total,
-            "last_rows": metrics.last_rows,
-            "last_elapsed_ms": metrics.last_elapsed_ms,
-            "error_total": metrics.error_total,
-            "rate_rows_per_sec": if metrics.last_elapsed_ms > 0 {
-                (metrics.last_rows as f64) * 1000.0 / (metrics.last_elapsed_ms as f64)
-            } else {
-                0.0
-            },
+    Ok(build_async_mirror_status(AsyncMirrorStatusInput {
+        slot_name: slot,
+        slot_json,
+        state_json,
+        max_retained_bytes: crate::guc::async_mirror_max_retained_bytes(),
+        shared,
+        wal_applier,
+        metrics: ApplyMetricsSnapshot {
+            rows_total: metrics.rows_total,
+            ticks_total: metrics.ticks_total,
+            last_rows: metrics.last_rows,
+            last_elapsed_ms: metrics.last_elapsed_ms,
+            error_total: metrics.error_total,
+            healthy: metrics.healthy,
         },
-        "retention": retention_health,
-        "healthy": metrics.healthy && retained_wal_within_threshold,
+        watchdog_ms: 30_000,
     }))
 }

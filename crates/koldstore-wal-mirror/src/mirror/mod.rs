@@ -1,4 +1,4 @@
-//! Storage contracts for clean-schema change-log mirror tables.
+//! Clean-schema change-log mirror contracts.
 //!
 //! - [`shared`] — naming, DDL, metadata columns, primitive read/write SQL
 //! - [`guard`] — PK / segment-order mutation guard planners
@@ -6,23 +6,21 @@
 //!
 //! Authoritative mirror `seq` values are allocated only by the serialized WAL
 //! applier. Keep separate from `koldstore-catalog`: catalog resolves *which*
-//! mirror a managed table uses; this crate builds SQL *against* that mirror.
-//! Must stay a `koldstore-common`-only leaf. SPI/WAL/worker wiring stays in
-//! `pg_koldstore`.
+//! mirror a managed table uses; this module builds SQL *against* that mirror.
 
 pub mod r#async;
 pub mod guard;
 pub mod shared;
 
-// Stable top-level paths (existing callers).
 pub use guard::{
     plan_mirror_pk_guard, plan_mirror_source_teardown, MirrorGuardError, MirrorGuardResult,
     MirrorPkGuardPlan,
 };
 pub use r#async::{
-    decode_message, must_flush_before_push, pg_value_json, pg_value_text, pk_identity,
-    primary_key_json, BatchFlushReason, PgOutputColumn, PgOutputDecodeError, PgOutputMessage,
-    PgOutputRelation, PgOutputTuple, PgOutputValue, APPLY_BATCH_ROWS,
+    decode_message, must_flush_before_push, parse_pk_bool, parse_pk_ints, pg_value_json,
+    pg_value_text, pk_identity, primary_key_json, BatchFlushReason, PgOutputColumn,
+    PgOutputDecodeError, PgOutputMessage, PgOutputRelation, PgOutputTuple, PgOutputValue,
+    APPLY_BATCH_ROWS,
 };
 pub use shared::{
     mirror_relation_for_source, plan_async_mirror_batch_delete_existing,
@@ -31,11 +29,10 @@ pub use shared::{
     plan_mirror_pk_column_renames, plan_mirror_schema, plan_mirror_schema_with_order_key,
     plan_mirror_stats, plan_select_mirror_last_rows, plan_select_mirror_last_rows_with_params,
     plan_select_mirror_rows_after_seq, plan_select_mirror_rows_after_seq_with_params,
-    plan_upsert_mirror_row, quoted_pk_columns, MirrorColumn, MirrorError, MirrorRelation,
-    MirrorResult, MirrorSchemaPlan, MirrorSeqStats, SqlAccess, SqlParamType, SqlStatement,
-    CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,
+    plan_upsert_mirror_row, published_column_list, quoted_pk_columns, MirrorColumn, MirrorError,
+    MirrorRelation, MirrorResult, MirrorSchemaPlan, MirrorSeqStats, SqlAccess, SqlParamType,
+    SqlStatement, CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,
 };
 
-// Module aliases so `koldstore_mirror::pgoutput` / `::batch` keep working.
 pub use r#async::{apply_row, batch, pgoutput};
 pub use shared::{columns, error, read, relation, row_json, schema, statement, write};

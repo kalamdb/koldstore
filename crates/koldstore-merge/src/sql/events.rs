@@ -3,7 +3,7 @@
 use koldstore_common::{
     scope::scope_predicate_sql, MirrorChange, QualifiedTableName, ScopeKey, SeqId, SqlStatement,
 };
-use koldstore_mirror::{
+use koldstore_wal_mirror::{
     plan_select_mirror_rows_after_seq_with_params, MirrorRelation, SqlParamType,
 };
 use thiserror::Error;
@@ -151,7 +151,7 @@ pub fn plan_mirror_changes_last(
         .map(MirrorRelation::new)
         .map_err(|error| ChangeFeedError::Sql(error.to_string()))?;
     let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
-    let statement = koldstore_mirror::plan_select_mirror_last_rows_with_params(
+    let statement = koldstore_wal_mirror::plan_select_mirror_last_rows_with_params(
         &mirror,
         &primary_key,
         limit_param,

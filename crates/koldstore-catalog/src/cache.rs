@@ -468,7 +468,7 @@ mod tests {
             "schema_version": 3,
             "active": true,
             "initialization_state": "complete",
-            "mirror_relation": "koldstore_mirror.items",
+            "mirror_relation": "koldstore_wal_mirror.items",
             "primary_key": [{"column_id": 7, "name": "renamed_id"}],
             "primary_key_shape": {"columns": [{"column_id": 7, "name": "renamed_id"}]},
             "scope_column": "old_tenant_name",
@@ -499,7 +499,7 @@ mod tests {
                 "schema_version": 3,
                 "active": true,
                 "initialization_state": "complete",
-                "mirror_relation": "koldstore_mirror.items",
+                "mirror_relation": "koldstore_wal_mirror.items",
                 "primary_key": [{"column_id": 7, "name": name}],
                 "primary_key_shape": {
                     "columns": [{"column_id": 7, "name": name, "type_oid": 20}]

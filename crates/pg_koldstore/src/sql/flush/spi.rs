@@ -9,7 +9,7 @@ use koldstore_flush::{
     WrittenFlushSegment,
 };
 use koldstore_manifest::manifest_from_catalog_rows;
-use koldstore_mirror::{
+use koldstore_wal_mirror::{
     plan_mirror_force_flush_stats, plan_mirror_oldest_rows_max_seq, plan_mirror_stats,
     MirrorRelation, MirrorSeqStats,
 };
@@ -653,7 +653,7 @@ fn arm_named_flush_origin_pg15(
     use std::ffi::CString;
 
     let database_oid =
-        koldstore_worker::DatabaseOid::new(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
+        koldstore_supervisor::DatabaseOid::new(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
     // Queue same-DB parallel prunes instead of failing with "origin already active".
     pgrx::Spi::run_with_args(
         "SELECT pg_catalog.pg_advisory_xact_lock($1, $2)",

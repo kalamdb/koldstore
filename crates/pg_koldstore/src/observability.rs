@@ -1,13 +1,31 @@
-//! Process-local async apply metrics.
+//! Process-local async apply metrics and PostgreSQL log sink wiring.
 //!
 //! A `tracing-subscriber` is intentionally not installed in the extension
 //! shared library: it adds significant binary size and PostgreSQL already
-//! provides its own logging facilities.
+//! provides its own logging facilities. Operational messages go through
+//! [`koldstore_common::log`] into `pgrx::log!` / `pgrx::warning!`.
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-/// Reserved for future PostgreSQL logging integration.
-pub fn init_tracing() {}
+/// Installs the common → PostgreSQL elog bridge for this backend/process.
+///
+/// No-op when built without the `pg` feature (library / unit-test targets).
+pub fn init_tracing() {
+    #[cfg(feature = "pg")]
+    {
+        use koldstore_common::log::{self, LogLevel};
+
+        fn postgres_log_sink(level: LogLevel, line: &str) {
+            // `line` already carries the `koldstore <component>: …` prefix.
+            match level {
+                LogLevel::Info => pgrx::log!("{line}"),
+                LogLevel::Warning => pgrx::warning!("{line}"),
+            }
+        }
+
+        log::install_sink(postgres_log_sink);
+    }
+}
 
 /// Process-local async apply counters (reset on backend restart).
 static APPLY_ROWS_TOTAL: AtomicI64 = AtomicI64::new(0);

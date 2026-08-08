@@ -1,14 +1,14 @@
-//! Short BGWorker transactions for SPI catalog boundaries.
+//! Transaction boundaries shared by KoldStore background workers.
 //!
 //! Queue-mode flush executors open and commit a transaction around each SPI
-//! phase (claim, mirror fetch, pending catalog insert, finalize, progress /
-//! cancel, job terminal marks). Object-store upload runs **outside** these
-//! transactions. Inline `flush_table` / `#[pg_test]` keep a single Nested
-//! caller transaction and do not use this helper for mid-flush commits.
-//!
-//! Soft-fail subtransactions (async mirror apply) stay in [`super::r#loop`];
-//! this module is the simple Start/Commit path shared by flush executors and
-//! the async-mirror launcher.
+//! phase. The WAL applier and maintenance worker additionally need a protected
+//! subtransaction so a PostgreSQL `ERROR` becomes a retryable Rust `Result`
+//! instead of terminating the worker in the middle of shared-state cleanup.
+
+use std::panic::AssertUnwindSafe;
+
+use pgrx::pg_sys::panic::CaughtError;
+use pgrx::PgTryBuilder;
 
 /// Runs `body` inside one PostgreSQL transaction and commits on success.
 ///
@@ -23,18 +23,8 @@ pub(crate) fn run<R>(body: impl FnOnce() -> Result<R, String>) -> Result<R, Stri
         pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
     }
     let result = pgrx::PgTryBuilder::new(std::panic::AssertUnwindSafe(body))
-        .catch_others(|error| {
-            let message = match error {
-                pgrx::pg_sys::panic::CaughtError::PostgresError(report)
-                | pgrx::pg_sys::panic::CaughtError::ErrorReport(report) => {
-                    report.message().to_string()
-                }
-                pgrx::pg_sys::panic::CaughtError::RustPanic { ereport, .. } => {
-                    ereport.message().to_string()
-                }
-            };
-            Err(format!("worker transaction: {message}"))
-        })
+        .catch_others(|error| Err(format_caught_error("worker transaction", error)))
+        .catch_rust_panic(|error| Err(format_caught_error("worker transaction panic", error)))
         .execute();
     unsafe {
         if !pgrx::pg_sys::IsTransactionOrTransactionBlock() {
@@ -48,4 +38,82 @@ pub(crate) fn run<R>(body: impl FnOnce() -> Result<R, String>) -> Result<R, Stri
         }
     }
     result
+}
+
+/// Runs `body` in a recoverable worker transaction.
+///
+/// A protected internal subtransaction absorbs PostgreSQL ERROR/longjmp and a
+/// Rust panic so the caller can publish durable retry state and return cleanly.
+/// This is used by both the always-on WAL applier and ephemeral maintenance.
+///
+/// # Errors
+///
+/// Returns the caught PostgreSQL/Rust error after rolling back the current
+/// transaction, or an explicit error returned by `body`.
+pub(crate) fn run_recoverable<R>(
+    context: &str,
+    body: impl FnOnce() -> Result<R, String>,
+) -> Result<R, String> {
+    unsafe {
+        pgrx::pg_sys::SetCurrentStatementStartTimestamp();
+        pgrx::pg_sys::StartTransactionCommand();
+        pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
+        pgrx::pg_sys::BeginInternalSubTransaction(std::ptr::null());
+    }
+    let result = PgTryBuilder::new(AssertUnwindSafe(body))
+        .catch_others(|error| Err(format_caught_error(context, error)))
+        .catch_rust_panic(|error| Err(format_caught_error(&format!("{context} panic"), error)))
+        .execute();
+    finish_subtransaction(result.is_ok());
+    if unsafe { pgrx::pg_sys::IsAbortedTransactionBlockState() } {
+        finish_outer_transaction(false);
+        return Err(result
+            .err()
+            .unwrap_or_else(|| format!("{context} transaction aborted after postgres error")));
+    }
+    finish_outer_transaction(true);
+    result
+}
+
+fn finish_subtransaction(release: bool) {
+    unsafe {
+        if pgrx::pg_sys::GetCurrentTransactionNestLevel() <= 1 {
+            return;
+        }
+        if release && !pgrx::pg_sys::IsAbortedTransactionBlockState() {
+            pgrx::pg_sys::ReleaseCurrentSubTransaction();
+        } else {
+            pgrx::pg_sys::RollbackAndReleaseCurrentSubTransaction();
+        }
+    }
+}
+
+fn finish_outer_transaction(commit: bool) {
+    unsafe {
+        if !pgrx::pg_sys::IsTransactionOrTransactionBlock() {
+            return;
+        }
+        if !commit || pgrx::pg_sys::IsAbortedTransactionBlockState() {
+            pgrx::pg_sys::AbortCurrentTransaction();
+            return;
+        }
+        pgrx::pg_sys::PopActiveSnapshot();
+        pgrx::pg_sys::CommitTransactionCommand();
+    }
+}
+
+fn format_caught_error(context: &str, error: CaughtError) -> String {
+    match error {
+        CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
+            format!("{context}: {}", report.message())
+        }
+        CaughtError::RustPanic { ereport, payload } => {
+            let detail = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("rust panic");
+            format!("{context}: {} ({detail})", ereport.message())
+        }
+    }
 }

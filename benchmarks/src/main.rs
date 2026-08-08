@@ -192,7 +192,7 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
         )
         .await?;
 
-    // SC-002a measures isolated foreground latency. Keep the apply worker off
+    // SC-002a measures isolated foreground latency. Keep the WAL applier off
     // after manage so background catch-up is not charged to hot UPDATE/INSERT.
     disable_async_worker_for_foreground_bench(&client).await?;
 
@@ -203,10 +203,10 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
     Ok(version)
 }
 
-/// Pins the async apply worker off and terminates any running applier.
+/// Pins the async apply worker off and terminates any persistent WAL applier.
 ///
 /// Matches the storage-comparison measurement control: manage may start the
-/// worker for activation, then foreground OLTP benches run without apply load.
+/// service for activation, then foreground OLTP benches run without apply load.
 async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Client) -> Result<()> {
     let dbname: String = client
         .query_one("SELECT current_database()", &[])
@@ -231,7 +231,7 @@ async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Clie
                 "SELECT COALESCE((\
                    SELECT pg_terminate_backend(pid) \
                    FROM pg_catalog.pg_stat_activity \
-                   WHERE backend_type = 'koldstore maintenance ' \
+                   WHERE backend_type = 'koldstore wal applier ' \
                      || (SELECT oid::text FROM pg_catalog.pg_database \
                          WHERE datname = current_database()) \
                    LIMIT 1\
@@ -243,7 +243,7 @@ async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Clie
             .query_one(
                 "SELECT EXISTS (\
                    SELECT 1 FROM pg_catalog.pg_stat_activity \
-                   WHERE backend_type = 'koldstore maintenance ' \
+                   WHERE backend_type = 'koldstore wal applier ' \
                      || (SELECT oid::text FROM pg_catalog.pg_database \
                          WHERE datname = current_database())\
                  )",

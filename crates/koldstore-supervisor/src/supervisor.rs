@@ -458,6 +458,47 @@ impl<const N: usize> SupervisorRegistry<N> {
                 .is_ok()
     }
 
+    /// Stops dispatch for a database whose capture is gone (dropped DB or no
+    /// logical slot) without freeing the open-addressed OID slot.
+    ///
+    /// Entries stay allocated for postmaster lifetime so probe chains remain
+    /// valid. Quiescing clears deadlines, event flags, and aligns processed
+    /// generations so the supervisor stops spawning workers that would
+    /// immediately FATAL and starve live databases of `max_worker_processes`.
+    pub fn quiesce(&self, database_oid: u32) -> bool {
+        let Some(entry) = self.find(database_oid) else {
+            return false;
+        };
+        entry.next_flush_due_at_ms.store(0, Ordering::Release);
+        entry.next_maintenance_due_at_ms.store(0, Ordering::Release);
+        entry.maintenance_pid.store(WORKER_FREE, Ordering::Release);
+        entry.flush_starting.store(0, Ordering::Release);
+        entry.flush_running.store(0, Ordering::Release);
+
+        // Concurrent publish_* can race; retry a few times so a late bump is
+        // still acknowledged before we clear flags.
+        for _ in 0..8 {
+            let wal = entry.wal_generation.load(Ordering::Acquire);
+            let maintenance = entry.maintenance_generation.load(Ordering::Acquire);
+            let flush = entry.flush_generation.load(Ordering::Acquire);
+            entry.wal_processed_generation.store(wal, Ordering::Release);
+            entry
+                .maintenance_processed_generation
+                .store(maintenance, Ordering::Release);
+            entry
+                .flush_processed_generation
+                .store(flush, Ordering::Release);
+            entry.event_flags.store(0, Ordering::Release);
+            if entry.wal_generation.load(Ordering::Acquire) == wal
+                && entry.maintenance_generation.load(Ordering::Acquire) == maintenance
+                && entry.flush_generation.load(Ordering::Acquire) == flush
+            {
+                return true;
+            }
+        }
+        true
+    }
+
     #[must_use]
     pub fn overflow_reconcile_required(&self) -> bool {
         self.overflow_reconcile_required.load(Ordering::Acquire) != 0
@@ -675,5 +716,25 @@ mod tests {
         let _ = registry.publish_wal(42);
         assert_eq!(registry.publish_wal(84), None);
         assert!(registry.overflow_reconcile_required());
+    }
+
+    #[test]
+    fn quiesce_stops_due_work_and_deadlines() {
+        let registry = SupervisorRegistry::<1>::default();
+        let _ = registry.publish_wal(42);
+        let _ = registry.publish_schedule(42);
+        let _ = registry.publish_flush(42);
+        registry.schedule_maintenance_at_ms(42, 9_000);
+        registry.schedule_flush_at_ms(42, 8_000);
+        assert!(registry.try_reserve_maintenance(42));
+        assert!(registry.quiesce(42));
+        let snapshot = registry.snapshot(42).unwrap();
+        assert!(!snapshot.maintenance_due());
+        assert!(!snapshot.flush_due());
+        assert_eq!(snapshot.event_flags, 0);
+        assert_eq!(snapshot.next_maintenance_due_at_ms, 0);
+        assert_eq!(snapshot.next_flush_due_at_ms, 0);
+        assert_eq!(snapshot.maintenance_pid, 0);
+        assert_eq!(snapshot.flush_workers(), 0);
     }
 }

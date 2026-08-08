@@ -1,4 +1,4 @@
-//! Shared helpers for async mirror worker E2E assertions.
+//! Shared helpers for persistent WAL-applier E2E assertions.
 
 use anyhow::Result;
 use std::time::{Duration, Instant};
@@ -8,12 +8,13 @@ const BACKGROUND_APPLY_DEADLINE: Duration = Duration::from_secs(30);
 const WORKER_OBSERVE_DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AsyncMaintenanceState {
-    registered: bool,
-    pid: Option<i32>,
-    running: bool,
-    starting: bool,
-    pending: bool,
+struct AsyncWorkerState {
+    slot_present: bool,
+    wal_registered: bool,
+    wal_pid: Option<i32>,
+    wal_running: bool,
+    wal_starting: bool,
+    wal_pending: bool,
     recovery_requested: bool,
     wal_generation: i64,
     wal_processed_generation: i64,
@@ -21,32 +22,33 @@ struct AsyncMaintenanceState {
     maintenance_processed_generation: i64,
 }
 
-impl AsyncMaintenanceState {
-    fn caught_up(self) -> bool {
-        self.registered
-            && !self.pending
+impl AsyncWorkerState {
+    fn settled(self) -> bool {
+        !self.wal_pending
+            && !self.recovery_requested
             && self.wal_generation == self.wal_processed_generation
             && self.maintenance_generation == self.maintenance_processed_generation
     }
 
-    fn available(self) -> bool {
-        self.registered && (self.running || self.starting || self.caught_up())
+    fn wal_available(self) -> bool {
+        self.slot_present && self.wal_registered && self.wal_running
     }
 }
 
-async fn async_maintenance_state(client: &tokio_postgres::Client) -> Result<AsyncMaintenanceState> {
+async fn async_worker_state(client: &tokio_postgres::Client) -> Result<AsyncWorkerState> {
     let row = client
         .query_one(
             r#"
             SELECT
-              COALESCE((status->'maintenance'->>'registered')::boolean, false),
-              (status->'maintenance'->>'pid')::integer,
-              COALESCE((status->'maintenance'->>'running')::boolean, false),
-              COALESCE((status->'maintenance'->>'starting')::boolean, false),
-              COALESCE((status->'maintenance'->>'pending')::boolean, false),
+              COALESCE((status->'slot'->>'present')::boolean, false),
+              COALESCE((status->'wal_applier'->>'registered')::boolean, false),
+              (status->'wal_applier'->>'pid')::integer,
+              COALESCE((status->'wal_applier'->>'running')::boolean, false),
+              COALESCE((status->'wal_applier'->>'starting')::boolean, false),
+              COALESCE((status->'wal_applier'->>'pending')::boolean, false),
               COALESCE((status->'maintenance'->>'recovery_requested')::boolean, false),
-              COALESCE((status->'maintenance'->>'wal_generation')::bigint, 0),
-              COALESCE((status->'maintenance'->>'wal_processed_generation')::bigint, 0),
+              COALESCE((status->'wal_applier'->>'wal_generation')::bigint, 0),
+              COALESCE((status->'wal_applier'->>'wal_processed_generation')::bigint, 0),
               COALESCE((status->'maintenance'->>'maintenance_generation')::bigint, 0),
               COALESCE((status->'maintenance'->>'maintenance_processed_generation')::bigint, 0)
             FROM (SELECT koldstore.async_mirror_status() AS status) s
@@ -54,32 +56,33 @@ async fn async_maintenance_state(client: &tokio_postgres::Client) -> Result<Asyn
             &[],
         )
         .await?;
-    Ok(AsyncMaintenanceState {
-        registered: row.get(0),
-        pid: row.get(1),
-        running: row.get(2),
-        starting: row.get(3),
-        pending: row.get(4),
-        recovery_requested: row.get(5),
-        wal_generation: row.get(6),
-        wal_processed_generation: row.get(7),
-        maintenance_generation: row.get(8),
-        maintenance_processed_generation: row.get(9),
+    Ok(AsyncWorkerState {
+        slot_present: row.get(0),
+        wal_registered: row.get(1),
+        wal_pid: row.get(2),
+        wal_running: row.get(3),
+        wal_starting: row.get(4),
+        wal_pending: row.get(5),
+        recovery_requested: row.get(6),
+        wal_generation: row.get(7),
+        wal_processed_generation: row.get(8),
+        maintenance_generation: row.get(9),
+        maintenance_processed_generation: row.get(10),
     })
 }
 
-/// Requests database maintenance and waits until the event-driven subsystem has
-/// either started the ephemeral worker or fully consumed the published request.
+/// Requests async capture and waits until the persistent database WAL applier is
+/// running or starting.
 ///
-/// A healthy KoldStore database normally has no maintenance process in
-/// `pg_stat_activity`: workers are one-shot/burst processes and exit after a
-/// short idle grace. Tests therefore assert shared generations rather than
-/// requiring a permanently visible process.
+/// Before a test creates its first managed table there may be no logical slot;
+/// that state is already idle and needs no process. Once a slot exists, the
+/// helper requires the persistent service rather than accepting a caught-up but
+/// absent worker.
 ///
 /// # Errors
 ///
-/// Returns an error when the request fails or the supervisor does not acknowledge
-/// the database within [`WORKER_START_DEADLINE`].
+/// Returns an error when the request fails or the supervisor does not publish a
+/// persistent process within [`WORKER_START_DEADLINE`].
 pub async fn wait_for_async_worker(client: &tokio_postgres::Client) -> Result<Duration> {
     release_async_worker_stop_lock(client).await?;
     let started = Instant::now();
@@ -90,67 +93,63 @@ pub async fn wait_for_async_worker(client: &tokio_postgres::Client) -> Result<Du
                 &[],
             )
             .await?;
-        let state = async_maintenance_state(client).await?;
-        if state.available() {
+        let state = async_worker_state(client).await?;
+        if !state.slot_present || state.wal_available() {
             return Ok(started.elapsed());
         }
         anyhow::ensure!(
             started.elapsed() <= WORKER_START_DEADLINE,
-            "async maintenance was not acknowledged within {WORKER_START_DEADLINE:?}; state={state:?}"
+            "persistent WAL applier was not acknowledged within {WORKER_START_DEADLINE:?}; state={state:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
-/// Waits for supervisor-owned recovery after a maintenance process was killed.
+/// Waits for supervisor-owned recovery after the persistent WAL applier was
+/// killed.
 ///
 /// This deliberately does not call `internal_ensure_async_mirror_worker`: the
-/// child lifecycle signal / safety reconciliation must make the shared state
-/// healthy again on its own. Because the replacement process can finish before
-/// a test samples `pg_stat_activity`, a caught-up generation is also success.
+/// child lifecycle signal / safety reconciliation must replace the process on
+/// its own even when the database is already caught up. The replacement must
+/// publish a different live PID than `previous_pid`.
 ///
 /// # Errors
 ///
 /// Returns an error when supervisor recovery does not settle before the deadline.
 pub async fn wait_for_async_worker_auto_restart(
     client: &tokio_postgres::Client,
+    previous_pid: i32,
 ) -> Result<Duration> {
     let started = Instant::now();
     loop {
-        let state = async_maintenance_state(client).await?;
-        if state.available() {
+        let state = async_worker_state(client).await?;
+        if state.wal_available() && state.wal_pid.is_some_and(|pid| pid != previous_pid) {
             return Ok(started.elapsed());
         }
         anyhow::ensure!(
             started.elapsed() <= WORKER_START_DEADLINE,
-            "async maintenance did not recover within {WORKER_START_DEADLINE:?}; state={state:?}"
+            "persistent WAL applier did not recover within {WORKER_START_DEADLINE:?}; state={state:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-/// Returns whether the event-driven maintenance subsystem is available for the
-/// current database.
-///
-/// Unlike the old permanent async worker, a healthy ephemeral maintenance worker
-/// normally exits after it catches up. Consequently, "running" for E2E health
-/// assertions means either a process is running/starting **or** the authoritative
-/// shared generations are fully caught up. Signal-injection helpers below use a
-/// separate raw process probe.
+/// Returns whether the persistent WAL-applier service is running or starting for
+/// the current database.
 ///
 /// # Errors
 ///
-/// Returns an error when the maintenance status probe fails.
+/// Returns an error when the async status probe fails.
 pub async fn async_worker_running(client: &tokio_postgres::Client) -> Result<bool> {
-    Ok(async_maintenance_state(client).await?.available())
+    Ok(async_worker_state(client).await?.wal_available())
 }
 
-async fn maintenance_process_running(client: &tokio_postgres::Client) -> Result<bool> {
+async fn wal_process_running(client: &tokio_postgres::Client) -> Result<bool> {
     Ok(client
         .query_one(
             "SELECT EXISTS (\
                SELECT 1 FROM pg_catalog.pg_stat_activity \
-               WHERE backend_type = 'koldstore maintenance ' \
+               WHERE backend_type = 'koldstore wal applier ' \
                  || (SELECT oid::text FROM pg_catalog.pg_database \
                      WHERE datname = current_database())\
              )",
@@ -160,93 +159,87 @@ async fn maintenance_process_running(client: &tokio_postgres::Client) -> Result<
         .get(0))
 }
 
-async fn signal_maintenance_process(client: &tokio_postgres::Client) -> Result<bool> {
-    // Prefer the PID already published by the worker into shared state. It is a
-    // tighter lifecycle signal than racing pg_stat_activity against a process
-    // that intentionally exits after a 200ms idle grace.
-    if let Some(pid) = async_maintenance_state(client).await?.pid {
-        let terminated: bool = client
-            .query_one("SELECT pg_terminate_backend($1)", &[&pid])
-            .await?
-            .get(0);
-        if terminated {
-            return Ok(true);
-        }
+async fn wal_process_pid(client: &tokio_postgres::Client) -> Result<Option<i32>> {
+    if let Some(pid) = async_worker_state(client).await?.wal_pid {
+        return Ok(Some(pid));
     }
-
     Ok(client
         .query_one(
-            "SELECT COALESCE((\
-               SELECT pg_terminate_backend(pid) \
+            "SELECT (\
+               SELECT pid::integer \
                FROM pg_catalog.pg_stat_activity \
-               WHERE backend_type = 'koldstore maintenance ' \
+               WHERE backend_type = 'koldstore wal applier ' \
                  || (SELECT oid::text FROM pg_catalog.pg_database \
                      WHERE datname = current_database()) \
                LIMIT 1\
-             ), false)",
+             )",
             &[],
         )
         .await?
         .get(0))
 }
 
-/// Terminates an ephemeral maintenance worker for the current database.
+async fn terminate_pid(client: &tokio_postgres::Client, pid: i32) -> Result<bool> {
+    Ok(client
+        .query_one("SELECT pg_terminate_backend($1)", &[&pid])
+        .await?
+        .get(0))
+}
+
+async fn pid_is_running(client: &tokio_postgres::Client, pid: i32) -> Result<bool> {
+    Ok(client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)",
+            &[&pid],
+        )
+        .await?
+        .get(0))
+}
+
+/// Terminates the persistent WAL applier for the current database.
 ///
-/// If the database is healthy and idle, there may be no process to kill. In that
-/// case this helper publishes one diagnostic maintenance request and briefly
-/// races the intentionally short-lived process using its shared-state PID. If
-/// the request is consumed before a signal can land, the helper still reports
-/// success once the authoritative generations are healthy; deterministic crash
-/// tests should park a worker at a failpoint before signalling it.
-///
-/// When dispatch is paused, the diagnostic request is rejected and the function
-/// reports that no worker existed.
+/// The helper waits for the original PID to disappear, not for the backend type
+/// to become absent: an unpaused supervisor may replace the process immediately.
+/// When no process is visible, one diagnostic request is published and observed
+/// briefly before reporting that no worker could be signalled.
 ///
 /// # Errors
 ///
-/// Returns an error when termination SQL or maintenance status probing fails.
+/// Returns an error when termination SQL or worker status probing fails.
 pub async fn terminate_async_worker(client: &tokio_postgres::Client) -> Result<bool> {
-    let mut terminated = signal_maintenance_process(client).await?;
-    let mut requested = false;
-    if !terminated {
-        requested = client
+    let mut target_pid = wal_process_pid(client).await?;
+    if target_pid.is_none() {
+        let requested: bool = client
             .query_one(
                 "SELECT koldstore.internal_ensure_async_mirror_worker()",
                 &[],
             )
             .await?
             .get(0);
-        if requested {
-            let observe_started = Instant::now();
-            while observe_started.elapsed() <= WORKER_OBSERVE_DEADLINE {
-                terminated = signal_maintenance_process(client).await?;
-                if terminated {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }
-    }
-
-    if !terminated {
         if !requested {
             return Ok(false);
         }
-        // The diagnostic worker can legitimately complete its only work before
-        // the test backend gets a chance to signal it. That is not a lifecycle
-        // failure: confirm the request settled rather than inventing a persistent
-        // worker requirement.
-        return Ok(async_maintenance_state(client).await?.available());
+        let observe_started = Instant::now();
+        while observe_started.elapsed() <= WORKER_OBSERVE_DEADLINE {
+            target_pid = wal_process_pid(client).await?;
+            if target_pid.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
     }
 
+    let Some(pid) = target_pid else {
+        return Ok(false);
+    };
+    let _ = terminate_pid(client, pid).await?;
     let started = Instant::now();
-    while maintenance_process_running(client).await? {
+    while pid_is_running(client, pid).await? {
         anyhow::ensure!(
             started.elapsed() <= WORKER_START_DEADLINE,
-            "async maintenance process did not exit within {WORKER_START_DEADLINE:?} after terminate"
+            "WAL applier pid={pid} did not exit within {WORKER_START_DEADLINE:?} after terminate"
         );
-        // Re-signal in case SIGTERM landed during a non-interruptible window.
-        let _ = signal_maintenance_process(client).await?;
+        let _ = terminate_pid(client, pid).await?;
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Ok(true)
@@ -267,11 +260,12 @@ pub async fn release_async_worker_stop_lock(client: &tokio_postgres::Client) -> 
     Ok(())
 }
 
-/// Pauses supervisor maintenance dispatch and terminates any live process.
+/// Pauses supervisor WAL/maintenance dispatch and terminates the live WAL
+/// applier.
 ///
 /// PostgreSQL advisory locks are database-local, so the test control uses the
 /// extension's shared-memory pause set. Call [`wait_for_async_worker`] or
-/// [`release_async_worker_stop_lock`] when maintenance should resume.
+/// [`release_async_worker_stop_lock`] when dispatch should resume.
 ///
 /// # Errors
 ///
@@ -287,12 +281,12 @@ pub async fn force_stop_async_worker(client: &tokio_postgres::Client) -> Result<
     loop {
         let _ = terminate_async_worker(client).await?;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        if !maintenance_process_running(client).await? {
+        if !wal_process_running(client).await? {
             return Ok(());
         }
         anyhow::ensure!(
             Instant::now() < deadline,
-            "async maintenance process did not stay stopped within 10s"
+            "persistent WAL applier did not stay stopped within 10s"
         );
     }
 }
@@ -316,8 +310,8 @@ pub async fn mirror_op_count(
         .get(0))
 }
 
-/// Passively waits until autonomous background maintenance has produced the
-/// expected mirror row count.
+/// Passively waits until autonomous WAL application has produced the expected
+/// mirror row count.
 ///
 /// This helper deliberately does **not** call `wait_for_async_mirror()`. A
 /// frontend fence applies WAL itself and would make worker/supervisor reliability
@@ -338,10 +332,11 @@ pub async fn wait_for_mirror_op_count(
         if actual == expected {
             return Ok(());
         }
-        let state = async_maintenance_state(client).await?;
+        let state = async_worker_state(client).await?;
+        let settled = state.settled();
         anyhow::ensure!(
             started.elapsed() <= BACKGROUND_APPLY_DEADLINE,
-            "timed out after {BACKGROUND_APPLY_DEADLINE:?} waiting for {expected} mirror rows with op={op}; actual={actual}, maintenance={state:?}"
+            "timed out after {BACKGROUND_APPLY_DEADLINE:?} waiting for {expected} mirror rows with op={op}; actual={actual}, settled={settled}, workers={state:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }

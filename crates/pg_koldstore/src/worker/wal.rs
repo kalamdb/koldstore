@@ -1,0 +1,362 @@
+//! Persistent per-database WAL-applier background worker.
+//!
+//! WAL application is a latency-sensitive service, not scheduled maintenance.
+//! One worker stays registered for each database that owns a KoldStore logical
+//! slot, sleeps on a latch with a long recovery watchdog, drains committed WAL
+//! through the existing fixed-fence protocol, and returns to sleep. Heavy flush
+//! and maintenance work remains in separate ephemeral processes.
+
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
+
+use koldstore_wal_mirror::{
+    wal_applier_worker_type, WalApplierRegistry, WalApplierSnapshot, WAL_APPLIER_REGISTRY_CAPACITY,
+};
+use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
+use pgrx::{pg_guard, pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
+
+use crate::mirror::apply::{apply_bounded, capture_durable_wal_fence, BoundedApplyRequest};
+
+const WAL_APPLIER_FUNCTION: &str = "koldstore_wal_applier_main";
+const WAL_APPLIER_WATCHDOG: Duration = Duration::from_secs(30);
+const APPLY_RETRY_MIN: Duration = Duration::from_millis(100);
+const APPLY_RETRY_MAX: Duration = Duration::from_secs(5);
+
+type SharedWalApplierRegistry =
+    AssertPGRXSharedMemory<WalApplierRegistry<WAL_APPLIER_REGISTRY_CAPACITY>>;
+
+static WAL_APPLIER_REGISTRY: PgAtomic<SharedWalApplierRegistry> =
+    unsafe { PgAtomic::new(c"koldstore wal applier registry") };
+
+/// Process-local database OID for SIGTERM cleanup when Rust `Drop` is skipped.
+static CURRENT_WAL_APPLIER_DATABASE_OID: AtomicU32 = AtomicU32::new(0);
+
+#[allow(unexpected_cfgs)]
+pub(crate) fn initialize() {
+    pg_shmem_init!(
+        WAL_APPLIER_REGISTRY =
+            unsafe { AssertPGRXSharedMemory::new(WalApplierRegistry::default()) }
+    );
+}
+
+#[must_use]
+pub(crate) fn require(database_oid: u32) -> bool {
+    WAL_APPLIER_REGISTRY.get().require(database_oid)
+}
+
+pub(crate) fn disable(database_oid: u32) {
+    WAL_APPLIER_REGISTRY.get().disable(database_oid);
+}
+
+#[must_use]
+pub(crate) fn snapshot(database_oid: u32) -> Option<WalApplierSnapshot> {
+    WAL_APPLIER_REGISTRY.get().snapshot(database_oid)
+}
+
+pub(crate) fn try_reserve(database_oid: u32) -> bool {
+    WAL_APPLIER_REGISTRY.get().try_reserve(database_oid)
+}
+
+pub(crate) fn cancel_start(database_oid: u32) {
+    WAL_APPLIER_REGISTRY.get().cancel_start(database_oid);
+}
+
+pub(crate) fn clear_stale(database_oid: u32) {
+    WAL_APPLIER_REGISTRY.get().clear_stale(database_oid);
+}
+
+pub(crate) fn required_oids_into(out: &mut Vec<u32>) {
+    WAL_APPLIER_REGISTRY.get().required_oids_into(out);
+}
+
+#[must_use]
+pub(crate) fn overflow_reconcile_required() -> bool {
+    WAL_APPLIER_REGISTRY.get().overflow_reconcile_required()
+}
+
+pub(crate) fn clear_overflow_reconcile_required() {
+    WAL_APPLIER_REGISTRY
+        .get()
+        .clear_overflow_reconcile_required();
+}
+
+/// Returns whether the published WAL-applier PID is still a live process.
+///
+/// PostgreSQL `die()` / `proc_exit` paths can skip Rust `Drop` handlers, so a
+/// terminated applier may leave a stale PID in shared memory. Callers must not
+/// treat `snapshot().running()` as authoritative without this check.
+#[must_use]
+pub(crate) fn process_alive(database_oid: u32, pid: i32) -> bool {
+    pid > 0 && super::proc_latch::background_worker_alive(pid, Some(database_oid))
+}
+
+/// Clears a published PID that no longer maps to a live WAL applier.
+///
+/// Returns `true` when the registry still names a live process for `database_oid`.
+#[must_use]
+pub(crate) fn ensure_live(database_oid: u32) -> bool {
+    let Some(state) = snapshot(database_oid) else {
+        return false;
+    };
+    if state.pid <= 0 {
+        return false;
+    }
+    if process_alive(database_oid, state.pid) {
+        return true;
+    }
+    clear_stale(database_oid);
+    false
+}
+
+/// Wakes an already-running applier. Returns false when it must be started.
+///
+/// A published PID that is no longer live is cleared immediately so the
+/// supervisor can re-register without waiting for the next liveness reconcile.
+#[must_use]
+pub(crate) fn wake(database_oid: u32) -> bool {
+    let Some(state) = snapshot(database_oid) else {
+        return false;
+    };
+    if !state.required || state.pid <= 0 {
+        return false;
+    }
+    if set_background_worker_latch(state.pid, database_oid) {
+        return true;
+    }
+    clear_stale(database_oid);
+    false
+}
+
+/// Registers one already-reserved persistent WAL applier.
+///
+/// The static cluster supervisor is the sole production caller. Registration
+/// remains dynamic so only databases with an actual KoldStore logical slot use
+/// a PostgreSQL worker slot.
+pub(crate) fn register_from_supervisor(database_oid: u32) -> Result<(), String> {
+    let worker_type = wal_applier_worker_type(database_oid);
+    BackgroundWorkerBuilder::new(&worker_type)
+        .set_type(&worker_type)
+        .set_library(koldstore_supervisor::LIBRARY_NAME)
+        .set_function(WAL_APPLIER_FUNCTION)
+        .enable_spi_access()
+        .set_restart_time(None)
+        .set_argument(Some(pg_sys::Datum::from(database_oid)))
+        .set_notify_pid(unsafe { pg_sys::MyProcPid })
+        .load_dynamic()
+        .map(|_| ())
+        .map_err(|_| {
+            format!(
+                "could not register WAL applier (worker_type={worker_type}; \
+                 usually max_worker_processes exhausted)"
+            )
+        })
+}
+
+#[pgrx::pg_guard]
+#[no_mangle]
+pub extern "C-unwind" fn koldstore_wal_applier_main(argument: pg_sys::Datum) {
+    run_wal_applier(argument.value() as u32);
+}
+
+fn run_wal_applier(database_oid: u32) {
+    CURRENT_WAL_APPLIER_DATABASE_OID.store(database_oid, Ordering::Release);
+    attach_signal_handlers();
+    BackgroundWorker::connect_worker_to_spi_by_oid(Some(pg_sys::Oid::from(database_oid)), None);
+
+    if !WAL_APPLIER_REGISTRY
+        .get()
+        .started(database_oid, unsafe { pg_sys::MyProcPid })
+    {
+        CURRENT_WAL_APPLIER_DATABASE_OID.store(0, Ordering::Release);
+        pgrx::log!("koldstore WAL applier db={database_oid}: stale/unreserved start; exiting");
+        return;
+    }
+    let _registration = WalApplierRegistration { database_oid };
+    // Recovery and scheduling share one durable generation. Apply at most once
+    // for a given recovery generation; the ephemeral maintenance worker may
+    // clear the flag later without making this process spin on an unchanged bit.
+    let mut applied_recovery_generation = 0_u64;
+    let mut retry_delay = APPLY_RETRY_MIN;
+
+    loop {
+        let Some(service) = snapshot(database_oid) else {
+            return;
+        };
+        if !service.required {
+            return;
+        }
+
+        let slot = crate::mirror::lifecycle::slot_name(database_oid);
+        if !crate::mirror::lifecycle::native_slot_exists(&slot) {
+            // A deliberately or externally removed slot cannot be serviced.
+            // Disable the requirement so the supervisor does not respawn this
+            // process forever; normal manage_table activation requires it again.
+            disable(database_oid);
+            return;
+        }
+
+        let Some(state) = super::wake::supervisor_snapshot(database_oid) else {
+            return;
+        };
+        let target_generation = state.wal_generation;
+        let recovery_requested =
+            state.event_flags & koldstore_supervisor::EVENT_RECOVERY_REQUIRED != 0;
+        let recovery_apply_due =
+            recovery_requested && state.maintenance_generation > applied_recovery_generation;
+        let wal_due = state.wal_generation != state.wal_processed_generation;
+
+        if wal_due || recovery_apply_due {
+            match drain_wal_through_fixed_fence() {
+                Ok(()) => {
+                    retry_delay = APPLY_RETRY_MIN;
+                    if wal_due {
+                        super::wake::mark_wal_processed(database_oid, target_generation);
+                    }
+                    if recovery_apply_due {
+                        applied_recovery_generation = state.maintenance_generation;
+                    }
+                }
+                Err(error) => {
+                    crate::observability::record_async_apply_error();
+                    pgrx::warning!(
+                        "koldstore WAL applier db={database_oid} apply deferred for {}ms: {error}",
+                        retry_delay.as_millis()
+                    );
+                    // Publish one durable recovery request for this error streak.
+                    // Subsequent retries keep the same dirty generations pending.
+                    if retry_delay == APPLY_RETRY_MIN {
+                        super::wake::request_recovery(database_oid);
+                    }
+                    if !wait_until(Instant::now() + retry_delay) {
+                        return;
+                    }
+                    retry_delay = retry_delay.saturating_mul(2).min(APPLY_RETRY_MAX);
+                }
+            }
+            // A commit or recovery request that arrived during this pass changed
+            // a generation. Re-read shared state immediately instead of sleeping.
+            continue;
+        }
+
+        // Latch wakes are latency hints. The long timeout is only a recovery
+        // watchdog for COMMIT PREPARED or a missed in-memory signal; there is no
+        // normal polling transaction while the worker is idle.
+        if !BackgroundWorker::wait_latch(Some(WAL_APPLIER_WATCHDOG)) {
+            return;
+        }
+        process_sighup();
+    }
+}
+
+/// Waits through an apply retry backoff even if lifecycle latches arrive early.
+///
+/// A failed apply keeps the generation dirty. The supervisor may therefore set
+/// the process latch while the worker is deliberately backing off; consume that
+/// hint but do not retry before the deadline.
+fn wait_until(deadline: Instant) -> bool {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
+        }
+        if !BackgroundWorker::wait_latch(Some(remaining)) {
+            return false;
+        }
+        process_sighup();
+    }
+}
+
+fn process_sighup() {
+    if BackgroundWorker::sighup_received() {
+        unsafe { pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP) };
+    }
+}
+
+/// Drains all WAL visible at one fixed durable fence while respecting bounded
+/// apply budgets. `synchronous_commit=off` stays foreground-asynchronous: this
+/// worker performs XLogFlush, not the application backend.
+fn drain_wal_through_fixed_fence() -> Result<(), String> {
+    let fence = capture_durable_wal_fence()?;
+    loop {
+        let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
+        let outcome = super::txn::run_recoverable("WAL applier", || {
+            let mut request = BoundedApplyRequest::available();
+            request.upper_bound = Some(fence);
+            request.advance_slot_on_empty = true;
+            apply_bounded(request)
+        });
+        drop(decoding_log_guard);
+        let outcome = outcome?;
+        crate::observability::record_async_apply_tick(outcome.row_changes, 0);
+        if !outcome.budget_exhausted {
+            return Ok(());
+        }
+    }
+}
+
+struct WalApplierRegistration {
+    database_oid: u32,
+}
+
+impl Drop for WalApplierRegistration {
+    fn drop(&mut self) {
+        release_wal_applier_registration(self.database_oid, unsafe { pg_sys::MyProcPid });
+    }
+}
+
+fn release_wal_applier_registration(database_oid: u32, pid: i32) {
+    WAL_APPLIER_REGISTRY.get().stopped(database_oid, pid);
+    CURRENT_WAL_APPLIER_DATABASE_OID.store(0, Ordering::Release);
+    super::wake::wake_supervisor();
+}
+
+struct DecodingLogGuard {
+    previous: std::os::raw::c_int,
+}
+
+impl DecodingLogGuard {
+    fn suppress_routine_log_messages() -> Self {
+        unsafe {
+            let previous = pg_sys::log_min_messages;
+            pg_sys::log_min_messages = pg_sys::FATAL as std::os::raw::c_int;
+            Self { previous }
+        }
+    }
+}
+
+impl Drop for DecodingLogGuard {
+    fn drop(&mut self) {
+        unsafe {
+            pg_sys::log_min_messages = self.previous;
+        }
+    }
+}
+
+fn attach_signal_handlers() {
+    BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP);
+    unsafe {
+        #[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
+        pg_sys::pqsignal(pg_sys::SIGTERM as i32, Some(wal_applier_sigterm));
+        #[cfg(feature = "pg18")]
+        pg_sys::pqsignal_be(pg_sys::SIGTERM as i32, Some(wal_applier_sigterm));
+    }
+}
+
+unsafe extern "C-unwind" fn wal_applier_sigterm(signal: std::os::raw::c_int) {
+    // `die()` / `proc_exit` can skip Rust destructors. Clear the shared PID
+    // before exiting so the supervisor does not treat this process as live.
+    // Avoid non-signal-safe work here; PostgreSQL still delivers the child
+    // lifecycle SIGUSR1 that wakes the supervisor.
+    let database_oid = CURRENT_WAL_APPLIER_DATABASE_OID.load(Ordering::Acquire);
+    if database_oid != 0 {
+        WAL_APPLIER_REGISTRY
+            .get()
+            .stopped(database_oid, unsafe { pg_sys::MyProcPid });
+        CURRENT_WAL_APPLIER_DATABASE_OID.store(0, Ordering::Release);
+    }
+    unsafe { pg_sys::die(signal) }
+}
+
+fn set_background_worker_latch(pid: i32, database_oid: u32) -> bool {
+    super::proc_latch::set_background_worker_latch(pid, Some(database_oid))
+}

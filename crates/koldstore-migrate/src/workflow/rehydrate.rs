@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use koldstore_mirror::{plan_drop_mirror_table, MirrorRelation};
+use koldstore_wal_mirror::{plan_drop_mirror_table, MirrorRelation};
 
 use koldstore_common::{SqlStatement, TableOid};
 
@@ -241,7 +241,7 @@ pub fn plan_clean_schema_artifact_cleanup(
     table: &QualifiedTableName,
     mirror_table: &QualifiedTableName,
 ) -> Result<Vec<SqlStatement>, DemigrationError> {
-    let mut statements = koldstore_mirror::plan_mirror_source_teardown(table, mirror_table)
+    let mut statements = koldstore_wal_mirror::plan_mirror_source_teardown(table, mirror_table)
         .map_err(|error| DemigrationError::Spi(error.to_string()))?;
     let mirror = mirror_table
         .as_table_name()

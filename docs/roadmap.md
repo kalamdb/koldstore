@@ -135,7 +135,7 @@ than embedding large values in row storage.
   PK seen-set remains in RAM (compact, payload-free) until spill lands. See
   [performance](performance.md).
 
-Built-in row-limit auto-flush scheduling is available on the database worker
+Built-in row-limit auto-flush scheduling is available via ephemeral maintenance
 (`koldstore.flush_check_interval_seconds`, per-table `auto_flush`). Auto-flush
 enqueues durable jobs for one-shot executors; it is not PostgreSQL autovacuum.
 Time-based `max_flush_interval` and predicate move policies remain deferred. See

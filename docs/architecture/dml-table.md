@@ -7,7 +7,7 @@ accounting, scope enforcement, and how DML state flows into flush and scan.
 **Application path:** native PostgreSQL heap DML + PK-mutation guard
 **Capture path:** committed-WAL logical decoding + database apply worker
 
-**Mirror contract:** `crates/koldstore-mirror/`
+**Mirror contract:** `crates/koldstore-wal-mirror/src/mirror/`
 **Capture/apply:** `crates/pg_koldstore/src/mirror/`
 **Counter cache:** `crates/pg_koldstore/src/row_counter_cache.rs`
 
@@ -99,10 +99,10 @@ The source table publishes only its primary-key columns through pgoutput v1. A
 logical slot filters out aborted transactions; therefore rollback correctness
 does not require speculative mirror writes or compensating deletes.
 
-Managed commits wake the database worker through a coalescing shared generation
-and latch. The worker applies committed changes in bounded batches of 8,192; a
-low-frequency watchdog recovers missed notifications. Asynchronous commits that
-are not yet decodeable retry for at most one second (10–200 ms).
+Managed commits wake the persistent WAL applier through a coalescing shared
+generation and latch. The applier applies committed changes in bounded batches
+of 8,192; a low-frequency watchdog recovers missed notifications. Asynchronous
+commits that are not yet decodeable retry for at most one second (10–200 ms).
 `koldstore.wait_for_async_mirror()` uses the same path when the caller needs an
 explicit consistency boundary:
 
@@ -325,8 +325,8 @@ no-op on the heap; durable cold masking requires a mirror tombstone + flush.
 
 Capture uses logical decoding only. There is no live `ExecutorStart` /
 `ProcessUtility` DML-rewrite hook that writes the mirror. Managed tables keep
-only the PK mutation guard; the always-on database worker is started during
-activation and restored by the shared-preload launcher or explicit ensure/fence
+only the PK mutation guard; the always-on WAL applier is started during
+activation and restored by the cluster supervisor or explicit ensure/fence
 paths, not by application DML triggers.
 
 ---
@@ -358,9 +358,9 @@ sequenceDiagram
 
 | Concern | Location |
 |---------|----------|
-| Shared `__cl` DDL / read / write SQL | `koldstore-mirror/src/shared/` |
-| PK / order mutation guard | `koldstore-mirror/src/guard.rs` |
-| Decoder / batch policy | `koldstore-mirror/src/async/` |
+| Shared `__cl` DDL / read / write SQL | `koldstore-wal-mirror/src/mirror/shared/` |
+| PK / order mutation guard | `koldstore-wal-mirror/src/mirror/guard.rs` |
+| Decoder / batch policy | `koldstore-wal-mirror/src/mirror/async/` |
 | Lifecycle / apply / workers | `pg_koldstore/src/mirror/` |
 | Migrate orchestration (uses mirror crate) | `koldstore-migrate/src/sql/mirror.rs` |
 | Row counter cache | `pg_koldstore/src/row_counter_cache.rs` |

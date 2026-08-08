@@ -35,7 +35,7 @@ pub(super) fn cleanup_managed_tables_before_drop(
 
 /// Drops change-log mirrors captured before DROP (best-effort after heap gone).
 pub(super) fn drop_captured_mirrors(mirrors: &[QualifiedTableName]) {
-    use koldstore_mirror::{plan_drop_mirror_table, MirrorRelation};
+    use koldstore_wal_mirror::{plan_drop_mirror_table, MirrorRelation};
 
     for mirror in mirrors {
         let sql = match mirror.as_table_name() {

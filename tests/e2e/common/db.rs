@@ -638,6 +638,9 @@ pub fn is_flush_entry_lock_busy(error: &tokio_postgres::Error) -> bool {
         || text.contains("flush unavailable")
         || text.contains("flush already in progress")
         || text.contains("retry after it completes")
+        // Concurrent force-flush vs completing job: enqueue upsert can briefly
+        // return no id before the next attempt inserts/looks up cleanly.
+        || text.contains("enqueue flush job returned no active job id")
 }
 
 /// True when a flush *job* failed because finalize could not take the slot lock.

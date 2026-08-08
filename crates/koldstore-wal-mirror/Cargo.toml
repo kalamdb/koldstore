@@ -1,9 +1,10 @@
 [package]
-name = "koldstore-mirror"
+name = "koldstore-wal-mirror"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "PostgreSQL-free WAL applier lifecycle and change-log mirror contracts"
 
 [dependencies]
 koldstore-common.workspace = true

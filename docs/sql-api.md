@@ -80,12 +80,12 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.max_merge_seen_keys` | int | `1000000` | Per-scan cap on exact PK identities retained by `KoldMergeScan` (fail-closed when exceeded). Protects backends from accidental full-table scans. `0` disables the cap. Clamped to `0..=100000000`. |
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
-| `koldstore.flush_check_interval_seconds` | int | `30` | How often the database worker evaluates `auto_flush` tables, enqueues at most one due flush job, and spawns flush executors. Clamped to `1..=86400`. Independent of PostgreSQL autovacuum. |
+| `koldstore.flush_check_interval_seconds` | int | `30` | How often ephemeral maintenance evaluates `auto_flush` tables, enqueues at most one due flush job, and asks the supervisor to spawn flush executors. Clamped to `1..=86400`. Independent of PostgreSQL autovacuum. |
 | `koldstore.max_parallel_flush_jobs` | int | `2` | Max concurrent one-shot flush executor workers per database. Clamped to `1..=16`. Use `1` on small-memory hosts so encode spikes do not overlap. |
 | `koldstore.flush_job_max_runtime_seconds` | int | `1800` | Wall-clock budget for one flush job attempt. Checked between passes and between streamed batches within a pass (so one oversized force-flush pass cannot outrun the budget); exceeded attempts fail with an error so a stuck worker cannot run forever. `0` disables. Clamped to `0..=86400`. |
 | `koldstore.flush_execution` | string | `queue` | `queue`: `flush_table` enqueues a durable job and returns its UUID; a one-shot executor runs the work. `inline`: enqueue then run in the calling backend (SPI / `#[pg_test]` only). |
 | `koldstore.job_retention_days` | int | `30` | Days to retain terminal jobs before purge; `0` disables. Jobs still referenced by pending cold segments are never deleted. |
-| `koldstore.async_apply_watchdog_interval_ms` | int | `30000` | Safety watchdog for missed commit wakeups. Managed commits normally set the database worker latch immediately. Clamped to `1000..=300000`. |
+| `koldstore.async_apply_watchdog_interval_ms` | int | `30000` | Safety watchdog for missed commit wakeups. Managed commits normally set the persistent WAL applier latch immediately. Clamped to `1000..=300000`. |
 | `koldstore.async_apply_max_rows_per_tick` | int | `0` | Max source row changes per apply tick (`0` = unlimited / drain available WAL). Cap this on small machines (for example `8192`) via `ALTER DATABASE` so background workers see it. |
 | `koldstore.async_apply_max_ms_per_tick` | int | `0` | Max wall-clock ms per apply tick (`0` = unlimited). When exhausted, commit `applied_lsn` and continue next wake. Cap alongside row budget on small hosts. |
 | `koldstore.flush_prelock_max_passes` | int | `3` | Max phase-5.5 pre-lock async apply passes during flush before failing closed. |
@@ -265,7 +265,7 @@ also available.
 | `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
 | `compression` | `NULL` | Optional Parquet compression name |
 | `target_file_size_mb` | `NULL` | Optional target Parquet segment size in MiB; stored for future size-aware flushing |
-| `auto_flush` | `true` | When `true`, the built-in database worker may enqueue flush jobs for this table; set `false` to reserve flushes for cron / manual `flush_table` |
+| `auto_flush` | `true` | When `true`, ephemeral maintenance may enqueue flush jobs for this table; set `false` to reserve flushes for cron / manual `flush_table` |
 
 **Returns:** `uuid` — the migration job id written to `koldstore.jobs` (empty
 tables get a completed migrate job; populated tables run mirror initialization

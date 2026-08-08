@@ -10,7 +10,7 @@
 //!
 //! A crash between steps 2 and 4 may re-peek already-applied changes; replay is
 //! safe because mirror writes are latest-state upserts. Batches are capped at
-//! [`koldstore_mirror::APPLY_BATCH_ROWS`] and cleared on every flush.
+//! [`koldstore_wal_mirror::APPLY_BATCH_ROWS`] and cleared on every flush.
 //!
 //! Flush prune fences use [`apply_bounded`] with an explicit `upto_lsn`,
 //! transaction skip boundary, and `acknowledge_durable_checkpoint = false` so
@@ -20,11 +20,12 @@ use std::collections::{HashMap, HashSet};
 
 use koldstore_catalog::{async_managed_relation, queries::plan_async_managed_relation_by_oid};
 use koldstore_common::{format_pg_lsn, next_id_after, MirrorOperation};
-use koldstore_mirror::{
-    decode_message, must_flush_before_push, pg_value_text, pk_identity,
-    plan_async_mirror_batch_delete_existing, plan_async_mirror_batch_update,
-    plan_async_mirror_batch_upsert, primary_key_json, PgOutputMessage, PgOutputRelation,
-    PgOutputTuple, APPLY_BATCH_ROWS,
+use koldstore_wal_mirror::{
+    budget_hit, decode_message, must_flush_before_push, parse_pk_bool, parse_pk_ints,
+    pg_value_text, pk_identity, plan_async_mirror_batch_delete_existing,
+    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, primary_key_json,
+    resolve_row_budget, resolve_time_budget, PgOutputMessage, PgOutputRelation, PgOutputTuple,
+    APPLY_BATCH_ROWS,
 };
 use pgrx::datum::DatumWithOid;
 use serde_json::Value;
@@ -32,6 +33,7 @@ use serde_json::Value;
 use super::lifecycle::{current_slot_name, PUBLICATION_NAME};
 
 pub use koldstore_common::{AppliedWalBoundary, WalFenceLsn};
+pub use koldstore_wal_mirror::{BoundedApplyOutcome, BoundedApplyRequest, PruneSeqFloor};
 
 const DECODE_FETCH_ROWS: std::os::raw::c_long = 8_192;
 
@@ -40,108 +42,6 @@ pub const ASYNC_MIRROR_APPLY_FAILPOINT: &str = "async_mirror_apply";
 /// Failpoint name: abort after at least one mirror batch SPI write, before
 /// `applied_lsn` is recorded — asserts one-txn-per-tick rollback.
 pub const ASYNC_MIRROR_APPLY_AFTER_BATCH_FAILPOINT: &str = "async_mirror_apply_after_batch";
-
-/// Target-table mirror seq must be strictly greater than this floor after fence apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PruneSeqFloor(i64);
-
-impl PruneSeqFloor {
-    /// Wraps a mirror `max_seq` watermark.
-    #[must_use]
-    pub const fn new(max_seq: i64) -> Self {
-        Self(max_seq)
-    }
-
-    /// Returns the raw floor value.
-    #[must_use]
-    pub const fn get(self) -> i64 {
-        self.0
-    }
-}
-
-/// Request for a single bounded (or unbounded) async mirror apply pass.
-#[derive(Debug, Clone)]
-pub struct BoundedApplyRequest {
-    /// When set, pass as `upto_lsn` to logical decoding.
-    pub upper_bound: Option<WalFenceLsn>,
-    /// Skip whole pgoutput transactions with `end_lsn <= skip_through`.
-    pub skip_through: Option<AppliedWalBoundary>,
-    /// When true, advance the slot to the previously committed durable checkpoint
-    /// and record a new pending `applied_lsn`. Flush prune fences must use false.
-    pub acknowledge_durable_checkpoint: bool,
-    /// When true, an empty publication peek advances `confirmed_flush` through
-    /// non-publication WAL. Wake-driven async-commit retries must use false so
-    /// unrelated WAL cannot move the slot before the watchdog.
-    pub advance_slot_on_empty: bool,
-    /// When set, allocate sequences for this table strictly above the floor.
-    pub target_prune_floor: Option<(pgrx::pg_sys::Oid, PruneSeqFloor)>,
-    /// Optional row budget override. `None` uses the background GUC; `Some(0)`
-    /// means unlimited; `Some(n > 0)` caps source row changes in this pass.
-    pub max_rows: Option<i64>,
-    /// Optional wall-time budget override (milliseconds). Same semantics as
-    /// [`Self::max_rows`].
-    pub max_ms: Option<i64>,
-}
-
-impl BoundedApplyRequest {
-    /// Default worker apply request (honors per-tick GUC budgets).
-    #[must_use]
-    pub fn available() -> Self {
-        Self {
-            upper_bound: None,
-            skip_through: None,
-            acknowledge_durable_checkpoint: true,
-            advance_slot_on_empty: true,
-            target_prune_floor: None,
-            max_rows: None,
-            max_ms: None,
-        }
-    }
-
-    /// Explicit fence / flush request: drain all peekable WAL in this pass.
-    #[must_use]
-    pub fn available_unlimited() -> Self {
-        Self {
-            upper_bound: None,
-            skip_through: None,
-            acknowledge_durable_checkpoint: true,
-            advance_slot_on_empty: true,
-            target_prune_floor: None,
-            max_rows: Some(0),
-            max_ms: Some(0),
-        }
-    }
-
-    /// Strong-consistency fence: apply through a fixed durable WAL upper bound.
-    ///
-    /// Unlike [`Self::available_unlimited`], concurrent commits after `fence`
-    /// cannot extend the catch-up target — the stream goes idle relative to
-    /// this bound even under continuous writers.
-    #[must_use]
-    pub fn upto_fence(fence: WalFenceLsn) -> Self {
-        Self {
-            upper_bound: Some(fence),
-            skip_through: None,
-            acknowledge_durable_checkpoint: true,
-            advance_slot_on_empty: true,
-            target_prune_floor: None,
-            max_rows: Some(0),
-            max_ms: Some(0),
-        }
-    }
-}
-
-/// Outcome of a bounded apply pass.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BoundedApplyOutcome {
-    /// Source row-change messages applied (skipped transactions excluded).
-    pub row_changes: i64,
-    /// Exact last decoded commit end-LSN, or the request skip / durable boundary
-    /// when the pass was empty. Never promoted to the fence upper bound alone.
-    pub last_applied: Option<AppliedWalBoundary>,
-    /// True when a row/time budget stopped the pass with more WAL remaining.
-    pub budget_exhausted: bool,
-}
 
 #[derive(Debug, Clone)]
 struct OrderColumnConfig {
@@ -202,21 +102,6 @@ impl ApplyBatch {
     }
 }
 
-/// Applies all currently available committed WAL for async managed tables.
-///
-/// The return value is the number of source row-change messages applied. Rust
-/// allocations and SPI writes are bounded to 8K rows per batch; PostgreSQL may
-/// spill the decoding SRF tuplestore according to `work_mem` for a very large
-/// source transaction.
-///
-/// # Errors
-///
-/// Returns an error for malformed protocol data, stale relation metadata,
-/// missing primary-key values, or an SPI/apply failure.
-pub fn apply_available() -> Result<i64, String> {
-    Ok(apply_bounded(BoundedApplyRequest::available())?.row_changes)
-}
-
 /// Applies committed WAL under an explicit fence request.
 ///
 /// Acquires the database slot lock for the current transaction, then applies.
@@ -271,8 +156,8 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
         acknowledge_committed_apply(&slot, durable.as_ref())?;
     }
 
-    let row_budget = resolve_row_budget(&request);
-    let time_budget = resolve_time_budget(&request);
+    let row_budget = row_budget_for(&request);
+    let time_budget = time_budget_for(&request);
     let tick_started = std::time::Instant::now();
     // Always bound the peek. An empty stream can then advance `confirmed_flush`
     // past non-publication WAL so idle ticks do not re-decode a growing
@@ -325,7 +210,7 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
                         // published to cold. Critical on PG15 (no peek
                         // origin=none filter). PG16+ stamps DoNotReplicateId
                         // instead and peeks with origin=none.
-                        let database_oid = koldstore_worker::DatabaseOid::new(
+                        let database_oid = koldstore_supervisor::DatabaseOid::new(
                             unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32(),
                         );
                         if super::lifecycle::is_flush_replication_origin(&name, database_oid) {
@@ -346,7 +231,7 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
                         skipping_transaction = false;
                         skipping_flush_origin = false;
                         // Stop only at commit boundaries so mirror + applied_lsn stay atomic.
-                        if budget_hit(row_budget, time_budget, applied, tick_started) {
+                        if budget_hit(row_budget, time_budget, applied, tick_started.elapsed()) {
                             budget_exhausted = true;
                             stop_after_commit = true;
                         }
@@ -462,58 +347,15 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
     result
 }
 
-fn resolve_row_budget(request: &BoundedApplyRequest) -> Option<i64> {
-    match request.max_rows {
-        Some(0) => None,
-        Some(limit) if limit > 0 => Some(limit),
-        Some(_) => None,
-        None => {
-            let guc = crate::guc::async_apply_max_rows_per_tick();
-            if guc > 0 {
-                Some(guc)
-            } else {
-                None
-            }
-        }
-    }
+fn row_budget_for(request: &BoundedApplyRequest) -> Option<i64> {
+    resolve_row_budget(
+        request.max_rows,
+        crate::guc::async_apply_max_rows_per_tick(),
+    )
 }
 
-fn resolve_time_budget(request: &BoundedApplyRequest) -> Option<std::time::Duration> {
-    let ms = match request.max_ms {
-        Some(0) => return None,
-        Some(limit) if limit > 0 => limit,
-        Some(_) => return None,
-        None => {
-            let guc = crate::guc::async_apply_max_ms_per_tick();
-            if guc > 0 {
-                guc
-            } else {
-                return None;
-            }
-        }
-    };
-    Some(std::time::Duration::from_millis(
-        u64::try_from(ms).unwrap_or(0),
-    ))
-}
-
-fn budget_hit(
-    row_budget: Option<i64>,
-    time_budget: Option<std::time::Duration>,
-    applied: i64,
-    started: std::time::Instant,
-) -> bool {
-    if let Some(limit) = row_budget {
-        if applied >= limit {
-            return true;
-        }
-    }
-    if let Some(limit) = time_budget {
-        if started.elapsed() >= limit {
-            return true;
-        }
-    }
-    false
+fn time_budget_for(request: &BoundedApplyRequest) -> Option<std::time::Duration> {
+    resolve_time_budget(request.max_ms, crate::guc::async_apply_max_ms_per_tick())
 }
 
 fn open_decode_cursor(slot: &str, upper_bound: Option<WalFenceLsn>) -> Result<String, String> {
@@ -789,7 +631,7 @@ fn push_change(
     // Allocate above the durable high-watermark (and prune floor when fencing).
     let mut floor = *seq_watermark;
     if let Some((target_oid, prune_floor)) = request.target_prune_floor {
-        if config.table_oid == target_oid {
+        if config.table_oid.to_u32() == target_oid {
             floor = floor.max(prune_floor.get());
         }
     }
@@ -1126,28 +968,6 @@ fn push_typed_pk_array_arg(
         }
     }
     Ok(())
-}
-
-fn parse_pk_ints<T>(cells: &[String], type_name: &str) -> Result<Vec<T>, String>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    cells
-        .iter()
-        .map(|cell| {
-            cell.parse::<T>()
-                .map_err(|error| format!("async mirror PK {type_name} value `{cell}`: {error}"))
-        })
-        .collect()
-}
-
-fn parse_pk_bool(cell: &str) -> Result<bool, String> {
-    match cell.trim().to_ascii_lowercase().as_str() {
-        "t" | "true" | "1" | "yes" | "on" => Ok(true),
-        "f" | "false" | "0" | "no" | "off" => Ok(false),
-        other => Err(format!("async mirror PK boolean value `{other}`")),
-    }
 }
 
 /// Applies committed WAL available at the fence boundary and returns row changes.

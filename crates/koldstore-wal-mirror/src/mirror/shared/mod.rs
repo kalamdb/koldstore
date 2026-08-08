@@ -5,6 +5,7 @@
 
 pub mod columns;
 pub mod error;
+pub mod publication;
 pub mod read;
 pub mod relation;
 pub mod row_json;
@@ -14,6 +15,7 @@ pub mod write;
 
 pub use columns::MirrorColumn;
 pub use error::{MirrorError, MirrorResult};
+pub use publication::published_column_list;
 pub use read::{
     plan_mirror_force_flush_stats, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats,
     plan_mirror_stats, plan_select_mirror_last_rows, plan_select_mirror_last_rows_with_params,

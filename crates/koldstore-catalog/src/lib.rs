@@ -3,7 +3,7 @@
 //! Owns cold segments, managed-table snapshots, sync-state FSM, PG-free catalog
 //! **read** SQL, decoding, and cache shapes. Keep separate from:
 //! - `koldstore-schema`: table shape/registry (this crate depends on it one-way)
-//! - `koldstore-mirror`: `__cl` DML/DDL SQL (catalog only stores/looks up
+//! - `koldstore-wal-mirror`: `__cl` DML/DDL SQL (catalog only stores/looks up
 //!   `mirror_relation`; mirror builds upserts/stats against it)
 //! - `koldstore-manifest`: derived object-store `manifest.json` (assembly/I/O)
 //!

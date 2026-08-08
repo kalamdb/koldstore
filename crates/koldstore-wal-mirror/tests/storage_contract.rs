@@ -2,7 +2,7 @@ use koldstore_common::{
     ColumnId, MirrorOperation, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal,
     PrimaryKeyColumnShape, TableName,
 };
-use koldstore_mirror::{
+use koldstore_wal_mirror::{
     mirror_relation_for_source, plan_async_mirror_batch_delete_existing,
     plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, plan_mirror_schema,
     plan_mirror_stats, plan_select_mirror_rows_after_seq, plan_upsert_mirror_row, MirrorColumn,

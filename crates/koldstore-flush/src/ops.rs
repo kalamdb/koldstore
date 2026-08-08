@@ -176,11 +176,13 @@ pub const fn flush_table_request(
     }
 }
 
-/// Plans INSERT … ON CONFLICT DO NOTHING then lookup of the active flush job id.
+/// Plans INSERT … ON CONFLICT DO UPDATE for the active flush job id.
 ///
-/// Inserts a pending flush job when none is active. On conflict with an existing
-/// pending/running flush job, returns that job's id. When `force = true`, upgrades
-/// an existing **pending** job's payload force intent.
+/// Concurrent force-flush callers racing a completing job used to hit
+/// `DO NOTHING` + a follow-up lookup that returned NULL (the active unique
+/// index entry disappearing mid-statement). `DO UPDATE … RETURNING id` keeps
+/// the outcome atomic: insert a new pending job or attach to the live one
+/// (and upgrade `force` when requested).
 ///
 /// Bind parameters:
 /// - `$1` table oid (`regclass::oid`)
@@ -199,58 +201,36 @@ pub fn plan_enqueue_or_lookup_flush_job(
         "enqueue or lookup flush job",
         &format!(
             r#"
-WITH inserted AS (
-    INSERT INTO koldstore.jobs (
-        id,
-        table_oid,
-        scope_key,
-        job_type,
-        status,
-        phase,
-        flush_seq_upper_bound,
-        payload
-    )
-    VALUES (
-        gen_random_uuid(),
-        $1::regclass::oid,
-        COALESCE($2::text, ''),
-        'flush',
-        'pending',
-        'pending',
-        $3::bigint,
-        jsonb_build_object('force', $4::boolean)
-    )
-    ON CONFLICT (table_oid, scope_key)
-    WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
-    DO NOTHING
-    RETURNING id
-),
-force_upgrade AS (
-    UPDATE koldstore.jobs j
-    SET payload = j.payload || jsonb_build_object('force', true),
-        updated_at = now()
-    WHERE $4::boolean
-      AND NOT EXISTS (SELECT 1 FROM inserted)
-      AND j.table_oid = $1::regclass::oid
-      AND j.scope_key = COALESCE($2::text, '')
-      AND j.job_type = 'flush'
-      AND j.status = 'pending'
-      AND COALESCE((j.payload->>'force')::boolean, false) IS DISTINCT FROM true
-    RETURNING j.id
+INSERT INTO koldstore.jobs (
+    id,
+    table_oid,
+    scope_key,
+    job_type,
+    status,
+    phase,
+    flush_seq_upper_bound,
+    payload
 )
-SELECT COALESCE(
-    (SELECT id FROM inserted LIMIT 1),
-    (SELECT id FROM force_upgrade LIMIT 1),
-    (
-        SELECT id
-        FROM koldstore.jobs
-        WHERE table_oid = $1::regclass::oid
-          AND scope_key = COALESCE($2::text, '')
-          AND {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
-        ORDER BY updated_at, id
-        LIMIT 1
-    )
+VALUES (
+    gen_random_uuid(),
+    $1::regclass::oid,
+    COALESCE($2::text, ''),
+    'flush',
+    'pending',
+    'pending',
+    $3::bigint,
+    jsonb_build_object('force', $4::boolean)
 )
+ON CONFLICT (table_oid, scope_key)
+WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
+DO UPDATE SET
+    payload = CASE
+        WHEN $4::boolean
+            THEN koldstore.jobs.payload || jsonb_build_object('force', true)
+        ELSE koldstore.jobs.payload
+    END,
+    updated_at = now()
+RETURNING id
 "#
         ),
     )
@@ -263,30 +243,45 @@ SELECT COALESCE(
     })
 }
 
-/// Plans selection of one due pending flush job for a one-shot executor.
+/// Plans a fair page of due pending flush jobs for one-shot executors.
 ///
-/// Returns JSON `{"table_oid":…,"force":…}` or empty string when the queue is
-/// empty. Does not lock the jobs row; session table ownership serializes claim.
+/// Bind `$1` = page size (`LIMIT`). Does not lock jobs rows; session table
+/// ownership serializes the subsequent claim.
 ///
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
-pub fn plan_select_pending_flush_candidate() -> Result<SqlStatement, OpsError> {
-    SqlStatement::read(
-        "select pending flush candidate",
+pub fn plan_select_pending_flush_candidates() -> Result<SqlStatement, OpsError> {
+    SqlStatement::read_with_params(
+        "select pending flush candidates",
         r#"
-SELECT COALESCE((
-    SELECT jsonb_build_object(
-        'table_oid', table_oid::bigint,
-        'force', COALESCE((payload->>'force')::boolean, false)
-    )::text
-    FROM koldstore.jobs
-    WHERE job_type = 'flush'
-      AND status = 'pending'
-      AND available_at <= now()
-    ORDER BY available_at, updated_at, id
-    LIMIT 1
-), '')
+SELECT table_oid::oid, COALESCE((payload->>'force')::boolean, false)
+FROM koldstore.jobs
+WHERE job_type = 'flush'
+  AND status = 'pending'
+  AND available_at <= clock_timestamp()
+ORDER BY available_at, updated_at, id
+LIMIT $1
+"#,
+        [SqlParamType::BigInt],
+    )
+    .map_err(|error| OpsError::Sql(error.to_string()))
+}
+
+/// Plans the earliest pending flush `available_at` as Unix epoch milliseconds.
+///
+/// Used to schedule the next supervisor wake when the fair page is empty.
+///
+/// # Errors
+///
+/// Returns an error when SPI statement metadata cannot be prepared.
+pub fn plan_next_pending_flush_due_epoch_ms() -> Result<SqlStatement, OpsError> {
+    SqlStatement::read(
+        "next pending flush due epoch ms",
+        r#"
+SELECT (extract(epoch FROM min(available_at)) * 1000)::bigint
+FROM koldstore.jobs
+WHERE job_type = 'flush' AND status = 'pending'
 "#,
     )
     .map_err(|error| OpsError::Sql(error.to_string()))
@@ -305,7 +300,7 @@ SELECT count(*)::bigint
 FROM koldstore.jobs
 WHERE job_type = 'flush'
   AND status = 'pending'
-  AND available_at <= now()
+  AND available_at <= clock_timestamp()
 "#,
     )
     .map_err(|error| OpsError::Sql(error.to_string()))
@@ -428,7 +423,7 @@ fn plan_mirror_flush_selection_inner(
         ));
     }
     let primary_key: Vec<&str> = primary_key_columns.iter().map(String::as_str).collect();
-    let pk_columns = koldstore_mirror::quoted_pk_columns(&primary_key)
+    let pk_columns = koldstore_wal_mirror::quoted_pk_columns(&primary_key)
         .map_err(|error| OpsError::Sql(error.to_string()))?;
     let base_columns = base_columns
         .iter()
@@ -452,11 +447,11 @@ fn plan_mirror_flush_selection_inner(
     select_columns.extend([
         format!(
             "mirror.{} AS \"seq\"",
-            koldstore_mirror::MirrorColumn::Seq.quoted_name()
+            koldstore_wal_mirror::MirrorColumn::Seq.quoted_name()
         ),
         format!(
             "mirror.{} AS \"op\"",
-            koldstore_mirror::MirrorColumn::Op.quoted_name()
+            koldstore_wal_mirror::MirrorColumn::Op.quoted_name()
         ),
     ]);
     if sort_by_order_key {

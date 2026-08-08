@@ -8,7 +8,7 @@ repository.workspace = true
 [dependencies]
 koldstore-common.workspace = true
 koldstore-catalog.workspace = true
-koldstore-mirror.workspace = true
+koldstore-wal-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-sortkey.workspace = true
 serde.workspace = true

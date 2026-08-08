@@ -9,8 +9,8 @@ members = [
     "crates/koldstore-storage",
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
-    "crates/koldstore-mirror",
-    "crates/koldstore-worker",
+    "crates/koldstore-wal-mirror",
+        "crates/koldstore-supervisor",
     "crates/koldstore-flush",
     "crates/koldstore-migrate",
     "crates/pg_koldstore",
@@ -32,8 +32,8 @@ default-members = [
     "crates/koldstore-storage",
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
-    "crates/koldstore-mirror",
-    "crates/koldstore-worker",
+    "crates/koldstore-wal-mirror",
+        "crates/koldstore-supervisor",
     "crates/koldstore-flush",
     "crates/koldstore-migrate",
     "crates/pg_koldstore",
@@ -61,8 +61,8 @@ koldstore-manifest = { path = "crates/koldstore-manifest" }
 koldstore-storage = { path = "crates/koldstore-storage", default-features = false }
 koldstore-parquet = { path = "crates/koldstore-parquet" }
 koldstore-merge = { path = "crates/koldstore-merge" }
-koldstore-mirror = { path = "crates/koldstore-mirror" }
-koldstore-worker = { path = "crates/koldstore-worker" }
+koldstore-wal-mirror = { path = "crates/koldstore-wal-mirror" }
+koldstore-supervisor = { path = "crates/koldstore-supervisor" }
 koldstore-flush = { path = "crates/koldstore-flush" }
 koldstore-migrate = { path = "crates/koldstore-migrate" }
 

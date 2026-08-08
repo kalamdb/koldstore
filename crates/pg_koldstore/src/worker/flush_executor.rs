@@ -5,9 +5,11 @@
 //! and capacity. Each executor tries a bounded fair page, claims one lockable
 //! table, runs one job, then exits.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use koldstore_worker::{flush_executor_worker_type, DatabaseOid, LIBRARY_NAME};
+use koldstore_common::unix_now_ms;
+use koldstore_flush::{plan_next_pending_flush_due_epoch_ms, plan_select_pending_flush_candidates};
+use koldstore_supervisor::{flush_executor_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder};
 use pgrx::datum::DatumWithOid;
 
@@ -62,16 +64,11 @@ struct PendingCandidate {
 }
 
 fn pending_candidates() -> Result<Vec<PendingCandidate>, String> {
+    let statement = plan_select_pending_flush_candidates().map_err(|error| error.to_string())?;
     pgrx::Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT table_oid::oid, COALESCE((payload->>'force')::boolean, false) \
-                 FROM koldstore.jobs \
-                 WHERE job_type = 'flush' \
-                   AND status = 'pending' \
-                   AND available_at <= clock_timestamp() \
-                 ORDER BY available_at, updated_at, id \
-                 LIMIT $1",
+                &statement.sql,
                 // SQL already supplies the hard page bound. Do not pass Some(1)
                 // here: that silently collapsed the intended fair page to one
                 // candidate and reintroduced head-of-line blocking.
@@ -96,12 +93,8 @@ fn pending_candidates() -> Result<Vec<PendingCandidate>, String> {
 }
 
 fn next_pending_due_ms() -> Result<Option<i64>, String> {
-    pgrx::Spi::get_one::<i64>(
-        "SELECT (extract(epoch FROM min(available_at)) * 1000)::bigint \
-         FROM koldstore.jobs \
-         WHERE job_type = 'flush' AND status = 'pending'",
-    )
-    .map_err(|error| error.to_string())
+    let statement = plan_next_pending_flush_due_epoch_ms().map_err(|error| error.to_string())?;
+    pgrx::Spi::get_one::<i64>(&statement.sql).map_err(|error| error.to_string())
 }
 
 struct ClaimedWork {
@@ -251,11 +244,4 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
     }
 
     registration.reconcile_queue(ClaimOutcome::Claimed);
-}
-
-fn unix_now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }
