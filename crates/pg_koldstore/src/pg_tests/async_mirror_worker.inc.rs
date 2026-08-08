@@ -1,5 +1,5 @@
 #[pg_test]
-fn async_manage_schedules_database_maintenance() {
+fn async_manage_requires_persistent_wal_service() {
     // #[pg_test] runs the body inside one SQL-function transaction. Provision
     // the logical slot before CREATE TABLE assigns the parent transaction an XID.
     preprovision_async_mirror();
@@ -22,13 +22,19 @@ fn async_manage_schedules_database_maintenance() {
     ))
     .expect("manage_table async");
 
-    // The new architecture has no permanent per-database worker to "ensure".
-    // This compatibility call only publishes a coalesced maintenance request;
-    // it must never block on or register a dynamic worker from this backend.
+    // This transaction cannot wait for a post-commit worker start, but the
+    // database-level service requirement is visible immediately and the dirty
+    // generation will wake the supervisor only after this transaction commits.
     let requested = Spi::get_one::<bool>("SELECT koldstore.internal_ensure_async_mirror_worker()")
-        .expect("request maintenance")
+        .expect("request WAL service")
         .expect("non-null");
-    assert!(requested, "maintenance request should be accepted while enabled");
+    assert!(requested, "WAL service request should be accepted while enabled");
+    let required = Spi::get_one::<bool>(
+        "SELECT COALESCE((koldstore.async_mirror_status()->'wal_applier'->>'required')::boolean, false)",
+    )
+    .expect("WAL service status")
+    .unwrap_or(false);
+    assert!(required, "manage_table must require the persistent WAL service");
 
     Spi::run(&format!(
         "SELECT koldstore.unmanage_table('{relation}'::regclass, true, true)"
@@ -43,14 +49,14 @@ fn async_manage_schedules_database_maintenance() {
 }
 
 #[pg_test]
-fn async_worker_guc_off_skips_maintenance_request() {
+fn async_worker_guc_off_skips_wal_service_request() {
     Spi::run("SET koldstore.internal_async_mirror_worker = off").expect("set guc");
     let requested = Spi::get_one::<bool>("SELECT koldstore.internal_ensure_async_mirror_worker()")
         .expect("request with guc off")
         .expect("non-null");
     assert!(
         !requested,
-        "maintenance request must be a no-op when the worker GUC is off"
+        "WAL service request must be a no-op when the worker GUC is off"
     );
     Spi::run("RESET koldstore.internal_async_mirror_worker").expect("reset guc");
 }
