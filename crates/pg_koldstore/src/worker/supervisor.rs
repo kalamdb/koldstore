@@ -238,26 +238,34 @@ fn dispatch_shared_work(
 ) {
     let now = Instant::now();
 
-    // WAL is a persistent service. Once started, every dirty generation merely
-    // sets its latch; process creation is never part of the steady-state commit
-    // latency path.
+    // Required WAL services stay resident even while caught up. Dirty
+    // generations only set the already-running process latch; process creation
+    // is never part of steady-state commit latency.
     for snapshot in snapshots {
-        let recovery_requested =
-            snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
-        let wal_due =
-            recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
-        if !wal_due {
+        let Some(wal_service) = super::wal::snapshot(snapshot.database_oid) else {
+            backoff.clear_if_idle(snapshot.database_oid, DynamicWorkerKind::Wal);
+            continue;
+        };
+        if !wal_service.required {
             backoff.clear_if_idle(snapshot.database_oid, DynamicWorkerKind::Wal);
             continue;
         }
         if super::wake::ensure_paused(snapshot.database_oid) {
             continue;
         }
-        if super::wal::wake(snapshot.database_oid) {
+
+        let recovery_requested =
+            snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
+        let wal_due =
+            recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
+        if wal_service.running() {
+            if wal_due {
+                let _ = super::wal::wake(snapshot.database_oid);
+            }
             backoff.succeeded(snapshot.database_oid, DynamicWorkerKind::Wal);
             continue;
         }
-        if super::wal::snapshot(snapshot.database_oid).is_some_and(|state| state.starting())
+        if wal_service.starting()
             || !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Wal, now)
         {
             continue;
@@ -458,6 +466,11 @@ fn min_optional_duration(left: Option<Duration>, right: Option<Duration>) -> Opt
 fn reconcile_cluster_startup() -> Result<bool, String> {
     let slots = discover_async_slots()?;
     for (oid, _) in &slots {
+        if !super::wal::require(*oid) {
+            return Err(format!(
+                "WAL applier registry is full while registering database {oid}"
+            ));
+        }
         super::wake::request_recovery(*oid);
     }
     Ok(!slots.is_empty())
@@ -468,6 +481,11 @@ fn reconcile_cluster_safety() -> Result<bool, String> {
     reconcile_worker_liveness()?;
     let slots = discover_async_slots()?;
     for (oid, retained_bytes) in &slots {
+        if !super::wal::require(*oid) {
+            return Err(format!(
+                "WAL applier registry is full while reconciling database {oid}"
+            ));
+        }
         if *retained_bytes > 0 {
             super::wake::request_recovery(*oid);
         }
@@ -550,7 +568,9 @@ fn reconcile_worker_liveness() -> Result<(), String> {
         });
         if wal_stale {
             super::wal::clear_stale(snapshot.database_oid);
-            super::wake::request_recovery(snapshot.database_oid);
+            if wal_state.is_some_and(|state| state.required) {
+                super::wake::request_recovery(snapshot.database_oid);
+            }
         }
         if live_wal.is_some_and(|state| state.count > 1) {
             pgrx::warning!(
