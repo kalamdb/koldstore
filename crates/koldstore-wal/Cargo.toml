@@ -1,0 +1,13 @@
+[package]
+name = "koldstore-wal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PostgreSQL-free WAL applier lifecycle for KoldStore"
+
+[dependencies]
+koldstore-mirror.workspace = true
+
+[lints]
+workspace = true
