@@ -9,12 +9,12 @@ const WORKER_OBSERVE_DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AsyncWorkerState {
+    slot_present: bool,
     wal_registered: bool,
     wal_pid: Option<i32>,
     wal_running: bool,
     wal_starting: bool,
     wal_pending: bool,
-    maintenance_pending: bool,
     recovery_requested: bool,
     wal_generation: i64,
     wal_processed_generation: i64,
@@ -23,15 +23,15 @@ struct AsyncWorkerState {
 }
 
 impl AsyncWorkerState {
-    fn caught_up(self) -> bool {
+    fn settled(self) -> bool {
         !self.wal_pending
-            && !self.maintenance_pending
+            && !self.recovery_requested
             && self.wal_generation == self.wal_processed_generation
             && self.maintenance_generation == self.maintenance_processed_generation
     }
 
     fn wal_available(self) -> bool {
-        self.wal_registered && (self.wal_running || self.wal_starting)
+        self.slot_present && self.wal_registered && (self.wal_running || self.wal_starting)
     }
 }
 
@@ -40,12 +40,12 @@ async fn async_worker_state(client: &tokio_postgres::Client) -> Result<AsyncWork
         .query_one(
             r#"
             SELECT
+              COALESCE((status->'slot'->>'present')::boolean, false),
               COALESCE((status->'wal_applier'->>'registered')::boolean, false),
               (status->'wal_applier'->>'pid')::integer,
               COALESCE((status->'wal_applier'->>'running')::boolean, false),
               COALESCE((status->'wal_applier'->>'starting')::boolean, false),
               COALESCE((status->'wal_applier'->>'pending')::boolean, false),
-              COALESCE((status->'maintenance'->>'pending')::boolean, false),
               COALESCE((status->'maintenance'->>'recovery_requested')::boolean, false),
               COALESCE((status->'wal_applier'->>'wal_generation')::bigint, 0),
               COALESCE((status->'wal_applier'->>'wal_processed_generation')::bigint, 0),
@@ -57,12 +57,12 @@ async fn async_worker_state(client: &tokio_postgres::Client) -> Result<AsyncWork
         )
         .await?;
     Ok(AsyncWorkerState {
-        wal_registered: row.get(0),
-        wal_pid: row.get(1),
-        wal_running: row.get(2),
-        wal_starting: row.get(3),
-        wal_pending: row.get(4),
-        maintenance_pending: row.get(5),
+        slot_present: row.get(0),
+        wal_registered: row.get(1),
+        wal_pid: row.get(2),
+        wal_running: row.get(3),
+        wal_starting: row.get(4),
+        wal_pending: row.get(5),
         recovery_requested: row.get(6),
         wal_generation: row.get(7),
         wal_processed_generation: row.get(8),
@@ -73,6 +73,11 @@ async fn async_worker_state(client: &tokio_postgres::Client) -> Result<AsyncWork
 
 /// Requests async capture and waits until the persistent database WAL applier is
 /// running or starting.
+///
+/// Before a test creates its first managed table there may be no logical slot;
+/// that state is already idle and needs no process. Once a slot exists, the
+/// helper requires the persistent service rather than accepting a caught-up but
+/// absent worker.
 ///
 /// # Errors
 ///
@@ -89,7 +94,7 @@ pub async fn wait_for_async_worker(client: &tokio_postgres::Client) -> Result<Du
             )
             .await?;
         let state = async_worker_state(client).await?;
-        if state.wal_available() {
+        if !state.slot_present || state.wal_available() {
             return Ok(started.elapsed());
         }
         anyhow::ensure!(
@@ -326,9 +331,10 @@ pub async fn wait_for_mirror_op_count(
             return Ok(());
         }
         let state = async_worker_state(client).await?;
+        let settled = state.settled();
         anyhow::ensure!(
             started.elapsed() <= BACKGROUND_APPLY_DEADLINE,
-            "timed out after {BACKGROUND_APPLY_DEADLINE:?} waiting for {expected} mirror rows with op={op}; actual={actual}, workers={state:?}"
+            "timed out after {BACKGROUND_APPLY_DEADLINE:?} waiting for {expected} mirror rows with op={op}; actual={actual}, settled={settled}, workers={state:?}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
