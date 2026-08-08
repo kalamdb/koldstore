@@ -6,7 +6,7 @@
 //! through the existing fixed-fence protocol, and returns to sleep. Heavy flush
 //! and maintenance work remains in separate ephemeral processes.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use koldstore_wal::{
     wal_applier_worker_type, WalApplierRegistry, WalApplierSnapshot, WAL_APPLIER_REGISTRY_CAPACITY,
@@ -18,6 +18,8 @@ use crate::mirror::apply::{apply_bounded, capture_durable_wal_fence, BoundedAppl
 
 const WAL_APPLIER_FUNCTION: &str = "koldstore_wal_applier_main";
 const WAL_APPLIER_WATCHDOG: Duration = Duration::from_secs(30);
+const APPLY_RETRY_MIN: Duration = Duration::from_millis(100);
+const APPLY_RETRY_MAX: Duration = Duration::from_secs(5);
 
 type SharedWalApplierRegistry =
     AssertPGRXSharedMemory<WalApplierRegistry<WAL_APPLIER_REGISTRY_CAPACITY>>;
@@ -129,6 +131,7 @@ fn run_wal_applier(database_oid: u32) {
     // for a given recovery generation; the ephemeral maintenance worker may
     // clear the flag later without making this process spin on an unchanged bit.
     let mut applied_recovery_generation = 0_u64;
+    let mut retry_delay = APPLY_RETRY_MIN;
 
     loop {
         let Some(service) = snapshot(database_oid) else {
@@ -140,6 +143,10 @@ fn run_wal_applier(database_oid: u32) {
 
         let slot = crate::mirror::lifecycle::slot_name(database_oid);
         if !crate::mirror::lifecycle::native_slot_exists(&slot) {
+            // A deliberately or externally removed slot cannot be serviced.
+            // Disable the requirement so the supervisor does not respawn this
+            // process forever; normal manage_table activation requires it again.
+            disable(database_oid);
             return;
         }
 
@@ -153,17 +160,32 @@ fn run_wal_applier(database_oid: u32) {
         let wal_due = state.wal_generation != state.wal_processed_generation;
 
         if wal_due || recovery_apply_due {
-            if let Err(error) = drain_wal_through_fixed_fence() {
-                crate::observability::record_async_apply_error();
-                pgrx::warning!("koldstore WAL applier db={database_oid} apply deferred: {error}");
-                super::wake::request_recovery(database_oid);
-                return;
-            }
-            if wal_due {
-                super::wake::mark_wal_processed(database_oid, target_generation);
-            }
-            if recovery_apply_due {
-                applied_recovery_generation = state.maintenance_generation;
+            match drain_wal_through_fixed_fence() {
+                Ok(()) => {
+                    retry_delay = APPLY_RETRY_MIN;
+                    if wal_due {
+                        super::wake::mark_wal_processed(database_oid, target_generation);
+                    }
+                    if recovery_apply_due {
+                        applied_recovery_generation = state.maintenance_generation;
+                    }
+                }
+                Err(error) => {
+                    crate::observability::record_async_apply_error();
+                    pgrx::warning!(
+                        "koldstore WAL applier db={database_oid} apply deferred for {}ms: {error}",
+                        retry_delay.as_millis()
+                    );
+                    // Publish one durable recovery request for this error streak.
+                    // Subsequent retries keep the same dirty generations pending.
+                    if retry_delay == APPLY_RETRY_MIN {
+                        super::wake::request_recovery(database_oid);
+                    }
+                    if !wait_until(Instant::now() + retry_delay) {
+                        return;
+                    }
+                    retry_delay = retry_delay.saturating_mul(2).min(APPLY_RETRY_MAX);
+                }
             }
             // A commit or recovery request that arrived during this pass changed
             // a generation. Re-read shared state immediately instead of sleeping.
@@ -176,9 +198,31 @@ fn run_wal_applier(database_oid: u32) {
         if !BackgroundWorker::wait_latch(Some(WAL_APPLIER_WATCHDOG)) {
             return;
         }
-        if BackgroundWorker::sighup_received() {
-            unsafe { pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP) };
+        process_sighup();
+    }
+}
+
+/// Waits through an apply retry backoff even if lifecycle latches arrive early.
+///
+/// A failed apply keeps the generation dirty. The supervisor may therefore set
+/// the process latch while the worker is deliberately backing off; consume that
+/// hint but do not retry before the deadline.
+fn wait_until(deadline: Instant) -> bool {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return true;
         }
+        if !BackgroundWorker::wait_latch(Some(remaining)) {
+            return false;
+        }
+        process_sighup();
+    }
+}
+
+fn process_sighup() {
+    if BackgroundWorker::sighup_received() {
+        unsafe { pg_sys::ProcessConfigFile(pg_sys::GucContext::PGC_SIGHUP) };
     }
 }
 
