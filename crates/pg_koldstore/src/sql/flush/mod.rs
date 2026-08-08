@@ -186,27 +186,51 @@ fn recover_segments_pg_impl(table_oid: pgrx::pg_sys::Oid, dry_run: bool) -> Resu
 /// Flushes one managed table scope from SQL.
 ///
 /// SQL contract:
-/// `koldstore.flush_table(table_name regclass, force boolean default false) → uuid`.
+/// `koldstore.flush_table(table_name regclass, force boolean default false) → jsonb`.
 ///
-/// Enqueues (or reuses) a durable flush job and returns its UUID immediately.
-/// Returns `NULL` when no flush work is due (policy selection empty, including
-/// selections below `max_rows_per_file`) so undersized jobs are never queued.
+/// Returns a JSON object (not a bare UUID):
+/// `{ ok, job_id, status, force, execution, reason, error, rows_flushed, estimated_rows }`.
+///
+/// - `status = not_due`: nothing to enqueue (`job_id` null) — policy selection
+///   empty or excess below `max_rows_per_file`.
+/// - `status = queued` / `already_running`: durable job id; poll
+///   `koldstore.jobs` / `table_status` for completion (queue mode returns
+///   before Parquet work finishes).
+/// - `status = completed` / `error`: inline mode finished in this backend;
+///   `error` carries the failure text when present.
+///
+/// Storage / executor failures also emit a PostgreSQL **WARNING**
+/// (`koldstore flush: FAILED ...`) so `docker logs` surfaces them.
+///
 /// With `koldstore.flush_execution = 'queue'` (default), a one-shot executor is
 /// spawned best-effort. With `'inline'`, the calling backend runs the flush
 /// after enqueue (required for `#[pg_test]` SPI transactions).
 ///
-/// Fails immediately in inline mode when another backend holds this table's
-/// session flush lock (`flush already in progress`). Nested inline does not
-/// take the database apply/slot lock until finalize; callers must drain WAL
-/// first (`wait_for_async_mirror` / prior apply).
+/// Hard lock conflicts still raise an ERROR (`flush already in progress`).
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "flush_table", schema = "koldstore", security_definer)]
 pub fn flush_table_pg(
     table_name: pgrx::PgRelation,
     force: pgrx::default!(bool, false),
-) -> Option<pgrx::Uuid> {
-    execute::flush_table_pg_impl(table_name.oid(), force)
-        .unwrap_or_else(|error| pgrx::error!("flush table failed: {error}"))
+) -> pgrx::JsonB {
+    match execute::flush_table_pg_impl(table_name.oid(), force) {
+        Ok(response) => {
+            if !response.ok {
+                if let Some(error) = response.error.as_deref() {
+                    pgrx::warning!(
+                        "koldstore flush_table: status={} error={}",
+                        response.status,
+                        error
+                    );
+                }
+            }
+            response.to_jsonb()
+        }
+        Err(error) => {
+            pgrx::warning!("koldstore flush_table failed: {error}");
+            pgrx::error!("flush table failed: {error}")
+        }
+    }
 }
 
 /// Lists KoldStore jobs for operator / UI polling.

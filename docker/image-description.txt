@@ -18,17 +18,26 @@ docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore
 psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
 ```
 
+**Windows / Docker Desktop bind mounts:** if you map a host folder to
+`/koldstore-data`, the image entrypoint creates `/koldstore-data/cold` and makes
+it writable for the `postgres` user (bind mounts often arrive as root-owned).
+Prefer `base_path => '/koldstore-data/cold/'` only after that path is writable;
+`/tmp/koldstore-demo` always works inside the container. Watch
+`docker logs <container>` for `WARNING: koldstore flush: FAILED ...` (permission
+errors used to be easy to miss at LOG level).
+
 Multi-arch (`linux/amd64`, `linux/arm64`). Default database is `koldstoredb`. Extension `koldstore` is created on first init, **shared-preloaded** (required for `KoldMergeScan` on every connection), and started with `wal_level=logical` (required for `manage_table` / async mirror).
 
 ```sql
 SHOW shared_preload_libraries;  -- includes koldstore
 SHOW wal_level;                 -- logical
 SELECT koldstore.preload_status();
+SELECT jsonb_pretty(koldstore.async_mirror_status());  -- wal.current_lsn vs wal.applied_lsn
 
 SELECT koldstore.register_storage(
   name         => 'local-dev',
   storage_type => 'filesystem',
-  base_path    => '/tmp/koldstore-demo',
+  base_path    => '/tmp/koldstore-demo',  -- or '/koldstore-data/cold/' on a writable mount
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb
 );
@@ -50,9 +59,8 @@ ALTER TABLE messages SET (
 INSERT INTO messages (id, body)
 SELECT gs, 'row ' || gs FROM generate_series(1, 1012) AS gs;
 
--- Optional: run a policy flush now. Otherwise the built-in worker auto-flushes
--- when hot rows exceed hot_row_limit.
-SELECT koldstore.flush_table(table_name => 'messages'::regclass);
+-- Returns jsonb: job_id / status / error (not a bare uuid)
+SELECT jsonb_pretty(koldstore.flush_table(table_name => 'messages'::regclass));
 SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 ```
 

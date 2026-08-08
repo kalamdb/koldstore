@@ -4,7 +4,7 @@ This document describes the flush path after a durable job is claimed: how mirro
 rows become Parquet segments, how the catalog and manifest are updated, and how
 hot/mirror rows are pruned after a successful write.
 
-**SQL entrypoint:** `koldstore.flush_table(table_name regclass) → uuid`
+**SQL entrypoint:** `koldstore.flush_table(table_name regclass) → jsonb`
 **Default mode:** `koldstore.flush_execution = queue` — enqueue (or reuse) a job,
 return the UUID immediately, and let a one-shot flush executor claim and run the
 work. `inline` keeps encode/upload in the calling backend for SPI / `#[pg_test]`
@@ -225,7 +225,8 @@ rows (`op = 3`) carry PK values from mirror only.
 
 `stream_flush_chunks` (`koldstore-flush/encode.rs`):
 
-1. Fetch page of up to 8192 rows (`FLUSH_MIRROR_FETCH_BATCH_SIZE`)
+1. Fetch page of up to 4096 rows (`FLUSH_MIRROR_FETCH_BATCH_SIZE`), clamped by
+   `max_rows_per_file`
 2. Optionally buffer and sort by configured segment-order column → PK → `seq`
 3. `CleanColdRecordBatchBuilder::push_typed_row` per row (app columns +
    metadata: `seq`, `op`, `deleted`, `schema_version`)
@@ -244,6 +245,16 @@ Catalog scalar bounds, aligned row-group arrays, row counts, null counts, and
 SeqId ranges are derived from that metadata and encoded directly as Sort Key V1
 bytes. There is no manual per-cell `indexed_bounds` path. Details:
 [ADR-002: Footer-Derived Catalog Segment Stats](../decisions/002-footer-derived-catalog-stats.md).
+
+### Memory bounds
+
+Flush peak RSS is **O(`max_rows_per_file`)**, not O(rows flushed). SPI pages
+(≤4096), Arrow row groups (1024), and apply batches (8192) are capped; the open
+compressed Parquet buffer for the current segment is the dominant spike until
+upload completes and the chunk is dropped. Idle Docker RSS after a heavy flush
+is usually PostgreSQL `shared_buffers` (often 128 MB), not retained flush of the
+full table. Operator guidance for small machines:
+[Memory and small machines](../performance.md#memory-and-small-machines).
 
 ### 4.4 Parquet write
 

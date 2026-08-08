@@ -1,26 +1,21 @@
-//! Database-scoped background worker orchestration.
+//! PostgreSQL-free primitives for KoldStore background work.
 //!
-//! Owns ensure-decision logic, worker identity naming, wake policy, tick
-//! outcomes used by long-lived database workers, and flush-check cadence
-//! helpers. Must not depend on `pgrx`, SPI, or PostgreSQL symbols — the
-//! extension adapter in `pg_koldstore` wires those.
+//! The crate intentionally contains only the small pieces shared by the
+//! PostgreSQL adapter: worker identity, transaction-local dirty tracking,
+//! test/diagnostic dispatch pausing, and lock-free supervisor state. Process
+//! lifecycle and SQL scheduling live in `pg_koldstore`.
 
-mod ensure;
+mod ensure_pause;
 mod identity;
 mod policy;
-mod scheduler;
-mod task;
+mod supervisor;
 mod wake;
 
-pub use ensure::{ensure_action, EnsureAction};
-pub use identity::{async_mirror_worker_type, flush_executor_worker_type, DatabaseOid};
-pub use policy::{
-    next_soft_fail_backoff_ms, LAUNCHER_POLL_INTERVAL_MS, LIBRARY_NAME,
-    MAX_IMMEDIATE_PENDING_TICKS, WAKE_REGISTRY_CAPACITY,
+pub use ensure_pause::EnsurePauseSet;
+pub use identity::{flush_executor_worker_type, maintenance_worker_type, DatabaseOid};
+pub use policy::LIBRARY_NAME;
+pub use supervisor::{
+    DatabaseWorkSnapshot, SupervisorPid, SupervisorRegistry, EVENT_FLUSH_QUEUE_DIRTY,
+    EVENT_RECOVERY_REQUIRED, EVENT_SCHEDULE_DIRTY, EVENT_WAL_DIRTY, SUPERVISOR_REGISTRY_CAPACITY,
 };
-pub use scheduler::{flush_check_due, millis_until_flush_check, PendingDrainBudget};
-pub use task::TickResult;
-pub use wake::{
-    AtomicWakeRegistry, EmptyWakeRetry, PublishWake, TransactionDirty, WakeCursor, WakeGeneration,
-    WorkerPid,
-};
+pub use wake::TransactionDirty;

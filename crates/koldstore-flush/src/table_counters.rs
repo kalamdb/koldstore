@@ -1,7 +1,7 @@
 //! O(1) per-table row counters stored on `koldstore.manifest`.
 //!
 //! These counters avoid repeated `COUNT(*)` scans over hot heaps and mirrors during
-//! flush logging, `describe_table`, and operator diagnostics. DML capture triggers
+//! flush logging, `table_status`, and operator diagnostics. DML capture triggers
 //! bump hot counts; flush finalization applies mirror/hot prune and cold deltas.
 //!
 //! Catalog **reads** for counter JSON live in
@@ -90,7 +90,13 @@ pub fn flush_mirror_fetch_limit(max_rows_per_file: usize) -> i64 {
     per_file.clamp(1, FLUSH_MIRROR_FETCH_BATCH_SIZE)
 }
 
-/// Plans DML-time counter bumps from mirror capture triggers.
+/// Plans a counter bump and returns the resulting mirror-row count.
+///
+/// The bump itself remains the existing catalog helper so foreground PRE_COMMIT
+/// callbacks and WAL apply share one mutation implementation. The CTE makes the
+/// WAL applier receive the new O(1) mirror count in the *same SPI round trip*;
+/// targeted RowLimit scheduling can therefore decide eligibility without a
+/// second counter read or a mirror `COUNT(*)`.
 ///
 /// # Errors
 ///
@@ -99,7 +105,14 @@ pub fn plan_bump_table_row_counts() -> Result<SqlStatement, TableCounterError> {
     SqlStatement::write_with_params(
         "bump manifest row counters",
         r#"
-SELECT koldstore.internal_bump_row_counts($1::oid, $2::bigint, $3::bigint)
+WITH bumped AS MATERIALIZED (
+  SELECT koldstore.internal_bump_row_counts($1::oid, $2::bigint, $3::bigint)
+)
+SELECT m.mirror_row_count::bigint
+FROM koldstore.manifest m
+CROSS JOIN bumped
+WHERE m.table_oid = $1::oid
+  AND m.scope_key = ''
 "#,
         [
             koldstore_common::SqlParamType::Oid,
@@ -165,7 +178,9 @@ SELECT koldstore.internal_refresh_row_counts(
 
 #[cfg(test)]
 mod tests {
-    use super::{flush_mirror_fetch_limit, FLUSH_MIRROR_FETCH_BATCH_SIZE};
+    use super::{
+        flush_mirror_fetch_limit, plan_bump_table_row_counts, FLUSH_MIRROR_FETCH_BATCH_SIZE,
+    };
 
     #[test]
     fn fetch_limit_caps_to_max_rows_per_file() {
@@ -188,5 +203,13 @@ mod tests {
             flush_mirror_fetch_limit(100_000),
             FLUSH_MIRROR_FETCH_BATCH_SIZE
         );
+    }
+
+    #[test]
+    fn bump_plan_returns_updated_mirror_count_in_same_round_trip() {
+        let plan = plan_bump_table_row_counts().unwrap();
+        assert!(plan.sql.contains("internal_bump_row_counts"));
+        assert!(plan.sql.contains("m.mirror_row_count"));
+        assert!(plan.sql.contains("MATERIALIZED"));
     }
 }

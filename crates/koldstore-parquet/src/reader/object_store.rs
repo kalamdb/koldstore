@@ -3,9 +3,12 @@
 use std::sync::Arc;
 
 use futures_util::StreamExt;
+use parquet::arrow::arrow_reader::ArrowReaderOptions;
 use parquet::arrow::async_reader::ParquetRecordBatchStreamBuilder;
+use parquet::file::metadata::PageIndexPolicy;
 
 use crate::object_reader::ObjectStoreParquetReader;
+use crate::page_prune::{row_selection_for_equality_values, PagePruneDecision};
 use crate::prune::{
     bloom_may_contain, column_index, prune_row_groups_by_seq_stats, select_row_groups_from_metadata,
 };
@@ -138,7 +141,14 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         reader = reader.with_file_size(size);
     }
     reader = reader.with_stats(Arc::clone(&io));
-    let mut builder = ParquetRecordBatchStreamBuilder::new(reader)
+    // Load page indexes only for equality probes; other paths keep the lighter
+    // Skip footer (and remain eligible for the footer cache).
+    let reader_options = if options.pk_values.is_some() {
+        ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Optional)
+    } else {
+        ArrowReaderOptions::new().with_page_index_policy(PageIndexPolicy::Skip)
+    };
+    let mut builder = ParquetRecordBatchStreamBuilder::new_with_options(reader, reader_options)
         .await
         .map_err(|error| error.to_string())?;
 
@@ -153,6 +163,7 @@ pub async fn read_clean_cold_rows_from_object_store_async(
     let mut stats_pruned = false;
     let mut bloom_mode = BloomPruneMode::NotRequested;
     let mut bloom_filters_fetched = 0usize;
+    let mut page_prune = PagePruneDecision::not_requested();
 
     // Seq-range prune from footer stats (no extra I/O) — same as kalamdb.
     if let Some(seq_range) = &options.seq_range {
@@ -192,23 +203,19 @@ pub async fn read_clean_cold_rows_from_object_store_async(
             let (range_calls, bytes_read) = io.snapshot();
             return Ok((
                 Vec::new(),
-                ParquetReadProfile {
+                empty_read_profile(ParquetReadProfile {
                     object_path: object_path.to_string(),
                     file_size,
-                    footer_first: true,
                     row_groups_total: total_row_groups,
-                    row_groups_selected: Vec::new(),
-                    row_groups_skipped: total_row_groups,
                     stats_pruned: true,
                     bloom: bloom_mode,
-                    bloom_filters_fetched: 0,
                     projected_columns: application_columns,
                     pk_probe: Some((pk.column.clone(), pk.values.clone())),
                     range_calls,
                     bytes_read,
-                    rows_returned: 0,
                     footer_cache_hit,
-                },
+                    ..Default::default()
+                }),
             ));
         }
         selected_row_groups = if stats_selected.len() <= 1 {
@@ -224,6 +231,14 @@ pub async fn read_clean_cold_rows_from_object_store_async(
             refined
         };
         pruning_applied = true;
+
+        page_prune = row_selection_for_equality_values(
+            builder.metadata(),
+            builder.parquet_schema(),
+            &selected_row_groups,
+            &pk.column,
+            &pk.values,
+        )?;
     }
 
     if pruning_applied {
@@ -231,16 +246,17 @@ pub async fn read_clean_cold_rows_from_object_store_async(
             let (range_calls, bytes_read) = io.snapshot();
             return Ok((
                 Vec::new(),
-                ParquetReadProfile {
+                empty_read_profile(ParquetReadProfile {
                     object_path: object_path.to_string(),
                     file_size,
-                    footer_first: true,
                     row_groups_total: total_row_groups,
-                    row_groups_selected: Vec::new(),
-                    row_groups_skipped: total_row_groups,
                     stats_pruned,
                     bloom: bloom_mode,
                     bloom_filters_fetched,
+                    page_index: page_prune.mode,
+                    pages_total: page_prune.pages_total,
+                    pages_selected: page_prune.pages_selected,
+                    pages_skipped: page_prune.pages_skipped,
                     projected_columns: application_columns,
                     pk_probe: options
                         .pk_values
@@ -248,12 +264,16 @@ pub async fn read_clean_cold_rows_from_object_store_async(
                         .map(|pk| (pk.column.clone(), pk.values.clone())),
                     range_calls,
                     bytes_read,
-                    rows_returned: 0,
                     footer_cache_hit,
-                },
+                    ..Default::default()
+                }),
             ));
         }
         builder = builder.with_row_groups(selected_row_groups.clone());
+    }
+
+    if let Some(selection) = page_prune.selection.clone() {
+        builder = builder.with_row_selection(selection);
     }
 
     if !options.columns.is_empty() {
@@ -307,6 +327,10 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         stats_pruned,
         bloom: bloom_mode,
         bloom_filters_fetched,
+        page_index: page_prune.mode,
+        pages_total: page_prune.pages_total,
+        pages_selected: page_prune.pages_selected,
+        pages_skipped: page_prune.pages_skipped,
         projected_columns: application_columns,
         pk_probe: options
             .pk_values
@@ -318,6 +342,18 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         footer_cache_hit,
     };
     Ok((rows, profile))
+}
+
+/// Builds a zero-row profile after prune eliminated every row group.
+fn empty_read_profile(base: ParquetReadProfile) -> ParquetReadProfile {
+    let total = base.row_groups_total;
+    ParquetReadProfile {
+        footer_first: true,
+        row_groups_selected: Vec::new(),
+        row_groups_skipped: total,
+        rows_returned: 0,
+        ..base
+    }
 }
 
 async fn refine_row_groups_with_bloom(

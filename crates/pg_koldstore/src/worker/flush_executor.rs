@@ -1,19 +1,11 @@
 //! One-shot flush executor background workers.
 //!
-//! The database coordinator (and `flush_table` in queue mode) spawns at most
-//! `koldstore.max_parallel_flush_jobs` of these workers. Each worker claims one
-//! pending flush job under session table ownership, runs it, then exits so
-//! PostgreSQL releases the session advisory lock automatically.
-//!
-//! ## Transaction boundaries (queue / Short)
-//!
-//! Claim commits in its own short transaction. Encode + object upload then run
-//! **outside** any PostgreSQL transaction. Catalog work (mirror fetch, pending
-//! segment insert, finalize, progress, cancel, job complete/fail) uses short
-//! transactions via [`super::txn`] and [`crate::sql::flush::execute::FlushCommitStyle::Short`].
-//!
-//! Inline `flush_table` / `#[pg_test]` keep [`FlushCommitStyle::Nested`] so the
-//! caller's SPI transaction is not mid-committed.
+//! Queue callers never register workers directly. They commit durable jobs and
+//! publish a queue generation; the cluster supervisor owns worker registration
+//! and capacity. Each executor tries a bounded fair page, claims one lockable
+//! table, runs one job, then exits.
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use koldstore_worker::{flush_executor_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder};
@@ -22,80 +14,31 @@ use pgrx::datum::DatumWithOid;
 use super::txn;
 
 const FLUSH_EXECUTOR_FUNCTION: &str = "koldstore_flush_executor_main";
+const CANDIDATE_PAGE_SIZE: i64 = 16;
+const BUSY_RETRY: Duration = Duration::from_millis(200);
 
-/// Counts live flush executor backends for `database_oid`.
-fn flush_executor_count(worker_type: &str) -> Result<i64, String> {
-    pgrx::Spi::get_one_with_args::<i64>(
-        "SELECT count(*)::bigint FROM pg_catalog.pg_stat_activity WHERE backend_type = $1",
-        &[DatumWithOid::from(worker_type)],
-    )
-    .map_err(|error| error.to_string())?
-    .ok_or_else(|| "flush executor activity query returned no row".to_string())
-}
-
-/// Spawns one flush executor when under the parallel cap and pending work exists.
-///
-/// Only waits for postmaster startup notification (same deadlock avoidance as
-/// async-mirror ensure: the worker cannot finish connecting until this
-/// transaction commits).
-///
-/// # Errors
-///
-/// Returns an error when activity probes or dynamic registration fail.
-pub(crate) fn spawn_flush_executor_if_needed() -> Result<bool, String> {
-    let pending = crate::sql::flush::jobs::count_pending_flush_jobs().map_err(|e| e.to_string())?;
-    if pending <= 0 {
-        return Ok(false);
+/// Reconstructs queue dispatch hints after postmaster/worker recovery.
+/// Must run inside a database-local maintenance transaction.
+pub(crate) fn reconcile_queue_after_recovery(database_oid: u32) -> Result<(), String> {
+    if crate::sql::flush::jobs::has_due_pending_flush_jobs().map_err(|e| e.to_string())? {
+        super::wake::mark_flush_queue_pending();
+        return Ok(());
     }
-    spawn_flush_executors_upto(1).map(|spawned| spawned > 0)
-}
-
-/// Spawns flush executors until `max_parallel_flush_jobs` or pending work is met.
-///
-/// # Errors
-///
-/// Returns an error when activity probes or dynamic registration fail.
-pub(crate) fn spawn_flush_executors_for_pending_work() -> Result<u32, String> {
-    let pending = crate::sql::flush::jobs::count_pending_flush_jobs().map_err(|e| e.to_string())?;
-    if pending <= 0 {
-        return Ok(0);
-    }
-    let max = i64::from(crate::guc::max_parallel_flush_jobs());
-    let to_spawn = pending.min(max).max(0);
-    let Ok(to_spawn) = u32::try_from(to_spawn) else {
-        return Ok(0);
-    };
-    spawn_flush_executors_upto(to_spawn)
-}
-
-fn spawn_flush_executors_upto(limit: u32) -> Result<u32, String> {
-    if limit == 0 {
-        return Ok(0);
-    }
-    let database_oid = DatabaseOid::new(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32());
-    let worker_type = flush_executor_worker_type(database_oid);
-    let max = i64::from(crate::guc::max_parallel_flush_jobs());
-    let running = flush_executor_count(&worker_type)?;
-    let available = u32::try_from((max - running).max(0)).unwrap_or(0);
-    let to_spawn = limit.min(available);
-    let mut spawned = 0_u32;
-    while spawned < to_spawn {
-        if !register_one_flush_executor(database_oid, &worker_type)? {
-            break;
+    match next_pending_due_ms()? {
+        Some(deadline_ms) if deadline_ms > 0 => {
+            super::wake::schedule_flush_at_ms(database_oid, deadline_ms);
         }
-        spawned = spawned.saturating_add(1);
+        _ => super::wake::clear_flush_deadline(database_oid),
     }
-    Ok(spawned)
+    Ok(())
 }
 
-fn register_one_flush_executor(
-    database_oid: DatabaseOid,
-    worker_type: &str,
-) -> Result<bool, String> {
-    // Dynamic NEVER_RESTART workers: crash recovery is a new spawn from the
-    // coordinator or the next flush_table call.
-    let worker = BackgroundWorkerBuilder::new(worker_type)
-        .set_type(worker_type)
+/// Registers one already-reserved flush executor. Called only by the supervisor.
+pub(crate) fn register_flush_executor_from_supervisor(database_oid: u32) -> Result<(), String> {
+    let database_oid = DatabaseOid::new(database_oid);
+    let worker_type = flush_executor_worker_type(database_oid);
+    BackgroundWorkerBuilder::new(&worker_type)
+        .set_type(&worker_type)
         .set_library(LIBRARY_NAME)
         .set_function(FLUSH_EXECUTOR_FUNCTION)
         .enable_spi_access()
@@ -103,58 +46,169 @@ fn register_one_flush_executor(
         .set_argument(Some(pgrx::pg_sys::Datum::from(database_oid.get())))
         .set_notify_pid(unsafe { pgrx::pg_sys::MyProcPid })
         .load_dynamic()
+        .map(|_| ())
         .map_err(|_| {
             format!(
-                "could not register flush executor \
-                 (worker_type={worker_type}; usually max_worker_processes exhausted)"
+                "could not register flush executor (worker_type={worker_type}; \
+                 usually max_worker_processes exhausted)"
             )
-        })?;
-    worker
-        .wait_for_startup()
-        .map_err(|status| format!("flush executor did not start: {status:?}"))?;
-    Ok(true)
+        })
 }
 
-/// Claim outcome that keeps session ownership across the claim→work commit.
+#[derive(Debug, Clone, Copy)]
+struct PendingCandidate {
+    table_oid: pgrx::pg_sys::Oid,
+    force: bool,
+}
+
+fn pending_candidates() -> Result<Vec<PendingCandidate>, String> {
+    pgrx::Spi::connect(|client| {
+        let table = client
+            .select(
+                "SELECT table_oid::oid, COALESCE((payload->>'force')::boolean, false) \
+                 FROM koldstore.jobs \
+                 WHERE job_type = 'flush' \
+                   AND status = 'pending' \
+                   AND available_at <= clock_timestamp() \
+                 ORDER BY available_at, updated_at, id \
+                 LIMIT $1",
+                // SQL already supplies the hard page bound. Do not pass Some(1)
+                // here: that silently collapsed the intended fair page to one
+                // candidate and reintroduced head-of-line blocking.
+                None,
+                &[DatumWithOid::from(CANDIDATE_PAGE_SIZE)],
+            )
+            .map_err(|error| error.to_string())?;
+        let mut candidates = Vec::with_capacity(CANDIDATE_PAGE_SIZE as usize);
+        for row in table {
+            let table_oid = row
+                .get::<pgrx::pg_sys::Oid>(1)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "pending flush candidate missing table_oid".to_string())?;
+            let force = row
+                .get::<bool>(2)
+                .map_err(|error| error.to_string())?
+                .unwrap_or(false);
+            candidates.push(PendingCandidate { table_oid, force });
+        }
+        Ok(candidates)
+    })
+}
+
+fn next_pending_due_ms() -> Result<Option<i64>, String> {
+    pgrx::Spi::get_one::<i64>(
+        "SELECT (extract(epoch FROM min(available_at)) * 1000)::bigint \
+         FROM koldstore.jobs \
+         WHERE job_type = 'flush' AND status = 'pending'",
+    )
+    .map_err(|error| error.to_string())
+}
+
 struct ClaimedWork {
     table_oid: pgrx::pg_sys::Oid,
     guard: crate::sql::job_lock::TableJobLockGuard,
     claimed: crate::sql::flush::execute::ClaimedFlushJob,
 }
 
-fn claim_one_flush_job() -> Result<Option<ClaimedWork>, String> {
-    let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()
-        .map_err(|error| error.to_string())?;
-    if reclaimed > 0 {
-        pgrx::log!("koldstore flush executor: reclaimed {reclaimed} stuck running flush job(s)");
-    }
-
-    let Some((table_oid, force)) = crate::sql::flush::jobs::select_pending_flush_candidate()
-        .map_err(|error| error.to_string())?
-    else {
-        return Ok(None);
-    };
-    let table_oid = pgrx::pg_sys::Oid::from(table_oid.get());
-
-    let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(table_oid)? else {
-        pgrx::log!(
-            "koldstore flush executor: skipping table_oid={} (lock busy)",
-            table_oid.to_u32()
-        );
-        return Ok(None);
-    };
-
-    let claimed = crate::sql::flush::execute::claim_flush_job_for_executor(table_oid, force)?;
-    Ok(Some(ClaimedWork {
-        table_oid,
-        guard,
-        claimed,
-    }))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaimOutcome {
+    Claimed,
+    Empty,
+    Busy,
 }
 
-/// One-shot flush executor entry point (`NEVER_RESTART`).
-///
-/// SQL / C contract: `koldstore_flush_executor_main(database_oid)`.
+fn claim_one_flush_job() -> Result<(ClaimOutcome, Option<ClaimedWork>), String> {
+    let candidates = pending_candidates()?;
+    if candidates.is_empty() {
+        return Ok((ClaimOutcome::Empty, None));
+    }
+
+    for candidate in candidates {
+        let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(candidate.table_oid)?
+        else {
+            continue;
+        };
+        match crate::sql::flush::execute::claim_flush_job_for_executor(
+            candidate.table_oid,
+            candidate.force,
+        ) {
+            Ok(claimed) => {
+                return Ok((
+                    ClaimOutcome::Claimed,
+                    Some(ClaimedWork {
+                        table_oid: candidate.table_oid,
+                        guard,
+                        claimed,
+                    }),
+                ));
+            }
+            Err(error) => {
+                pgrx::log!(
+                    "koldstore flush executor: candidate table_oid={} changed before claim: {error}",
+                    candidate.table_oid.to_u32()
+                );
+                drop(guard);
+            }
+        }
+    }
+
+    Ok((ClaimOutcome::Busy, None))
+}
+
+struct FlushWorkerRegistration {
+    database_oid: u32,
+    queue_generation: u64,
+}
+
+impl FlushWorkerRegistration {
+    fn start(database_oid: u32) -> Option<Self> {
+        let effective_limit = u32::try_from(crate::guc::max_parallel_flush_jobs())
+            .unwrap_or(1)
+            .max(1);
+        if !super::wake::flush_started(database_oid, effective_limit) {
+            return None;
+        }
+        let queue_generation = super::wake::supervisor_snapshot(database_oid)
+            .map(|snapshot| snapshot.flush_generation)
+            .unwrap_or(0);
+        Some(Self {
+            database_oid,
+            queue_generation,
+        })
+    }
+
+    fn reconcile_queue(&self, outcome: ClaimOutcome) {
+        let next_due = match outcome {
+            ClaimOutcome::Busy => Some(
+                unix_now_ms().saturating_add(i64::try_from(BUSY_RETRY.as_millis()).unwrap_or(200)),
+            ),
+            ClaimOutcome::Empty | ClaimOutcome::Claimed => {
+                txn::run(next_pending_due_ms).unwrap_or(None)
+            }
+        };
+
+        let Some(snapshot) = super::wake::supervisor_snapshot(self.database_oid) else {
+            return;
+        };
+        if snapshot.flush_generation != self.queue_generation {
+            return;
+        }
+
+        if let Some(deadline_ms) = next_due.filter(|deadline| *deadline > 0) {
+            super::wake::schedule_flush_at_ms(self.database_oid, deadline_ms);
+        } else {
+            super::wake::clear_flush_deadline(self.database_oid);
+        }
+        super::wake::mark_flush_processed(self.database_oid, self.queue_generation);
+    }
+}
+
+impl Drop for FlushWorkerRegistration {
+    fn drop(&mut self) {
+        super::wake::flush_stopped(self.database_oid);
+    }
+}
+
 #[pgrx::pg_guard]
 #[no_mangle]
 pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::Datum) {
@@ -163,12 +217,18 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         Some(pgrx::pg_sys::Oid::from(database_oid)),
         None,
     );
+    let Some(registration) = FlushWorkerRegistration::start(database_oid) else {
+        pgrx::log!(
+            "koldstore flush executor db={database_oid}: stale/unreserved start; exiting before queue access"
+        );
+        return;
+    };
 
-    // Short claim transaction: durable running + attempt_token before any I/O.
-    let claimed = match txn::run(claim_one_flush_job) {
+    let (claim_outcome, claimed) = match txn::run(claim_one_flush_job) {
         Ok(claimed) => claimed,
         Err(error) => {
             pgrx::warning!("koldstore flush executor claim failed: {error}");
+            super::wake::request_recovery(database_oid);
             return;
         }
     };
@@ -178,14 +238,24 @@ pub extern "C-unwind" fn koldstore_flush_executor_main(argument: pgrx::pg_sys::D
         claimed,
     }) = claimed
     else {
+        registration.reconcile_queue(claim_outcome);
         return;
     };
 
-    // Short-txn flush path: upload outside Postgres txns; catalog SPI uses
-    // FlushCommitStyle::Short. Do not wrap the entire flush in one transaction.
     if let Err(error) =
         crate::sql::flush::execute::run_claimed_flush_with_session_lock(table_oid, guard, claimed)
     {
         pgrx::warning!("koldstore flush executor failed: {error}");
+        super::wake::request_recovery(database_oid);
+        return;
     }
+
+    registration.reconcile_queue(ClaimOutcome::Claimed);
+}
+
+fn unix_now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }

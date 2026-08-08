@@ -54,6 +54,11 @@ mod live {
     #[pgrx::pg_guard]
     unsafe extern "C-unwind" fn executor_end(query_desc: *mut pg_sys::QueryDesc) {
         unsafe {
+            // Only managed result relations publish a WAL generation. Nested
+            // trigger/cascade DML still fires ExecutorEnd with the managed
+            // relation as the result target, so those writes are not missed.
+            // Unmanaged DML in a database that happens to have a capture slot
+            // must not wake maintenance or advance the logical slot.
             let changed_managed_relation = changed_managed_relation(query_desc);
             if let Some(previous) = PREVIOUS {
                 previous(query_desc);
@@ -63,8 +68,6 @@ mod live {
             if changed_managed_relation {
                 crate::worker::wake::mark_managed_dml_pending();
             }
-            // Reclaim Rust heap after merge-scan / flush spikes even when the
-            // next client command is a tiny keepalive (`SELECT 1`).
             crate::memory::release_process_heap_if_pending();
         }
     }

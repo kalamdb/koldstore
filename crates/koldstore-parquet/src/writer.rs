@@ -59,6 +59,10 @@ pub struct WriterOptions {
     pub statistics_columns: Vec<String>,
     pub bloom_filter_columns: Vec<String>,
     pub bloom_filter_false_positive_rate: Option<f64>,
+    /// Caps rows per data page so page indexes can prune finer than row groups.
+    ///
+    /// `None` keeps the parquet-rs default.
+    pub data_page_row_count_limit: Option<usize>,
     /// Native Parquet `sorting_columns` declared in row-group metadata.
     pub sorting_columns: Vec<SortingColumnSpec>,
 }
@@ -474,6 +478,7 @@ impl Default for WriterOptions {
             statistics_columns: Vec::new(),
             bloom_filter_columns: Vec::new(),
             bloom_filter_false_positive_rate: Some(0.01),
+            data_page_row_count_limit: None,
             sorting_columns: Vec::new(),
         }
     }
@@ -548,10 +553,15 @@ impl WriterOptions {
             .set_max_row_group_row_count(Some(row_group_size))
             .set_statistics_enabled(EnabledStatistics::None)
             .set_sorting_columns(sorting_columns);
+        if let Some(limit) = self.data_page_row_count_limit {
+            builder = builder.set_data_page_row_count_limit(limit.max(1));
+        }
         for column in &self.statistics_columns {
             builder = builder.set_column_statistics_enabled(
                 ColumnPath::from(column.as_str()),
-                EnabledStatistics::Chunk,
+                // Page-level stats populate the Parquet column index used for
+                // RowSelection pushdown; chunk-only stats omit page indexes.
+                EnabledStatistics::Page,
             );
         }
         for column in &self.bloom_filter_columns {

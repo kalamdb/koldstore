@@ -69,8 +69,14 @@ async fn auto_flush_false_skips_scheduler_manual_flush_still_works() -> Result<(
             .get::<_, String>(0);
         anyhow::ensure!(!job_id.is_empty(), "enqueue must ignore auto_flush opt-out");
 
-        let flushed = db.flush_table(&relation).await?;
-        anyhow::ensure!(flushed > 0, "manual flush_table must still work");
+        // Enqueue publishes FLUSH_QUEUE_DIRTY; the supervisor may already be
+        // running the one-shot executor. Wait on that job instead of racing a
+        // second inline flush_table against the same table lock.
+        let flushed = common::wait_for_flush_job_terminal(&db.client, &job_id).await?;
+        anyhow::ensure!(
+            flushed > 0,
+            "manual enqueue must still flush when auto_flush=false"
+        );
         anyhow::ensure!(completed_flush_jobs(&db.client, &relation).await? >= 1);
 
         reset_flush_interval(&db.client, &dbname).await?;

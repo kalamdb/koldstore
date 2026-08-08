@@ -10,6 +10,15 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
             .create_indexed_items_table("object_outage_items", 20)
             .await?;
         db.manage_shared(&table.relation, "id").await?;
+        db.client
+            .execute(
+                "SELECT koldstore.set_table_auto_flush($1::text::regclass, false)",
+                &[&table.relation],
+            )
+            .await
+            .context(
+                "disable auto-flush so the outage path is not raced by a background executor",
+            )?;
 
         let blocking_file = db.storage_root.join("blocked");
         std::fs::write(&blocking_file, b"not a directory")
@@ -17,9 +26,11 @@ async fn flush_object_outage_does_not_publish_partial_cold_state_on_pgrx() -> Re
         let blocking_path = blocking_file
             .to_str()
             .context("blocking path must be valid utf-8")?;
+        // Skip the register-time writability probe so we can point at a plain
+        // file and force the failure into flush (status=error), not alter.
         db.client
             .query_one(
-                "SELECT koldstore.alter_storage_location($1, $2, '{}'::jsonb)",
+                "SELECT koldstore.alter_storage_location($1, $2, '{}'::jsonb, false)",
                 &[&db.storage_name, &blocking_path],
             )
             .await?;

@@ -89,9 +89,35 @@ pub(super) fn active_flush_policy(
     Ok(active_manage_options(table_oid)?.and_then(|options| options.flush_policy()))
 }
 
-pub(super) fn active_manage_options(
+pub(crate) fn active_manage_options(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<Option<koldstore_common::ManageTableOptions>, String> {
+    let Some(options) = active_options_json(table_oid)? else {
+        return Ok(None);
+    };
+    Ok(Some(koldstore_common::ManageTableOptions::try_from_value(
+        &options,
+    )?))
+}
+
+pub(super) fn active_cold_metadata(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<Option<koldstore_migrate::register::ColdMetadataConfig>, String> {
+    let Some(options) = active_options_json(table_oid)? else {
+        return Ok(None);
+    };
+    let Some(value) = options.get("cold_metadata") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn active_options_json(table_oid: pgrx::pg_sys::Oid) -> Result<Option<serde_json::Value>, String> {
     use pgrx::datum::DatumWithOid;
 
     let statement = koldstore_catalog::queries::plan_active_flush_policy_options()
@@ -99,12 +125,7 @@ pub(super) fn active_manage_options(
     let options =
         crate::spi::select_one::<pgrx::JsonB>(&statement, &[DatumWithOid::from(table_oid)])
             .map_err(|error| error.to_string())?;
-    let Some(options) = options else {
-        return Ok(None);
-    };
-    Ok(Some(koldstore_common::ManageTableOptions::try_from_value(
-        &options.0,
-    )?))
+    Ok(options.map(|options| options.0))
 }
 
 fn older_than_cutoff(

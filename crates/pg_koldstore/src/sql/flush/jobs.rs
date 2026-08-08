@@ -1,29 +1,26 @@
 //! Flush job lifecycle SPI adapters.
 
-use koldstore_common::{SeqId, TableName, TableOid};
+use koldstore_common::{SeqId, TableName};
 use koldstore_flush::{
     flush_table_request, plan_cancel_jobs_for_drop, plan_clear_table_cancel_request,
-    plan_count_pending_flush_jobs, plan_enqueue_or_lookup_flush_job, plan_flush_cancel_requested,
-    plan_insert_flush_job, plan_list_jobs, plan_list_running_flush_table_oids,
-    plan_lookup_active_flush_job, plan_mark_flush_job_cancelled, plan_mark_flush_job_completed,
-    plan_mark_flush_job_completed_after_cancel, plan_mark_flush_job_failed,
-    plan_mark_flush_job_running, plan_purge_old_jobs, plan_reclaim_running_flush_jobs,
-    plan_request_cancel_job, plan_request_cancel_table_jobs, plan_select_pending_flush_candidate,
-    plan_update_flush_job_progress, DEFAULT_PURGE_BATCH_LIMIT,
+    plan_enqueue_or_lookup_flush_job, plan_flush_cancel_requested, plan_insert_flush_job,
+    plan_list_jobs, plan_mark_flush_job_cancelled, plan_mark_flush_job_completed,
+    plan_mark_flush_job_completed_after_cancel, plan_mark_flush_job_running, plan_purge_old_jobs,
+    plan_reclaim_running_flush_jobs, plan_request_cancel_job, plan_request_cancel_table_jobs,
+    plan_update_flush_job_progress,
 };
 
-#[derive(serde::Deserialize)]
-struct PendingFlushJobWire {
-    id: String,
-    #[serde(default)]
-    force: bool,
-}
+const ORPHAN_RECOVERY_PAGE: i64 = 64;
+/// Queue executors retry transient failures on the same durable job before
+/// exposing a terminal error to operators. Attempts are already incremented at
+/// claim, so the fifth failed attempt becomes terminal.
+const MAX_QUEUE_FLUSH_ATTEMPTS: i32 = 5;
 
-#[derive(serde::Deserialize)]
-struct PendingFlushCandidateWire {
-    table_oid: i64,
-    #[serde(default)]
+#[derive(Debug, Clone, Copy)]
+struct ActiveFlushJob {
+    id: uuid::Uuid,
     force: bool,
+    running: bool,
 }
 
 /// Enqueues a flush job or returns the existing active job UUID.
@@ -57,96 +54,113 @@ pub(crate) fn enqueue_or_lookup_flush_job(
 
 /// Enqueues only when flush work is due (or an active job already exists).
 ///
-/// Returns `None` when policy selection is empty — including when excess is
-/// positive but below `max_rows_per_file` — so undersized flushes are never
-/// queued. `force = true` always enqueues.
-///
-/// Queue callers unlock the table-job lock before this runs, so ownerless
-/// durable `running` rows are reclaimed here (when the lock is free) and a
-/// `force=true` call upgrades a pending job's payload before spawn.
+/// Enqueue has no hidden recovery or worker-registration side effects. The job
+/// row is the durable request; a transaction-local queue dirty bit wakes the
+/// cluster supervisor only after this transaction commits. Rollback publishes
+/// nothing. Crash/orphan reclamation belongs to DB maintenance recovery.
 pub(crate) fn enqueue_flush_job_if_due(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
 ) -> crate::error::PgResult<Option<pgrx::Uuid>> {
-    // Mirror ensure_flush_job's reclaim, but only when no live owner holds the
-    // session table-job lock. Otherwise a concurrent executor still owns work.
-    if crate::sql::job_lock::try_lock_table_job(table_oid)
-        .map_err(crate::error::PgAdapterError::from_display)?
-    {
-        let _ = reclaim_running_flush_jobs(table_oid)?;
-        crate::sql::job_lock::unlock_table_job(table_oid)
-            .map_err(crate::error::PgAdapterError::from_display)?;
-    }
+    let job_id = if let Some(existing) = lookup_active_flush_job(table_oid)? {
+        if force && !existing.force {
+            // Upgrade pending force intent while preserving the same active UUID.
+            Some(enqueue_or_lookup_flush_job(table_oid, true)?)
+        } else {
+            Some(crate::spi::uuid_to_pgrx(existing.id))
+        }
+    } else {
+        if !force {
+            let estimate = super::spi::flush_progress_total_estimate(table_oid, false)
+                .map_err(crate::error::PgAdapterError::from_display)?;
+            if estimate <= 0 {
+                return Ok(None);
+            }
+        }
+        Some(enqueue_or_lookup_flush_job(table_oid, force)?)
+    };
 
-    if let Some((existing_id, existing_force)) = lookup_active_flush_job(table_oid)? {
-        if force && !existing_force {
-            // Upgrade pending force intent; still returns the same job UUID when
-            // the row is pending (or the active id if another owner still runs).
-            return Ok(Some(enqueue_or_lookup_flush_job(table_oid, true)?));
-        }
-        return Ok(Some(crate::spi::uuid_to_pgrx(existing_id)));
+    if job_id.is_some() {
+        crate::worker::wake::mark_flush_queue_pending();
     }
-    if !force {
-        let estimate = super::spi::flush_progress_total_estimate(table_oid, false)
-            .map_err(crate::error::PgAdapterError::from_display)?;
-        if estimate <= 0 {
-            return Ok(None);
-        }
-    }
-    Ok(Some(enqueue_or_lookup_flush_job(table_oid, force)?))
+    Ok(job_id)
 }
 
 /// Looks up a committed active flush job without inserting.
 ///
-/// Used when the session table lock is held by another backend so enqueue must
-/// not wait on that backend's uncommitted jobs-row / unique-index conflict, and
-/// by claim paths that already hold the lock.
+/// Keep this path typed end-to-end. It runs for ordinary queue enqueue/claim, so
+/// building JSON in PostgreSQL, converting it to text, parsing JSON in Rust, and
+/// then parsing the UUID is unnecessary allocator/CPU work.
 fn lookup_active_flush_job(
     table_oid: pgrx::pg_sys::Oid,
-) -> crate::error::PgResult<Option<(uuid::Uuid, bool)>> {
+) -> crate::error::PgResult<Option<ActiveFlushJob>> {
     use pgrx::datum::DatumWithOid;
 
-    let lookup =
-        plan_lookup_active_flush_job().map_err(crate::error::PgAdapterError::from_display)?;
-    let existing = crate::spi::select_one::<String>(&lookup, &[DatumWithOid::from(table_oid)])?
-        .filter(|value| !value.is_empty());
-    let Some(existing) = existing else {
-        return Ok(None);
-    };
-    let wire: PendingFlushJobWire = serde_json::from_str(&existing)?;
-    Ok(Some((uuid::Uuid::parse_str(&wire.id)?, wire.force)))
+    pgrx::Spi::connect(|client| {
+        let table = client
+            .select(
+                r#"
+SELECT id,
+       COALESCE((payload->>'force')::boolean, false) AS force,
+       status = 'running' AS running
+FROM koldstore.jobs
+WHERE table_oid = $1::oid
+  AND scope_key = ''
+  AND job_type = 'flush'
+  AND status IN ('pending', 'running')
+ORDER BY updated_at, id
+LIMIT 1
+"#,
+                Some(1),
+                &[DatumWithOid::from(table_oid)],
+            )
+            .map_err(crate::error::PgAdapterError::from_display)?;
+        if table.is_empty() {
+            return Ok(None);
+        }
+        let first = table.first();
+        let Some(row) = first
+            .get::<pgrx::Uuid>(1)
+            .map_err(crate::error::PgAdapterError::from_display)?
+        else {
+            return Ok(None);
+        };
+        let force = first
+            .get::<bool>(2)
+            .map_err(crate::error::PgAdapterError::from_display)?
+            .unwrap_or(false);
+        let running = first
+            .get::<bool>(3)
+            .map_err(crate::error::PgAdapterError::from_display)?
+            .unwrap_or(false);
+        Ok(Some(ActiveFlushJob {
+            id: crate::spi::uuid_from_pgrx(row),
+            force,
+            running,
+        }))
+    })
 }
 
 /// Looks up a committed active flush job UUID without inserting.
 pub(crate) fn lookup_active_flush_job_uuid(
     table_oid: pgrx::pg_sys::Oid,
 ) -> crate::error::PgResult<Option<pgrx::Uuid>> {
-    Ok(lookup_active_flush_job(table_oid)?.map(|(id, _)| crate::spi::uuid_to_pgrx(id)))
+    Ok(lookup_active_flush_job(table_oid)?.map(|job| crate::spi::uuid_to_pgrx(job.id)))
 }
 
-/// Selects one due pending flush candidate for a one-shot executor.
-///
-/// Returns a pg-free [`TableOid`]; convert to `pg_sys::Oid` only at SPI / lock edges.
-pub(crate) fn select_pending_flush_candidate() -> crate::error::PgResult<Option<(TableOid, bool)>> {
-    let statement = plan_select_pending_flush_candidate()
-        .map_err(crate::error::PgAdapterError::from_display)?;
-    let json = crate::spi::select_one::<String>(&statement, &[])?.unwrap_or_default();
-    if json.is_empty() {
-        return Ok(None);
-    }
-    let wire: PendingFlushCandidateWire = serde_json::from_str(&json)?;
-    let raw = u32::try_from(wire.table_oid).unwrap_or(0);
-    let Ok(table_oid) = TableOid::new(raw) else {
-        return Ok(None);
-    };
-    Ok(Some((table_oid, wire.force)))
-}
-
-/// Counts due pending flush jobs for executor spawn budgeting.
-pub(crate) fn count_pending_flush_jobs() -> crate::error::PgResult<i64> {
-    let statement =
-        plan_count_pending_flush_jobs().map_err(crate::error::PgAdapterError::from_display)?;
-    Ok(crate::spi::select_one::<i64>(&statement, &[])?.unwrap_or(0))
+/// Returns whether any due pending flush job exists. Recovery only needs a
+/// boolean dispatch decision; avoid counting the entire due queue.
+pub(crate) fn has_due_pending_flush_jobs() -> crate::error::PgResult<bool> {
+    Ok(pgrx::Spi::get_one::<bool>(
+        "SELECT EXISTS (\
+           SELECT 1 FROM koldstore.jobs \
+           WHERE job_type = 'flush' \
+             AND status = 'pending' \
+             AND available_at <= clock_timestamp()\
+         )",
+    )
+    .map_err(crate::error::PgAdapterError::from_display)?
+    .unwrap_or(false))
 }
 
 pub(super) fn ensure_flush_job(
@@ -155,13 +169,14 @@ pub(super) fn ensure_flush_job(
 ) -> crate::error::PgResult<(uuid::Uuid, bool)> {
     use pgrx::datum::DatumWithOid;
 
-    // Caller must hold the session table-job lock. Any durable `running` row
-    // here has no live owner — reclaim to pending so uniqueness clears and the
-    // same job can be resumed.
-    reclaim_running_flush_jobs(table_oid)?;
-
-    if let Some((existing_id, existing_force)) = lookup_active_flush_job(table_oid)? {
-        return Ok((existing_id, force || existing_force));
+    // The caller owns the session table-job lock. A `running` row therefore has
+    // no live executor owner and may be returned to pending. The overwhelmingly
+    // common `pending` path performs no reclaim write at all.
+    if let Some(existing) = lookup_active_flush_job(table_oid)? {
+        if existing.running {
+            reclaim_running_flush_jobs(table_oid)?;
+        }
+        return Ok((existing.id, force || existing.force));
     }
 
     let job_id = uuid::Uuid::new_v4();
@@ -188,19 +203,37 @@ pub(crate) fn reclaim_running_flush_jobs(
     Ok(rows.rows_affected)
 }
 
-/// Reclaims durable `running` flush jobs whose session table-job lock is free.
+/// Reclaims a bounded page of durable `running` jobs whose session table lock is free.
 pub(crate) fn reclaim_orphan_running_flush_jobs() -> crate::error::PgResult<u64> {
-    let statement =
-        plan_list_running_flush_table_oids().map_err(crate::error::PgAdapterError::from_display)?;
-    let json =
-        crate::spi::select_one::<String>(&statement, &[])?.unwrap_or_else(|| "[]".to_string());
-    let oids: Vec<i64> = serde_json::from_str(&json)?;
-    let mut reclaimed = 0_u64;
-    for oid_i64 in oids {
-        let table_oid = pgrx::pg_sys::Oid::from(u32::try_from(oid_i64).unwrap_or(0));
-        if table_oid == pgrx::pg_sys::InvalidOid {
-            continue;
+    use pgrx::datum::DatumWithOid;
+
+    let oids = pgrx::Spi::connect(|client| -> Result<Vec<pgrx::pg_sys::Oid>, String> {
+        let table = client
+            .select(
+                "SELECT DISTINCT table_oid::oid \
+                 FROM koldstore.jobs \
+                 WHERE job_type = 'flush' AND status = 'running' \
+                 ORDER BY table_oid \
+                 LIMIT $1",
+                None,
+                &[DatumWithOid::from(ORPHAN_RECOVERY_PAGE)],
+            )
+            .map_err(|error| error.to_string())?;
+        let mut out = Vec::with_capacity(ORPHAN_RECOVERY_PAGE as usize);
+        for row in table {
+            if let Some(oid) = row
+                .get::<pgrx::pg_sys::Oid>(1)
+                .map_err(|error| error.to_string())?
+            {
+                out.push(oid);
+            }
         }
+        Ok(out)
+    })
+    .map_err(crate::error::PgAdapterError::from_display)?;
+
+    let mut reclaimed = 0_u64;
+    for table_oid in oids {
         let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(table_oid)? else {
             continue;
         };
@@ -211,8 +244,6 @@ pub(crate) fn reclaim_orphan_running_flush_jobs() -> crate::error::PgResult<u64>
 }
 
 /// Marks a flush job running and returns the attempt token that fences mutations.
-///
-/// `target_seq` is the fixed job watermark (`None` / unset when no mirror rows).
 pub(super) fn mark_flush_job_running(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
@@ -224,7 +255,7 @@ pub(super) fn mark_flush_job_running(
     let attempt_token = uuid::Uuid::new_v4();
     let statement =
         plan_mark_flush_job_running().map_err(crate::error::PgAdapterError::from_display)?;
-    crate::spi::update(
+    let updated = crate::spi::update(
         &statement,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
@@ -234,6 +265,7 @@ pub(super) fn mark_flush_job_running(
             DatumWithOid::from(target_seq.map(SeqId::get).unwrap_or(0)),
         ],
     )?;
+    require_attempt_update("claim running", updated.rows_affected)?;
     Ok(attempt_token)
 }
 
@@ -242,13 +274,12 @@ pub(super) struct FlushJobProgressUpdate<'a> {
     pub attempt_token: uuid::Uuid,
     pub rows_flushed: i64,
     pub batches_completed: i32,
-    /// Last flushed seq watermark; `None` when unset (0 in catalog).
     pub checkpoint_seq: Option<SeqId>,
     pub phase: &'a str,
     pub progress_total: i64,
 }
 
-/// Persists mid-flush progress for operator visibility (`list_jobs` / job row).
+/// Persists mid-flush progress for operator visibility.
 pub(super) fn update_flush_job_progress(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
@@ -258,7 +289,7 @@ pub(super) fn update_flush_job_progress(
 
     let statement =
         plan_update_flush_job_progress().map_err(crate::error::PgAdapterError::from_display)?;
-    crate::spi::update(
+    let updated = crate::spi::update(
         &statement,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
@@ -271,7 +302,7 @@ pub(super) fn update_flush_job_progress(
             DatumWithOid::from(progress.progress_total),
         ],
     )?;
-    Ok(())
+    require_attempt_update("progress", updated.rows_affected)
 }
 
 pub(super) fn mark_flush_job_completed(
@@ -286,7 +317,7 @@ pub(super) fn mark_flush_job_completed(
 
     let statement =
         plan_mark_flush_job_completed().map_err(crate::error::PgAdapterError::from_display)?;
-    crate::spi::update(
+    let updated = crate::spi::update(
         &statement,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
@@ -297,31 +328,113 @@ pub(super) fn mark_flush_job_completed(
             DatumWithOid::from(batches_completed),
         ],
     )?;
+    require_attempt_update("complete", updated.rows_affected)?;
     clear_table_cancel_request(table_oid)?;
+    // A successful flush changes the oldest remaining mirror row and may change
+    // both RowLimit and OlderThan eligibility. Reconcile once after COMMIT rather
+    // than retaining a stale pre-flush clock deadline in shared memory.
+    crate::worker::wake::mark_schedule_pending();
     Ok(())
 }
 
+/// Records one failed flush attempt.
+///
+/// Queue workers treat ordinary execution failures as retryable for a bounded
+/// number of attempts. The *same job UUID* returns to `pending`, its attempt token
+/// is cleared, and `available_at` carries exponential backoff. The executor's
+/// queue reconciliation reads that timestamp after this transaction commits and
+/// arms the supervisor exactly once. Inline callers pass `retryable = false` and
+/// retain synchronous terminal-error behavior.
+///
+/// Returns the retry timestamp in epoch milliseconds when another attempt was
+/// scheduled, or `None` when the failure became terminal.
 pub(super) fn mark_flush_job_failed(
     job_id: uuid::Uuid,
     table_oid: pgrx::pg_sys::Oid,
     attempt_token: uuid::Uuid,
     error_trace: &str,
-) -> crate::error::PgResult<()> {
+    retryable: bool,
+) -> crate::error::PgResult<Option<i64>> {
     use pgrx::datum::DatumWithOid;
 
-    let statement =
-        plan_mark_flush_job_failed().map_err(crate::error::PgAdapterError::from_display)?;
-    crate::spi::update(
-        &statement,
+    let retry_at_ms = crate::spi::update_one::<i64>(
+        &koldstore_common::SqlStatement::write_with_params(
+            "record flush attempt failure",
+            r#"
+WITH updated AS (
+  UPDATE koldstore.jobs
+     SET status = CASE
+                    WHEN $5::boolean AND attempts < $6::integer THEN 'pending'
+                    ELSE 'error'
+                  END,
+         phase = CASE
+                   WHEN $5::boolean AND attempts < $6::integer THEN 'pending'
+                   ELSE 'failed'
+                 END,
+         attempt_token = CASE
+                           WHEN $5::boolean AND attempts < $6::integer THEN NULL
+                           ELSE attempt_token
+                         END,
+         available_at = CASE
+                          WHEN $5::boolean AND attempts < $6::integer
+                          THEN clock_timestamp() + make_interval(
+                                 secs => power(
+                                   2.0,
+                                   LEAST(GREATEST(attempts - 1, 0), 5)
+                                 )
+                               )
+                          ELSE available_at
+                        END,
+         error_trace = $4::text,
+         finished_at = CASE
+                         WHEN $5::boolean AND attempts < $6::integer THEN NULL
+                         ELSE clock_timestamp()
+                       END,
+         payload = payload || jsonb_build_object(
+                     'last_failed_at', clock_timestamp(),
+                     'retry_scheduled', ($5::boolean AND attempts < $6::integer)
+                   ),
+         updated_at = clock_timestamp()
+   WHERE id = $1::uuid
+     AND table_oid = $2::oid
+     AND job_type = 'flush'
+     AND status = 'running'
+     AND attempt_token = $3::uuid
+   RETURNING status, available_at
+)
+SELECT CASE
+         WHEN status = 'pending'
+         THEN (extract(epoch FROM available_at) * 1000)::bigint
+         ELSE 0::bigint
+       END
+FROM updated
+"#,
+            [
+                koldstore_common::SqlParamType::Uuid,
+                koldstore_common::SqlParamType::Oid,
+                koldstore_common::SqlParamType::Uuid,
+                koldstore_common::SqlParamType::Text,
+                koldstore_common::SqlParamType::Boolean,
+                koldstore_common::SqlParamType::Integer,
+            ],
+        )
+        .map_err(crate::error::PgAdapterError::from_display)?,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
             DatumWithOid::from(table_oid),
             DatumWithOid::from(crate::spi::uuid_to_pgrx(attempt_token)),
             DatumWithOid::from(error_trace),
+            DatumWithOid::from(retryable),
+            DatumWithOid::from(MAX_QUEUE_FLUSH_ATTEMPTS),
         ],
-    )?;
+    )?
+    .ok_or_else(|| {
+        crate::error::PgAdapterError::from_display(
+            "flush job attempt lost ownership while recording failure",
+        )
+    })?;
     clear_table_cancel_request(table_oid)?;
-    Ok(())
+    Ok((retry_at_ms > 0).then_some(retry_at_ms))
 }
 
 /// Lists jobs as a JSON array for `koldstore.list_jobs`.
@@ -372,7 +485,7 @@ pub(super) fn mark_flush_job_cancelled(
 
     let statement =
         plan_mark_flush_job_cancelled().map_err(crate::error::PgAdapterError::from_display)?;
-    crate::spi::update(
+    let updated = crate::spi::update(
         &statement,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
@@ -380,8 +493,8 @@ pub(super) fn mark_flush_job_cancelled(
             DatumWithOid::from(crate::spi::uuid_to_pgrx(attempt_token)),
         ],
     )?;
-    clear_table_cancel_request(table_oid)?;
-    Ok(())
+    require_attempt_update("cancel", updated.rows_affected)?;
+    clear_table_cancel_request(table_oid)
 }
 
 pub(super) fn mark_flush_job_completed_after_cancel(
@@ -396,7 +509,7 @@ pub(super) fn mark_flush_job_completed_after_cancel(
 
     let statement = plan_mark_flush_job_completed_after_cancel()
         .map_err(crate::error::PgAdapterError::from_display)?;
-    crate::spi::update(
+    let updated = crate::spi::update(
         &statement,
         &[
             DatumWithOid::from(crate::spi::uuid_to_pgrx(job_id)),
@@ -407,8 +520,17 @@ pub(super) fn mark_flush_job_completed_after_cancel(
             DatumWithOid::from(batches_completed),
         ],
     )?;
-    clear_table_cancel_request(table_oid)?;
-    Ok(())
+    require_attempt_update("complete after cancel", updated.rows_affected)?;
+    clear_table_cancel_request(table_oid)
+}
+
+fn require_attempt_update(operation: &str, rows_affected: u64) -> crate::error::PgResult<()> {
+    if rows_affected == 1 {
+        return Ok(());
+    }
+    Err(crate::error::PgAdapterError::from_display(format!(
+        "flush job attempt lost ownership during {operation}: expected 1 fenced row, affected {rows_affected}"
+    )))
 }
 
 fn clear_table_cancel_request(table_oid: pgrx::pg_sys::Oid) -> crate::error::PgResult<()> {
@@ -433,7 +555,7 @@ pub(crate) fn request_cancel_job(job_id: uuid::Uuid) -> crate::error::PgResult<b
     Ok(updated.is_some())
 }
 
-/// Requests cancel for all active jobs on a table. Returns affected row count.
+/// Requests cancel for all active jobs on one table. Returns affected row count.
 pub(crate) fn request_cancel_table_jobs(
     table_oid: pgrx::pg_sys::Oid,
 ) -> crate::error::PgResult<i64> {
@@ -454,9 +576,6 @@ pub(crate) fn cancel_jobs_for_drop(table_oid: pgrx::pg_sys::Oid) -> crate::error
 }
 
 /// Deletes a batch of aged terminal jobs. Returns deleted count.
-///
-/// Skips jobs still referenced by `pending` cold segments. Caller should pass
-/// `retention_days > 0`; `batch_limit` is clamped to at least 1.
 pub(crate) fn purge_old_jobs(retention_days: i32, batch_limit: i32) -> crate::error::PgResult<i64> {
     use pgrx::datum::DatumWithOid;
 
@@ -473,13 +592,4 @@ pub(crate) fn purge_old_jobs(retention_days: i32, batch_limit: i32) -> crate::er
         ],
     )?
     .unwrap_or(0))
-}
-
-/// Coordinator tick helper: purge using GUC retention and the default batch size.
-pub(crate) fn purge_old_jobs_tick() -> crate::error::PgResult<i64> {
-    let retention_days = crate::guc::job_retention_days();
-    if retention_days <= 0 {
-        return Ok(0);
-    }
-    purge_old_jobs(retention_days, DEFAULT_PURGE_BATCH_LIMIT)
 }

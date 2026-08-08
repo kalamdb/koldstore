@@ -84,6 +84,11 @@ RUN set -eux; \
     install -m 0755 /tmp/koldstore/koldstore.so "${LIBDIR}/koldstore.so"; \
     rm -rf /tmp/koldstore; \
     chmod +x /usr/local/bin/release-entrypoint.sh; \
+    # Common cold-storage roots for try-it / Windows mapped drives. Entrypoint
+    # re-chowns these at start; creating them here documents the mount point.
+    mkdir -p /koldstore-data/cold /tmp/koldstore-demo; \
+    chown -R postgres:postgres /koldstore-data /tmp/koldstore-demo; \
+    chmod -R a+rwX /koldstore-data /tmp/koldstore-demo; \
     # PGDG sample defaults to localhost; Docker port publish needs '*'.
     # koldstore must be preloaded so every backend installs KoldMergeScan
     # planner hooks — otherwise SELECT on managed tables is heap-only.
@@ -92,7 +97,8 @@ RUN set -eux; \
     printf "\n# pg-koldstore release image defaults\n" >> "${conf_sample}"; \
     printf "listen_addresses = '*'\n" >> "${conf_sample}"; \
     printf "shared_preload_libraries = 'koldstore'\n" >> "${conf_sample}"; \
-    printf "wal_level = logical\n" >> "${conf_sample}"
+    printf "wal_level = logical\n" >> "${conf_sample}"; \
+    printf "log_min_messages = info\n" >> "${conf_sample}"
 
 STOPSIGNAL SIGINT
 EXPOSE 5432

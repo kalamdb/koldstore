@@ -51,11 +51,16 @@ pgrx_quiet_backends() {
   if ! "${psql}" -h "${host}" -p "${port}" -d postgres -v ON_ERROR_STOP=1 -c "SELECT 1" >/dev/null 2>&1; then
     return 0
   fi
+  # Leave the shared-preload supervisor running; only stop per-DB workers.
   "${psql}" -h "${host}" -p "${port}" -d postgres -v ON_ERROR_STOP=0 -c \
     "SELECT pg_terminate_backend(pid)
      FROM pg_stat_activity
      WHERE pid <> pg_backend_pid()
-       AND backend_type LIKE 'koldstore%';" >/dev/null 2>&1 || true
+       AND (
+         backend_type LIKE 'koldstore maintenance %'
+         OR backend_type LIKE 'koldstore flush executor %'
+       )
+       AND backend_type <> 'koldstore supervisor';" >/dev/null 2>&1 || true
   "${psql}" -h "${host}" -p "${port}" -d postgres -v ON_ERROR_STOP=0 -c \
     "SELECT pg_terminate_backend(pid)
      FROM pg_stat_activity

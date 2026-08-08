@@ -59,8 +59,8 @@ pub use session::{
     snowflake_id_call_expression, SessionSqlError, SessionSqlResult, SNOWFLAKE_ID_FUNCTION,
 };
 pub use snowflake::{
-    minimum_id_at_unix_millis, next_id, next_id_after, worker_id, SnowflakeError,
-    KOLDSTORE_EPOCH_MILLIS,
+    minimum_id_at_unix_millis, next_id, next_id_after, unix_millis_from_id, worker_id,
+    SnowflakeError, KOLDSTORE_EPOCH_MILLIS,
 };
 pub use sql::{map_sql_error, SqlAccess, SqlError, SqlParamType, SqlResult, SqlStatement};
 pub use storage_id::StorageId;

@@ -39,14 +39,14 @@ fn prepare_managed_for_catalog() {
     measurement_time_ms = 2_000,
     warm_up_time_ms = 500
 )]
-fn describe_table_spi(b: &mut Bencher) {
+fn table_status_spi(b: &mut Bencher) {
     let relation = ctx("relation");
     b.iter(move || {
         let described = Spi::get_one::<pgrx::JsonB>(&format!(
-            "SELECT koldstore.describe_table('{relation}'::regclass)"
+            "SELECT koldstore.table_status('{relation}'::regclass)"
         ))
-        .expect("describe_table")
-        .expect("describe_table non-null");
+        .expect("table_status")
+        .expect("table_status non-null");
         black_box(described.0.to_string());
     });
 }

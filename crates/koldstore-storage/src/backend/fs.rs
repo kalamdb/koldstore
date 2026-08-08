@@ -30,3 +30,45 @@ pub(super) fn parse_filesystem_root(base_path: &str) -> StorageResult<PathBuf> {
         })
     }
 }
+
+/// Creates `base_path` when needed and best-effort chmods it for Docker bind mounts.
+///
+/// Does not write a probe file — [`super::open::ensure_storage_backend_writable`]
+/// performs the object-store put/delete probe for every backend kind.
+///
+/// # Errors
+///
+/// Returns [`StorageClientError::InvalidPath`] when the directory cannot be created.
+pub fn ensure_filesystem_base_prepared(base_path: &str) -> StorageResult<PathBuf> {
+    let root = parse_filesystem_root(base_path)?;
+    std::fs::create_dir_all(&root).map_err(|error| StorageClientError::InvalidPath {
+        message: format!(
+            "cannot create filesystem base_path `{base_path}` (resolved {}): {error}. \
+             For Docker Desktop / Windows bind mounts, ensure the host folder is writable \
+             inside the container (entrypoint chowns /koldstore-data; or use /tmp/koldstore-demo).",
+            root.display()
+        ),
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Best-effort only — ignored when the process does not own the directory.
+        let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777));
+    }
+
+    Ok(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_filesystem_base_prepared;
+
+    #[test]
+    fn ensure_filesystem_base_prepared_creates_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cold");
+        let resolved = ensure_filesystem_base_prepared(path.to_str().unwrap()).expect("prepared");
+        assert!(resolved.is_dir());
+    }
+}

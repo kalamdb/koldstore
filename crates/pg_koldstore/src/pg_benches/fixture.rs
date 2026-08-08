@@ -202,7 +202,7 @@ pub(crate) fn prepare_seeded_managed_messages(label: &str, rows: i64, flushable:
 /// Runs `flush_table(..., force => true)` and returns `rows_flushed`.
 pub(crate) fn flush_table_rows(relation: &str) -> i64 {
     let job_id = spi_get_text(&format!(
-        "SELECT koldstore.flush_table('{relation}'::regclass, force => true)::text"
+        "SELECT (koldstore.flush_table('{relation}'::regclass, force => true)->>'job_id')"
     ));
     spi_get_i64(&format!(
         "SELECT rows_flushed FROM koldstore.jobs WHERE id = '{job_id}'::uuid"

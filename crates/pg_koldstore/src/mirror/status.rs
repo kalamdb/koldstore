@@ -1,20 +1,28 @@
-//! Async mirror status SQL surface for lag and apply-rate observability.
+//! Async mirror status SQL surface for lag, scheduling, and apply-rate observability.
 
 use pgrx::datum::DatumWithOid;
 use serde_json::json;
 
 use super::lifecycle::current_slot_name;
 
-/// Returns async mirror lag, retained WAL, and process-local apply rates.
+/// Returns async mirror lag, WAL watermarks, maintenance state, slot identity,
+/// and apply rates.
 ///
-/// SQL contract: `koldstore.async_mirror_status()` → `jsonb`. Never drops WAL;
-/// callers use this to alert and tune the retained-WAL health threshold.
+/// SQL contract: `koldstore.async_mirror_status()` -> `jsonb`. Database-scoped
+/// health (no table required). Prefer `koldstore.table_status(table)` when you
+/// already have a managed table - it embeds this under `async_mirror`. Slot name
+/// is included as top-level `slot_name`.
 #[pgrx::pg_extern(name = "async_mirror_status", schema = "koldstore")]
 pub fn async_mirror_status() -> pgrx::JsonB {
     pgrx::JsonB(
-        async_mirror_status_impl()
-            .unwrap_or_else(|error| json!({ "error": error, "healthy": false })),
+        async_mirror_status_value()
+            .unwrap_or_else(|error| serde_json::json!({ "error": error, "healthy": false })),
     )
+}
+
+/// Builds the async mirror status JSON (shared by SQL and `table_status`).
+pub(crate) fn async_mirror_status_value() -> Result<serde_json::Value, String> {
+    async_mirror_status_impl()
 }
 
 fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
@@ -32,7 +40,13 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
         &[DatumWithOid::from(slot.as_str())],
     )
     .map_err(|error| error.to_string())?
-    .unwrap_or_else(|| json!({ "slot_name": slot, "present": false }).to_string());
+    .unwrap_or_else(|| {
+        json!({
+            "slot_name": slot,
+            "present": false,
+        })
+        .to_string()
+    });
 
     let state_plan = plan_async_mirror_state_status().map_err(|error| error.to_string())?;
     let state_row = pgrx::Spi::get_one_with_args::<String>(
@@ -47,6 +61,18 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
     let state_json: serde_json::Value =
         serde_json::from_str(&state_row).map_err(|error| error.to_string())?;
 
+    let current_wal_lsn = slot_json
+        .get("current_wal_lsn")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let confirmed_flush_lsn = slot_json
+        .get("confirmed_flush_lsn")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let applied_lsn = state_json
+        .get("applied_lsn")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let retained_bytes = slot_json
         .get("retained_bytes")
         .and_then(|value| value.as_i64())
@@ -59,9 +85,61 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
         "ok": retained_wal_within_threshold,
     });
 
+    // The database maintenance worker is intentionally ephemeral. Expose the
+    // authoritative shared generations as well as the transient PID so callers
+    // can distinguish "idle and caught up" from "worker missing while work is
+    // pending" without relying on pg_stat_activity timing.
+    let maintenance = crate::worker::wake::supervisor_snapshot(database_oid.to_u32())
+        .map(|snapshot| {
+            json!({
+                "registered": true,
+                "pid": (snapshot.maintenance_pid > 0).then_some(snapshot.maintenance_pid),
+                "running": snapshot.maintenance_pid > 0,
+                "starting": snapshot.maintenance_pid < 0,
+                "pending": snapshot.maintenance_due(),
+                "wal_generation": snapshot.wal_generation,
+                "wal_processed_generation": snapshot.wal_processed_generation,
+                "maintenance_generation": snapshot.maintenance_generation,
+                "maintenance_processed_generation": snapshot.maintenance_processed_generation,
+                "recovery_requested": snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0,
+                "schedule_dirty": snapshot.event_flags & koldstore_worker::EVENT_SCHEDULE_DIRTY != 0,
+                "next_due_at_ms": snapshot.next_maintenance_due_at_ms,
+            })
+        })
+        .unwrap_or_else(|| {
+            json!({
+                "registered": false,
+                "pid": serde_json::Value::Null,
+                "running": false,
+                "starting": false,
+                "pending": false,
+                "wal_generation": 0,
+                "wal_processed_generation": 0,
+                "maintenance_generation": 0,
+                "maintenance_processed_generation": 0,
+                "recovery_requested": false,
+                "schedule_dirty": false,
+                "next_due_at_ms": 0,
+            })
+        });
+
+    // Compact WAL cursor view: "latest commit" ~= current WAL tip; "latest read"
+    // ~= durable applied_lsn (mirror catch-up watermark). Slot confirmed_flush is
+    // the decoded/ack frontier used for retention.
+    let wal = json!({
+        "current_lsn": current_wal_lsn,
+        "applied_lsn": applied_lsn,
+        "confirmed_flush_lsn": confirmed_flush_lsn,
+        "restart_lsn": slot_json.get("restart_lsn").cloned().unwrap_or(serde_json::Value::Null),
+        "lag_bytes": retained_bytes,
+    });
+
     Ok(json!({
+        "slot_name": slot,
         "slot": slot_json,
         "state": state_json,
+        "wal": wal,
+        "maintenance": maintenance,
         "apply": {
             "rows_total": metrics.rows_total,
             "ticks_total": metrics.ticks_total,

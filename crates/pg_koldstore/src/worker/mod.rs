@@ -1,37 +1,34 @@
-//! PostgreSQL adapter for [`koldstore_worker`] database-scoped background work.
+//! PostgreSQL adapter for [`koldstore_worker`] background work.
 //!
-//! Owns `pgrx` background-worker registration, latch wakeups, and SPI connection.
-//! Ensure decisions and naming come from the PostgreSQL-free library crate.
+//! The static cluster supervisor owns dynamic worker registration. Database
+//! maintenance workers and heavy flush executors are both ephemeral.
 
 #[cfg(feature = "pg")]
-mod ensure;
+mod control;
 #[cfg(feature = "pg")]
 mod flush_executor;
 #[cfg(feature = "pg")]
 mod flush_task;
 #[cfg(feature = "pg")]
-mod launcher;
+mod maintenance;
 #[cfg(feature = "pg")]
-mod r#loop;
+mod supervisor;
+#[cfg(feature = "pg")]
+mod timed_policy;
 #[cfg(feature = "pg")]
 pub(crate) mod txn;
 #[cfg(feature = "pg")]
 pub(crate) mod wake;
 
 #[cfg(feature = "pg")]
-pub use ensure::ensure_async_mirror_worker_pg;
+pub(crate) use control::require_async_mirror_worker;
 #[cfg(feature = "pg")]
-pub(crate) use ensure::{
-    ensure_async_mirror_worker, ensure_async_mirror_worker_once_if_needed, mark_worker_not_ensured,
-    require_async_mirror_worker,
-};
-#[cfg(feature = "pg")]
-pub(crate) use flush_executor::{
-    spawn_flush_executor_if_needed, spawn_flush_executors_for_pending_work,
-};
+pub(crate) use flush_executor::register_flush_executor_from_supervisor;
 #[cfg(feature = "pg")]
 pub use flush_task::run_flush_scheduler_tick_pg;
 #[cfg(feature = "pg")]
-pub(crate) use launcher::register_if_shared_preload as register_launcher_if_shared_preload;
+pub(crate) use flush_task::schedule_policy_after_counter;
 #[cfg(feature = "pg")]
-pub(crate) use r#loop::run_async_mirror_applier;
+pub(crate) use maintenance::register_maintenance_from_supervisor;
+#[cfg(feature = "pg")]
+pub(crate) use supervisor::register_if_shared_preload as register_supervisor_if_shared_preload;

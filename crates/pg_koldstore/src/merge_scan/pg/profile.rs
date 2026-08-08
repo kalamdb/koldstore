@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::time::Instant;
 
-use koldstore_parquet::{BloomPruneMode, ParquetReadProfile};
+use koldstore_parquet::{BloomPruneMode, PageIndexPruneMode, ParquetReadProfile};
 use pgrx::pg_sys;
 
 /// EXPLAIN data PostgreSQL asked this plan node to collect.
@@ -684,6 +684,12 @@ fn explain_visual_parquet_io_stages(
             parquet.bloom_filters_fetched as i64,
         );
     }
+    explain_text(es, "Page Index", parquet.page_index.as_str());
+    if parquet.page_index == PageIndexPruneMode::Applied {
+        explain_integer(es, "Pages Total", None, parquet.pages_total as i64);
+        explain_integer(es, "Pages Selected", None, parquet.pages_selected as i64);
+        explain_integer(es, "Pages Skipped", None, parquet.pages_skipped as i64);
+    }
     if !parquet.row_groups_selected.is_empty() {
         let selected = parquet
             .row_groups_selected
@@ -1004,6 +1010,15 @@ fn explain_cold_scan(
                 bloom_filters_fetched as i64,
             );
         }
+        let pages_skipped = profile.pages_skipped_by_page_index();
+        if pages_skipped > 0 {
+            explain_integer(
+                es,
+                "Pages Skipped by Page Index",
+                None,
+                pages_skipped as i64,
+            );
+        }
     }
 
     if profile.manifest_path != "(none)" {
@@ -1245,6 +1260,12 @@ fn explain_segment(
             parquet.bloom_filters_fetched as i64,
         );
     }
+    explain_text(es, "Page Index", parquet.page_index.as_str());
+    if parquet.page_index == PageIndexPruneMode::Applied {
+        explain_integer(es, "Pages Total", None, parquet.pages_total as i64);
+        explain_integer(es, "Pages Selected", None, parquet.pages_selected as i64);
+        explain_integer(es, "Pages Skipped", None, parquet.pages_skipped as i64);
+    }
 }
 
 impl ColdReadProfile {
@@ -1273,6 +1294,15 @@ impl ColdReadProfile {
             .filter_map(|segment| segment.parquet.as_ref())
             .filter(|parquet| parquet.bloom == BloomPruneMode::Applied && !parquet.stats_pruned)
             .map(|parquet| parquet.row_groups_skipped)
+            .sum()
+    }
+
+    fn pages_skipped_by_page_index(&self) -> usize {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+            .filter(|parquet| parquet.page_index == PageIndexPruneMode::Applied)
+            .map(|parquet| parquet.pages_skipped)
             .sum()
     }
 

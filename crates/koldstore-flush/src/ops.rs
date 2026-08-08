@@ -1,6 +1,6 @@
 //! Operational SQL planning for flush jobs and maintenance commands.
 //!
-//! Owns flush enqueue, recovery request shapes, `describe_table` (which mixes
+//! Owns flush enqueue, recovery request shapes, table status planning (which mixes
 //! catalog counters with live hot/mirror SQL), and thin wrappers around
 //! catalog-owned backup/validate/export SELECTs. Inline flush job lifecycle
 //! lives in `table_jobs`. PostgreSQL `#[pg_extern]` wrappers stay in
@@ -30,7 +30,7 @@ pub const FLUSH_SQL_FUNCTIONS: &[&str] = &[
     "koldstore.enqueue_flush_job",
     "koldstore.flush_table",
     "koldstore.recover_segments",
-    "koldstore.describe_table",
+    "koldstore.table_status",
     "koldstore.manage_table",
     "koldstore.unmanage_table",
 ];
@@ -577,7 +577,9 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
     }
 }
 
-/// Plans `koldstore.describe_table` for one managed table and mirror relation.
+/// Plans table status fields for one managed table and mirror relation.
+///
+/// Used by `koldstore.table_status` (async mirror is attached in `pg_koldstore`).
 ///
 /// The caller supplies validated quoted table and mirror relation names. The
 /// returned JSON includes hot heap, mirror, and cold row accounting used by
@@ -586,7 +588,7 @@ pub fn classify_command(command: &str) -> Option<OpsCommand> {
 /// # Errors
 ///
 /// Returns an error when SPI statement metadata cannot be prepared.
-pub fn describe_table_plan(
+pub fn table_status_plan(
     table: &QualifiedTableName,
     mirror: &QualifiedTableName,
 ) -> Result<TableStatusPlan, OpsError> {

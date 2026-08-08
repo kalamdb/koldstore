@@ -147,7 +147,7 @@ Time-based `max_flush_interval` and predicate move policies remain deferred. See
   metadata supplies Sort Key V1 segment bounds and row-group arrays; scalar
   SQL candidate lookup is refined in Rust before opening an object. See
   [ADR-002](decisions/002-footer-derived-catalog-stats.md).
-- Operator-configurable `pruning_columns` and `bloom_filter_columns`.
+- Operator-configurable `pruning_columns` and `bloom_filter_columns` (manage options + `cold_metadata`; page-index / Bloom pushdown on selective cold reads — see [design](plans/2026-08-07-parquet-page-index-bloom-pushdown-design.md)).
 - Configurable `flush_order_by`; flush selection is always ordered by mirror
   `seq` today.
 

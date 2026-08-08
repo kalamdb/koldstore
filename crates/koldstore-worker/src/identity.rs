@@ -18,19 +18,13 @@ impl DatabaseOid {
     }
 }
 
-/// Backend type / bgworker name for the shared database worker.
-///
-/// Kept as `koldstore async mirror {oid}` so existing e2e and storage probes
-/// keep working. The same process now also runs built-in auto-flush ticks.
+/// Backend type / bgworker name for the ephemeral database-maintenance worker.
 #[must_use]
-pub fn async_mirror_worker_type(database_oid: DatabaseOid) -> String {
-    format!("koldstore async mirror {}", database_oid.get())
+pub fn maintenance_worker_type(database_oid: DatabaseOid) -> String {
+    format!("koldstore maintenance {}", database_oid.get())
 }
 
 /// Backend type / bgworker name for a one-shot flush executor.
-///
-/// Used by `pg_stat_activity` probes when capping
-/// `koldstore.max_parallel_flush_jobs`.
 #[must_use]
 pub fn flush_executor_worker_type(database_oid: DatabaseOid) -> String {
     format!("koldstore flush executor {}", database_oid.get())
@@ -38,13 +32,13 @@ pub fn flush_executor_worker_type(database_oid: DatabaseOid) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{async_mirror_worker_type, flush_executor_worker_type, DatabaseOid};
+    use super::{flush_executor_worker_type, maintenance_worker_type, DatabaseOid};
 
     #[test]
-    fn worker_type_is_stable_for_oid() {
+    fn maintenance_worker_type_is_stable_for_oid() {
         assert_eq!(
-            async_mirror_worker_type(DatabaseOid::new(42)),
-            "koldstore async mirror 42"
+            maintenance_worker_type(DatabaseOid::new(42)),
+            "koldstore maintenance 42"
         );
     }
 

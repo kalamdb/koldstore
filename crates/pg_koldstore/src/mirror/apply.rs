@@ -223,17 +223,15 @@ pub fn apply_available() -> Result<i64, String> {
 /// Flush finalize should prefer [`try_lock_slot`] + [`apply_bounded_locked`] so
 /// encode/upload never wait on a blocked slot lock.
 ///
+/// Scheduling is deliberately not coupled to synchronous fence calls. Durable
+/// WAL and supervisor generations own background progress; this function only
+/// performs the requested apply work in its current backend.
+///
 /// # Errors
 ///
 /// Returns an error for malformed protocol data, stale relation metadata,
 /// missing primary-key values, or an SPI/apply failure.
 pub fn apply_bounded(request: BoundedApplyRequest) -> Result<BoundedApplyOutcome, String> {
-    // Frontend fences (flush / wait_for_async_mirror) re-attach the applier after
-    // postmaster restart. The applier itself must not re-enter ensure: that takes
-    // the worker-registration xact lock held by an in-progress manage_table.
-    if !is_background_worker() {
-        crate::worker::ensure_async_mirror_worker_once_if_needed();
-    }
     super::lifecycle::lock_slot(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())?;
     apply_bounded_locked(request)
 }
@@ -1152,16 +1150,12 @@ fn parse_pk_bool(cell: &str) -> Result<bool, String> {
     }
 }
 
-fn is_background_worker() -> bool {
-    unsafe { !pgrx::pg_sys::MyBgworkerEntry.is_null() }
-}
-
 /// Applies committed WAL available at the fence boundary and returns row changes.
 ///
 /// SQL contract: `koldstore.wait_for_async_mirror()` is an **optional** strong-
 /// consistency fence for callers that need the mirror caught up before a read
-/// or benchmark sample. It is **not** on the flush hot path:
-/// `flush_table` / auto-flush enqueue and return (or spawn) without calling this.
+/// or benchmark sample. It is **not** on the flush hot path: queue-mode
+/// `flush_table` and auto-flush enqueue durable work and return.
 ///
 /// Captures a durable WAL upper bound at call time and applies through that
 /// bound only. Concurrent commits after the fence LSN are not waited on —

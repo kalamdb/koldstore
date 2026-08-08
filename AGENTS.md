@@ -23,6 +23,20 @@
 - Introduce packaged `ALTER EXTENSION … UPDATE` edges only when intentionally
   shipping a supported upgrade path.
 
+## Formatting Is Required Before Done
+
+- After editing Rust, run `cargo fmt --all` (or at least format the touched
+  files) before ending the turn. Do not leave `cargo fmt --all -- --check`
+  diffs for the user to clean up.
+- Treat rustfmt output as authoritative: apply the suggested layout (line
+  breaks, chaining, trailing commas, import order) rather than hand-formatting
+  around it.
+- If a pre-commit hook or CI fails on fmt, fix formatting in a follow-up edit
+  immediately — do not ask the user to run fmt, and do not commit with
+  `--no-verify` to bypass it.
+- Prefer verifying with `cargo fmt --all -- --check` when claiming work is
+  complete or ready to commit.
+
 ## Testing Loop
 
 - Keep the default development and verification loop local and fast with pgrx-managed PostgreSQL.

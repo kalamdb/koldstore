@@ -34,7 +34,7 @@ async fn update_during_flush() -> Result<()> {
                 .ok();
             let _ = flush_client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&flush_relation],
                 )
                 .await;
@@ -82,7 +82,7 @@ async fn delete_during_flush() -> Result<()> {
                 .ok();
             let _ = flush_client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&flush_relation],
                 )
                 .await;
@@ -128,7 +128,7 @@ async fn insert_during_flush() -> Result<()> {
                 .ok();
             let _ = flush_client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&flush_relation],
                 )
                 .await;
@@ -180,7 +180,7 @@ async fn concurrent_flush_fencing() -> Result<()> {
             let rel_b = relation.clone();
             let ha = tokio::spawn(async move {
                 a.query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&rel_a],
                 )
                 .await
@@ -188,7 +188,7 @@ async fn concurrent_flush_fencing() -> Result<()> {
             });
             let hb = tokio::spawn(async move {
                 b.query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&rel_b],
                 )
                 .await
@@ -259,7 +259,7 @@ async fn migrate_vs_flush() -> Result<()> {
                 .ok();
             let _ = flush_client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&flush_relation],
                 )
                 .await;
@@ -269,7 +269,7 @@ async fn migrate_vs_flush() -> Result<()> {
         // While flush may be waiting, perform a non-destructive catalog describe.
         let _ = peer
             .query(
-                "SELECT * FROM koldstore.describe_table($1::text::regclass)",
+                "SELECT * FROM koldstore.table_status($1::text::regclass)",
                 &[&relation],
             )
             .await?;
@@ -354,7 +354,7 @@ async fn query_during_flush() -> Result<()> {
                 .ok();
             let _ = flush_client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&flush_relation],
                 )
                 .await;
@@ -413,7 +413,7 @@ async fn read_committed_during_flush() -> Result<()> {
                 .ok();
             let _ = flush_client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&flush_relation],
                 )
                 .await;
@@ -474,7 +474,7 @@ async fn repeatable_read_snapshot_during_flush() -> Result<()> {
                 .ok();
             let _ = flush_client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&flush_relation],
                 )
                 .await;

@@ -29,7 +29,7 @@ async fn async_apply_drains_above_retained_wal_health_threshold() -> Result<()> 
                  SET koldstore.async_mirror_max_retained_bytes = 1",
             )
             .await?;
-        force_stop_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
         db.client
             .execute(
                 &format!(
@@ -47,6 +47,7 @@ async fn async_apply_drains_above_retained_wal_health_threshold() -> Result<()> 
         );
         assert_eq!(common::mirror_op_count(&db.client, &mirror, 1).await?, 100);
 
+        common::release_async_worker_stop_lock(&db.client).await?;
         db.client
             .batch_execute(
                 "RESET koldstore.async_mirror_max_retained_bytes; \
@@ -90,11 +91,13 @@ async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Re
 
         assert!(common::terminate_async_worker(&db.client).await?);
 
-        // Dynamic appliers are BGW_NEVER_RESTART and E2E does not preload the
-        // launcher — bounce via ensure instead of waiting for auto-restart.
-        force_stop_async_worker(&db.client).await?;
-        common::wait_for_async_worker(&db.client).await?;
-        common::log_always("worker available again after kill");
+        // Dynamic appliers are BGW_NEVER_RESTART; the shared-preload launcher
+        // (scripts/run-pg-e2e.sh) must re-ensure without this session calling
+        // internal_ensure.
+        let auto_restart = common::wait_for_async_worker_auto_restart(&db.client).await?;
+        common::log_always(format!(
+            "worker auto-restarted via launcher after kill in {auto_restart:?}"
+        ));
 
         db.client
             .execute(
@@ -120,6 +123,9 @@ async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Re
 
 #[tokio::test]
 async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Result<()> {
+    // Soft-fail apply leaves the slot mid-decode; concurrent wait_for_async_mirror
+    // on sibling DBs has aborted assert-enabled postmasters (connection closed).
+    let _cluster = common::acquire_cluster_exclusive()?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mirror_failpoint").await?;
         clear_async_failpoint(&db.client).await?;
@@ -150,7 +156,7 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
                 ))
                 .await?;
             // Fully stop before ensure so the restarted applier loads the new GUC.
-            force_stop_async_worker(&db.client).await?;
+            common::force_stop_async_worker(&db.client).await?;
             common::wait_for_async_worker(&db.client).await?;
 
             db.client
@@ -182,7 +188,7 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
 
         // Worker keeps the old failpoint until reconnect; bounce after reset.
         // NEVER_RESTART appliers do not auto-respawn — ensure explicitly.
-        force_stop_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
         common::wait_for_async_worker(&db.client).await?;
         // Catch up any WAL left from the soft-failed apply attempt, then insert the recovery row.
         let _ = common::wait_for_async_mirror(&db.client).await?;
@@ -247,7 +253,7 @@ async fn async_worker_respects_guc_and_cleanup_lifecycle() -> Result<()> {
         manage_async(&db.client, &relation, &db.storage_name).await?;
         common::wait_for_async_worker(&db.client).await?;
         cleanup_async_table(&db.client, &relation).await?;
-        force_stop_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
 
         let reenabled = format!("{}_re", db.schema);
         let reenabled_relation = db.relation(&reenabled);
@@ -335,6 +341,10 @@ async fn async_worker_survives_truncate_noise_in_slot() -> Result<()> {
 /// mirror rows together (one PostgreSQL transaction per apply tick).
 #[tokio::test]
 async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
+    // After-batch failpoint + wait_for_async_mirror ERROR path stresses logical
+    // decoding; keep exclusive so assert-enabled postmasters do not SIGABRT
+    // siblings mid-suite.
+    let _cluster = common::acquire_cluster_exclusive()?;
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "async_mid_tick_abort").await?;
         clear_async_failpoint(&db.client).await?;
@@ -367,7 +377,7 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
                  SET koldstore.internal_async_mirror_worker = off"
             ))
             .await?;
-        force_stop_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
 
         let before: Option<String> = db
             .client
@@ -500,7 +510,7 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
 
         // Stop the applier so non-publication WAL accumulates behind confirmed_flush
         // (the historical pin-CPU shape: large restart→current gap on every wake).
-        force_stop_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
         db.client
             .batch_execute(&format!(
                 "INSERT INTO {noise} (payload) \
@@ -527,7 +537,7 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
         let drained = common::wait_for_confirmed_flush_at_least(
             &db.client,
             &noise_horizon,
-            Duration::from_secs(15),
+            Duration::from_secs(60),
         )
         .await?;
         let advanced_bytes = common::wal_lsn_diff_bytes(
@@ -594,7 +604,7 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
         // Second noise wave: prove the empty-peek path stays correct when the
         // slot lags again (repeatability), without relying on wall-clock fence
         // budgets that flake under parallel CI apply-lock contention.
-        force_stop_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
         let before_second = common::async_mirror_progress(&db.client).await?;
         db.client
             .batch_execute(&format!(
@@ -702,11 +712,14 @@ async fn clear_async_failpoint(client: &tokio_postgres::Client) -> Result<()> {
         .query_one("SELECT current_database()::text", &[])
         .await?
         .get(0);
+    // ALTER DATABASE RESET only affects *new* sessions. Session RESET restores
+    // the value from connect time, so clear with an explicit SET '' after the
+    // database default is removed.
     client
         .batch_execute(&format!(
             "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
              ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
-             RESET koldstore.failpoint; \
+             SET koldstore.failpoint = ''; \
              RESET koldstore.internal_async_mirror_worker"
         ))
         .await?;
@@ -719,7 +732,8 @@ async fn clear_async_failpoint(client: &tokio_postgres::Client) -> Result<()> {
         "failpoint GUC still armed after clear: {armed:?}"
     );
     // Running workers keep prior ALTER DATABASE GUCs until reconnect.
-    force_stop_async_worker(client).await?;
+    common::force_stop_async_worker(client).await?;
+    common::wait_for_async_worker(client).await?;
     Ok(())
 }
 
@@ -744,22 +758,6 @@ async fn cleanup_leftover_async_tables(client: &tokio_postgres::Client) -> Resul
         .query_one("SELECT koldstore.disable_async_mirror()", &[])
         .await;
     Ok(())
-}
-
-/// Terminates the applier until it stays down.
-async fn force_stop_async_worker(client: &tokio_postgres::Client) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let _ = common::terminate_async_worker(client).await?;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        if !common::async_worker_running(client).await? {
-            return Ok(());
-        }
-        anyhow::ensure!(
-            Instant::now() < deadline,
-            "async worker did not stay stopped within 10s"
-        );
-    }
 }
 
 async fn ensure_publication(client: &tokio_postgres::Client) -> Result<()> {

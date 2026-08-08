@@ -102,7 +102,7 @@ async fn run_executor_kill(target: common::PgTarget) -> Result<()> {
     let job_id: String = db
         .client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+            "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
             &[&relation],
         )
         .await
@@ -148,7 +148,7 @@ async fn run_executor_kill(target: common::PgTarget) -> Result<()> {
 
     let retry_job: String = client
         .query_one(
-            "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+            "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
             &[&relation],
         )
         .await

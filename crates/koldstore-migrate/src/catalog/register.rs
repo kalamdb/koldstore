@@ -108,6 +108,14 @@ pub enum RegistryError {
     /// User-scoped table metadata is missing its scope column.
     #[error("user-scoped table requires scope_column")]
     MissingScopeColumn,
+    /// Operator pruning/Bloom column list references an unknown column.
+    #[error("unknown {field} column `{column}`")]
+    UnknownColdMetadataColumn {
+        /// Option field name (`pruning_columns` or `bloom_filter_columns`).
+        field: &'static str,
+        /// Operator-supplied column name.
+        column: String,
+    },
     /// SPI statement metadata could not be prepared.
     #[error("{0}")]
     Spi(String),
@@ -393,7 +401,13 @@ impl RegistrationMetadata {
         self.validate()?;
 
         let mut options = self.options.to_value();
-        let cold_metadata = cold_metadata_config(&self.primary_key, &self.indexed_columns);
+        let cold_metadata = cold_metadata_config_for_registration(
+            &self.primary_key,
+            &self.indexed_columns,
+            &self.columns,
+            self.options.pruning_columns.as_deref(),
+            self.options.bloom_filter_columns.as_deref(),
+        )?;
         if !cold_metadata.is_empty() {
             let object = options_object_mut(&mut options)?;
             object.insert(
@@ -782,8 +796,73 @@ pub fn cold_metadata_config(
     primary_key: &[ColumnRef],
     indexed_columns: &[ColumnRef],
 ) -> ColdMetadataConfig {
-    let stats_columns = dedupe_column_refs(indexed_columns.iter());
-    let bloom_filter_columns = dedupe_column_refs(primary_key.iter().chain(indexed_columns));
+    cold_metadata_config_with_overrides(primary_key, indexed_columns, None, None)
+}
+
+/// Builds cold metadata, applying optional operator pruning/Bloom column lists.
+///
+/// When an operator list is `None`, candidates are auto-derived as
+/// PK ∪ indexed for both stats and Bloom. When `Some`, the list replaces the
+/// auto-derived set for that field after resolving names against `columns`
+/// (falling back to PK/indexed refs). Primary-key columns are always forced
+/// into both the stats and Bloom sets so cold segment-index PK / order-column
+/// probes remain correct after flush.
+///
+/// # Errors
+///
+/// Returns [`RegistryError::UnknownColdMetadataColumn`] when an operator name
+/// does not match any known column.
+pub fn cold_metadata_config_for_registration(
+    primary_key: &[ColumnRef],
+    indexed_columns: &[ColumnRef],
+    columns: &[SchemaColumn],
+    pruning_columns: Option<&[String]>,
+    bloom_filter_columns: Option<&[String]>,
+) -> RegistryResult<ColdMetadataConfig> {
+    let resolved_pruning = match pruning_columns {
+        Some(names) => Some(resolve_operator_columns(
+            "pruning_columns",
+            names,
+            columns,
+            primary_key,
+            indexed_columns,
+        )?),
+        None => None,
+    };
+    let resolved_bloom = match bloom_filter_columns {
+        Some(names) => Some(resolve_operator_columns(
+            "bloom_filter_columns",
+            names,
+            columns,
+            primary_key,
+            indexed_columns,
+        )?),
+        None => None,
+    };
+    Ok(cold_metadata_config_with_overrides(
+        primary_key,
+        indexed_columns,
+        resolved_pruning.as_deref(),
+        resolved_bloom.as_deref(),
+    ))
+}
+
+fn cold_metadata_config_with_overrides(
+    primary_key: &[ColumnRef],
+    indexed_columns: &[ColumnRef],
+    pruning_columns: Option<&[ColumnRef]>,
+    bloom_filter_columns: Option<&[ColumnRef]>,
+) -> ColdMetadataConfig {
+    // PK must stay in stats_columns: flush writes `cold_segment_index` from this
+    // list, and Exact-PK / order-column segment prune looks up those bounds.
+    let stats_columns = match pruning_columns {
+        Some(columns) => dedupe_column_refs(primary_key.iter().chain(columns.iter())),
+        None => dedupe_column_refs(primary_key.iter().chain(indexed_columns.iter())),
+    };
+    let bloom_filter_columns = match bloom_filter_columns {
+        Some(columns) => dedupe_column_refs(primary_key.iter().chain(columns.iter())),
+        None => dedupe_column_refs(primary_key.iter().chain(indexed_columns.iter())),
+    };
     let mut indexed_metadata = Vec::new();
     for (index, column) in primary_key
         .iter()
@@ -795,14 +874,16 @@ pub fn cold_metadata_config(
             (index + 1) as u32,
         ));
     }
-    for (index, column) in stats_columns.iter().enumerate() {
+    let mut secondary_ordinal = 0u32;
+    for column in &stats_columns {
         if !primary_key
             .iter()
             .any(|pk| pk.column_id == column.column_id)
         {
+            secondary_ordinal += 1;
             indexed_metadata.push(IndexedColumnMetadata::secondary_index(
                 column,
-                (index + 1) as u32,
+                secondary_ordinal,
             ));
         }
     }
@@ -813,6 +894,42 @@ pub fn cold_metadata_config(
         indexed_columns: indexed_metadata,
         ordered_indexes: Vec::new(),
     }
+}
+
+fn resolve_operator_columns(
+    field: &'static str,
+    names: &[String],
+    columns: &[SchemaColumn],
+    primary_key: &[ColumnRef],
+    indexed_columns: &[ColumnRef],
+) -> RegistryResult<Vec<ColumnRef>> {
+    let mut resolved = Vec::with_capacity(names.len());
+    for raw in names {
+        let name = raw.trim();
+        if name.is_empty() {
+            return Err(RegistryError::UnknownColdMetadataColumn {
+                field,
+                column: raw.clone(),
+            });
+        }
+        if let Some(column) = columns.iter().find(|column| column.name == name) {
+            resolved.push(ColumnRef::new(column.column_id, column.name.clone()));
+            continue;
+        }
+        if let Some(column) = primary_key
+            .iter()
+            .chain(indexed_columns.iter())
+            .find(|column| column.name == name)
+        {
+            resolved.push(column.clone());
+            continue;
+        }
+        return Err(RegistryError::UnknownColdMetadataColumn {
+            field,
+            column: name.to_string(),
+        });
+    }
+    Ok(resolved)
 }
 
 fn dedupe_column_refs<'a>(columns: impl IntoIterator<Item = &'a ColumnRef>) -> Vec<ColumnRef> {

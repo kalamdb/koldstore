@@ -362,6 +362,8 @@ fn ensure_initial_management(
         file,
         true,
         None,
+        None,
+        None,
     );
     Ok(())
 }

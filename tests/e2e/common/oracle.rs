@@ -7,7 +7,7 @@
 use anyhow::{bail, Context, Result};
 use tokio_postgres::Client;
 
-use super::equality::{assert_relations_equal, assert_row_counts_equal};
+use super::equality::{assert_pk_unique, assert_relations_equal, assert_row_counts_equal};
 
 /// Builds `CREATE TABLE … AS SELECT` SQL that clones `source` into `reference`.
 ///
@@ -64,6 +64,48 @@ pub async fn assert_managed_matches_reference(
     Ok(())
 }
 
+/// Asserts logical table equality, PK uniqueness, and KoldStore catalog/object integrity.
+///
+/// This is the preferred quiescent-state oracle for managed-table E2E tests. It
+/// deliberately combines three independent checks:
+///
+/// - differential equality against a plain PostgreSQL heap using `EXCEPT ALL`;
+/// - uniqueness of the logical primary key after hot/cold winner resolution;
+/// - `koldstore.verify_table_integrity`, which validates KoldStore metadata and
+///   published cold-storage invariants.
+///
+/// A row-count-only assertion can miss wrong values, duplicates that happen to
+/// balance missing rows, or catalog/object divergence, so lifecycle tests should
+/// use this helper whenever a reference table is available.
+///
+/// # Errors
+///
+/// Returns an error when any independent integrity oracle fails.
+pub async fn assert_managed_integrity(
+    client: &Client,
+    managed: &str,
+    reference: &str,
+    pk_columns: &[&str],
+) -> Result<()> {
+    assert_managed_matches_reference(client, managed, reference).await?;
+    assert_pk_unique(client, managed, pk_columns).await?;
+
+    let integrity_text: String = client
+        .query_one(
+            "SELECT koldstore.verify_table_integrity($1::text::regclass)::text",
+            &[&managed],
+        )
+        .await
+        .with_context(|| format!("verify_table_integrity for {managed}"))?
+        .get(0);
+    let integrity: serde_json::Value = serde_json::from_str(&integrity_text)
+        .with_context(|| format!("parse verify_table_integrity result for {managed}"))?;
+    if integrity.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        bail!("verify_table_integrity reported failure for {managed}: {integrity}");
+    }
+    Ok(())
+}
+
 /// Runs the same DML statement against both relations.
 ///
 /// `sql_template` must contain the `{rel}` placeholder (once or more).
@@ -94,6 +136,8 @@ pub async fn apply_dml_to_both(
 ///
 /// Prefer [`assert_managed_matches_reference`] when `SELECT *` column layouts match.
 /// `order_by_cols` names the compared columns (typically the PK / business key set).
+/// Despite the historical function name, ordering is not part of this check;
+/// multiset equality is intentionally order-independent.
 ///
 /// # Errors
 ///

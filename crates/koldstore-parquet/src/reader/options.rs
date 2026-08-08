@@ -135,6 +135,8 @@ pub enum BloomPruneMode {
     Applied,
 }
 
+pub use crate::page_prune::PageIndexPruneMode;
+
 /// Per-segment ObjectStore Parquet read diagnostics for EXPLAIN / tracing.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ParquetReadProfile {
@@ -156,6 +158,14 @@ pub struct ParquetReadProfile {
     pub bloom: BloomPruneMode,
     /// Number of bloom filters actually range-fetched.
     pub bloom_filters_fetched: usize,
+    /// Page-index usage for this read.
+    pub page_index: PageIndexPruneMode,
+    /// Data pages considered when page-index pruning ran.
+    pub pages_total: usize,
+    /// Pages kept after page min/max pruning.
+    pub pages_selected: usize,
+    /// Pages skipped by page min/max pruning.
+    pub pages_skipped: usize,
     /// Projected application column names (plus required cold metadata).
     pub projected_columns: Vec<String>,
     /// PK equality probe values when present.
@@ -235,6 +245,19 @@ impl ParquetReadProfile {
             BloomPruneMode::Applied => {
                 format!("applied, filters_fetched={}", self.bloom_filters_fetched)
             }
+        }
+    }
+
+    /// Compact page-index prune summary for EXPLAIN / tracing.
+    #[must_use]
+    pub fn format_page_index_summary(&self) -> String {
+        match self.page_index {
+            PageIndexPruneMode::NotRequested => "not_requested".to_string(),
+            PageIndexPruneMode::Absent => "absent".to_string(),
+            PageIndexPruneMode::Applied => format!(
+                "applied, pages_total={}, pages_selected={}, pages_skipped={}",
+                self.pages_total, self.pages_selected, self.pages_skipped
+            ),
         }
     }
 }

@@ -189,12 +189,20 @@ pub fn plan_async_mirror_slot_status() -> SqlResult<SqlStatement> {
         "SELECT COALESCE(\
            (SELECT CAST(jsonb_build_object(\
               'slot_name', slot_name,\
+              'present', true,\
               'active', active,\
+              'active_pid', active_pid,\
+              'restart_lsn', CAST(restart_lsn AS text),\
               'confirmed_flush_lsn', CAST(confirmed_flush_lsn AS text),\
+              'current_wal_lsn', CAST(pg_current_wal_lsn() AS text),\
               'retained_bytes', pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)\
             ) AS text)\
             FROM pg_catalog.pg_replication_slots WHERE slot_name = $1), \
-           CAST(jsonb_build_object('slot_name', $1, 'present', false) AS text)\
+           CAST(jsonb_build_object(\
+              'slot_name', $1,\
+              'present', false,\
+              'current_wal_lsn', CAST(pg_current_wal_lsn() AS text)\
+            ) AS text)\
          )",
         [SqlParamType::Text],
     )
@@ -210,7 +218,9 @@ pub fn plan_async_mirror_state_status() -> SqlResult<SqlStatement> {
         "async mirror durable state status",
         "SELECT COALESCE(\
            (SELECT CAST(jsonb_build_object(\
+              'present', true,\
               'applied_lsn', CAST(applied_lsn AS text),\
+              'seq_high_watermark', seq_high_watermark,\
               'updated_at', updated_at,\
               'updated_at_age_seconds', EXTRACT(EPOCH FROM (now() - updated_at))\
             ) AS text)\

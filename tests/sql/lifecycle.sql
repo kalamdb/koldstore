@@ -21,7 +21,7 @@ SELECT count(*)::bigint AS active_schemas
 FROM koldstore.schemas
 WHERE table_oid = 'sqlreg.lifecycle_t'::regclass::oid AND active;
 
-SELECT (koldstore.describe_table('sqlreg.lifecycle_t'::regclass)
+SELECT (koldstore.table_status('sqlreg.lifecycle_t'::regclass)
          ? 'storage_binding') AS has_storage_binding;
 
 SELECT sqlreg.flush_table('sqlreg.lifecycle_t'::regclass);

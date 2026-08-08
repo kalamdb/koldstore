@@ -135,7 +135,7 @@ async fn committed_hot_visible_while_async_mirror_lags() -> Result<()> {
                  SET koldstore.internal_async_mirror_worker = off"
             ))
             .await?;
-        let _ = common::terminate_async_worker(&db.client).await?;
+        common::force_stop_async_worker(&db.client).await?;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         db.client
@@ -172,6 +172,7 @@ async fn committed_hot_visible_while_async_mirror_lags() -> Result<()> {
                  RESET koldstore.internal_async_mirror_worker"
             ))
             .await?;
+        common::release_async_worker_stop_lock(&db.client).await?;
     }
     Ok(())
 }

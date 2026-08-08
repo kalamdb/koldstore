@@ -27,6 +27,7 @@ SET koldstore.min_max_rows_per_file = 1;
 SET koldstore.flush_execution = 'inline';
 
 -- Fail-fast apply lock: retry like e2e `flush_table_job_id` so background
+-- Thin wrapper: returns the flush job UUID (null when not due). Retries when
 -- mirror apply briefly holding the lock does not flake ON_ERROR_STOP cases.
 -- Default force=true so policy no-ops (empty / under hot_row_limit / undersized
 -- excess) still return a job UUID for stable expected outputs.
@@ -37,11 +38,16 @@ AS $$
 DECLARE
   attempt integer := 0;
   err_text text;
+  result jsonb;
 BEGIN
   LOOP
     attempt := attempt + 1;
     BEGIN
-      RETURN koldstore.flush_table(rel, force);
+      result := koldstore.flush_table(rel, force);
+      IF result ? 'error' AND result->>'error' IS NOT NULL AND NOT COALESCE((result->>'ok')::boolean, false) THEN
+        RAISE WARNING 'koldstore flush_table: %', result->>'error';
+      END IF;
+      RETURN NULLIF(result->>'job_id', '')::uuid;
     EXCEPTION
       WHEN OTHERS THEN
         GET STACKED DIAGNOSTICS err_text = MESSAGE_TEXT;

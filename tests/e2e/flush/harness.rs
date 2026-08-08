@@ -202,14 +202,14 @@ pub async fn flush_table_retrying_entry_locks(
         let result = if force {
             client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
                     &[&relation],
                 )
                 .await
         } else {
             client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&relation],
                 )
                 .await

@@ -107,7 +107,7 @@ pub(crate) fn manage_for_cold_flush(relation: &str, storage: &str) {
 /// Force-flushes and asserts the job completed with at least `min_rows` flushed.
 pub(crate) fn flush_table_rows_completed(relation: &str, min_rows: i64) -> i64 {
     let job_id = spi_get_text(&format!(
-        "SELECT koldstore.flush_table('{relation}'::regclass, force => true)::text"
+        "SELECT (koldstore.flush_table('{relation}'::regclass, force => true)->>'job_id')"
     ));
     let (status, rows) = wait_for_flush_job(&job_id);
     if status != "completed" || rows < min_rows {
@@ -162,8 +162,11 @@ pub(crate) fn spi_succeeds(sql: &str) -> bool {
 pub(crate) fn flush_table_rows(relation: &str, force: bool) -> i64 {
     let force_sql = if force { "true" } else { "false" };
     let job_id = spi_get_text(&format!(
-        "SELECT koldstore.flush_table('{relation}'::regclass, force => {force_sql})::text"
+        "SELECT koldstore.flush_table('{relation}'::regclass, force => {force_sql})->>'job_id'"
     ));
+    if job_id.is_empty() || job_id == "null" {
+        return 0;
+    }
     let (_status, rows) = wait_for_flush_job(&job_id);
     rows
 }
@@ -311,10 +314,10 @@ pub(crate) fn setup_cold_typed_join_fixture(label: &str) -> ColdTypedJoinFixture
         "expected at least 7 cold rows flushed, got rows_flushed={flushed}"
     );
     let cold = spi_get_i64(&format!(
-        "SELECT (koldstore.describe_table('{facts}'::regclass)->>'cold_row_count')::bigint"
+        "SELECT (koldstore.table_status('{facts}'::regclass)->>'cold_row_count')::bigint"
     ));
     let hot = spi_get_i64(&format!(
-        "SELECT (koldstore.describe_table('{facts}'::regclass)->>'hot_rows')::bigint"
+        "SELECT (koldstore.table_status('{facts}'::regclass)->>'hot_rows')::bigint"
     ));
     assert!(
         cold >= 7,

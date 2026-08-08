@@ -23,7 +23,28 @@ fn valid_context() -> ManageTableValidationContext<'static> {
             min_max_rows_per_file: 1_000,
             auto_flush: true,
         },
+        pruning_columns: None,
+        bloom_filter_columns: None,
     }
+}
+
+#[test]
+fn operator_bloom_and_pruning_columns_are_persisted_on_options() {
+    let mut context = valid_context();
+    let pruning = vec!["created_at".to_string()];
+    let bloom = vec!["id".to_string(), "tenant_id".to_string()];
+    context.pruning_columns = Some(&pruning);
+    context.bloom_filter_columns = Some(&bloom);
+
+    let validated = validate_manage_table(context).unwrap();
+    assert_eq!(
+        validated.options.pruning_columns.as_deref(),
+        Some(["created_at".to_string()].as_slice())
+    );
+    assert_eq!(
+        validated.options.bloom_filter_columns.as_deref(),
+        Some(["id".to_string(), "tenant_id".to_string()].as_slice())
+    );
 }
 
 #[test]

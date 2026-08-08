@@ -318,6 +318,11 @@ impl TestDb {
 
     /// Like [`Self::flush_table`], optionally forcing a flush.
     ///
+    /// Retries when finalize loses the database slot/apply lock race to the
+    /// async applier (job `status=error` with a slot-lock deadline). Callers
+    /// such as the bounded-batch mirror test rely on this instead of a single
+    /// shot flush under parallel suite load.
+    ///
     /// # Errors
     ///
     /// Returns an error when flush fails after apply-lock retries.
@@ -325,10 +330,25 @@ impl TestDb {
         // Policy flush decides from mirror pending counts; catch up WAL apply so
         // recently committed DML is visible to the due check.
         super::async_mirror::fence_async_mirror(&self.client).await?;
-        let Some(job_id) = flush_table_job_id(&self.client, relation, force).await? else {
-            return Ok(0);
-        };
-        wait_for_flush_job_terminal(&self.client, &job_id).await
+        let mut last_slot_busy: Option<anyhow::Error> = None;
+        for attempt in 1..=8 {
+            let Some(job_id) = flush_table_job_id(&self.client, relation, force).await? else {
+                return Ok(0);
+            };
+            match wait_for_flush_job_terminal(&self.client, &job_id).await {
+                Ok(rows) => return Ok(rows),
+                Err(error) if is_flush_slot_lock_contention(&error) => {
+                    last_slot_busy = Some(error);
+                    // Let the applier finish its tick, then fence before retry.
+                    let _ = super::async_mirror::fence_async_mirror(&self.client).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(last_slot_busy.expect("retry loop always records a slot-lock error")).context(format!(
+            "flush_table still blocked by slot lock after retries for {relation}"
+        ))
     }
 
     /// Creates a user-scoped notes table and seeds rows for two tenants.
@@ -616,6 +636,18 @@ pub fn is_flush_entry_lock_busy(error: &tokio_postgres::Error) -> bool {
     text.contains("apply lock")
         || text.contains("retry shortly")
         || text.contains("flush unavailable")
+        || text.contains("flush already in progress")
+        || text.contains("retry after it completes")
+}
+
+/// True when a flush *job* failed because finalize could not take the slot lock.
+///
+/// Unlike [`is_flush_entry_lock_busy`], this surfaces after `flush_table` returns
+/// a `job_id` whose terminal status is `error` (inline finalize deadline).
+#[must_use]
+pub fn is_flush_slot_lock_contention(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}");
+    text.contains("slot lock") || text.contains("apply lock")
 }
 
 /// Clears leftover per-database GUCs and forces synchronous flush for E2E.
@@ -624,6 +656,8 @@ pub fn is_flush_entry_lock_busy(error: &tokio_postgres::Error) -> bool {
 /// most E2E assertions need the calling backend to run flush (`inline`), and
 /// peer connections inherit the database-level setting.
 async fn reset_fixture_gucs(client: &Client, dbname: &str) -> Result<()> {
+    // After ALTER DATABASE RESET, session RESET restores connect-time values —
+    // not the new database defaults — so failpoint must be cleared with SET ''.
     client
         .batch_execute(&format!(
             "ALTER DATABASE \"{dbname}\" RESET koldstore.failpoint; \
@@ -631,7 +665,7 @@ async fn reset_fixture_gucs(client: &Client, dbname: &str) -> Result<()> {
              ALTER DATABASE \"{dbname}\" RESET koldstore.flush_check_interval_seconds; \
              ALTER DATABASE \"{dbname}\" RESET koldstore.async_apply_watchdog_interval_ms; \
              ALTER DATABASE \"{dbname}\" SET koldstore.flush_execution = 'inline'; \
-             RESET koldstore.failpoint; \
+             SET koldstore.failpoint = ''; \
              RESET koldstore.internal_async_mirror_worker; \
              RESET koldstore.flush_check_interval_seconds; \
              RESET koldstore.async_apply_watchdog_interval_ms; \
@@ -642,6 +676,14 @@ async fn reset_fixture_gucs(client: &Client, dbname: &str) -> Result<()> {
         ))
         .await
         .context("reset leftover GUC / schema state for fixture")?;
+    // Clear shared-memory ensure pauses left by force_stop on this pooled DB.
+    client
+        .query_one(
+            "SELECT koldstore.internal_set_async_mirror_ensure_paused(false)",
+            &[],
+        )
+        .await
+        .context("clear async mirror ensure pause for fixture")?;
     Ok(())
 }
 
@@ -706,14 +748,14 @@ pub async fn flush_table_job_id(
         let result = if force {
             client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass, true)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass, true)->>'job_id')",
                     &[&relation],
                 )
                 .await
         } else {
             client
                 .query_one(
-                    "SELECT koldstore.flush_table($1::text::regclass)::text",
+                    "SELECT (koldstore.flush_table($1::text::regclass)->>'job_id')",
                     &[&relation],
                 )
                 .await

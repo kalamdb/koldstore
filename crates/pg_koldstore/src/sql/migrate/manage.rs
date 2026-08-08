@@ -11,7 +11,7 @@ use super::schema_registry::register_schema_version;
 #[cfg(feature = "pg")]
 use super::schema_registry::SchemaRegistrationInput;
 #[cfg(feature = "pg")]
-use koldstore_common::{ManageTableOptions, MigrationStatus};
+use koldstore_common::MigrationStatus;
 #[cfg(feature = "pg")]
 use koldstore_migrate::{introspection, MigrateTableRequest};
 #[cfg(feature = "pg")]
@@ -31,6 +31,8 @@ pub(crate) fn manage_table_pg_impl(
     max_rows_per_file: i64,
     auto_flush: bool,
     segment_order_column: Option<&str>,
+    pruning_columns: Option<Vec<String>>,
+    bloom_filter_columns: Option<Vec<String>>,
 ) -> pgrx::Uuid {
     crate::preload::require_shared_preload();
     let min_max_rows_per_file = u64::try_from(crate::guc::min_max_rows_per_file())
@@ -78,6 +80,8 @@ pub(crate) fn manage_table_pg_impl(
             min_flush_rows,
             max_rows_per_file,
             auto_flush,
+            pruning_columns.as_deref(),
+            bloom_filter_columns.as_deref(),
             catalog.as_ref(),
             constraints,
         ))
@@ -171,7 +175,6 @@ pub(crate) fn manage_table_pg_impl(
             order_column_name,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-        ensure_async_mirror_worker_for_managed_options(&request.options);
         return crate::spi::uuid_to_pgrx(job_id);
     }
 
@@ -294,16 +297,8 @@ pub(crate) fn manage_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     refresh_managed_table_row_counters(table_oid_u32, &plan.table, &mirror_plan.mirror_table)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
-    ensure_async_mirror_worker_for_managed_options(&request.options);
 
     crate::spi::uuid_to_pgrx(job_id)
-}
-
-#[cfg(feature = "pg")]
-fn ensure_async_mirror_worker_for_managed_options(options: &ManageTableOptions) {
-    if options.auto_flush_enabled() && options.flush_enabled() {
-        let _ = crate::worker::ensure_async_mirror_worker();
-    }
 }
 
 #[cfg(feature = "pg")]
@@ -368,6 +363,8 @@ fn manage_table_validation_context<'a>(
     min_flush_rows: i64,
     max_rows_per_file: i64,
     auto_flush: bool,
+    pruning_columns: Option<&'a [String]>,
+    bloom_filter_columns: Option<&'a [String]>,
     catalog: &'a koldstore_migrate::ExistingTableCatalog,
     constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
 ) -> koldstore_migrate::manage_table::ManageTableValidationContext<'a> {
@@ -451,6 +448,8 @@ fn manage_table_validation_context<'a>(
             min_max_rows_per_file,
             auto_flush,
         },
+        pruning_columns,
+        bloom_filter_columns,
     }
 }
 
@@ -494,7 +493,9 @@ pub(super) fn set_table_auto_flush_pg_impl(
     }
     crate::catalog::cache::invalidate_table_globally(table_oid);
     if enabled {
-        let _ = crate::worker::ensure_async_mirror_worker();
+        // Auto-flush policy changed in this transaction. Publish one scheduling
+        // generation after commit instead of invoking the old worker ensure API.
+        crate::worker::wake::mark_schedule_pending();
     }
     Ok(true)
 }

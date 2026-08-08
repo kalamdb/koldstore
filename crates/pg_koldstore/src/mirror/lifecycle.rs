@@ -12,7 +12,6 @@ use koldstore_worker::DatabaseOid;
 use pgrx::datum::DatumWithOid;
 
 const APPLY_LOCK_NAMESPACE: i32 = 1_263_354_732;
-const WORKER_LOCK_NAMESPACE: i32 = 1_263_354_733;
 const SLOT_PROVISION_LOCK_NAMESPACE: i32 = 1_263_354_734;
 const LIFECYCLE_LOCK_NAMESPACE: i32 = 1_263_354_735;
 /// Serializes PG15 flush-origin `replorigin_session_setup` within one database.
@@ -194,7 +193,7 @@ fn native_slot_provision_lock(database_oid: u32, acquire: bool) {
     }
 }
 
-/// Publishes one managed table for WAL capture and starts the applier.
+/// Publishes one managed table for WAL capture and schedules maintenance.
 ///
 /// Publication membership is transactional with manage_table. The source table
 /// should already hold a short write lock (or be empty) so concurrent DML cannot
@@ -243,9 +242,9 @@ pub(crate) fn activate_table(
         reconcile_publication_columns(source, primary_key, order_column)?;
     }
 
-    // Ensure the WAL applier once here. Managed commits wake it through the
-    // shared generation/latch path; postmaster and the shared_preload launcher
-    // re-ensure it after crashes or restart.
+    // Activation is transactional. The dirty scheduling bit is published only
+    // after commit; abort/prepare clears it, so no foreground worker lifecycle
+    // coordination or registration lock is required here.
     crate::worker::require_async_mirror_worker()?;
     Ok(())
 }
@@ -380,17 +379,17 @@ pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
     }
 }
 
-/// Stops the database WAL applier so disable cannot deadlock on [`lock_slot`].
+/// Stops the current database maintenance worker so disable cannot deadlock on [`lock_slot`].
 ///
-/// The applier may hold the apply lock inside a peek that waits for concurrent
+/// Maintenance may hold the apply lock inside a peek that waits for concurrent
 /// XIDs — including this backend's open transaction (common under `#[pg_test]`).
 /// Terminate by `backend_type` (not only `active_pid`) so a worker blocked
 /// before acquiring the slot is also cleared.
 fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
-    let worker_type = koldstore_worker::async_mirror_worker_type(DatabaseOid::new(database_oid));
+    let worker_type = koldstore_worker::maintenance_worker_type(DatabaseOid::new(database_oid));
     // Always return a row: an empty SELECT through Spi::run_with_args errors with
     // "SpiTupleTable positioned before the start or after the end" when no
-    // applier is running (common under parallel E2E once the worker already exited).
+    // maintenance worker is running.
     let _ = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT COALESCE(\
            (SELECT bool_or(pg_catalog.pg_terminate_backend(pid)) \
@@ -431,12 +430,11 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
-                "async mirror applier for slot {slot} did not stop after terminate \
+                "async mirror maintenance worker for slot {slot} did not stop after terminate \
                  (slot_idle={slot_idle}, worker_gone={worker_gone})"
             ));
         }
-        // Re-signal in case the first SIGTERM arrived during a non-interruptible
-        // decoding window; NEVER_RESTART workers exit via die() once they notice.
+        // Re-signal in case SIGTERM landed during a non-interruptible decoding window.
         let _ = pgrx::Spi::get_one_with_args::<bool>(
             "SELECT COALESCE(\
                (SELECT bool_or(pg_catalog.pg_terminate_backend(pid)) \
@@ -456,16 +454,6 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
         std::thread::sleep(SLOT_INACTIVE_POLL);
         pgrx::check_for_interrupts!();
     }
-}
-
-/// Serializes dynamic worker discovery and registration for one database.
-pub(crate) fn lock_worker_registration(database_oid: u32) -> Result<(), String> {
-    lock_database(WORKER_LOCK_NAMESPACE, database_oid)
-}
-
-/// Non-blocking variant for the cluster launcher (skip when a session holds the lock).
-pub(crate) fn try_lock_worker_registration(database_oid: u32) -> Result<bool, String> {
-    try_lock_database(WORKER_LOCK_NAMESPACE, database_oid)
 }
 
 fn lock_database(namespace: i32, database_oid: u32) -> Result<(), String> {
@@ -491,19 +479,14 @@ fn try_lock_database(namespace: i32, database_oid: u32) -> Result<bool, String> 
     .ok_or_else(|| "database advisory try-lock returned no row".to_string())
 }
 
-/// Returns the current database's async slot name.
-#[must_use]
-pub(super) fn current_slot_name() -> String {
-    slot_name(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())
-}
-
 /// Returns the logical-slot name KoldStore creates for this database.
 ///
-/// SQL contract: `koldstore.async_mirror_slot_name()` returns text and does not
-/// mutate replication state.
-#[pgrx::pg_extern(name = "async_mirror_slot_name", schema = "koldstore")]
-pub fn async_mirror_slot_name() -> String {
-    current_slot_name()
+/// Not exposed as a public SQL function — use
+/// `koldstore.async_mirror_status()->>'slot_name'` or
+/// `koldstore.table_status(...)->'async_mirror'->>'slot_name'`.
+#[must_use]
+pub(crate) fn current_slot_name() -> String {
+    slot_name(unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32())
 }
 
 /// Removes automatic async-mirror infrastructure after async tables are gone.
@@ -533,11 +516,11 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         );
     }
     let slot = slot_name(database_oid);
-    // Stop the applier before lock_slot: a peek blocked on concurrent XIDs
+    // Stop maintenance before lock_slot: a peek blocked on concurrent XIDs
     // (including this backend's open transaction) holds the apply lock and
     // would otherwise deadlock with disable.
     stop_async_mirror_applier(database_oid, &slot)
-        .map_err(|error| format!("stop applier: {error}"))?;
+        .map_err(|error| format!("stop maintenance worker: {error}"))?;
     lock_slot(database_oid).map_err(|error| format!("lock apply: {error}"))?;
     let slot_exists = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)",
@@ -582,6 +565,5 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         &[DatumWithOid::from(pgrx::pg_sys::Oid::from(database_oid))],
     )
     .map_err(|error| format!("clear async_mirror_state: {error}"))?;
-    crate::worker::mark_worker_not_ensured();
     Ok(slot_exists || publication_exists || flush_origins_dropped > 0)
 }

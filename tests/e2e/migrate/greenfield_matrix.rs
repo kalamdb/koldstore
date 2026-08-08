@@ -49,12 +49,14 @@ async fn install_storage_fixture(client: &tokio_postgres::Client) -> Result<()> 
 
             -- Shared pooled DBs may already have this fixture name from another
             -- matrix test; register only when missing.
+            -- Catalog-only fixture: MinIO may be down; skip the write probe.
             SELECT koldstore.register_storage(
               'local-minio',
               's3',
               's3://koldstore-test/',
               '{"access_key_id":"minioadmin","secret_access_key":"minioadmin"}'::jsonb,
-              '{"endpoint":"http://localhost:9000","region":"us-east-1","path_style":true}'::jsonb
+              '{"endpoint":"http://localhost:9000","region":"us-east-1","path_style":true}'::jsonb,
+              false
             )
             WHERE NOT EXISTS (
               SELECT 1 FROM koldstore.storage WHERE name = 'local-minio'

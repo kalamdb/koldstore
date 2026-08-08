@@ -224,7 +224,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
         let status_row = db
             .client
             .query_one(
-                "SELECT koldstore.describe_table(table_name => $1::text::regclass)::text",
+                "SELECT koldstore.table_status(table_name => $1::text::regclass)::text",
                 &[&table.relation],
             )
             .await?;
@@ -246,7 +246,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
                                 .is_some()
                     })
                 }),
-            "describe_table should expose job progress, got {status}"
+            "table_status should expose job progress, got {status}"
         );
 
         wait_for_completed_job(&db.client, &flush_job_id).await?;

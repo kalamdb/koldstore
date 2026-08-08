@@ -123,7 +123,7 @@ fn schema_registry_plan_captures_greenfield_metadata() {
                         "column": "created_at",
                         "source": "secondary_index",
                         "source_name": null,
-                        "ordinal": 2,
+                        "ordinal": 1,
                         "unique": false,
                         "primary_key": false,
                         "foreign_key": false,
@@ -165,6 +165,7 @@ fn schema_registry_plan_derives_type_matrix_and_cold_metadata_candidates() {
         plan.metadata.options["cold_metadata"],
         serde_json::json!({
             "stats_columns": [
+                {"column_id": 1, "name": "id"},
                 {"column_id": 4, "name": "created_at"},
                 {"column_id": 2, "name": "title"}
             ],
@@ -229,6 +230,7 @@ fn cold_metadata_config_records_typed_sources_and_bloom_columns() {
     assert_eq!(
         config.stats_columns,
         vec![
+            ColumnRef::new(ColumnId::from_attnum(1), "id"),
             ColumnRef::new(ColumnId::from_attnum(2), "created_at"),
             ColumnRef::new(ColumnId::from_attnum(3), "tenant_id"),
         ]
@@ -251,6 +253,57 @@ fn cold_metadata_config_records_typed_sources_and_bloom_columns() {
         IndexedColumnSource::SecondaryIndex
     );
     assert!(config.ordered_indexes.is_empty());
+}
+
+#[test]
+fn cold_metadata_honors_operator_pruning_and_bloom_overrides() {
+    let mut metadata = metadata();
+    metadata
+        .columns
+        .push(SchemaColumn::app(4, "created_at", "timestamptz", false));
+    metadata.options = metadata
+        .options
+        .with_pruning_columns(["created_at"])
+        .with_bloom_filter_columns(["title"]);
+
+    let plan = plan_schema_registry_insert_with_id(&metadata, Uuid::from_u128(99)).unwrap();
+    let cold = &plan.metadata.options["cold_metadata"];
+
+    assert_eq!(
+        cold["stats_columns"],
+        serde_json::json!([
+            {"column_id": 1, "name": "id"},
+            {"column_id": 4, "name": "created_at"}
+        ])
+    );
+    // PK is forced into Bloom even when the operator list only names title.
+    assert_eq!(
+        cold["bloom_filter_columns"],
+        serde_json::json!([
+            {"column_id": 1, "name": "id"},
+            {"column_id": 2, "name": "title"}
+        ])
+    );
+    assert_eq!(
+        plan.metadata.options["pruning_columns"],
+        serde_json::json!(["created_at"])
+    );
+    assert_eq!(
+        plan.metadata.options["bloom_filter_columns"],
+        serde_json::json!(["title"])
+    );
+}
+
+#[test]
+fn cold_metadata_rejects_unknown_operator_bloom_column() {
+    let mut metadata = metadata();
+    metadata.options = metadata.options.with_bloom_filter_columns(["not_a_column"]);
+
+    let err = plan_schema_registry_insert_with_id(&metadata, Uuid::from_u128(99)).unwrap_err();
+    assert!(
+        err.to_string().contains("bloom_filter_columns"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

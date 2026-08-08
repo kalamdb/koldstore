@@ -188,16 +188,24 @@ WHERE id = 42;
 Flush eligible history:
 
 ```sql
-SELECT koldstore.flush_table(
+SELECT jsonb_pretty(koldstore.flush_table(
   table_name => 'messages'
-);
+));
+-- → { ok, job_id, status, error, ... }; check docker logs for WARNING on failures
+```
+
+Inspect mirror catch-up (current WAL vs applied):
+
+```sql
+SELECT jsonb_pretty(koldstore.async_mirror_status());
+-- wal.current_lsn = latest commit tip; wal.applied_lsn = mirror catch-up watermark
 ```
 
 Inspect the managed table:
 
 ```sql
 SELECT jsonb_pretty(
-  koldstore.describe_table(table_name => 'messages')
+  koldstore.table_status(table_name => 'messages')
 );
 ```
 
@@ -321,7 +329,9 @@ KoldStore is not currently a universal query accelerator:
 - Cold point lookups are slower than native PostgreSQL B-tree lookups.
 - Mixed hot/cold reads remain slower than native heap/index access.
 - Update overhead remains material.
-- Flush memory and CPU behavior are active optimization areas.
+- Flush peak RSS scales with `max_rows_per_file` (streaming, not O(rows flushed));
+  keep file sizes small on low-RAM hosts — see
+  [Memory and small machines](docs/performance.md#memory-and-small-machines).
 
 These are controlled benchmark results, not guarantees. Hardware, schema shape, row width, compression, object storage, file sizing, and access patterns can materially change the outcome.
 
@@ -404,6 +414,7 @@ Read the following before managing a table:
 - [Quickstart](docs/quickstart.md)
 - [SQL API](docs/sql-api.md)
 - [Limitations](docs/limitations.md)
+- [Performance / small-machine memory](docs/performance.md#memory-and-small-machines)
 - [Backup and operations](docs/backup-and-operations.md)
 
 ## Research roadmap

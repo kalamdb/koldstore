@@ -18,5 +18,7 @@ pub use object_store::{
     read_clean_cold_rows_from_object_store_with_size,
     read_clean_cold_rows_from_object_store_with_stats,
 };
-pub use options::{BloomPruneMode, ParquetReadOptions, ParquetReadProfile, PkValues, SeqRange};
+pub use options::{
+    BloomPruneMode, PageIndexPruneMode, ParquetReadOptions, ParquetReadProfile, PkValues, SeqRange,
+};
 pub use types::{CleanColdRow, ParquetReadRequest};

@@ -81,6 +81,9 @@ SELECT koldstore.manage_table(
 more than 1000 keys, `koldstore.flush_table` moves only the oldest excess rows
 by mirror `seq` to cold storage. The low `min_flush_rows` keeps this small
 tutorial predictable; production tables usually use `1000` or higher.
+Keep `max_rows_per_file` small on low-RAM hosts — flush peak RSS scales with
+that setting, not with total rows flushed. See
+[Memory and small machines](performance.md#memory-and-small-machines).
 
 Sample result:
 
@@ -169,9 +172,9 @@ after management. Nothing is cold yet:
 
 ```sql
 SELECT
-  (koldstore.describe_table(table_name => 'app.messages')::jsonb->>'hot_rows')::int AS hot_rows,
-  (koldstore.describe_table(table_name => 'app.messages')::jsonb->>'mirror_rows')::int AS mirror_rows,
-  (koldstore.describe_table(table_name => 'app.messages')::jsonb->>'cold_row_count')::int AS cold_row_count;
+  (koldstore.table_status(table_name => 'app.messages')::jsonb->>'hot_rows')::int AS hot_rows,
+  (koldstore.table_status(table_name => 'app.messages')::jsonb->>'mirror_rows')::int AS mirror_rows,
+  (koldstore.table_status(table_name => 'app.messages')::jsonb->>'cold_row_count')::int AS cold_row_count;
 ```
 
 ```text
@@ -189,7 +192,8 @@ only the 12 oldest mirror entries move to cold storage; the newest 1000 keys
 stay hot.
 
 ```sql
-SELECT koldstore.flush_table(table_name => 'app.messages') AS flush_job_id;
+SELECT jsonb_pretty(koldstore.flush_table(table_name => 'app.messages'));
+-- job_id is null when status = not_due (nothing to flush yet)
 ```
 
 ```text
@@ -237,14 +241,14 @@ Schedule periodic flush with [pg_cron](operations/scheduling.md).
 ## 6. Describe table stats
 
 ```sql
-SELECT jsonb_pretty(koldstore.describe_table(table_name => 'app.messages'));
+SELECT jsonb_pretty(koldstore.table_status(table_name => 'app.messages'));
 ```
 
 After the sample flush you should see roughly `hot_rows = 1000`,
 `cold_row_count = 12`, and `manifest_state = 'in_sync'`.
 
 Field meanings, sample JSON, and job-progress queries are in
-[`koldstore.describe_table`](sql-api.md#koldstoredescribe_table).
+[`koldstore.table_status`](sql-api.md#koldstoretable_status).
 
 ## 7. Explain a managed query
 

@@ -81,13 +81,13 @@ by the normal PostgreSQL reload rules for the chosen scope.
 | `koldstore.log_level` | string | `info` | Extension log verbosity: `error`, `warn`, `info`, `debug`, or `trace`. |
 | `koldstore.min_max_rows_per_file` | int | `1000` | Minimum allowed `max_rows_per_file` for `manage_table` and flush. Lower temporarily for tests, for example `SET koldstore.min_max_rows_per_file = 100`. Clamped to `1..=1000000`. |
 | `koldstore.flush_check_interval_seconds` | int | `30` | How often the database worker evaluates `auto_flush` tables, enqueues at most one due flush job, and spawns flush executors. Clamped to `1..=86400`. Independent of PostgreSQL autovacuum. |
-| `koldstore.max_parallel_flush_jobs` | int | `2` | Max concurrent one-shot flush executor workers per database. Clamped to `1..=16`. |
+| `koldstore.max_parallel_flush_jobs` | int | `2` | Max concurrent one-shot flush executor workers per database. Clamped to `1..=16`. Use `1` on small-memory hosts so encode spikes do not overlap. |
 | `koldstore.flush_job_max_runtime_seconds` | int | `1800` | Wall-clock budget for one flush job attempt. Checked between passes and between streamed batches within a pass (so one oversized force-flush pass cannot outrun the budget); exceeded attempts fail with an error so a stuck worker cannot run forever. `0` disables. Clamped to `0..=86400`. |
 | `koldstore.flush_execution` | string | `queue` | `queue`: `flush_table` enqueues a durable job and returns its UUID; a one-shot executor runs the work. `inline`: enqueue then run in the calling backend (SPI / `#[pg_test]` only). |
 | `koldstore.job_retention_days` | int | `30` | Days to retain terminal jobs before purge; `0` disables. Jobs still referenced by pending cold segments are never deleted. |
 | `koldstore.async_apply_watchdog_interval_ms` | int | `30000` | Safety watchdog for missed commit wakeups. Managed commits normally set the database worker latch immediately. Clamped to `1000..=300000`. |
-| `koldstore.async_apply_max_rows_per_tick` | int | `0` | Max source row changes per apply tick (`0` = unlimited / drain available WAL). |
-| `koldstore.async_apply_max_ms_per_tick` | int | `0` | Max wall-clock ms per apply tick (`0` = unlimited). When exhausted, commit `applied_lsn` and continue next wake. |
+| `koldstore.async_apply_max_rows_per_tick` | int | `0` | Max source row changes per apply tick (`0` = unlimited / drain available WAL). Cap this on small machines (for example `8192`) via `ALTER DATABASE` so background workers see it. |
+| `koldstore.async_apply_max_ms_per_tick` | int | `0` | Max wall-clock ms per apply tick (`0` = unlimited). When exhausted, commit `applied_lsn` and continue next wake. Cap alongside row budget on small hosts. |
 | `koldstore.flush_prelock_max_passes` | int | `3` | Max phase-5.5 pre-lock async apply passes during flush before failing closed. |
 | `koldstore.flush_prelock_max_ms` | int | `5000` | Combined wall-clock budget (ms) for flush phase-5.5 pre-lock catch-up. |
 | `koldstore.async_mirror_max_retained_bytes` | int | `1073741824` (1 GiB) | Health threshold for slot-retained WAL bytes. Exceeding it marks `async_mirror_status().retention.ok` false but never blocks the applier from draining WAL. `0` disables this health threshold. Configure PostgreSQL retention/disk safeguards independently. |
@@ -118,12 +118,11 @@ Every SQL-callable function the extension installs today:
 | `koldstore.set_table_auto_flush(...)` | `boolean` | `true` when an active managed table was updated |
 | `koldstore.unmanage_table(...)` | `bigint` | Count of deactivated `koldstore.schemas` rows |
 | `koldstore.wait_for_async_mirror()` | `bigint` | Async source row changes applied by this fence |
-| `koldstore.async_mirror_status()` | `jsonb` | Slot lag, retained bytes, apply rates, health |
-| `koldstore.async_mirror_slot_name()` | `text` | Deterministic logical-slot name for the current database |
+| `koldstore.async_mirror_status()` | `jsonb` | DB-scoped slot lag, WAL watermarks, apply rates, health |
 | `koldstore.disable_async_mirror()` | `boolean` | Whether async publication or slot infrastructure was removed |
 | `koldstore.enqueue_flush_job(...)` | `uuid` | Flush job id, or `NULL` when nothing is due |
-| `koldstore.flush_table(...)` | `uuid` | Flush job id (enqueue / reuse and start), or `NULL` when nothing is due |
-| `koldstore.describe_table(...)` | `jsonb` | Table status object (see below) |
+| `koldstore.flush_table(...)` | `jsonb` | Flush result object (`job_id`, `status`, `error`, …); see below |
+| `koldstore.table_status(...)` | `jsonb` | Operator view: table hot/mirror/cold/jobs + `async_mirror` |
 | `koldstore.recover_segments(...)` | `bigint` | Number of orphan recovery actions planned |
 
 ## Storage and Migration
@@ -159,6 +158,23 @@ SELECT koldstore.register_storage(
 kinds require the matching extension cargo feature: `s3`, `gcs`, `azure`, or
 `cloud`).
 
+Optional `check` (default `true`): opens the configured backend (filesystem,
+S3, GCS, or Azure) and performs a put/delete probe object
+(`.koldstore-write-probe`) so registration fails fast on bad credentials,
+unreachable endpoints, or unwritable paths. Filesystem backends also create
+`base_path` when needed. Pass `check => false` to skip the probe.
+
+```sql
+SELECT koldstore.register_storage(
+  name         => 'local-dev',
+  storage_type => 'filesystem',
+  base_path    => '/koldstore-data/cold/',
+  credentials  => '{}'::jsonb,
+  config       => '{}'::jsonb,
+  check        => false   -- skip writability probe
+);
+```
+
 **Returns:** `uuid` — the storage backend id (`koldstore.storage.id`). Fails with
 `storage \`<name>\` already exists` when the name is taken; use
 `alter_storage_credentials` / `alter_storage_location` to change an existing
@@ -187,7 +203,9 @@ SELECT koldstore.alter_storage_location(
 );
 ```
 
-Updates storage location/configuration without direct catalog DML.
+Updates storage location/configuration without direct catalog DML. Optional
+`check` (default `true`) probes local filesystem paths the same way as
+`register_storage`; pass `check => false` to skip.
 
 **Returns:** `uuid` — the storage backend id. Errors if the storage name does
 not exist.
@@ -241,7 +259,7 @@ also available.
 | `storage` | required | Registered storage backend name |
 | `hot_row_limit` | required (`NULL` allowed) | Maximum mirror rows to keep hot; `NULL` for hot-only tables |
 | `min_flush_rows` | `1000` | Minimum excess rows required before a flush moves data cold |
-| `max_rows_per_file` | `1000` | Maximum rows written into one Parquet segment per flush batch (minimum `1000` unless lowered via `koldstore.min_max_rows_per_file`) |
+| `max_rows_per_file` | `1000` | Maximum rows written into one Parquet segment per flush batch (minimum `1000` unless lowered via `koldstore.min_max_rows_per_file`). Dominates flush peak RSS — keep small on low-RAM hosts; see [Memory and small machines](performance.md#memory-and-small-machines) |
 | `table_type` | `'shared'` | `shared` or `user` |
 | `scope_column` | `NULL` | Required when `table_type => 'user'` |
 | `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
@@ -343,15 +361,26 @@ The background worker normally keeps the mirror caught up without an explicit ca
 this invocation. A return value of `0` can mean the worker had already caught
 up; it does not mean async capture is disabled.
 
-### `koldstore.async_mirror_slot_name`
+### `koldstore.async_mirror_status`
 
 ```sql
-SELECT koldstore.async_mirror_slot_name();
+SELECT koldstore.async_mirror_status();
 ```
 
-**Returns:** `text` — the deterministic logical replication slot name for the
-current database. The function is read-only and is primarily useful when
-monitoring `pg_replication_slots`.
+Database-scoped async mirror health (no managed table required). Prefer
+`table_status(table)` when you already have a table — it embeds the same object
+under `async_mirror`.
+
+Includes:
+
+| Field | Meaning |
+|-------|---------|
+| `slot_name` | Deterministic logical-slot name for this database |
+| `wal.current_lsn` | Current WAL tip (`pg_current_wal_lsn`) — latest commit frontier |
+| `wal.applied_lsn` | Durable mirror apply watermark (`async_mirror_state`) — latest read/apply |
+| `wal.confirmed_flush_lsn` | Slot ack / retention frontier |
+| `wal.lag_bytes` | Bytes between current WAL and confirmed flush |
+| `slot` / `state` / `apply` / `retention` / `healthy` | Slot presence, durable state, process-local rates, retention threshold |
 
 ### `koldstore.disable_async_mirror`
 
@@ -393,40 +422,38 @@ nothing is due.
 SELECT koldstore.flush_table(
   table_name => 'chat.messages'
 );
+-- → jsonb, for example:
+-- {"ok": true, "job_id": "...", "status": "queued", "execution": "queue", ...}
+-- {"ok": true, "job_id": null, "status": "not_due", "reason": "..."}
+-- {"ok": false, "job_id": "...", "status": "error", "error": "Permission denied ..."}
 ```
 
 Ensures a durable flush job exists and starts queue execution (production
 default `koldstore.flush_execution = queue`):
 
-1. Inserts a pending job or returns the existing active job UUID
+1. Inserts a pending job or returns the existing active job UUID inside JSON
 2. Spawns a one-shot flush executor when capacity allows
-3. Returns the UUID immediately — progress is visible in `koldstore.jobs` and
-   `koldstore.list_jobs` / `koldstore.describe_table`
+3. Returns immediately with `status = queued` — progress is visible in
+   `koldstore.jobs` / `list_jobs` / `table_status`
 
-Returns `NULL` (no job row) when policy selection is empty — including when
-mirror excess is positive but below `max_rows_per_file` — so undersized Parquet
-segments are never queued. Cron callers should treat `NULL` as “nothing to do”.
+`status = not_due` (with `job_id` null) when policy selection is empty —
+including when mirror excess is positive but below `max_rows_per_file` — so
+undersized Parquet segments are never queued.
+
+Queue-mode storage failures happen in the executor after return; they set
+`koldstore.jobs.error_trace` and emit a PostgreSQL **WARNING**
+(`koldstore flush: FAILED ...`) so `docker logs` shows them. Inline mode
+includes `error` / `rows_flushed` in the same JSON response.
 
 With `flush_execution = inline` (SPI tests only), the calling backend also runs
-the flush before returning.
+the flush before returning (`status = completed` or `error`).
 
 If another backend already holds this table's flush lock while no active job
-row is visible yet, the call fails immediately with an error such as
-`flush already in progress` instead of waiting. When an active job already
-exists, `flush_table` returns that job UUID.
+row is visible yet, the call fails with an ERROR such as
+`flush already in progress`. When an active job already exists,
+`status = already_running` and `job_id` is that job.
 
-Row selection always follows the table flush policy:
-
-- Tables managed through `manage_table` honor `hot_row_limit`,
-  `min_flush_rows`, and `max_rows_per_file` (newest rows stay hot by mirror
-  `seq`; oldest eligible excess moves cold). A selection smaller than
-  `max_rows_per_file` is treated as not due.
-- When no flush policy is configured, all pending mirror rows are flushed.
-- `progress_total` is the selected flush row count at claim time (not the full
-  mirror backlog).
-
-**Returns:** `uuid` — the flush job id (`koldstore.jobs.id`), or `NULL` when
-nothing is due.
+**Returns:** `jsonb` — see fields above.
 
 ### `koldstore.list_jobs`
 
@@ -467,19 +494,24 @@ flush/migrate advisory lock to release, deactivates catalog metadata, deletes
 cold objects under the table prefix, drops the change-log mirror, and records a
 completed `drop_table_cleanup` job before PostgreSQL removes the heap.
 
-### `koldstore.describe_table`
+### `koldstore.table_status`
 
 ```sql
-SELECT koldstore.describe_table(
+SELECT jsonb_pretty(koldstore.table_status(
   table_name => 'chat.messages'
-);
-
-SELECT jsonb_pretty(koldstore.describe_table(table_name => 'chat.messages'));
+));
 ```
 
+Preferred single operator API. Returns table hot / mirror / cold / jobs fields
+**plus** `async_mirror` (same object as `async_mirror_status()`), so one call
+shows table state and WAL tip vs applied LSN / slot health.
+
+`async_mirror` is database-scoped (one slot per DB), not per-table — it is
+embedded here for convenience when you already know the table.
+
 **Returns:** `jsonb` — managed-table storage, mirror, cold-segment, size,
-manifest, and recent job state. Counters are table-wide across scopes. Errors
-if the table is not actively managed.
+manifest, recent jobs, and `async_mirror`. Counters are table-wide across
+scopes. Errors if the table is not actively managed.
 
 Sample result after a small flush:
 
@@ -541,6 +573,7 @@ Top-level fields:
 | `jobs` | `jsonb` | Up to 20 recent jobs, newest first (see below) |
 | `storage_binding` | `text` | Bound storage backend id as text |
 | `last_error` | `text` | Last manifest or storage error, or `null` |
+| `async_mirror` | `jsonb` | Same payload as `async_mirror_status()` |
 
 Each element of `jobs`:
 
@@ -564,7 +597,7 @@ Size notes:
 - `table_size_bytes` excludes indexes; use
   `table_size_bytes + index_size_bytes` for a closer total, or call
   `pg_total_relation_size` directly when you need PostgreSQL’s total.
-- Percent-saved figures require a caller-held baseline; `describe_table` does
+- Percent-saved figures require a caller-held baseline; `table_status` does
   not store pre-flush sizes.
 
 For job-level progress, inspect `koldstore.jobs`:

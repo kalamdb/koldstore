@@ -43,7 +43,7 @@ async fn fresh_session_after_flush_uses_merge_scan_and_sees_cold_rows() -> Resul
         anyhow::ensure!(flushed > 0, "expected flush to archive rows");
         common::assert_no_active_jobs(&db.client, &table.relation).await?;
 
-        let status = common::describe_table(&db.client, &table.relation).await?;
+        let status = common::table_status(&db.client, &table.relation).await?;
         anyhow::ensure!(
             status.cold_row_count > 0,
             "expected cold rows after flush, status={status:?}"
