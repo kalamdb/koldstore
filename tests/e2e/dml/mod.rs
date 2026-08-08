@@ -7,4 +7,5 @@ mod change_feed;
 mod change_log_mirror;
 mod changes_since_latency;
 mod cold_dml_matrix;
+mod persistent_wal_applier;
 mod wal_only_seq_cursor;
