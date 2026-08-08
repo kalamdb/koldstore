@@ -135,9 +135,8 @@ fn run_maintenance_worker(database_oid: u32) {
 }
 
 fn maintenance_due(database_oid: u32) -> bool {
-    super::wake::supervisor_snapshot(database_oid).is_some_and(|state| {
-        state.maintenance_generation != state.maintenance_processed_generation
-    })
+    super::wake::supervisor_snapshot(database_oid)
+        .is_some_and(|state| state.maintenance_generation != state.maintenance_processed_generation)
 }
 
 /// Replaces database timed-policy state after a full configuration/recovery
