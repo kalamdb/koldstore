@@ -1,19 +1,15 @@
 //! Ephemeral database-maintenance background worker.
 //!
 //! The cluster supervisor owns registration. At most one maintenance worker is
-//! active per database. A worker drains committed WAL through a fixed durable
-//! fence, performs database-local recovery/reconciliation only when requested,
-//! waits briefly to coalesce a write burst, and exits when the database is caught up.
+//! active per database. It performs database-local recovery, policy scheduling,
+//! and queue reconciliation, waits briefly to coalesce a maintenance burst, and
+//! exits when those generations are caught up. Near-realtime WAL application is
+//! owned by the separate persistent WAL applier.
 
-use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use koldstore_worker::{maintenance_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
-use pgrx::pg_sys::panic::CaughtError;
-use pgrx::PgTryBuilder;
-
-use crate::mirror::apply::{apply_bounded, capture_durable_wal_fence, BoundedApplyRequest};
 
 const MAINTENANCE_FUNCTION: &str = "koldstore_maintenance_worker_main";
 const IDLE_GRACE: Duration = Duration::from_millis(200);
@@ -76,29 +72,14 @@ fn run_maintenance_worker(database_oid: u32) {
         let Some(snapshot) = super::wake::supervisor_snapshot(database_oid) else {
             return;
         };
-        let target_wal_generation = snapshot.wal_generation;
         let target_maintenance_generation = snapshot.maintenance_generation;
         let recovery_requested =
             snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
         let schedule_requested = snapshot.event_flags & koldstore_worker::EVENT_SCHEDULE_DIRTY != 0;
-        let wal_due =
-            recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
-
-        if wal_due {
-            if let Err(error) = drain_wal_through_fixed_fence() {
-                crate::observability::record_async_apply_error();
-                pgrx::warning!(
-                    "koldstore maintenance worker db={database_oid} WAL apply deferred: {error}"
-                );
-                super::wake::request_recovery(database_oid);
-                return;
-            }
-            super::wake::mark_wal_processed(database_oid, target_wal_generation);
-        }
-
         let needs_reconciliation = recovery_requested || schedule_requested;
+
         if needs_reconciliation {
-            let maintenance_result = worker_transaction_result(|| {
+            let maintenance_result = super::txn::run_recoverable("maintenance worker", || {
                 if recovery_requested {
                     // A SIGKILL/FATAL executor cannot run Rust Drop. The supervisor
                     // marks RECOVERY_REQUIRED after native lifecycle reconciliation;
@@ -134,63 +115,37 @@ fn run_maintenance_worker(database_oid: u32) {
                 }
             }
         }
-        // Ordinary WAL intentionally does not open a second PostgreSQL
-        // transaction here. The apply transaction already bumped counters,
-        // evaluated every touched policy, and published any exact OlderThan
-        // deadline after commit. Avoiding an empty Start/Commit pair on every
-        // write burst materially reduces scheduler CPU and WAL-visibility lag.
 
-        if super::wake::supervisor_snapshot(database_oid)
-            .is_some_and(|state| state.maintenance_due())
-        {
+        if maintenance_due(database_oid) {
             continue;
         }
 
-        // Brief interruptible grace amortizes fork/exit cost across commit bursts.
-        // New commits set this worker's latch directly while it is alive.
+        // Brief interruptible grace amortizes fork/exit cost across a burst of
+        // policy/recovery requests without making maintenance permanently resident.
         if !BackgroundWorker::wait_latch(Some(IDLE_GRACE)) {
             return;
         }
         if BackgroundWorker::sighup_received() {
             unsafe { pgrx::pg_sys::ProcessConfigFile(pgrx::pg_sys::GucContext::PGC_SIGHUP) };
         }
-        if !super::wake::supervisor_snapshot(database_oid)
-            .is_some_and(|state| state.maintenance_due())
-        {
+        if !maintenance_due(database_oid) {
             return;
         }
     }
 }
 
+fn maintenance_due(database_oid: u32) -> bool {
+    super::wake::supervisor_snapshot(database_oid).is_some_and(|state| {
+        state.maintenance_generation != state.maintenance_processed_generation
+    })
+}
+
 /// Replaces database timed-policy state after a full configuration/recovery
-/// reconciliation. Normal WAL applies publish their touched-table deadlines
-/// transactionally and do not come through this function.
+/// reconciliation.
 fn update_timed_policy_deadline(database_oid: u32, next_due_at_ms: Option<i64>) {
     match next_due_at_ms.filter(|deadline| *deadline > 0) {
         Some(deadline_ms) => super::wake::schedule_maintenance_at_ms(database_oid, deadline_ms),
         None => super::wake::clear_maintenance_deadline(database_oid),
-    }
-}
-
-/// Drains all WAL visible at one fixed durable fence while respecting bounded
-/// apply budgets. `synchronous_commit=off` stays foreground-asynchronous: this
-/// worker performs XLogFlush, not the application backend.
-fn drain_wal_through_fixed_fence() -> Result<(), String> {
-    let fence = capture_durable_wal_fence()?;
-    loop {
-        let decoding_log_guard = DecodingLogGuard::suppress_routine_log_messages();
-        let outcome = worker_transaction_result(|| {
-            let mut request = BoundedApplyRequest::available();
-            request.upper_bound = Some(fence);
-            request.advance_slot_on_empty = true;
-            apply_bounded(request)
-        });
-        drop(decoding_log_guard);
-        let outcome = outcome?;
-        crate::observability::record_async_apply_tick(outcome.row_changes, 0);
-        if !outcome.budget_exhausted {
-            return Ok(());
-        }
     }
 }
 
@@ -201,28 +156,6 @@ struct MaintenanceRegistration {
 impl Drop for MaintenanceRegistration {
     fn drop(&mut self) {
         super::wake::maintenance_stopped(self.database_oid);
-    }
-}
-
-struct DecodingLogGuard {
-    previous: std::os::raw::c_int,
-}
-
-impl DecodingLogGuard {
-    fn suppress_routine_log_messages() -> Self {
-        unsafe {
-            let previous = pgrx::pg_sys::log_min_messages;
-            pgrx::pg_sys::log_min_messages = pgrx::pg_sys::FATAL as std::os::raw::c_int;
-            Self { previous }
-        }
-    }
-}
-
-impl Drop for DecodingLogGuard {
-    fn drop(&mut self) {
-        unsafe {
-            pgrx::pg_sys::log_min_messages = self.previous;
-        }
     }
 }
 
@@ -238,73 +171,4 @@ fn attach_signal_handlers() {
 
 unsafe extern "C-unwind" fn maintenance_sigterm(signal: std::os::raw::c_int) {
     unsafe { pgrx::pg_sys::die(signal) }
-}
-
-/// Runs `body` in a recoverable worker transaction. PostgreSQL ERROR/longjmp and
-/// Rust panic become a normal Result so durable generations remain retryable.
-pub(crate) fn worker_transaction_result<R>(
-    body: impl FnOnce() -> Result<R, String>,
-) -> Result<R, String> {
-    unsafe {
-        pgrx::pg_sys::SetCurrentStatementStartTimestamp();
-        pgrx::pg_sys::StartTransactionCommand();
-        pgrx::pg_sys::PushActiveSnapshot(pgrx::pg_sys::GetTransactionSnapshot());
-        pgrx::pg_sys::BeginInternalSubTransaction(std::ptr::null());
-    }
-    let result = PgTryBuilder::new(AssertUnwindSafe(body))
-        .catch_others(|error| Err(format_caught_error("maintenance worker", error)))
-        .catch_rust_panic(|error| Err(format_caught_error("maintenance worker panic", error)))
-        .execute();
-    finish_subtransaction(result.is_ok());
-    if unsafe { pgrx::pg_sys::IsAbortedTransactionBlockState() } {
-        finish_outer_transaction(false);
-        return Err(result.err().unwrap_or_else(|| {
-            "maintenance worker transaction aborted after postgres error".to_string()
-        }));
-    }
-    finish_outer_transaction(true);
-    result
-}
-
-fn finish_subtransaction(release: bool) {
-    unsafe {
-        if pgrx::pg_sys::GetCurrentTransactionNestLevel() <= 1 {
-            return;
-        }
-        if release && !pgrx::pg_sys::IsAbortedTransactionBlockState() {
-            pgrx::pg_sys::ReleaseCurrentSubTransaction();
-        } else {
-            pgrx::pg_sys::RollbackAndReleaseCurrentSubTransaction();
-        }
-    }
-}
-
-fn finish_outer_transaction(commit: bool) {
-    unsafe {
-        if !pgrx::pg_sys::IsTransactionOrTransactionBlock() {
-            return;
-        }
-        if !commit || pgrx::pg_sys::IsAbortedTransactionBlockState() {
-            pgrx::pg_sys::AbortCurrentTransaction();
-            return;
-        }
-        pgrx::pg_sys::PopActiveSnapshot();
-        pgrx::pg_sys::CommitTransactionCommand();
-    }
-}
-
-fn format_caught_error(context: &str, error: CaughtError) -> String {
-    match error {
-        CaughtError::PostgresError(report) | CaughtError::ErrorReport(report) => {
-            format!("{context}: {}", report.message())
-        }
-        CaughtError::RustPanic { ereport, payload } => {
-            let detail = payload
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| payload.downcast_ref::<&str>().copied())
-                .unwrap_or("rust panic");
-            format!("{context}: {} ({detail})", ereport.message())
-        }
-    }
 }
