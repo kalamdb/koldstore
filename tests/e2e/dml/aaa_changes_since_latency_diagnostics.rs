@@ -18,6 +18,11 @@ use crate::flush::harness::connect_peer;
 const VISIBILITY_BOUND: Duration = Duration::from_secs(1);
 const POLL_SLEEP: Duration = Duration::from_millis(10);
 
+struct ProbeStatuses<'a> {
+    before_probe: &'a str,
+    after_commit: &'a str,
+}
+
 async fn create_managed_events_table(db: &common::TestDb, name: &str) -> Result<String> {
     let relation = db.relation(name);
     db.client
@@ -34,6 +39,7 @@ async fn create_managed_events_table(db: &common::TestDb, name: &str) -> Result<
             SELECT koldstore.manage_table(
               table_name => $1::text::regclass,
               storage => $2,
+              hot_row_limit => NULL::bigint,
               min_flush_rows => 1,
               max_rows_per_file => 1000,
               migration_order_by => 'id',
@@ -103,8 +109,7 @@ async fn wait_changes_since_pk(
     id: i64,
     op: i16,
     deadline: Instant,
-    status_before_probe: &str,
-    status_after_commit: &str,
+    statuses: ProbeStatuses<'_>,
 ) -> Result<Duration> {
     let started = Instant::now();
     loop {
@@ -126,9 +131,10 @@ async fn wait_changes_since_pk(
             let timeout = timeout_details(client, relation, id, op, since_seq).await?;
             bail!(
                 "changes_since latency diagnostic timed out for id={id} op={op} relation={relation} \
-                 since_seq={since_seq} elapsed={:?}; before_probe={status_before_probe}; \
-                 after_commit={status_after_commit}; timeout={timeout}",
-                started.elapsed()
+                 since_seq={since_seq} elapsed={:?}; before_probe={}; after_commit={}; timeout={timeout}",
+                started.elapsed(),
+                statuses.before_probe,
+                statuses.after_commit
             );
         }
         tokio::time::sleep(POLL_SLEEP).await;
@@ -192,8 +198,10 @@ async fn diagnose_insert_visibility_under_managed_commit_load() -> Result<()> {
             1,
             1,
             committed_at + VISIBILITY_BOUND,
-            &before_probe,
-            &after_commit,
+            ProbeStatuses {
+                before_probe: &before_probe,
+                after_commit: &after_commit,
+            },
         )
         .await;
 
@@ -238,8 +246,10 @@ async fn diagnose_delete_visibility_under_managed_commit_load() -> Result<()> {
             1,
             3,
             committed_at + VISIBILITY_BOUND,
-            &before_probe,
-            &after_commit,
+            ProbeStatuses {
+                before_probe: &before_probe,
+                after_commit: &after_commit,
+            },
         )
         .await;
 
