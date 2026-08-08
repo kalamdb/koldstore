@@ -147,8 +147,8 @@ fn flush_sql_requests_capture_table_scope_and_enqueue_metadata() {
     assert_eq!(enqueue.seq_upper_bound.unwrap().get(), 1_000);
     assert!(enqueue.statement.sql.contains("flush_seq_upper_bound"));
     assert!(enqueue.statement.sql.contains("ON CONFLICT"));
-    assert!(enqueue.statement.sql.contains("force_upgrade"));
-    assert!(enqueue.statement.sql.contains("SELECT COALESCE"));
+    assert!(enqueue.statement.sql.contains("DO UPDATE SET"));
+    assert!(enqueue.statement.sql.contains("RETURNING id"));
     assert!(enqueue
         .statement
         .sql

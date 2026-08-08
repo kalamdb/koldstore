@@ -25,7 +25,9 @@ struct ActiveFlushJob {
 
 /// Enqueues a flush job or returns the existing active job UUID.
 ///
-/// When `force = true`, upgrades an existing pending job's payload force intent.
+/// When `force = true`, upgrades an existing active job's payload force intent.
+/// Retries briefly when a concurrent completion races the unique active-job
+/// index (INSERT finds a conflict that disappears before RETURNING).
 pub(crate) fn enqueue_or_lookup_flush_job(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
@@ -37,19 +39,30 @@ pub(crate) fn enqueue_or_lookup_flush_job(
         TableName::parse(&table_name).map_err(crate::error::PgAdapterError::from_display)?;
     let plan = plan_enqueue_or_lookup_flush_job(flush_table_request(table_name, None, force), None)
         .map_err(crate::error::PgAdapterError::from_display)?;
-    let job_id = crate::spi::update_one::<pgrx::Uuid>(
-        &plan.statement,
-        &[
-            DatumWithOid::from(table_oid),
-            DatumWithOid::from(Option::<&str>::None),
-            DatumWithOid::from(Option::<i64>::None),
-            DatumWithOid::from(force),
-        ],
-    )?
-    .ok_or_else(|| {
-        crate::error::PgAdapterError::from_display("enqueue flush job returned no active job id")
-    })?;
-    Ok(job_id)
+    for attempt in 1..=8 {
+        if let Some(job_id) = crate::spi::update_one::<pgrx::Uuid>(
+            &plan.statement,
+            &[
+                DatumWithOid::from(table_oid),
+                DatumWithOid::from(Option::<&str>::None),
+                DatumWithOid::from(Option::<i64>::None),
+                DatumWithOid::from(force),
+            ],
+        )? {
+            return Ok(job_id);
+        }
+        // Completing job dropped the unique index entry mid-statement; either
+        // an active row remains or the next insert must succeed.
+        if let Some(existing) = lookup_active_flush_job(table_oid)? {
+            return Ok(crate::spi::uuid_to_pgrx(existing.id));
+        }
+        if attempt < 8 {
+            std::thread::sleep(std::time::Duration::from_millis(attempt as u64));
+        }
+    }
+    Err(crate::error::PgAdapterError::from_display(
+        "enqueue flush job returned no active job id",
+    ))
 }
 
 /// Enqueues only when flush work is due (or an active job already exists).

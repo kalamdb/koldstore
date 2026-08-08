@@ -176,11 +176,13 @@ pub const fn flush_table_request(
     }
 }
 
-/// Plans INSERT … ON CONFLICT DO NOTHING then lookup of the active flush job id.
+/// Plans INSERT … ON CONFLICT DO UPDATE for the active flush job id.
 ///
-/// Inserts a pending flush job when none is active. On conflict with an existing
-/// pending/running flush job, returns that job's id. When `force = true`, upgrades
-/// an existing **pending** job's payload force intent.
+/// Concurrent force-flush callers racing a completing job used to hit
+/// `DO NOTHING` + a follow-up lookup that returned NULL (the active unique
+/// index entry disappearing mid-statement). `DO UPDATE … RETURNING id` keeps
+/// the outcome atomic: insert a new pending job or attach to the live one
+/// (and upgrade `force` when requested).
 ///
 /// Bind parameters:
 /// - `$1` table oid (`regclass::oid`)
@@ -199,58 +201,36 @@ pub fn plan_enqueue_or_lookup_flush_job(
         "enqueue or lookup flush job",
         &format!(
             r#"
-WITH inserted AS (
-    INSERT INTO koldstore.jobs (
-        id,
-        table_oid,
-        scope_key,
-        job_type,
-        status,
-        phase,
-        flush_seq_upper_bound,
-        payload
-    )
-    VALUES (
-        gen_random_uuid(),
-        $1::regclass::oid,
-        COALESCE($2::text, ''),
-        'flush',
-        'pending',
-        'pending',
-        $3::bigint,
-        jsonb_build_object('force', $4::boolean)
-    )
-    ON CONFLICT (table_oid, scope_key)
-    WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
-    DO NOTHING
-    RETURNING id
-),
-force_upgrade AS (
-    UPDATE koldstore.jobs j
-    SET payload = j.payload || jsonb_build_object('force', true),
-        updated_at = now()
-    WHERE $4::boolean
-      AND NOT EXISTS (SELECT 1 FROM inserted)
-      AND j.table_oid = $1::regclass::oid
-      AND j.scope_key = COALESCE($2::text, '')
-      AND j.job_type = 'flush'
-      AND j.status = 'pending'
-      AND COALESCE((j.payload->>'force')::boolean, false) IS DISTINCT FROM true
-    RETURNING j.id
+INSERT INTO koldstore.jobs (
+    id,
+    table_oid,
+    scope_key,
+    job_type,
+    status,
+    phase,
+    flush_seq_upper_bound,
+    payload
 )
-SELECT COALESCE(
-    (SELECT id FROM inserted LIMIT 1),
-    (SELECT id FROM force_upgrade LIMIT 1),
-    (
-        SELECT id
-        FROM koldstore.jobs
-        WHERE table_oid = $1::regclass::oid
-          AND scope_key = COALESCE($2::text, '')
-          AND {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
-        ORDER BY updated_at, id
-        LIMIT 1
-    )
+VALUES (
+    gen_random_uuid(),
+    $1::regclass::oid,
+    COALESCE($2::text, ''),
+    'flush',
+    'pending',
+    'pending',
+    $3::bigint,
+    jsonb_build_object('force', $4::boolean)
 )
+ON CONFLICT (table_oid, scope_key)
+WHERE {ACTIVE_FLUSH_JOB_CONFLICT_PREDICATE}
+DO UPDATE SET
+    payload = CASE
+        WHEN $4::boolean
+            THEN koldstore.jobs.payload || jsonb_build_object('force', true)
+        ELSE koldstore.jobs.payload
+    END,
+    updated_at = now()
+RETURNING id
 "#
         ),
     )

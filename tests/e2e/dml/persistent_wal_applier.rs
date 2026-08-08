@@ -342,11 +342,13 @@ async fn persistent_wal_applier_survives_concurrent_dml_and_flush_flood() -> Res
                             tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                         Err(error) => {
-                            // Slot-lock / already-running races are expected under flood.
+                            // Slot-lock / already-running / enqueue races are
+                            // expected under flood (completing job vs insert).
                             let msg = format!("{error:#}");
                             if msg.contains("flush already in progress")
                                 || msg.contains("slot lock")
                                 || msg.contains("already holds the flush lock")
+                                || msg.contains("enqueue flush job returned no active job id")
                             {
                                 tokio::time::sleep(Duration::from_millis(20)).await;
                                 continue;
