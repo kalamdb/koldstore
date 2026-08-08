@@ -3,6 +3,16 @@
 //! Owns flush eligibility, job state transitions, manifest sync planning, segment
 //! cleanup, and recovery classification. Must not depend on `pgrx`. PostgreSQL job
 //! enqueue and SPI execution stay in `pg_koldstore`.
+//!
+//! The lower storage stack is exposed explicitly so the supervision tree reads
+//! naturally as `supervisor::flush::{manifest, storage, parquet}`.
+
+/// Manifest publication and generation contracts beneath flush.
+pub use koldstore_manifest as manifest;
+/// Parquet encoding/decoding beneath flush.
+pub use koldstore_parquet as parquet;
+/// Object-storage backends beneath flush.
+pub use koldstore_storage as storage;
 
 pub mod cleanup;
 pub mod encode;
