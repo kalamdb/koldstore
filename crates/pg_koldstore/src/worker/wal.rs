@@ -65,6 +65,10 @@ pub(crate) fn clear_stale(database_oid: u32) {
     WAL_APPLIER_REGISTRY.get().clear_stale(database_oid);
 }
 
+pub(crate) fn required_oids_into(out: &mut Vec<u32>) {
+    WAL_APPLIER_REGISTRY.get().required_oids_into(out);
+}
+
 #[must_use]
 pub(crate) fn overflow_reconcile_required() -> bool {
     WAL_APPLIER_REGISTRY.get().overflow_reconcile_required()

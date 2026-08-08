@@ -146,11 +146,14 @@ async fn flush_check_interval_seconds_is_honored_after_worker_restart() -> Resul
         manage_auto_flush(&db.client, &relation, &db.storage_name, true).await?;
 
         // Drop interval to 1s and bounce the worker so it reloads database GUCs.
+        // Also publish schedule-dirty so maintenance re-arms cadence from the new
+        // interval instead of waiting out a prior default-30s deadline.
         configure_flush_interval_and_restart_worker(&db.client, &dbname, 1).await?;
         insert_rows(&db.client, &relation, 1, 10).await?;
         restart_database_worker(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
-        wait_for_completed_flush_jobs(&db.client, &relation, 1, Duration::from_secs(15)).await?;
+        wait_for_completed_flush_jobs(&db.client, &relation, 1, SCHEDULER_DEADLINE).await?;
         reset_flush_interval(&db.client, &dbname).await?;
     }
     Ok(())
@@ -267,6 +270,14 @@ async fn configure_flush_interval_and_restart_worker(
 ) -> Result<()> {
     set_flush_interval(client, dbname, seconds).await?;
     let _ = common::terminate_async_worker(client).await?;
+    // Ensure publishes schedule-dirty after commit so maintenance reloads the
+    // database GUC and re-arms flush_check_interval cadence immediately.
+    let _ = client
+        .query_one(
+            "SELECT koldstore.internal_ensure_async_mirror_worker()",
+            &[],
+        )
+        .await?;
     Ok(())
 }
 

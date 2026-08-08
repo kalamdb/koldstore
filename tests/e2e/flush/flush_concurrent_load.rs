@@ -19,6 +19,9 @@ async fn flush_while_ten_mixed_workers_write_and_query() -> Result<()> {
         let db = common::TestDb::start(target, "flush_load").await?;
         let table = db.create_indexed_items_table("load_items", 128).await?;
         db.manage_shared(&table.relation, "id").await?;
+        common::wait_for_async_worker(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
+        let mirror = common::change_log_mirror_relation(&table.relation);
 
         let stop = Arc::new(AtomicBool::new(false));
         let peers = connect_workers(&db, WORKER_COUNT).await?;
@@ -68,6 +71,16 @@ async fn flush_while_ten_mixed_workers_write_and_query() -> Result<()> {
         } else if cleaned == 0 {
             anyhow::bail!("cleanup flush archived no rows after concurrent load");
         }
+
+        // WAL apply must remain live after the firehose; change-log prune after
+        // flush can empty recent `__cl` history, so we do not require mirror
+        // cardinality to match heap visibility here.
+        common::fence_async_mirror(&db.client).await?;
+        anyhow::ensure!(
+            common::async_worker_running(&db.client).await?,
+            "WAL applier must remain available after concurrent flush load"
+        );
+        common::assert_change_log_mirror_exists(&db.client, &mirror).await?;
 
         assert_flush_load_invariants(&db.client, &table.relation).await?;
 

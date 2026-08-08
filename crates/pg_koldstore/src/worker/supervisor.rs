@@ -6,7 +6,7 @@
 //! Durable logical slots and jobs remain the source of truth; the supervisor
 //! supplies low-latency dispatch, capacity control, and recovery.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,7 @@ use koldstore_supervisor::{
     SAFETY_RECONCILE_INTERVAL, SUPERVISOR_REGISTRY_CAPACITY,
 };
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
+use pgrx::datum::DatumWithOid;
 
 const SUPERVISOR_FUNCTION: &str = "koldstore_supervisor_main";
 const SUPERVISOR_NAME: &str = "koldstore supervisor";
@@ -205,6 +206,11 @@ fn dispatch_shared_work(
         } else if wal_service.starting() {
             continue;
         }
+        // Registration opens a new backend connected by OID. Probe first so a
+        // dropped database cannot FATAL-loop and exhaust max_worker_processes.
+        if retire_if_database_absent(snapshot.database_oid) {
+            continue;
+        }
         if !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Wal, now) {
             continue;
         }
@@ -237,6 +243,9 @@ fn dispatch_shared_work(
             || super::wake::ensure_paused(snapshot.database_oid)
             || !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Maintenance, now)
         {
+            continue;
+        }
+        if retire_if_database_absent(snapshot.database_oid) {
             continue;
         }
         if !super::wake::try_reserve_maintenance(snapshot.database_oid) {
@@ -284,6 +293,9 @@ fn dispatch_shared_work(
                 backoff.clear_if_idle(snapshot.database_oid, DynamicWorkerKind::Flush);
                 continue;
             }
+            if retire_if_database_absent(snapshot.database_oid) {
+                continue;
+            }
             if !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Flush, now) {
                 continue;
             }
@@ -329,17 +341,24 @@ fn publish_reached_deadlines(snapshots: &[DatabaseWorkSnapshot]) -> bool {
     let mut published = false;
     for snapshot in snapshots {
         let flush_deadline = snapshot.next_flush_due_at_ms;
-        if flush_deadline > 0
-            && flush_deadline <= now_ms
-            && super::wake::consume_flush_deadline(snapshot.database_oid, flush_deadline)
-        {
+        let flush_due = flush_deadline > 0 && flush_deadline <= now_ms;
+        let maintenance_deadline = snapshot.next_maintenance_due_at_ms;
+        let maintenance_due = maintenance_deadline > 0 && maintenance_deadline <= now_ms;
+        if !(flush_due || maintenance_due) {
+            continue;
+        }
+        // Deadlines for dropped databases must be retired, not republished —
+        // otherwise dispatch spawn-crashes until the next safety reconcile.
+        if retire_if_database_absent(snapshot.database_oid) {
+            continue;
+        }
+
+        if flush_due && super::wake::consume_flush_deadline(snapshot.database_oid, flush_deadline) {
             super::wake::publish_due_flush(snapshot.database_oid);
             published = true;
         }
 
-        let maintenance_deadline = snapshot.next_maintenance_due_at_ms;
-        if maintenance_deadline > 0
-            && maintenance_deadline <= now_ms
+        if maintenance_due
             && super::wake::consume_maintenance_deadline(
                 snapshot.database_oid,
                 maintenance_deadline,
@@ -369,6 +388,7 @@ fn reconcile_cluster_startup() -> Result<bool, String> {
 fn reconcile_cluster_safety() -> Result<bool, String> {
     reconcile_worker_liveness()?;
     let slots = discover_async_slots()?;
+    let slot_oids: HashSet<u32> = slots.iter().map(|(oid, _)| *oid).collect();
     for (oid, retained_bytes) in &slots {
         if !super::wal::require(*oid) {
             return Err(format!(
@@ -379,6 +399,25 @@ fn reconcile_cluster_safety() -> Result<bool, String> {
             super::wake::request_recovery(*oid);
         }
     }
+
+    // Capture teardown / DROP DATABASE leave registry entries behind. Without
+    // retirement the supervisor spawn-crashes forever on missing OIDs and can
+    // exhaust max_worker_processes for live databases (auto-flush starves).
+    let mut snapshots = Vec::with_capacity(SUPERVISOR_REGISTRY_CAPACITY);
+    super::wake::fill_supervisor_snapshots(&mut snapshots);
+    for snapshot in &snapshots {
+        if !slot_oids.contains(&snapshot.database_oid) {
+            retire_absent_capture(snapshot.database_oid);
+        }
+    }
+    let mut required_wal = Vec::with_capacity(SUPERVISOR_REGISTRY_CAPACITY);
+    super::wal::required_oids_into(&mut required_wal);
+    for oid in required_wal {
+        if !slot_oids.contains(&oid) {
+            retire_absent_capture(oid);
+        }
+    }
+
     Ok(!slots.is_empty())
 }
 
@@ -442,7 +481,11 @@ fn reconcile_worker_liveness() -> Result<(), String> {
         if wal_stale {
             super::wal::clear_stale(snapshot.database_oid);
             if wal_state.is_some_and(|state| state.required) {
-                super::wake::request_recovery(snapshot.database_oid);
+                if database_oid_exists_spi(snapshot.database_oid)? {
+                    super::wake::request_recovery(snapshot.database_oid);
+                } else {
+                    retire_absent_capture(snapshot.database_oid);
+                }
             }
         }
         if wal_count > 1 {
@@ -468,7 +511,13 @@ fn reconcile_worker_liveness() -> Result<(), String> {
         };
         if maintenance_stale {
             super::wake::clear_stale_maintenance(snapshot.database_oid);
-            super::wake::request_recovery(snapshot.database_oid);
+            if database_oid_exists_spi(snapshot.database_oid)? {
+                super::wake::request_recovery(snapshot.database_oid);
+            } else {
+                // Stale maintenance for a dropped DB used to request_recovery,
+                // which re-armed dispatch and spawned FATAL workers in a loop.
+                retire_absent_capture(snapshot.database_oid);
+            }
         }
         if maintenance_count > 1 {
             pgrx::warning!(
@@ -485,7 +534,11 @@ fn reconcile_worker_liveness() -> Result<(), String> {
             let lost_owner = snapshot.flush_running > actual_flush;
             super::wake::reconcile_flush_counts(snapshot.database_oid, actual_flush);
             if lost_owner {
-                super::wake::request_recovery(snapshot.database_oid);
+                if database_oid_exists_spi(snapshot.database_oid)? {
+                    super::wake::request_recovery(snapshot.database_oid);
+                } else {
+                    retire_absent_capture(snapshot.database_oid);
+                }
             }
         }
     }
@@ -528,4 +581,48 @@ fn discover_async_slots() -> Result<Vec<(u32, i64)>, String> {
         }
         Ok(out)
     })
+}
+
+/// Retires supervisor + WAL dispatch for a database that no longer has capture.
+fn retire_absent_capture(database_oid: u32) {
+    super::wal::disable(database_oid);
+    super::wal::clear_stale(database_oid);
+    super::wake::quiesce_database(database_oid);
+    pgrx::log!("koldstore supervisor: retired absent capture db={database_oid}");
+}
+
+fn database_oid_exists_spi(database_oid: u32) -> Result<bool, String> {
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_database WHERE oid = $1::oid)",
+        &[DatumWithOid::from(pgrx::pg_sys::Oid::from(database_oid))],
+    )
+    .map_err(|error| error.to_string())
+    .map(|value| value.unwrap_or(false))
+}
+
+/// Existence probe for the latch-driven supervisor loop (no open transaction).
+///
+/// `SearchSysCache` asserts `IsTransactionState()`, so probes must open a short
+/// SPI transaction. Call only when about to register a worker or publish a
+/// reached deadline — not on every idle wake of an already-running service.
+fn database_present_for_dispatch(database_oid: u32) -> bool {
+    match super::txn::run(|| database_oid_exists_spi(database_oid)) {
+        Ok(exists) => exists,
+        Err(error) => {
+            pgrx::log!(
+                "koldstore supervisor: database existence probe deferred for db={database_oid}: {error}"
+            );
+            // Fail open: a transient probe error must not retire a live database.
+            true
+        }
+    }
+}
+
+/// Retires capture when the database OID is gone. Returns `true` when retired.
+fn retire_if_database_absent(database_oid: u32) -> bool {
+    if database_present_for_dispatch(database_oid) {
+        return false;
+    }
+    retire_absent_capture(database_oid);
+    true
 }

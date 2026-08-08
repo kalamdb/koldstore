@@ -201,6 +201,20 @@ impl<const N: usize> WalApplierRegistry<N> {
         self.overflow_reconcile_required.store(0, Ordering::Release);
     }
 
+    /// Copies every allocated database OID that is still marked required.
+    pub fn required_oids_into(&self, out: &mut Vec<u32>) {
+        out.clear();
+        if out.capacity() < N {
+            out.reserve(N - out.capacity());
+        }
+        for entry in &self.entries {
+            let oid = entry.database_oid.load(Ordering::Acquire);
+            if oid != 0 && entry.required.load(Ordering::Acquire) != 0 {
+                out.push(oid);
+            }
+        }
+    }
+
     fn find(&self, database_oid: u32) -> Option<&WalApplierEntry> {
         if N == 0 || database_oid == 0 {
             return None;
@@ -278,6 +292,18 @@ mod tests {
         registry.disable(42);
         assert!(!registry.snapshot(42).unwrap().required);
         assert!(!registry.try_reserve(42));
+    }
+
+    #[test]
+    fn required_oids_into_lists_only_required_entries() {
+        let registry = WalApplierRegistry::<4>::default();
+        assert!(registry.require(42));
+        assert!(registry.require(84));
+        registry.disable(84);
+        let mut oids = Vec::new();
+        registry.required_oids_into(&mut oids);
+        assert_eq!(oids, vec![42]);
+        assert!(!oids.contains(&84));
     }
 
     #[test]

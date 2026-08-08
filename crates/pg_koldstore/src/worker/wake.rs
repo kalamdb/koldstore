@@ -182,6 +182,11 @@ pub(crate) fn clear_stale_maintenance(database_oid: u32) {
         .clear_stale_maintenance(database_oid);
 }
 
+/// Stops supervisor dispatch for a database whose capture/slot is gone.
+pub(crate) fn quiesce_database(database_oid: u32) {
+    SUPERVISOR_REGISTRY.get().quiesce(database_oid);
+}
+
 pub(crate) fn maintenance_stopped(database_oid: u32) {
     SUPERVISOR_REGISTRY
         .get()

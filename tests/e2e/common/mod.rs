@@ -48,7 +48,9 @@ pub use db::{
     flush_table_job_id, is_flush_entry_lock_busy, is_flush_slot_lock_contention,
     wait_for_flush_job_terminal, FixtureStorage, ManagedTable, TestDb,
 };
-pub use db_pool::{acquire_cluster_exclusive, ClusterExclusiveGuard};
+pub use db_pool::{
+    acquire_cluster_exclusive, e2e_db_pool_enabled, e2e_pool_size, ClusterExclusiveGuard,
+};
 pub use equality::{
     assert_pk_unique, assert_relations_equal, assert_row_counts_equal, relation_row_count,
 };
