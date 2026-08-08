@@ -18,7 +18,7 @@ Refresh a publishable median with
 | --- | --- |
 | [README](README.md) (this page) | How to read results + reproduce |
 | [RESULTS](RESULTS.md) | Latest published comparison tables only |
-| [HammerDB / TPROC-C](hammerdb.md) | Selective-manage OLTP stress: baseline vs HISTORY-only manage |
+| [HammerDB / TPROC-C](hammerdb.md) | Selective-manage OLTP: weekly smoke + opt-in deep |
 
 ## Storage comparison
 
