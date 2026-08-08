@@ -12,7 +12,7 @@ use koldstore_wal::{
     wal_applier_worker_type, WalApplierRegistry, WalApplierSnapshot, WAL_APPLIER_REGISTRY_CAPACITY,
 };
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
-use pgrx::{pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
+use pgrx::{pg_guard, pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
 
 use crate::mirror::apply::{apply_bounded, capture_durable_wal_fence, BoundedApplyRequest};
 
@@ -25,6 +25,7 @@ type SharedWalApplierRegistry =
 static WAL_APPLIER_REGISTRY: PgAtomic<SharedWalApplierRegistry> =
     unsafe { PgAtomic::new(c"koldstore wal applier registry") };
 
+#[allow(unexpected_cfgs)]
 pub(crate) fn initialize() {
     pg_shmem_init!(
         WAL_APPLIER_REGISTRY =
