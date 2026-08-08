@@ -379,17 +379,17 @@ pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
     }
 }
 
-/// Stops the current database maintenance worker so disable cannot deadlock on [`lock_slot`].
+/// Stops the current database WAL applier so disable cannot deadlock on [`lock_slot`].
 ///
-/// Maintenance may hold the apply lock inside a peek that waits for concurrent
+/// The applier may hold the apply lock inside a peek that waits for concurrent
 /// XIDs — including this backend's open transaction (common under `#[pg_test]`).
 /// Terminate by `backend_type` (not only `active_pid`) so a worker blocked
 /// before acquiring the slot is also cleared.
 fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
-    let worker_type = koldstore_worker::maintenance_worker_type(DatabaseOid::new(database_oid));
+    let worker_type = koldstore_wal::wal_applier_worker_type(database_oid);
     // Always return a row: an empty SELECT through Spi::run_with_args errors with
-    // "SpiTupleTable positioned before the start or after the end" when no
-    // maintenance worker is running.
+    // "SpiTupleTable positioned before the start or after the end" when no WAL
+    // applier is running.
     let _ = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT COALESCE(\
            (SELECT bool_or(pg_catalog.pg_terminate_backend(pid)) \
@@ -430,7 +430,7 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
-                "async mirror maintenance worker for slot {slot} did not stop after terminate \
+                "async mirror WAL applier for slot {slot} did not stop after terminate \
                  (slot_idle={slot_idle}, worker_gone={worker_gone})"
             ));
         }
@@ -516,11 +516,11 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         );
     }
     let slot = slot_name(database_oid);
-    // Stop maintenance before lock_slot: a peek blocked on concurrent XIDs
-    // (including this backend's open transaction) holds the apply lock and
-    // would otherwise deadlock with disable.
+    // Stop the persistent WAL applier before lock_slot: a peek blocked on
+    // concurrent XIDs (including this backend's open transaction) holds the
+    // apply lock and would otherwise deadlock with disable.
     stop_async_mirror_applier(database_oid, &slot)
-        .map_err(|error| format!("stop maintenance worker: {error}"))?;
+        .map_err(|error| format!("stop WAL applier: {error}"))?;
     lock_slot(database_oid).map_err(|error| format!("lock apply: {error}"))?;
     let slot_exists = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)",
