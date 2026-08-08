@@ -83,15 +83,18 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
 
     let shared = crate::worker::wake::supervisor_snapshot(database_oid_u32);
     let applier = crate::worker::wal::snapshot(database_oid_u32);
-    let wal_pending = shared.is_some_and(|snapshot| {
-        snapshot.wal_generation != snapshot.wal_processed_generation
-            || snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0
-    });
+    let wal_required = applier.is_some_and(|state| state.required);
+    let wal_pending = wal_required
+        && shared.is_some_and(|snapshot| {
+            snapshot.wal_generation != snapshot.wal_processed_generation
+                || snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0
+        });
     let wal_applier = json!({
-        "registered": applier.is_some(),
-        "pid": applier.and_then(|state| (state.pid > 0).then_some(state.pid)),
-        "running": applier.is_some_and(|state| state.running()),
-        "starting": applier.is_some_and(|state| state.starting()),
+        "registered": wal_required,
+        "required": wal_required,
+        "pid": applier.and_then(|state| (state.required && state.pid > 0).then_some(state.pid)),
+        "running": applier.is_some_and(|state| state.required && state.running()),
+        "starting": applier.is_some_and(|state| state.required && state.starting()),
         "pending": wal_pending,
         "wal_generation": shared.map(|snapshot| snapshot.wal_generation).unwrap_or(0),
         "wal_processed_generation": shared
@@ -99,8 +102,8 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
             .unwrap_or(0),
         "watchdog_ms": 30_000,
     });
-    let wal_service_healthy =
-        !wal_pending || applier.is_some_and(|state| state.running() || state.starting());
+    let wal_service_healthy = !wal_required
+        || applier.is_some_and(|state| state.required && (state.running() || state.starting()));
 
     // Compatibility: existing operators/tests read the composite `maintenance`
     // object. Keep WAL generation fields there while exposing the new process
