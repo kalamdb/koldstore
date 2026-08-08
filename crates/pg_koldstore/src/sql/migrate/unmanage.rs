@@ -10,6 +10,10 @@ pub(super) fn unmanage_table_pg_impl(
 
     let table_oid_u32 = table_oid.to_u32();
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+    let timer = koldstore_common::TimedOp::start(
+        koldstore_common::log::component::UNMANAGE,
+        format!("table={relation}"),
+    );
     let table = koldstore_migrate::QualifiedTableName::parse(&relation)
         .map_err(|error| error.to_string())?;
     let mirror_table = crate::catalog::resolve::mirror_relation_by_table_oid(table_oid)?;
@@ -26,6 +30,9 @@ pub(super) fn unmanage_table_pg_impl(
     crate::catalog::cache::invalidate_table_globally(table_oid);
     crate::spi::invalidate_all_prepared_plans();
 
+    timer.finish(format!(
+        "unmanaged table={relation} schemas_deactivated={deactivated}"
+    ));
     Ok(deactivated)
 }
 

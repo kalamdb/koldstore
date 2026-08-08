@@ -37,6 +37,7 @@ pub(crate) fn enqueue_or_lookup_flush_job(
     let table_name = crate::catalog::resolve::qualified_relation_name(table_oid)?;
     let table_name =
         TableName::parse(&table_name).map_err(crate::error::PgAdapterError::from_display)?;
+    let table_label = table_name.as_str().to_string();
     let plan = plan_enqueue_or_lookup_flush_job(flush_table_request(table_name, None, force), None)
         .map_err(crate::error::PgAdapterError::from_display)?;
     for attempt in 1..=8 {
@@ -49,17 +50,38 @@ pub(crate) fn enqueue_or_lookup_flush_job(
                 DatumWithOid::from(force),
             ],
         )? {
+            if attempt > 1 {
+                koldstore_common::klog!(
+                    koldstore_common::log::component::FLUSH,
+                    "enqueue recovered after race table={table_label} force={force} attempt={attempt} job={}",
+                    crate::spi::uuid_from_pgrx(job_id)
+                );
+            }
             return Ok(job_id);
         }
         // Completing job dropped the unique index entry mid-statement; either
         // an active row remains or the next insert must succeed.
         if let Some(existing) = lookup_active_flush_job(table_oid)? {
+            koldstore_common::klog!(
+                koldstore_common::log::component::FLUSH,
+                "enqueue attached to active job after race table={table_label} force={force} attempt={attempt} job={} running={}",
+                existing.id,
+                existing.running
+            );
             return Ok(crate::spi::uuid_to_pgrx(existing.id));
         }
+        koldstore_common::klog!(
+            koldstore_common::log::component::FLUSH,
+            "enqueue raced completing job; retrying table={table_label} force={force} attempt={attempt}/8"
+        );
         if attempt < 8 {
             std::thread::sleep(std::time::Duration::from_millis(attempt as u64));
         }
     }
+    koldstore_common::kwarn!(
+        koldstore_common::log::component::FLUSH,
+        "enqueue failed after retries table={table_label} force={force}"
+    );
     Err(crate::error::PgAdapterError::from_display(
         "enqueue flush job returned no active job id",
     ))
@@ -187,7 +209,15 @@ pub(crate) fn reclaim_orphan_running_under_lock(
 ) -> crate::error::PgResult<()> {
     if let Some(existing) = lookup_active_flush_job(table_oid)? {
         if existing.running {
-            reclaim_running_flush_jobs(table_oid)?;
+            let reclaimed = reclaim_running_flush_jobs(table_oid)?;
+            if reclaimed > 0 {
+                koldstore_common::klog!(
+                    koldstore_common::log::component::FLUSH,
+                    "reclaimed orphan running flush job table_oid={} job={} count={reclaimed}",
+                    table_oid.to_u32(),
+                    existing.id
+                );
+            }
         }
     }
     Ok(())

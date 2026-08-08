@@ -58,6 +58,10 @@ pub(crate) fn manage_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let relation = crate::catalog::resolve::qualified_relation_name(table_oid)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    let manage_timer = koldstore_common::TimedOp::start(
+        koldstore_common::log::component::MANAGE,
+        format!("table={relation} storage={storage_name}"),
+    );
     let storage_id = crate::catalog::resolve::storage_id_by_name(storage_name)
         .unwrap_or_else(|error| pgrx::error!("storage lookup failed: {error}"));
     let catalog = migration_catalog(table_oid_u32)
@@ -175,6 +179,10 @@ pub(crate) fn manage_table_pg_impl(
             order_column_name,
         )
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+        manage_timer.finish(format!(
+            "managed table={relation} job={job_id} path=empty_table mirror={}",
+            mirror_plan.mirror_table.quoted()
+        ));
         return crate::spi::uuid_to_pgrx(job_id);
     }
 
@@ -298,6 +306,10 @@ pub(crate) fn manage_table_pg_impl(
     refresh_managed_table_row_counters(table_oid_u32, &plan.table, &mirror_plan.mirror_table)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
 
+    manage_timer.finish(format!(
+        "managed table={relation} job={job_id} path=existing_table rows_backfilled={processed_rows} mirror={}",
+        mirror_plan.mirror_table.quoted()
+    ));
     crate::spi::uuid_to_pgrx(job_id)
 }
 
