@@ -244,8 +244,8 @@ fn dispatch_shared_work(
     for snapshot in snapshots {
         let recovery_requested =
             snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
-        let wal_due = recovery_requested
-            || snapshot.wal_generation != snapshot.wal_processed_generation;
+        let wal_due =
+            recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
         if !wal_due {
             backoff.clear_if_idle(snapshot.database_oid, DynamicWorkerKind::Wal);
             continue;
