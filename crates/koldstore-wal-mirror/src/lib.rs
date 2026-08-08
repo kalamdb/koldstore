@@ -42,8 +42,8 @@ pub use wal::naming::{
     flush_replication_origin_name, is_flush_replication_origin, slot_name, PUBLICATION_NAME,
 };
 pub use wal::status::{
-    build_async_mirror_status, ApplyMetricsSnapshot, StatusSupervisorSnapshot,
-    StatusWalApplierSnapshot,
+    build_async_mirror_status, ApplyMetricsSnapshot, AsyncMirrorStatusInput,
+    StatusSupervisorSnapshot, StatusWalApplierSnapshot,
 };
 pub use wal::{
     wal_applier_worker_type, WalApplierRegistry, WalApplierSnapshot, WAL_APPLIER_REGISTRY_CAPACITY,

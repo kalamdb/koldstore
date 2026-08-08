@@ -181,8 +181,8 @@ mod tests {
 
     #[test]
     fn parse_pk_bool_accepts_pg_forms() {
-        assert_eq!(parse_pk_bool("t").unwrap(), true);
-        assert_eq!(parse_pk_bool("FALSE").unwrap(), false);
+        assert!(parse_pk_bool("t").unwrap());
+        assert!(!parse_pk_bool("FALSE").unwrap());
         assert!(parse_pk_bool("maybe").is_err());
         assert_eq!(
             parse_pk_ints::<i32>(&["1".into(), "2".into()], "int4").unwrap(),

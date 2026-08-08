@@ -2,8 +2,8 @@
 
 use koldstore_supervisor::EVENT_RECOVERY_REQUIRED;
 use koldstore_wal_mirror::{
-    build_async_mirror_status, ApplyMetricsSnapshot, StatusSupervisorSnapshot,
-    StatusWalApplierSnapshot,
+    build_async_mirror_status, ApplyMetricsSnapshot, AsyncMirrorStatusInput,
+    StatusSupervisorSnapshot, StatusWalApplierSnapshot,
 };
 use pgrx::datum::DatumWithOid;
 use serde_json::json;
@@ -85,14 +85,14 @@ pub(crate) fn async_mirror_status_value() -> Result<serde_json::Value, String> {
         starting: wal_starting,
     };
 
-    Ok(build_async_mirror_status(
-        &slot,
+    Ok(build_async_mirror_status(AsyncMirrorStatusInput {
+        slot_name: slot,
         slot_json,
         state_json,
-        crate::guc::async_mirror_max_retained_bytes(),
+        max_retained_bytes: crate::guc::async_mirror_max_retained_bytes(),
         shared,
         wal_applier,
-        ApplyMetricsSnapshot {
+        metrics: ApplyMetricsSnapshot {
             rows_total: metrics.rows_total,
             ticks_total: metrics.ticks_total,
             last_rows: metrics.last_rows,
@@ -100,6 +100,6 @@ pub(crate) fn async_mirror_status_value() -> Result<serde_json::Value, String> {
             error_total: metrics.error_total,
             healthy: metrics.healthy,
         },
-        30_000,
-    ))
+        watchdog_ms: 30_000,
+    }))
 }

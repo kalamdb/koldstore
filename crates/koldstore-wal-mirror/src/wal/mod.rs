@@ -22,8 +22,8 @@ pub use naming::{
     flush_replication_origin_name, is_flush_replication_origin, slot_name, PUBLICATION_NAME,
 };
 pub use status::{
-    build_async_mirror_status, ApplyMetricsSnapshot, StatusSupervisorSnapshot,
-    StatusWalApplierSnapshot,
+    build_async_mirror_status, ApplyMetricsSnapshot, AsyncMirrorStatusInput,
+    StatusSupervisorSnapshot, StatusWalApplierSnapshot,
 };
 
 /// The mirror's bounded apply batch is also the WAL service's default batch.

@@ -19,7 +19,7 @@ use koldstore_flush::{
 };
 use pgrx::datum::DatumWithOid;
 
-const AUTO_FLUSH_PAGE_LIMIT: usize = 64;
+const AUTO_FLUSH_SCAN_LIMIT: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FlushTickResult {
@@ -85,64 +85,77 @@ pub(crate) fn schedule_policy_after_counter(
     Ok(true)
 }
 
-fn select_due_auto_flush_tables() -> Result<(Vec<u32>, bool, Option<i64>), String> {
-    pgrx::Spi::connect(|client| -> Result<(Vec<u32>, bool, Option<i64>), String> {
-        let statement =
-            plan_select_auto_flush_candidate_tables().map_err(|error| error.to_string())?;
-        let table = client
-            .select(&statement.sql, None, &[])
-            .map_err(|error| error.to_string())?;
+fn select_due_auto_flush_tables() -> Result<(Option<u32>, bool, Option<i64>), String> {
+    pgrx::Spi::connect(
+        |client| -> Result<(Option<u32>, bool, Option<i64>), String> {
+            let statement =
+                plan_select_auto_flush_candidate_tables().map_err(|error| error.to_string())?;
+            let table = client
+                .select(&statement.sql, None, &[])
+                .map_err(|error| error.to_string())?;
 
-        let now_ms = unix_now_ms();
-        let mut due_tables = Vec::with_capacity(AUTO_FLUSH_PAGE_LIMIT);
-        let mut more_due = false;
-        let mut next_timed_wake_at_ms: Option<i64> = None;
-        for row in table {
-            let oid: pgrx::pg_sys::Oid = row
-                .get(1)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "missing table_oid".to_string())?;
-            let options_text: String = row
-                .get(2)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "missing options".to_string())?;
-            let catalog_pending: i64 = row.get(3).map_err(|error| error.to_string())?.unwrap_or(0);
-            let parsed = ManageTableOptions::from_json_str(&options_text);
-            let policy = parsed.flush_policy();
-            let (_, mirror_delta) = crate::row_counter_cache::pending_deltas(oid);
-            let pending = catalog_pending.saturating_add(mirror_delta).max(0);
-
-            let due = match policy.as_ref() {
-                Some(policy @ FlushPolicy::OlderThan { .. }) => {
-                    let evaluation = evaluate_older_than(oid, policy)?;
-                    if let Some(deadline_ms) = evaluation
-                        .next_due_at_ms
-                        .filter(|deadline_ms| *deadline_ms > now_ms)
-                    {
-                        next_timed_wake_at_ms = Some(
-                            next_timed_wake_at_ms
-                                .map(|current| current.min(deadline_ms))
-                                .unwrap_or(deadline_ms),
-                        );
-                    }
-                    evaluation.due
-                }
-                Some(FlushPolicy::RowLimit { .. }) => {
-                    scheduler_should_flush_parsed(&parsed, pending)
-                }
-                _ => false,
-            };
-
-            if due {
-                if due_tables.len() >= AUTO_FLUSH_PAGE_LIMIT {
+            let now_ms = unix_now_ms();
+            let mut selected: Option<u32> = None;
+            let mut more_due = false;
+            let mut next_timed_wake_at_ms: Option<i64> = None;
+            let mut scanned = 0_usize;
+            for row in table {
+                if scanned >= AUTO_FLUSH_SCAN_LIMIT {
+                    // Unscanned candidates may still be due; ask for another tick.
                     more_due = true;
                     break;
                 }
-                due_tables.push(oid.to_u32());
+                scanned = scanned.saturating_add(1);
+
+                let oid: pgrx::pg_sys::Oid = row
+                    .get(1)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "missing table_oid".to_string())?;
+                let options_text: String = row
+                    .get(2)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "missing options".to_string())?;
+                let catalog_pending: i64 =
+                    row.get(3).map_err(|error| error.to_string())?.unwrap_or(0);
+                let parsed = ManageTableOptions::from_json_str(&options_text);
+                let policy = parsed.flush_policy();
+                let (_, mirror_delta) = crate::row_counter_cache::pending_deltas(oid);
+                let pending = catalog_pending.saturating_add(mirror_delta).max(0);
+
+                let due = match policy.as_ref() {
+                    Some(policy @ FlushPolicy::OlderThan { .. }) => {
+                        let evaluation = evaluate_older_than(oid, policy)?;
+                        if let Some(deadline_ms) = evaluation
+                            .next_due_at_ms
+                            .filter(|deadline_ms| *deadline_ms > now_ms)
+                        {
+                            next_timed_wake_at_ms = Some(
+                                next_timed_wake_at_ms
+                                    .map(|current| current.min(deadline_ms))
+                                    .unwrap_or(deadline_ms),
+                            );
+                        }
+                        evaluation.due
+                    }
+                    Some(FlushPolicy::RowLimit { .. }) => {
+                        scheduler_should_flush_parsed(&parsed, pending)
+                    }
+                    _ => false,
+                };
+
+                if due {
+                    // Contract: enqueue at most one auto-flush job per scheduler tick.
+                    // Continue scanning so OlderThan deadlines and `more_due` stay accurate.
+                    if selected.is_none() {
+                        selected = Some(oid.to_u32());
+                    } else {
+                        more_due = true;
+                    }
+                }
             }
-        }
-        Ok((due_tables, more_due, next_timed_wake_at_ms))
-    })
+            Ok((selected, more_due, next_timed_wake_at_ms))
+        },
+    )
 }
 
 /// Explicit diagnostic hook used by in-server tests. Production recovery is
@@ -165,40 +178,43 @@ pub fn run_flush_scheduler_tick_pg() -> bool {
 
 /// Broad reconciliation used only when policy/configuration or recovery state
 /// may have changed without a fresh WAL counter bump.
+///
+/// Enqueues at most one auto-flush job per tick (docs/architecture contract).
+/// Remaining due tables publish a schedule-dirty wake for a later tick.
 pub(crate) fn run_flush_scheduler_tick() -> Result<FlushTickResult, String> {
-    let (due_tables, more_due, next_timed_wake_at_ms) = select_due_auto_flush_tables()?;
+    let (selected, more_due, next_timed_wake_at_ms) = select_due_auto_flush_tables()?;
     let mut completed = false;
 
-    for table_oid in due_tables {
+    if let Some(table_oid) = selected {
         let oid = pgrx::pg_sys::Oid::from(table_oid);
-        let Some(job_id) = crate::sql::flush::jobs::enqueue_flush_job_if_due(oid, false)
+        if let Some(job_id) = crate::sql::flush::jobs::enqueue_flush_job_if_due(oid, false)
             .map_err(|error| error.to_string())?
-        else {
-            continue;
-        };
-        pgrx::log!(
-            "koldstore auto-flush reconciliation: enqueued table_oid={} job={}",
-            table_oid,
-            crate::spi::uuid_from_pgrx(job_id)
-        );
+        {
+            pgrx::log!(
+                "koldstore auto-flush reconciliation: enqueued table_oid={} job={}",
+                table_oid,
+                crate::spi::uuid_from_pgrx(job_id)
+            );
 
-        if crate::guc::flush_execution_mode() == crate::settings::FlushExecutionMode::Inline {
-            let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(oid)? else {
-                pgrx::log!(
-                    "koldstore auto-flush: table_oid={} already owned; leaving durable job queued",
-                    table_oid
-                );
-                continue;
-            };
-            let completed_job =
-                crate::sql::flush::execute::flush_table_with_session_lock(oid, false, guard)?;
-            completed |= flush_job_completed(completed_job)?;
+            if crate::guc::flush_execution_mode() == crate::settings::FlushExecutionMode::Inline {
+                if let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(oid)? {
+                    let completed_job = crate::sql::flush::execute::flush_table_with_session_lock(
+                        oid, false, guard,
+                    )?;
+                    completed = flush_job_completed(completed_job)?;
+                } else {
+                    pgrx::log!(
+                        "koldstore auto-flush: table_oid={} already owned; leaving durable job queued",
+                        table_oid
+                    );
+                }
+            }
         }
     }
 
     if more_due {
-        // Another bounded page is already due. Publish a new maintenance
-        // generation instead of keeping this worker alive scanning indefinitely.
+        // Another due table remains. Publish a new maintenance generation
+        // instead of flushing multiple tables in one reconciliation tick.
         crate::worker::wake::mark_schedule_pending();
     }
 

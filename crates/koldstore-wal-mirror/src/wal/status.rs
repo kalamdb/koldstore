@@ -38,18 +38,33 @@ pub struct StatusWalApplierSnapshot {
     pub starting: bool,
 }
 
+/// Already-fetched inputs for [`build_async_mirror_status`].
+#[derive(Debug)]
+pub struct AsyncMirrorStatusInput {
+    pub slot_name: String,
+    pub slot_json: Value,
+    pub state_json: Value,
+    pub max_retained_bytes: i64,
+    pub shared: Option<StatusSupervisorSnapshot>,
+    pub wal_applier: StatusWalApplierSnapshot,
+    pub metrics: ApplyMetricsSnapshot,
+    pub watchdog_ms: i64,
+}
+
 /// Builds the `async_mirror_status` JSON document from already-fetched inputs.
 #[must_use]
-pub fn build_async_mirror_status(
-    slot_name: &str,
-    slot_json: Value,
-    state_json: Value,
-    max_retained_bytes: i64,
-    shared: Option<StatusSupervisorSnapshot>,
-    wal_applier: StatusWalApplierSnapshot,
-    metrics: ApplyMetricsSnapshot,
-    watchdog_ms: i64,
-) -> Value {
+pub fn build_async_mirror_status(input: AsyncMirrorStatusInput) -> Value {
+    let AsyncMirrorStatusInput {
+        slot_name,
+        slot_json,
+        state_json,
+        max_retained_bytes,
+        shared,
+        wal_applier,
+        metrics,
+        watchdog_ms,
+    } = input;
+
     let current_wal_lsn = slot_json
         .get("current_wal_lsn")
         .cloned()
