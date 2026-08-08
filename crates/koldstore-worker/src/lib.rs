@@ -1,15 +1,26 @@
-//! PostgreSQL-free primitives for KoldStore background work.
+//! PostgreSQL-free primitives for the KoldStore supervision tree.
 //!
-//! The crate intentionally contains only the small pieces shared by the
-//! PostgreSQL adapter: worker identity, transaction-local dirty tracking,
-//! test/diagnostic dispatch pausing, and lock-free supervisor state. Process
-//! lifecycle and SQL scheduling live in `pg_koldstore`.
+//! `koldstore-supervisor` is the top orchestration crate. It exposes the two
+//! independently scheduled services beneath it:
+//!
+//! - [`flush`] — durable hot-to-cold work, backed by manifest/storage/Parquet.
+//! - [`wal`] — near-realtime WAL application, backed by the mirror contract.
+//!
+//! The crate also owns worker identity, transaction-local dirty tracking,
+//! diagnostic dispatch pausing, and lock-free cluster-supervisor state. Actual
+//! PostgreSQL process lifecycle, SPI, latches, and worker entry points remain in
+//! `pg_koldstore`.
 
 mod ensure_pause;
 mod identity;
 mod policy;
 mod supervisor;
 mod wake;
+
+/// Flush workflow and its lower storage stack.
+pub use koldstore_flush as flush;
+/// WAL-applier lifecycle and mirror stack.
+pub use koldstore_wal as wal;
 
 pub use ensure_pause::EnsurePauseSet;
 pub use identity::{flush_executor_worker_type, maintenance_worker_type, DatabaseOid};
