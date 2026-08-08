@@ -163,6 +163,23 @@ pub(crate) fn has_due_pending_flush_jobs() -> crate::error::PgResult<bool> {
     .unwrap_or(false))
 }
 
+/// Returns an orphan `running` flush job to `pending` when the caller holds the
+/// session table-job lock (so no live executor owns the claim).
+///
+/// Queue `flush_table` must reclaim under that lock before releasing it for the
+/// one-shot executor; without this, an orphan stays `running` forever and the
+/// client waits out the job budget.
+pub(crate) fn reclaim_orphan_running_under_lock(
+    table_oid: pgrx::pg_sys::Oid,
+) -> crate::error::PgResult<()> {
+    if let Some(existing) = lookup_active_flush_job(table_oid)? {
+        if existing.running {
+            reclaim_running_flush_jobs(table_oid)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn ensure_flush_job(
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
