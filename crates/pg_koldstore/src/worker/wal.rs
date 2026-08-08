@@ -123,6 +123,10 @@ fn run_wal_applier(database_oid: u32) {
         return;
     }
     let _registration = WalApplierRegistration { database_oid };
+    // Recovery and scheduling share one durable generation. Apply at most once
+    // for a given recovery generation; the ephemeral maintenance worker may
+    // clear the flag later without making this process spin on an unchanged bit.
+    let mut applied_recovery_generation = 0_u64;
 
     loop {
         let slot = crate::mirror::lifecycle::slot_name(database_oid);
@@ -136,10 +140,11 @@ fn run_wal_applier(database_oid: u32) {
         let target_generation = state.wal_generation;
         let recovery_requested =
             state.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
-        let wal_due = recovery_requested
-            || state.wal_generation != state.wal_processed_generation;
+        let recovery_apply_due = recovery_requested
+            && state.maintenance_generation > applied_recovery_generation;
+        let wal_due = state.wal_generation != state.wal_processed_generation;
 
-        if wal_due {
+        if wal_due || recovery_apply_due {
             if let Err(error) = drain_wal_through_fixed_fence() {
                 crate::observability::record_async_apply_error();
                 pgrx::warning!(
@@ -148,9 +153,14 @@ fn run_wal_applier(database_oid: u32) {
                 super::wake::request_recovery(database_oid);
                 return;
             }
-            super::wake::mark_wal_processed(database_oid, target_generation);
-            // A commit that arrived during this pass advanced the generation.
-            // Re-read shared state immediately instead of sleeping first.
+            if wal_due {
+                super::wake::mark_wal_processed(database_oid, target_generation);
+            }
+            if recovery_apply_due {
+                applied_recovery_generation = state.maintenance_generation;
+            }
+            // A commit or recovery request that arrived during this pass changed
+            // a generation. Re-read shared state immediately instead of sleeping.
             continue;
         }
 
