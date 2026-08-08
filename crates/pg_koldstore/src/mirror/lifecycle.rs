@@ -379,6 +379,37 @@ pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
     }
 }
 
+/// Temporarily disables WAL-service restarts while teardown removes the slot.
+/// If any cleanup step fails, Drop restores the requirement and requests
+/// supervisor recovery so a surviving slot is not left without its applier.
+struct WalServiceDisableGuard {
+    database_oid: u32,
+    restore_on_drop: bool,
+}
+
+impl WalServiceDisableGuard {
+    fn new(database_oid: u32) -> Self {
+        crate::worker::wal::disable(database_oid);
+        Self {
+            database_oid,
+            restore_on_drop: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.restore_on_drop = false;
+    }
+}
+
+impl Drop for WalServiceDisableGuard {
+    fn drop(&mut self) {
+        if self.restore_on_drop {
+            let _ = crate::worker::wal::require(self.database_oid);
+            crate::worker::wake::request_recovery(self.database_oid);
+        }
+    }
+}
+
 /// Stops the current database WAL applier so disable cannot deadlock on [`lock_slot`].
 ///
 /// The applier may hold the apply lock inside a peek that waits for concurrent
@@ -516,6 +547,7 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         );
     }
     let slot = slot_name(database_oid);
+    let mut wal_service_guard = WalServiceDisableGuard::new(database_oid);
     // Stop the persistent WAL applier before lock_slot: a peek blocked on
     // concurrent XIDs (including this backend's open transaction) holds the
     // apply lock and would otherwise deadlock with disable.
@@ -565,5 +597,6 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         &[DatumWithOid::from(pgrx::pg_sys::Oid::from(database_oid))],
     )
     .map_err(|error| format!("clear async_mirror_state: {error}"))?;
+    wal_service_guard.disarm();
     Ok(slot_exists || publication_exists || flush_origins_dropped > 0)
 }
