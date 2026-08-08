@@ -9,8 +9,7 @@
 use std::time::Duration;
 
 use koldstore_wal::{
-    wal_applier_worker_type, WalApplierRegistry, WalApplierSnapshot,
-    WAL_APPLIER_REGISTRY_CAPACITY,
+    wal_applier_worker_type, WalApplierRegistry, WalApplierSnapshot, WAL_APPLIER_REGISTRY_CAPACITY,
 };
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::{pg_shmem_init, pg_sys, AssertPGRXSharedMemory, PgAtomic};
@@ -28,9 +27,8 @@ static WAL_APPLIER_REGISTRY: PgAtomic<SharedWalApplierRegistry> =
 
 pub(crate) fn initialize() {
     pg_shmem_init!(
-        WAL_APPLIER_REGISTRY = unsafe {
-            AssertPGRXSharedMemory::new(WalApplierRegistry::default())
-        }
+        WAL_APPLIER_REGISTRY =
+            unsafe { AssertPGRXSharedMemory::new(WalApplierRegistry::default()) }
     );
 }
 
@@ -117,9 +115,7 @@ fn run_wal_applier(database_oid: u32) {
         .get()
         .started(database_oid, unsafe { pg_sys::MyProcPid })
     {
-        pgrx::log!(
-            "koldstore WAL applier db={database_oid}: stale/unreserved start; exiting"
-        );
+        pgrx::log!("koldstore WAL applier db={database_oid}: stale/unreserved start; exiting");
         return;
     }
     let _registration = WalApplierRegistration { database_oid };
@@ -138,18 +134,15 @@ fn run_wal_applier(database_oid: u32) {
             return;
         };
         let target_generation = state.wal_generation;
-        let recovery_requested =
-            state.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
-        let recovery_apply_due = recovery_requested
-            && state.maintenance_generation > applied_recovery_generation;
+        let recovery_requested = state.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
+        let recovery_apply_due =
+            recovery_requested && state.maintenance_generation > applied_recovery_generation;
         let wal_due = state.wal_generation != state.wal_processed_generation;
 
         if wal_due || recovery_apply_due {
             if let Err(error) = drain_wal_through_fixed_fence() {
                 crate::observability::record_async_apply_error();
-                pgrx::warning!(
-                    "koldstore WAL applier db={database_oid} apply deferred: {error}"
-                );
+                pgrx::warning!("koldstore WAL applier db={database_oid} apply deferred: {error}");
                 super::wake::request_recovery(database_oid);
                 return;
             }
