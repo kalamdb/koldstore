@@ -222,7 +222,7 @@ fn sync_runtime_artifacts_after_schema_refresh(
         primary_key_renames, resolve_scope_column_name, runtime_artifacts_need_sync,
         QualifiedTableName,
     };
-    use koldstore_mirror::MirrorRelation;
+    use koldstore_wal_mirror::MirrorRelation;
 
     let options: ManageTableOptions =
         serde_json::from_value(active.options.clone()).unwrap_or_default();
@@ -239,8 +239,9 @@ fn sync_runtime_artifacts_after_schema_refresh(
 
     let renames = primary_key_renames(active, catalog);
     if !renames.is_empty() {
-        let statements = koldstore_mirror::plan_mirror_pk_column_renames(&mirror_storage, &renames)
-            .map_err(|error| error.to_string())?;
+        let statements =
+            koldstore_wal_mirror::plan_mirror_pk_column_renames(&mirror_storage, &renames)
+                .map_err(|error| error.to_string())?;
         for statement in statements {
             pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
         }
@@ -256,7 +257,7 @@ fn sync_runtime_artifacts_after_schema_refresh(
             .find(|column| column.column_id.get() == column_id)
             .map(|column| column.name.as_str())
     });
-    let pk_guard = koldstore_mirror::plan_mirror_pk_guard(
+    let pk_guard = koldstore_wal_mirror::plan_mirror_pk_guard(
         &source,
         &mirror,
         primary_key_shape.columns(),
@@ -264,7 +265,7 @@ fn sync_runtime_artifacts_after_schema_refresh(
     )
     .map_err(|error| error.to_string())?;
     // Drop any leftover legacy DML capture triggers from pre-WAL-only installs.
-    for statement in koldstore_mirror::plan_mirror_source_teardown(&source, &mirror)
+    for statement in koldstore_wal_mirror::plan_mirror_source_teardown(&source, &mirror)
         .map_err(|error| error.to_string())?
     {
         pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;

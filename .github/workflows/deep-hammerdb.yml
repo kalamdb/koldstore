@@ -1,0 +1,122 @@
+name: deep-hammerdb
+
+# Opt-in deep TPROC-C (+ optional CH). Never on push/PR/schedule.
+# Weekly smoke remains weekly-hammerdb.yml → scripts/hammerdb/run.sh.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Scale profile
+        required: true
+        default: standard
+        type: choice
+        options:
+          - smoke
+          - standard
+          - heavy
+          - custom
+      manage_set:
+        description: KoldStore manage set
+        required: true
+        default: append
+        type: choice
+        options:
+          - history
+          - append
+          - broad
+      ch_mode:
+        description: CH-benCHmark-style analytical mode
+        required: true
+        default: after
+        type: choice
+        options:
+          - off
+          - after
+          - concurrent
+          - only
+      pg_version:
+        description: PostgreSQL major version
+        required: true
+        default: "16"
+        type: choice
+        options:
+          - "16"
+      warehouses:
+        description: Custom warehouses (profile=custom)
+        required: false
+        default: "10"
+      vu:
+        description: Custom virtual users (profile=custom)
+        required: false
+        default: "8"
+      minutes:
+        description: Custom duration minutes (profile=custom)
+        required: false
+        default: "10"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  PGRX_VERSION: "0.19.1"
+
+jobs:
+  deep-hammerdb:
+    name: Deep HammerDB (${{ inputs.profile }} / ${{ inputs.manage_set }} / ch=${{ inputs.ch_mode }})
+    runs-on: ubuntu-latest
+    # heavy can take a long time; smoke/standard finish sooner.
+    timeout-minutes: 360
+    env:
+      KOLDSTORE_E2E_PGVERSION: ${{ inputs.pg_version }}
+      KOLDSTORE_E2E_PGPORT: "288${{ inputs.pg_version }}"
+      KOLDSTORE_E2E_PGHOST: 127.0.0.1
+      KOLDSTORE_E2E_PGDATABASE: koldstore_pgrx_e2e
+      KOLDSTORE_E2E_WAIT_FOR_STARTUP: "1"
+      PGRX_PG_CONFIG: /usr/lib/postgresql/${{ inputs.pg_version }}/bin/pg_config
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install PostgreSQL ${{ inputs.pg_version }} development packages
+        run: bash scripts/ci/install-pgdg-dev.sh ${{ inputs.pg_version }}
+
+      - name: Install cargo-pgrx
+        run: cargo install cargo-pgrx --version ${PGRX_VERSION} --locked
+
+      - name: Initialize pgrx for PostgreSQL ${{ inputs.pg_version }}
+        run: cargo pgrx init --pg${{ inputs.pg_version }} "${PGRX_PG_CONFIG}"
+
+      - name: Install HammerDB
+        id: hammerdb
+        run: |
+          BIN="$(bash scripts/ci/install-hammerdb.sh | tail -n 1)"
+          echo "bin=${BIN}" >> "$GITHUB_OUTPUT"
+
+      - name: Apply custom scale overrides
+        if: inputs.profile == 'custom'
+        run: |
+          echo "KOLDSTORE_HAMMERDB_WAREHOUSES=${{ inputs.warehouses }}" >> "$GITHUB_ENV"
+          echo "KOLDSTORE_HAMMERDB_VU=${{ inputs.vu }}" >> "$GITHUB_ENV"
+          echo "KOLDSTORE_HAMMERDB_MINUTES=${{ inputs.minutes }}" >> "$GITHUB_ENV"
+
+      - name: Run deep HammerDB
+        env:
+          HAMMERDB_BIN: ${{ steps.hammerdb.outputs.bin }}
+          KOLDSTORE_PGRX_INSTALL_SUDO: "1"
+        run: |
+          bash scripts/hammerdb/run-deep.sh \
+            --profile "${{ inputs.profile }}" \
+            --manage-set "${{ inputs.manage_set }}" \
+            --ch "${{ inputs.ch_mode }}" \
+            "${{ inputs.pg_version }}"
+
+      - name: Upload deep HammerDB artifacts
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: deep-hammerdb-${{ inputs.profile }}-${{ inputs.manage_set }}-${{ inputs.ch_mode }}
+          path: |
+            target/hammerdb-deep/
+          if-no-files-found: warn

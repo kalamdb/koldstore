@@ -8,8 +8,15 @@
 use std::time::Duration;
 
 use koldstore_common::{quote_ident, QualifiedTableName};
-use koldstore_worker::DatabaseOid;
+use koldstore_supervisor::DatabaseOid;
+use koldstore_wal_mirror::{
+    flush_replication_origin_name as wal_flush_origin_name,
+    is_flush_replication_origin as wal_is_flush_replication_origin, published_column_list,
+    slot_name as wal_slot_name,
+};
 use pgrx::datum::DatumWithOid;
+
+pub use koldstore_wal_mirror::PUBLICATION_NAME;
 
 const APPLY_LOCK_NAMESPACE: i32 = 1_263_354_732;
 const SLOT_PROVISION_LOCK_NAMESPACE: i32 = 1_263_354_734;
@@ -18,38 +25,22 @@ const LIFECYCLE_LOCK_NAMESPACE: i32 = 1_263_354_735;
 #[cfg(feature = "pg15")]
 pub(crate) const FLUSH_ORIGIN_LOCK_NAMESPACE: i32 = 1_263_354_736;
 
-/// Publication shared by async managed tables in one database.
-pub const PUBLICATION_NAME: &str = "koldstore_async_mirror";
-
-/// Prefix for flush-prune replication origins stamped on async cleanup WAL.
-///
-/// PG16+ peek uses `origin=none` (defense in depth) and prune stamps
-/// `DoNotReplicateId` instead. PG15 has no that filter, so apply must honor
-/// ORIGIN messages whose name matches this database's flush origin.
-const FLUSH_REPLICATION_ORIGIN_PREFIX: &str = "koldstore_flush";
-
 /// Returns the database-scoped flush replication origin name (PG15 prune path).
-///
-/// Replication-origin sessions are cluster-global and exclusive. Including the
-/// database OID lets independent databases flush concurrently; same-DB parallel
-/// prunes serialize on an advisory xact lock in `arm_flush_replication_origin`.
 #[must_use]
 pub(crate) fn flush_replication_origin_name(database_oid: DatabaseOid) -> String {
-    format!("{FLUSH_REPLICATION_ORIGIN_PREFIX}_{}", database_oid.get())
+    wal_flush_origin_name(database_oid.get())
 }
 
 /// Returns true when `name` is a flush-prune origin for `database_oid`.
-///
-/// Matches the database-scoped `koldstore_flush_<oid>` name stamped by prune.
 #[must_use]
 pub(crate) fn is_flush_replication_origin(name: &str, database_oid: DatabaseOid) -> bool {
-    name == flush_replication_origin_name(database_oid)
+    wal_is_flush_replication_origin(name, database_oid.get())
 }
 
 /// Returns the cluster-unique logical slot name for a database OID.
 #[must_use]
 pub(crate) fn slot_name(database_oid: u32) -> String {
-    format!("koldstore_async_{database_oid}")
+    wal_slot_name(database_oid)
 }
 
 /// Prepares the database slot before `manage_table` performs transactional DDL.
@@ -95,7 +86,7 @@ fn prepare_slot_locked(database_oid: u32, slot: &str) -> Result<(), String> {
     // the parent an XID, and the slot's consistent-point search would then
     // wait for the parent while the parent waits for the provisioner.
     let slot_ready = native_slot_exists(slot);
-    let publication_ready = native_publication_exists();
+    let publication_ready = native_publication_exists_for_provision();
     if !slot_ready || !publication_ready {
         require_no_assigned_xid_for_slot_provision()?;
         super::provision::provision_infrastructure(database_oid)?;
@@ -122,10 +113,6 @@ fn require_no_assigned_xid_for_slot_provision() -> Result<(), String> {
         );
     }
     Ok(())
-}
-
-fn native_publication_exists() -> bool {
-    native_publication_exists_for_provision()
 }
 
 /// Native publication probe for pre-SPI provisioning paths (no XID assigned).
@@ -265,25 +252,6 @@ fn reconcile_publication_columns(
     Ok(())
 }
 
-/// Quoted PK (+ optional segment-order) column list for publication DDL.
-fn published_column_list(
-    primary_key: &koldstore_common::PrimaryKeyShape,
-    order_column: Option<&str>,
-) -> String {
-    let mut published = primary_key
-        .columns()
-        .iter()
-        .map(|column| quote_ident(column.column().as_str()))
-        .collect::<Vec<_>>();
-    if let Some(order_column) = order_column {
-        let quoted = quote_ident(order_column);
-        if !published.iter().any(|column| column == &quoted) {
-            published.push(quoted);
-        }
-    }
-    published.join(", ")
-}
-
 fn validate_slot(slot: &str) -> Result<(), String> {
     let compatible = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (\
@@ -379,17 +347,48 @@ pub(super) fn wait_until_slot_inactive(slot: &str) -> Result<(), String> {
     }
 }
 
-/// Stops the current database maintenance worker so disable cannot deadlock on [`lock_slot`].
+/// Temporarily disables WAL-service restarts while teardown removes the slot.
+/// If any cleanup step fails, Drop restores the requirement and requests
+/// supervisor recovery so a surviving slot is not left without its applier.
+struct WalServiceDisableGuard {
+    database_oid: u32,
+    restore_on_drop: bool,
+}
+
+impl WalServiceDisableGuard {
+    fn new(database_oid: u32) -> Self {
+        crate::worker::wal::disable(database_oid);
+        Self {
+            database_oid,
+            restore_on_drop: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.restore_on_drop = false;
+    }
+}
+
+impl Drop for WalServiceDisableGuard {
+    fn drop(&mut self) {
+        if self.restore_on_drop {
+            let _ = crate::worker::wal::require(self.database_oid);
+            crate::worker::wake::request_recovery(self.database_oid);
+        }
+    }
+}
+
+/// Stops the current database WAL applier so disable cannot deadlock on [`lock_slot`].
 ///
-/// Maintenance may hold the apply lock inside a peek that waits for concurrent
+/// The applier may hold the apply lock inside a peek that waits for concurrent
 /// XIDs — including this backend's open transaction (common under `#[pg_test]`).
 /// Terminate by `backend_type` (not only `active_pid`) so a worker blocked
 /// before acquiring the slot is also cleared.
 fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
-    let worker_type = koldstore_worker::maintenance_worker_type(DatabaseOid::new(database_oid));
+    let worker_type = koldstore_wal_mirror::wal_applier_worker_type(database_oid);
     // Always return a row: an empty SELECT through Spi::run_with_args errors with
-    // "SpiTupleTable positioned before the start or after the end" when no
-    // maintenance worker is running.
+    // "SpiTupleTable positioned before the start or after the end" when no WAL
+    // applier is running.
     let _ = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT COALESCE(\
            (SELECT bool_or(pg_catalog.pg_terminate_backend(pid)) \
@@ -430,7 +429,7 @@ fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String
         }
         if std::time::Instant::now() >= deadline {
             return Err(format!(
-                "async mirror maintenance worker for slot {slot} did not stop after terminate \
+                "async mirror WAL applier for slot {slot} did not stop after terminate \
                  (slot_idle={slot_idle}, worker_gone={worker_gone})"
             ));
         }
@@ -516,11 +515,12 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         );
     }
     let slot = slot_name(database_oid);
-    // Stop maintenance before lock_slot: a peek blocked on concurrent XIDs
-    // (including this backend's open transaction) holds the apply lock and
-    // would otherwise deadlock with disable.
+    let mut wal_service_guard = WalServiceDisableGuard::new(database_oid);
+    // Stop the persistent WAL applier before lock_slot: a peek blocked on
+    // concurrent XIDs (including this backend's open transaction) holds the
+    // apply lock and would otherwise deadlock with disable.
     stop_async_mirror_applier(database_oid, &slot)
-        .map_err(|error| format!("stop maintenance worker: {error}"))?;
+        .map_err(|error| format!("stop WAL applier: {error}"))?;
     lock_slot(database_oid).map_err(|error| format!("lock apply: {error}"))?;
     let slot_exists = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_replication_slots WHERE slot_name = $1)",
@@ -565,5 +565,6 @@ fn disable_async_mirror_impl() -> Result<bool, String> {
         &[DatumWithOid::from(pgrx::pg_sys::Oid::from(database_oid))],
     )
     .map_err(|error| format!("clear async_mirror_state: {error}"))?;
+    wal_service_guard.disarm();
     Ok(slot_exists || publication_exists || flush_origins_dropped > 0)
 }

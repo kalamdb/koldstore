@@ -6,7 +6,7 @@
 //! - `provision` — one-shot slot provisioner worker
 //!
 //! Ephemeral maintenance-worker registration and its C entry point live under
-//! `crate::worker`; the PostgreSQL-free decoder lives in `koldstore_mirror`.
+//! `crate::worker`; the PostgreSQL-free decoder lives in `koldstore_wal_mirror`.
 
 #[cfg(feature = "pg")]
 pub mod apply;

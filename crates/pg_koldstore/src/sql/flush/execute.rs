@@ -724,7 +724,7 @@ fn run_async_prelock_catchup(
             skip_through,
             acknowledge_durable_checkpoint: false,
             advance_slot_on_empty: false,
-            target_prune_floor: Some((table_oid, PruneSeqFloor::new(prune_max_seq))),
+            target_prune_floor: Some((table_oid.to_u32(), PruneSeqFloor::new(prune_max_seq))),
             max_rows: Some(0),
             max_ms: Some(remaining_ms),
         })?;
@@ -775,7 +775,7 @@ fn run_async_prune_fence(
         skip_through,
         acknowledge_durable_checkpoint: false,
         advance_slot_on_empty: false,
-        target_prune_floor: Some((table_oid, PruneSeqFloor::new(prune_max_seq))),
+        target_prune_floor: Some((table_oid.to_u32(), PruneSeqFloor::new(prune_max_seq))),
         max_rows: Some(0),
         max_ms: Some(0),
     })?;
@@ -925,6 +925,12 @@ pub(crate) fn flush_table_pg_impl(
                 }
                 return Err(flush_already_in_progress_message(table_oid));
             }
+            // Successful try-lock means no live executor owns this table. Reclaim
+            // any durable orphan `running` row before releasing the lock; queue
+            // enqueue alone only force-upgrades / inserts and would leave the
+            // orphan `running` forever (e2e wait-budget hang).
+            crate::sql::flush::jobs::reclaim_orphan_running_under_lock(table_oid)
+                .map_err(|error| error.to_string())?;
             // Queue callers must not keep the session lock; one-shot executors
             // claim it for the real attempt.
             crate::sql::job_lock::unlock_table_job(table_oid)?;

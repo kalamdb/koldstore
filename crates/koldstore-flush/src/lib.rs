@@ -3,6 +3,16 @@
 //! Owns flush eligibility, job state transitions, manifest sync planning, segment
 //! cleanup, and recovery classification. Must not depend on `pgrx`. PostgreSQL job
 //! enqueue and SPI execution stay in `pg_koldstore`.
+//!
+//! The lower storage stack is exposed explicitly so the supervision tree reads
+//! naturally as `supervisor::flush::{manifest, storage, parquet}`.
+
+/// Manifest publication and generation contracts beneath flush.
+pub use koldstore_manifest as manifest;
+/// Parquet encoding/decoding beneath flush.
+pub use koldstore_parquet as parquet;
+/// Object-storage backends beneath flush.
+pub use koldstore_storage as storage;
 
 pub mod cleanup;
 pub mod encode;
@@ -32,16 +42,16 @@ pub use encode::{
 pub use ops::{
     classify_command, flush_table_request, plan_count_pending_flush_jobs,
     plan_enqueue_or_lookup_flush_job, plan_koldstore_exec, plan_mirror_flush_selection_batch,
-    plan_mirror_flush_selection_batch_with_order_key, plan_select_pending_flush_candidate,
-    sql_param_cast, table_status_plan, FlushJobEnqueuePlan, FlushRequest, KoldstoreExecPlan,
-    MirrorFlushSelectionPlan, OpsCommand, OpsError,
+    plan_mirror_flush_selection_batch_with_order_key, plan_next_pending_flush_due_epoch_ms,
+    plan_select_pending_flush_candidates, sql_param_cast, table_status_plan, FlushJobEnqueuePlan,
+    FlushRequest, KoldstoreExecPlan, MirrorFlushSelectionPlan, OpsCommand, OpsError,
 };
 pub use policy::{policy_flush_row_count, selected_rows_meet_file_minimum};
 pub use retention::{plan_purge_old_jobs, JobRetentionError, DEFAULT_PURGE_BATCH_LIMIT};
 pub use scheduler::{
-    plan_older_than_eligible_mirror_rows, plan_select_auto_flush_candidate_tables,
-    scheduler_should_flush, scheduler_should_flush_parsed, AutoFlushPlanError,
-    AUTO_FLUSH_TABLE_PREDICATE,
+    evaluate_older_than_scan, plan_older_than_eligible_mirror_rows,
+    plan_select_auto_flush_candidate_tables, scheduler_should_flush, scheduler_should_flush_parsed,
+    AutoFlushPlanError, OlderThanEvaluation, AUTO_FLUSH_TABLE_PREDICATE,
 };
 pub use segment_catalog::{
     plan_activate_flush_segments, plan_flush_segments_batch_insert, SegmentCatalogError,

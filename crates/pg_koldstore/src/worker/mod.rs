@@ -1,7 +1,8 @@
-//! PostgreSQL adapter for [`koldstore_worker`] background work.
+//! PostgreSQL adapter for the [`koldstore_supervisor`] supervision tree.
 //!
-//! The static cluster supervisor owns dynamic worker registration. Database
-//! maintenance workers and heavy flush executors are both ephemeral.
+//! The static cluster supervisor owns dynamic worker registration. WAL apply is
+//! a persistent per-database, latch-driven service; scheduled maintenance and
+//! heavy flush executors remain ephemeral.
 
 #[cfg(feature = "pg")]
 mod control;
@@ -12,13 +13,15 @@ mod flush_task;
 #[cfg(feature = "pg")]
 mod maintenance;
 #[cfg(feature = "pg")]
-mod supervisor;
+mod proc_latch;
 #[cfg(feature = "pg")]
-mod timed_policy;
+mod supervisor;
 #[cfg(feature = "pg")]
 pub(crate) mod txn;
 #[cfg(feature = "pg")]
 pub(crate) mod wake;
+#[cfg(feature = "pg")]
+pub(crate) mod wal;
 
 #[cfg(feature = "pg")]
 pub(crate) use control::require_async_mirror_worker;
@@ -32,3 +35,5 @@ pub(crate) use flush_task::schedule_policy_after_counter;
 pub(crate) use maintenance::register_maintenance_from_supervisor;
 #[cfg(feature = "pg")]
 pub(crate) use supervisor::register_if_shared_preload as register_supervisor_if_shared_preload;
+#[cfg(feature = "pg")]
+pub(crate) use wal::register_from_supervisor as register_wal_applier_from_supervisor;

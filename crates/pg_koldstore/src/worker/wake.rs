@@ -3,11 +3,12 @@
 //! Wakeups are latency hints only. The durable sources of truth remain the
 //! logical replication slot / async_mirror_state and koldstore.jobs. Foreground
 //! transactions publish monotonically increasing shared generations only after
-//! top-level commit, then wake the single postmaster-supervised cluster process.
+//! top-level commit, wake the persistent database WAL applier directly when it
+//! exists, and always wake the cluster supervisor for lifecycle recovery.
 
 use std::cell::RefCell;
 
-use koldstore_worker::{
+use koldstore_supervisor::{
     DatabaseWorkSnapshot, EnsurePauseSet, SupervisorPid, SupervisorRegistry, TransactionDirty,
     SUPERVISOR_REGISTRY_CAPACITY,
 };
@@ -181,6 +182,11 @@ pub(crate) fn clear_stale_maintenance(database_oid: u32) {
         .clear_stale_maintenance(database_oid);
 }
 
+/// Stops supervisor dispatch for a database whose capture/slot is gone.
+pub(crate) fn quiesce_database(database_oid: u32) {
+    SUPERVISOR_REGISTRY.get().quiesce(database_oid);
+}
+
 pub(crate) fn maintenance_stopped(database_oid: u32) {
     SUPERVISOR_REGISTRY
         .get()
@@ -342,13 +348,10 @@ fn publish_pending_commit() {
         let slot = crate::mirror::lifecycle::slot_name(database_oid);
         if crate::mirror::lifecycle::native_slot_exists(&slot) {
             supervisor = registry.publish_wal(database_oid);
-            // If a burst worker is already alive, wake it too. The generation is
-            // authoritative, so a stale PID or missed SetLatch cannot lose work.
-            if let Some(snapshot) = registry.snapshot(database_oid) {
-                if snapshot.maintenance_pid > 0 {
-                    set_background_worker_latch(snapshot.maintenance_pid, Some(database_oid));
-                }
-            }
+            // The persistent applier is the sub-second path. The supervisor is
+            // still woken below so a missing/stale process is recreated without
+            // making worker startup part of steady-state commit latency.
+            let _ = crate::worker::wal::wake(database_oid);
         }
     }
     if flush_pending {
@@ -441,28 +444,7 @@ fn current_nesting_level() -> u32 {
 }
 
 fn set_background_worker_latch(pid: i32, database_oid: Option<u32>) {
-    unsafe {
-        let process = pg_sys::BackendPidGetProc(pid);
-        if process.is_null() || (*process).pid != pid || !is_background_worker(process) {
-            return;
-        }
-        if let Some(database_oid) = database_oid {
-            if (*process).databaseId.to_u32() != database_oid {
-                return;
-            }
-        }
-        pg_sys::SetLatch(&raw mut (*process).procLatch);
-    }
-}
-
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
-unsafe fn is_background_worker(process: *mut pg_sys::PGPROC) -> bool {
-    unsafe { (*process).isBackgroundWorker }
-}
-
-#[cfg(feature = "pg18")]
-unsafe fn is_background_worker(process: *mut pg_sys::PGPROC) -> bool {
-    unsafe { !(*process).isRegularBackend }
+    let _ = super::proc_latch::set_background_worker_latch(pid, database_oid);
 }
 
 fn is_current_backend_background_worker() -> bool {

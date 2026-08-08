@@ -8,6 +8,7 @@ mod flush_memory_spike;
 mod full_lifecycle;
 mod jobs_and_recovery;
 mod memory_leak;
+mod multi_database_stress;
 mod query_cancel;
 mod quickstart_matrix;
 mod schema_evolution;

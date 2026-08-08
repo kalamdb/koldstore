@@ -146,11 +146,14 @@ async fn flush_check_interval_seconds_is_honored_after_worker_restart() -> Resul
         manage_auto_flush(&db.client, &relation, &db.storage_name, true).await?;
 
         // Drop interval to 1s and bounce the worker so it reloads database GUCs.
+        // Also publish schedule-dirty so maintenance re-arms cadence from the new
+        // interval instead of waiting out a prior default-30s deadline.
         configure_flush_interval_and_restart_worker(&db.client, &dbname, 1).await?;
         insert_rows(&db.client, &relation, 1, 10).await?;
         restart_database_worker(&db.client).await?;
+        common::fence_async_mirror(&db.client).await?;
 
-        wait_for_completed_flush_jobs(&db.client, &relation, 1, Duration::from_secs(15)).await?;
+        wait_for_completed_flush_jobs(&db.client, &relation, 1, SCHEDULER_DEADLINE).await?;
         reset_flush_interval(&db.client, &dbname).await?;
     }
     Ok(())
@@ -172,30 +175,12 @@ async fn worker_startup_reclaims_orphan_running_and_auto_flushes() -> Result<()>
         insert_rows(&db.client, &relation, 1, 10).await?;
         common::fence_async_mirror(&db.client).await?;
 
-        // Stop the worker before planting the orphan so auto-flush cannot race
-        // ahead and complete a flush before reclaim runs.
-        let _ = common::terminate_async_worker(&db.client).await?;
+        // Pause dispatch before planting so WAL-side auto-enqueue cannot leave a
+        // second active job (jobs_one_active_flush_per_scope_idx) or finish the
+        // flush before reclaim runs.
+        common::force_stop_async_worker(&db.client).await?;
         let completed_before = completed_flush_jobs(&db.client, &relation).await?;
-
-        // Simulate a crash-orphaned durable claim with no session lock holder.
-        db.client
-            .execute(
-                r#"
-                INSERT INTO koldstore.jobs (
-                  id, table_oid, scope_key, job_type, status, phase, payload
-                ) VALUES (
-                  gen_random_uuid(),
-                  $1::text::regclass::oid,
-                  '',
-                  'flush',
-                  'running',
-                  'writing',
-                  '{"force":false}'::jsonb
-                )
-                "#,
-                &[&relation],
-            )
-            .await?;
+        plant_orphan_running_flush(&db.client, &relation).await?;
 
         // Bounce the worker so its first flush-check tick reclaims + schedules.
         restart_database_worker(&db.client).await?;
@@ -267,6 +252,63 @@ async fn configure_flush_interval_and_restart_worker(
 ) -> Result<()> {
     set_flush_interval(client, dbname, seconds).await?;
     let _ = common::terminate_async_worker(client).await?;
+    // Ensure publishes schedule-dirty after commit so maintenance reloads the
+    // database GUC and re-arms flush_check_interval cadence immediately.
+    let _ = client
+        .query_one(
+            "SELECT koldstore.internal_ensure_async_mirror_worker()",
+            &[],
+        )
+        .await?;
+    Ok(())
+}
+
+/// Plants a crash-style `running` flush row with no session lock holder.
+///
+/// WAL apply may already have enqueued a pending/running job for the same
+/// table. Convert that row in place when present; only INSERT when none exists
+/// so we never trip `jobs_one_active_flush_per_scope_idx`.
+async fn plant_orphan_running_flush(client: &tokio_postgres::Client, relation: &str) -> Result<()> {
+    let updated = client
+        .execute(
+            r#"
+            UPDATE koldstore.jobs
+            SET status = 'running',
+                phase = 'writing',
+                attempt_token = NULL,
+                available_at = clock_timestamp(),
+                error_trace = NULL,
+                payload = '{"force":false}'::jsonb,
+                updated_at = clock_timestamp()
+            WHERE table_oid = $1::text::regclass::oid
+              AND scope_key = ''
+              AND job_type = 'flush'
+              AND status IN ('pending', 'running')
+            "#,
+            &[&relation],
+        )
+        .await?;
+    if updated > 0 {
+        return Ok(());
+    }
+    client
+        .execute(
+            r#"
+            INSERT INTO koldstore.jobs (
+              id, table_oid, scope_key, job_type, status, phase, payload
+            ) VALUES (
+              gen_random_uuid(),
+              $1::text::regclass::oid,
+              '',
+              'flush',
+              'running',
+              'writing',
+              '{"force":false}'::jsonb
+            )
+            "#,
+            &[&relation],
+        )
+        .await?;
     Ok(())
 }
 

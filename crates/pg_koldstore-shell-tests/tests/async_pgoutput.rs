@@ -1,4 +1,4 @@
-use koldstore_mirror::pgoutput::{decode_message, PgOutputMessage, PgOutputValue};
+use koldstore_wal_mirror::pgoutput::{decode_message, PgOutputMessage, PgOutputValue};
 
 fn cstring(bytes: &mut Vec<u8>, value: &str) {
     bytes.extend_from_slice(value.as_bytes());

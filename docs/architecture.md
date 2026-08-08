@@ -56,12 +56,13 @@ Design notes for correctness edge cases (proposed or landed):
 
 Managed user tables keep application columns only. Sequence and delete state
 live in `koldstore.{table}__cl` and in cold Parquet metadata (`seq`, `deleted`).
-Committed primary-key-only WAL is applied to the mirror by a database worker,
-with an explicit consistency fence for strong reads. UPDATE uses a direct set-based update
-for existing mirror keys and a conflict-safe insert-missing fallback for keys
-already pruned by flush. The worker drains bounded batches in short retry
-bursts and always yields between bursts.
-See [dml-table](architecture/dml-table.md) and
+Committed primary-key-only WAL is applied to the mirror by a persistent
+per-database WAL applier, with an explicit consistency fence for strong reads.
+UPDATE uses a direct set-based update for existing mirror keys and a
+conflict-safe insert-missing fallback for keys already pruned by flush. The
+applier drains bounded batches on commit latch wakes (with a 30 s watchdog for
+missed hints) and holds no transaction while idle. See
+[dml-table](architecture/dml-table.md) and
 [mirror capture](architecture/mirror-capture.md).
 
 ### Custom scan instead of an external query engine

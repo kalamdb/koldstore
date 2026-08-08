@@ -1,9 +1,11 @@
 # Jobs and Scheduler
 
 KoldStore uses durable rows in `koldstore.jobs` as a PostgreSQL-native flush
-queue. A database-scoped coordinator applies committed WAL, evaluates automatic
-flush eligibility, and spawns bounded one-shot flush executors. Jobs are both
-the work request and the operator-visible progress record.
+queue. Scheduling and recovery run in an ephemeral per-database maintenance
+worker; Parquet work runs in bounded one-shot flush executors. Persistent WAL
+application is a separate latch-driven service and is not part of the flush
+scheduler loop. Jobs are both the work request and the operator-visible
+progress record.
 
 Production default is `koldstore.flush_execution = queue`.
 `koldstore.flush_execution = inline` exists only so `#[pg_test]` SPI
@@ -13,28 +15,31 @@ transactions can run flush in the calling backend.
 
 ```mermaid
 flowchart TD
-  launcher["Shared-preload launcher"] --> worker["One database worker"]
-  worker --> apply["Bounded WAL mirror apply"]
-  worker --> cadence{"Flush check due?"}
+  supervisor["Cluster supervisor"] --> wal["Persistent WAL applier / DB"]
+  supervisor --> maint["Ephemeral maintenance / DB"]
+  supervisor --> spawn["Spawn flush executors\nupto max_parallel_flush_jobs"]
+  maint --> cadence{"Flush check due?"}
   cadence -->|yes| candidate["Find first eligible table"]
   candidate --> enqueue["Enqueue flush job"]
-  enqueue --> spawn["Spawn flush executors\nupto max_parallel_flush_jobs"]
+  enqueue --> spawn
   client["flush_table()"] --> enqueue
   client --> spawn
   spawn --> exec["One-shot flush executor"]
   exec --> jobs["Update koldstore.jobs"]
 ```
 
-The launcher discovers KoldStore logical slots after postmaster start and
-ensures one worker per database on a sub-second poll. It is registered as a
-restartable static background worker: after a crash or `pg_terminate_backend`
-it comes back (exit code 1 + `bgw_restart_time`), so the cluster is not left
-without an always-on ensure loop until the next postmaster restart.
-`manage_table`, explicit consistency fences, and the worker itself also ensure
-the worker when necessary. A per-database applier stays alive while the database
-has either a mirror slot or an automatic-flush-eligible managed table; those
-appliers use `BGW_NEVER_RESTART` so intentional slot drop leaves them stopped
-until the launcher or session ensure re-registers them.
+The static cluster supervisor discovers KoldStore-active databases and keeps
+required services alive. One persistent WAL applier runs per active database
+(see [mirror-capture.md](mirror-capture.md)). Maintenance workers are
+ephemeral: they reconcile recovery, evaluate automatic flush eligibility,
+reconcile the flush queue, recover orphan jobs, wait a short 200 ms
+burst-coalescing grace, then exit when caught up.
+
+`manage_table`, explicit consistency fences, and the supervisor also ensure
+lifecycle when necessary. WAL appliers use `BGW_NEVER_RESTART` so intentional
+slot drop leaves them stopped until the supervisor re-registers a still-required
+service. A registration backoff applies when `max_worker_processes` is
+exhausted.
 
 ## `koldstore.jobs`
 
@@ -68,24 +73,21 @@ safe boundaries. Drop and unmanage hard-cancel pending jobs and signal running
 ones. Startup/scheduler recovery reclaims a durable `running` flush only after
 it can acquire that table's job lock, which proves no live owner holds it.
 
-## Worker loop
+## Maintenance and WAL loops
 
-Managed commits advance a shared database generation and set the worker latch.
-Concurrent commits therefore coalesce into one bounded WAL drain. If an
-asynchronous commit is not decodeable on the first wake, the worker retries with
-a 10–200 ms exponential delay for at most one second. A row or time budget that
-leaves work pending gets a bounded number of immediate retries before yielding
-to the latch. Soft SPI/apply errors stay in-process with exponential backoff
-(capped at a few seconds) rather than permanently ending the applier; hard
-process death is recovered by the shared-preload launcher on a sub-second poll
-(or by session ensure/fence). A 30-second watchdog recovers missed in-memory
-hints.
+Managed commits advance a shared WAL generation and set the persistent WAL
+applier latch (with the cluster supervisor as lifecycle fallback). Concurrent
+commits coalesce into one bounded WAL drain. Soft SPI/apply errors stay in the
+WAL process with bounded exponential backoff rather than permanently ending the
+applier; hard process death is recovered by the supervisor even when the mirror
+is already caught up. A 30-second watchdog recovers missed in-memory hints
+without opening an idle apply transaction.
 
-The flush check is independent of the apply wake and runs only when
-`koldstore.flush_check_interval_seconds` is due. This avoids catalog scans on
-every commit wake. The worker evaluates at most one table and enqueues at most
-one auto-flush job per check, then may spawn multiple executors for already
-pending work up to `koldstore.max_parallel_flush_jobs`.
+Flush scheduling is independent of the apply wake. Ephemeral maintenance runs
+only when recovery or schedule work is due, evaluates at most one table, and
+enqueues at most one auto-flush job per check. It may then ask the supervisor to
+spawn multiple executors for already pending work up to
+`koldstore.max_parallel_flush_jobs`.
 
 Auto-flush eligibility is **not** driven by PostgreSQL autovacuum. It uses
 KoldStore mirror / hot-row policy on that check cadence. See
@@ -108,7 +110,8 @@ the first one whose policy is due.
   opt-out, so operators can flush an opted-out table deliberately.
 
 The internal `koldstore.internal_run_flush_scheduler_tick()` exists for tests
-and diagnostics. Production scheduling comes from the database worker.
+and diagnostics. Production scheduling comes from ephemeral maintenance workers
+started by the cluster supervisor.
 
 ## Operational knobs
 

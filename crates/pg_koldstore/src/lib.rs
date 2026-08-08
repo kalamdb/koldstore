@@ -20,7 +20,7 @@ pub mod row_counter_cache;
 pub mod settings;
 pub mod spi;
 pub mod sql;
-/// Cluster-supervised PostgreSQL background work adapter over `koldstore-worker`.
+/// Cluster-supervised PostgreSQL background work adapter.
 #[cfg(feature = "pg")]
 pub mod worker;
 
@@ -43,7 +43,7 @@ pub mod pg_test {
             "wal_level=logical",
             // Merge-scan hooks + supervisor must exist in every backend.
             "shared_preload_libraries=koldstore",
-            // Supervisor + provisioner + ephemeral workers need headroom.
+            // Supervisor + persistent WAL appliers + ephemeral workers need headroom.
             "max_worker_processes=16",
         ]
     }
@@ -101,6 +101,7 @@ pub extern "C" fn _PG_init() {
     guc::define_gucs();
     object_store::install_interrupt_hook();
     worker::wake::initialize();
+    worker::wal::initialize();
     catalog::cache::register_invalidation_callback();
     hooks::register_hooks();
     row_counter_cache::register_xact_callbacks();

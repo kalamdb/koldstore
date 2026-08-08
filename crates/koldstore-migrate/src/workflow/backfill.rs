@@ -3,7 +3,7 @@
 use koldstore_common::{
     is_safe_identifier, quote_ident, snowflake_id_call_expression, PrimaryKeyColumnShape,
 };
-use koldstore_mirror::{quoted_pk_columns, MirrorColumn};
+use koldstore_wal_mirror::{quoted_pk_columns, MirrorColumn};
 use thiserror::Error;
 
 use koldstore_common::{SqlParamType, SqlStatement};
@@ -30,11 +30,11 @@ pub enum MirrorInitializationError {
     Spi(String),
 }
 
-impl From<koldstore_mirror::MirrorError> for MirrorInitializationError {
-    fn from(error: koldstore_mirror::MirrorError) -> Self {
+impl From<koldstore_wal_mirror::MirrorError> for MirrorInitializationError {
+    fn from(error: koldstore_wal_mirror::MirrorError) -> Self {
         match error {
-            koldstore_mirror::MirrorError::MissingPrimaryKey => Self::MissingPrimaryKey,
-            koldstore_mirror::MirrorError::InvalidColumn(name) => Self::InvalidIdentifier(name),
+            koldstore_wal_mirror::MirrorError::MissingPrimaryKey => Self::MissingPrimaryKey,
+            koldstore_wal_mirror::MirrorError::InvalidColumn(name) => Self::InvalidIdentifier(name),
             other => Self::Spi(other.to_string()),
         }
     }

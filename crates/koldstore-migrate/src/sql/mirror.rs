@@ -1,12 +1,12 @@
 //! Change-log mirror orchestration for clean-schema managed tables.
 //!
-//! Combines [`koldstore_mirror::shared`] DDL with
-//! [`koldstore_mirror::guard`] PK guards into a migrate-facing
+//! Combines [`koldstore_wal_mirror::shared`] DDL with
+//! [`koldstore_wal_mirror::guard`] PK guards into a migrate-facing
 //! [`ChangeLogMirrorPlan`]. Storage errors map into this module's
 //! [`MirrorError`].
 
 use koldstore_common::{PrimaryKeyColumnShape, PrimaryKeyShape, SqlStatement};
-use koldstore_mirror::{
+use koldstore_wal_mirror::{
     mirror_relation_for_source as storage_mirror_relation_for_source, plan_mirror_pk_guard,
     plan_mirror_schema_with_order_key, MirrorPkGuardPlan,
 };
@@ -35,20 +35,20 @@ pub enum MirrorError {
     Guard(String),
 }
 
-impl From<koldstore_mirror::MirrorError> for MirrorError {
-    fn from(error: koldstore_mirror::MirrorError) -> Self {
+impl From<koldstore_wal_mirror::MirrorError> for MirrorError {
+    fn from(error: koldstore_wal_mirror::MirrorError) -> Self {
         match error {
-            koldstore_mirror::MirrorError::MissingPrimaryKey => Self::MissingPrimaryKey,
-            koldstore_mirror::MirrorError::InvalidMirrorName(value) => {
+            koldstore_wal_mirror::MirrorError::MissingPrimaryKey => Self::MissingPrimaryKey,
+            koldstore_wal_mirror::MirrorError::InvalidMirrorName(value) => {
                 Self::InvalidMirrorName(value)
             }
-            koldstore_mirror::MirrorError::NullablePrimaryKey(column) => {
+            koldstore_wal_mirror::MirrorError::NullablePrimaryKey(column) => {
                 Self::NullablePrimaryKey(column)
             }
-            koldstore_mirror::MirrorError::InvalidColumn(column) => {
+            koldstore_wal_mirror::MirrorError::InvalidColumn(column) => {
                 Self::Sql(format!("invalid mirror storage column `{column}`"))
             }
-            koldstore_mirror::MirrorError::Sql(message) => Self::Sql(message),
+            koldstore_wal_mirror::MirrorError::Sql(message) => Self::Sql(message),
         }
     }
 }

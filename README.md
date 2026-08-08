@@ -225,15 +225,15 @@ flowchart LR
   Merge --> Catalog[KoldStore catalog]
   Catalog --> Cold[Parquet / object storage]
 
-  WAL[Committed PK-only WAL] --> Worker[Mirror worker]
-  Worker --> Mirror[Latest-state mirror]
+  WAL[Committed PK-only WAL] --> Applier[Persistent WAL applier]
+  Applier --> Mirror[Latest-state mirror]
   Mirror --> Flush[Flush jobs]
   Flush --> Cold
 ```
 
 1. The source table remains a normal PostgreSQL heap.
 2. PostgreSQL continues handling foreground transactions and hot indexes.
-3. A database worker consumes committed primary-key changes from logical WAL.
+3. A persistent per-database WAL applier consumes committed primary-key changes from logical WAL.
 4. Flush jobs write eligible historical rows to immutable Parquet segments.
 5. Cold visibility is published before matching hot rows are removed.
 6. `KoldMergeScan` combines current hot state, cold history, and mirror metadata for supported reads.

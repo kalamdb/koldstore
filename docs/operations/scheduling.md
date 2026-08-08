@@ -17,22 +17,24 @@ This is **not** PostgreSQL autovacuum.
 | | Autovacuum | KoldStore auto-flush |
 |---|---|---|
 | Trigger | Dead tuples, freeze horizons, wraparound risk | Mirror / hot-row policy on managed tables |
-| Cadence | Autovacuum launcher + per-table thresholds | `koldstore.flush_check_interval_seconds` on the database worker |
+| Cadence | Autovacuum launcher + per-table thresholds | `koldstore.flush_check_interval_seconds` on ephemeral maintenance |
 | Work | VACUUM / ANALYZE heap | Enqueue a flush job → Parquet + prune |
 
 Conceptually both are background maintenance when a threshold is crossed, but
 they use different metrics and workers. Autovacuum never enqueues KoldStore
 flush jobs, and KoldStore does not hook the autovacuum launcher.
 
-On each `flush_check_interval_seconds` tick the database worker:
+On each `flush_check_interval_seconds` tick ephemeral maintenance:
 
-1. Applies available async mirror WAL first (when an async slot exists)
-2. Evaluates active managed tables with `auto_flush` enabled
-3. When `hot_row_limit` / `min_flush_rows` say a flush is due **and** the
+1. Evaluates active managed tables with `auto_flush` enabled
+2. When `hot_row_limit` / `min_flush_rows` say a flush is due **and** the
    selected row count is at least `max_rows_per_file`, enqueues at most one
-   flush job and spawns flush executors up to
+   flush job and asks the supervisor to spawn flush executors up to
    `koldstore.max_parallel_flush_jobs`. Undersized selections (for example 450
    excess with `max_rows_per_file = 1000`) are skipped — no job row is created.
+
+WAL application is not part of this tick: the persistent WAL applier runs as a
+separate latch-driven service. See [mirror-capture.md](../architecture/mirror-capture.md).
 
 ## Built-in scheduler
 
@@ -43,27 +45,28 @@ is mandatory for correctness (not only for scheduling).
 ```sql
 -- Per-database (preferred for the bgworker — new backends inherit this):
 ALTER DATABASE mydb SET koldstore.flush_check_interval_seconds = 5;
--- Then restart the database worker (or wait for a new ensure after terminate).
+-- Then wake maintenance (or wait for the next supervisor ensure).
 
 -- Or persist cluster-wide:
 ALTER SYSTEM SET koldstore.flush_check_interval_seconds = 60;
 SELECT pg_reload_conf();
 ```
 
-Session `SET` only affects the current backend. The built-in worker reads GUCs
-from its own connection (database / system defaults), so use `ALTER DATABASE`
+Session `SET` only affects the current backend. Background workers read GUCs
+from their own connection (database / system defaults), so use `ALTER DATABASE`
 or `ALTER SYSTEM` when changing scheduler cadence for background flushes.
 
 ### Async apply commit wakeups and watchdog
 
-Managed-table commits advance a database-scoped shared generation and set the
-worker latch. Concurrent commits coalesce: the worker drains through the latest
+Managed-table commits advance a database-scoped shared WAL generation and set
+the persistent WAL applier latch (with the cluster supervisor as lifecycle
+fallback). Concurrent commits coalesce: the applier drains through the latest
 generation instead of queueing one job per transaction. Each apply tick runs in
 **one** PostgreSQL transaction: mirror batch writes and
 `async_mirror_state.applied_lsn` commit together (or roll back together on
-ERROR).
+ERROR). While idle, the applier holds no open transaction.
 
-The worker does not periodically decode on a short poll interval. A safety
+The applier does not periodically decode on a short poll interval. A safety
 watchdog controlled by `koldstore.async_apply_watchdog_interval_ms` (default
 `30000`, clamped to `1000..=300000`) catches a lost notification or a two-phase
 commit that cannot carry the originating backend's in-memory hint.
@@ -71,7 +74,7 @@ commit that cannot carry the originating backend's in-memory hint.
 ```sql
 -- Per-database (preferred for the bgworker):
 ALTER DATABASE mydb SET koldstore.async_apply_watchdog_interval_ms = 30000;
--- Restart the database worker (or terminate + ensure) so it reconnects with
+-- Restart the WAL applier (or terminate + ensure) so it reconnects with
 -- the new database default. SIGHUP also reloads ALTER SYSTEM values.
 
 -- Or persist cluster-wide:
@@ -79,7 +82,7 @@ ALTER SYSTEM SET koldstore.async_apply_watchdog_interval_ms = 30000;
 SELECT pg_reload_conf();
 ```
 
-Session `SET` does not affect the background worker. Prefer `ALTER DATABASE`
+Session `SET` does not affect background workers. Prefer `ALTER DATABASE`
 or `ALTER SYSTEM` + reload / worker restart, matching
 `flush_check_interval_seconds`.
 

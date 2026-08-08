@@ -4,6 +4,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+# shellcheck source=lib/pgrx-lifecycle.sh
+source "${ROOT_DIR}/scripts/lib/pgrx-lifecycle.sh"
 
 PG_VERSION="${1:-${KOLDSTORE_E2E_PGVERSION:-16}}"
 PG_FEATURE="pg${PG_VERSION}"
@@ -34,8 +36,11 @@ normalize_output() {
 }
 
 prepare_cluster() {
+  # CI runs examples first on the same pgrx cluster; leftover wal/maintenance
+  # bgworkers make plain `cargo pgrx stop` fail with "server does not shut down".
   echo "starting pgrx-managed PostgreSQL ${PG_VERSION}"
-  cargo pgrx start "$PG_FEATURE" \
+  pgrx_force_stop "${PG_VERSION}"
+  pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" \
     --postgresql-conf wal_level=logical
 
   echo "installing koldstore into pgrx PostgreSQL ${PG_VERSION}"
@@ -51,8 +56,8 @@ prepare_cluster() {
   cargo pgrx install "${INSTALL_ARGS[@]}"
 
   echo "restarting pgrx-managed PostgreSQL ${PG_VERSION} with koldstore shared_preload"
-  cargo pgrx stop "$PG_FEATURE"
-  cargo pgrx start "$PG_FEATURE" \
+  pgrx_force_stop "${PG_VERSION}"
+  pgrx_start_or_dump "${PG_VERSION}" "$PG_FEATURE" \
     --postgresql-conf wal_level=logical \
     --postgresql-conf shared_preload_libraries=koldstore
 

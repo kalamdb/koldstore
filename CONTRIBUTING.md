@@ -84,6 +84,8 @@ scripts/readiness/run-crash-recovery.sh 16
 scripts/readiness/run-sqlsmith.sh 16          # KOLDSTORE_SQLSMITH_SECONDS=…
 scripts/readiness/run-integrity-checks.sh 16  # pg_amcheck + KoldStore checks
 scripts/readiness/run-hammerdb.sh 16          # weekly/RC; skips if HammerDB missing
+# Opt-in deep (not default CI): scripts/hammerdb/run-deep.sh --profile standard --manage-set append --ch after 16
+# Or Actions → Deep HammerDB (workflow_dispatch only)
 scripts/readiness/run-readiness-report.sh 16
 ```
 

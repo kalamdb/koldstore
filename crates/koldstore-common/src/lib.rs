@@ -4,6 +4,7 @@
 //! - [`domain`] — row/PK/seq/scope/filter/table models and snowflake ids
 //! - [`sql`] — statement metadata, quoting, session literals, LSN helpers
 //! - [`config`] — manage/flush options and GUC privilege policy
+//! - [`log`] — PostgreSQL-free operational logging (`koldstore <component>: …`)
 //! - [`error`] — shared error type (crate root)
 //!
 //! Top-level module names (`pk`, `session`, `scope`, …) are re-exported for
@@ -13,13 +14,14 @@
 pub mod config;
 pub mod domain;
 pub mod error;
+pub mod log;
 pub mod sql;
 
 // Stable top-level paths used across the workspace.
 pub use config::privileges;
 pub use domain::{
     cell, column, filter, object_keys, pk, row, scope, segment_paths, seq, snowflake, storage_id,
-    table_kind, table_name, table_oid,
+    table_kind, table_name, table_oid, time,
 };
 pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 
@@ -34,6 +36,7 @@ pub use error::{Diagnostic, KoldstoreError, Result};
 pub use filter::{ColumnClass, Predicate, PredicateClass, PredicateValue};
 pub use ident::{escape_sql_literal, is_safe_identifier, quote_ident, quote_qualified_ident};
 pub use json::{column_stats_range_may_overlap, compare_json_values};
+pub use log::{component as log_component, format_line as format_log_line, TimedOp};
 pub use lsn::{format_pg_lsn, parse_pg_lsn, AppliedWalBoundary, WalFenceLsn};
 pub use object_keys::{join_object_key, manifest_object_key, normalize_table_prefix};
 pub use pg_type_name::canonical_postgres_type_name;
@@ -68,6 +71,7 @@ pub use strings::dedupe_nonblank;
 pub use table_kind::TableKind;
 pub use table_name::{QualifiedTableName, TableName};
 pub use table_oid::TableOid;
+pub use time::unix_now_ms;
 
 /// Catalog / extension schema name for internal KoldStore objects.
 pub const KOLDSTORE_SCHEMA: &str = "koldstore";

@@ -1,7 +1,7 @@
-//! Deep async mirror database-worker lifecycle coverage.
+//! Deep async mirror WAL-applier lifecycle coverage.
 use crate::common;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::time::{Duration, Instant};
 
 #[tokio::test]
@@ -89,12 +89,22 @@ async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Re
         common::wait_for_mirror_op_count(&db.client, &mirror, 1, 100).await?;
         assert_eq!(common::mirror_op_count(&db.client, &mirror, 1).await?, 100);
 
+        let killed_pid = db
+            .client
+            .query_one(
+                "SELECT (koldstore.async_mirror_status()->'wal_applier'->>'pid')::integer",
+                &[],
+            )
+            .await?
+            .get::<_, Option<i32>>(0)
+            .context("WAL applier PID missing before terminate")?;
         assert!(common::terminate_async_worker(&db.client).await?);
 
         // Dynamic appliers are BGW_NEVER_RESTART; the shared-preload launcher
         // (scripts/run-pg-e2e.sh) must re-ensure without this session calling
         // internal_ensure.
-        let auto_restart = common::wait_for_async_worker_auto_restart(&db.client).await?;
+        let auto_restart =
+            common::wait_for_async_worker_auto_restart(&db.client, killed_pid).await?;
         common::log_always(format!(
             "worker auto-restarted via launcher after kill in {auto_restart:?}"
         ));

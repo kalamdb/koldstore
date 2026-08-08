@@ -3,7 +3,7 @@ use koldstore_common::{
     PrimaryKeyShape,
 };
 use koldstore_migrate::{mirror, QualifiedTableName};
-use koldstore_mirror::plan_mirror_pk_guard;
+use koldstore_wal_mirror::plan_mirror_pk_guard;
 
 fn pk_column(name: &str, ordinal: u16) -> PrimaryKeyColumnShape {
     PrimaryKeyColumnShape::new(

@@ -64,8 +64,23 @@ if ! [[ "$PG_DATABASE" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
   exit 2
 fi
 TEMPLATE_DB="${PG_DATABASE}_template"
-# Async needs one applier per worker DB plus headroom for the launcher.
-WORKER_PROCESSES=$((THREADS + 8))
+# Budget every worker that the test harness can legitimately start at once:
+# one static supervisor, one persistent WAL applier and one ephemeral
+# maintenance worker per test database, up to eight cluster-wide flush
+# executors, and four slots of startup/recovery headroom. The old 16-slot
+# minimum was insufficient for the normal four-database CI matrix
+# (1 + 4 + 4 + 8 = 17), causing dynamic registration to back off until the
+# scheduler tests timed out.
+STATIC_SUPERVISOR_WORKERS=1
+PER_DATABASE_WORKERS=2
+CLUSTER_FLUSH_WORKERS=8
+WORKER_STARTUP_HEADROOM=4
+WORKER_PROCESSES=$(( \
+  STATIC_SUPERVISOR_WORKERS \
+  + THREADS * PER_DATABASE_WORKERS \
+  + CLUSTER_FLUSH_WORKERS \
+  + WORKER_STARTUP_HEADROOM \
+))
 if [[ "$WORKER_PROCESSES" -lt 16 ]]; then
   WORKER_PROCESSES=16
 fi
