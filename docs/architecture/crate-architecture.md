@@ -1,20 +1,50 @@
 # Crate Architecture
 
-pg-kalam is organized as layered Rust crates. Library crates hold PostgreSQL-free
-domain logic; [`crates/pg_koldstore`](../../crates/pg_koldstore) is the thin
-integration shell (`pgrx`, SPI, hooks, custom scan FFI).
+pg-koldstore is organized as layered Rust crates. Library crates hold
+PostgreSQL-free domain logic; [`crates/pg_koldstore`](../../crates/pg_koldstore)
+is the thin integration shell (`pgrx`, SPI, hooks, custom scan FFI, background
+worker entry points).
+
+## Supervision Tree
+
+The top-level operational hierarchy mirrors the runtime process model:
+
+```text
+koldstore-supervisor
+├── flush
+│   ├── manifest
+│   ├── storage
+│   └── parquet
+└── wal
+    └── mirror
+```
+
+- **Supervisor** owns PostgreSQL-free worker identity, generations, reservations,
+  retry/backoff state, and the semantic grouping of background services.
+- **Flush** owns durable hot-to-cold workflow logic and exposes its lower storage
+  stack as `flush::{manifest, storage, parquet}`.
+- **WAL** owns the lifecycle contract for the persistent near-realtime applier and
+  exposes the lower mirror layer as `wal::mirror`.
+- **`pg_koldstore::worker`** remains the PostgreSQL adapter: static/dynamic worker
+  registration, SPI transactions, latches, signals, shared-memory allocation,
+  and process-liveness reconciliation.
+
+This hierarchy does **not** move `pgrx` into library crates. The persistent WAL
+applier and ephemeral maintenance/flush processes are PostgreSQL concepts and
+therefore remain implemented in `pg_koldstore`.
 
 ## Extension Domains
 
 | Domain | Library crate(s) | Extension adapter |
-|--------|------------------|-------------------|
+|---|---|---|
 | Setup | `koldstore-setup` | `pg_koldstore` bootstrap SQL + SPI |
 | Migrate | `koldstore-migrate` | `pg_koldstore::sql::migrate` |
-| Merge scan | `koldstore-merge` | `pg_koldstore::merge_scan` — see [scanning-table.md](scanning-table.md) (shared preload required) |
-| DML | `koldstore-mirror` | `pg_koldstore::hooks`, `pg_koldstore::mirror` |
-| Flush | `koldstore-flush`, `koldstore-manifest` | `pg_koldstore::sql::flush` |
-| DB worker + shared jobs | `koldstore-worker` | `pg_koldstore::worker` |
-| Storage | `koldstore-storage` | storage registration wrappers |
+| Merge scan | `koldstore-merge` | `pg_koldstore::merge_scan` — see [scanning-table.md](scanning-table.md) |
+| Mirror state | `koldstore-mirror` | `pg_koldstore::mirror`, DML hooks |
+| WAL service | `koldstore-wal` | `pg_koldstore::worker::wal` |
+| Flush service | `koldstore-flush`, `koldstore-manifest` | `pg_koldstore::sql::flush`, flush executors |
+| Supervision | `koldstore-supervisor` | `pg_koldstore::worker::supervisor` |
+| Storage | `koldstore-storage`, `koldstore-parquet` | storage registration wrappers |
 | Schema | `koldstore-schema` | schema registry SQL execution |
 
 ## Setup vs Schema vs Catalog
@@ -27,22 +57,18 @@ integration shell (`pgrx`, SPI, hooks, custom scan FFI).
   versions, type matrix, initialization state for migrated tables.
 - **catalog** (`koldstore-catalog`): cold bookkeeping — segment visibility,
   sync-state FSM, managed-table snapshots, flush policy config, shared catalog
-  **reads** (cold prune, row counters, operator backup/validate/export SELECTs,
-  active schema refresh context), decode/cache (capped OID maps). Must stay free
-  of `koldstore-storage`.
+  reads, decode/cache. It must stay free of `koldstore-storage`.
 
 **Do not merge schema and catalog.** Schema stays a leaf used by migrate and
-parquet; catalog depends on schema one-way for typed init state. Combining them
-would force migrate/parquet to pull cold-segment SQL and decode helpers.
+Parquet; catalog depends on schema one-way for typed initialization state.
 
-**Do not merge mirror and catalog.** Mirror owns `__cl` DML/DDL SQL (common-only
-leaf for migrate/merge). Catalog owns cold bookkeeping and may *look up*
-`mirror_relation` from `koldstore.schemas`, but does not build mirror upserts.
+**Do not merge mirror and catalog.** Mirror owns `__cl` DML/DDL SQL and pgoutput
+contracts. Catalog owns cold bookkeeping and may look up mirror identity, but it
+does not build mirror upserts.
 
 **Do not merge manifest and catalog.** Catalog is PostgreSQL cold-metadata
-authority; `koldstore-manifest` owns the derived object-store export
-(`manifest.json` root + content-addressed folder shard files: model, assembly,
-paths, I/O) and depends on catalog + storage.
+authority; `koldstore-manifest` owns the derived object-store export and depends
+on catalog + storage.
 
 ## Dependency Graph
 
@@ -56,10 +82,11 @@ flowchart BT
     parquet[koldstore-parquet]
     manifest[koldstore-manifest]
     mirror[koldstore-mirror]
+    wal[koldstore-wal]
     merge[koldstore-merge]
-    worker[koldstore-worker]
     setup[koldstore-setup]
     flush[koldstore-flush]
+    supervisor[koldstore-supervisor]
     migrate[koldstore-migrate]
     pg[pg_koldstore]
 
@@ -75,6 +102,7 @@ flowchart BT
     manifest --> catalog
     manifest --> storage
     mirror --> common
+    wal --> mirror
     merge --> common
     merge --> catalog
     merge --> mirror
@@ -87,11 +115,13 @@ flowchart BT
     flush --> mirror
     flush --> storage
     flush --> sortkey
+    supervisor --> flush
+    supervisor --> wal
     migrate --> common
     migrate --> catalog
     migrate --> schema
     migrate --> mirror
-    migrate --> worker
+    migrate --> supervisor
     migrate --> sortkey
     pg --> common
     pg --> catalog
@@ -100,49 +130,68 @@ flowchart BT
     pg --> manifest
     pg --> parquet
     pg --> mirror
+    pg --> wal
     pg --> merge
-    pg --> worker
+    pg --> supervisor
     pg --> setup
     pg --> flush
     pg --> migrate
     pg --> sortkey
 ```
 
-`koldstore-setup` is a dependency-free SQL classifier (no `koldstore-*` edges).
-`koldstore-worker` is a leaf crate with no internal `koldstore-*` dependencies
-(DB worker ensure/task/policy). Pure scheduling policy, including the bounded
-immediate-pending retry budget, stays here; `pg_koldstore::worker`
-owns latch, signal, SPI-transaction, and GUC integration.
-`koldstore-sortkey` is a foundation leaf (Sort Key V1 encode/decode) with only
-a `koldstore-common` edge.
+`koldstore-setup` is a dependency-free SQL classifier.
+`koldstore-sortkey` is a foundation leaf with only a `koldstore-common` edge.
+`koldstore-wal` is PostgreSQL-free and depends only on the mirror contract.
+`koldstore-supervisor` is the highest PostgreSQL-free orchestration layer; it
+contains no SPI, process, latch, or `pg_sys` code.
 
 **Rules:**
 
-1. Arrows point only into lower layers — no crate depends on `pg_koldstore`.
-2. `pgrx` belongs only in `pg_koldstore`.
-3. New domain logic defaults to the lowest layer that does not need PostgreSQL.
+1. Arrows point only into lower layers — no library crate depends on
+   `pg_koldstore`.
+2. `pgrx`, SPI, latches, shared-memory allocation, and worker entry points belong
+   only in `pg_koldstore`.
+3. New domain logic defaults to the lowest layer that can express it without
+   PostgreSQL.
+4. The persistent WAL service must not perform Parquet/object-store maintenance;
+   it may only decode/apply mirror state and publish durable scheduling hints.
+5. Heavy flush work must not execute inside the latency-sensitive WAL process.
 
 ## Where New Code Goes
 
 | Change | Crate |
-|--------|-------|
-| Shared identifier, seq, row model, object-key join, segment path layout | `koldstore-common` |
+|---|---|
+| Shared identifier, seq, row model, segment path layout | `koldstore-common` |
 | Sort Key V1 encode/decode | `koldstore-sortkey` |
 | Internal metadata table model | `koldstore-catalog` or `koldstore-schema` |
-| Runtime column catalog (`CatalogColumn`) | `koldstore-schema` |
+| Runtime column catalog | `koldstore-schema` |
 | Internal table DDL plan | `koldstore-setup` |
-| Migrated-table schema/version | `koldstore-schema` |
-| Object-store access + path *templates* | `koldstore-storage` |
+| Object-store access and path templates | `koldstore-storage` |
 | Parquet read/write | `koldstore-parquet` |
-| Manifest model / assembly / JSON I/O / default-prefix helpers | `koldstore-manifest` |
-| Manifest sync-state FSM (`koldstore.manifest.sync_state`) | `koldstore-catalog` |
-| Mirror SQL / DML statements / pgoutput decoder / PK update guard | `koldstore-mirror` |
+| Manifest model, assembly, and JSON I/O | `koldstore-manifest` |
+| Mirror SQL, pgoutput decoding contracts, PK guard | `koldstore-mirror` |
+| Persistent WAL-service identity and lifecycle state | `koldstore-wal` |
 | Hot+cold merge logic | `koldstore-merge` |
-| Database worker ensure / task / commit-wake policy / pending retry fairness / flush-check cadence | `koldstore-worker` |
-| Flush workflow (selection, encode, segment write, catalog SQL plans, cleanup) | `koldstore-flush` |
+| Flush selection, encoding, segment publication, cleanup | `koldstore-flush` |
+| Cross-service generations, reservations, and policy | `koldstore-supervisor` |
 | Migration workflow | `koldstore-migrate` |
-| Shared privilege / LSN helpers | `koldstore-common` |
-| SPI, hooks, custom scan, `#[pg_extern]` | `pg_koldstore` |
+| SPI, hooks, custom scan, shared memory, worker main loops | `pg_koldstore` |
+
+## Runtime Worker Model
+
+```text
+PostgreSQL postmaster
+└── koldstore supervisor                  persistent, cluster-wide
+    ├── koldstore WAL applier <db oid>    persistent, one per active DB
+    │   └── WaitLatch → bounded apply → WaitLatch
+    ├── koldstore maintenance <db oid>    ephemeral
+    └── koldstore flush executor <db oid> bounded ephemeral pool
+```
+
+The WAL process holds no transaction, snapshot, apply lock, or slot ownership
+while sleeping. Commit generations are coalesced; latches are latency hints;
+the logical slot and `async_mirror_state` remain durable truth. The 30-second
+watchdog is recovery insurance, not the normal polling mechanism.
 
 ## Cleanup Policy
 
@@ -154,29 +203,29 @@ When moving code between crates:
 - Narrow `pub` to `pub(crate)` unless another crate needs the item.
 - Only delete provably unreferenced code; flag ambiguous cases in PR notes.
 
-## Memory longevity
+## Memory Longevity
 
-Backend-local OID caches (`ManagedTableSnapshotCache`, migration catalog cache,
-segment-stats lookups) are **entry-capped** (default 64) and invalidated on
-unmanage/flush. Async apply and flush SPI paths page at fixed batch sizes.
+Backend-local OID caches are entry-capped and invalidated on unmanage/flush.
+Async apply and flush SPI paths page at fixed batch sizes. A persistent WAL
+worker may retain only bounded lifecycle state and reusable buffers; per-drain
+maps and decoded batches must be released before the worker returns to
+`WaitLatch`.
 
-Remaining billion-row follow-ups (not solved by cache caps alone): segment
-cardinality until compaction, streaming merge-scan emit, incremental
-`manifest.json` publish without full reload.
+Remaining billion-row follow-ups include segment cardinality until compaction,
+streaming merge-scan emit, and incremental manifest publication.
 
 ## Documentation Standard
 
-- Crate `lib.rs`: `//!` header — ownership, forbidden deps, where new code goes.
+- Crate `lib.rs`: `//!` header — ownership, forbidden dependencies, and where new
+  code goes.
 - Module files: `//!` header — what logic the module implements.
 - Logic-bearing functions: `///` with purpose, invariants, and `# Errors`.
 - Extension SQL entrypoints: document user contract and delegating crate.
 
-See [ADR-001](../decisions/001-layered-crate-architecture.md) for rationale.
+See [ADR-001](../decisions/001-layered-crate-architecture.md) for the original
+layering rationale.
 
-## Runtime workflow docs
-
-End-to-end behavior (manage, flush, scan, DML) is documented separately from
-crate layout:
+## Runtime Workflow Docs
 
 - [manage-table.md](manage-table.md)
 - [flushing-table.md](flushing-table.md)
