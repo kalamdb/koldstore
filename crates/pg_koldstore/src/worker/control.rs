@@ -7,14 +7,20 @@
 
 /// Requires automatic async capture before table activation.
 ///
-/// The WAL generation is intentionally published even when activation itself
-/// produced no source-row change: after commit it starts the persistent database
-/// WAL applier so the first application write never pays process-start latency.
+/// The logical slot is provisioned outside ordinary transactional DDL, so the
+/// database-level WAL service requirement may also be published immediately.
+/// The WAL generation remains commit-aware: only successful activation wakes
+/// the supervisor and starts the process, ensuring the first application write
+/// never pays dynamic-process startup latency.
 pub(crate) fn require_async_mirror_worker() -> Result<(), String> {
     if !crate::guc::async_mirror_worker_enabled() {
         return Err(
             "async mirror capture requires koldstore.internal_async_mirror_worker=on".to_string(),
         );
+    }
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    if !crate::worker::wal::require(database_oid) {
+        return Err("KoldStore WAL-applier registry is full".to_string());
     }
     crate::worker::wake::mark_managed_dml_pending();
     crate::worker::wake::mark_schedule_pending();
@@ -34,7 +40,9 @@ pub fn request_async_mirror_maintenance_pg() -> bool {
         return false;
     }
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
-    if crate::worker::wake::ensure_paused(database_oid) {
+    if crate::worker::wake::ensure_paused(database_oid)
+        || !crate::worker::wal::require(database_oid)
+    {
         return false;
     }
     crate::worker::wake::mark_managed_dml_pending();
@@ -58,6 +66,7 @@ pub fn set_async_mirror_ensure_paused_pg(paused: bool) -> bool {
         true
     } else {
         crate::worker::wake::resume_ensure(oid);
+        let _ = crate::worker::wal::require(oid);
         crate::worker::wake::request_recovery(oid);
         true
     }
