@@ -1,17 +1,12 @@
-//! Async mirror status SQL surface for lag, scheduling, and apply-rate observability.
+//! Async mirror status SQL surface for lag, WAL service, scheduling, and apply rates.
 
 use pgrx::datum::DatumWithOid;
 use serde_json::json;
 
 use super::lifecycle::current_slot_name;
 
-/// Returns async mirror lag, WAL watermarks, maintenance state, slot identity,
-/// and apply rates.
-///
-/// SQL contract: `koldstore.async_mirror_status()` -> `jsonb`. Database-scoped
-/// health (no table required). Prefer `koldstore.table_status(table)` when you
-/// already have a managed table - it embeds this under `async_mirror`. Slot name
-/// is included as top-level `slot_name`.
+/// Returns async mirror lag, WAL watermarks, worker state, slot identity, and
+/// apply rates.
 #[pgrx::pg_extern(name = "async_mirror_status", schema = "koldstore")]
 pub fn async_mirror_status() -> pgrx::JsonB {
     pgrx::JsonB(
@@ -32,6 +27,7 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
 
     let slot = current_slot_name();
     let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId };
+    let database_oid_u32 = database_oid.to_u32();
     let metrics = crate::observability::async_apply_metrics();
 
     let slot_plan = plan_async_mirror_slot_status().map_err(|error| error.to_string())?;
@@ -85,18 +81,40 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
         "ok": retained_wal_within_threshold,
     });
 
-    // The database maintenance worker is intentionally ephemeral. Expose the
-    // authoritative shared generations as well as the transient PID so callers
-    // can distinguish "idle and caught up" from "worker missing while work is
-    // pending" without relying on pg_stat_activity timing.
-    let maintenance = crate::worker::wake::supervisor_snapshot(database_oid.to_u32())
+    let shared = crate::worker::wake::supervisor_snapshot(database_oid_u32);
+    let applier = crate::worker::wal::snapshot(database_oid_u32);
+    let wal_pending = shared.is_some_and(|snapshot| {
+        snapshot.wal_generation != snapshot.wal_processed_generation
+            || snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0
+    });
+    let wal_applier = json!({
+        "registered": applier.is_some(),
+        "pid": applier.and_then(|state| (state.pid > 0).then_some(state.pid)),
+        "running": applier.is_some_and(|state| state.running()),
+        "starting": applier.is_some_and(|state| state.starting()),
+        "pending": wal_pending,
+        "wal_generation": shared.map(|snapshot| snapshot.wal_generation).unwrap_or(0),
+        "wal_processed_generation": shared
+            .map(|snapshot| snapshot.wal_processed_generation)
+            .unwrap_or(0),
+        "watchdog_ms": 30_000,
+    });
+    let wal_service_healthy = !wal_pending
+        || applier.is_some_and(|state| state.running() || state.starting());
+
+    // Compatibility: existing operators/tests read the composite `maintenance`
+    // object. Keep WAL generation fields there while exposing the new process
+    // boundary explicitly under `wal_applier`.
+    let maintenance = shared
         .map(|snapshot| {
+            let maintenance_pending =
+                snapshot.maintenance_generation != snapshot.maintenance_processed_generation;
             json!({
                 "registered": true,
                 "pid": (snapshot.maintenance_pid > 0).then_some(snapshot.maintenance_pid),
                 "running": snapshot.maintenance_pid > 0,
                 "starting": snapshot.maintenance_pid < 0,
-                "pending": snapshot.maintenance_due(),
+                "pending": wal_pending || maintenance_pending,
                 "wal_generation": snapshot.wal_generation,
                 "wal_processed_generation": snapshot.wal_processed_generation,
                 "maintenance_generation": snapshot.maintenance_generation,
@@ -123,9 +141,6 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
             })
         });
 
-    // Compact WAL cursor view: "latest commit" ~= current WAL tip; "latest read"
-    // ~= durable applied_lsn (mirror catch-up watermark). Slot confirmed_flush is
-    // the decoded/ack frontier used for retention.
     let wal = json!({
         "current_lsn": current_wal_lsn,
         "applied_lsn": applied_lsn,
@@ -139,6 +154,7 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
         "slot": slot_json,
         "state": state_json,
         "wal": wal,
+        "wal_applier": wal_applier,
         "maintenance": maintenance,
         "apply": {
             "rows_total": metrics.rows_total,
@@ -153,6 +169,6 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
             },
         },
         "retention": retention_health,
-        "healthy": metrics.healthy && retained_wal_within_threshold,
+        "healthy": metrics.healthy && retained_wal_within_threshold && wal_service_healthy,
     }))
 }
