@@ -99,8 +99,8 @@ fn async_mirror_status_impl() -> Result<serde_json::Value, String> {
             .unwrap_or(0),
         "watchdog_ms": 30_000,
     });
-    let wal_service_healthy = !wal_pending
-        || applier.is_some_and(|state| state.running() || state.starting());
+    let wal_service_healthy =
+        !wal_pending || applier.is_some_and(|state| state.running() || state.starting());
 
     // Compatibility: existing operators/tests read the composite `maintenance`
     // object. Keep WAL generation fields there while exposing the new process
