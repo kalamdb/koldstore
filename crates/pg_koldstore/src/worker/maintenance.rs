@@ -142,10 +142,22 @@ fn maintenance_due(database_oid: u32) -> bool {
 
 /// Replaces database timed-policy state after a full configuration/recovery
 /// reconciliation.
+///
+/// Always arms the next `flush_check_interval_seconds` tick so RowLimit
+/// auto-flush keeps a durable cadence even when no OlderThan deadline exists.
+/// Policy deadlines that fire sooner win.
 fn update_timed_policy_deadline(database_oid: u32, next_due_at_ms: Option<i64>) {
-    match next_due_at_ms.filter(|deadline| *deadline > 0) {
-        Some(deadline_ms) => super::wake::schedule_maintenance_at_ms(database_oid, deadline_ms),
-        None => super::wake::clear_maintenance_deadline(database_oid),
+    let now_ms = koldstore_common::unix_now_ms();
+    let cadence_ms = crate::guc::flush_check_interval_seconds().saturating_mul(1000);
+    let cadence_deadline = now_ms.saturating_add(cadence_ms);
+    let deadline_ms = match next_due_at_ms.filter(|deadline| *deadline > now_ms) {
+        Some(policy_deadline) => policy_deadline.min(cadence_deadline),
+        None => cadence_deadline,
+    };
+    if deadline_ms > now_ms {
+        super::wake::schedule_maintenance_at_ms(database_oid, deadline_ms);
+    } else {
+        super::wake::clear_maintenance_deadline(database_oid);
     }
 }
 

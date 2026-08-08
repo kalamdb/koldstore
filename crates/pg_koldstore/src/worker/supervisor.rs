@@ -382,18 +382,12 @@ fn reconcile_cluster_safety() -> Result<bool, String> {
     Ok(!slots.is_empty())
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SingleWorkerLiveness {
-    first_pid: i32,
-    count: u32,
-}
-
 /// Repairs worker reservations from PostgreSQL's authoritative process list.
 fn reconcile_worker_liveness() -> Result<(), String> {
-    let (wal, maintenance, flush_counts) = pgrx::Spi::connect(|client| {
+    let (wal_counts, maintenance_counts, flush_counts) = pgrx::Spi::connect(|client| {
         let table = client
             .select(
-                "SELECT datid::oid, pid::int4, backend_type \
+                "SELECT backend_type \
                  FROM pg_catalog.pg_stat_activity \
                  WHERE backend_type LIKE 'koldstore wal applier %' \
                     OR backend_type LIKE 'koldstore maintenance %' \
@@ -402,55 +396,45 @@ fn reconcile_worker_liveness() -> Result<(), String> {
                 &[],
             )
             .map_err(|error| error.to_string())?;
-        let mut wal = HashMap::<u32, SingleWorkerLiveness>::new();
-        let mut maintenance = HashMap::<u32, SingleWorkerLiveness>::new();
+        let mut wal_counts = HashMap::<u32, u32>::new();
+        let mut maintenance_counts = HashMap::<u32, u32>::new();
         let mut flush_counts = HashMap::<u32, u32>::new();
         for row in table {
-            let Some(datid) = row
-                .get::<pgrx::pg_sys::Oid>(1)
+            let backend_type = row
+                .get::<String>(1)
                 .map_err(|error| error.to_string())?
+                .unwrap_or_default();
+            // Prefer the OID embedded in backend_type. `datid` can be NULL on
+            // PG18 while a bgworker is between pgstat_beinit and pgstat_bestart;
+            // treating that as "not live" falsely clears reservations and can
+            // spawn duplicate WAL/maintenance/flush workers.
+            let Some(database_oid) =
+                koldstore_supervisor::database_oid_from_worker_backend_type(&backend_type)
             else {
                 continue;
             };
-            let pid = row
-                .get::<i32>(2)
-                .map_err(|error| error.to_string())?
-                .unwrap_or(0);
-            let backend_type = row
-                .get::<String>(3)
-                .map_err(|error| error.to_string())?
-                .unwrap_or_default();
-            let database_oid = datid.to_u32();
-            let record = |workers: &mut HashMap<u32, SingleWorkerLiveness>| {
-                workers
-                    .entry(database_oid)
-                    .and_modify(|state| state.count = state.count.saturating_add(1))
-                    .or_insert(SingleWorkerLiveness {
-                        first_pid: pid,
-                        count: 1,
-                    });
-            };
             if backend_type.starts_with("koldstore wal applier ") {
-                record(&mut wal);
+                *wal_counts.entry(database_oid).or_default() += 1;
             } else if backend_type.starts_with("koldstore maintenance ") {
-                record(&mut maintenance);
+                *maintenance_counts.entry(database_oid).or_default() += 1;
             } else if backend_type.starts_with("koldstore flush executor ") {
                 *flush_counts.entry(database_oid).or_default() += 1;
             }
         }
-        Ok::<_, String>((wal, maintenance, flush_counts))
+        Ok::<_, String>((wal_counts, maintenance_counts, flush_counts))
     })?;
 
     let mut snapshots = Vec::with_capacity(SUPERVISOR_REGISTRY_CAPACITY);
     super::wake::fill_supervisor_snapshots(&mut snapshots);
     for snapshot in snapshots {
         let wal_state = super::wal::snapshot(snapshot.database_oid);
-        let live_wal = wal.get(&snapshot.database_oid).copied();
+        let wal_count = wal_counts.get(&snapshot.database_oid).copied().unwrap_or(0);
         let wal_stale = wal_state.is_some_and(|state| {
             if state.pid > 0 {
-                live_wal.is_none_or(|live| live.first_pid != state.pid)
+                // PGPROC is authoritative; activity can lag behind registration.
+                !super::wal::process_alive(snapshot.database_oid, state.pid)
             } else if state.pid < 0 {
-                live_wal.is_none()
+                wal_count == 0
             } else {
                 false
             }
@@ -461,19 +445,24 @@ fn reconcile_worker_liveness() -> Result<(), String> {
                 super::wake::request_recovery(snapshot.database_oid);
             }
         }
-        if live_wal.is_some_and(|state| state.count > 1) {
+        if wal_count > 1 {
             pgrx::warning!(
-                "koldstore supervisor: multiple WAL appliers for db={} count={}",
-                snapshot.database_oid,
-                live_wal.map(|state| state.count).unwrap_or(0)
+                "koldstore supervisor: multiple WAL appliers for db={} count={wal_count}",
+                snapshot.database_oid
             );
         }
 
-        let live_maintenance = maintenance.get(&snapshot.database_oid).copied();
+        let maintenance_count = maintenance_counts
+            .get(&snapshot.database_oid)
+            .copied()
+            .unwrap_or(0);
         let maintenance_stale = if snapshot.maintenance_pid > 0 {
-            live_maintenance.is_none_or(|state| state.first_pid != snapshot.maintenance_pid)
+            !super::proc_latch::background_worker_alive(
+                snapshot.maintenance_pid,
+                Some(snapshot.database_oid),
+            )
         } else if snapshot.maintenance_pid < 0 {
-            live_maintenance.is_none()
+            maintenance_count == 0
         } else {
             false
         };
@@ -481,11 +470,10 @@ fn reconcile_worker_liveness() -> Result<(), String> {
             super::wake::clear_stale_maintenance(snapshot.database_oid);
             super::wake::request_recovery(snapshot.database_oid);
         }
-        if live_maintenance.is_some_and(|state| state.count > 1) {
+        if maintenance_count > 1 {
             pgrx::warning!(
-                "koldstore supervisor: multiple maintenance workers for db={} count={}",
-                snapshot.database_oid,
-                live_maintenance.map(|state| state.count).unwrap_or(0)
+                "koldstore supervisor: multiple maintenance workers for db={} count={maintenance_count}",
+                snapshot.database_oid
             );
         }
 

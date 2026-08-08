@@ -7,18 +7,23 @@
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use koldstore_common::log::{self, LogLevel};
-
 /// Installs the common → PostgreSQL elog bridge for this backend/process.
+///
+/// No-op when built without the `pg` feature (library / unit-test targets).
 pub fn init_tracing() {
-    log::install_sink(postgres_log_sink);
-}
+    #[cfg(feature = "pg")]
+    {
+        use koldstore_common::log::{self, LogLevel};
 
-fn postgres_log_sink(level: LogLevel, line: &str) {
-    // `line` already carries the `koldstore <component>: …` prefix.
-    match level {
-        LogLevel::Info => pgrx::log!("{line}"),
-        LogLevel::Warning => pgrx::warning!("{line}"),
+        fn postgres_log_sink(level: LogLevel, line: &str) {
+            // `line` already carries the `koldstore <component>: …` prefix.
+            match level {
+                LogLevel::Info => pgrx::log!("{line}"),
+                LogLevel::Warning => pgrx::warning!("{line}"),
+            }
+        }
+
+        log::install_sink(postgres_log_sink);
     }
 }
 

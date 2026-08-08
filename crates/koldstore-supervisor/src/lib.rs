@@ -28,7 +28,10 @@ pub use dispatch::{
     RegistrationBackoff, REGISTRATION_RETRY_MAX, REGISTRATION_RETRY_MIN, SAFETY_RECONCILE_INTERVAL,
 };
 pub use ensure_pause::EnsurePauseSet;
-pub use identity::{flush_executor_worker_type, maintenance_worker_type, DatabaseOid};
+pub use identity::{
+    database_oid_from_worker_backend_type, flush_executor_worker_type, maintenance_worker_type,
+    DatabaseOid,
+};
 pub use policy::LIBRARY_NAME;
 pub use supervisor::{
     DatabaseWorkSnapshot, SupervisorPid, SupervisorRegistry, EVENT_FLUSH_QUEUE_DIRTY,
