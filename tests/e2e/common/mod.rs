@@ -59,8 +59,8 @@ pub use flush_executor::{
 pub use log::{log, log_always, log_step, log_step_always, timed_sync, verbose_enabled, StepGuard};
 pub use minio::{minio_enabled, MinioConfig};
 pub use oracle::{
-    apply_dml_to_both, assert_managed_matches_reference, assert_managed_matches_reference_ordered,
-    clone_reference_sql, create_reference_clone,
+    apply_dml_to_both, assert_managed_integrity, assert_managed_matches_reference,
+    assert_managed_matches_reference_ordered, clone_reference_sql, create_reference_clone,
 };
 pub use peer::{
     barrier_lock, barrier_unlock, connect_flush_peer, connect_peer, BARRIER_LOCK_NAMESPACE,
