@@ -114,12 +114,7 @@ impl<const N: usize> WalApplierRegistry<N> {
         pid > 0
             && entry
                 .pid
-                .compare_exchange(
-                    WORKER_STARTING,
-                    pid,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
+                .compare_exchange(WORKER_STARTING, pid, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
     }
 
