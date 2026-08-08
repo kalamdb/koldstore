@@ -97,51 +97,48 @@ fn run_maintenance_worker(database_oid: u32) {
         }
 
         let needs_reconciliation = recovery_requested || schedule_requested;
-        let maintenance_result = worker_transaction_result(|| {
-            if recovery_requested {
-                // A SIGKILL/FATAL executor cannot run Rust Drop. The supervisor
-                // marks RECOVERY_REQUIRED after native lifecycle reconciliation;
-                // reclaim durable owners before redispatch.
-                let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()
-                    .map_err(|error| error.to_string())?;
-                if reclaimed > 0 {
-                    pgrx::log!(
-                        "koldstore maintenance worker db={database_oid}: reclaimed {reclaimed} orphan flush job(s)"
-                    );
-                    super::wake::mark_flush_queue_pending();
+        if needs_reconciliation {
+            let maintenance_result = worker_transaction_result(|| {
+                if recovery_requested {
+                    // A SIGKILL/FATAL executor cannot run Rust Drop. The supervisor
+                    // marks RECOVERY_REQUIRED after native lifecycle reconciliation;
+                    // reclaim durable owners before redispatch.
+                    let reclaimed = crate::sql::flush::jobs::reclaim_orphan_running_flush_jobs()
+                        .map_err(|error| error.to_string())?;
+                    if reclaimed > 0 {
+                        pgrx::log!(
+                            "koldstore maintenance worker db={database_oid}: reclaimed {reclaimed} orphan flush job(s)"
+                        );
+                        super::wake::mark_flush_queue_pending();
+                    }
+                    super::flush_executor::reconcile_queue_after_recovery(database_oid)?;
                 }
-                super::flush_executor::reconcile_queue_after_recovery(database_oid)?;
-            }
 
-            if needs_reconciliation {
-                super::flush_task::run_flush_scheduler_tick().map(Some)
-            } else {
-                // Ordinary WAL is deliberately catalog-scan free here. The apply
-                // transaction already scheduled every touched policy from its
-                // post-bump counters and published any OlderThan deadline only
-                // after COMMIT.
-                Ok(None)
-            }
-        });
+                super::flush_task::run_flush_scheduler_tick()
+            });
 
-        match maintenance_result {
-            Ok(result) => {
-                if let Some(result) = result {
+            match maintenance_result {
+                Ok(result) => {
                     update_timed_policy_deadline(database_oid, result.next_timed_wake_at_ms);
+                    super::wake::mark_maintenance_reconciled(
+                        database_oid,
+                        target_maintenance_generation,
+                    );
                 }
-                super::wake::mark_maintenance_reconciled(
-                    database_oid,
-                    target_maintenance_generation,
-                );
-            }
-            Err(error) => {
-                pgrx::warning!(
-                    "koldstore maintenance worker db={database_oid} scheduling/recovery deferred: {error}"
-                );
-                super::wake::request_recovery(database_oid);
-                return;
+                Err(error) => {
+                    pgrx::warning!(
+                        "koldstore maintenance worker db={database_oid} scheduling/recovery deferred: {error}"
+                    );
+                    super::wake::request_recovery(database_oid);
+                    return;
+                }
             }
         }
+        // Ordinary WAL intentionally does not open a second PostgreSQL
+        // transaction here. The apply transaction already bumped counters,
+        // evaluated every touched policy, and published any exact OlderThan
+        // deadline after commit. Avoiding an empty Start/Commit pair on every
+        // write burst materially reduces scheduler CPU and WAL-visibility lag.
 
         if super::wake::supervisor_snapshot(database_oid)
             .is_some_and(|state| state.maintenance_due())

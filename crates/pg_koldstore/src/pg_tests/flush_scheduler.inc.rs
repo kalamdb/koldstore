@@ -137,8 +137,9 @@ fn flush_table_drains_multiple_policy_waves_in_one_job() {
 #[pg_test]
 fn flush_scheduler_reclaims_orphan_running_flush_job() {
     // A durable `running` row with no session table-job lock is an orphan (owner
-    // crashed). The tick reclaims it to pending and may flush. Live owners are
-    // skipped via try_lock in the same tick (covered by e2e dual-flush).
+    // crashed). Recovery must return the same durable job to `pending`; broad
+    // policy reconciliation deliberately excludes active pending/running jobs so
+    // it cannot create a duplicate. The next owner then resumes that same UUID.
     let suffix = unique_suffix("flush_reclaim_orphan");
     let schema = format!("pgtest_{suffix}");
     let table = "msgs";
@@ -152,8 +153,6 @@ fn flush_scheduler_reclaims_orphan_running_flush_job() {
         ))
         .expect("insert");
     }
-    // Excess after reclaim is 5 rows; keep max_rows_per_file at that floor so the
-    // undersized-segment gate does not skip the follow-on auto-flush.
     Spi::run("SET koldstore.min_max_rows_per_file = 1").expect("relax file floor");
     Spi::run(&format!(
         r#"
@@ -186,14 +185,45 @@ fn flush_scheduler_reclaims_orphan_running_flush_job() {
         "#
     ))
     .expect("insert orphan running flush job");
+    let orphan_id = spi_get_text(&format!(
+        "SELECT id::text FROM koldstore.jobs WHERE table_oid = '{relation}'::regclass::oid AND status = 'running' LIMIT 1"
+    ));
 
     let ran = Spi::get_one::<bool>("SELECT koldstore.internal_run_flush_scheduler_tick()")
         .expect("scheduler tick")
         .expect("non-null");
     assert!(
-        ran,
-        "orphan running job must be reclaimed so auto-flush can proceed"
+        !ran,
+        "recovery should reclaim the durable owner; broad reconciliation must not duplicate its pending job"
     );
+
+    let pending = spi_get_i64(&format!(
+        r#"
+        SELECT count(*)::bigint
+        FROM koldstore.jobs
+        WHERE table_oid = '{relation}'::regclass::oid
+          AND job_type = 'flush'
+          AND status = 'pending'
+        "#
+    ));
+    assert_eq!(pending, 1, "orphan must become one durable pending job");
+    let leftover_running = spi_get_i64(&format!(
+        r#"
+        SELECT count(*)::bigint
+        FROM koldstore.jobs
+        WHERE table_oid = '{relation}'::regclass::oid
+          AND job_type = 'flush'
+          AND status = 'running'
+        "#
+    ));
+    assert_eq!(leftover_running, 0, "orphan running ownership must be cleared");
+
+    // #[pg_test] uses inline execution. A foreground claimant should resume the
+    // reclaimed pending UUID rather than inserting a second active job.
+    let resumed_id = spi_get_text(&format!(
+        "SELECT (koldstore.flush_table('{relation}'::regclass, force => false)->>'job_id')"
+    ));
+    assert_eq!(resumed_id, orphan_id, "recovery must preserve the durable job UUID");
 
     let completed = spi_get_i64(&format!(
         r#"
@@ -204,23 +234,7 @@ fn flush_scheduler_reclaims_orphan_running_flush_job() {
           AND status = 'completed'
         "#
     ));
-    assert!(
-        completed >= 1,
-        "reclaimed orphan must allow a completed flush, got {completed}"
-    );
-    let leftover_running = spi_get_i64(&format!(
-        r#"
-        SELECT count(*)::bigint
-        FROM koldstore.jobs
-        WHERE table_oid = '{relation}'::regclass::oid
-          AND job_type = 'flush'
-          AND status = 'running'
-        "#
-    ));
-    assert_eq!(
-        leftover_running, 0,
-        "orphan running row must not remain after the tick"
-    );
+    assert_eq!(completed, 1, "reclaimed job must remain executable exactly once");
 }
 
 #[pg_test]
