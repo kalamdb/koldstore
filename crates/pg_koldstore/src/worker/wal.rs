@@ -34,12 +34,17 @@ pub(crate) fn initialize() {
 }
 
 #[must_use]
-pub(crate) fn snapshot(database_oid: u32) -> Option<WalApplierSnapshot> {
-    WAL_APPLIER_REGISTRY.get().snapshot(database_oid)
+pub(crate) fn require(database_oid: u32) -> bool {
+    WAL_APPLIER_REGISTRY.get().require(database_oid)
 }
 
-pub(crate) fn fill_snapshots(out: &mut Vec<WalApplierSnapshot>) {
-    WAL_APPLIER_REGISTRY.get().snapshots_into(out);
+pub(crate) fn disable(database_oid: u32) {
+    WAL_APPLIER_REGISTRY.get().disable(database_oid);
+}
+
+#[must_use]
+pub(crate) fn snapshot(database_oid: u32) -> Option<WalApplierSnapshot> {
+    WAL_APPLIER_REGISTRY.get().snapshot(database_oid)
 }
 
 pub(crate) fn try_reserve(database_oid: u32) -> bool {
@@ -71,7 +76,7 @@ pub(crate) fn wake(database_oid: u32) -> bool {
     let Some(state) = snapshot(database_oid) else {
         return false;
     };
-    if state.pid <= 0 {
+    if !state.required || state.pid <= 0 {
         return false;
     }
     set_background_worker_latch(state.pid, database_oid)
@@ -126,6 +131,13 @@ fn run_wal_applier(database_oid: u32) {
     let mut applied_recovery_generation = 0_u64;
 
     loop {
+        let Some(service) = snapshot(database_oid) else {
+            return;
+        };
+        if !service.required {
+            return;
+        }
+
         let slot = crate::mirror::lifecycle::slot_name(database_oid);
         if !crate::mirror::lifecycle::native_slot_exists(&slot) {
             return;
