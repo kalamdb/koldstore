@@ -224,6 +224,7 @@ async fn persistent_wal_applier_survives_concurrent_dml_and_flush_flood() -> Res
             ))
             .await?;
 
+        let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
 
         db.client
@@ -471,8 +472,28 @@ async fn persistent_wal_applier_survives_concurrent_dml_and_flush_flood() -> Res
             seen.len()
         );
 
-        let flushed = db.flush_table_with_force(&relation, true).await?;
-        anyhow::ensure!(flushed >= 0, "post-flood force flush must succeed");
+        // Flood flushers may still be finishing commits; wait for a quiet queue
+        // before the final catch-up flush (avoids enqueue races on active UUID).
+        let quiet_deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let active = common::active_job_count(&db.client, &relation).await?;
+            if active == 0 {
+                break;
+            }
+            anyhow::ensure!(
+                Instant::now() < quiet_deadline,
+                "flush jobs still active after flood drain budget (active={active})"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let hot_before = common::hot_row_count(&db.client, &relation).await?;
+        if hot_before > HOT_ROW_LIMIT {
+            let flushed = db.flush_table_with_force(&relation, true).await?;
+            anyhow::ensure!(
+                flushed > 0,
+                "post-flood force flush must archive excess hot rows"
+            );
+        }
         let hot = common::hot_row_count(&db.client, &relation).await?;
         anyhow::ensure!(
             hot <= HOT_ROW_LIMIT,

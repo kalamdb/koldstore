@@ -772,8 +772,8 @@ async fn queue_orphan_reclaim_across_repeated_waves_with_dml() -> Result<()> {
                 any_rows = any_rows.max(rows);
             }
             anyhow::ensure!(
-                any_rows > 0 || wave > 1,
-                "wave {wave}: reclaim force flush must archive rows at least once early"
+                any_rows > 0,
+                "wave {wave}: reclaim force flush must archive rows"
             );
             anyhow::ensure!(
                 running_flush_job_count(&db.client, &table.relation).await? == 0,
