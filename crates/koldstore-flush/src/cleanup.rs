@@ -3,7 +3,7 @@
 //! Production flush prune uses [`plan_seq_range_cleanup`] (`seq <= max_seq`).
 //! JSON selected-set cleanup was retired; do not revive it for the live path.
 
-use koldstore_mirror::{quoted_pk_columns, MirrorRelation};
+use koldstore_wal_mirror::{quoted_pk_columns, MirrorRelation};
 use thiserror::Error;
 
 use koldstore_common::{QualifiedTableName, SqlParamType, SqlStatement};
@@ -25,11 +25,11 @@ pub enum CleanupError {
     Spi(String),
 }
 
-impl From<koldstore_mirror::MirrorError> for CleanupError {
-    fn from(error: koldstore_mirror::MirrorError) -> Self {
+impl From<koldstore_wal_mirror::MirrorError> for CleanupError {
+    fn from(error: koldstore_wal_mirror::MirrorError) -> Self {
         match error {
-            koldstore_mirror::MirrorError::MissingPrimaryKey => Self::MissingPrimaryKey,
-            koldstore_mirror::MirrorError::InvalidColumn(name) => Self::InvalidIdentifier(name),
+            koldstore_wal_mirror::MirrorError::MissingPrimaryKey => Self::MissingPrimaryKey,
+            koldstore_wal_mirror::MirrorError::InvalidColumn(name) => Self::InvalidIdentifier(name),
             other => Self::Spi(other.to_string()),
         }
     }

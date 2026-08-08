@@ -8,7 +8,60 @@ use koldstore_common::{FlushPolicy, ManageTableOptions, SqlParamType, SqlStateme
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::policy::policy_flush_row_count;
+use crate::policy::{policy_flush_row_count, selected_rows_meet_file_minimum};
+
+/// Pure result of an OlderThan eligibility scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OlderThanEvaluation {
+    /// Whether the table should flush now.
+    pub due: bool,
+    /// Exact clock wake when the minimum viable batch becomes old enough.
+    pub next_due_at_ms: Option<i64>,
+}
+
+impl OlderThanEvaluation {
+    /// Policy is not OlderThan or cannot become due from time alone.
+    pub const NOT_APPLICABLE: Self = Self {
+        due: false,
+        next_due_at_ms: None,
+    };
+}
+
+/// Classifies OlderThan eligibility from one bounded mirror seq-index scan.
+///
+/// `eligible_count` is how many of the oldest `max_rows_per_flush` rows are
+/// already older than the cutoff. `threshold_count`/`threshold_seq` describe the
+/// last row required for the minimum viable batch. `threshold_due_at_ms` is the
+/// wall-clock time when that threshold row becomes old enough (computed with
+/// PostgreSQL interval arithmetic in the extension adapter).
+#[must_use]
+pub fn evaluate_older_than_scan(
+    eligible_count: i64,
+    threshold_count: i64,
+    required_rows: i64,
+    min_flush_rows: u64,
+    max_rows_per_file: u64,
+    threshold_due_at_ms: Option<i64>,
+) -> OlderThanEvaluation {
+    let due = eligible_count >= i64::try_from(min_flush_rows).unwrap_or(i64::MAX)
+        && selected_rows_meet_file_minimum(
+            u64::try_from(eligible_count.max(0)).unwrap_or(0),
+            max_rows_per_file,
+        );
+    if due {
+        return OlderThanEvaluation {
+            due: true,
+            next_due_at_ms: None,
+        };
+    }
+    if threshold_count < required_rows || threshold_due_at_ms.is_none() {
+        return OlderThanEvaluation::NOT_APPLICABLE;
+    }
+    OlderThanEvaluation {
+        due: false,
+        next_due_at_ms: threshold_due_at_ms,
+    }
+}
 
 /// Shared catalog predicates for managed tables the built-in scheduler may flush.
 pub const AUTO_FLUSH_TABLE_PREDICATE: &str = r#"
@@ -92,7 +145,7 @@ ORDER BY s.created_at DESC, s.table_oid DESC
 /// Plans OlderThan eligibility: count and max seq among mirror rows below a cutoff.
 ///
 /// This lower-level plan is retained for the flush selection path itself. Clock
-/// scheduling uses `worker::timed_policy`, which evaluates due state + next
+/// scheduling uses `worker::flush_task`, which evaluates due state + next
 /// deadline together in one bounded index walk.
 ///
 /// Bind parameters:

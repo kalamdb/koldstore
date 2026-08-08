@@ -724,7 +724,7 @@ fn run_async_prelock_catchup(
             skip_through,
             acknowledge_durable_checkpoint: false,
             advance_slot_on_empty: false,
-            target_prune_floor: Some((table_oid, PruneSeqFloor::new(prune_max_seq))),
+            target_prune_floor: Some((table_oid.to_u32(), PruneSeqFloor::new(prune_max_seq))),
             max_rows: Some(0),
             max_ms: Some(remaining_ms),
         })?;
@@ -775,7 +775,7 @@ fn run_async_prune_fence(
         skip_through,
         acknowledge_durable_checkpoint: false,
         advance_slot_on_empty: false,
-        target_prune_floor: Some((table_oid, PruneSeqFloor::new(prune_max_seq))),
+        target_prune_floor: Some((table_oid.to_u32(), PruneSeqFloor::new(prune_max_seq))),
         max_rows: Some(0),
         max_ms: Some(0),
     })?;

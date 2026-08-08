@@ -11,6 +11,7 @@
 //! PostgreSQL process lifecycle, SPI, latches, and worker entry points remain in
 //! `pg_koldstore`.
 
+mod dispatch;
 mod ensure_pause;
 mod identity;
 mod policy;
@@ -20,8 +21,12 @@ mod wake;
 /// Flush workflow and its lower storage stack.
 pub use koldstore_flush as flush;
 /// WAL-applier lifecycle and mirror stack.
-pub use koldstore_wal as wal;
+pub use koldstore_wal_mirror as wal;
 
+pub use dispatch::{
+    deadline_delay, min_optional_duration, next_wait_duration, DynamicWorkerKind,
+    RegistrationBackoff, REGISTRATION_RETRY_MAX, REGISTRATION_RETRY_MIN, SAFETY_RECONCILE_INTERVAL,
+};
 pub use ensure_pause::EnsurePauseSet;
 pub use identity::{flush_executor_worker_type, maintenance_worker_type, DatabaseOid};
 pub use policy::LIBRARY_NAME;

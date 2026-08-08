@@ -378,7 +378,7 @@ Serde: `#[serde(rename_all = "snake_case")]` on job phase enums.
 |-------|-------|------|
 | SQL / SPI | `pg_koldstore::sql::migrate` | Orchestration |
 | Planning | `koldstore-migrate` | Mirror, backfill, registry, jobs, scope |
-| Mirror DDL | `koldstore-mirror` | `__cl` table contract |
+| Mirror DDL | `koldstore-wal-mirror` | `__cl` table contract |
 | Options / policy | `koldstore-common` | `ManageTableOptions`, `FlushPolicy` |
 | Counters | `koldstore-flush::table_counters` | Manifest counter SQL plans |
 | Cache | `koldstore-catalog` | `managed_table_snapshot` for later reads |

@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 
-use koldstore_worker::{
+use koldstore_supervisor::{
     DatabaseWorkSnapshot, EnsurePauseSet, SupervisorPid, SupervisorRegistry, TransactionDirty,
     SUPERVISOR_REGISTRY_CAPACITY,
 };
@@ -267,7 +267,9 @@ pub(crate) fn schedule_maintenance_at_ms(database_oid: u32, deadline_ms: i64) {
 }
 
 pub(crate) fn clear_maintenance_deadline(database_oid: u32) {
-    SUPERVISOR_REGISTRY.get().clear_maintenance_deadline(database_oid);
+    SUPERVISOR_REGISTRY
+        .get()
+        .clear_maintenance_deadline(database_oid);
 }
 
 pub(crate) fn consume_maintenance_deadline(database_oid: u32, sampled_ms: i64) -> bool {
@@ -437,28 +439,7 @@ fn current_nesting_level() -> u32 {
 }
 
 fn set_background_worker_latch(pid: i32, database_oid: Option<u32>) {
-    unsafe {
-        let process = pg_sys::BackendPidGetProc(pid);
-        if process.is_null() || (*process).pid != pid || !is_background_worker(process) {
-            return;
-        }
-        if let Some(database_oid) = database_oid {
-            if (*process).databaseId.to_u32() != database_oid {
-                return;
-            }
-        }
-        pg_sys::SetLatch(&raw mut (*process).procLatch);
-    }
-}
-
-#[cfg(any(feature = "pg15", feature = "pg16", feature = "pg17"))]
-unsafe fn is_background_worker(process: *mut pg_sys::PGPROC) -> bool {
-    unsafe { (*process).isBackgroundWorker }
-}
-
-#[cfg(feature = "pg18")]
-unsafe fn is_background_worker(process: *mut pg_sys::PGPROC) -> bool {
-    unsafe { !(*process).isRegularBackend }
+    let _ = super::proc_latch::set_background_worker_latch(pid, database_oid);
 }
 
 fn is_current_backend_background_worker() -> bool {

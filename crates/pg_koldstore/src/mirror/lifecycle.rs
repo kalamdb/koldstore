@@ -8,8 +8,15 @@
 use std::time::Duration;
 
 use koldstore_common::{quote_ident, QualifiedTableName};
-use koldstore_worker::DatabaseOid;
+use koldstore_supervisor::DatabaseOid;
+use koldstore_wal_mirror::{
+    flush_replication_origin_name as wal_flush_origin_name,
+    is_flush_replication_origin as wal_is_flush_replication_origin, published_column_list,
+    slot_name as wal_slot_name,
+};
 use pgrx::datum::DatumWithOid;
+
+pub use koldstore_wal_mirror::PUBLICATION_NAME;
 
 const APPLY_LOCK_NAMESPACE: i32 = 1_263_354_732;
 const SLOT_PROVISION_LOCK_NAMESPACE: i32 = 1_263_354_734;
@@ -18,38 +25,22 @@ const LIFECYCLE_LOCK_NAMESPACE: i32 = 1_263_354_735;
 #[cfg(feature = "pg15")]
 pub(crate) const FLUSH_ORIGIN_LOCK_NAMESPACE: i32 = 1_263_354_736;
 
-/// Publication shared by async managed tables in one database.
-pub const PUBLICATION_NAME: &str = "koldstore_async_mirror";
-
-/// Prefix for flush-prune replication origins stamped on async cleanup WAL.
-///
-/// PG16+ peek uses `origin=none` (defense in depth) and prune stamps
-/// `DoNotReplicateId` instead. PG15 has no that filter, so apply must honor
-/// ORIGIN messages whose name matches this database's flush origin.
-const FLUSH_REPLICATION_ORIGIN_PREFIX: &str = "koldstore_flush";
-
 /// Returns the database-scoped flush replication origin name (PG15 prune path).
-///
-/// Replication-origin sessions are cluster-global and exclusive. Including the
-/// database OID lets independent databases flush concurrently; same-DB parallel
-/// prunes serialize on an advisory xact lock in `arm_flush_replication_origin`.
 #[must_use]
 pub(crate) fn flush_replication_origin_name(database_oid: DatabaseOid) -> String {
-    format!("{FLUSH_REPLICATION_ORIGIN_PREFIX}_{}", database_oid.get())
+    wal_flush_origin_name(database_oid.get())
 }
 
 /// Returns true when `name` is a flush-prune origin for `database_oid`.
-///
-/// Matches the database-scoped `koldstore_flush_<oid>` name stamped by prune.
 #[must_use]
 pub(crate) fn is_flush_replication_origin(name: &str, database_oid: DatabaseOid) -> bool {
-    name == flush_replication_origin_name(database_oid)
+    wal_is_flush_replication_origin(name, database_oid.get())
 }
 
 /// Returns the cluster-unique logical slot name for a database OID.
 #[must_use]
 pub(crate) fn slot_name(database_oid: u32) -> String {
-    format!("koldstore_async_{database_oid}")
+    wal_slot_name(database_oid)
 }
 
 /// Prepares the database slot before `manage_table` performs transactional DDL.
@@ -95,7 +86,7 @@ fn prepare_slot_locked(database_oid: u32, slot: &str) -> Result<(), String> {
     // the parent an XID, and the slot's consistent-point search would then
     // wait for the parent while the parent waits for the provisioner.
     let slot_ready = native_slot_exists(slot);
-    let publication_ready = native_publication_exists();
+    let publication_ready = native_publication_exists_for_provision();
     if !slot_ready || !publication_ready {
         require_no_assigned_xid_for_slot_provision()?;
         super::provision::provision_infrastructure(database_oid)?;
@@ -122,10 +113,6 @@ fn require_no_assigned_xid_for_slot_provision() -> Result<(), String> {
         );
     }
     Ok(())
-}
-
-fn native_publication_exists() -> bool {
-    native_publication_exists_for_provision()
 }
 
 /// Native publication probe for pre-SPI provisioning paths (no XID assigned).
@@ -265,25 +252,6 @@ fn reconcile_publication_columns(
     Ok(())
 }
 
-/// Quoted PK (+ optional segment-order) column list for publication DDL.
-fn published_column_list(
-    primary_key: &koldstore_common::PrimaryKeyShape,
-    order_column: Option<&str>,
-) -> String {
-    let mut published = primary_key
-        .columns()
-        .iter()
-        .map(|column| quote_ident(column.column().as_str()))
-        .collect::<Vec<_>>();
-    if let Some(order_column) = order_column {
-        let quoted = quote_ident(order_column);
-        if !published.iter().any(|column| column == &quoted) {
-            published.push(quoted);
-        }
-    }
-    published.join(", ")
-}
-
 fn validate_slot(slot: &str) -> Result<(), String> {
     let compatible = pgrx::Spi::get_one_with_args::<bool>(
         "SELECT EXISTS (\
@@ -417,7 +385,7 @@ impl Drop for WalServiceDisableGuard {
 /// Terminate by `backend_type` (not only `active_pid`) so a worker blocked
 /// before acquiring the slot is also cleared.
 fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
-    let worker_type = koldstore_wal::wal_applier_worker_type(database_oid);
+    let worker_type = koldstore_wal_mirror::wal_applier_worker_type(database_oid);
     // Always return a row: an empty SELECT through Spi::run_with_args errors with
     // "SpiTupleTable positioned before the start or after the end" when no WAL
     // applier is running.

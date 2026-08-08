@@ -19,7 +19,7 @@ pub mod sql;
 pub use config::privileges;
 pub use domain::{
     cell, column, filter, object_keys, pk, row, scope, segment_paths, seq, snowflake, storage_id,
-    table_kind, table_name, table_oid,
+    table_kind, table_name, table_oid, time,
 };
 pub use sql::{ident, json, lsn, pg_type_name, session, strings};
 
@@ -68,6 +68,7 @@ pub use strings::dedupe_nonblank;
 pub use table_kind::TableKind;
 pub use table_name::{QualifiedTableName, TableName};
 pub use table_oid::TableOid;
+pub use time::unix_now_ms;
 
 /// Catalog / extension schema name for internal KoldStore objects.
 pub const KOLDSTORE_SCHEMA: &str = "koldstore";

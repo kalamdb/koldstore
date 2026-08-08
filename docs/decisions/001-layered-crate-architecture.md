@@ -22,9 +22,10 @@ Split pg-kalam into layered crates:
 - **Foundation:** `koldstore-common` (shared types, no internal deps).
 - **Primitives:** `koldstore-catalog`, `koldstore-schema`, `koldstore-storage`,
   `koldstore-parquet`.
-- **Building blocks:** `koldstore-manifest`, `koldstore-mirror`, `koldstore-merge`,
-  `koldstore-worker`, `koldstore-setup`.
-- **Workflows:** `koldstore-flush`, `koldstore-migrate`.
+- **Building blocks:** `koldstore-manifest`, `koldstore-wal-mirror`,
+  `koldstore-merge`, `koldstore-setup`.
+- **Workflows:** `koldstore-flush`, `koldstore-migrate`, `koldstore-supervisor`
+  (PostgreSQL-free orchestration over flush + wal-mirror).
 - **Integration:** `pg_koldstore` only — `pgrx`, SPI, hooks, merge scan FFI,
   thin SQL wrappers.
 

@@ -5,7 +5,7 @@ use koldstore::spi::prepared_plan_key;
 use koldstore_common::TableName;
 use koldstore_merge::events::plan_mirror_changes_since;
 use koldstore_migrate::QualifiedTableName;
-use koldstore_mirror::{mirror_relation_for_source, plan_mirror_stats};
+use koldstore_wal_mirror::{mirror_relation_for_source, plan_mirror_stats};
 
 fn bench_spi_plan_cache_shapes(c: &mut Criterion) {
     let source = TableName::parse("app.items").expect("valid table name");

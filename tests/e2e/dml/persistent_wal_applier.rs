@@ -151,7 +151,7 @@ async fn supervisor_replaces_idle_wal_applier_without_new_dml() -> Result<()> {
             common::terminate_async_worker(&db.client).await?,
             "expected to terminate the resident WAL applier"
         );
-        common::wait_for_async_worker_auto_restart(&db.client).await?;
+        common::wait_for_async_worker_auto_restart(&db.client, original_pid).await?;
         let replacement_pid = wal_applier_pid(&db.client).await?;
         assert_ne!(
             replacement_pid, original_pid,

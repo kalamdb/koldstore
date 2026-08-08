@@ -133,6 +133,6 @@ throughput demos, **not** recommended defaults for low-RAM hosts.
    the open segment buffer.
 
 Rough host budget: Postgres `shared_buffers` + **one** flush executor spike
-(tens of MiB at defaults; much more with large files) + async mirror worker +
+(tens of MiB at defaults; much more with large files) + persistent WAL applier +
 OS. See also [flushing architecture](architecture/flushing-table.md#memory-bounds)
 and the manage-time options in [SQL API](sql-api.md#advanced-and-compatibility-management-koldstoremanage_table).

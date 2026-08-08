@@ -1,4 +1,4 @@
-//! PostgreSQL adapter for the [`koldstore_worker`] supervision tree.
+//! PostgreSQL adapter for the [`koldstore_supervisor`] supervision tree.
 //!
 //! The static cluster supervisor owns dynamic worker registration. WAL apply is
 //! a persistent per-database, latch-driven service; scheduled maintenance and
@@ -13,9 +13,9 @@ mod flush_task;
 #[cfg(feature = "pg")]
 mod maintenance;
 #[cfg(feature = "pg")]
-mod supervisor;
+mod proc_latch;
 #[cfg(feature = "pg")]
-mod timed_policy;
+mod supervisor;
 #[cfg(feature = "pg")]
 pub(crate) mod txn;
 #[cfg(feature = "pg")]

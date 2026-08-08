@@ -273,7 +273,7 @@ pub(crate) fn manage_table_pg_impl(
         acknowledge_durable_checkpoint: true,
         advance_slot_on_empty: true,
         target_prune_floor: Some((
-            table_oid,
+            table_oid.to_u32(),
             crate::mirror::apply::PruneSeqFloor::new(wal_apply_floor),
         )),
         max_rows: Some(0),

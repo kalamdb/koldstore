@@ -18,3 +18,4 @@ pub mod storage_id;
 pub mod table_kind;
 pub mod table_name;
 pub mod table_oid;
+pub mod time;

@@ -22,7 +22,7 @@ koldstore-manifest.workspace = true
 koldstore-flush.workspace = true
 koldstore-migrate.workspace = true
 koldstore-merge.workspace = true
-koldstore-mirror.workspace = true
+koldstore-wal-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-storage = { workspace = true, features = ["s3"] }
 koldstore = { path = "../crates/pg_koldstore", package = "pg_koldstore", default-features = false }

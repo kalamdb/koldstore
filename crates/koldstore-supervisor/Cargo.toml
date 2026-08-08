@@ -8,7 +8,7 @@ description = "PostgreSQL-free supervision tree for KoldStore WAL and flush serv
 
 [dependencies]
 koldstore-flush.workspace = true
-koldstore-wal.workspace = true
+koldstore-wal-mirror.workspace = true
 
 [lints]
 workspace = true

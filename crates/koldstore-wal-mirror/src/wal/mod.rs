@@ -1,21 +1,33 @@
 //! PostgreSQL-free lifecycle primitives for the KoldStore WAL service.
 //!
-//! The WAL service is intentionally distinct from scheduled maintenance:
-//! one lightweight applier may stay registered per KoldStore-active database,
-//! sleep on a PostgreSQL latch, and wake for committed WAL. PostgreSQL process
-//! registration, shared-memory allocation, SPI, and logical decoding remain in
-//! `pg_koldstore`; this crate owns only identity and lock-free lifecycle state.
-//!
-//! The mirror remains the lower-level storage contract used by WAL apply.
+//! One lightweight applier may stay registered per KoldStore-active database.
+//! PostgreSQL process registration, shared-memory allocation, SPI, and logical
+//! decoding remain in `pg_koldstore`; this module owns identity and lock-free
+//! lifecycle state. Mirror SQL/decode contracts live in [`crate::mirror`].
 
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 
-/// Mirror decoding and write-planning contracts beneath the WAL service.
-pub use koldstore_mirror as mirror;
+/// Bounded apply request/outcome contracts and budget helpers.
+pub mod apply_contract;
+/// Capture infrastructure naming (publication, slot, flush origin).
+pub mod naming;
+/// Pure `async_mirror_status` JSON composition.
+pub mod status;
+
+pub use apply_contract::{
+    budget_hit, resolve_row_budget, resolve_time_budget, BoundedApplyOutcome, BoundedApplyRequest,
+    PruneSeqFloor,
+};
+pub use naming::{
+    flush_replication_origin_name, is_flush_replication_origin, slot_name, PUBLICATION_NAME,
+};
+pub use status::{
+    build_async_mirror_status, ApplyMetricsSnapshot, StatusSupervisorSnapshot,
+    StatusWalApplierSnapshot,
+};
 
 /// The mirror's bounded apply batch is also the WAL service's default batch.
-pub const WAL_APPLY_BATCH_ROWS: usize = mirror::APPLY_BATCH_ROWS;
-/// Maximum database entries tracked by the shared WAL-applier registry.
+pub const WAL_APPLY_BATCH_ROWS: usize = crate::mirror::APPLY_BATCH_ROWS;
 pub const WAL_APPLIER_REGISTRY_CAPACITY: usize = 256;
 
 const WORKER_FREE: i32 = 0;
@@ -178,19 +190,6 @@ impl<const N: usize> WalApplierRegistry<N> {
     #[must_use]
     pub fn snapshot(&self, database_oid: u32) -> Option<WalApplierSnapshot> {
         self.find(database_oid).map(WalApplierEntry::snapshot)
-    }
-
-    /// Copies allocated entries into a reusable caller buffer.
-    pub fn snapshots_into(&self, out: &mut Vec<WalApplierSnapshot>) {
-        out.clear();
-        if out.capacity() < N {
-            out.reserve(N - out.capacity());
-        }
-        for entry in &self.entries {
-            if entry.database_oid.load(Ordering::Acquire) != 0 {
-                out.push(entry.snapshot());
-            }
-        }
     }
 
     #[must_use]

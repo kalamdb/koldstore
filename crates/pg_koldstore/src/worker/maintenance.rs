@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use koldstore_worker::{maintenance_worker_type, DatabaseOid, LIBRARY_NAME};
+use koldstore_supervisor::{maintenance_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 
 const MAINTENANCE_FUNCTION: &str = "koldstore_maintenance_worker_main";
@@ -74,8 +74,9 @@ fn run_maintenance_worker(database_oid: u32) {
         };
         let target_maintenance_generation = snapshot.maintenance_generation;
         let recovery_requested =
-            snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
-        let schedule_requested = snapshot.event_flags & koldstore_worker::EVENT_SCHEDULE_DIRTY != 0;
+            snapshot.event_flags & koldstore_supervisor::EVENT_RECOVERY_REQUIRED != 0;
+        let schedule_requested =
+            snapshot.event_flags & koldstore_supervisor::EVENT_SCHEDULE_DIRTY != 0;
         let needs_reconciliation = recovery_requested || schedule_requested;
 
         if needs_reconciliation {

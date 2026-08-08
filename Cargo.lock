@@ -717,7 +717,7 @@ dependencies = [
  "koldstore-migrate",
  "koldstore-parquet",
  "koldstore-storage",
- "koldstore-worker",
+ "koldstore-supervisor",
  "parquet",
  "pg_koldstore",
  "serde",
@@ -786,7 +786,7 @@ dependencies = [
  "koldstore-common",
  "koldstore-memory-tests",
  "koldstore-storage",
- "koldstore-worker",
+ "koldstore-supervisor",
  "parquet",
  "serde",
  "serde_json",
@@ -1459,10 +1459,10 @@ dependencies = [
  "koldstore-manifest",
  "koldstore-merge",
  "koldstore-migrate",
- "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-sortkey",
  "koldstore-storage",
+ "koldstore-wal-mirror",
  "parquet",
  "serde_json",
  "tempfile",
@@ -1497,9 +1497,9 @@ dependencies = [
  "koldstore-catalog",
  "koldstore-common",
  "koldstore-migrate",
- "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-sortkey",
+ "koldstore-wal-mirror",
  "serde",
  "serde_json",
  "thiserror",
@@ -1511,23 +1511,13 @@ version = "0.1.11-preview.0"
 dependencies = [
  "koldstore-catalog",
  "koldstore-common",
- "koldstore-mirror",
  "koldstore-schema",
  "koldstore-sortkey",
+ "koldstore-wal-mirror",
  "serde",
  "serde_json",
  "thiserror",
  "uuid",
-]
-
-[[package]]
-name = "koldstore-mirror"
-version = "0.1.11-preview.0"
-dependencies = [
- "koldstore-common",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -1596,8 +1586,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "koldstore-worker"
+name = "koldstore-supervisor"
 version = "0.1.11-preview.0"
+dependencies = [
+ "koldstore-flush",
+ "koldstore-wal-mirror",
+]
+
+[[package]]
+name = "koldstore-wal-mirror"
+version = "0.1.11-preview.0"
+dependencies = [
+ "koldstore-common",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "libc"
@@ -1998,9 +2002,9 @@ dependencies = [
  "koldstore-manifest",
  "koldstore-merge",
  "koldstore-migrate",
- "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-storage",
+ "koldstore-wal-mirror",
  "pg_koldstore",
  "serde",
  "serde_json",
@@ -2020,12 +2024,12 @@ dependencies = [
  "koldstore-manifest",
  "koldstore-merge",
  "koldstore-migrate",
- "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-schema",
  "koldstore-sortkey",
  "koldstore-storage",
- "koldstore-worker",
+ "koldstore-supervisor",
+ "koldstore-wal-mirror",
  "pgrx",
  "pgrx-bench",
  "pgrx-tests",
@@ -2043,9 +2047,9 @@ dependencies = [
  "koldstore-flush",
  "koldstore-merge",
  "koldstore-migrate",
- "koldstore-mirror",
  "koldstore-parquet",
  "koldstore-schema",
+ "koldstore-wal-mirror",
  "pg_koldstore",
  "serde_json",
 ]
@@ -2832,7 +2836,7 @@ dependencies = [
  "koldstore-common",
  "koldstore-memory-tests",
  "koldstore-storage",
- "koldstore-worker",
+ "koldstore-supervisor",
  "serde",
  "serde_json",
  "tokio",
@@ -2857,7 +2861,7 @@ dependencies = [
  "koldstore-common",
  "koldstore-memory-tests",
  "koldstore-storage",
- "koldstore-worker",
+ "koldstore-supervisor",
  "serde",
  "serde_json",
  "tokio",

@@ -29,8 +29,8 @@ pub struct FlushStats {
     pub max_seq: i64,
 }
 
-impl From<koldstore_mirror::MirrorSeqStats> for FlushStats {
-    fn from(stats: koldstore_mirror::MirrorSeqStats) -> Self {
+impl From<koldstore_wal_mirror::MirrorSeqStats> for FlushStats {
+    fn from(stats: koldstore_wal_mirror::MirrorSeqStats) -> Self {
         Self {
             row_count: stats.row_count,
             min_seq: stats.min_seq,

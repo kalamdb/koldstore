@@ -31,7 +31,7 @@ impl AsyncWorkerState {
     }
 
     fn wal_available(self) -> bool {
-        self.slot_present && self.wal_registered && (self.wal_running || self.wal_starting)
+        self.slot_present && self.wal_registered && self.wal_running
     }
 }
 
@@ -110,18 +110,20 @@ pub async fn wait_for_async_worker(client: &tokio_postgres::Client) -> Result<Du
 ///
 /// This deliberately does not call `internal_ensure_async_mirror_worker`: the
 /// child lifecycle signal / safety reconciliation must replace the process on
-/// its own even when the database is already caught up.
+/// its own even when the database is already caught up. The replacement must
+/// publish a different live PID than `previous_pid`.
 ///
 /// # Errors
 ///
 /// Returns an error when supervisor recovery does not settle before the deadline.
 pub async fn wait_for_async_worker_auto_restart(
     client: &tokio_postgres::Client,
+    previous_pid: i32,
 ) -> Result<Duration> {
     let started = Instant::now();
     loop {
         let state = async_worker_state(client).await?;
-        if state.wal_available() {
+        if state.wal_available() && state.wal_pid.is_some_and(|pid| pid != previous_pid) {
             return Ok(started.elapsed());
         }
         anyhow::ensure!(

@@ -8,16 +8,17 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-use koldstore_worker::{DatabaseWorkSnapshot, LIBRARY_NAME, SUPERVISOR_REGISTRY_CAPACITY};
+use koldstore_common::unix_now_ms;
+use koldstore_supervisor::{
+    next_wait_duration, DatabaseWorkSnapshot, DynamicWorkerKind, RegistrationBackoff, LIBRARY_NAME,
+    SAFETY_RECONCILE_INTERVAL, SUPERVISOR_REGISTRY_CAPACITY,
+};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 
 const SUPERVISOR_FUNCTION: &str = "koldstore_supervisor_main";
 const SUPERVISOR_NAME: &str = "koldstore supervisor";
-const SAFETY_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
-const REGISTRATION_RETRY_MIN: Duration = Duration::from_millis(100);
-const REGISTRATION_RETRY_MAX: Duration = Duration::from_secs(5);
 const CHILD_LIFECYCLE_GRACE: Duration = Duration::from_secs(1);
 const CLUSTER_FLUSH_WORKER_LIMIT: u32 = 8;
 
@@ -50,75 +51,6 @@ impl SupervisorRegistration {
 impl Drop for SupervisorRegistration {
     fn drop(&mut self) {
         super::wake::unregister_supervisor();
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum DynamicWorkerKind {
-    Wal,
-    Maintenance,
-    Flush,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RegistrationRetry {
-    failures: u8,
-    next_attempt_at: Instant,
-}
-
-/// Supervisor-local retry state for dynamic-worker registration pressure.
-///
-/// `max_worker_processes` exhaustion is not durable work failure, so retrying is
-/// correct, but a fixed cluster wake burns CPU indefinitely under sustained
-/// pressure. Backoff lives only in the static supervisor; durable generations
-/// remain dirty and survive supervisor/postmaster restart independently.
-#[derive(Debug, Default)]
-struct RegistrationBackoff {
-    entries: HashMap<(u32, DynamicWorkerKind), RegistrationRetry>,
-}
-
-impl RegistrationBackoff {
-    fn ready(&self, database_oid: u32, kind: DynamicWorkerKind, now: Instant) -> bool {
-        self.entries
-            .get(&(database_oid, kind))
-            .is_none_or(|retry| now >= retry.next_attempt_at)
-    }
-
-    fn succeeded(&mut self, database_oid: u32, kind: DynamicWorkerKind) {
-        self.entries.remove(&(database_oid, kind));
-    }
-
-    fn failed(&mut self, database_oid: u32, kind: DynamicWorkerKind, now: Instant) -> Duration {
-        let failures = self
-            .entries
-            .get(&(database_oid, kind))
-            .map(|retry| retry.failures.saturating_add(1))
-            .unwrap_or(1)
-            .min(16);
-        let shift = u32::from(failures.saturating_sub(1)).min(6);
-        let multiplier = 1_u32 << shift;
-        let delay = REGISTRATION_RETRY_MIN
-            .saturating_mul(multiplier)
-            .min(REGISTRATION_RETRY_MAX);
-        self.entries.insert(
-            (database_oid, kind),
-            RegistrationRetry {
-                failures,
-                next_attempt_at: now + delay,
-            },
-        );
-        delay
-    }
-
-    fn clear_if_idle(&mut self, database_oid: u32, kind: DynamicWorkerKind) {
-        self.entries.remove(&(database_oid, kind));
-    }
-
-    fn next_wait(&self, now: Instant) -> Option<Duration> {
-        self.entries
-            .values()
-            .map(|retry| retry.next_attempt_at.saturating_duration_since(now))
-            .min()
     }
 }
 
@@ -193,6 +125,8 @@ pub extern "C-unwind" fn koldstore_supervisor_main(_argument: pgrx::pg_sys::Datu
             &registration_backoff,
             lifecycle_reconcile_at,
             &snapshots,
+            Instant::now(),
+            unix_now_ms(),
         );
         if !BackgroundWorker::wait_latch(wait) {
             // bgworker exit 0 disables restart; non-zero preserves the static
@@ -255,19 +189,23 @@ fn dispatch_shared_work(
         }
 
         let recovery_requested =
-            snapshot.event_flags & koldstore_worker::EVENT_RECOVERY_REQUIRED != 0;
+            snapshot.event_flags & koldstore_supervisor::EVENT_RECOVERY_REQUIRED != 0;
         let wal_due =
             recovery_requested || snapshot.wal_generation != snapshot.wal_processed_generation;
         if wal_service.running() {
-            if wal_due {
-                let _ = super::wal::wake(snapshot.database_oid);
+            // A stale PID must not block replacement of a required service,
+            // including when the database is already caught up.
+            if super::wal::ensure_live(snapshot.database_oid) {
+                if wal_due {
+                    let _ = super::wal::wake(snapshot.database_oid);
+                }
+                backoff.succeeded(snapshot.database_oid, DynamicWorkerKind::Wal);
+                continue;
             }
-            backoff.succeeded(snapshot.database_oid, DynamicWorkerKind::Wal);
+        } else if wal_service.starting() {
             continue;
         }
-        if wal_service.starting()
-            || !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Wal, now)
-        {
+        if !backoff.ready(snapshot.database_oid, DynamicWorkerKind::Wal, now) {
             continue;
         }
         if !super::wal::try_reserve(snapshot.database_oid) {
@@ -412,55 +350,6 @@ fn publish_reached_deadlines(snapshots: &[DatabaseWorkSnapshot]) -> bool {
         }
     }
     published
-}
-
-fn next_wait_duration(
-    has_slots: bool,
-    last_safety: Instant,
-    registration_backoff: &RegistrationBackoff,
-    lifecycle_reconcile_at: Option<Instant>,
-    snapshots: &[DatabaseWorkSnapshot],
-) -> Option<Duration> {
-    let now = Instant::now();
-    let mut wait = registration_backoff.next_wait(now);
-    if has_slots {
-        wait = min_optional_duration(
-            wait,
-            Some(SAFETY_RECONCILE_INTERVAL.saturating_sub(last_safety.elapsed())),
-        );
-    }
-    if let Some(deadline) = lifecycle_reconcile_at {
-        wait = min_optional_duration(wait, Some(deadline.saturating_duration_since(now)));
-    }
-
-    let now_ms = unix_now_ms();
-    for snapshot in snapshots {
-        wait = min_optional_duration(wait, deadline_delay(snapshot.next_flush_due_at_ms, now_ms));
-        wait = min_optional_duration(
-            wait,
-            deadline_delay(snapshot.next_maintenance_due_at_ms, now_ms),
-        );
-    }
-
-    wait.map(|duration| duration.max(Duration::from_millis(1)))
-}
-
-fn deadline_delay(deadline_ms: i64, now_ms: i64) -> Option<Duration> {
-    if deadline_ms <= 0 {
-        return None;
-    }
-    let delay_ms = deadline_ms.saturating_sub(now_ms).max(1);
-    Some(Duration::from_millis(
-        u64::try_from(delay_ms).unwrap_or(u64::MAX),
-    ))
-}
-
-fn min_optional_duration(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
-    match (left, right) {
-        (Some(left), Some(right)) => Some(left.min(right)),
-        (Some(value), None) | (None, Some(value)) => Some(value),
-        (None, None) => None,
-    }
 }
 
 fn reconcile_cluster_startup() -> Result<bool, String> {
@@ -651,11 +540,4 @@ fn discover_async_slots() -> Result<Vec<(u32, i64)>, String> {
         }
         Ok(out)
     })
-}
-
-fn unix_now_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
-        .unwrap_or(0)
 }

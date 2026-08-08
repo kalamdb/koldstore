@@ -49,14 +49,13 @@ koldstore-common.workspace = true
 koldstore-flush.workspace = true
 koldstore-manifest.workspace = true
 koldstore-merge.workspace = true
-koldstore-mirror.workspace = true
-koldstore-wal.workspace = true
+koldstore-wal-mirror.workspace = true
 koldstore-parquet.workspace = true
 koldstore-migrate.workspace = true
 koldstore-schema.workspace = true
 koldstore-sortkey.workspace = true
 koldstore-storage.workspace = true
-koldstore-worker.workspace = true
+koldstore-supervisor.workspace = true
 pgrx = { workspace = true, optional = true }
 pgrx-bench = { workspace = true, optional = true }
 pgrx-tests = { workspace = true, optional = true }

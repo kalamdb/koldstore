@@ -15,16 +15,18 @@ koldstore-supervisor
 │   ├── manifest
 │   ├── storage
 │   └── parquet
-└── wal
-    └── mirror
+└── wal  (koldstore-wal-mirror)
+    ├── wal      — applier registry / identity / naming
+    └── mirror   — __cl SQL, pgoutput, PK guards
 ```
 
 - **Supervisor** owns PostgreSQL-free worker identity, generations, reservations,
-  retry/backoff state, and the semantic grouping of background services.
+  registration backoff, wait scheduling, and the semantic grouping of background
+  services.
 - **Flush** owns durable hot-to-cold workflow logic and exposes its lower storage
   stack as `flush::{manifest, storage, parquet}`.
-- **WAL** owns the lifecycle contract for the persistent near-realtime applier and
-  exposes the lower mirror layer as `wal::mirror`.
+- **WAL-mirror** (`koldstore-wal-mirror`, re-exported as `supervisor::wal`) owns
+  the persistent applier lifecycle contract plus clean-schema mirror SQL/decode.
 - **`pg_koldstore::worker`** remains the PostgreSQL adapter: static/dynamic worker
   registration, SPI transactions, latches, signals, shared-memory allocation,
   and process-liveness reconciliation.
@@ -40,8 +42,7 @@ therefore remain implemented in `pg_koldstore`.
 | Setup | `koldstore-setup` | `pg_koldstore` bootstrap SQL + SPI |
 | Migrate | `koldstore-migrate` | `pg_koldstore::sql::migrate` |
 | Merge scan | `koldstore-merge` | `pg_koldstore::merge_scan` — see [scanning-table.md](scanning-table.md) |
-| Mirror state | `koldstore-mirror` | `pg_koldstore::mirror`, DML hooks |
-| WAL service | `koldstore-wal` | `pg_koldstore::worker::wal` |
+| WAL + mirror | `koldstore-wal-mirror` | `pg_koldstore::mirror`, `pg_koldstore::worker::wal` |
 | Flush service | `koldstore-flush`, `koldstore-manifest` | `pg_koldstore::sql::flush`, flush executors |
 | Supervision | `koldstore-supervisor` | `pg_koldstore::worker::supervisor` |
 | Storage | `koldstore-storage`, `koldstore-parquet` | storage registration wrappers |
@@ -81,8 +82,7 @@ flowchart BT
     storage[koldstore-storage]
     parquet[koldstore-parquet]
     manifest[koldstore-manifest]
-    mirror[koldstore-mirror]
-    wal[koldstore-wal]
+    mirror[koldstore-wal-mirror]
     merge[koldstore-merge]
     setup[koldstore-setup]
     flush[koldstore-flush]
@@ -102,7 +102,6 @@ flowchart BT
     manifest --> catalog
     manifest --> storage
     mirror --> common
-    wal --> mirror
     merge --> common
     merge --> catalog
     merge --> mirror
@@ -116,12 +115,11 @@ flowchart BT
     flush --> storage
     flush --> sortkey
     supervisor --> flush
-    supervisor --> wal
+    supervisor --> mirror
     migrate --> common
     migrate --> catalog
     migrate --> schema
     migrate --> mirror
-    migrate --> supervisor
     migrate --> sortkey
     pg --> common
     pg --> catalog
@@ -130,7 +128,6 @@ flowchart BT
     pg --> manifest
     pg --> parquet
     pg --> mirror
-    pg --> wal
     pg --> merge
     pg --> supervisor
     pg --> setup
@@ -141,7 +138,8 @@ flowchart BT
 
 `koldstore-setup` is a dependency-free SQL classifier.
 `koldstore-sortkey` is a foundation leaf with only a `koldstore-common` edge.
-`koldstore-wal` is PostgreSQL-free and depends only on the mirror contract.
+`koldstore-wal-mirror` is PostgreSQL-free and owns both the WAL-applier registry
+and the mirror SQL/decode contracts (`wal` + `mirror` modules).
 `koldstore-supervisor` is the highest PostgreSQL-free orchestration layer; it
 contains no SPI, process, latch, or `pg_sys` code.
 
@@ -169,11 +167,10 @@ contains no SPI, process, latch, or `pg_sys` code.
 | Object-store access and path templates | `koldstore-storage` |
 | Parquet read/write | `koldstore-parquet` |
 | Manifest model, assembly, and JSON I/O | `koldstore-manifest` |
-| Mirror SQL, pgoutput decoding contracts, PK guard | `koldstore-mirror` |
-| Persistent WAL-service identity and lifecycle state | `koldstore-wal` |
+| WAL applier registry + mirror SQL/pgoutput/PK guard | `koldstore-wal-mirror` |
 | Hot+cold merge logic | `koldstore-merge` |
 | Flush selection, encoding, segment publication, cleanup | `koldstore-flush` |
-| Cross-service generations, reservations, and policy | `koldstore-supervisor` |
+| Cross-service generations, reservations, backoff, and policy | `koldstore-supervisor` |
 | Migration workflow | `koldstore-migrate` |
 | SPI, hooks, custom scan, shared memory, worker main loops | `pg_koldstore` |
 
