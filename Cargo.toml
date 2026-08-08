@@ -10,6 +10,7 @@ members = [
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
     "crates/koldstore-mirror",
+    "crates/koldstore-wal",
     "crates/koldstore-worker",
     "crates/koldstore-flush",
     "crates/koldstore-migrate",
@@ -33,6 +34,7 @@ default-members = [
     "crates/koldstore-parquet",
     "crates/koldstore-merge",
     "crates/koldstore-mirror",
+    "crates/koldstore-wal",
     "crates/koldstore-worker",
     "crates/koldstore-flush",
     "crates/koldstore-migrate",
@@ -62,7 +64,11 @@ koldstore-storage = { path = "crates/koldstore-storage", default-features = fals
 koldstore-parquet = { path = "crates/koldstore-parquet" }
 koldstore-merge = { path = "crates/koldstore-merge" }
 koldstore-mirror = { path = "crates/koldstore-mirror" }
-koldstore-worker = { path = "crates/koldstore-worker" }
+koldstore-wal = { path = "crates/koldstore-wal" }
+koldstore-supervisor = { path = "crates/koldstore-worker" }
+# Transitional dependency key for crates whose Rust imports are still
+# `koldstore_worker`; the package itself is now `koldstore-supervisor`.
+koldstore-worker = { package = "koldstore-supervisor", path = "crates/koldstore-worker" }
 koldstore-flush = { path = "crates/koldstore-flush" }
 koldstore-migrate = { path = "crates/koldstore-migrate" }
 
