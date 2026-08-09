@@ -24,7 +24,9 @@ pub(crate) use manage::manage_table_pg_impl;
 #[cfg(feature = "pg")]
 use manage::set_table_auto_flush_pg_impl;
 #[cfg(feature = "pg")]
-pub(crate) use schema_registry::refresh_active_schema_if_changed;
+pub(crate) use schema_registry::{
+    refresh_active_schema_if_changed, sync_active_mirror_relation_names_in_schema,
+};
 
 /// A SQL `regclass` argument decoded without opening or locking the relation.
 ///

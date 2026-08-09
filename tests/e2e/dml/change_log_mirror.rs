@@ -11,7 +11,7 @@ async fn mirror_tracks_insert_update_delete_reinsert_and_rollback() -> Result<()
         let db = common::TestDb::start(target.clone(), "change_log_mirror").await?;
         let table_name = format!("{}_messages", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -122,7 +122,7 @@ async fn mirror_bulk_update_and_delete_keep_latest_state() -> Result<()> {
         let db = common::TestDb::start(target.clone(), "change_log_mirror_bulk").await?;
         let table_name = format!("{}_messages", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(

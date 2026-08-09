@@ -206,7 +206,7 @@ async fn migrate_and_flush_sql_return_job_ids_and_expose_progress_on_pgrx() -> R
         assert!(["pending", "running", "completed"]
             .contains(&migrate_job.get::<_, String>("status").as_str()));
 
-        let mirror_relation = format!("koldstore.{}__cl", table.table_name);
+        let mirror_relation = common::change_log_mirror_relation(&table.relation);
         wait_for_completed_job(&db.client, &migrate_job_id).await?;
         let base_rows = common::row_count(&db.client, &table.relation).await?;
         let mirror_rows = common::row_count(&db.client, &mirror_relation).await?;

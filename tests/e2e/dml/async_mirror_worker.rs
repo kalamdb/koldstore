@@ -12,7 +12,7 @@ async fn async_apply_drains_above_retained_wal_health_threshold() -> Result<()> 
         cleanup_leftover_async_tables(&db.client).await?;
         let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         ensure_publication(&db.client).await?;
         db.client
@@ -67,7 +67,7 @@ async fn async_worker_restarts_after_kill_and_applies_without_duplicates() -> Re
         cleanup_leftover_async_tables(&db.client).await?;
         let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         ensure_publication(&db.client).await?;
         db.client
@@ -142,7 +142,7 @@ async fn async_worker_recovers_from_apply_failpoint_without_duplicates() -> Resu
         cleanup_leftover_async_tables(&db.client).await?;
         let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
         let dbname: String = db
             .client
             .query_one("SELECT current_database()::text", &[])
@@ -287,7 +287,7 @@ async fn async_worker_survives_truncate_noise_in_slot() -> Result<()> {
         cleanup_leftover_async_tables(&db.client).await?;
         let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
         let noise = format!("{}_noise", db.schema);
         let noise_relation = db.relation(&noise);
 
@@ -361,7 +361,7 @@ async fn async_apply_mid_tick_abort_rolls_back_applied_lsn() -> Result<()> {
         cleanup_leftover_async_tables(&db.client).await?;
         let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
         let dbname: String = db
             .client
             .query_one("SELECT current_database()::text", &[])
@@ -468,7 +468,7 @@ async fn async_idle_non_publication_wal_advances_slot_without_reapply() -> Resul
         cleanup_leftover_async_tables(&db.client).await?;
         let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
         let noise_name = format!("{}_noise", db.schema);
         let noise = db.relation(&noise_name);
 

@@ -147,6 +147,14 @@ pub(crate) fn manage_table_pg_impl(
         order_column_name,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    if crate::catalog::resolve::mirror_has_other_active_owner(table_oid, &mirror_plan.mirror_table)
+        .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"))
+    {
+        pgrx::error!(
+            "migrate table failed: mirror {} is already owned by another active managed table",
+            mirror_plan.mirror_table.quoted()
+        );
+    }
     if !has_existing_rows {
         for statement in mirror_plan.create_statements() {
             pgrx::Spi::run(&statement.sql)

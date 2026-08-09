@@ -49,8 +49,11 @@ async fn manage_no_auto_flush_with_hot_limit(
         .await
         .with_context(|| format!("manage_table auto_flush=false for {relation}"))?;
     common::assert_system_columns_absent(&db.client, relation).await?;
-    let table = relation.rsplit('.').next().unwrap_or(relation);
-    common::assert_change_log_mirror_exists(&db.client, &format!("koldstore.{table}__cl")).await?;
+    common::assert_change_log_mirror_exists(
+        &db.client,
+        &common::change_log_mirror_relation(relation),
+    )
+    .await?;
     common::assert_catalog_has_active_schema(&db.client, relation).await?;
     common::wait_for_async_worker(&db.client).await?;
     Ok(())

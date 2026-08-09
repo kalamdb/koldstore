@@ -68,7 +68,7 @@ async fn standard_hot_dml_on_managed_table_updates_change_log_mirror_on_pgrx() -
             .await?;
         common::fence_async_mirror(&db.client).await?;
 
-        let mirror = format!("koldstore.{}__cl", table.table_name);
+        let mirror = common::change_log_mirror_relation(&table.relation);
         let row = db
             .client
             .query_one(

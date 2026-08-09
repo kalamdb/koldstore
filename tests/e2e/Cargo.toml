@@ -25,6 +25,7 @@ koldstore-manifest.workspace = true
 koldstore-parquet.workspace = true
 koldstore-storage = { workspace = true, features = ["s3"] }
 koldstore-supervisor.workspace = true
+koldstore-wal-mirror.workspace = true
 koldstore-memory-tests = { path = "../memory" }
 parquet.workspace = true
 koldstore = { path = "../../crates/pg_koldstore", package = "pg_koldstore", default-features = false }

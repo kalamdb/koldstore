@@ -17,6 +17,14 @@ pub(super) fn unmanage_table_pg_impl(
     let table = koldstore_migrate::QualifiedTableName::parse(&relation)
         .map_err(|error| error.to_string())?;
     let mirror_table = crate::catalog::resolve::mirror_relation_by_table_oid(table_oid)?;
+    if let Some(mirror_table) = &mirror_table {
+        if crate::catalog::resolve::mirror_has_other_active_owner(table_oid, mirror_table)? {
+            return Err(format!(
+                "refusing to unmanage {relation}: mirror {} is still referenced by another active managed table",
+                mirror_table.quoted()
+            ));
+        }
+    }
     let context = demigration_context(
         table,
         koldstore_common::TableOid::from_raw(table_oid_u32),

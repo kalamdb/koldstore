@@ -20,7 +20,7 @@ async fn wal_only_empty_activation_has_no_capture_triggers() -> Result<()> {
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_empty", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -78,7 +78,7 @@ async fn wal_apply_assigns_seq_in_commit_order_not_start_order() -> Result<()> {
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_order", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -150,7 +150,7 @@ async fn changes_since_seq_pagination_survives_flush() -> Result<()> {
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_feed", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -256,7 +256,7 @@ async fn worker_restart_keeps_seq_above_durable_watermark() -> Result<()> {
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_wm", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -323,7 +323,7 @@ async fn populated_activation_under_concurrent_dml_is_gap_free() -> Result<()> {
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_pop", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -414,7 +414,7 @@ async fn changes_since_hot_mirror_index_scan_for_seq_pagination() -> Result<()> 
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_idx", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
         let seq_index = format!("{table_name}__cl_seq_idx");
 
         db.client
@@ -511,7 +511,7 @@ async fn changes_since_pagination_no_skip_or_dup_under_concurrent_dml() -> Resul
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_race", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -650,7 +650,7 @@ async fn changes_since_includes_delete_revive_and_omits_rollback() -> Result<()>
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_life", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -746,7 +746,7 @@ async fn changes_since_varied_limits_cover_all_live_latest_state() -> Result<()>
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_lim", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -803,7 +803,7 @@ async fn changes_since_flush_prune_exposes_retention_floor_not_silent_catchup() 
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_gap", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -940,7 +940,7 @@ async fn changes_since_merges_cold_oldest_and_hot_newest_with_mid_cursor() -> Re
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_mix", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -1115,7 +1115,7 @@ async fn changes_since_limit_does_not_open_newer_unneeded_segments() -> Result<(
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_bounded", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -1273,7 +1273,7 @@ async fn changes_since_from_start_keeps_cold_before_hot_across_segments() -> Res
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_order", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -1449,7 +1449,7 @@ async fn changes_since_last_rows_rewinds_newest_n_like_kalamdb() -> Result<()> {
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_last", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -1540,7 +1540,7 @@ async fn changes_since_last_rows_spans_multiple_cold_segments() -> Result<()> {
         ensure_publication(&db.client).await?;
         let table_name = format!("{}_last_ms", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         db.client
             .batch_execute(&format!(

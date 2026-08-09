@@ -43,7 +43,7 @@ it end-to-end.
 ## Change API (`changes_since`)
 
 Managing a table creates a **latest-state change-log mirror**
-(`koldstore.<table>__cl`): one row per primary key with a monotonic `seq` and
+(`koldstore.<schema>_<table>__cl`): one row per primary key with a monotonic `seq` and
 `op` (`INSERT` / `UPDATE` / `DELETE`). Committed WAL is applied by the async
 mirror worker so flush can cut by `seq` and scans know which keys are still
 hot. The mirror is not an append-only history of every intermediate update (a

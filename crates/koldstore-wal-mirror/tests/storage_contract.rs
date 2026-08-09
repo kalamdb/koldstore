@@ -24,12 +24,12 @@ fn pk_shape(name: &str, type_name: &str) -> PrimaryKeyColumnShape {
 }
 
 #[test]
-fn mirror_relation_uses_clean_schema_storage_name() {
+fn mirror_relation_includes_the_source_schema() {
     let source = TableName::parse("app.items").unwrap();
     let mirror = mirror_relation_for_source(&source).unwrap();
 
-    assert_eq!(mirror.table_name().as_str(), "koldstore.items__cl");
-    assert_eq!(mirror.quoted(), "\"koldstore\".\"items__cl\"");
+    assert_eq!(mirror.table_name().as_str(), "koldstore.app_items__cl");
+    assert_eq!(mirror.quoted(), "\"koldstore\".\"app_items__cl\"");
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
     assert!(plan
         .create_table
         .sql
-        .contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"items__cl\""));
+        .contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"app_items__cl\""));
     assert!(plan.create_table.sql.contains("\"id\" bigint NOT NULL"));
     assert!(plan.create_table.sql.contains("\"seq\" bigint NOT NULL"));
     assert!(!plan.create_table.sql.contains("commit_lsn"));
@@ -57,11 +57,11 @@ fn mirror_schema_plan_creates_exact_pk_storage_and_indexes() {
     assert!(plan
         .seq_index
         .sql
-        .contains("ON \"koldstore\".\"items__cl\" (\"seq\")"));
+        .contains("ON \"koldstore\".\"app_items__cl\" (\"seq\")"));
     assert!(plan
         .tombstone_index
         .sql
-        .contains("ON \"koldstore\".\"items__cl\" (\"seq\") WHERE \"op\" = 3"));
+        .contains("ON \"koldstore\".\"app_items__cl\" (\"seq\") WHERE \"op\" = 3"));
     assert_eq!(plan.create_statements().len(), 3);
 }
 
@@ -77,7 +77,7 @@ fn mirror_upsert_builder_returns_latest_state_write_fragment() {
     )
     .unwrap();
 
-    assert!(sql.contains("INSERT INTO \"koldstore\".\"items__cl\""));
+    assert!(sql.contains("INSERT INTO \"koldstore\".\"app_items__cl\""));
     assert!(sql.contains("VALUES (NEW.\"id\", SNOWFLAKE_ID(), 2)"));
     assert!(sql.contains("ON CONFLICT (\"id\") DO UPDATE"));
     assert!(!sql.contains("commit_lsn"));
@@ -196,6 +196,6 @@ fn mirror_changes_since_scan_keeps_callers_in_control_of_predicates() {
         ]
     );
     assert!(stats.sql.contains("'row_count', count(*)"));
-    assert!(stats.sql.contains("FROM \"koldstore\".\"items__cl\""));
+    assert!(stats.sql.contains("FROM \"koldstore\".\"app_items__cl\""));
     assert!(stats.param_types.is_empty());
 }
