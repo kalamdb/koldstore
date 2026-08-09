@@ -26,12 +26,13 @@ pub use shared::{
     mirror_relation_for_source, plan_async_mirror_batch_delete_existing,
     plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, plan_drop_mirror_table,
     plan_mirror_force_flush_stats, plan_mirror_oldest_rows_max_seq, plan_mirror_op_stats,
-    plan_mirror_pk_column_renames, plan_mirror_schema, plan_mirror_schema_with_order_key,
-    plan_mirror_stats, plan_select_mirror_last_rows, plan_select_mirror_last_rows_with_params,
-    plan_select_mirror_rows_after_seq, plan_select_mirror_rows_after_seq_with_params,
-    plan_upsert_mirror_row, published_column_list, quoted_pk_columns, MirrorColumn, MirrorError,
-    MirrorRelation, MirrorResult, MirrorSchemaPlan, MirrorSeqStats, SqlAccess, SqlParamType,
-    SqlStatement, CHANGE_LOG_MIRROR_SUFFIX, KOLDSTORE_SCHEMA,
+    plan_mirror_pk_column_renames, plan_mirror_relation_rename, plan_mirror_schema,
+    plan_mirror_schema_with_order_key, plan_mirror_stats, plan_select_mirror_last_rows,
+    plan_select_mirror_last_rows_with_params, plan_select_mirror_rows_after_seq,
+    plan_select_mirror_rows_after_seq_with_params, plan_upsert_mirror_row, published_column_list,
+    quoted_pk_columns, MirrorColumn, MirrorError, MirrorRelation, MirrorResult, MirrorSchemaPlan,
+    MirrorSeqStats, SqlAccess, SqlParamType, SqlStatement, CHANGE_LOG_MIRROR_SUFFIX,
+    KOLDSTORE_SCHEMA,
 };
 
 pub use r#async::{apply_row, batch, pgoutput};

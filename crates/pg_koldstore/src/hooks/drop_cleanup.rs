@@ -84,6 +84,16 @@ fn cleanup_one_managed_table_before_drop(
     let relation = crate::catalog::resolve::relation_context(table_oid)?;
     let storage = crate::catalog::resolve::active_flush_storage_context(table_oid)?;
     let mirror = crate::catalog::resolve::mirror_relation_by_table_oid(table_oid)?;
+    if let Some(mirror_relation) = &mirror {
+        if crate::catalog::resolve::mirror_has_other_active_owner(table_oid, mirror_relation)? {
+            return Err(format!(
+                "refusing to drop managed table {}.{}: mirror {} is still referenced by another active managed table",
+                relation.namespace,
+                relation.name,
+                mirror_relation.quoted()
+            ));
+        }
+    }
     let prefix = render_regular_table_prefix(
         &PathTemplate::new(&storage.regular_path_tmpl),
         &relation.namespace,

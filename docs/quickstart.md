@@ -145,7 +145,8 @@ LIMIT 3;
 
 ## 4. Latest-state mirror (optional inspection)
 
-Management also creates `koldstore.messages__cl`, a latest-state mirror with
+Management also creates `koldstore.app_messages__cl` (the source schema and
+table name joined with `_`), a latest-state mirror with
 one metadata row per primary key. It stores the key columns plus `seq` and
 `op`; it does not duplicate full application row payloads. The mirror follows
 committed WAL and may briefly lag; the worker and consistency fence close that
@@ -154,7 +155,7 @@ in the [architecture docs](architecture.md).
 
 ```sql
 SELECT id, seq, op
-FROM koldstore.messages__cl
+FROM koldstore.app_messages__cl
 ORDER BY id
 LIMIT 3;
 ```

@@ -86,6 +86,7 @@ mod process_utility {
             let mut drop_oids = Vec::new();
             let mut truncate_oids = Vec::new();
             let mut refresh_oid = None;
+            let mut renamed_schema = None;
             let mut copy_from_oid = None;
             if !copied.is_null() && !(*copied).utilityStmt.is_null() {
                 match (*(*copied).utilityStmt).type_ {
@@ -99,6 +100,14 @@ mod process_utility {
                         // `ALTER TABLE … RENAME COLUMN` is RenameStmt, not AlterTableStmt.
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::RenameStmt>();
                         refresh_oid = rename_stmt_relation_oid(stmt);
+                        renamed_schema = rename_stmt_schema_name(stmt);
+                    }
+                    pg_sys::NodeTag::T_AlterObjectSchemaStmt => {
+                        // `ALTER TABLE … SET SCHEMA` is neither AlterTableStmt nor RenameStmt.
+                        let stmt = (*copied)
+                            .utilityStmt
+                            .cast::<pg_sys::AlterObjectSchemaStmt>();
+                        refresh_oid = alter_object_schema_relation_oid(stmt);
                     }
                     pg_sys::NodeTag::T_DropStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::DropStmt>();
@@ -169,6 +178,17 @@ mod process_utility {
                             "KoldStore schema refresh after ALTER TABLE deferred: {error}"
                         );
                     }
+                }
+            }
+            if let Some(schema_name) = renamed_schema {
+                if crate::catalog::cache::managed_catalog_ready() {
+                    pg_sys::CommandCounterIncrement();
+                    crate::sql::migrate::sync_active_mirror_relation_names_in_schema(&schema_name)
+                        .unwrap_or_else(|error| {
+                            pgrx::error!(
+                                "KoldStore schema rename could not rehome managed mirrors: {error}"
+                            )
+                        });
                 }
             }
         }
@@ -335,6 +355,29 @@ mod process_utility {
                 }
                 _ => None,
             }
+        }
+    }
+
+    /// Resolves the table OID for `ALTER TABLE … SET SCHEMA`.
+    unsafe fn alter_object_schema_relation_oid(
+        stmt: *mut pg_sys::AlterObjectSchemaStmt,
+    ) -> Option<pg_sys::Oid> {
+        unsafe {
+            if stmt.is_null() || (*stmt).objectType != pg_sys::ObjectType::OBJECT_TABLE {
+                return None;
+            }
+            relation_oid_from_range_var((*stmt).relation)
+        }
+    }
+
+    /// Returns the new schema name for a schema rename statement.
+    unsafe fn rename_stmt_schema_name(stmt: *mut pg_sys::RenameStmt) -> Option<String> {
+        unsafe {
+            if stmt.is_null() || (*stmt).renameType != pg_sys::ObjectType::OBJECT_SCHEMA {
+                return None;
+            }
+            let new_name = (*stmt).newname;
+            (!new_name.is_null()).then(|| CStr::from_ptr(new_name).to_string_lossy().into_owned())
         }
     }
 

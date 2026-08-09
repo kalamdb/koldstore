@@ -39,7 +39,7 @@ for your hardware. See
 [Mirror capture](../architecture/mirror-capture.md).
 
 **Managed PostgreSQL sizes always include** the hot user heap **plus**
-`koldstore.<table>__cl` (latest-state change-log mirror) **and** that mirror’s
+`koldstore.<schema>_<table>__cl` (latest-state change-log mirror) **and** that mirror’s
 indexes (PK + `seq` + partial tombstone). Cold Parquet is listed separately and
 is outside the PostgreSQL data directory. Report **local PostgreSQL** and
 **total hot+cold** as separate rows — combining them into one “99% smaller”

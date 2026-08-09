@@ -4,7 +4,7 @@ fn manage_populated_table_is_independent_of_caller_search_path() {
     let schema = format!("pgtest_{suffix}");
     let table = format!("messages_{suffix}");
     let relation = format!("{schema}.{table}");
-    let mirror = format!("koldstore.{table}__cl");
+    let mirror = change_log_mirror_relation(&relation);
     let storage = register_temp_storage(&suffix);
     create_messages_table(&schema, &table);
     Spi::run(&format!(
@@ -31,6 +31,167 @@ fn manage_populated_table_is_independent_of_caller_search_path() {
         spi_get_i64(&format!("SELECT count(*) FROM {mirror}")),
         2,
         "activation backfill should initialize every existing row"
+    );
+}
+
+#[pg_test]
+fn manage_same_named_tables_in_distinct_schemas_uses_distinct_mirrors() {
+    let suffix = unique_suffix("mirror_schema_collision");
+    let first_schema = format!("first_{suffix}");
+    let second_schema = format!("second_{suffix}");
+    let first_relation = format!("{first_schema}.messages");
+    let second_relation = format!("{second_schema}.messages");
+    let first_mirror = format!("koldstore.{first_schema}_messages__cl");
+    let second_mirror = format!("koldstore.{second_schema}_messages__cl");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&first_schema, "messages");
+    create_messages_table(&second_schema, "messages");
+    manage_shared(&first_relation, &storage);
+    manage_shared(&second_relation, &storage);
+
+    assert_ne!(first_mirror, second_mirror);
+    assert_eq!(spi_get_i64(&format!("SELECT count(*) FROM {first_mirror}")), 0);
+    assert_eq!(spi_get_i64(&format!("SELECT count(*) FROM {second_mirror}")), 0);
+
+    Spi::run(&format!(
+        "SELECT koldstore.unmanage_table('{first_relation}'::regclass)"
+    ))
+    .expect("unmanage first relation");
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (to_regclass('{second_mirror}') IS NOT NULL)::int"
+        )),
+        1,
+        "unmanaging one source must not drop another source's mirror"
+    );
+}
+
+#[pg_test]
+fn unmanage_refuses_a_legacy_shared_mirror() {
+    let suffix = unique_suffix("legacy_shared_mirror");
+    let first_schema = format!("first_{suffix}");
+    let second_schema = format!("second_{suffix}");
+    let first_relation = format!("{first_schema}.messages");
+    let second_relation = format!("{second_schema}.messages");
+    let first_mirror = format!("koldstore.{first_schema}_messages__cl");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&first_schema, "messages");
+    create_messages_table(&second_schema, "messages");
+    manage_shared(&first_relation, &storage);
+    manage_shared(&second_relation, &storage);
+    Spi::run(&format!(
+        "UPDATE koldstore.schemas \
+         SET mirror_relation = '{first_mirror}'::regclass \
+         WHERE table_oid = '{second_relation}'::regclass"
+    ))
+    .expect("simulate a legacy shared mirror catalog row");
+
+    Spi::run(&format!(
+        r#"
+        DO $$
+        BEGIN
+          BEGIN
+            PERFORM koldstore.unmanage_table('{first_relation}'::regclass);
+            RAISE EXCEPTION 'unmanage unexpectedly accepted a shared mirror';
+          EXCEPTION WHEN OTHERS THEN
+            IF SQLERRM = 'unmanage unexpectedly accepted a shared mirror' THEN
+              RAISE;
+            END IF;
+          END;
+        END
+        $$;
+        "#
+    ))
+    .expect("unmanage must fail closed when another active table owns the same mirror");
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (to_regclass('{first_mirror}') IS NOT NULL)::int"
+        )),
+        1,
+        "a failed unmanage must leave the shared mirror intact"
+    );
+}
+
+#[pg_test]
+fn managed_mirror_follows_source_table_and_schema_renames() {
+    let suffix = unique_suffix("mirror_rename");
+    let original_schema = format!("original_{suffix}");
+    let moved_schema = format!("moved_{suffix}");
+    let renamed_schema = format!("renamed_{suffix}");
+    let original_relation = format!("{original_schema}.messages");
+    let moved_relation = format!("{moved_schema}.events");
+    let renamed_relation = format!("{renamed_schema}.events");
+    let original_mirror = format!("koldstore.{original_schema}_messages__cl");
+    let table_renamed_mirror = format!("koldstore.{original_schema}_events__cl");
+    let moved_mirror = format!("koldstore.{moved_schema}_events__cl");
+    let schema_renamed_mirror = format!("koldstore.{renamed_schema}_events__cl");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&original_schema, "messages");
+    manage_shared(&original_relation, &storage);
+    Spi::run(&format!("ALTER TABLE {original_relation} RENAME TO events"))
+        .expect("rename managed table");
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (to_regclass('{table_renamed_mirror}') IS NOT NULL)::int"
+        )),
+        1,
+        "table rename must rename its mirror"
+    );
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (to_regclass('{original_mirror}') IS NULL)::int"
+        )),
+        1,
+        "old generated mirror name must be released"
+    );
+
+    Spi::run(&format!("CREATE SCHEMA {moved_schema}")).expect("create target schema");
+    Spi::run(&format!("ALTER TABLE {original_schema}.events SET SCHEMA {moved_schema}"))
+        .expect("move managed table to another schema");
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (to_regclass('{moved_mirror}') IS NOT NULL)::int"
+        )),
+        1,
+        "moving a table to another schema must rename its mirror"
+    );
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (to_regclass('{table_renamed_mirror}') IS NULL)::int"
+        )),
+        1,
+        "moving a table must release the prior schema-qualified mirror name"
+    );
+    assert_eq!(
+        spi_get_i64(&format!("SELECT count(*) FROM {moved_relation}")),
+        0
+    );
+
+    Spi::run(&format!("ALTER SCHEMA {moved_schema} RENAME TO {renamed_schema}"))
+        .expect("rename schema containing managed table");
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (to_regclass('{schema_renamed_mirror}') IS NOT NULL)::int"
+        )),
+        1,
+        "schema rename must rename its managed mirrors"
+    );
+
+    create_messages_table(&renamed_schema, "messages");
+    manage_shared(&format!("{renamed_schema}.messages"), &storage);
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (to_regclass('koldstore.{renamed_schema}_messages__cl') IS NOT NULL)::int"
+        )),
+        1,
+        "a new table may reuse the source's former name"
+    );
+    assert_eq!(
+        spi_get_i64(&format!("SELECT count(*) FROM {renamed_relation}")),
+        0
     );
 }
 

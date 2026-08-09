@@ -144,7 +144,7 @@ pub(crate) fn refresh_active_schema_if_changed(
     })
     .map_err(|error| error.to_string())?;
     if action == koldstore_schema::SchemaEvolutionAction::Unchanged {
-        return Ok(false);
+        return sync_active_mirror_relation_name(table_oid);
     }
 
     let primary_key_shape = primary_key_shape(table_oid_u32)?;
@@ -163,6 +163,132 @@ pub(crate) fn refresh_active_schema_if_changed(
     crate::catalog::cache::invalidate_table_globally(table_oid);
     crate::spi::invalidate_all_prepared_plans();
     Ok(true)
+}
+
+/// Renames a managed mirror when its source's schema-qualified name changes.
+///
+/// PostgreSQL preserves a relation OID across `ALTER TABLE ... RENAME` and
+/// `ALTER TABLE ... SET SCHEMA`, but mirror names encode that source identity.
+/// Rehoming all generated artifacts frees the old source name for safe reuse.
+#[cfg(feature = "pg")]
+pub(crate) fn sync_active_mirror_relation_name(
+    table_oid: pgrx::pg_sys::Oid,
+) -> Result<bool, String> {
+    let Some(active) = active_schema_refresh_context(table_oid)? else {
+        return Ok(false);
+    };
+    let source_name = crate::catalog::resolve::qualified_relation_name(table_oid)?;
+    let source = koldstore_migrate::QualifiedTableName::parse(&source_name)
+        .map_err(|error| error.to_string())?;
+    let old_mirror = koldstore_migrate::QualifiedTableName::parse(&active.mirror_relation)
+        .map_err(|error| error.to_string())?;
+    let new_mirror = koldstore_migrate::mirror_relation_for_source(&source)
+        .map_err(|error| error.to_string())?;
+    if old_mirror == new_mirror {
+        return Ok(false);
+    }
+    if crate::catalog::resolve::mirror_has_other_active_owner(table_oid, &old_mirror)? {
+        return Err(format!(
+            "refusing to rename managed mirror {} for {source_name}: it is still referenced by another active managed table",
+            old_mirror.quoted()
+        ));
+    }
+
+    let old_storage = koldstore_wal_mirror::MirrorRelation::new(
+        old_mirror
+            .as_table_name()
+            .map_err(|error| error.to_string())?,
+    );
+    let new_storage = koldstore_wal_mirror::MirrorRelation::new(
+        new_mirror
+            .as_table_name()
+            .map_err(|error| error.to_string())?,
+    );
+    for statement in koldstore_wal_mirror::plan_mirror_relation_rename(&old_storage, &new_storage)
+        .map_err(|error| error.to_string())?
+    {
+        pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+    }
+
+    let catalog = load_migration_catalog(table_oid.to_u32())?;
+    let primary_key_shape = primary_key_shape(table_oid.to_u32())?;
+    let options: koldstore_common::ManageTableOptions =
+        serde_json::from_value(active.options.clone()).unwrap_or_default();
+    let order_column = options.segment_order_column_id.and_then(|column_id| {
+        catalog
+            .columns
+            .iter()
+            .find(|column| column.column_id.get() == column_id)
+            .map(|column| column.name.as_str())
+    });
+    for statement in koldstore_wal_mirror::plan_mirror_source_teardown(&source, &old_mirror)
+        .map_err(|error| error.to_string())?
+    {
+        pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+    }
+    let pk_guard = koldstore_wal_mirror::plan_mirror_pk_guard(
+        &source,
+        &new_mirror,
+        primary_key_shape.columns(),
+        order_column,
+    )
+    .map_err(|error| error.to_string())?;
+    for statement in pk_guard.create_statements() {
+        pgrx::Spi::run(&statement.sql).map_err(|error| error.to_string())?;
+    }
+    crate::mirror::lifecycle::activate_table(
+        &source,
+        &new_mirror,
+        &primary_key_shape,
+        order_column,
+    )?;
+    crate::catalog::cache::invalidate_table_globally(table_oid);
+    crate::spi::invalidate_all_prepared_plans();
+    Ok(true)
+}
+
+/// Rehomes every active managed mirror whose source table is in `schema_name`.
+///
+/// # Errors
+///
+/// Returns an error when catalog lookup or any mirror rename operation fails.
+#[cfg(feature = "pg")]
+pub(crate) fn sync_active_mirror_relation_names_in_schema(
+    schema_name: &str,
+) -> Result<usize, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let table_oids = pgrx::Spi::connect(|client| -> Result<Vec<pgrx::pg_sys::Oid>, String> {
+        let rows = client
+            .select(
+                "SELECT s.table_oid::oid \
+                 FROM koldstore.schemas s \
+                 JOIN pg_catalog.pg_class c ON c.oid = s.table_oid \
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE s.active AND n.nspname = $1 \
+                 ORDER BY s.table_oid",
+                None,
+                &[DatumWithOid::from(schema_name)],
+            )
+            .map_err(|error| error.to_string())?;
+        let mut table_oids = Vec::new();
+        for row in rows {
+            if let Some(table_oid) = row
+                .get::<pgrx::pg_sys::Oid>(1)
+                .map_err(|error| error.to_string())?
+            {
+                table_oids.push(table_oid);
+            }
+        }
+        Ok(table_oids)
+    })
+    .map_err(|error| error.to_string())?;
+
+    let mut renamed = 0;
+    for table_oid in table_oids {
+        renamed += usize::from(sync_active_mirror_relation_name(table_oid)?);
+    }
+    Ok(renamed)
 }
 
 #[cfg(feature = "pg")]

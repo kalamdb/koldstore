@@ -61,6 +61,17 @@ pub(crate) fn create_messages_table(schema: &str, table: &str) {
     .expect("create messages table");
 }
 
+/// Returns the generated mirror relation for a source relation.
+pub(crate) fn change_log_mirror_relation(source_relation: &str) -> String {
+    let source = koldstore_common::TableName::parse(source_relation)
+        .expect("pg_test source relation must be a safe identifier");
+    koldstore_wal_mirror::mirror_relation_for_source(&source)
+        .expect("pg_test source relation must produce a mirror")
+        .table_name()
+        .as_str()
+        .to_string()
+}
+
 /// Manages a shared table with flush-friendly settings for small fixtures.
 ///
 /// Includes `migration_order_by => 'id'` so seeded (pre-manage) heaps can backfill

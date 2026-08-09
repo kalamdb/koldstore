@@ -51,6 +51,35 @@ pub fn mirror_relation_by_table_oid(
         .transpose()
 }
 
+/// Returns whether another active managed table references `mirror_relation`.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot inspect the managed-schema catalog.
+pub fn mirror_has_other_active_owner(
+    table_oid: pgrx::pg_sys::Oid,
+    mirror_relation: &QualifiedTableName,
+) -> Result<bool, String> {
+    use pgrx::datum::DatumWithOid;
+
+    let mirror_relation = mirror_relation.quoted();
+    pgrx::Spi::get_one_with_args::<bool>(
+        "SELECT EXISTS (\
+           SELECT 1 \
+           FROM koldstore.schemas \
+           WHERE active \
+             AND table_oid <> $1::oid \
+             AND mirror_relation = pg_catalog.to_regclass($2)\
+         )",
+        &[
+            DatumWithOid::from(table_oid),
+            DatumWithOid::from(mirror_relation.as_str()),
+        ],
+    )
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "mirror ownership query returned no result".to_string())
+}
+
 /// Resolves a registered storage ID by name.
 ///
 /// # Errors

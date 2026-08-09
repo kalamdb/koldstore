@@ -50,7 +50,7 @@ async fn demigrate_catalog_deactivation_cancels_jobs_and_preserves_heap_rows_on_
             .get::<_, i64>(0);
         assert_eq!(system_columns, 0);
 
-        let mirror = format!("koldstore.{}__cl", table.table_name);
+        let mirror = common::change_log_mirror_relation(&table.relation);
         let mirror_exists = db
             .client
             .query_one("SELECT to_regclass($1)::oid IS NOT NULL", &[&mirror])

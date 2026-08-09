@@ -264,10 +264,7 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
             .await?;
         common::fence_async_mirror(&db.client).await?;
 
-        let mirror = format!(
-            "koldstore.{}__cl",
-            relation.rsplit('.').next().unwrap_or(relation.as_str())
-        );
+        let mirror = common::change_log_mirror_relation(&relation);
         let before: Vec<u8> = db
             .client
             .query_one(&format!("SELECT order_key FROM {mirror} WHERE id = 1"), &[])

@@ -718,6 +718,7 @@ dependencies = [
  "koldstore-parquet",
  "koldstore-storage",
  "koldstore-supervisor",
+ "koldstore-wal-mirror",
  "parquet",
  "pg_koldstore",
  "serde",
