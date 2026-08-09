@@ -7,6 +7,7 @@
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::future::BoxFuture;
@@ -18,23 +19,74 @@ use parquet::arrow::async_reader::{AsyncFileReader, MetadataSuffixFetch};
 use parquet::errors::{ParquetError, Result as ParquetResult};
 use parquet::file::metadata::{PageIndexPolicy, ParquetMetaData, ParquetMetaDataReader};
 
-/// Optional I/O counters for proving range-only ObjectStore reads in tests.
+/// Optional I/O counters and wait timing for EXPLAIN diagnostics and tests.
 #[derive(Debug, Default)]
 pub struct ObjectStoreReadStats {
     /// Number of `get_range` / `get_ranges` / suffix `get_opts` calls.
     pub range_calls: AtomicU64,
     /// Total bytes returned by those range calls.
     pub bytes_read: AtomicU64,
+    /// Wall time awaiting successful object-store range reads, in nanoseconds.
+    read_nanos: AtomicU64,
+    /// Whether callers requested wall-clock timing in addition to counters.
+    timing_enabled: bool,
+}
+
+/// Point-in-time object-store I/O counters for one Parquet reader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ObjectStoreReadSnapshot {
+    /// Successful range/suffix calls completed so far.
+    pub range_calls: u64,
+    /// Bytes returned by successful range/suffix calls.
+    pub bytes_read: u64,
+    /// Wall time spent awaiting successful range/suffix calls.
+    pub read_duration: Duration,
 }
 
 impl ObjectStoreReadStats {
-    /// Snapshot of `(range_calls, bytes_read)`.
+    /// Creates counters that also measure object-store wait time.
+    #[must_use]
+    pub fn with_timing() -> Self {
+        Self {
+            timing_enabled: true,
+            ..Self::default()
+        }
+    }
+
+    /// Snapshot of `(range_calls, bytes_read)` for compatibility with existing callers.
     #[must_use]
     pub fn snapshot(&self) -> (u64, u64) {
-        (
-            self.range_calls.load(Ordering::SeqCst),
-            self.bytes_read.load(Ordering::SeqCst),
-        )
+        let snapshot = self.timed_snapshot();
+        (snapshot.range_calls, snapshot.bytes_read)
+    }
+
+    /// Returns completed-read counters plus accumulated object-store wait time.
+    #[must_use]
+    pub fn timed_snapshot(&self) -> ObjectStoreReadSnapshot {
+        ObjectStoreReadSnapshot {
+            range_calls: self.range_calls.load(Ordering::Relaxed),
+            bytes_read: self.bytes_read.load(Ordering::Relaxed),
+            read_duration: Duration::from_nanos(self.read_nanos.load(Ordering::Relaxed)),
+        }
+    }
+
+    fn start_timer(&self) -> Option<Instant> {
+        self.timing_enabled.then(Instant::now)
+    }
+
+    fn record_read(&self, bytes: usize, started: Option<Instant>) {
+        self.range_calls.fetch_add(1, Ordering::Relaxed);
+        self.bytes_read
+            .fetch_add(u64::try_from(bytes).unwrap_or(u64::MAX), Ordering::Relaxed);
+        if let Some(started) = started {
+            let elapsed = started.elapsed();
+            let elapsed_nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+            let _ = self
+                .read_nanos
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_add(elapsed_nanos))
+                });
+        }
     }
 }
 
@@ -99,15 +151,13 @@ impl AsyncFileReader for ObjectStoreParquetReader {
         let path = self.path.clone();
         let stats = self.stats.clone();
         async move {
+            let started = stats.as_ref().and_then(|stats| stats.start_timer());
             let bytes = store
                 .get_range(&path, range)
                 .await
                 .map_err(|error| ParquetError::External(Box::new(error)))?;
             if let Some(stats) = stats {
-                stats.range_calls.fetch_add(1, Ordering::SeqCst);
-                stats
-                    .bytes_read
-                    .fetch_add(bytes.len() as u64, Ordering::SeqCst);
+                stats.record_read(bytes.len(), started);
             }
             Ok(bytes)
         }
@@ -122,14 +172,14 @@ impl AsyncFileReader for ObjectStoreParquetReader {
         let path = self.path.clone();
         let stats = self.stats.clone();
         async move {
+            let started = stats.as_ref().and_then(|stats| stats.start_timer());
             let parts = store
                 .get_ranges(&path, &ranges)
                 .await
                 .map_err(|error| ParquetError::External(Box::new(error)))?;
             if let Some(stats) = stats {
-                stats.range_calls.fetch_add(1, Ordering::SeqCst);
-                let total: u64 = parts.iter().map(|b| b.len() as u64).sum();
-                stats.bytes_read.fetch_add(total, Ordering::SeqCst);
+                let total = parts.iter().map(bytes::Bytes::len).sum();
+                stats.record_read(total, started);
             }
             Ok(parts)
         }
@@ -192,6 +242,7 @@ impl MetadataSuffixFetch for &mut ObjectStoreParquetReader {
         let path = self.path.clone();
         let stats = self.stats.clone();
         async move {
+            let started = stats.as_ref().and_then(|stats| stats.start_timer());
             let options = GetOptions {
                 range: Some(GetRange::Suffix(suffix as u64)),
                 ..Default::default()
@@ -205,13 +256,45 @@ impl MetadataSuffixFetch for &mut ObjectStoreParquetReader {
                 .await
                 .map_err(|error| ParquetError::External(Box::new(error)))?;
             if let Some(stats) = stats {
-                stats.range_calls.fetch_add(1, Ordering::SeqCst);
-                stats
-                    .bytes_read
-                    .fetch_add(bytes.len() as u64, Ordering::SeqCst);
+                stats.record_read(bytes.len(), started);
             }
             Ok(bytes)
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ObjectStoreReadStats;
+    use std::time::Duration;
+
+    #[test]
+    fn object_store_read_stats_do_not_measure_wait_time_by_default() {
+        let stats = ObjectStoreReadStats::default();
+
+        stats.record_read(512, stats.start_timer());
+        stats.record_read(256, stats.start_timer());
+
+        let snapshot = stats.timed_snapshot();
+        assert_eq!(snapshot.range_calls, 2);
+        assert_eq!(snapshot.bytes_read, 768);
+        assert_eq!(snapshot.read_duration, Duration::ZERO);
+    }
+
+    #[test]
+    fn object_store_read_stats_measure_wait_time_when_requested() {
+        let stats = ObjectStoreReadStats::with_timing();
+
+        let started = stats.start_timer().expect("timed stats must start a clock");
+        while started.elapsed().is_zero() {
+            std::hint::spin_loop();
+        }
+        stats.record_read(512, Some(started));
+
+        let snapshot = stats.timed_snapshot();
+        assert_eq!(snapshot.range_calls, 1);
+        assert_eq!(snapshot.bytes_read, 512);
+        assert!(snapshot.read_duration > Duration::ZERO);
     }
 }

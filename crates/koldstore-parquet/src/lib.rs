@@ -21,7 +21,7 @@ pub use footer::{
 pub use footer_cache as parquet_footer_cache;
 pub use koldstore_common::{canonical_postgres_type_name, CellValue};
 pub use koldstore_schema::{PgIntegerArrayOid, PgType, SchemaError};
-pub use object_reader::{ObjectStoreParquetReader, ObjectStoreReadStats};
+pub use object_reader::{ObjectStoreParquetReader, ObjectStoreReadSnapshot, ObjectStoreReadStats};
 pub use page_prune::{row_selection_for_equality_values, PagePruneDecision};
 pub use pg_type_codec::{
     arrow_array_for_column, arrow_array_from_json, arrow_data_type, cell_from_arrow_cell,
@@ -32,8 +32,8 @@ pub use reader::{
     clean_cold_row_to_common, read_clean_cold_rows_from_object_store,
     read_clean_cold_rows_from_object_store_async, read_clean_cold_rows_from_object_store_with_size,
     read_clean_cold_rows_from_object_store_with_stats, read_clean_cold_rows_with_options,
-    BloomPruneMode, CleanColdRow, PageIndexPruneMode, ParquetReadOptions, ParquetReadProfile,
-    ParquetReadRequest,
+    BloomPruneMode, CleanColdRow, PageIndexPruneMode, ParquetProfileMode, ParquetReadOptions,
+    ParquetReadProfile, ParquetReadRequest,
 };
 pub use schema::{build_clean_arrow_schema, ColdMetadataColumn, PgColumn};
 pub use writer::{

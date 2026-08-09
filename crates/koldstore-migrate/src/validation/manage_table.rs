@@ -79,6 +79,19 @@ pub struct ValidatedManageTable {
     pub migration: MigrationValidation,
 }
 
+/// Resolves the cold segment-order column for a managed table.
+///
+/// An explicit segment-order column takes precedence. Otherwise the stable
+/// migration ordering column also orders cold segments, so ordered reads can
+/// use the progressive merge path without repeating the same configuration.
+#[must_use]
+pub fn effective_segment_order_column<'a>(
+    segment_order_column: Option<&'a str>,
+    migration_order_by: Option<&'a str>,
+) -> Option<&'a str> {
+    segment_order_column.or(migration_order_by)
+}
+
 /// Validates operator-provided policy values without requiring catalog access.
 ///
 /// PostgreSQL callers use this before provisioning WAL capture so malformed

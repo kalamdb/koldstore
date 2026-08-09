@@ -8,6 +8,11 @@
 # Override image / ports:
 #   KOLDSTORE_IMAGE=jamals86/pg-koldstore:0.1.11-preview.0 PG_PORT=5433 \
 #     docker compose -f docker/docker-compose.release.yml up -d
+#
+# Data persistence:
+#   - koldstore-pgdata  → PostgreSQL PGDATA (databases survive image recreate)
+#   - koldstore-cold    → local filesystem cold objects (when not using MinIO)
+#   - koldstore-minio   → MinIO object data
 
 services:
   postgres:
@@ -16,6 +21,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-koldstoredb}
+      PGDATA: /var/lib/postgresql/data
     # Multi-database managed farms need per-DB slots + background workers.
     command:
       - postgres
@@ -30,6 +36,7 @@ services:
     ports:
       - "${PG_PORT:-5432}:5432"
     volumes:
+      - koldstore-pgdata:/var/lib/postgresql/data
       - koldstore-cold:/koldstore-data/cold
     healthcheck:
       test:
@@ -51,6 +58,8 @@ services:
     ports:
       - "${MINIO_PORT:-19000}:9000"
       - "${MINIO_CONSOLE_PORT:-19001}:9001"
+    volumes:
+      - koldstore-minio:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
@@ -73,4 +82,6 @@ services:
     restart: "no"
 
 volumes:
+  koldstore-pgdata:
   koldstore-cold:
+  koldstore-minio:

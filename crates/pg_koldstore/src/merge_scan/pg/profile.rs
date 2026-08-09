@@ -58,6 +58,7 @@ pub(super) struct ScanProfiler {
 /// The uninstrumented implementation is a zero-sized no-op, allowing LLVM to
 /// remove every profiling call from ordinary query execution.
 pub(super) trait ScanProfileSink {
+    fn collection_mode(&self) -> ProfileCollectionMode;
     fn start_timer(&self) -> Option<Instant>;
     fn record_hot_scan(&mut self, started: Option<Instant>);
     fn record_hot_buffer(&mut self, row_count: usize);
@@ -69,6 +70,11 @@ pub(super) trait ScanProfileSink {
 pub(super) struct DisabledScanProfiler;
 
 impl ScanProfileSink for DisabledScanProfiler {
+    #[inline(always)]
+    fn collection_mode(&self) -> ProfileCollectionMode {
+        ProfileCollectionMode::Disabled
+    }
+
     #[inline(always)]
     fn start_timer(&self) -> Option<Instant> {
         None
@@ -100,9 +106,12 @@ impl ScanProfiler {
         );
         Self {
             collection,
-            execution: collection
-                .collects_counts()
-                .then(|| Box::new(ScanExecutionProfile::default())),
+            execution: collection.collects_counts().then(|| {
+                Box::new(ScanExecutionProfile {
+                    collect_timing: collection.collects_timing(),
+                    ..ScanExecutionProfile::default()
+                })
+            }),
         }
     }
 
@@ -134,6 +143,11 @@ impl ScanProfiler {
 }
 
 impl ScanProfileSink for ScanProfiler {
+    #[inline]
+    fn collection_mode(&self) -> ProfileCollectionMode {
+        self.collection
+    }
+
     #[inline]
     fn start_timer(&self) -> Option<Instant> {
         self.collection.collects_timing().then(Instant::now)
@@ -200,6 +214,8 @@ impl EmitPath {
 /// Execution counters and phase timings for one KoldMergeScan invocation.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ScanExecutionProfile {
+    /// Whether PostgreSQL requested wall-clock timings as well as counters.
+    collect_timing: bool,
     /// Rows read from the hot heap, including a zero-row point probe.
     pub(super) hot_rows: usize,
     /// Maximum hot JSON rows retained in one MergeStream SPI page.
@@ -228,6 +244,7 @@ pub(super) struct ScanExecutionProfile {
     pub(super) initialization_ms: Option<f64>,
     /// Managed-table metadata lookup and scan-shape construction.
     pub(super) metadata_ms: Option<f64>,
+
     /// Hot SPI scan or point-probe time. Native child timing remains on its plan node.
     pub(super) hot_scan_ms: Option<f64>,
     /// Mirror tombstone SPI scan time.
@@ -238,6 +255,17 @@ pub(super) struct ScanExecutionProfile {
     pub(super) merge_ms: Option<f64>,
     /// Winner row-image to PostgreSQL Datum materialization time.
     pub(super) materialization_ms: Option<f64>,
+}
+
+impl ScanExecutionProfile {
+    #[inline]
+    pub(super) const fn collection_mode(&self) -> ProfileCollectionMode {
+        if self.collect_timing {
+            ProfileCollectionMode::CountsAndTiming
+        } else {
+            ProfileCollectionMode::Counts
+        }
+    }
 }
 
 /// Execution metadata retained until PostgreSQL invokes the EXPLAIN callback.
@@ -286,6 +314,8 @@ pub(super) fn abandon_completed_explain_states() {
 pub(super) struct SegmentReadProfile {
     pub(super) object_path: String,
     pub(super) row_count: usize,
+    /// Time waiting for a bounded Parquet-reader permit.
+    pub(super) reader_pool_wait_ms: Option<f64>,
     pub(super) read_ms: Option<f64>,
     /// Catalog object size when known.
     pub(super) byte_size: Option<u64>,
@@ -341,6 +371,11 @@ pub(super) struct ColdReadProfile {
 }
 
 impl ColdReadProfile {
+    /// Empty placeholder retained by uninstrumented executor state.
+    pub(super) fn disabled() -> Self {
+        Self::empty(String::new())
+    }
+
     pub(super) fn empty(manifest_path: impl Into<String>) -> Self {
         Self {
             manifest_path: manifest_path.into(),
@@ -382,6 +417,42 @@ impl ColdReadProfile {
             }
         }
         any.then_some(total)
+    }
+
+    fn reader_pool_wait_ms(&self) -> Option<f64> {
+        self.segments
+            .iter()
+            .filter_map(|segment| segment.reader_pool_wait_ms)
+            .reduce(|total, wait| total + wait)
+    }
+
+    fn parquet_open_ms(&self) -> Option<f64> {
+        self.sum_parquet_duration(|parquet| parquet.open_duration)
+    }
+
+    fn parquet_scan_ms(&self) -> Option<f64> {
+        self.sum_parquet_duration(|parquet| parquet.scan_duration)
+    }
+
+    fn object_store_read_ms(&self) -> Option<f64> {
+        self.sum_parquet_duration(|parquet| parquet.object_store_read_duration)
+    }
+
+    fn sum_parquet_duration(
+        &self,
+        duration: impl Fn(&ParquetReadProfile) -> std::time::Duration,
+    ) -> Option<f64> {
+        let mut total = std::time::Duration::ZERO;
+        let mut any = false;
+        for parquet in self
+            .segments
+            .iter()
+            .filter_map(|segment| segment.parquet.as_ref())
+        {
+            total = total.saturating_add(duration(parquet));
+            any = true;
+        }
+        any.then(|| total.as_secs_f64() * 1000.0)
     }
 }
 
@@ -471,8 +542,10 @@ pub(super) fn explain_visual_pipeline(
                 "Hot Actual Access",
                 hot_actual_access(emit_path, used_spi),
             );
-            if let Some(sql) = execution.hot_spi_query.as_deref() {
-                explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
+            if explain_shows_diagnostics(es) {
+                if let Some(sql) = execution.hot_spi_query.as_deref() {
+                    explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
+                }
             }
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
             if show_timing {
@@ -658,6 +731,15 @@ fn explain_visual_parquet_io_stages(
         explain_uinteger(es, "Object Bytes", Some("bytes"), size);
     }
     explain_text(es, "Status", if executed { "executed" } else { "planned" });
+    if executed && show_timing {
+        explain_float(
+            es,
+            "Actual Total Time",
+            "ms",
+            parquet.open_duration.as_secs_f64() * 1000.0,
+            3,
+        );
+    }
     explain_visual_node_close(es, "KoldStore Parquet Footer");
 
     explain_visual_node_open(
@@ -715,9 +797,13 @@ fn explain_visual_parquet_io_stages(
     if executed {
         explain_integer(es, "Rows Returned", None, parquet.rows_returned as i64);
         if show_timing {
-            if let Some(ms) = segment.read_ms {
-                explain_float(es, "Actual Total Time", "ms", ms, 3);
-            }
+            explain_float(
+                es,
+                "Actual Total Time",
+                "ms",
+                parquet.scan_duration.as_secs_f64() * 1000.0,
+                3,
+            );
         }
     }
     if !parquet.projected_columns.is_empty() {
@@ -753,6 +839,18 @@ fn explain_visual_timing_node(
     }
     if let Some(ms) = profile.cold_read_ms() {
         explain_float(es, "Cold Read Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.reader_pool_wait_ms() {
+        explain_float(es, "Reader Pool Wait Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.parquet_open_ms() {
+        explain_float(es, "Parquet Open Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.object_store_read_ms() {
+        explain_float(es, "Object Store Read Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.parquet_scan_ms() {
+        explain_float(es, "Parquet Scan Time", "ms", ms, 3);
     }
     if let Some(ms) = execution.mirror_scan_ms {
         explain_float(es, "Mirror Scan Time", "ms", ms, 3);
@@ -837,8 +935,10 @@ fn explain_hot_scan(
         Some(execution) => {
             let used_spi = execution.hot_spi_query.is_some();
             explain_text(es, "Actual Access", hot_actual_access(emit_path, used_spi));
-            if let Some(sql) = execution.hot_spi_query.as_deref() {
-                explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
+            if explain_shows_diagnostics(es) {
+                if let Some(sql) = execution.hot_spi_query.as_deref() {
+                    explain_text(es, "Hot SPI Query", &compact_sql_for_explain(sql));
+                }
             }
             explain_integer(es, "Rows Scanned", None, execution.hot_rows as i64);
             if matches!(
@@ -1040,11 +1140,13 @@ fn explain_cold_scan(
         );
         explain_bool(es, "Runtime Manifest Read", false);
     }
-    if let Some(query) = profile.cold_segments_query.as_deref() {
-        explain_text(es, "Cold Segments Query", &compact_sql_for_explain(query));
-    }
-    if let Some(query) = profile.segment_index_query.as_deref() {
-        explain_text(es, "Segment Index Query", &compact_sql_for_explain(query));
+    if explain_shows_diagnostics(es) {
+        if let Some(query) = profile.cold_segments_query.as_deref() {
+            explain_text(es, "Cold Segments Query", &compact_sql_for_explain(query));
+        }
+        if let Some(query) = profile.segment_index_query.as_deref() {
+            explain_text(es, "Segment Index Query", &compact_sql_for_explain(query));
+        }
     }
 
     if !profile.storage_type.is_empty() {
@@ -1065,13 +1167,15 @@ fn explain_cold_scan(
 
     // Nested group for JSON/YAML/XML graph clients; TEXT uses a native "Label:\n"
     // section header. Empty arrays still emit so structured clients see a stable key.
-    explain_open_group(es, "Parquet Segments", Some("Parquet Segments"), false);
-    for segment in &profile.segments {
-        explain_open_group(es, "Parquet Segment", None, true);
-        explain_segment(es, segment, show_timing, analyze);
-        explain_close_group(es, "Parquet Segment", None, true);
+    if explain_shows_diagnostics(es) {
+        explain_open_group(es, "Parquet Segments", Some("Parquet Segments"), false);
+        for segment in &profile.segments {
+            explain_open_group(es, "Parquet Segment", None, true);
+            explain_segment(es, segment, show_timing, analyze);
+            explain_close_group(es, "Parquet Segment", None, true);
+        }
+        explain_close_group(es, "Parquet Segments", Some("Parquet Segments"), false);
     }
-    explain_close_group(es, "Parquet Segments", Some("Parquet Segments"), false);
     explain_close_group(es, "Cold Scan", Some("Cold Scan"), true);
 }
 
@@ -1187,6 +1291,18 @@ fn explain_timing_group(
     if let Some(ms) = cold_ms {
         explain_float(es, "Cold Read Time", "ms", ms, 3);
     }
+    if let Some(ms) = profile.reader_pool_wait_ms() {
+        explain_float(es, "Reader Pool Wait Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.parquet_open_ms() {
+        explain_float(es, "Parquet Open Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.object_store_read_ms() {
+        explain_float(es, "Object Store Read Time", "ms", ms, 3);
+    }
+    if let Some(ms) = profile.parquet_scan_ms() {
+        explain_float(es, "Parquet Scan Time", "ms", ms, 3);
+    }
     if let Some(ms) = execution.mirror_scan_ms {
         explain_float(es, "Mirror Scan Time", "ms", ms, 3);
     }
@@ -1221,6 +1337,9 @@ fn explain_segment(
             if let Some(ms) = segment.read_ms {
                 explain_float(es, "Read Time", "ms", ms, 3);
             }
+            if let Some(ms) = segment.reader_pool_wait_ms {
+                explain_float(es, "Reader Pool Wait Time", "ms", ms, 3);
+            }
         }
     } else {
         explain_text(es, "Status", "planned");
@@ -1229,6 +1348,29 @@ fn explain_segment(
     let Some(parquet) = &segment.parquet else {
         return;
     };
+    if executed && show_timing {
+        explain_float(
+            es,
+            "Open Time",
+            "ms",
+            parquet.open_duration.as_secs_f64() * 1000.0,
+            3,
+        );
+        explain_float(
+            es,
+            "Object Store Read Time",
+            "ms",
+            parquet.object_store_read_duration.as_secs_f64() * 1000.0,
+            3,
+        );
+        explain_float(
+            es,
+            "Scan Time",
+            "ms",
+            parquet.scan_duration.as_secs_f64() * 1000.0,
+            3,
+        );
+    }
     explain_bool(es, "Footer First", parquet.footer_first);
     explain_bool(es, "Footer Cache Hit", parquet.footer_cache_hit);
     explain_uinteger(es, "Range Gets", None, parquet.range_calls);
@@ -1365,6 +1507,15 @@ fn explain_wants_timing(es: *mut pg_sys::ExplainState) -> bool {
         return false;
     }
     unsafe { (*es).timing }
+}
+
+/// TEXT plans reserve raw SQL and per-file diagnostics for EXPLAIN VERBOSE.
+/// Structured formats retain their stable nested graph contract.
+fn explain_shows_diagnostics(es: *mut pg_sys::ExplainState) -> bool {
+    if es.is_null() {
+        return false;
+    }
+    unsafe { (*es).verbose || (*es).format != pg_sys::ExplainFormat::EXPLAIN_FORMAT_TEXT }
 }
 
 pub(super) fn explain_integer(
@@ -1519,7 +1670,7 @@ unsafe fn explain_indent_text(es: *mut pg_sys::ExplainState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bytes_human, ProfileCollectionMode};
+    use super::{format_bytes_human, ColdReadProfile, ProfileCollectionMode};
 
     #[test]
     fn format_bytes_human_uses_readable_units() {
@@ -1543,5 +1694,16 @@ mod tests {
             ProfileCollectionMode::from_instrumentation(true, true),
             ProfileCollectionMode::CountsAndTiming
         );
+    }
+
+    #[test]
+    fn disabled_cold_profile_owns_no_diagnostic_heap_buffers() {
+        let profile = ColdReadProfile::disabled();
+
+        assert_eq!(profile.manifest_path.capacity(), 0);
+        assert_eq!(profile.storage_type.capacity(), 0);
+        assert_eq!(profile.base_path.capacity(), 0);
+        assert_eq!(profile.projected_columns.capacity(), 0);
+        assert_eq!(profile.segments.capacity(), 0);
     }
 }

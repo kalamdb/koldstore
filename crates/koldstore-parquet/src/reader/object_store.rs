@@ -1,6 +1,7 @@
 //! ObjectStore-backed Parquet cold reads (footer-first, range GETs).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures_util::StreamExt;
 use parquet::arrow::arrow_reader::ArrowReaderOptions;
@@ -15,7 +16,9 @@ use crate::prune::{
 use crate::schema::PgColumn;
 
 use super::decode::{application_columns_for_read, clean_rows_from_batch, projection_mask};
-use super::options::{BloomPruneMode, ParquetReadOptions, ParquetReadProfile, PkValues};
+use super::options::{
+    BloomPruneMode, ParquetProfileMode, ParquetReadOptions, ParquetReadProfile, PkValues,
+};
 use super::types::CleanColdRow;
 
 /// Reads clean-schema cold rows via ObjectStore range requests.
@@ -53,7 +56,8 @@ pub fn read_clean_cold_rows_from_object_store(
 /// request (important for S3 backends that do not support suffix ranges).
 ///
 /// Returns `(rows, profile)` so callers can surface footer/bloom/I/O details in
-/// EXPLAIN and tracing.
+/// EXPLAIN and tracing. The profile is empty unless `options.profile_mode`
+/// explicitly enables diagnostic collection.
 ///
 /// # Errors
 ///
@@ -67,12 +71,12 @@ pub fn read_clean_cold_rows_from_object_store_with_size(
     primary_key_columns: &[String],
     options: &ParquetReadOptions,
 ) -> Result<(Vec<CleanColdRow>, ParquetReadProfile), String> {
-    let io = Arc::new(crate::object_reader::ObjectStoreReadStats::default());
+    let io = read_stats_for(options.profile_mode);
     read_clean_cold_rows_from_object_store_with_stats(
         store,
         object_path,
         file_size,
-        Some(io),
+        io,
         columns,
         primary_key_columns,
         options,
@@ -133,14 +137,19 @@ pub async fn read_clean_cold_rows_from_object_store_async(
     primary_key_columns: &[String],
     options: &ParquetReadOptions,
 ) -> Result<(Vec<CleanColdRow>, ParquetReadProfile), String> {
-    let io =
-        stats.unwrap_or_else(|| Arc::new(crate::object_reader::ObjectStoreReadStats::default()));
-    let footer_cache_hit = crate::footer_cache::get(object_path, file_size).is_some();
+    let collect_profile = options.profile_mode.collects_counts();
+    let collect_timing = options.profile_mode.collects_timing();
+    let io = stats.or_else(|| read_stats_for(options.profile_mode));
+    let open_started = collect_timing.then(Instant::now);
+    let footer_cache_hit =
+        collect_profile && crate::footer_cache::get(object_path, file_size).is_some();
     let mut reader = ObjectStoreParquetReader::from_key(store, object_path)?;
     if let Some(size) = file_size {
         reader = reader.with_file_size(size);
     }
-    reader = reader.with_stats(Arc::clone(&io));
+    if let Some(io) = &io {
+        reader = reader.with_stats(Arc::clone(io));
+    }
     // Load page indexes only for equality probes; other paths keep the lighter
     // Skip footer (and remain eligible for the footer cache).
     let reader_options = if options.pk_values.is_some() {
@@ -151,6 +160,10 @@ pub async fn read_clean_cold_rows_from_object_store_async(
     let mut builder = ParquetRecordBatchStreamBuilder::new_with_options(reader, reader_options)
         .await
         .map_err(|error| error.to_string())?;
+    let open_duration = open_started
+        .map(|started| started.elapsed())
+        .unwrap_or_default();
+    let scan_started = collect_timing.then(Instant::now);
 
     let application_columns = application_columns_for_read(columns, primary_key_columns, options)?;
 
@@ -200,7 +213,13 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         };
         stats_pruned |= stats_selected.len() < selected_row_groups.len();
         if stats_selected.is_empty() {
-            let (range_calls, bytes_read) = io.snapshot();
+            if !collect_profile {
+                return Ok((Vec::new(), ParquetReadProfile::default()));
+            }
+            let io_snapshot = io
+                .as_ref()
+                .map(|stats| stats.timed_snapshot())
+                .unwrap_or_default();
             return Ok((
                 Vec::new(),
                 empty_read_profile(ParquetReadProfile {
@@ -211,9 +230,14 @@ pub async fn read_clean_cold_rows_from_object_store_async(
                     bloom: bloom_mode,
                     projected_columns: application_columns,
                     pk_probe: Some((pk.column.clone(), pk.values.clone())),
-                    range_calls,
-                    bytes_read,
+                    range_calls: io_snapshot.range_calls,
+                    bytes_read: io_snapshot.bytes_read,
                     footer_cache_hit,
+                    open_duration,
+                    scan_duration: scan_started
+                        .map(|started| started.elapsed())
+                        .unwrap_or_default(),
+                    object_store_read_duration: io_snapshot.read_duration,
                     ..Default::default()
                 }),
             ));
@@ -243,7 +267,13 @@ pub async fn read_clean_cold_rows_from_object_store_async(
 
     if pruning_applied {
         if selected_row_groups.is_empty() {
-            let (range_calls, bytes_read) = io.snapshot();
+            if !collect_profile {
+                return Ok((Vec::new(), ParquetReadProfile::default()));
+            }
+            let io_snapshot = io
+                .as_ref()
+                .map(|stats| stats.timed_snapshot())
+                .unwrap_or_default();
             return Ok((
                 Vec::new(),
                 empty_read_profile(ParquetReadProfile {
@@ -262,9 +292,14 @@ pub async fn read_clean_cold_rows_from_object_store_async(
                         .pk_values
                         .as_ref()
                         .map(|pk| (pk.column.clone(), pk.values.clone())),
-                    range_calls,
-                    bytes_read,
+                    range_calls: io_snapshot.range_calls,
+                    bytes_read: io_snapshot.bytes_read,
                     footer_cache_hit,
+                    open_duration,
+                    scan_duration: scan_started
+                        .map(|started| started.elapsed())
+                        .unwrap_or_default(),
+                    object_store_read_duration: io_snapshot.read_duration,
                     ..Default::default()
                 }),
             ));
@@ -311,12 +346,18 @@ pub async fn read_clean_cold_rows_from_object_store_async(
         }
     }
 
+    if !collect_profile {
+        return Ok((rows, ParquetReadProfile::default()));
+    }
     let selected = if pruning_applied {
         selected_row_groups
     } else {
         (0..total_row_groups).collect()
     };
-    let (range_calls, bytes_read) = io.snapshot();
+    let io_snapshot = io
+        .as_ref()
+        .map(|stats| stats.timed_snapshot())
+        .unwrap_or_default();
     let profile = ParquetReadProfile {
         object_path: object_path.to_string(),
         file_size,
@@ -336,12 +377,29 @@ pub async fn read_clean_cold_rows_from_object_store_async(
             .pk_values
             .as_ref()
             .map(|pk| (pk.column.clone(), pk.values.clone())),
-        range_calls,
-        bytes_read,
+        range_calls: io_snapshot.range_calls,
+        bytes_read: io_snapshot.bytes_read,
         rows_returned: rows.len(),
         footer_cache_hit,
+        open_duration,
+        scan_duration: scan_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default(),
+        object_store_read_duration: io_snapshot.read_duration,
     };
     Ok((rows, profile))
+}
+
+fn read_stats_for(
+    mode: ParquetProfileMode,
+) -> Option<Arc<crate::object_reader::ObjectStoreReadStats>> {
+    mode.collects_counts().then(|| {
+        Arc::new(if mode.collects_timing() {
+            crate::object_reader::ObjectStoreReadStats::with_timing()
+        } else {
+            crate::object_reader::ObjectStoreReadStats::default()
+        })
+    })
 }
 
 /// Builds a zero-row profile after prune eliminated every row group.

@@ -87,9 +87,9 @@ pub async fn force_flush_table(client: &Client, relation: &str) -> Result<i64> {
 ///
 /// Returns an error when flush or job lookup fails after slot-lock retries.
 pub async fn flush_table(client: &Client, relation: &str) -> Result<i64> {
-    // Policy flush decides from mirror pending counts; catch up WAL apply so
-    // recently committed DML is visible to the due check.
-    e2e::fence_async_mirror(client).await?;
+    // Queue flush executors perform their own bounded catch-up. Do not run the
+    // strong foreground fence here: under continuous ingest it holds the
+    // database apply lock while draining a large backlog and starves finalize.
     let mut last_slot_busy: Option<anyhow::Error> = None;
     for attempt in 1..=8 {
         let Some(job_id) = e2e::flush_table_job_id(client, relation, false).await? else {
@@ -99,7 +99,6 @@ pub async fn flush_table(client: &Client, relation: &str) -> Result<i64> {
             Ok(rows) => return Ok(rows),
             Err(error) if e2e::is_flush_slot_lock_contention(&error) => {
                 last_slot_busy = Some(error);
-                let _ = e2e::fence_async_mirror(client).await;
                 tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
             }
             Err(error) => return Err(error),

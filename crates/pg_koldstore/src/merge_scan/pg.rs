@@ -934,7 +934,11 @@ unsafe fn initialize_fallback_scan(
         memory,
     } = source_execution;
 
-    let hot_plan_label = hot_child_explain_label(node);
+    let hot_plan_label = if profiler.is_enabled() {
+        hot_child_explain_label(node)
+    } else {
+        String::new()
+    };
     cold_profile.segments_opened = cold_profile.segments.len();
     let execution = profiler.finish(hot_rows, scan_started);
 

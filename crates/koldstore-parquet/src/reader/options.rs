@@ -15,6 +15,8 @@ pub struct ParquetReadOptions {
     pub row_limit: Option<usize>,
     /// Outer wall-clock budget for one segment open/read (`None` = disabled).
     pub timeout: Option<Duration>,
+    /// Diagnostic work requested by the caller.
+    pub profile_mode: ParquetProfileMode,
 }
 
 impl ParquetReadOptions {
@@ -106,6 +108,35 @@ impl ParquetReadOptions {
         self.timeout = timeout.filter(|value| !value.is_zero());
         self
     }
+
+    /// Selects whether read counters and wall-clock timings are collected.
+    #[must_use]
+    pub fn with_profile_mode(mut self, mode: ParquetProfileMode) -> Self {
+        self.profile_mode = mode;
+        self
+    }
+}
+
+/// Per-read diagnostic collection requested by a caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParquetProfileMode {
+    /// Skip diagnostic counters, clocks, and profile-owned allocations.
+    #[default]
+    Disabled,
+    /// Collect counters and pruning details without reading the wall clock.
+    Counts,
+    /// Collect counters, pruning details, and phase timings.
+    CountsAndTiming,
+}
+
+impl ParquetProfileMode {
+    pub(crate) const fn collects_counts(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    pub(crate) const fn collects_timing(self) -> bool {
+        matches!(self, Self::CountsAndTiming)
+    }
 }
 
 /// Sequence range pruning.
@@ -178,6 +209,15 @@ pub struct ParquetReadProfile {
     pub rows_returned: usize,
     /// Footer metadata served from the backend-local cache (no footer GET).
     pub footer_cache_hit: bool,
+    /// Wall time to construct the Parquet reader and load footer metadata.
+    pub open_duration: Duration,
+    /// Wall time after footer load through row-group scan and row decoding.
+    pub scan_duration: Duration,
+    /// Wall time awaited inside successful object-store range/suffix reads.
+    ///
+    /// This is a subset of `open_duration + scan_duration`, not an additive
+    /// phase, because footer and column reads occur within those two phases.
+    pub object_store_read_duration: Duration,
 }
 
 impl BloomPruneMode {
@@ -259,5 +299,20 @@ impl ParquetReadProfile {
                 self.pages_total, self.pages_selected, self.pages_skipped
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ParquetProfileMode;
+
+    #[test]
+    fn parquet_profile_modes_separate_regular_counts_and_timed_reads() {
+        assert!(!ParquetProfileMode::Disabled.collects_counts());
+        assert!(!ParquetProfileMode::Disabled.collects_timing());
+        assert!(ParquetProfileMode::Counts.collects_counts());
+        assert!(!ParquetProfileMode::Counts.collects_timing());
+        assert!(ParquetProfileMode::CountsAndTiming.collects_counts());
+        assert!(ParquetProfileMode::CountsAndTiming.collects_timing());
     }
 }

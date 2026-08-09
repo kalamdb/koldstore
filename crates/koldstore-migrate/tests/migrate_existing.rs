@@ -3,7 +3,9 @@ use koldstore_common::{
 };
 use koldstore_common::{SqlAccess as SpiAccess, SqlParamType};
 use koldstore_migrate::{
-    backfill::plan_mirror_initialization_batch,
+    backfill::{
+        plan_mirror_initialization_batch, plan_mirror_initialization_batch_with_segment_order,
+    },
     constraints::{ColumnDefinition, IndexDefinition, MigrationValidationInput},
     jobs::MigrationBatchSize,
     order::{MigrationOrdering, OrderingSource},
@@ -122,4 +124,36 @@ fn existing_row_initialization_uses_skip_locked_batches_not_table_wide_update() 
     ] {
         assert!(!plan.statement.sql.contains(forbidden));
     }
+}
+
+#[test]
+fn existing_row_initialization_populates_the_segment_order_key() {
+    let table = QualifiedTableName::parse("app.items").unwrap();
+    let mirror = QualifiedTableName::parse("koldstore.items__cl").unwrap();
+    let plan = plan_mirror_initialization_batch_with_segment_order(
+        &table,
+        &mirror,
+        &pk(),
+        MigrationOrdering {
+            column: "created_at".to_string(),
+            source: OrderingSource::ExplicitColumn,
+            ascending_oldest_first: true,
+        },
+        MigrationBatchSize::new(1_000).unwrap(),
+        Some("created_at"),
+    )
+    .unwrap();
+
+    assert!(plan
+        .statement
+        .sql
+        .contains("\"order_key\", \"seq\", \"op\""));
+    assert!(plan
+        .statement
+        .sql
+        .contains("hot.\"created_at\" AS segment_order_value"));
+    assert!(plan
+        .statement
+        .sql
+        .contains("koldstore.internal_encode_sort_key(segment_order_value)"));
 }

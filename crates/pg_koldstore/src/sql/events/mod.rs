@@ -18,7 +18,8 @@ use koldstore_merge::events::{self, DEFAULT_CHANGE_LIMIT};
 use koldstore_merge::scan::SegmentStatsHint;
 #[cfg(feature = "pg")]
 use koldstore_parquet::{
-    read_clean_cold_rows_from_object_store_with_size, CleanColdRow, ParquetReadOptions, PgColumn,
+    read_clean_cold_rows_from_object_store_with_size, CleanColdRow, ParquetProfileMode,
+    ParquetReadOptions, PgColumn,
 };
 #[cfg(feature = "pg")]
 use pgrx::datum::DatumWithOid;
@@ -543,7 +544,8 @@ fn read_cold_segment_page(
         .with_columns(projection.physical_names.clone())
         .with_clean_seq_range(min_seq, segment.max_seq)
         .with_row_limit(limit)
-        .with_timeout(client.timeout());
+        .with_timeout(client.timeout())
+        .with_profile_mode(ParquetProfileMode::Disabled);
 
     let _permit = crate::merge_scan::reader_pool::try_acquire_parquet_reader_permit(
         crate::guc::max_open_parquet_readers(),
@@ -615,7 +617,8 @@ fn read_cold_segment_newest_window(
 
     let options = ParquetReadOptions::new()
         .with_columns(projection.physical_names.clone())
-        .with_timeout(client.timeout());
+        .with_timeout(client.timeout())
+        .with_profile_mode(ParquetProfileMode::Disabled);
     let _permit = crate::merge_scan::reader_pool::try_acquire_parquet_reader_permit(
         crate::guc::max_open_parquet_readers(),
     )?;

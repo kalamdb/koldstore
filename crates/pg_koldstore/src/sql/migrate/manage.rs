@@ -70,6 +70,13 @@ pub(crate) fn manage_table_pg_impl(
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
     let already_managed = table_is_already_managed(table_oid)
         .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));
+    // A stable migration order is also the natural physical cold order. Keep
+    // an explicit segment order authoritative, but default it so ordered reads
+    // receive their cold frontier/index metadata without duplicate arguments.
+    let segment_order_column = koldstore_migrate::manage_table::effective_segment_order_column(
+        segment_order_column,
+        migration_order_by,
+    );
     let validation =
         koldstore_migrate::manage_table::validate_manage_table(manage_table_validation_context(
             table_type,
@@ -255,6 +262,7 @@ pub(crate) fn manage_table_pg_impl(
         &plan,
         &mirror_plan,
         &primary_key_shape,
+        order_column_name,
         job_id,
     )
     .unwrap_or_else(|error| pgrx::error!("migrate table failed: {error}"));

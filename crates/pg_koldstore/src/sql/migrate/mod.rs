@@ -62,6 +62,8 @@ pgrx::impl_sql_translatable!(RegClassOid, arg_only = "regclass");
 ///
 /// SQL contract:
 /// `koldstore.manage_table(table_name regclass, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, auto_flush default true, segment_order_column default null)`.
+/// When `segment_order_column` is omitted, `migration_order_by` is used for
+/// both migration and cold-segment ordering.
 ///
 /// `table_name` is PostgreSQL `regclass`, so relation names like `'app.messages'`
 /// cast correctly (plain `oid` would reject that string).

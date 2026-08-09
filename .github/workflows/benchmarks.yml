@@ -104,6 +104,9 @@ jobs:
         env:
           DATABASE_URL: "host=/var/run/postgresql user=runner dbname=runner"
           KOLDSTORE_BENCH_START_PGRX: "0"
+          # Packaged Postgres runs as OS user `postgres` and cannot write under
+          # $GITHUB_WORKSPACE; keep cold Parquet in /tmp (world-writable).
+          KOLDSTORE_BENCH_STORAGE_ROOT: /tmp/koldstore-bench-cold
           # Enable Criterion extension microbenches (default in run.sh skips them).
           KOLDSTORE_BENCH_SKIP_CRITERION: "0"
           BENCH_ROWS: "100000"
