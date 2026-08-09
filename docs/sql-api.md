@@ -243,7 +243,10 @@ SELECT koldstore.manage_table(
   min_flush_rows    => 1000,
   max_rows_per_file => 1000,
   target_file_size_mb => 256,
-  migration_order_by  => 'created_at'
+  migration_order_by  => 'created_at',
+  parquet_row_group_size => 256,
+  parquet_data_page_row_count_limit => 64,
+  parquet_bloom_filter_fpp => 0.01
 );
 ```
 
@@ -265,7 +268,15 @@ also available.
 | `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
 | `compression` | `NULL` | Optional Parquet compression name |
 | `target_file_size_mb` | `NULL` | Optional target Parquet segment size in MiB; stored for future size-aware flushing |
+| `parquet_row_group_size` | `NULL` | Rows per Parquet row group on future flushes; omitted keeps the writer default |
+| `parquet_data_page_row_count_limit` | `NULL` | Rows per Parquet data page on future flushes; smaller values enable finer page-index pruning |
+| `parquet_bloom_filter_fpp` | `NULL` | Bloom filter false-positive probability for future flushes; must be strictly between `0` and `1` |
 | `auto_flush` | `true` | When `true`, ephemeral maintenance may enqueue flush jobs for this table; set `false` to reserve flushes for cron / manual `flush_table` |
+
+Existing tables can change the same settings for future segments with
+`ALTER TABLE ... SET (koldstore_parquet_row_group_size = 256,
+koldstore_parquet_data_page_row_count_limit = 64,
+koldstore_parquet_bloom_filter_fpp = 0.01)`. Existing segments are unchanged.
 
 **Returns:** `uuid` — the migration job id written to `koldstore.jobs` (empty
 tables get a completed migrate job; populated tables run mirror initialization

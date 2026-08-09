@@ -68,6 +68,9 @@ pub(super) struct FlushPreparedContext {
     bloom_filter_columns: Vec<String>,
     max_rows_per_file: usize,
     target_file_size_bytes: Option<u64>,
+    parquet_row_group_size: usize,
+    parquet_data_page_row_count_limit: Option<usize>,
+    parquet_bloom_filter_false_positive_rate: Option<f64>,
 }
 
 /// Acquires the session table-job lock without waiting.
@@ -148,6 +151,20 @@ fn load_flush_prepared_context(
                 .ok_or_else(|| format!("target_file_size_mb {megabytes} is too large"))
         })
         .transpose()?;
+    let parquet_row_group_size = options
+        .parquet_row_group_size
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|error| format!("parquet_row_group_size is too large: {error}"))?
+        .unwrap_or_else(|| koldstore_parquet::WriterOptions::default().row_group_size);
+    let parquet_data_page_row_count_limit = options
+        .parquet_data_page_row_count_limit
+        .map(usize::try_from)
+        .transpose()
+        .map_err(|error| format!("parquet_data_page_row_count_limit is too large: {error}"))?;
+    let parquet_bloom_filter_false_positive_rate = options
+        .parquet_bloom_filter_fpp
+        .map(koldstore_common::ParquetBloomFilterFpp::get);
     if let Some(cold) = cold_metadata.as_ref() {
         if !cold.stats_columns.is_empty() {
             // Start from catalog stats, then force PK + order column so Exact-PK
@@ -211,6 +228,9 @@ fn load_flush_prepared_context(
         bloom_filter_columns,
         max_rows_per_file,
         target_file_size_bytes,
+        parquet_row_group_size,
+        parquet_data_page_row_count_limit,
+        parquet_bloom_filter_false_positive_rate,
     })
 }
 
@@ -323,7 +343,9 @@ fn stream_write_flush_batches(
         fetch_batch_size: flush_mirror_fetch_limit(ctx.max_rows_per_file),
         target_file_size_bytes: ctx.target_file_size_bytes,
         compression: ctx.storage.compression.clone(),
-        row_group_size: koldstore_parquet::WriterOptions::default().row_group_size,
+        row_group_size: ctx.parquet_row_group_size,
+        data_page_row_count_limit: ctx.parquet_data_page_row_count_limit,
+        bloom_filter_false_positive_rate: ctx.parquet_bloom_filter_false_positive_rate,
         mirror_ops: selection.mirror_ops.clone(),
         sort_by_order_key: ctx.snapshot.segment_order_column_id.is_some(),
         order_key_column: ctx.snapshot.segment_order_column_id.and_then(|column_id| {

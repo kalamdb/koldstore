@@ -33,6 +33,9 @@ pub(crate) fn manage_table_pg_impl(
     segment_order_column: Option<&str>,
     pruning_columns: Option<Vec<String>>,
     bloom_filter_columns: Option<Vec<String>>,
+    parquet_row_group_size: Option<i64>,
+    parquet_data_page_row_count_limit: Option<i64>,
+    parquet_bloom_filter_fpp: Option<f64>,
 ) -> pgrx::Uuid {
     crate::preload::require_shared_preload();
     let min_max_rows_per_file = u64::try_from(crate::guc::min_max_rows_per_file())
@@ -45,6 +48,9 @@ pub(crate) fn manage_table_pg_impl(
             target_file_size_mb,
             min_max_rows_per_file,
             auto_flush,
+            parquet_row_group_size,
+            parquet_data_page_row_count_limit,
+            parquet_bloom_filter_fpp,
         },
         compression,
     )
@@ -93,6 +99,9 @@ pub(crate) fn manage_table_pg_impl(
             auto_flush,
             pruning_columns.as_deref(),
             bloom_filter_columns.as_deref(),
+            parquet_row_group_size,
+            parquet_data_page_row_count_limit,
+            parquet_bloom_filter_fpp,
             catalog.as_ref(),
             constraints,
         ))
@@ -385,6 +394,9 @@ fn manage_table_validation_context<'a>(
     auto_flush: bool,
     pruning_columns: Option<&'a [String]>,
     bloom_filter_columns: Option<&'a [String]>,
+    parquet_row_group_size: Option<i64>,
+    parquet_data_page_row_count_limit: Option<i64>,
+    parquet_bloom_filter_fpp: Option<f64>,
     catalog: &'a koldstore_migrate::ExistingTableCatalog,
     constraints: koldstore_migrate::constraints::ManageTableConstraintsCatalog,
 ) -> koldstore_migrate::manage_table::ManageTableValidationContext<'a> {
@@ -467,6 +479,9 @@ fn manage_table_validation_context<'a>(
             target_file_size_mb,
             min_max_rows_per_file,
             auto_flush,
+            parquet_row_group_size,
+            parquet_data_page_row_count_limit,
+            parquet_bloom_filter_fpp,
         },
         pruning_columns,
         bloom_filter_columns,

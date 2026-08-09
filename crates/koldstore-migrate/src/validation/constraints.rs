@@ -24,7 +24,7 @@ pub fn exact_primary_key_shape_supported(shape: &PrimaryKeyShape) -> bool {
 pub type ConstraintResult<T> = Result<T, MigrationConstraintError>;
 
 /// Migration validation error.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum MigrationConstraintError {
     /// The table already has a managed schema registration.
     #[error("table is already managed")]
@@ -36,6 +36,12 @@ pub enum MigrationConstraintError {
         field: &'static str,
         /// Invalid value.
         value: i64,
+    },
+    /// A Parquet Bloom false-positive probability is outside its valid range.
+    #[error("parquet_bloom_filter_fpp must be greater than 0 and less than 1 (got {value})")]
+    InvalidParquetBloomFilterFpp {
+        /// Invalid probability.
+        value: f64,
     },
     /// The requested Parquet compression codec is unsupported.
     #[error("unsupported compression codec `{0}`")]

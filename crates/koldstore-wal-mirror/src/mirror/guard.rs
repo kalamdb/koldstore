@@ -176,7 +176,10 @@ fn pk_guard_function_sql(
         .collect::<Vec<_>>();
     if let Some(order_column) = order_column {
         let name = quote_ident(order_column);
-        distinct.push(format!("OLD.{name} IS DISTINCT FROM NEW.{name}"));
+        let predicate = format!("OLD.{name} IS DISTINCT FROM NEW.{name}");
+        if !distinct.contains(&predicate) {
+            distinct.push(predicate);
+        }
     }
     let distinct = distinct.join("\n       OR ");
 
@@ -215,7 +218,10 @@ fn plan_pk_guard_trigger(
         .map(|column| quote_ident(column.column().as_str()))
         .collect::<Vec<_>>();
     if let Some(order_column) = order_column {
-        of_columns.push(quote_ident(order_column));
+        let name = quote_ident(order_column);
+        if !of_columns.contains(&name) {
+            of_columns.push(name);
+        }
     }
     let of_list = of_columns.join(", ");
     let drop_sql = drop_trigger_if_present_sql(&trigger_name, source_table);

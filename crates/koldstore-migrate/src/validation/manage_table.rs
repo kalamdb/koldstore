@@ -4,14 +4,14 @@
 //! them here before constructing migration plans. This module owns no SPI or
 //! PostgreSQL types.
 
-use koldstore_common::{ManageTableOptions, ParquetCompression};
+use koldstore_common::{ManageTableOptions, ParquetBloomFilterFpp, ParquetCompression};
 
 use super::constraints::{
     ConstraintResult, MigrationConstraintError, MigrationValidation, MigrationValidationInput,
 };
 
 /// Raw numeric policy values accepted by `manage_table`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ManageTablePolicyInput {
     /// Maximum hot rows before automatic flush.
     pub hot_row_limit: Option<i64>,
@@ -25,6 +25,12 @@ pub struct ManageTablePolicyInput {
     pub min_max_rows_per_file: u64,
     /// Whether the built-in scheduler may auto-flush this table.
     pub auto_flush: bool,
+    /// Optional row cap per Parquet row group.
+    pub parquet_row_group_size: Option<i64>,
+    /// Optional row cap per Parquet data page.
+    pub parquet_data_page_row_count_limit: Option<i64>,
+    /// Optional Parquet Bloom filter false-positive probability.
+    pub parquet_bloom_filter_fpp: Option<f64>,
 }
 
 /// Catalog-resolved segment ordering column accepted at the manage boundary.
@@ -48,7 +54,7 @@ pub struct ScopeColumnInput {
 }
 
 /// PostgreSQL-free context required to validate one `manage_table` call.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ManageTableValidationContext<'a> {
     /// Catalog-derived migration shape and constraint policy.
     pub migration: MigrationValidationInput,
@@ -119,6 +125,16 @@ pub fn validate_manage_table_preflight(
     }
     if let Some(target_file_size_mb) = policy.target_file_size_mb {
         positive_value(target_file_size_mb, "target_file_size_mb")?;
+    }
+    if let Some(row_group_size) = policy.parquet_row_group_size {
+        positive_value(row_group_size, "parquet_row_group_size")?;
+    }
+    if let Some(page_limit) = policy.parquet_data_page_row_count_limit {
+        positive_value(page_limit, "parquet_data_page_row_count_limit")?;
+    }
+    if let Some(fpp) = policy.parquet_bloom_filter_fpp {
+        ParquetBloomFilterFpp::new(fpp)
+            .map_err(|_| MigrationConstraintError::InvalidParquetBloomFilterFpp { value: fpp })?;
     }
     Ok(())
 }
@@ -204,6 +220,21 @@ pub fn validate_manage_table(
     if let Some(target_file_size_mb) = context.policy.target_file_size_mb {
         options = options
             .with_target_file_size_mb(positive_value(target_file_size_mb, "target_file_size_mb")?);
+    }
+    if let Some(row_group_size) = context.policy.parquet_row_group_size {
+        options = options
+            .with_parquet_row_group_size(positive_value(row_group_size, "parquet_row_group_size")?);
+    }
+    if let Some(page_limit) = context.policy.parquet_data_page_row_count_limit {
+        options = options.with_parquet_data_page_row_count_limit(positive_value(
+            page_limit,
+            "parquet_data_page_row_count_limit",
+        )?);
+    }
+    if let Some(fpp) = context.policy.parquet_bloom_filter_fpp {
+        let fpp = ParquetBloomFilterFpp::new(fpp)
+            .map_err(|_| MigrationConstraintError::InvalidParquetBloomFilterFpp { value: fpp })?;
+        options = options.with_parquet_bloom_filter_fpp(fpp);
     }
     if let Some(columns) = context.pruning_columns {
         options = options.with_pruning_columns(columns.iter().cloned());

@@ -61,7 +61,7 @@ pgrx::impl_sql_translatable!(RegClassOid, arg_only = "regclass");
 /// Manages a heap table with structured hot/cold flush settings.
 ///
 /// SQL contract:
-/// `koldstore.manage_table(table_name regclass, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, auto_flush default true, segment_order_column default null)`.
+/// `koldstore.manage_table(table_name regclass, storage, hot_row_limit, min_flush_rows default 1000, max_rows_per_file default 1000, table_type default 'shared', scope_column default null, migration_order_by default null, compression default null, target_file_size_mb default null, auto_flush default true, segment_order_column default null, pruning_columns default null, bloom_filter_columns default null, parquet_row_group_size default null, parquet_data_page_row_count_limit default null, parquet_bloom_filter_fpp default null)`.
 /// When `segment_order_column` is omitted, `migration_order_by` is used for
 /// both migration and cold-segment ordering.
 ///
@@ -86,6 +86,9 @@ pub fn manage_table_pg(
     segment_order_column: pgrx::default!(Option<&str>, "NULL"),
     pruning_columns: pgrx::default!(Option<Vec<String>>, "NULL"),
     bloom_filter_columns: pgrx::default!(Option<Vec<String>>, "NULL"),
+    parquet_row_group_size: pgrx::default!(Option<i64>, "NULL"),
+    parquet_data_page_row_count_limit: pgrx::default!(Option<i64>, "NULL"),
+    parquet_bloom_filter_fpp: pgrx::default!(Option<f64>, "NULL"),
 ) -> pgrx::Uuid {
     manage::manage_table_pg_impl(
         table_name.0,
@@ -102,6 +105,9 @@ pub fn manage_table_pg(
         segment_order_column,
         pruning_columns,
         bloom_filter_columns,
+        parquet_row_group_size,
+        parquet_data_page_row_count_limit,
+        parquet_bloom_filter_fpp,
     )
 }
 

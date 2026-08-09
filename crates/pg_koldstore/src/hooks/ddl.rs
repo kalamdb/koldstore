@@ -431,6 +431,9 @@ fn ensure_initial_management(
         None,
         None,
         None,
+        None,
+        None,
+        None,
     );
     Ok(())
 }
@@ -533,6 +536,41 @@ fn apply_flush_policy_updates(
 }
 
 #[cfg(feature = "pg")]
+fn apply_parquet_layout_updates(
+    options: &mut koldstore_common::ManageTableOptions,
+    values: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    if let Some(value) = option_value(values, "koldstore_parquet_row_group_size") {
+        let row_count = value
+            .parse::<u64>()
+            .map_err(|_| "parquet_row_group_size must be a positive integer")?;
+        if row_count == 0 {
+            return Err("parquet_row_group_size must be greater than zero".into());
+        }
+        *options = options.clone().with_parquet_row_group_size(row_count);
+    }
+    if let Some(value) = option_value(values, "koldstore_parquet_data_page_row_count_limit") {
+        let row_count = value
+            .parse::<u64>()
+            .map_err(|_| "parquet_data_page_row_count_limit must be a positive integer")?;
+        if row_count == 0 {
+            return Err("parquet_data_page_row_count_limit must be greater than zero".into());
+        }
+        *options = options
+            .clone()
+            .with_parquet_data_page_row_count_limit(row_count);
+    }
+    if let Some(value) = option_value(values, "koldstore_parquet_bloom_filter_fpp") {
+        let fpp = value
+            .parse::<f64>()
+            .map_err(|_| "parquet_bloom_filter_fpp must be greater than 0 and less than 1")?;
+        let fpp = koldstore_common::ParquetBloomFilterFpp::new(fpp)?;
+        *options = options.clone().with_parquet_bloom_filter_fpp(fpp);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "pg")]
 fn apply_management_options(
     table_oid: pgrx::pg_sys::Oid,
     values: &std::collections::HashMap<String, String>,
@@ -574,6 +612,7 @@ fn apply_management_options(
     let mut options = koldstore_common::ManageTableOptions::from_value(&current.0["options"]);
     let (min, file, max) = resolve_flush_batching(values, options.flush_policy().as_ref())?;
     apply_flush_policy_updates(&mut options, values, min, file, max)?;
+    apply_parquet_layout_updates(&mut options, values)?;
     let json = pgrx::JsonB(options.to_value());
     let update = koldstore_migrate::register::plan_update_schema_options()
         .map_err(|error| error.to_string())?;

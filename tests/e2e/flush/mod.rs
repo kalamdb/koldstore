@@ -21,3 +21,4 @@ mod flush_recovery;
 mod flush_scheduler;
 mod flush_to_cold;
 pub(crate) mod harness;
+mod parquet_layout_options;
