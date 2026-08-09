@@ -288,9 +288,18 @@ fn drain_wal_through_fixed_fence() -> Result<(), String> {
         drop(decoding_log_guard);
         let outcome = outcome?;
         crate::observability::record_async_apply_tick(outcome.row_changes, 0);
-        if !outcome.budget_exhausted {
+        if outcome.budget_exhausted {
+            continue;
+        }
+        if outcome.row_changes == 0 {
             return Ok(());
         }
+        // The apply transaction just committed `applied_lsn`, but advancing a
+        // logical slot before that commit would risk acknowledging mirror work
+        // that can still roll back (and SPI from XACT_EVENT_COMMIT is unsafe).
+        // Run one immediate empty pass so the durable checkpoint is
+        // acknowledged now instead of waiting for the 30-second recovery
+        // watchdog (or an unrelated future commit).
     }
 }
 

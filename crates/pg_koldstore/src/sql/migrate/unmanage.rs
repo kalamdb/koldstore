@@ -66,6 +66,10 @@ fn execute_demigration_statements(
 ) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
 
+    // Rehydrate issues `TRUNCATE TABLE ONLY <managed>` before catalog deactivation.
+    // The ProcessUtility TRUNCATE guard must allow that internal path only.
+    let _allow_truncate = crate::hooks::ddl::AllowManagedTruncateGuard::enter();
+
     let statement_count = plan.statements.len();
     let mut deactivated = 0_i64;
 

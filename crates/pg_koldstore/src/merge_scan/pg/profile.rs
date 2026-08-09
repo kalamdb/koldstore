@@ -273,6 +273,15 @@ pub(super) fn take_completed_explain_state(node_key: usize) -> Option<CompletedE
     COMPLETED_EXPLAIN_STATES.with(|states| states.borrow_mut().remove(&node_key))
 }
 
+/// Drops retained EXPLAIN metadata on transaction abort.
+pub(super) fn abandon_completed_explain_states() {
+    COMPLETED_EXPLAIN_STATES.with(|states| {
+        if let Ok(mut states) = states.try_borrow_mut() {
+            states.clear();
+        }
+    });
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct SegmentReadProfile {
     pub(super) object_path: String,

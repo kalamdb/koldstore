@@ -1,20 +1,26 @@
 //! Bounded, set-based application of committed `pgoutput` changes.
 //!
 //! Ordering (idempotent under crash):
-//! 1. Peek available WAL (`pg_logical_slot_peek_binary_changes`)
-//! 2. Write latest-state mirror rows (Insert/Delete: PK `ON CONFLICT` upsert;
+//! 1. Advance the slot to any **previously committed** durable `applied_lsn`
+//!    (frees recyclable WAL even on flush fences that skip recording)
+//! 2. Peek available WAL (`pg_logical_slot_peek_binary_changes`)
+//! 3. Write latest-state mirror rows (Insert/Delete: PK `ON CONFLICT` upsert;
 //!    Update: keyed update)
-//! 3. Record durable `applied_lsn` as the exact last decoded source commit
+//! 4. Record durable `applied_lsn` as the exact last decoded source commit
 //!    end-LSN in `koldstore.async_mirror_state` (never the global insert LSN)
-//! 4. On the **next** call, advance the slot to that LSN
+//! 5. On the **next** apply transaction (worker empty follow-up / next tick),
+//!    advance the slot to that LSN — never in the same uncommitted txn as
+//!    step 4 (`pg_replication_slot_advance` is not rolled back with SPI)
 //!
-//! A crash between steps 2 and 4 may re-peek already-applied changes; replay is
+//! A crash between steps 4 and 5 may re-peek already-applied changes; replay is
 //! safe because mirror writes are latest-state upserts. Batches are capped at
 //! [`koldstore_wal_mirror::APPLY_BATCH_ROWS`] and cleared on every flush.
 //!
 //! Flush prune fences use [`apply_bounded`] with an explicit `upto_lsn`,
 //! transaction skip boundary, and `acknowledge_durable_checkpoint = false` so
-//! the still-uncommitted flush transaction cannot advance the slot.
+//! the still-uncommitted flush transaction cannot **record** a new applied_lsn
+//! or empty-advance past its fence. Prior committed applied WAL is still
+//! acknowledged in step 1 so flush finalize cannot pin recyclable WAL.
 
 use std::collections::{HashMap, HashSet};
 
@@ -151,10 +157,11 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
 
     let durable = read_durable_applied_lsn()?;
     let mut seq_watermark = read_durable_seq_high_watermark()?;
-    if request.acknowledge_durable_checkpoint {
-        // Only acknowledge a checkpoint written by a previously committed txn.
-        acknowledge_committed_apply(&slot, durable.as_ref())?;
-    }
+    // Always free WAL for a previously committed applied_lsn — including flush
+    // fences that set acknowledge_durable_checkpoint=false (those must not
+    // *record* a new applied_lsn in the uncommitted flush txn, but they must
+    // not pin recyclable WAL either).
+    acknowledge_committed_apply(&slot, durable.as_ref())?;
 
     let row_budget = row_budget_for(&request);
     let time_budget = time_budget_for(&request);

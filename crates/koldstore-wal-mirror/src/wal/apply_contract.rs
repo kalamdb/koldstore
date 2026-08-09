@@ -33,8 +33,11 @@ pub struct BoundedApplyRequest {
     pub upper_bound: Option<WalFenceLsn>,
     /// Skip whole pgoutput transactions with `end_lsn <= skip_through`.
     pub skip_through: Option<AppliedWalBoundary>,
-    /// When true, advance the slot to the previously committed durable checkpoint
-    /// and record a new pending `applied_lsn`. Flush prune fences must use false.
+    /// When true, record a new pending `applied_lsn` (and empty-advance through
+    /// non-publication WAL when [`Self::advance_slot_on_empty`] is set). Flush
+    /// prune fences must use false so an uncommitted flush txn cannot claim new
+    /// apply progress. Previously committed `applied_lsn` is still acknowledged
+    /// at the start of every apply pass so recyclable WAL is freed.
     pub acknowledge_durable_checkpoint: bool,
     /// When true, an empty publication peek advances `confirmed_flush` through
     /// non-publication WAL. Wake-driven async-commit retries must use false so

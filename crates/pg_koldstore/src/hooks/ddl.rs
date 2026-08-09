@@ -14,6 +14,7 @@ pub use koldstore_migrate::drop_table::{
 
 #[cfg(feature = "pg")]
 mod process_utility {
+    use std::cell::Cell;
     use std::collections::HashMap;
     use std::ffi::CStr;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +27,34 @@ mod process_utility {
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     static mut PREVIOUS: pg_sys::ProcessUtility_hook_type = None;
+
+    // Nesting counter so demigrate/unmanage can TRUNCATE the heap while rebuilding
+    // it, without opening a hole for user-issued TRUNCATE on managed tables.
+    thread_local! {
+        static ALLOW_MANAGED_TRUNCATE: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// RAII guard that permits managed-table TRUNCATE for demigrate rehydrate.
+    pub(crate) struct AllowManagedTruncateGuard;
+
+    impl AllowManagedTruncateGuard {
+        /// Enters a demigrate/unmanage scope that may issue internal TRUNCATE.
+        #[must_use]
+        pub(crate) fn enter() -> Self {
+            ALLOW_MANAGED_TRUNCATE.with(|depth| depth.set(depth.get().saturating_add(1)));
+            Self
+        }
+    }
+
+    impl Drop for AllowManagedTruncateGuard {
+        fn drop(&mut self) {
+            ALLOW_MANAGED_TRUNCATE.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    fn managed_truncate_allowed() -> bool {
+        ALLOW_MANAGED_TRUNCATE.with(|depth| depth.get() > 0)
+    }
 
     pub(super) fn register() {
         if REGISTERED.swap(true, Ordering::AcqRel) {
@@ -55,6 +84,7 @@ mod process_utility {
             let mut captured = None;
             let mut has_standard_actions = true;
             let mut drop_oids = Vec::new();
+            let mut truncate_oids = Vec::new();
             let mut refresh_oid = None;
             let mut copy_from_oid = None;
             if !copied.is_null() && !(*copied).utilityStmt.is_null() {
@@ -80,8 +110,21 @@ mod process_utility {
                             copy_from_oid = relation_oid_from_range_var((*stmt).relation);
                         }
                     }
+                    pg_sys::NodeTag::T_TruncateStmt => {
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::TruncateStmt>();
+                        truncate_oids = truncate_table_oids(stmt);
+                    }
                     _ => {}
                 }
+            }
+            if !managed_truncate_allowed()
+                && truncate_oids
+                    .into_iter()
+                    .any(crate::catalog::cache::is_managed_relation)
+            {
+                pgrx::error!(
+                    "TRUNCATE is not supported for KoldStore-managed tables; use DELETE so WAL capture preserves hot/cold consistency"
+                );
             }
             let mut mirrors = Vec::new();
             if !drop_oids.is_empty() {
@@ -260,6 +303,26 @@ mod process_utility {
         }
     }
 
+    /// Resolves every explicitly targeted relation before TRUNCATE executes.
+    unsafe fn truncate_table_oids(stmt: *mut pg_sys::TruncateStmt) -> Vec<pg_sys::Oid> {
+        unsafe {
+            if stmt.is_null() || (*stmt).relations.is_null() {
+                return Vec::new();
+            }
+            let relations = (*stmt).relations;
+            let mut oids = Vec::with_capacity((*relations).length as usize);
+            for index in 0..(*relations).length as usize {
+                let relation = (*(*relations).elements.add(index))
+                    .ptr_value
+                    .cast::<pg_sys::RangeVar>();
+                if let Some(oid) = relation_oid_from_range_var(relation) {
+                    oids.push(oid);
+                }
+            }
+            oids
+        }
+    }
+
     /// Resolves the table OID for column/table renames that need schema sync.
     unsafe fn rename_stmt_relation_oid(stmt: *mut pg_sys::RenameStmt) -> Option<pg_sys::Oid> {
         unsafe {
@@ -292,6 +355,10 @@ mod process_utility {
 pub(crate) fn register_process_utility_hook() {
     process_utility::register();
 }
+
+/// Allows demigrate/unmanage SPI to TRUNCATE a still-managed heap safely.
+#[cfg(feature = "pg")]
+pub(crate) use process_utility::AllowManagedTruncateGuard;
 
 #[cfg(feature = "pg")]
 fn option_value<'a>(

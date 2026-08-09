@@ -21,11 +21,16 @@ async fn auto_flush_worker_flushes_without_manual_tick() -> Result<()> {
         common::wait_for_async_worker(&db.client).await?;
 
         insert_rows(&db.client, &relation, 1, 10).await?;
-        // Restart so the worker's first cadence tick sees committed over-limit rows
-        // (avoids racing an empty first tick against a long interval).
-        restart_database_worker(&db.client).await?;
-
-        wait_for_completed_flush_jobs(&db.client, &relation, 1, SCHEDULER_DEADLINE).await?;
+        let target_lsn = common::current_wal_lsn(&db.client).await?;
+        common::wait_for_passive_convergence(
+            &db.client,
+            &relation,
+            &target_lsn,
+            1,
+            5,
+            SCHEDULER_DEADLINE,
+        )
+        .await?;
         reset_flush_interval(&db.client, &dbname).await?;
     }
     Ok(())
@@ -96,6 +101,7 @@ async fn set_table_auto_flush_toggles_background_scheduling() -> Result<()> {
         create_messages_table(&db.client, &relation).await?;
         manage_auto_flush(&db.client, &relation, &db.storage_name, false).await?;
         insert_rows(&db.client, &relation, 1, 10).await?;
+        let target_lsn = common::current_wal_lsn(&db.client).await?;
 
         tokio::time::sleep(NO_FLUSH_WINDOW).await;
         anyhow::ensure!(completed_flush_jobs(&db.client, &relation).await? == 0);
@@ -106,8 +112,15 @@ async fn set_table_auto_flush_toggles_background_scheduling() -> Result<()> {
                 &[&relation],
             )
             .await?;
-        restart_database_worker(&db.client).await?;
-        wait_for_completed_flush_jobs(&db.client, &relation, 1, SCHEDULER_DEADLINE).await?;
+        common::wait_for_passive_convergence(
+            &db.client,
+            &relation,
+            &target_lsn,
+            1,
+            5,
+            SCHEDULER_DEADLINE,
+        )
+        .await?;
 
         db.client
             .execute(
@@ -150,10 +163,16 @@ async fn flush_check_interval_seconds_is_honored_after_worker_restart() -> Resul
         // interval instead of waiting out a prior default-30s deadline.
         configure_flush_interval_and_restart_worker(&db.client, &dbname, 1).await?;
         insert_rows(&db.client, &relation, 1, 10).await?;
-        restart_database_worker(&db.client).await?;
-        common::fence_async_mirror(&db.client).await?;
-
-        wait_for_completed_flush_jobs(&db.client, &relation, 1, SCHEDULER_DEADLINE).await?;
+        let target_lsn = common::current_wal_lsn(&db.client).await?;
+        common::wait_for_passive_convergence(
+            &db.client,
+            &relation,
+            &target_lsn,
+            1,
+            5,
+            SCHEDULER_DEADLINE,
+        )
+        .await?;
         reset_flush_interval(&db.client, &dbname).await?;
     }
     Ok(())
@@ -385,6 +404,14 @@ async fn completed_flush_jobs(client: &tokio_postgres::Client, relation: &str) -
             WHERE table_oid = $1::text::regclass::oid
               AND job_type = 'flush'
               AND status = 'completed'
+              AND created_at >= COALESCE(
+                  (
+                      SELECT created_at
+                      FROM koldstore.schemas
+                      WHERE table_oid = $1::text::regclass::oid AND active
+                  ),
+                  '-infinity'::timestamptz
+              )
             "#,
             &[&relation],
         )
@@ -400,12 +427,6 @@ async fn wait_for_completed_flush_jobs(
 ) -> Result<()> {
     let started = Instant::now();
     loop {
-        let _ = client
-            .query_one(
-                "SELECT koldstore.internal_ensure_async_mirror_worker()",
-                &[],
-            )
-            .await?;
         if completed_flush_jobs(client, relation).await? >= min_completed {
             return Ok(());
         }

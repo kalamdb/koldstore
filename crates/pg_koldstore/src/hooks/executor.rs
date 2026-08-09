@@ -59,27 +59,33 @@ mod live {
             // relation as the result target, so those writes are not missed.
             // Unmanaged DML in a database that happens to have a capture slot
             // must not wake maintenance or advance the logical slot.
-            let changed_managed_relation = changed_managed_relation(query_desc);
+            // Capture OIDs while QueryDesc is still live, but defer catalog/SPI
+            // lookup until the previous ExecutorEnd has closed the executor.
+            // Opening SPI before standard_ExecutorEnd can fail and used to turn
+            // managed DML into a silent false negative.
+            let changed_relation_oids = changed_relation_oids(query_desc);
             if let Some(previous) = PREVIOUS {
                 previous(query_desc);
             } else {
                 pg_sys::standard_ExecutorEnd(query_desc);
             }
-            if changed_managed_relation {
+            if changed_relation_oids
+                .into_iter()
+                .any(crate::catalog::cache::is_managed_relation)
+            {
                 crate::worker::wake::mark_managed_dml_pending();
             }
             crate::memory::release_process_heap_if_pending();
         }
     }
 
-    unsafe fn changed_managed_relation(query_desc: *mut pg_sys::QueryDesc) -> bool {
+    unsafe fn changed_relation_oids(query_desc: *mut pg_sys::QueryDesc) -> Vec<pg_sys::Oid> {
         unsafe {
             if query_desc.is_null()
                 || (*query_desc).plannedstmt.is_null()
                 || (*query_desc).estate.is_null()
-                || (*(*query_desc).estate).es_processed == 0
             {
-                return false;
+                return Vec::new();
             }
             if !matches!(
                 (*query_desc).operation,
@@ -88,15 +94,35 @@ mod live {
                     | pg_sys::CmdType::CMD_DELETE
                     | pg_sys::CmdType::CMD_MERGE
             ) {
-                return false;
+                return Vec::new();
             }
 
             let planned = (*query_desc).plannedstmt;
+            let estate = (*query_desc).estate;
+            let mut relation_oids = Vec::new();
+
+            // PostgreSQL can leave PlannedStmt.resultRelations empty for some
+            // ModifyTable shapes. EState's opened result array is the executed
+            // source of truth and also covers routed partitions.
+            if !(*estate).es_result_relations.is_null() {
+                for index in 0..(*estate).es_range_table_size as usize {
+                    let result_rel = *(*estate).es_result_relations.add(index);
+                    if result_rel.is_null() || (*result_rel).ri_RelationDesc.is_null() {
+                        continue;
+                    }
+                    let oid = (*(*result_rel).ri_RelationDesc).rd_id;
+                    if !relation_oids.contains(&oid) {
+                        relation_oids.push(oid);
+                    }
+                }
+            }
+
             let result_relations = (*planned).resultRelations;
             let rtable = (*planned).rtable;
             if result_relations.is_null() || rtable.is_null() {
-                return false;
+                return relation_oids;
             }
+            relation_oids.reserve((*result_relations).length as usize);
             for index in 0..(*result_relations).length as usize {
                 let range_table_index = (*(*result_relations).elements.add(index)).int_value;
                 if range_table_index <= 0 || range_table_index > (*rtable).length {
@@ -107,12 +133,12 @@ mod live {
                     .cast::<pg_sys::RangeTblEntry>();
                 if !rte.is_null()
                     && (*rte).rtekind == pg_sys::RTEKind::RTE_RELATION
-                    && crate::catalog::cache::is_managed_relation((*rte).relid)
+                    && !relation_oids.contains(&(*rte).relid)
                 {
-                    return true;
+                    relation_oids.push((*rte).relid);
                 }
             }
-            false
+            relation_oids
         }
     }
 }

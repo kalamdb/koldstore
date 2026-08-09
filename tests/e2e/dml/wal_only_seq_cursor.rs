@@ -1531,6 +1531,124 @@ async fn changes_since_last_rows_rewinds_newest_n_like_kalamdb() -> Result<()> {
     Ok(())
 }
 
+/// `last_rows` must walk multiple cold segments when the tip file is smaller
+/// than the requested window (multi-wave flush).
+#[tokio::test]
+async fn changes_since_last_rows_spans_multiple_cold_segments() -> Result<()> {
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "wal_changes_last_multi_seg").await?;
+        ensure_publication(&db.client).await?;
+        let table_name = format!("{}_last_ms", db.schema);
+        let relation = db.relation(&table_name);
+        let mirror = format!("koldstore.{table_name}__cl");
+
+        db.client
+            .batch_execute(&format!(
+                "CREATE TABLE {relation} (id bigint PRIMARY KEY, body text NOT NULL);
+                 SET koldstore.min_max_rows_per_file = 1;"
+            ))
+            .await?;
+        db.client
+            .execute(
+                r#"
+                SELECT koldstore.manage_table(
+                  table_name => $1::text::regclass,
+                  storage => $2,
+                  hot_row_limit => NULL,
+                  min_flush_rows => 1,
+                  max_rows_per_file => 100,
+                  auto_flush => false,
+                  migration_order_by => 'id'
+                )
+                "#,
+                &[&relation, &db.storage_name],
+            )
+            .await?;
+        common::wait_for_async_worker(&db.client).await?;
+
+        // Three flush waves → at least three cold segments with 60 rows each.
+        for wave in 0..3_i64 {
+            let lo = wave * 60 + 1;
+            let hi = (wave + 1) * 60;
+            db.client
+                .execute(
+                    &format!(
+                        "INSERT INTO {relation}
+                         SELECT id, 'row-' || id
+                         FROM generate_series({lo}::bigint, {hi}::bigint) id"
+                    ),
+                    &[],
+                )
+                .await?;
+            common::wait_for_mirror_op_count(&db.client, &mirror, 1, 60).await?;
+            common::wait_for_async_mirror(&db.client).await?;
+            common::flush_table_job_id(&db.client, &relation, true).await?;
+        }
+
+        let segments = common::cold_segment_count(&db.client, &relation).await?;
+        anyhow::ensure!(
+            segments >= 3,
+            "expected multi-segment flush, got {segments} segments"
+        );
+
+        let last = db
+            .client
+            .query(
+                "SELECT (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 1000, 100) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(
+            last.len(),
+            100,
+            "last_rows=100 must fill across multiple cold segments (got {})",
+            last.len()
+        );
+        let ids: Vec<i64> = last.iter().map(|row| row.get(0)).collect();
+        assert_eq!(ids, (81..=180).collect::<Vec<_>>());
+        assert!(
+            last.iter().all(|row| row.get::<_, String>(1) == "cold"),
+            "expected cold sources after full prune"
+        );
+
+        // Leave a small hot tip and ensure last_rows still fills from cold+hot.
+        db.client
+            .execute(
+                &format!(
+                    "INSERT INTO {relation} SELECT id, 'live-' || id FROM generate_series(181, 190) id"
+                ),
+                &[],
+            )
+            .await?;
+        common::fence_async_mirror(&db.client).await?;
+        let mixed = db
+            .client
+            .query(
+                "SELECT (pk->>'id')::bigint AS id, source \
+                 FROM koldstore.changes_since($1::text::regclass, 0, 1000, 40) \
+                 ORDER BY seq",
+                &[&relation],
+            )
+            .await?;
+        assert_eq!(mixed.len(), 40);
+        let mixed_ids: Vec<i64> = mixed.iter().map(|row| row.get(0)).collect();
+        assert_eq!(mixed_ids, (151..=190).collect::<Vec<_>>());
+        assert!(
+            mixed.iter().any(|row| row.get::<_, String>(1) == "hot"),
+            "mixed last_rows window must include hot tip"
+        );
+        assert!(
+            mixed.iter().any(|row| row.get::<_, String>(1) == "cold"),
+            "mixed last_rows window must still pull cold history"
+        );
+
+        unmanage(&db.client, &relation).await?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChangeRow {
     id: i64,

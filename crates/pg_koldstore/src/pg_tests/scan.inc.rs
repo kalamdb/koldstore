@@ -1198,6 +1198,51 @@ fn merge_scan_fails_closed_when_seen_key_limit_is_exceeded() {
         "#
     ))
     .expect("seen-key limit must fail closed with a clear error");
+    // Same backend must remain usable: portal ERROR skips EndCustomScan, so
+    // SCAN_STATES abort scrub must disown ScanMemory instead of double-freeing.
+    let still_alive = Spi::get_one::<i64>("SELECT 1").expect("spi").expect("row");
+    assert_eq!(still_alive, 1);
+    let recount = Spi::get_one::<i64>(&format!(
+        "SELECT count(*) FROM {relation} WHERE id = 1"
+    ))
+    .expect("point lookup after seen-key error")
+    .expect("row");
+    assert_eq!(recount, 1);
+    Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
+}
+
+#[pg_test]
+fn merge_scan_survives_followup_query_after_unbounded_count() {
+    let suffix = unique_suffix("seen_unlimited");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, 'body-' || gs::text
+         FROM generate_series(1, 400) AS gs"
+    ))
+    .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 300, "expected cold rows, rows_flushed={flushed}");
+
+    Spi::run("SET koldstore.max_merge_seen_keys = 0").expect("disable seen-key cap");
+    let total = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {relation}"))
+        .expect("unbounded count")
+        .expect("row");
+    assert_eq!(total, 400);
+    // Regression: large merge-scan teardown used to double-free on the next
+    // statement in the same backend (signal 6 / glibc abort).
+    let followup = Spi::get_one::<i64>(&format!("SELECT id FROM {relation} WHERE id = 42"))
+        .expect("follow-up point lookup")
+        .expect("row");
+    assert_eq!(followup, 42);
+    let alive = Spi::get_one::<i64>("SELECT 1").expect("spi").expect("row");
+    assert_eq!(alive, 1);
     Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
 }
 

@@ -279,7 +279,11 @@ fn fetch_since_seq_page(
     Ok(page)
 }
 
-/// Newest-N rewind: mirror first, then one newest cold segment if shortfall.
+/// Newest-N rewind: hot mirror first, then newest cold segments until filled.
+///
+/// Flush with `max_rows_per_file` writes many Parquet segments; the tip segment
+/// alone may hold far fewer than `last_rows` keys. Walk segments newest-first
+/// until the merged window reaches `last_rows` (or cold is exhausted).
 #[cfg(feature = "pg")]
 fn fetch_last_rows_page(
     targets: &ChangeFeedTargets<'_>,
@@ -308,13 +312,7 @@ fn fetch_last_rows_page(
         .as_ref()
         .map(|ctx| ctx.segments.as_slice())
         .unwrap_or(&[]);
-    let Some(newest) = segments.iter().max_by_key(|segment| {
-        (
-            segment.max_seq.get(),
-            segment.min_seq.get(),
-            &segment.object_path,
-        )
-    }) else {
+    if segments.is_empty() {
         return events::changes_last(
             &hot,
             targets.table_oid.to_u32(),
@@ -322,19 +320,54 @@ fn fetch_last_rows_page(
             last_rows,
         )
         .map_err(|error| error.to_string());
-    };
+    }
 
-    let need = (last_rows as usize).saturating_sub(hot.len());
-    // Stream the newest segment with an ascending seq read, keep a bounded
-    // newest-N window (O(last_rows) memory, not O(segment)).
-    let cold = read_cold_segment_newest_window(
-        targets.table_oid,
-        targets.snapshot,
-        newest,
-        need,
-        targets.scope_key,
-    )?;
-    let mut combined = cold;
+    let mut ordered: Vec<&SegmentStatsHint> = segments.iter().collect();
+    ordered.sort_by(|left, right| {
+        (
+            right.max_seq.get(),
+            right.min_seq.get(),
+            right.object_path.as_str(),
+        )
+            .cmp(&(
+                left.max_seq.get(),
+                left.min_seq.get(),
+                left.object_path.as_str(),
+            ))
+    });
+
+    let mut cold_acc = Vec::new();
+    for segment in ordered {
+        let mut probe = cold_acc.clone();
+        probe.extend(hot.iter().cloned());
+        let have = events::changes_last(
+            &probe,
+            targets.table_oid.to_u32(),
+            targets.scope_key,
+            last_rows,
+        )
+        .map_err(|error| error.to_string())?
+        .len();
+        if have >= last_rows as usize {
+            break;
+        }
+
+        // Up to `last_rows` newest keys from this segment; older tip segments
+        // fill any remaining shortfall after PK merge with hot.
+        let chunk = read_cold_segment_newest_window(
+            targets.table_oid,
+            targets.snapshot,
+            segment,
+            last_rows as usize,
+            targets.scope_key,
+        )?;
+        if chunk.is_empty() {
+            continue;
+        }
+        cold_acc.extend(chunk);
+    }
+
+    let mut combined = cold_acc;
     combined.extend(hot);
     events::changes_last(
         &combined,
