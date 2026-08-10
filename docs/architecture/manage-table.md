@@ -3,7 +3,7 @@
 This document describes what actually happens when you call
 `koldstore.manage_table`. It is written against the current clean-schema
 implementation: user heap tables keep application columns only; KoldStore state
-lives in a change-log mirror (`koldstore.{table}__cl`), catalog tables, and
+lives in a change-log mirror (`koldstore.<schema>_<table>__cl`), catalog tables, and
 (once flushed) cold Parquet segments.
 
 **SQL entrypoint:** `koldstore.manage_table(table_name regclass, storage text, …) → uuid`
@@ -136,7 +136,7 @@ rejected unless `allow_fk_hot_only = true`.
 
 | Artifact | Name pattern | Contents |
 |----------|--------------|----------|
-| Mirror table | `koldstore.{source_table}__cl` | PK cols + `seq bigint`, `op smallint`, `commit_lsn pg_lsn` (+ optional `order_key`) |
+| Mirror table | `koldstore.<source_schema>_<source_table>__cl` | PK cols + `seq bigint`, `op smallint` (+ optional encoded `order_key`) |
 | Seq index | `{mirror}_seq_idx` | `("seq")` |
 | Tombstone index | `{mirror}_tombstone_seq_idx` | `("seq") WHERE op = 3` |
 | PK guard | on user heap | BEFORE UPDATE OF primary-key columns FOR EACH ROW |
@@ -148,7 +148,24 @@ removal must be justified by write, catch-up, and flush benchmarks.
 The user heap is **not** altered. No `_seq`, `_commit_seq`, or `_deleted`
 columns are added (clean-schema contract).
 
-### 2.3 Existing-table ordering (populated heap only)
+### 2.3 Mirror identity and collision protection
+
+The source schema is part of every new mirror identity: for example,
+`db1.messages` uses `koldstore.db1_messages__cl`, while `db2.messages` uses
+`koldstore.db2_messages__cl`. This prevents the two sources from sharing
+latest-state rows or generated PK-guard artifacts.
+
+PostgreSQL identifiers are limited to 63 bytes. When the readable generated
+name would exceed that limit, KoldStore keeps its suffix and uses a stable hash
+for the omitted portion. The same bounded-name rule applies to generated mirror
+indexes and PK-guard trigger/function names.
+
+Before creating a mirror, `manage_table` verifies that no other **active**
+managed table owns the proposed mirror relation. This is a fail-closed defence
+for a generated-name collision or a corrupted legacy catalog; `CREATE TABLE IF
+NOT EXISTS` is never relied on as a sharing mechanism.
+
+### 2.4 Existing-table ordering (populated heap only)
 
 `plan_existing_table_migration` chooses backfill order:
 
@@ -165,7 +182,7 @@ Batch size defaults to `10_000` (`DEFAULT_BACKFILL_BATCH_ROWS`).
 When `EXISTS (SELECT 1 FROM ONLY table LIMIT 1)` is false:
 
 1. **Create mirror objects** — `mirror_plan.create_statements()` via SPI:
-   - `CREATE TABLE IF NOT EXISTS koldstore.{name}__cl`
+   - `CREATE TABLE IF NOT EXISTS koldstore.<schema>_<table>__cl`
    - Indexes
    - PK-update guard only (no DML capture triggers)
 
@@ -212,7 +229,7 @@ When the heap already has rows:
 5. **Inline mirror backfill** — `run_existing_table_mirror_initialization_inline`:
    - Loops `plan_mirror_initialization_batch` until no candidates
    - Each batch: scan hot rows missing mirror rows, `INSERT … ON CONFLICT DO NOTHING`
-   - `op = 1`, `seq` from WAL-apply-safe snowflake allocation, `commit_lsn` sampled
+   - `op = 1`, `seq` from WAL-apply-safe snowflake allocation
    - `ORDER BY <migration_order_by> ASC, ctid ASC`, `FOR KEY SHARE SKIP LOCKED`
 
 6. **Catch-up** — apply committed WAL above the seq floor until caught up
@@ -235,6 +252,18 @@ row is durable audit/progress; there is no separate worker claim loop in
 
 Publication membership is established before backfill so concurrent DML cannot
 escape capture. See [mirror-capture.md](mirror-capture.md).
+
+## DDL after management
+
+The source relation keeps its PostgreSQL OID when it is renamed or moved. Its
+mirror name, however, encodes the source's schema-qualified identity. The DDL
+hook therefore rehomes the mirror table, generated indexes, and PK-guard
+artifacts after a table or schema identity change. The catalog continues to
+refer to the same relation and mirror OIDs; caches and prepared plans are
+invalidated after the rehome.
+
+See [managed-table lifecycle and DDL](managed-table-lifecycle.md) for the
+complete table/schema/database rename matrix and legacy shared-mirror behavior.
 
 ---
 ## Phase 5 — Manifest row counter initialization

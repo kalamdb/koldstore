@@ -75,6 +75,22 @@ The hot child preserves PostgreSQL's index, permission, locking, and RLS
 behavior. KoldStore is the coordinator; it does not replace the heap with a
 custom table access method or a view rewrite.
 
+### What is being merged
+
+`KoldMergeScan` is a correctness merge, not a union of independently visible
+tables. It resolves each primary-key identity across these sources before it
+emits a row:
+
+| Source | Role | Can override an older cold row? |
+| --- | --- | --- |
+| Hot heap | Current PostgreSQL row image and native access path | Yes |
+| `koldstore.<schema>_<table>__cl` | Latest-state metadata: sequence and tombstone overlay | Yes; updates/inserts mask cold, deletes suppress it |
+| Cold Parquet segments | Published older row images | Only when no newer hot/mirror state masks the key |
+
+The exact-winner resolver retains primary-key identities, not complete row
+images. This is why an ordinary heap-only plan is permitted only when the
+planner or executor has proven that cold cannot contribute.
+
 At plan time the cheapest native hot path becomes the custom scan's child. The
 custom scan is not parallel-safe, so it owns the final scan path whenever cold
 is possible. There is no DSM/parallel custom-scan implementation today.

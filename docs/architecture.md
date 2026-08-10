@@ -20,6 +20,7 @@ boundaries at each step:
 
 | Workflow | Document |
 |----------|----------|
+| Managed-table lifecycle and DDL identity changes | [managed-table-lifecycle](architecture/managed-table-lifecycle.md) |
 | Register a table for hot/cold management | [manage-table](architecture/manage-table.md) |
 | Mirror capture (WAL apply) | [mirror-capture](architecture/mirror-capture.md) |
 | Move mirror rows to Parquet and prune hot | [flushing-table](architecture/flushing-table.md) |
@@ -55,7 +56,9 @@ Design notes for correctness edge cases (proposed or landed):
 ### Clean-schema mirror (no heap system columns)
 
 Managed user tables keep application columns only. Sequence and delete state
-live in `koldstore.{table}__cl` and in cold Parquet metadata (`seq`, `deleted`).
+live in a schema-qualified mirror named
+`koldstore.<schema>_<table>__cl` (with a stable hash fallback for long names)
+and in cold Parquet metadata (`seq`, `deleted`).
 Committed primary-key-only WAL is applied to the mirror by a persistent
 per-database WAL applier, with an explicit consistency fence for strong reads.
 UPDATE uses a direct set-based update for existing mirror keys and a

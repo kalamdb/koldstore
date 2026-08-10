@@ -16,14 +16,13 @@ accounting, scope enforcement, and how DML state flows into flush and scan.
 ## Clean-schema model
 
 User tables keep application columns only. Each managed table has a latest-state
-change-log mirror at `koldstore.{table}__cl`:
+change-log mirror at `koldstore.<schema>_<table>__cl`:
 
 | Column | Type | Meaning |
 |--------|------|---------|
 | `<pk columns>` | same as heap | Primary key |
 | `seq` | `bigint` | Snowflake-style effect id (ordering, flush cutoffs) |
 | `op` | `smallint` | `1 = INSERT`, `2 = UPDATE`, `3 = DELETE` |
-| `commit_lsn` | `pg_lsn` | WAL position sampled at capture (diagnostics only) |
 
 The mirror holds **at most one row per PK** — the latest hot-side state for that
 key. It is not a full event log. Tombstones (`op = 3`) stay until flush prunes
@@ -45,7 +44,7 @@ flowchart TD
   APPLY --> AKIND{"Operation"}
   AKIND -->|"INSERT / DELETE"| AUPSERT["INSERT ... ON CONFLICT"]
   AKIND -->|"UPDATE"| AUPDATE["UPDATE existing + upsert missing"]
-  AUPSERT --> MIR["koldstore.{table}__cl"]
+  AUPSERT --> MIR["koldstore.<schema>_<table>__cl"]
   AUPDATE --> MIR
   APPLY --> RC["Row counter deltas"]
   RC --> MAN["manifest counters"]
@@ -72,9 +71,9 @@ succeed because the guard raises only on `IS DISTINCT FROM`.
 
 Installed by `koldstore.manage_table` (see [manage-table.md](manage-table.md)):
 
-1. `CREATE TABLE koldstore.{name}__cl` with PK + metadata columns
+1. `CREATE TABLE koldstore.<schema>_<table>__cl` with PK + metadata columns
 2. B-tree on `seq`, plus partial tombstone index `(seq) WHERE op = 3`
-3. PK-guard function `koldstore.{name}__cl_pk_guard()`
+3. PK-guard function with a bounded, mirror-derived name in `koldstore`
 4. One `BEFORE UPDATE OF <pk...> FOR EACH ROW` guard trigger
 5. Counter refresh so manifest hot/mirror counts match live heaps before capture
    takes over
@@ -146,7 +145,6 @@ strong reads still use the fence. Full operational semantics are in
 | PK values | pgoutput text → typed unnest | Native PG column types |
 | `seq` | WAL applier snowflake allocation | `i64` above durable watermark |
 | `op` | `MirrorOperation::code()` | `smallint` 1/2/3 |
-| `commit_lsn` | apply-path sample | `pg_lsn` (diagnostics) |
 
 ---
 
