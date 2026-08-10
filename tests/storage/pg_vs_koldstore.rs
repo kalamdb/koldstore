@@ -25,7 +25,8 @@
 //! Mirror apply remains a separate catch-up row on managed; during timed
 //! phases the sticky WAL applier is paused+terminated so query/DML samples
 //! are not contaminated by a respawned background apply process.
-//! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
+//! Managed sizes always include the schema-qualified change-log mirror heap +
+//! indexes (`koldstore.<schema>_<table>__cl`, hash-bounded when needed).
 //!
 //! Published runs isolate each column via `KOLDSTORE_STORAGE_SIDE=pg|async`
 //! on a wiped + re-initdb pgrx data directory (see
@@ -350,8 +351,8 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
             result
         }
         StorageSide::Combined => {
-            // Mirror tables are `koldstore.<unqualified>__cl`, so table names
-            // must be unique across schemas in the shared E2E database.
+            // Mirror names encode schema + relation; keep table names unique in
+            // the shared E2E database for readable artifacts.
             let baseline_table = format!("{}_baseline", db.schema);
             let managed_table = format!("{}_managed", db.schema);
             let baseline = format!("{}.{}", db.schema, baseline_table);
@@ -547,7 +548,7 @@ async fn run_pg_only_body(
 async fn run_managed_only_body(
     db: &common::TestDb,
     managed: &str,
-    managed_table: &str,
+    _managed_table: &str,
     rows: i64,
     hot_limit: i64,
     dml_sample: i64,
@@ -556,9 +557,10 @@ async fn run_managed_only_body(
     warmup_rows: i64,
 ) -> Result<()> {
     assert_async_worker_disabled_for_benchmark(&db.client).await?;
+    let managed_mirror = common::change_log_mirror_relation(managed);
     db.client
         .batch_execute(&format!(
-            "ALTER TABLE koldstore.{managed_table}__cl SET (autovacuum_enabled = false)"
+            "ALTER TABLE {managed_mirror} SET (autovacuum_enabled = false)"
         ))
         .await
         .context("disable autovacuum on benchmark mirror")?;
@@ -808,7 +810,7 @@ async fn run_storage_comparison_body(
     db: &common::TestDb,
     baseline: &str,
     managed: &str,
-    managed_table: &str,
+    _managed_table: &str,
     rows: i64,
     hot_limit: i64,
     dml_sample: i64,
@@ -819,9 +821,10 @@ async fn run_storage_comparison_body(
     // Apply the source tables' benchmark-only autovacuum control to the
     // generated mirror. Otherwise a long async catch-up can launch mirror
     // maintenance during the next timed phase.
+    let managed_mirror = common::change_log_mirror_relation(managed);
     db.client
         .batch_execute(&format!(
-            "ALTER TABLE koldstore.{managed_table}__cl SET (autovacuum_enabled = false)"
+            "ALTER TABLE {managed_mirror} SET (autovacuum_enabled = false)"
         ))
         .await
         .context("disable autovacuum on benchmark mirror")?;
@@ -1226,9 +1229,10 @@ async fn warm_up_before_timed_seed(
             max_rows_per_flush,
         )
         .await?;
+        let warmup_mirror = common::change_log_mirror_relation(&warmup_relation);
         client
             .batch_execute(&format!(
-                "ALTER TABLE koldstore.{warmup_table}__cl SET (autovacuum_enabled = false)"
+                "ALTER TABLE {warmup_mirror} SET (autovacuum_enabled = false)"
             ))
             .await
             .context("disable autovacuum on warm-up mirror")?;
@@ -1259,10 +1263,7 @@ async fn warm_up_before_timed_seed(
 }
 
 fn mirror_relation(managed: &str) -> Option<String> {
-    managed
-        .rsplit('.')
-        .next()
-        .map(|table| format!("koldstore.{table}__cl"))
+    Some(common::change_log_mirror_relation(managed))
 }
 
 fn schema_sql_path() -> PathBuf {

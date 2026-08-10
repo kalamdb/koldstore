@@ -378,13 +378,16 @@ impl Drop for WalServiceDisableGuard {
     }
 }
 
-/// Stops the current database WAL applier so disable cannot deadlock on [`lock_slot`].
+/// Stops the current database WAL applier so callers can take [`lock_slot`] safely.
 ///
 /// The applier may hold the apply lock inside a peek that waits for concurrent
 /// XIDs — including this backend's open transaction (common under `#[pg_test]`).
 /// Terminate by `backend_type` (not only `active_pid`) so a worker blocked
 /// before acquiring the slot is also cleared.
-fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
+///
+/// Used by disable/teardown and by `#[pg_test]` fixtures that manage a populated
+/// table in the same uncommitted transaction that wrote the seed rows.
+pub(crate) fn stop_async_mirror_applier(database_oid: u32, slot: &str) -> Result<(), String> {
     let worker_type = koldstore_wal_mirror::wal_applier_worker_type(database_oid);
     // Always return a row: an empty SELECT through Spi::run_with_args errors with
     // "SpiTupleTable positioned before the start or after the end" when no WAL

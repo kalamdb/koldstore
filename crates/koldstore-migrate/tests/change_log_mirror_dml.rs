@@ -49,7 +49,7 @@ fn change_log_mirror_installs_pk_guard_only() {
     );
     assert!(guard.trigger.sql.contains("$koldstore_drop_trigger$"));
     assert!(guard.trigger.sql.contains(
-        "EXECUTE 'DROP TRIGGER \"messages__cl_pk_update_guard\" ON \"public\".\"messages\"'"
+        "EXECUTE 'DROP TRIGGER \"public_messages__cl_pk_update_guard\" ON \"public\".\"messages\"'"
     ));
 }
 

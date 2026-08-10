@@ -23,7 +23,7 @@ fn clean_schema_migration_uses_mirror_table_instead_of_system_columns() {
     assert!(plan
         .create_table
         .sql
-        .contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"items__cl\""));
+        .contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"app_items__cl\""));
     for forbidden in [
         "\"_seq\"",
         "\"_commit_seq\"",

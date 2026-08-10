@@ -177,11 +177,19 @@ discover_rpm_file_entries() {
 stage_release_tree() {
   local pg="$1"
   local stage_dir="$2"
-  local root
+  local root project_root
   root="$(pgrx_package_root "${pg}")"
+  project_root="$(build_release_root_dir)"
   rm -rf "${stage_dir}"
   mkdir -p "${stage_dir}"
   cp -a "${root}/." "${stage_dir}/"
+  for notice in LICENSE NOTICE THIRD_PARTY_NOTICES.html; do
+    if [[ ! -f "${project_root}/${notice}" ]]; then
+      echo "error: required release notice missing: ${project_root}/${notice}" >&2
+      return 1
+    fi
+    install -m 0644 "${project_root}/${notice}" "${stage_dir}/${notice}"
+  done
   write_install_sh "${stage_dir}"
 }
 
@@ -211,9 +219,15 @@ create_deb_package() {
   local dist_dir="dist/${version}"
   local out
   out="$(artifact_basename "${version}" "${pg}" "${distro}" "${arch}" "deb")"
-  local deb_root
+  local deb_root project_root doc_dir
   deb_root="$(mktemp -d)"
+  project_root="$(build_release_root_dir)"
   cp -a "${stage_dir}/usr" "${deb_root}/"
+  doc_dir="${deb_root}/usr/share/doc/postgresql-${pg}-koldstore"
+  install -D -m 0644 "${project_root}/packaging/debian/copyright" "${doc_dir}/copyright"
+  install -m 0644 "${stage_dir}/LICENSE" "${doc_dir}/LICENSE"
+  install -m 0644 "${stage_dir}/NOTICE" "${doc_dir}/NOTICE"
+  install -m 0644 "${stage_dir}/THIRD_PARTY_NOTICES.html" "${doc_dir}/THIRD_PARTY_NOTICES.html"
   mkdir -p "${deb_root}/DEBIAN"
   cat >"${deb_root}/DEBIAN/control" <<EOF
 Package: postgresql-${pg}-koldstore
@@ -307,9 +321,15 @@ PostgreSQL extension providing hot/cold table storage for PostgreSQL ${pg}.
 rm -rf %{buildroot}
 mkdir -p %{buildroot}
 cp -a ${stage_dir}/usr %{buildroot}/
+install -D -m 0644 ${stage_dir}/LICENSE %{buildroot}/usr/share/licenses/postgresql${pg}-koldstore/LICENSE
+install -D -m 0644 ${stage_dir}/NOTICE %{buildroot}/usr/share/doc/postgresql${pg}-koldstore/NOTICE
+install -D -m 0644 ${stage_dir}/THIRD_PARTY_NOTICES.html %{buildroot}/usr/share/doc/postgresql${pg}-koldstore/THIRD_PARTY_NOTICES.html
 
 %files
 %defattr(-,root,root,-)
+%license /usr/share/licenses/postgresql${pg}-koldstore/LICENSE
+%doc /usr/share/doc/postgresql${pg}-koldstore/NOTICE
+%doc /usr/share/doc/postgresql${pg}-koldstore/THIRD_PARTY_NOTICES.html
 $(printf '%s\n' "${rpm_files}")
 
 %changelog

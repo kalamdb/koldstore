@@ -452,7 +452,7 @@ impl ColdReadProfile {
             total = total.saturating_add(duration(parquet));
             any = true;
         }
-        any.then(|| total.as_secs_f64() * 1000.0)
+        any.then_some(total.as_secs_f64() * 1000.0)
     }
 }
 
@@ -562,7 +562,7 @@ pub(super) fn explain_visual_pipeline(
     explain_visual_node_close(es, "KoldStore Hot Scan");
 
     explain_visual_node_open(es, "KoldStore Cold Storage Scan", "Cold Source");
-    let cold_accessed = profile.manifest_read_ms.is_some();
+    let cold_accessed = cold_scan_accessed(profile, execution);
     explain_text(
         es,
         "Status",
@@ -632,7 +632,7 @@ fn explain_visual_catalog_node(
         es,
         "Status",
         if analyze {
-            if profile.manifest_read_ms.is_some() {
+            if cold_scan_accessed(profile, None) {
                 "executed"
             } else {
                 "not executed"
@@ -990,7 +990,7 @@ fn explain_cold_scan(
     // carries placeholder timing (e.g. manifest_read_ms: Some(0.0)).
     let analyze = explain_is_analyze(es);
     explain_open_group(es, "Cold Scan", Some("Cold Scan"), true);
-    let cold_accessed = profile.manifest_read_ms.is_some();
+    let cold_accessed = cold_scan_accessed(profile, execution);
     let status = if analyze {
         if cold_accessed {
             "executed"
@@ -1507,6 +1507,24 @@ fn explain_wants_timing(es: *mut pg_sys::ExplainState) -> bool {
         return false;
     }
     unsafe { (*es).timing }
+}
+
+/// True when ANALYZE observed cold catalog and/or Parquet work.
+///
+/// Prefer durable counters over timing fields so `EXPLAIN (ANALYZE, TIMING OFF)`
+/// still reports `Status: executed` after a real cold read.
+fn cold_scan_accessed(profile: &ColdReadProfile, execution: Option<&ScanExecutionProfile>) -> bool {
+    if profile.manifest_read_ms.is_some()
+        || profile.segments_opened > 0
+        || profile.bytes_fetched() > 0
+    {
+        return true;
+    }
+    let (row_groups_total, _, _, _) = profile.row_group_totals();
+    if row_groups_total > 0 {
+        return true;
+    }
+    execution.is_some_and(|execution| execution.cold_rows > 0)
 }
 
 /// TEXT plans reserve raw SQL and per-file diagnostics for EXPLAIN VERBOSE.

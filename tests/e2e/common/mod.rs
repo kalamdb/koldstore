@@ -36,8 +36,10 @@ pub use async_mirror::{
 pub use catalog::{
     active_job_count, assert_catalog_has_active_schema, assert_change_log_mirror_exists,
     assert_cold_metadata_present, assert_no_active_jobs, assert_primary_key_columns_match,
-    assert_system_columns_absent, change_log_mirror_relation, cold_segment_count, manifest_count,
-    primary_key_columns, published_manifest_count,
+    assert_system_columns_absent, change_log_mirror_relation, change_log_mirror_relation_name,
+    change_log_mirror_seq_index_name, change_log_mirror_tombstone_index_name,
+    change_log_pk_guard_trigger_name, cold_segment_count, manifest_count, primary_key_columns,
+    published_manifest_count,
 };
 pub use cluster::{
     connect, error_chain_contains, expected_pg_ports, expected_pg_versions, local_pg_matrix,

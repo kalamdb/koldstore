@@ -507,4 +507,4 @@ Links:
 ## License
 
 Apache License 2.0.
-Copyright 2026 KalamDB.
+Copyright 2026 KoldStore contributors.

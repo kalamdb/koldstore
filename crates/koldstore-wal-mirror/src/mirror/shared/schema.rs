@@ -12,6 +12,18 @@ use super::relation::{bounded_identifier, legacy_truncated_identifier, MirrorRel
 const SEQ_INDEX_SUFFIX: &str = "_seq_idx";
 const TOMBSTONE_INDEX_SUFFIX: &str = "_tombstone_seq_idx";
 
+/// Builds the PostgreSQL-safe seq index name for a mirror relation.
+#[must_use]
+pub fn mirror_seq_index_name(mirror_relation: &str) -> String {
+    bounded_identifier(mirror_relation, SEQ_INDEX_SUFFIX)
+}
+
+/// Builds the PostgreSQL-safe tombstone seq index name for a mirror relation.
+#[must_use]
+pub fn mirror_tombstone_index_name(mirror_relation: &str) -> String {
+    bounded_identifier(mirror_relation, TOMBSTONE_INDEX_SUFFIX)
+}
+
 /// Primitive mirror table schema statements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirrorSchemaPlan {
@@ -171,14 +183,8 @@ pub fn plan_mirror_schema_with_order_key(
         "CREATE TABLE IF NOT EXISTS {quoted_mirror} (\n    {}\n)",
         ddl_columns.join(",\n    ")
     );
-    let seq_index_name = quote_ident(&bounded_identifier(
-        mirror_table.relation(),
-        SEQ_INDEX_SUFFIX,
-    ));
-    let tombstone_index_name = quote_ident(&bounded_identifier(
-        mirror_table.relation(),
-        TOMBSTONE_INDEX_SUFFIX,
-    ));
+    let seq_index_name = quote_ident(&mirror_seq_index_name(mirror_table.relation()));
+    let tombstone_index_name = quote_ident(&mirror_tombstone_index_name(mirror_table.relation()));
 
     Ok(MirrorSchemaPlan {
         collision_probe: SqlStatement::read(

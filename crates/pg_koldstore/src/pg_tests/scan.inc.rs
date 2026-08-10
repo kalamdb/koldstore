@@ -622,8 +622,8 @@ fn explain_analyze_counts_mirror_overlay_rows() {
     // this same transaction still conflicts in the heap's unique index. Seed
     // the post-flush mirror state directly to isolate EXPLAIN's overlay metrics.
     Spi::run(&format!(
-        "INSERT INTO {mirror} (id, seq, op) \
-         SELECT 2, last_flush_seq + 1, 3 \
+        "INSERT INTO {mirror} (id, order_key, seq, op) \
+         SELECT 2, koldstore.internal_encode_sort_key(2::bigint), last_flush_seq + 1, 3 \
          FROM koldstore.schemas \
          WHERE table_oid = '{relation}'::regclass AND active"
     ))

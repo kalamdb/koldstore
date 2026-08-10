@@ -32,7 +32,7 @@ async fn wal_only_empty_activation_has_no_capture_triggers() -> Result<()> {
         let triggers = source_triggers(&db.client, &relation).await?;
         assert_eq!(
             triggers,
-            vec![format!("{table_name}__cl_pk_update_guard")],
+            vec![common::change_log_pk_guard_trigger_name(&relation)],
             "WAL-only activation must not install DML capture triggers"
         );
 
@@ -368,7 +368,7 @@ async fn populated_activation_under_concurrent_dml_is_gap_free() -> Result<()> {
         let triggers = source_triggers(&db.client, &relation).await?;
         assert_eq!(
             triggers,
-            vec![format!("{table_name}__cl_pk_update_guard")],
+            vec![common::change_log_pk_guard_trigger_name(&relation)],
             "populated activation must remain WAL-only"
         );
 
@@ -415,7 +415,9 @@ async fn changes_since_hot_mirror_index_scan_for_seq_pagination() -> Result<()> 
         let table_name = format!("{}_idx", db.schema);
         let relation = db.relation(&table_name);
         let mirror = common::change_log_mirror_relation(&relation);
-        let seq_index = format!("{table_name}__cl_seq_idx");
+        let mirror_name = common::change_log_mirror_relation_name(&relation);
+        let seq_index = common::change_log_mirror_seq_index_name(&relation);
+        let tombstone_index = common::change_log_mirror_tombstone_index_name(&relation);
 
         db.client
             .batch_execute(&format!(
@@ -442,7 +444,7 @@ async fn changes_since_hot_mirror_index_scan_for_seq_pagination() -> Result<()> 
                 "SELECT indexname::text FROM pg_indexes \
                  WHERE schemaname = 'koldstore' AND tablename = $1 \
                  ORDER BY indexname",
-                &[&format!("{table_name}__cl")],
+                &[&mirror_name],
             )
             .await?
             .into_iter()
@@ -453,9 +455,7 @@ async fn changes_since_hot_mirror_index_scan_for_seq_pagination() -> Result<()> 
             "expected {seq_index} among {indexes:?}"
         );
         assert!(
-            indexes
-                .iter()
-                .any(|name| name == &format!("{table_name}__cl_tombstone_seq_idx")),
+            indexes.iter().any(|name| name == &tombstone_index),
             "expected tombstone seq index among {indexes:?}"
         );
 

@@ -246,6 +246,9 @@ fn alter_table_manages_a_populated_table() {
         "INSERT INTO {relation} (body) VALUES ('alpha'), ('beta')"
     ))
     .expect("seed populated table");
+    // Seed INSERT assigned an XID; keep the WAL applier off the apply lock for
+    // the rest of this uncommitted #[pg_test] transaction.
+    hold_apply_lock_for_populated_manage();
 
     Spi::run(&format!(
         r#"

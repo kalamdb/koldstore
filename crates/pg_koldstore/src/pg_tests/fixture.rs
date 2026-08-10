@@ -52,6 +52,21 @@ pub(crate) fn register_temp_storage(label: &str) -> String {
     name
 }
 
+/// Stops the WAL applier and holds the apply lock for the rest of this `#[pg_test]`.
+///
+/// Populated manage takes the apply lock for publish/backfill/catch-up. If the
+/// persistent applier already holds that lock while waiting on this backend's
+/// open XID (seed INSERT), the deadlock detector cannot see the cycle and the
+/// test stalls for minutes. Call this after seeding and before manage/ALTER.
+pub(crate) fn hold_apply_lock_for_populated_manage() {
+    let database_oid = unsafe { pgrx::pg_sys::MyDatabaseId }.to_u32();
+    let slot = crate::mirror::lifecycle::slot_name(database_oid);
+    crate::mirror::lifecycle::stop_async_mirror_applier(database_oid, &slot)
+        .expect("stop WAL applier before populated manage");
+    crate::mirror::lifecycle::lock_slot(database_oid)
+        .expect("hold apply lock for populated manage");
+}
+
 /// Creates a simple heap table with a bigint primary key and text body.
 pub(crate) fn create_messages_table(schema: &str, table: &str) {
     Spi::run(&format!("CREATE SCHEMA IF NOT EXISTS {schema}")).expect("create schema");

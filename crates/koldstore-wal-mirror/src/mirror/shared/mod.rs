@@ -26,8 +26,9 @@ pub use relation::{
 };
 pub use row_json::MirrorSeqStats;
 pub use schema::{
-    plan_drop_mirror_table, plan_mirror_pk_column_renames, plan_mirror_relation_rename,
-    plan_mirror_schema, plan_mirror_schema_with_order_key, MirrorSchemaPlan,
+    mirror_seq_index_name, mirror_tombstone_index_name, plan_drop_mirror_table,
+    plan_mirror_pk_column_renames, plan_mirror_relation_rename, plan_mirror_schema,
+    plan_mirror_schema_with_order_key, MirrorSchemaPlan,
 };
 pub use statement::{SqlAccess, SqlParamType, SqlStatement};
 pub use write::{

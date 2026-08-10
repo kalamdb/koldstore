@@ -219,7 +219,10 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
             .iter()
             .map(|row| row.get::<_, String>(0))
             .collect::<Vec<_>>();
-        assert_eq!(triggers, vec![format!("{table_name}__cl_pk_update_guard"),]);
+        assert_eq!(
+            triggers,
+            vec![common::change_log_pk_guard_trigger_name(&relation)],
+        );
         let worker_start_latency = common::wait_for_async_worker(&db.client).await?;
         common::log_always(format!(
             "async mirror worker visible after {worker_start_latency:?}"

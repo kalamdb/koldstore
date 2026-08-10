@@ -230,53 +230,69 @@ fn fetch_since_seq_page(
         );
     }
 
-    let mut page = Vec::with_capacity(limit);
-    let mut cursor = since_seq;
-    while page.len() < limit {
-        let Some(segment) = next_cold_segment(segments, cursor) else {
-            let rest = limit - page.len();
-            let hot = fetch_hot_mirror_changes(
-                targets.table_oid.to_u32(),
-                targets.mirror,
-                targets.pk_names,
-                cursor,
-                rest,
-                targets.scope_column,
-                targets.scope_key,
-            )?;
-            page.extend(hot);
-            break;
-        };
+    // Segment files may be packed by segment-order key (id/time), so seq ranges
+    // overlap across objects. Walk candidates by ascending min_seq and merge by
+    // seq; stop once no remaining segment can beat the current page cutoff.
+    let mut candidates: Vec<&SegmentStatsHint> = segments
+        .iter()
+        .filter(|segment| segment.max_seq.get() > since_seq)
+        .collect();
+    candidates.sort_by(|left, right| {
+        (
+            left.min_seq.get(),
+            left.max_seq.get(),
+            left.object_path.as_str(),
+        )
+            .cmp(&(
+                right.min_seq.get(),
+                right.max_seq.get(),
+                right.object_path.as_str(),
+            ))
+    });
 
-        let need = limit - page.len();
-        let mut cold = read_cold_segment_page(
+    let mut cold_acc: Vec<MirrorChange> = Vec::new();
+    for segment in candidates {
+        if cold_acc.len() >= limit {
+            cold_acc.sort_by_key(|row| row.seq);
+            cold_acc.truncate(limit);
+            if segment.min_seq.get() > cold_acc[limit - 1].seq.get() {
+                break;
+            }
+        }
+
+        let cold = read_cold_segment_page(
             targets.table_oid,
             targets.snapshot,
             segment,
-            cursor,
-            need,
+            since_seq,
+            usize::MAX,
             targets.scope_key,
         )?;
         if cold.is_empty() {
-            // Stats prune / scope filter emptied this segment for the cursor —
-            // advance past it and try the next catalog candidate.
-            cursor = segment.max_seq.get();
             continue;
         }
-        // Parquet batch order is not a cursor contract; advance by max seq and
-        // keep the page ascending so exclusive resume cannot skip/duplicate.
-        cold.sort_by_key(|row| row.seq);
-        cursor = cold.last().map(|row| row.seq.get()).unwrap_or(cursor);
-        page.extend(cold);
-        if page.len() >= limit {
-            break;
-        }
-        // Page still short: either the segment EOF'd under the row limit, or
-        // scope filtering dropped rows. Re-enter with the advanced cursor so
-        // the same segment can continue, or the next catalog candidate / mirror.
+        cold_acc.extend(cold);
     }
 
-    page.sort_by_key(|row| row.seq);
+    cold_acc.sort_by_key(|row| row.seq);
+    if cold_acc.len() > limit {
+        cold_acc.truncate(limit);
+    }
+
+    let mut page = cold_acc;
+    if page.len() < limit {
+        let cursor = page.last().map(|row| row.seq.get()).unwrap_or(since_seq);
+        let hot = fetch_hot_mirror_changes(
+            targets.table_oid.to_u32(),
+            targets.mirror,
+            targets.pk_names,
+            cursor,
+            limit - page.len(),
+            targets.scope_column,
+            targets.scope_key,
+        )?;
+        page.extend(hot);
+    }
     Ok(page)
 }
 
@@ -381,6 +397,7 @@ fn fetch_last_rows_page(
 
 /// Oldest published segment that can still contribute rows after `since_seq`.
 #[cfg(feature = "pg")]
+#[allow(dead_code)] // retained for seq-partitioned segment walks / future prune helpers
 fn next_cold_segment(segments: &[SegmentStatsHint], since_seq: i64) -> Option<&SegmentStatsHint> {
     segments
         .iter()
@@ -540,10 +557,13 @@ fn read_cold_segment_page(
     let store = client.store();
 
     let min_seq = SeqId::new(since_seq.saturating_add(1).max(1)).map_err(|e| e.to_string())?;
+    // Do not push `row_limit` into the Parquet reader: segment row order follows
+    // the configured segment-order column (often PK/id), not mirror `seq`. An
+    // early stop mid-file would advance the exclusive seq cursor past unread
+    // lower-seq rows in the same segment and silently drop change-feed history.
     let options = ParquetReadOptions::new()
         .with_columns(projection.physical_names.clone())
         .with_clean_seq_range(min_seq, segment.max_seq)
-        .with_row_limit(limit)
         .with_timeout(client.timeout())
         .with_profile_mode(ParquetProfileMode::Disabled);
 
@@ -577,6 +597,10 @@ fn read_cold_segment_page(
             }
         }
         changes.push(change);
+    }
+    changes.sort_by_key(|change| change.seq);
+    if changes.len() > limit {
+        changes.truncate(limit);
     }
     // Scope filter can drop rows after the reader already early-stopped; that
     // is acceptable — the next page advances by the last emitted seq.

@@ -8,19 +8,16 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use koldstore_merge::scan::{hot_keys_dominate_bound, OrderDirection};
-use koldstore_merge::{NewestFirstWinnerResolver, ResolvedRow, RowSource};
+use koldstore_merge::{MirrorOverlay, NewestFirstWinnerResolver, ResolvedRow, RowSource};
 use koldstore_migrate::{order::CatalogColumn, ExistingTableCatalog};
 use pgrx::pg_sys;
 
-use super::cold::{prepare_cold_row_stream, ColdReadPhase, ColdRowStream};
+use super::cold::{prepare_cold_row_stream, ColdReadPhase, ColdRowStream, ColdStreamPlanRequest};
 use super::cold_frontier;
 use super::emit::materialize_scan_row_from_image;
 use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader, HotRangeFilter};
 use super::hot_cursor::{HotMergeSource, NativeHotCursor};
-use super::mirror::{
-    filter_cold_rows_with_overlay, load_mirror_tombstone_overlay, load_mirror_tombstones_for_pks,
-    MirrorOverlay,
-};
+use super::mirror::{load_mirror_tombstone_overlay, load_mirror_tombstones_for_pks};
 use super::path_strategy::{STRATEGY_TAG_ORDERED_PROGRESSIVE, STRATEGY_TAG_UNORDERED_HOT_FIRST};
 use super::profile::{
     elapsed_ms, ColdReadProfile, DisabledScanProfiler, EmitPath, ProfileCollectionMode,
@@ -232,7 +229,7 @@ impl MergeRowStream {
                 }
                 if !self.replay_hot {
                     self.resolver
-                        .mask_older_pks(self.overlay.masked_pks.iter().cloned())
+                        .mask_older_pks(self.overlay.iter().cloned())
                         .map_err(seen_key_limit_error)?;
                     self.resolver.checkpoint();
                 }
@@ -267,10 +264,9 @@ impl MergeRowStream {
                 self.probe_overlay_for_cold_batch(&cold_rows, execution.as_deref_mut())?;
             }
 
-            let overlay_input = cold_rows.len();
             let overlay_started = execution_timer(execution.as_deref());
-            let cold_rows = filter_cold_rows_with_overlay(cold_rows, &self.overlay);
-            let overlay_removed = overlay_input.saturating_sub(cold_rows.len());
+            let mut cold_rows = cold_rows;
+            let overlay_removed = self.overlay.retain_unmasked(&mut cold_rows);
             let merge_input = cold_rows.len();
             let merge_started = execution_timer(execution.as_deref());
             let winners = self
@@ -455,8 +451,8 @@ impl MergeRowStream {
                 self.probe_overlay_for_cold_batch(&cold_rows, execution.as_deref_mut())?;
             }
             let overlay_input = cold_rows.len();
-            let cold_rows = filter_cold_rows_with_overlay(cold_rows, &self.overlay);
-            let overlay_removed = overlay_input.saturating_sub(cold_rows.len());
+            let mut cold_rows = cold_rows;
+            let overlay_removed = self.overlay.retain_unmasked(&mut cold_rows);
             let winners = self
                 .resolver
                 .resolve_cold_batch(cold_rows)
@@ -509,7 +505,7 @@ impl MergeRowStream {
         };
         let mut unseen = Vec::new();
         for row in cold_rows {
-            if !self.overlay.masked_pks.contains(&row.pk) {
+            if !self.overlay.contains(&row.pk) {
                 unseen.push(row.pk.clone());
             }
         }
@@ -523,13 +519,12 @@ impl MergeRowStream {
             &unseen,
         )?;
         if let Some(execution) = execution {
-            execution.mirror_rows = execution.mirror_rows.saturating_add(batch.tombstones);
+            execution.mirror_rows = execution.mirror_rows.saturating_add(batch.len());
             // Deferred PK probes are the ordered/unordered mirror scan phase.
             accumulate_ms(&mut execution.mirror_scan_ms, started);
         }
-        for pk in batch.masked_pks {
-            self.overlay.masked_pks.insert(pk);
-            self.overlay.tombstones = self.overlay.masked_pks.len();
+        for pk in batch.into_masked_pks() {
+            self.overlay.insert(pk);
         }
         Ok(())
     }
@@ -783,16 +778,16 @@ fn prepare_cold_stream(
     inputs: &ScanSourceInputs<'_>,
     profile_mode: ProfileCollectionMode,
 ) -> (ColdReadProfile, Option<ColdRowStream>) {
-    prepare_cold_row_stream(
-        inputs.table_oid,
-        inputs.scanrelid,
-        inputs.snapshot,
-        &inputs.catalog,
-        inputs.qual,
-        inputs.image_columns,
-        inputs.params,
+    prepare_cold_row_stream(ColdStreamPlanRequest {
+        table_oid: inputs.table_oid,
+        scanrelid: inputs.scanrelid,
+        snapshot: inputs.snapshot,
+        catalog: &inputs.catalog,
+        qual: inputs.qual,
+        projected_columns: inputs.image_columns,
+        params: inputs.params,
         profile_mode,
-    )
+    })
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} cold stream setup failed: {error}"))
 }
 
@@ -960,11 +955,11 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
         });
     if let Some(leading) = inputs.catalog.column_by_attnum(leading_column_id) {
         let leading_ref = koldstore_common::ColumnRef::new(leading.column_id, leading.name.clone());
-        if cold_stream.enable_late_materialization(&leading_ref) {
-            if profiler.collection_mode().collects_counts() {
-                cold_profile.compete_columns = cold_stream.compete_projection_names();
-                cold_profile.body_columns = cold_stream.body_projection_names();
-            }
+        if cold_stream.enable_late_materialization(&leading_ref)
+            && profiler.collection_mode().collects_counts()
+        {
+            cold_profile.compete_columns = cold_stream.compete_projection_names();
+            cold_profile.body_columns = cold_stream.body_projection_names();
         }
     }
     let cold_bound =
@@ -1051,6 +1046,6 @@ fn load_overlay<P: ScanProfileSink>(
         inputs.pk_equality,
     )
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} mirror overlay failed: {error}"));
-    profiler.record_mirror_scan(overlay.tombstones, started);
+    profiler.record_mirror_scan(overlay.len(), started);
     overlay
 }

@@ -12,6 +12,7 @@ ignored = [
     "koldstore-memory-tests",
     "koldstore-storage",
     "koldstore-supervisor",
+    "koldstore-wal-mirror",
 ]
 
 [[test]]
@@ -26,6 +27,7 @@ koldstore-common.workspace = true
 koldstore-memory-tests = { path = "../memory" }
 koldstore-storage = { workspace = true, features = ["s3"] }
 koldstore-supervisor.workspace = true
+koldstore-wal-mirror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "sync"] }

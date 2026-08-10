@@ -71,6 +71,7 @@ COPY --from=postgres:16-bookworm /usr/local/bin/docker-ensure-initdb.sh /usr/loc
 COPY docker-artifacts/koldstore.so /tmp/koldstore/koldstore.so
 COPY docker-artifacts/koldstore.control /tmp/koldstore/koldstore.control
 COPY docker-artifacts/koldstore--*.sql /tmp/koldstore/
+COPY docker-artifacts/LICENSE docker-artifacts/NOTICE docker-artifacts/THIRD_PARTY_NOTICES.html /tmp/koldstore/
 
 COPY docker/release-init/ /docker-entrypoint-initdb.d/
 COPY docker/release-entrypoint.sh /usr/local/bin/release-entrypoint.sh
@@ -82,6 +83,9 @@ RUN set -eux; \
     install -m 0644 /tmp/koldstore/koldstore.control "${EXTDIR}/"; \
     install -m 0644 /tmp/koldstore/koldstore--*.sql "${EXTDIR}/"; \
     install -m 0755 /tmp/koldstore/koldstore.so "${LIBDIR}/koldstore.so"; \
+    install -D -m 0644 /tmp/koldstore/LICENSE /usr/share/doc/koldstore/LICENSE; \
+    install -m 0644 /tmp/koldstore/NOTICE /usr/share/doc/koldstore/NOTICE; \
+    install -m 0644 /tmp/koldstore/THIRD_PARTY_NOTICES.html /usr/share/doc/koldstore/THIRD_PARTY_NOTICES.html; \
     rm -rf /tmp/koldstore; \
     chmod +x /usr/local/bin/release-entrypoint.sh; \
     # Common cold-storage roots for try-it / Windows mapped drives. Entrypoint

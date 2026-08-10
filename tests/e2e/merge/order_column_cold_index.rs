@@ -514,10 +514,7 @@ async fn setup_order_table(db: &common::TestDb, table: &str) -> Result<String> {
                 AND column_name = 'order_key'
             )
             "#,
-            &[&format!(
-                "{}__cl",
-                relation.rsplit('.').next().unwrap_or(relation.as_str())
-            )],
+            &[&common::change_log_mirror_relation_name(&relation)],
         )
         .await?
         .get(0);

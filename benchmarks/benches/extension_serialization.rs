@@ -1,10 +1,10 @@
 use std::hint::black_box;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
 use koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 use koldstore_catalog::FlushPolicy;
 use koldstore_common::{ColdRow, HotRow, LogicalPk, PkColumn, PkValue, RowImage, ScopeKey, SeqId};
-use koldstore_merge::resolve_rows;
+use koldstore_merge::{resolve_rows, NewestFirstWinnerResolver};
 use koldstore_storage::PathTemplate;
 use serde_json::json;
 
@@ -25,6 +25,25 @@ fn bench_hot_cold_deduplication(c: &mut Criterion) {
     let cold = cold_rows(10_000);
     c.bench_function("deduplicate_hot_and_cold_by_primary_key", |b| {
         b.iter(|| resolve_rows(black_box(&hot), black_box(&cold)))
+    });
+}
+
+fn bench_streaming_hot_cold_resolution(c: &mut Criterion) {
+    let hot = hot_rows(10_000);
+    let cold = cold_rows(10_000);
+    c.bench_function("streaming_resolve_hot_then_cold_by_primary_key", |b| {
+        b.iter_batched(
+            || (hot.clone(), cold.clone()),
+            |(hot, cold)| {
+                let mut resolver = NewestFirstWinnerResolver::default();
+                let hot = resolver.resolve_hot_batch(hot).expect("hot batch resolves");
+                let cold = resolver
+                    .resolve_cold_batch(cold)
+                    .expect("cold batch resolves");
+                black_box((hot, cold, resolver.seen_key_count()))
+            },
+            BatchSize::LargeInput,
+        )
     });
 }
 
@@ -185,6 +204,7 @@ criterion_group!(
     benches,
     bench_merge_plan_serialization,
     bench_hot_cold_deduplication,
+    bench_streaming_hot_cold_resolution,
     bench_path_and_policy,
     bench_query_mode_decision
 );
