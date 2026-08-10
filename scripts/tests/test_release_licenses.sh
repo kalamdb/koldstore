@@ -30,6 +30,6 @@ test -x "${stage_dir}/install.sh"
 create_tarball_package 0.0.0-license-test 16 test amd64 "${stage_dir}"
 archive="dist/0.0.0-license-test/pg_koldstore-v0.0.0-license-test-pg16-test-amd64.tar.gz"
 trap 'rm -rf "${test_root}" "${package_root}" "dist/0.0.0-license-test"' EXIT
-tar -tzf "${archive}" | rg '/LICENSE$'
-tar -tzf "${archive}" | rg '/NOTICE$'
-tar -tzf "${archive}" | rg '/THIRD_PARTY_NOTICES.html$'
+tar -tzf "${archive}" | grep -E '/LICENSE$'
+tar -tzf "${archive}" | grep -E '/NOTICE$'
+tar -tzf "${archive}" | grep -E '/THIRD_PARTY_NOTICES.html$'
