@@ -123,7 +123,7 @@ KoldStore is organized around concrete research questions rather than only a fea
 
 ## Try it
 
-The preview Docker image includes PostgreSQL 16 with KoldStore preloaded and logical WAL enabled.
+The preview Docker image includes PostgreSQL **18** with KoldStore preloaded and logical WAL enabled (`latest`, amd64 + arm64). PostgreSQL 16 stays available as `:pg16` / `:<version>-pg16` (**amd64 only**). PostgreSQL 17 images (`:pg17`) are published only when enabled on the Release workflow.
 
 ```bash
 docker pull jamals86/pg-koldstore:latest
@@ -133,6 +133,13 @@ docker run --rm \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
   jamals86/pg-koldstore:latest
+```
+
+PostgreSQL 16:
+
+```bash
+docker pull jamals86/pg-koldstore:pg16
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:pg16
 ```
 
 Connect:

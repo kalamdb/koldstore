@@ -1,20 +1,32 @@
 # syntax=docker/dockerfile:1
 #
-# Release runtime — PostgreSQL 16 + prebuilt koldstore + pg_cron.
+# Release runtime — PostgreSQL + prebuilt koldstore + pg_cron.
 # Does not compile the extension; copy artifacts from the release tarball.
 #
 # Build context: repository root, with extracted extension files in
 # docker-artifacts/ (koldstore.so, koldstore.control, koldstore--*.sql).
 #
-#   docker build -f docker/Dockerfile.release -t pg-koldstore:16 .
+#   # PostgreSQL 18 (default / :latest)
+#   docker build -f docker/Dockerfile.release \
+#     --build-arg PG_MAJOR=18 \
+#     -t pg-koldstore:18 .
+#
+#   # PostgreSQL 16 (still published as :<version>-pg16)
+#   docker build -f docker/Dockerfile.release \
+#     --build-arg PG_MAJOR=16 \
+#     --build-arg OCI_IMAGE_DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly." \
+#     -t pg-koldstore:16 .
 #
 # Base is Ubuntu 24.04 + PGDG PostgreSQL so the prebuilt ubuntu24.04
-# package (amd64 or arm64) matches the runtime glibc (official
-# postgres:16-bookworm would not). Build each arch with its matching
-# docker-artifacts/koldstore.so; release CI publishes a multi-arch manifest.
+# package (amd64 or arm64) matches the runtime glibc. Build each arch with
+# its matching docker-artifacts/koldstore.so; release CI publishes multi-arch
+# manifests for both PG majors (`latest` tracks PG18).
 
-ARG PG_MAJOR=16
-ARG OCI_IMAGE_DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly."
+ARG PG_MAJOR=18
+ARG OCI_IMAGE_DESCRIPTION="PostgreSQL 18 with koldstore preinstalled for trying KoldStore quickly."
+
+# Official entrypoint scripts (initdb, POSTGRES_* env, init hooks).
+FROM postgres:${PG_MAJOR}-bookworm AS official_postgres
 
 FROM ubuntu:24.04
 
@@ -64,9 +76,8 @@ RUN set -eux; \
     chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql; \
     chmod 2777 /var/run/postgresql
 
-# Official entrypoint (handles initdb, POSTGRES_* env, init scripts).
-COPY --from=postgres:16-bookworm /usr/local/bin/docker-entrypoint.sh /usr/local/bin/
-COPY --from=postgres:16-bookworm /usr/local/bin/docker-ensure-initdb.sh /usr/local/bin/
+COPY --from=official_postgres /usr/local/bin/docker-entrypoint.sh /usr/local/bin/
+COPY --from=official_postgres /usr/local/bin/docker-ensure-initdb.sh /usr/local/bin/
 
 COPY docker-artifacts/koldstore.so /tmp/koldstore/koldstore.so
 COPY docker-artifacts/koldstore.control /tmp/koldstore/koldstore.control

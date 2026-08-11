@@ -10,7 +10,7 @@ mod s3;
 mod util;
 
 pub use config::BackendConfig;
-pub use fs::ensure_filesystem_base_prepared;
+pub use fs::{ensure_filesystem_base_empty, ensure_filesystem_base_prepared};
 pub use kind::StorageBackendKind;
 pub use open::{
     ensure_storage_backend_writable, open_client_from_catalog_fields,

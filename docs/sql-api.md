@@ -162,7 +162,11 @@ Optional `check` (default `true`): opens the configured backend (filesystem,
 S3, GCS, or Azure) and performs a put/delete probe object
 (`.koldstore-write-probe`) so registration fails fast on bad credentials,
 unreachable endpoints, or unwritable paths. Filesystem backends also create
-`base_path` when needed. Pass `check => false` to skip the probe.
+`base_path` when needed and **require the directory to be empty** so existing
+files are not mixed with cold objects. Pass `check => false` to skip both the
+emptiness requirement and the writability probe (for example when you
+intentionally reuse a non-empty directory, or credentials/mounts will exist
+later).
 
 ```sql
 SELECT koldstore.register_storage(
@@ -171,7 +175,7 @@ SELECT koldstore.register_storage(
   base_path    => '/koldstore-data/cold/',
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb,
-  check        => false   -- skip writability probe
+  check        => false   -- skip emptiness + writability probe
 );
 ```
 
@@ -204,8 +208,9 @@ SELECT koldstore.alter_storage_location(
 ```
 
 Updates storage location/configuration without direct catalog DML. Optional
-`check` (default `true`) probes local filesystem paths the same way as
-`register_storage`; pass `check => false` to skip.
+`check` (default `true`) probes the new location the same way as
+`register_storage` (filesystem roots must be empty; put/delete probe for all
+backends). Pass `check => false` to skip.
 
 **Returns:** `uuid` — the storage backend id. Errors if the storage name does
 not exist.

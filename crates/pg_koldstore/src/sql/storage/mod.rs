@@ -12,10 +12,13 @@ use koldstore_storage::registration::*;
 ///   regular_path_tmpl, scoped_path_tmpl, check default true)`.
 ///
 /// When `check` is true (default), opens the configured backend and performs a
-/// put/delete probe (filesystem roots are created first). Pass `check => false`
-/// to skip (for example when credentials or mounts will be available later).
+/// put/delete probe (filesystem roots are created first and must be empty).
+/// Pass `check => false` to skip emptiness and writability checks (for example
+/// when intentionally reusing a non-empty directory, or when credentials or
+/// mounts will be available later).
 ///
-/// Errors when `name` already exists.
+/// Errors when `name` already exists, when `check` is true and a filesystem
+/// `base_path` is non-empty, or when the writability probe fails.
 #[cfg(feature = "pg")]
 #[allow(clippy::too_many_arguments)]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
@@ -48,9 +51,11 @@ pub fn register_storage_pg(
 ///   check default true)`.
 ///
 /// When `check` is true (default), opens the configured backend and performs a
-/// put/delete probe. Pass `check => false` to skip.
+/// put/delete probe (filesystem roots are created first and must be empty).
+/// Pass `check => false` to skip emptiness and writability checks.
 ///
-/// Errors when `name` already exists.
+/// Errors when `name` already exists, when `check` is true and a filesystem
+/// `base_path` is non-empty, or when the writability probe fails.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(name = "register_storage", schema = "koldstore", security_definer)]
 pub fn register_storage_pg_with_default_templates(
@@ -174,7 +179,8 @@ pub fn alter_storage_credentials_pg(name: &str, credentials: pgrx::JsonB) {
 /// `koldstore.alter_storage_location(name, base_path, config, check default true)`.
 ///
 /// When `check` is true (default), opens the backend with existing credentials
-/// and probes put/delete at the new location. Pass `check => false` to skip.
+/// and probes put/delete at the new location (filesystem roots must be empty).
+/// Pass `check => false` to skip emptiness and writability checks.
 #[cfg(feature = "pg")]
 #[pgrx::pg_extern(
     name = "alter_storage_location",
