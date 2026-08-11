@@ -530,6 +530,11 @@ async fn persistent_wal_applier_restarts_under_write_flood_without_gaps() -> Res
     let _cluster = common::acquire_cluster_exclusive()?;
     common::require_pgrx_server().await?;
 
+    const PRE_KILL_MIN: i64 = 25;
+    const TOTAL_MIN: i64 = 50;
+    const POST_RESTART_MIN: i64 = 10;
+    const FLOOD_PROGRESS_DEADLINE: Duration = Duration::from_secs(20);
+
     for target in common::scenario_pg_matrix() {
         let db = common::TestDb::start(target, "persistent_wal_restart_flood").await?;
         let table_name = format!("{}_events", db.schema);
@@ -575,13 +580,15 @@ async fn persistent_wal_applier_restarts_under_write_flood_without_gaps() -> Res
                         &[&id, &format!("w{writer_idx}-{id}")],
                     )
                     .await?;
-                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    // Yield only — fixed sleeps make the flood wall-clock bound and
+                    // flake under loaded CI ("restart flood too light").
+                    tokio::task::yield_now().await;
                 }
                 Ok::<_, anyhow::Error>(())
             }));
         }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        wait_for_insert_progress(&next_id, PRE_KILL_MIN, FLOOD_PROGRESS_DEADLINE).await?;
         anyhow::ensure!(
             common::terminate_async_worker(&db.client).await?,
             "expected to terminate resident WAL applier mid-flood"
@@ -590,7 +597,13 @@ async fn persistent_wal_applier_restarts_under_write_flood_without_gaps() -> Res
         let replacement = wal_applier_pid(&db.client).await?;
         assert_ne!(replacement, original_pid);
 
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        let at_restart = next_id.load(Ordering::SeqCst) - 1;
+        wait_for_insert_progress(
+            &next_id,
+            (at_restart + POST_RESTART_MIN).max(TOTAL_MIN),
+            FLOOD_PROGRESS_DEADLINE,
+        )
+        .await?;
         stop.store(true, Ordering::SeqCst);
         for (idx, handle) in writers.into_iter().enumerate() {
             handle
@@ -600,7 +613,10 @@ async fn persistent_wal_applier_restarts_under_write_flood_without_gaps() -> Res
 
         common::fence_async_mirror(&db.client).await?;
         let inserted = next_id.load(Ordering::SeqCst) - 1;
-        anyhow::ensure!(inserted >= 50, "restart flood too light ({inserted} rows)");
+        anyhow::ensure!(
+            inserted >= TOTAL_MIN,
+            "restart flood too light ({inserted} rows)"
+        );
         let visible: i64 = db
             .client
             .query_one(&format!("SELECT count(*)::bigint FROM {relation}"), &[])
@@ -643,4 +659,23 @@ async fn persistent_wal_applier_restarts_under_write_flood_without_gaps() -> Res
             .await?;
     }
     Ok(())
+}
+
+async fn wait_for_insert_progress(
+    next_id: &AtomicI64,
+    min_inserted: i64,
+    deadline: Duration,
+) -> Result<i64> {
+    let started = Instant::now();
+    loop {
+        let inserted = next_id.load(Ordering::SeqCst) - 1;
+        if inserted >= min_inserted {
+            return Ok(inserted);
+        }
+        anyhow::ensure!(
+            started.elapsed() < deadline,
+            "restart flood too light ({inserted} rows); wanted >= {min_inserted} within {deadline:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
