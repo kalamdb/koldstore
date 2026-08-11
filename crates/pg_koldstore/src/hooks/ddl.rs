@@ -1,11 +1,12 @@
 //! DDL and ProcessUtility integration for KoldStore table options.
 //!
-//! DROP TABLE cleanup planning lives in `koldstore-migrate`; this module
+//! DROP cleanup planning lives in `koldstore-migrate`; this module
 //! re-exports those plans for the extension shell and installs the live
 //! ProcessUtility hook used for `ALTER TABLE … SET/RESET` KoldStore options
-//! and managed `DROP TABLE` teardown. Managed-table schema changes (including
-//! `RENAME COLUMN`) also refresh catalog metadata and rename-sensitive runtime
-//! artifacts so DML keeps working without waiting for the next flush.
+//! and managed `DROP TABLE` / `DROP SCHEMA … CASCADE` teardown. Managed-table
+//! schema changes (including `RENAME COLUMN`) also refresh catalog metadata and
+//! rename-sensitive runtime artifacts so DML keeps working without waiting for
+//! the next flush.
 
 pub use koldstore_migrate::drop_table::{
     plan_drop_table_cleanup, DropTableCleanupError, DropTableCleanupOutcome, DropTableCleanupPlan,
@@ -137,9 +138,8 @@ mod process_utility {
             }
             let mut mirrors = Vec::new();
             if !drop_oids.is_empty() {
-                mirrors = cleanup_managed_tables_before_drop(&drop_oids).unwrap_or_else(|error| {
-                    pgrx::error!("KoldStore DROP TABLE cleanup failed: {error}")
-                });
+                mirrors = cleanup_managed_tables_before_drop(&drop_oids)
+                    .unwrap_or_else(|error| pgrx::error!("KoldStore DROP cleanup failed: {error}"));
             }
             if has_standard_actions {
                 delegate(copied, query, read_only, context, params, env, dest, qc);

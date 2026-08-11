@@ -1,4 +1,8 @@
-//! DROP TABLE ProcessUtility cleanup for managed KoldStore tables.
+//! DROP TABLE / DROP SCHEMA ProcessUtility cleanup for managed KoldStore tables.
+//!
+//! `DROP SCHEMA … CASCADE` does not emit per-table `DropStmt`s through
+//! ProcessUtility, so schema drops must resolve managed heaps in the target
+//! namespace here before PostgreSQL removes them.
 //!
 //! Order matters to avoid deadlocks with an in-flight flush:
 //! 1. Resolve OIDs with `NoLock` (do not hold relation locks across waits)
@@ -7,13 +11,15 @@
 //! 4. Catalog + object-store cleanup, then allow PostgreSQL DROP
 //! 5. Drop the change-log mirror after the heap is gone
 
+use std::ffi::{CStr, CString};
+
 use koldstore_common::QualifiedTableName;
 use koldstore_migrate::drop_table::{plan_drop_table_cleanup, DropTableCleanupPolicy};
 use koldstore_storage::{render_regular_table_prefix, PathTemplate, StorageClient};
 use pgrx::datum::DatumWithOid;
 use pgrx::pg_sys;
 
-/// Cancels jobs and removes cold artifacts for managed tables in a DROP TABLE.
+/// Cancels jobs and removes cold artifacts for managed tables about to drop.
 ///
 /// # Errors
 ///
@@ -144,7 +150,7 @@ fn cleanup_one_managed_table_before_drop(
     Ok(mirror)
 }
 
-/// Resolves table OIDs named by a `DROP TABLE` statement (missing_ok aware).
+/// Resolves managed table OIDs targeted by a `DROP TABLE` or `DROP SCHEMA`.
 ///
 /// Uses `NoLock` so this hook does not hold relation locks while waiting for a
 /// concurrent flush to finish after cancel.
@@ -154,9 +160,19 @@ fn cleanup_one_managed_table_before_drop(
 /// `stmt` must point at a live `DropStmt`.
 pub(super) unsafe fn drop_table_oids(stmt: *mut pg_sys::DropStmt) -> Vec<pg_sys::Oid> {
     unsafe {
-        if stmt.is_null() || (*stmt).removeType != pg_sys::ObjectType::OBJECT_TABLE {
+        if stmt.is_null() {
             return Vec::new();
         }
+        match (*stmt).removeType {
+            pg_sys::ObjectType::OBJECT_TABLE => drop_table_statement_oids(stmt),
+            pg_sys::ObjectType::OBJECT_SCHEMA => drop_schema_managed_table_oids(stmt),
+            _ => Vec::new(),
+        }
+    }
+}
+
+unsafe fn drop_table_statement_oids(stmt: *mut pg_sys::DropStmt) -> Vec<pg_sys::Oid> {
+    unsafe {
         let objects = (*stmt).objects;
         if objects.is_null() {
             return Vec::new();
@@ -196,4 +212,84 @@ pub(super) unsafe fn drop_table_oids(stmt: *mut pg_sys::DropStmt) -> Vec<pg_sys:
         }
         oids
     }
+}
+
+unsafe fn drop_schema_managed_table_oids(stmt: *mut pg_sys::DropStmt) -> Vec<pg_sys::Oid> {
+    unsafe {
+        let objects = (*stmt).objects;
+        if objects.is_null() {
+            return Vec::new();
+        }
+        let missing_ok = (*stmt).missing_ok;
+        let mut oids = Vec::new();
+        let count = (*objects).length as usize;
+        for index in 0..count {
+            let names = (*(*objects).elements.add(index))
+                .ptr_value
+                .cast::<pg_sys::List>();
+            if names.is_null() {
+                continue;
+            }
+            let Some(schema_name) = name_list_to_string(names) else {
+                continue;
+            };
+            oids.extend(active_managed_table_oids_in_schema(
+                &schema_name,
+                missing_ok,
+            ));
+        }
+        oids
+    }
+}
+
+unsafe fn name_list_to_string(names: *mut pg_sys::List) -> Option<String> {
+    unsafe {
+        let ptr = pg_sys::NameListToString(names);
+        if ptr.is_null() {
+            return None;
+        }
+        Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    }
+}
+
+fn active_managed_table_oids_in_schema(schema_name: &str, missing_ok: bool) -> Vec<pg_sys::Oid> {
+    let Ok(c_name) = CString::new(schema_name) else {
+        return Vec::new();
+    };
+    let namespace = unsafe { pg_sys::get_namespace_oid(c_name.as_ptr(), missing_ok) };
+    if namespace == pg_sys::InvalidOid {
+        return Vec::new();
+    }
+    if !crate::catalog::cache::managed_catalog_ready() {
+        return Vec::new();
+    }
+    pgrx::Spi::connect(|client| -> Result<Vec<pg_sys::Oid>, String> {
+        let rows = client
+            .select(
+                "SELECT s.table_oid::oid \
+                 FROM koldstore.schemas s \
+                 JOIN pg_catalog.pg_class c ON c.oid = s.table_oid \
+                 WHERE s.active AND c.relnamespace = $1::oid \
+                 ORDER BY s.table_oid",
+                None,
+                &[DatumWithOid::from(namespace)],
+            )
+            .map_err(|error| error.to_string())?;
+        let mut oids = Vec::new();
+        for row in rows {
+            if let Some(table_oid) = row
+                .get::<pg_sys::Oid>(1)
+                .map_err(|error| error.to_string())?
+            {
+                oids.push(table_oid);
+            }
+        }
+        Ok(oids)
+    })
+    .unwrap_or_else(|error| {
+        pgrx::warning!(
+            "koldstore drop: failed to list managed tables in schema {schema_name}: {error}"
+        );
+        Vec::new()
+    })
 }

@@ -117,9 +117,16 @@ SELECT (SELECT jsonb_build_object(
       FROM jsonb_array_elements(s.primary_key) WITH ORDINALITY AS t(elem, ord)
     ),
     'segment_order_column_id', (s.options->>'segment_order_column_id')::int,
+    -- Name and type_oid must resolve together via pg_attribute. A name-only
+    -- hit (orphaned active schema after DROP SCHEMA CASCADE, dropped column)
+    -- would otherwise fail async decode with incomplete segment_order fields.
     'segment_order_column', (
       SELECT c->>'name'
       FROM jsonb_array_elements(s.columns) AS c
+      JOIN pg_catalog.pg_attribute a
+        ON a.attrelid = s.table_oid
+       AND a.attnum = (c->>'column_id')::smallint
+       AND NOT a.attisdropped
       WHERE (c->>'column_id')::int = (s.options->>'segment_order_column_id')::int
       LIMIT 1
     ),
@@ -135,6 +142,7 @@ SELECT (SELECT jsonb_build_object(
     )
 )::text
 FROM koldstore.schemas s
+JOIN pg_catalog.pg_class rel ON rel.oid = s.table_oid
 WHERE s.active AND s.table_oid = $1::oid
 LIMIT 1)
 "#,
@@ -1347,6 +1355,18 @@ mod tests {
         assert!(
             statement.sql.contains("a.atttypid"),
             "order-column type must come from pg_attribute, not missing columns.type_oid"
+        );
+        assert!(
+            statement.sql.contains("JOIN pg_catalog.pg_class rel"),
+            "orphaned active schemas must not resolve without a live relation"
+        );
+        assert!(
+            statement
+                .sql
+                .matches("JOIN pg_catalog.pg_attribute a")
+                .count()
+                >= 2,
+            "segment_order name and type_oid must both require pg_attribute"
         );
         assert!(!statement.sql.contains("c->>'type_oid'"));
     }

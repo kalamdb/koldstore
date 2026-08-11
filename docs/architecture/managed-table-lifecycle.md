@@ -81,6 +81,8 @@ the source PK-guard trigger/function:
 | `ALTER TABLE db1.messages RENAME TO events` | `db1.events` | `koldstore.db1_messages__cl` → `koldstore.db1_events__cl` |
 | `ALTER TABLE db1.messages SET SCHEMA db2` | `db2.messages` | `koldstore.db1_messages__cl` → `koldstore.db2_messages__cl` |
 | `ALTER SCHEMA db1 RENAME TO db2` | Every managed table moves from `db1.*` to `db2.*` | Each affected mirror is rehomed |
+| `DROP TABLE db1.messages` | Relation gone | Catalog deactivated; cold objects deleted; mirror dropped |
+| `DROP SCHEMA db1 CASCADE` | Every managed table in `db1` gone | Same per-table cleanup before PostgreSQL removes the heaps |
 | `ALTER DATABASE old RENAME TO new` | Same relations in the same database OID | No mirror rename is needed |
 
 The final row is intentionally different: KoldStore catalogs, the logical slot,
