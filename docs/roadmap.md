@@ -114,9 +114,12 @@ must be **KoldStore-aware** and keep both tiers consistent.
 - Scoped storage should make per-tenant backup/export a natural subset once
   cold folders are per `scopeId`
 
-Today: `koldstore.backup_manifest` and validation helpers exist;
-`EXPORT TABLE` is the intended archive boundary; `IMPORT TABLE` is still
-rejected until those rules land.
+Today, the catalog and storage layers contain pieces needed for this design,
+but `koldstore.backup_manifest`, cold-storage validation, and packaged
+export/import are not shipped SQL interfaces. Their operator surface is tracked
+in [#103](https://github.com/kalamdb/koldstore/issues/103). `EXPORT TABLE` is
+the intended archive boundary; `IMPORT TABLE` remains rejected until ownership,
+conflict, and schema rules land.
 
 ## FILE datatype
 

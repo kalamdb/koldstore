@@ -70,18 +70,20 @@ otherwise a query could omit valid cold rows.
 
 ## Source DDL and generated-artifact behavior
 
-The source table's PostgreSQL OID is stable across the supported rename and
-move operations. KoldStore keeps catalog references by OID, but mirror names
-contain the source identity for clarity and uniqueness. After the following DDL
-operations complete, it rehomes the mirror table, its generated indexes, and
-the source PK-guard trigger/function:
+The source table's PostgreSQL OID is stable across rename and schema moves, and
+KoldStore rehomes generated mirror artifacts by the new name. The default cold
+object prefix, however, is derived from the current database/schema/table name.
+Once a table has published cold segments, renaming the table or moving/renaming
+its schema can therefore make existing objects unreachable. These operations
+are not supported until storage identity is detached from mutable names
+([#64](https://github.com/kalamdb/koldstore/issues/64)).
 
 | User operation | Source identity after DDL | Mirror effect |
 | --- | --- | --- |
-| `ALTER TABLE db1.messages RENAME TO events` | `db1.events` | `koldstore.db1_messages__cl` → `koldstore.db1_events__cl` |
-| `ALTER TABLE db1.messages SET SCHEMA db2` | `db2.messages` | `koldstore.db1_messages__cl` → `koldstore.db2_messages__cl` |
-| `ALTER SCHEMA db1 RENAME TO db2` | Every managed table moves from `db1.*` to `db2.*` | Each affected mirror is rehomed |
-| `DROP TABLE db1.messages` | Relation gone | Catalog deactivated; cold objects deleted; mirror dropped |
+| `ALTER TABLE db1.messages RENAME TO events` | `db1.events` | Mirror is rehomed, but published cold paths still use the old name; unsupported after cold publish |
+| `ALTER TABLE db1.messages SET SCHEMA db2` | `db2.messages` | Mirror is rehomed, but published cold paths still use the old schema; unsupported after cold publish |
+| `ALTER SCHEMA db1 RENAME TO db2` | Every managed table moves from `db1.*` to `db2.*` | Mirrors are rehomed; tables with published cold data are unsupported |
+| `DROP TABLE db1.messages` | Relation gone | Catalog deactivated; cold objects deleted inline; mirror dropped |
 | `DROP SCHEMA db1 CASCADE` | Every managed table in `db1` gone | Same per-table cleanup before PostgreSQL removes the heaps |
 | `ALTER DATABASE old RENAME TO new` | Same relations in the same database OID | No mirror rename is needed |
 
@@ -91,10 +93,18 @@ the database OID and its contained schemas/relations, so no source identity used
 by a mirror changes. In the issue terminology, names such as `db1.messages`
 refer to schemas, not separate PostgreSQL databases.
 
-Other supported `ALTER TABLE` changes run the active-schema refresh path so
-catalogued columns, publication membership, and runtime artifacts stay aligned.
-If a change cannot preserve the managed schema contract, KoldStore fails safely
-during maintenance instead of treating an incomplete heap-only read as correct.
+The current `DROP TABLE` cleanup performs object-store deletion before the
+PostgreSQL DDL transaction commits. Object deletion is not transactional, so a
+later rollback can leave catalog state referring to missing files. Durable
+post-commit garbage collection is tracked in
+[#100](https://github.com/kalamdb/koldstore/issues/100). The `drop_cold`
+argument to `unmanage_table` is also not executed by the current implementation;
+do not rely on it for retention or deletion.
+
+Other `ALTER TABLE` changes run a post-DDL schema refresh. Because PostgreSQL
+has already applied the DDL when that refresh runs, an unsupported refresh can
+warn without rolling back the original change. Treat schema evolution as a
+preview surface, and verify hot+cold results after every change.
 
 ## Legacy shared mirrors
 

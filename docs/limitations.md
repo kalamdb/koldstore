@@ -19,6 +19,52 @@ managed tables and return **hot-only** rows after flush.
 
 Check with `SELECT koldstore.preload_status();`.
 
+## PostgreSQL semantic compatibility
+
+The original relation remains a PostgreSQL heap, but a cold row returned from
+Parquet is not a heap tuple. The preview therefore does not claim that every
+PostgreSQL operation keeps its normal semantics across both tiers.
+
+- Mirror capture is asynchronous and sees committed WAL only. It does not
+  provide read-your-own-uncommitted-writes for a key with an older cold version
+  ([#121](https://github.com/kalamdb/koldstore/issues/121)).
+- `wait_for_async_mirror()` fences commits up to a captured WAL boundary. Call
+  it before acquiring a fixed `REPEATABLE READ` or `SERIALIZABLE` snapshot; it
+  cannot advance an existing snapshot or decode the caller's uncommitted work.
+- Normal `UPDATE` and `DELETE` cannot target a row that exists only in cold
+  storage. Native `INSERT ... ON CONFLICT` and primary-key checks inspect the
+  hot index, not a global hot+cold constraint index
+  ([#122](https://github.com/kalamdb/koldstore/issues/122)).
+- Cold rows have no heap `ctid`, `xmin`, tuple lock, or SSI predicate lock.
+  System-column projections and `SELECT ... FOR UPDATE/SHARE` are unsupported;
+  `SERIALIZABLE` is not a PostgreSQL-equivalent guarantee for cold reads.
+- Partitioned/inherited/foreign/temporary/unlogged relations, `TABLESAMPLE`,
+  and `TRUNCATE ... CASCADE` are outside the supported preview contract unless
+  a specific test documents otherwise
+  ([#125](https://github.com/kalamdb/koldstore/issues/125)).
+- Table/schema renames after cold publication are unsafe because object paths
+  still depend on mutable names. Other schema evolution can apply in PostgreSQL
+  before KoldStore discovers it is unsupported; defaults and constraints are
+  not retroactively enforced on older Parquet rows
+  ([#123](https://github.com/kalamdb/koldstore/issues/123)).
+- `pg_dump --data-only -t table` and `COPY table TO` export the heap and can omit
+  cold-only rows. Only a planned query such as `COPY (SELECT ...) TO` can enter
+  `KoldMergeScan`, and coordinated backup/PITR is not shipped
+  ([#126](https://github.com/kalamdb/koldstore/issues/126)).
+
+The generated user-scope policy is application-context filtering, not an
+authentication boundary. `koldstore.user_id` is a user-settable GUC, and the
+generated policy is permissive, so another permissive policy can broaden the
+combined RLS expression. Use a trusted connection layer and dedicated roles;
+do not advertise this surface as database-enforced tenant isolation. Management
+API privilege hardening is tracked in
+[#120](https://github.com/kalamdb/koldstore/issues/120).
+
+Planner cardinality and cost estimates are also a preview limitation. Current
+estimates can reflect the hot child rather than the logical hot+cold row set;
+cold-aware statistics work is tracked in
+[#124](https://github.com/kalamdb/koldstore/issues/124).
+
 ## Unique and Foreign Key Constraints
 
 PostgreSQL `UNIQUE` and foreign-key constraints on managed tables are enforced on
@@ -35,7 +81,7 @@ accounting, not for proving that a unique value is absent from cold storage on
 
 | Constraint | Hot rows | Cold rows | Normal DML checks cold? |
 |------------|----------|-----------|-------------------------|
-| Primary key | Yes | Logical winner via merge | Cold presence via `cold_segment_index` + Parquet; not a full UNIQUE layer |
+| Primary key | Yes | Logical winner via merge | No; the native check is hot-only |
 | `UNIQUE` (non-PK) | Yes | No | No |
 | Foreign keys | Yes | No | No |
 
@@ -210,8 +256,8 @@ and a small-host checklist.
 
 | Feature | Hot rows | Cold rows |
 |---------|----------|-----------|
-| Normal SQL select | Yes | Yes, through Kalam cold reader |
-| Primary key enforcement | Yes | Winner resolved by merge |
+| Supported `SELECT` shapes | Yes | Yes, through `KoldMergeScan` |
+| Primary key enforcement | Yes | No global enforcement; winner resolution only |
 | `UNIQUE` (non-PK) | Yes | No |
 | Foreign keys | Yes | No |
 | PostgreSQL custom indexes | Yes | No |

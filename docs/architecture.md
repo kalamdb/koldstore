@@ -6,10 +6,13 @@ access, and cost needs. In KoldStore, the hot tier is the PostgreSQL heap and
 its native indexes; the cold tier is compressed Parquet on a configured
 filesystem or object store.
 
-PostgreSQL remains the transaction, locking, and hot-row authority. KoldStore
-adds a change-log mirror, cold Parquet segments, and a `KoldMergeScan` custom
-scan so SQL, MVCC, permissions, and RLS stay PostgreSQL-owned. Applications
-query the original table across both tiers. Tier placement is policy-driven:
+PostgreSQL remains the transaction, locking, permission, and MVCC authority for
+rows in the hot heap. KoldStore adds a change-log mirror, cold Parquet segments,
+and an experimental `KoldMergeScan` custom scan for a supported subset of
+`SELECT` through the original relation. PostgreSQL still evaluates the scan's
+ordinary quals and RLS policies, but cold rows are not heap tuples: system
+columns, row locks, predicate locking, native constraints, and complete
+snapshot semantics do not automatically extend to them. Tier placement is policy-driven:
 today, a hot-row limit selects older mirror sequence values for flush rather
 than measuring row access frequency automatically.
 
@@ -60,7 +63,10 @@ live in a schema-qualified mirror named
 `koldstore.<schema>_<table>__cl` (with a stable hash fallback for long names)
 and in cold Parquet metadata (`seq`, `deleted`).
 Committed primary-key-only WAL is applied to the mirror by a persistent
-per-database WAL applier, with an explicit consistency fence for strong reads.
+per-database WAL applier, with an explicit committed-change fence. The fence
+cannot observe the caller's uncommitted writes and must precede a fixed
+`REPEATABLE READ` or `SERIALIZABLE` snapshot that is expected to include the
+captured commits.
 UPDATE uses a direct set-based update for existing mirror keys and a
 conflict-safe insert-missing fallback for keys already pruned by flush. The
 applier drains bounded batches on commit latch wakes (with a 30 s watchdog for

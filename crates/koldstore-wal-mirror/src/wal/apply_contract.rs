@@ -69,7 +69,7 @@ impl BoundedApplyRequest {
         }
     }
 
-    /// Strong-consistency fence: apply through a fixed durable WAL upper bound.
+    /// Committed-change fence: apply through a fixed durable WAL upper bound.
     #[must_use]
     pub fn upto_fence(fence: WalFenceLsn) -> Self {
         Self {

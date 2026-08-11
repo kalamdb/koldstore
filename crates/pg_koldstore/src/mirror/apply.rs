@@ -979,10 +979,11 @@ fn push_typed_pk_array_arg(
 
 /// Applies committed WAL available at the fence boundary and returns row changes.
 ///
-/// SQL contract: `koldstore.wait_for_async_mirror()` is an **optional** strong-
-/// consistency fence for callers that need the mirror caught up before a read
-/// or benchmark sample. It is **not** on the flush hot path: queue-mode
-/// `flush_table` and auto-flush enqueue durable work and return.
+/// SQL contract: `koldstore.wait_for_async_mirror()` is an optional committed-
+/// change fence for callers that need the mirror caught up before a read or
+/// benchmark sample. It cannot observe the caller's uncommitted changes or
+/// advance a snapshot acquired before the call. It is **not** on the flush hot
+/// path: queue-mode `flush_table` and auto-flush enqueue durable work and return.
 ///
 /// Captures a durable WAL upper bound at call time and applies through that
 /// bound only. Concurrent commits after the fence LSN are not waited on —

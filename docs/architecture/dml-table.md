@@ -134,8 +134,12 @@ produce new mirror tombstones.
 When a configured row/time budget ends with WAL still pending, the database
 worker runs up to four more ticks immediately. The fifth pending result yields
 through the latch before a new burst, balancing catch-up latency with CPU and
-flush-scheduler fairness. Capture does not provide transparent read-your-writes;
-strong reads still use the fence. Full operational semantics are in
+flush-scheduler fairness. Capture does not provide transparent read-your-writes.
+The fence covers changes that committed before its WAL boundary; it cannot
+decode the caller's uncommitted writes. In `REPEATABLE READ` or `SERIALIZABLE`,
+a snapshot acquired before the fence also cannot see later-applied mirror state.
+Call the fence before opening the transaction/snapshot that requires those
+commits. Full operational semantics are in
 [mirror-capture.md](mirror-capture.md).
 
 ### Encoding at mirror boundary
@@ -201,7 +205,8 @@ Used by flush stats resolution and operator diagnostics. Mid-transaction reads
 of `manifest.mirror_row_count` do not include pending backend deltas until
 pre-commit flush (pg_tests that assert counters call `flush_pending_deltas`
 explicitly). Flush selection folds `row_counter_cache::pending_deltas` into the
-O(1) mirror pending count so an in-transaction async fence cannot miss rows.
+O(1) mirror pending count. This counter accounting does not make uncommitted
+source changes visible to logical decoding or to `KoldMergeScan`.
 
 ---
 
@@ -244,8 +249,11 @@ Session scope is set with:
 SET koldstore.user_id = '<tenant_id>';
 ```
 
-`koldstore.user_id` is a GUC. Applications must set it before scoped DML and
-reads.
+`koldstore.user_id` is a user-settable GUC. Applications must set it before
+scoped DML and reads, but it is not proof of identity. A trusted connection
+layer must bind it to an authenticated principal. The generated policy is
+permissive; PostgreSQL OR-combines it with any other permissive policy on the
+table, so additional policies can broaden access.
 
 `hooks/executor.rs::enforce_dml_scope` is a pure helper used by unit/shell
 tests and planning code. It is **not** registered as a live executor hook;

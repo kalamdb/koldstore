@@ -1,6 +1,6 @@
 # Scanning Managed Tables
 
-Managed tables remain ordinary PostgreSQL heaps. A read uses PostgreSQL's native
+Managed tables retain an ordinary PostgreSQL heap for hot rows. A read uses PostgreSQL's native
 plan when published cold storage cannot contribute; otherwise the
 KoldMergeScan custom scan combines hot heap rows, cold Parquet rows, and the
 unflushed mirror overlay. This document describes the current planner and
@@ -128,8 +128,10 @@ alone—inspect `Strategy` in `EXPLAIN ANALYZE`.
     plus latest-state __cl mirror overlay
 
 The hot child preserves PostgreSQL's index, permission, locking, and RLS
-behavior. KoldStore is the coordinator; it does not replace the heap with a
-custom table access method or a view rewrite.
+behavior for heap tuples. Cold rows are materialized by the custom scan, not by
+the heap access method, so heap system columns, row locks, SSI predicate locks,
+and native constraint checks do not apply to them. KoldStore is the coordinator;
+it does not replace the heap with a custom table access method or a view rewrite.
 
 ### What is being merged
 
@@ -391,9 +393,10 @@ tombstone should have hidden it.
 | ORDER BY, LIMIT, parameters, joins | Cannot bypass the merge path when cold can contribute. |
 
 seq identifies a row effect for mirror ordering and flush cutoffs. It is not a
-commit-order cursor; durable replay uses WAL LSN. For an unflushed mutation that
-must mask old cold data, wait for mirror capture with
-koldstore.wait_for_async_mirror() before the read.
+commit-order cursor; durable replay uses WAL LSN. For a committed, unflushed
+mutation that must mask old cold data, wait for mirror capture with
+`koldstore.wait_for_async_mirror()` before acquiring the snapshot used by the
+read. The fence cannot expose the current transaction's uncommitted changes.
 
 ## Cold-read controls and diagnostics
 
@@ -420,6 +423,9 @@ instrumented execution.
 | Cold metadata unavailable or uncertain | Use merge path and surface the error if it cannot execute. |
 | Merge scan disabled | Error rather than incomplete heap-only result. |
 | `SELECT ctid`, `xmin`, or another PostgreSQL system column from a cold-capable managed relation | Error: KoldMergeScan cannot materialize heap system attributes from Parquet. |
+| `SELECT ... FOR UPDATE/SHARE` that can reach cold rows | Unsupported: cold rows have no heap TID to lock. |
+| `SERIALIZABLE` transaction that can read cold rows | Unsupported as a PostgreSQL-equivalent guarantee: cold reads do not participate in heap predicate locking. |
+| `TABLESAMPLE`, inheritance/partition routing, or `TRUNCATE ... CASCADE` involving managed cold data | Not part of the supported preview contract; these shapes must not be assumed hot+cold complete. |
 | `koldstore.max_merge_seen_keys` exceeded | Error rather than dropping older keys from winner resolution. |
 | `koldstore.cold_reads = off` while cold is required | Error rather than an incomplete hot-only answer. |
 
