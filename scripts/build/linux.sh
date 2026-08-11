@@ -130,9 +130,7 @@ EOF
   fi
   bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" update -y -qq
   bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" install -y --no-install-recommends ca-certificates curl gnupg
-  install -d /usr/share/keyrings
-  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+  bash "${ROOT_DIR}/scripts/ci/install-pgdg-key.sh" /usr/share/keyrings/postgresql.gpg
   echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
     > /etc/apt/sources.list.d/pgdg.list
   bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" update -y -qq

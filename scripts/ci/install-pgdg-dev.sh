@@ -55,8 +55,8 @@ APT_GET=(bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh")
   ca-certificates curl gnupg lsb-release wget
 
 sudo install -d /usr/share/postgresql-common/pgdg
-curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-  | sudo gpg --batch --yes --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
+bash "${ROOT_DIR}/scripts/ci/install-pgdg-key.sh" \
+  /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
 echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
   | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
 

@@ -7,12 +7,14 @@ FROM rust:1.96-bookworm AS builder
 ARG PG_MAJOR
 ARG PGRX_VERSION=0.19.1
 
+COPY scripts/ci/keys/ACCC4CF8.asc /tmp/ACCC4CF8.asc
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
       wget ca-certificates gnupg lsb-release \
       build-essential libssl-dev pkg-config clang llvm \
-    && wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-      | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg \
+    && gpg --batch --yes --dearmor -o /usr/share/keyrings/postgresql.gpg /tmp/ACCC4CF8.asc \
+    && rm -f /tmp/ACCC4CF8.asc \
     && echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list \
     && apt-get update \

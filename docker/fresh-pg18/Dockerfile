@@ -18,6 +18,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANGUAGE=en_US:en \
     LC_ALL=en_US.UTF-8
 
+COPY scripts/ci/keys/ACCC4CF8.asc /tmp/ACCC4CF8.asc
+
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -32,8 +34,8 @@ RUN set -eux; \
       tzdata; \
     echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen; \
     locale-gen; \
-    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-      | gpg --batch --yes --dearmor -o /usr/share/keyrings/postgresql.gpg; \
+    gpg --batch --yes --dearmor -o /usr/share/keyrings/postgresql.gpg /tmp/ACCC4CF8.asc; \
+    rm -f /tmp/ACCC4CF8.asc; \
     echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
