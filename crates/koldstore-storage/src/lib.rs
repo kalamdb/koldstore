@@ -21,7 +21,7 @@ pub mod registration;
 pub mod runtime;
 
 pub use backend::{
-    ensure_filesystem_base_prepared, ensure_storage_backend_writable,
+    ensure_filesystem_base_empty, ensure_filesystem_base_prepared, ensure_storage_backend_writable,
     open_client_from_catalog_fields, open_client_from_catalog_fields_with_timeout,
     open_filesystem_client, open_storage_client, open_storage_client_with_timeout, BackendConfig,
     StorageBackendKind, STORAGE_WRITE_PROBE_KEY,

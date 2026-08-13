@@ -58,7 +58,7 @@ PostgreSQL forbids creating a logical slot in a transaction that has performed
 writes. `wal_level=logical` and its server restart remain the only manual
 administrator prerequisite.
 
-Expose `koldstore.wait_for_async_mirror()` as an explicit strong-consistency
+Expose `koldstore.wait_for_async_mirror()` as an explicit committed-change
 fence. It peeks committed pgoutput v1 changes, parses them in Rust, and applies
 8,192-row set-based mirror batches. Mirror writes and
 `koldstore.async_mirror_state.applied_lsn` commit together. The next fence
@@ -70,8 +70,10 @@ One dynamic worker per database polls every 100 ms, avoids reopening logical
 decoding at an unchanged WAL position, and applies committed WAL when it moves.
 An async-only statement trigger ensures the worker exists without performing
 mirror work in the source transaction, including after PostgreSQL restart.
-Strong reads retain the explicit fence. Logical apply and manual fences share a
-database advisory lock so only one consumer touches the slot at a time.
+Reads that require a committed mirror boundary retain the explicit fence. It
+does not provide read-your-own-uncommitted-writes or advance an existing
+snapshot. Logical apply and manual fences share a database advisory lock so
+only one consumer touches the slot at a time.
 
 ## Alternatives Considered
 

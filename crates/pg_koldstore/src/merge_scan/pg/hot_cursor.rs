@@ -19,7 +19,7 @@ use koldstore_migrate::order::CatalogColumn;
 use pgrx::pg_sys;
 
 use super::hot::HotMergeBatchReader;
-use super::literals::datum_to_cell_value;
+use super::literals::{datum_to_cell_value, unwrap_relabel};
 use super::pg_list::{list_len, list_nth_ptr};
 use super::{exec_proc_node, tuple_slot_is_empty, with_hook_disabled};
 
@@ -325,18 +325,6 @@ unsafe fn var_attnum(expr: *mut pg_sys::Expr) -> Option<i16> {
     let var = expr.cast::<pg_sys::Var>();
     let attnum = (*var).varattno;
     (attnum > 0).then_some(attnum)
-}
-
-unsafe fn unwrap_relabel(expr: *mut pg_sys::Expr) -> *mut pg_sys::Expr {
-    if expr.is_null() {
-        return expr;
-    }
-    if (*expr).type_ == pg_sys::NodeTag::T_RelabelType {
-        let relabel = expr.cast::<pg_sys::RelabelType>();
-        (*relabel).arg.cast::<pg_sys::Expr>()
-    } else {
-        expr
-    }
 }
 
 unsafe fn ensure_slot_attrs(slot: *mut pg_sys::TupleTableSlot, attnum: i16) {

@@ -704,7 +704,7 @@ dependencies = [
 
 [[package]]
 name = "e2e"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -718,6 +718,7 @@ dependencies = [
  "koldstore-parquet",
  "koldstore-storage",
  "koldstore-supervisor",
+ "koldstore-wal-mirror",
  "parquet",
  "pg_koldstore",
  "serde",
@@ -779,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "examples"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -787,6 +788,7 @@ dependencies = [
  "koldstore-memory-tests",
  "koldstore-storage",
  "koldstore-supervisor",
+ "koldstore-wal-mirror",
  "parquet",
  "serde",
  "serde_json",
@@ -1429,7 +1431,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-catalog"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "koldstore-common",
  "koldstore-schema",
@@ -1440,7 +1442,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-common"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "hex",
  "serde",
@@ -1451,7 +1453,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-flush"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "hex",
  "koldstore-catalog",
@@ -1472,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-manifest"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "chrono",
  "hex",
@@ -1488,11 +1490,11 @@ dependencies = [
 
 [[package]]
 name = "koldstore-memory-tests"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 
 [[package]]
 name = "koldstore-merge"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "koldstore-catalog",
  "koldstore-common",
@@ -1507,7 +1509,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-migrate"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "koldstore-catalog",
  "koldstore-common",
@@ -1522,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-parquet"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -1542,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-schema"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "koldstore-common",
  "serde",
@@ -1553,11 +1555,11 @@ dependencies = [
 
 [[package]]
 name = "koldstore-setup"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 
 [[package]]
 name = "koldstore-sortkey"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "chrono",
  "serde_json",
@@ -1568,7 +1570,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-storage"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1587,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-supervisor"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "koldstore-flush",
  "koldstore-wal-mirror",
@@ -1595,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "koldstore-wal-mirror"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "koldstore-common",
  "serde",
@@ -1991,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "pg-koldstore-benchmarks"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2015,7 +2017,7 @@ dependencies = [
 
 [[package]]
 name = "pg_koldstore"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "hex",
  "koldstore-catalog",
@@ -2040,7 +2042,7 @@ dependencies = [
 
 [[package]]
 name = "pg_koldstore-shell-tests"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "koldstore-catalog",
  "koldstore-common",
@@ -2829,7 +2831,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "storage-comparison"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2837,6 +2839,7 @@ dependencies = [
  "koldstore-memory-tests",
  "koldstore-storage",
  "koldstore-supervisor",
+ "koldstore-wal-mirror",
  "serde",
  "serde_json",
  "tokio",
@@ -2854,7 +2857,7 @@ dependencies = [
 
 [[package]]
 name = "stress"
-version = "0.1.11-preview.0"
+version = "0.1.12-preview.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2862,6 +2865,7 @@ dependencies = [
  "koldstore-memory-tests",
  "koldstore-storage",
  "koldstore-supervisor",
+ "koldstore-wal-mirror",
  "serde",
  "serde_json",
  "tokio",

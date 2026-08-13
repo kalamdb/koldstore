@@ -6,48 +6,13 @@
 
 use std::collections::HashSet;
 
-use koldstore_common::{quote_ident, ColdRow, ColumnRef, LogicalPk, PkColumn, TableName};
+use koldstore_common::{quote_ident, ColumnRef, LogicalPk, PkColumn, TableName};
+use koldstore_merge::MirrorOverlay;
 use pgrx::pg_sys;
 
 use super::hot::HotEqualityFilter;
 use super::spi_query::with_read_query;
 use super::with_hook_disabled;
-
-/// Mirror tombstones that must mask cold Parquet rows until flush.
-#[derive(Debug, Default, Clone)]
-pub(super) struct MirrorOverlay {
-    /// Unflushed tombstone PKs (`op = 3`), keyed as [`LogicalPk`].
-    pub masked_pks: HashSet<LogicalPk>,
-    /// Count of tombstone (op = 3) rows in the overlay.
-    pub tombstones: usize,
-}
-
-impl MirrorOverlay {
-    /// Returns true when cold state for this PK must be skipped.
-    #[must_use]
-    pub(super) fn masks_pk(&self, pk: &LogicalPk) -> bool {
-        self.masked_pks.contains(pk)
-    }
-
-    #[must_use]
-    pub(super) fn is_empty(&self) -> bool {
-        self.masked_pks.is_empty()
-    }
-}
-
-/// Removes cold rows masked by unflushed mirror tombstones.
-pub(super) fn filter_cold_rows_with_overlay(
-    cold_rows: Vec<ColdRow>,
-    overlay: &MirrorOverlay,
-) -> Vec<ColdRow> {
-    if overlay.is_empty() {
-        return cold_rows;
-    }
-    cold_rows
-        .into_iter()
-        .filter(|row| !overlay.masks_pk(&row.pk))
-        .collect()
-}
 
 /// Loads mirror tombstones that can mask cold rows for this scan.
 ///
@@ -184,8 +149,7 @@ unsafe fn execute_mirror_overlay_query(
                     .map_err(|error| format!("mirror overlay pk JSON: {error}"))?;
                 let pk = LogicalPk::from_json_object(&pk_value, pk_columns)
                     .map_err(|error| error.to_string())?;
-                overlay.tombstones += 1;
-                overlay.masked_pks.insert(pk);
+                overlay.insert(pk);
             }
         }
         Ok(overlay)

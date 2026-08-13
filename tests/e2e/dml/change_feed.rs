@@ -56,7 +56,7 @@ async fn change_feed_reads_table_specific_mirror_without_row_events_on_pgrx() ->
             .await?;
         db.manage_shared(&table.relation, "id").await?;
 
-        let mirror = format!("koldstore.{}__cl", table.table_name);
+        let mirror = common::change_log_mirror_relation(&table.relation);
         let rows = db
             .client
             .query(

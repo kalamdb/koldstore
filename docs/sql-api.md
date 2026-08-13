@@ -72,7 +72,7 @@ by the normal PostgreSQL reload rules for the chosen scope.
 
 | GUC | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `koldstore.user_id` | string | empty | Active user-scope id for user-scoped managed tables. Required for scoped reads and writes. |
+| `koldstore.user_id` | string | empty | User-set application scope for user-scoped managed tables. Required for scoped reads and writes; not an authentication credential. |
 | `koldstore.cold_reads` | string | `auto` | `auto`: cold eligible by catalog/cost; `on`: cold eligible without forcing unnecessary object reads; `off`: hot-only and ERROR when correctness requires cold segments. |
 | `koldstore.enable_merge_scan` | bool | `on` | Required for managed-table SELECT. When `off`, `KoldMergeScan` errors at execution instead of allowing an incorrect heap-only read. |
 | `koldstore.explain_pipeline` | bool | `off` | When `on`, `EXPLAIN (FORMAT JSON)` includes the nested `KoldStore Pipeline` diagnostic tree. `EXPLAIN … VERBOSE` also enables it for JSON. Default keeps concise Custom Scan properties plus real `Plans` children. |
@@ -162,7 +162,11 @@ Optional `check` (default `true`): opens the configured backend (filesystem,
 S3, GCS, or Azure) and performs a put/delete probe object
 (`.koldstore-write-probe`) so registration fails fast on bad credentials,
 unreachable endpoints, or unwritable paths. Filesystem backends also create
-`base_path` when needed. Pass `check => false` to skip the probe.
+`base_path` when needed and **require the directory to be empty** so existing
+files are not mixed with cold objects. Pass `check => false` to skip both the
+emptiness requirement and the writability probe (for example when you
+intentionally reuse a non-empty directory, or credentials/mounts will exist
+later).
 
 ```sql
 SELECT koldstore.register_storage(
@@ -171,7 +175,7 @@ SELECT koldstore.register_storage(
   base_path    => '/koldstore-data/cold/',
   credentials  => '{}'::jsonb,
   config       => '{}'::jsonb,
-  check        => false   -- skip writability probe
+  check        => false   -- skip emptiness + writability probe
 );
 ```
 
@@ -204,8 +208,9 @@ SELECT koldstore.alter_storage_location(
 ```
 
 Updates storage location/configuration without direct catalog DML. Optional
-`check` (default `true`) probes local filesystem paths the same way as
-`register_storage`; pass `check => false` to skip.
+`check` (default `true`) probes the new location the same way as
+`register_storage` (filesystem roots must be empty; put/delete probe for all
+backends). Pass `check => false` to skip.
 
 **Returns:** `uuid` — the storage backend id. Errors if the storage name does
 not exist.
@@ -243,7 +248,10 @@ SELECT koldstore.manage_table(
   min_flush_rows    => 1000,
   max_rows_per_file => 1000,
   target_file_size_mb => 256,
-  migration_order_by  => 'created_at'
+  migration_order_by  => 'created_at',
+  parquet_row_group_size => 256,
+  parquet_data_page_row_count_limit => 64,
+  parquet_bloom_filter_fpp => 0.01
 );
 ```
 
@@ -265,7 +273,15 @@ also available.
 | `migration_order_by` | `NULL` | Optional oldest-to-newest column used for populated-table migration |
 | `compression` | `NULL` | Optional Parquet compression name |
 | `target_file_size_mb` | `NULL` | Optional target Parquet segment size in MiB; stored for future size-aware flushing |
+| `parquet_row_group_size` | `NULL` | Rows per Parquet row group on future flushes; omitted keeps the writer default |
+| `parquet_data_page_row_count_limit` | `NULL` | Rows per Parquet data page on future flushes; smaller values enable finer page-index pruning |
+| `parquet_bloom_filter_fpp` | `NULL` | Bloom filter false-positive probability for future flushes; must be strictly between `0` and `1` |
 | `auto_flush` | `true` | When `true`, ephemeral maintenance may enqueue flush jobs for this table; set `false` to reserve flushes for cron / manual `flush_table` |
+
+Existing tables can change the same settings for future segments with
+`ALTER TABLE ... SET (koldstore_parquet_row_group_size = 256,
+koldstore_parquet_data_page_row_count_limit = 64,
+koldstore_parquet_bloom_filter_fpp = 0.01)`. Existing segments are unchanged.
 
 **Returns:** `uuid` — the migration job id written to `koldstore.jobs` (empty
 tables get a completed migrate job; populated tables run mirror initialization
@@ -335,6 +351,10 @@ SELECT koldstore.unmanage_table(
 );
 ```
 
+`rehydrate` controls whether cold rows are restored before detaching. The
+current implementation accepts but does not execute the planned `drop_cold`
+action; do not rely on it to delete or retain objects.
+
 **Returns:** `bigint` — number of `koldstore.schemas` rows deactivated for the
 table (normally `1` when the table was actively managed, `0` if none were
 active).
@@ -353,7 +373,11 @@ SELECT koldstore.wait_for_async_mirror();
 Applies committed source changes available at the fence boundary and returns
 when the mirror has reached that boundary. The fence LSN is captured at call
 time (and forced durable), so concurrent writers after that point do not extend
-the wait. This is an **optional** strong-consistency API for reads/benchmarks —
+the wait. It cannot decode the caller's uncommitted changes, and a fixed
+`REPEATABLE READ` or `SERIALIZABLE` snapshot acquired before the call cannot see
+state applied afterward. Invoke the fence before acquiring the snapshot that
+must include the committed boundary. This is an **optional committed-visibility
+API** for reads/benchmarks —
 `flush_table` and auto-flush do **not** call it (they enqueue/spawn and return).
 The background worker normally keeps the mirror caught up without an explicit call.
 
@@ -493,6 +517,12 @@ unpublished).
 flush/migrate advisory lock to release, deactivates catalog metadata, deletes
 cold objects under the table prefix, drops the change-log mirror, and records a
 completed `drop_table_cleanup` job before PostgreSQL removes the heap.
+
+Cold-object deletion currently happens before the surrounding PostgreSQL DDL
+transaction commits and cannot be rolled back with it. An aborted `DROP TABLE`
+can therefore restore catalog rows whose cold objects are gone; see
+[#100](https://github.com/kalamdb/koldstore/issues/100). The `drop_cold`
+argument to `unmanage_table` is also not currently executed.
 
 ### `koldstore.table_status`
 
@@ -703,8 +733,13 @@ extension (tracked: https://github.com/kalamdb/koldstore/issues/56):
 ## Security
 
 User-scoped tables require `koldstore.user_id` and fail closed when it is
-missing. RLS/security qualifiers must be enforceable on cold rows or planning
-must fail closed.
+missing. The GUC is user-settable and must be bound by a trusted connection
+layer; it is not authentication. The generated policy is permissive, so another
+permissive policy on the same table can broaden the combined RLS expression.
+RLS/security qualifiers must be enforceable on cold rows or planning must fail
+closed. Until extension-function grants, ownership checks, and definer
+`search_path` are hardened, do not expose the management SQL API to untrusted
+database roles.
 
 ## Upgrade note
 

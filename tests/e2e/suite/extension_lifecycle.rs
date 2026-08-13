@@ -45,8 +45,7 @@ async fn drop_extension_requires_cascade_with_managed_tables_then_reinstalls() -
             "expected dependent-object / CASCADE error, got: {message}"
         );
 
-        db.client
-            .batch_execute("DROP EXTENSION koldstore CASCADE;")
+        drop_extension_cascade(&db.client)
             .await
             .context("DROP EXTENSION CASCADE")?;
 
@@ -64,6 +63,8 @@ async fn drop_extension_requires_cascade_with_managed_tables_then_reinstalls() -
             .batch_execute("CREATE EXTENSION koldstore;")
             .await
             .context("CREATE EXTENSION after CASCADE drop")?;
+        // Pause is shared-memory / preloaded-library state and survives DROP.
+        let _ = common::release_async_worker_stop_lock(&db.client).await;
 
         let version: String = db
             .client
@@ -107,9 +108,14 @@ async fn quiesce_extension_drop_targets(client: &tokio_postgres::Client) -> Resu
     let _ = client
         .batch_execute("UPDATE koldstore.schemas SET active = false WHERE active;")
         .await;
-    let _ = common::terminate_async_worker(client).await;
+    // Pause supervisor dispatch so terminate sticks; a bare terminate lets the
+    // WAL applier respawn and deadlock DROP EXTENSION (AccessExclusiveLock vs
+    // applier AccessShareLock).
+    if common::force_stop_async_worker(client).await.is_err() {
+        let _ = common::terminate_async_worker(client).await;
+    }
     // Brief settle so terminated backends release relation locks before DROP.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     Ok(())
 }
 
@@ -142,6 +148,36 @@ async fn drop_extension_without_cascade_error(client: &tokio_postgres::Client) -
         }
     }
     bail!("DROP EXTENSION without CASCADE kept deadlocking: {last_message}")
+}
+
+/// Drops the extension with CASCADE, retrying transient deadlocks after re-quiesce.
+async fn drop_extension_cascade(client: &tokio_postgres::Client) -> Result<()> {
+    let mut last_message = String::new();
+    for attempt in 1..=4 {
+        match client
+            .batch_execute("DROP EXTENSION koldstore CASCADE;")
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let _ = client.batch_execute("ROLLBACK").await;
+                let message = error
+                    .as_db_error()
+                    .map(|db| db.message().to_string())
+                    .unwrap_or_else(|| format!("{error:?}"));
+                let lower = message.to_ascii_lowercase();
+                if lower.contains("deadlock detected") || lower.contains("canceling statement") {
+                    last_message = message;
+                    // Extension may still be present; re-quiesce before retry.
+                    let _ = quiesce_extension_drop_targets(client).await;
+                    tokio::time::sleep(Duration::from_millis(50 * attempt as u64)).await;
+                    continue;
+                }
+                return Err(error).context("DROP EXTENSION CASCADE");
+            }
+        }
+    }
+    bail!("DROP EXTENSION CASCADE kept deadlocking: {last_message}")
 }
 
 #[tokio::test]

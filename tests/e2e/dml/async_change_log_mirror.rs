@@ -11,7 +11,7 @@ async fn managed_commit_wakes_sleeping_worker_without_poll_delay() -> Result<()>
         let db = common::TestDb::start(target, "async_commit_wake").await?;
         let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
         let noise = db.relation(&format!("{}_noise", db.schema));
         let database: String = db
             .client
@@ -171,7 +171,7 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
         let db = common::TestDb::start(target, "async_change_log_mirror").await?;
         let table_name = format!("{}_events", db.schema);
         let relation = db.relation(&table_name);
-        let mirror = format!("koldstore.{table_name}__cl");
+        let mirror = common::change_log_mirror_relation(&relation);
 
         let publication_exists: bool = db
             .client
@@ -219,7 +219,10 @@ async fn async_mirror_applies_only_committed_wal_in_bounded_batches() -> Result<
             .iter()
             .map(|row| row.get::<_, String>(0))
             .collect::<Vec<_>>();
-        assert_eq!(triggers, vec![format!("{table_name}__cl_pk_update_guard"),]);
+        assert_eq!(
+            triggers,
+            vec![common::change_log_pk_guard_trigger_name(&relation)],
+        );
         let worker_start_latency = common::wait_for_async_worker(&db.client).await?;
         common::log_always(format!(
             "async mirror worker visible after {worker_start_latency:?}"

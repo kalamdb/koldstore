@@ -8,7 +8,10 @@
 use std::time::Duration;
 
 use koldstore_common::unix_now_ms;
-use koldstore_flush::{plan_next_pending_flush_due_epoch_ms, plan_select_pending_flush_candidates};
+use koldstore_flush::{
+    plan_next_pending_flush_due_epoch_ms, plan_select_pending_flush_candidates,
+    plan_select_pending_flush_candidates_after,
+};
 use koldstore_supervisor::{flush_executor_worker_type, DatabaseOid, LIBRARY_NAME};
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder};
 use pgrx::datum::DatumWithOid;
@@ -61,35 +64,62 @@ pub(crate) fn register_flush_executor_from_supervisor(database_oid: u32) -> Resu
 struct PendingCandidate {
     table_oid: pgrx::pg_sys::Oid,
     force: bool,
+    cursor: PendingCandidateCursor,
 }
 
-fn pending_candidates() -> Result<Vec<PendingCandidate>, String> {
-    let statement = plan_select_pending_flush_candidates().map_err(|error| error.to_string())?;
-    pgrx::Spi::connect(|client| {
-        let table = client
-            .select(
-                &statement.sql,
-                // SQL already supplies the hard page bound. Do not pass Some(1)
-                // here: that silently collapsed the intended fair page to one
-                // candidate and reintroduced head-of-line blocking.
-                None,
-                &[DatumWithOid::from(CANDIDATE_PAGE_SIZE)],
-            )
-            .map_err(|error| error.to_string())?;
+#[derive(Debug, Clone, Copy)]
+struct PendingCandidateCursor {
+    available_at: pgrx::datum::TimestampWithTimeZone,
+    updated_at: pgrx::datum::TimestampWithTimeZone,
+    id: pgrx::Uuid,
+}
+
+fn pending_candidates(
+    after: Option<PendingCandidateCursor>,
+) -> Result<Vec<PendingCandidate>, String> {
+    let statement = match after {
+        Some(_) => {
+            plan_select_pending_flush_candidates_after().map_err(|error| error.to_string())?
+        }
+        None => plan_select_pending_flush_candidates().map_err(|error| error.to_string())?,
+    };
+    let mut args = vec![DatumWithOid::from(CANDIDATE_PAGE_SIZE)];
+    if let Some(after) = after {
+        args.extend([
+            DatumWithOid::from(after.available_at),
+            DatumWithOid::from(after.updated_at),
+            DatumWithOid::from(after.id),
+        ]);
+    }
+    crate::spi::execute_prepared(&statement, &args, |table| {
         let mut candidates = Vec::with_capacity(CANDIDATE_PAGE_SIZE as usize);
         for row in table {
             let table_oid = row
-                .get::<pgrx::pg_sys::Oid>(1)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "pending flush candidate missing table_oid".to_string())?;
-            let force = row
-                .get::<bool>(2)
-                .map_err(|error| error.to_string())?
-                .unwrap_or(false);
-            candidates.push(PendingCandidate { table_oid, force });
+                .get::<pgrx::pg_sys::Oid>(1)?
+                .ok_or_else(|| crate::spi::missing_attribute("table_oid"))?;
+            let force = row.get::<bool>(2)?.unwrap_or(false);
+            let available_at = row
+                .get::<pgrx::datum::TimestampWithTimeZone>(3)?
+                .ok_or_else(|| crate::spi::missing_attribute("available_at"))?;
+            let updated_at = row
+                .get::<pgrx::datum::TimestampWithTimeZone>(4)?
+                .ok_or_else(|| crate::spi::missing_attribute("updated_at"))?;
+            let id = row
+                .get::<pgrx::Uuid>(5)?
+                .ok_or_else(|| crate::spi::missing_attribute("id"))?;
+            candidates.push(PendingCandidate {
+                table_oid,
+                force,
+                cursor: PendingCandidateCursor {
+                    available_at,
+                    updated_at,
+                    id,
+                },
+            });
         }
         Ok(candidates)
     })
+    .map_err(|error| error.to_string())
 }
 
 fn next_pending_due_ms() -> Result<Option<i64>, String> {
@@ -111,41 +141,54 @@ enum ClaimOutcome {
 }
 
 fn claim_one_flush_job() -> Result<(ClaimOutcome, Option<ClaimedWork>), String> {
-    let candidates = pending_candidates()?;
-    if candidates.is_empty() {
-        return Ok((ClaimOutcome::Empty, None));
-    }
+    let mut after = None;
+    let mut saw_candidate = false;
 
-    for candidate in candidates {
-        let Some(guard) = crate::sql::job_lock::TableJobLockGuard::try_lock(candidate.table_oid)?
-        else {
-            continue;
-        };
-        match crate::sql::flush::execute::claim_flush_job_for_executor(
-            candidate.table_oid,
-            candidate.force,
-        ) {
-            Ok(claimed) => {
-                return Ok((
-                    ClaimOutcome::Claimed,
-                    Some(ClaimedWork {
-                        table_oid: candidate.table_oid,
-                        guard,
-                        claimed,
-                    }),
-                ));
-            }
-            Err(error) => {
-                pgrx::log!(
-                    "koldstore flush executor: candidate table_oid={} changed before claim: {error}",
-                    candidate.table_oid.to_u32()
-                );
-                drop(guard);
+    loop {
+        let candidates = pending_candidates(after)?;
+        if candidates.is_empty() {
+            return Ok((
+                if saw_candidate {
+                    ClaimOutcome::Busy
+                } else {
+                    ClaimOutcome::Empty
+                },
+                None,
+            ));
+        }
+        saw_candidate = true;
+        after = candidates.last().map(|candidate| candidate.cursor);
+
+        for candidate in candidates {
+            let Some(guard) =
+                crate::sql::job_lock::TableJobLockGuard::try_lock(candidate.table_oid)?
+            else {
+                continue;
+            };
+            match crate::sql::flush::execute::claim_flush_job_for_executor(
+                candidate.table_oid,
+                candidate.force,
+            ) {
+                Ok(claimed) => {
+                    return Ok((
+                        ClaimOutcome::Claimed,
+                        Some(ClaimedWork {
+                            table_oid: candidate.table_oid,
+                            guard,
+                            claimed,
+                        }),
+                    ));
+                }
+                Err(error) => {
+                    pgrx::log!(
+                        "koldstore flush executor: candidate table_oid={} changed before claim: {error}",
+                        candidate.table_oid.to_u32()
+                    );
+                    drop(guard);
+                }
             }
         }
     }
-
-    Ok((ClaimOutcome::Busy, None))
 }
 
 struct FlushWorkerRegistration {

@@ -1,6 +1,6 @@
 # pg-koldstore
 
-PostgreSQL 16 with the [KoldStore](https://github.com/kalamdb/koldstore) extension preinstalled. Use this image to try tiered storage without building from source.
+PostgreSQL with the [KoldStore](https://github.com/kalamdb/koldstore) extension preinstalled. Use this image to try tiered storage without building from source.
 
 **Keep hot data in PostgreSQL. Move historical rows to Parquet. Query one table.**
 
@@ -13,10 +13,12 @@ A built-in database worker auto-flushes managed tables when hot rows exceed `hot
 ## Quick start
 
 ```bash
-docker pull jamals86/pg-koldstore:latest
+docker pull jamals86/pg-koldstore:latest   # PostgreSQL 18
 docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:latest
 psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
 ```
+
+PostgreSQL 16 remains available as `jamals86/pg-koldstore:pg16` (or `:<version>-pg16`).
 
 **Windows / Docker Desktop bind mounts:** if you map a host folder to
 `/koldstore-data`, the image entrypoint creates `/koldstore-data/cold` and makes
@@ -68,7 +70,7 @@ SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 
 | Component | Notes |
 | --- | --- |
-| PostgreSQL | 16 (Ubuntu 24.04 / PGDG) |
+| PostgreSQL | 18 by default (`latest` / `pg18`, amd64+arm64); 16 via `pg16` (amd64); optional 17 via `pg17` (amd64) |
 | `koldstore` | Preinstalled + in `shared_preload_libraries` (required for KoldMergeScan + auto-flush worker); `wal_level=logical` by default |
 | `pg_cron` | Packaged only; not preloaded. Enable yourself if you want cron-based flush |
 | Entrypoint | Compatible with official `POSTGRES_*` env vars |
@@ -77,10 +79,17 @@ SELECT count(*) FROM messages;  -- still 1012 via KoldMergeScan
 
 | Tag | Meaning |
 | --- | --- |
-| `latest` | Latest published release image |
+| `latest` | Latest published release on **PostgreSQL 18** (amd64 + arm64) |
+| `pg18` | Floating tag for the latest PostgreSQL 18 image (amd64 + arm64) |
+| `pg16` | Floating tag for the latest PostgreSQL 16 image (**amd64 only**) |
+| `pg17` | Floating tag for the latest PostgreSQL 17 image (**amd64 only**, published when enabled in Release) |
+| `<version>-pg18` | Specific KoldStore version on PostgreSQL 18 |
 | `<version>-pg16` | Specific KoldStore version on PostgreSQL 16 |
+| `<version>-pg17` | Specific KoldStore version on PostgreSQL 17 |
 
-Example: `jamals86/pg-koldstore:0.1.5-beta.0-pg16`
+Example: `jamals86/pg-koldstore:0.1.12-preview.0-pg18`
+
+> PGDATA is major-version specific. Do not point a PG18 container at a PG16 volume (or the reverse) without `pg_upgrade`.
 
 ## Environment
 

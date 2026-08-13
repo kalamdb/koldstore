@@ -8,23 +8,20 @@ use std::collections::VecDeque;
 use std::time::Instant;
 
 use koldstore_merge::scan::{hot_keys_dominate_bound, OrderDirection};
-use koldstore_merge::{NewestFirstWinnerResolver, ResolvedRow, RowSource};
+use koldstore_merge::{MirrorOverlay, NewestFirstWinnerResolver, ResolvedRow, RowSource};
 use koldstore_migrate::{order::CatalogColumn, ExistingTableCatalog};
 use pgrx::pg_sys;
 
-use super::cold::{prepare_cold_row_stream, ColdReadPhase, ColdRowStream};
+use super::cold::{prepare_cold_row_stream, ColdReadPhase, ColdRowStream, ColdStreamPlanRequest};
 use super::cold_frontier;
 use super::emit::materialize_scan_row_from_image;
 use super::hot::{load_hot_rows_native, HotEqualityFilter, HotMergeBatchReader, HotRangeFilter};
 use super::hot_cursor::{HotMergeSource, NativeHotCursor};
-use super::mirror::{
-    filter_cold_rows_with_overlay, load_mirror_tombstone_overlay, load_mirror_tombstones_for_pks,
-    MirrorOverlay,
-};
+use super::mirror::{load_mirror_tombstone_overlay, load_mirror_tombstones_for_pks};
 use super::path_strategy::{STRATEGY_TAG_ORDERED_PROGRESSIVE, STRATEGY_TAG_UNORDERED_HOT_FIRST};
 use super::profile::{
-    elapsed_ms, ColdReadProfile, DisabledScanProfiler, EmitPath, ScanExecutionProfile,
-    ScanProfileSink, ScanProfiler,
+    elapsed_ms, ColdReadProfile, DisabledScanProfiler, EmitPath, ProfileCollectionMode,
+    ScanExecutionProfile, ScanProfileSink, ScanProfiler,
 };
 use super::qual::ScanProjection;
 use super::tuple::{MaterializedRow, ScanMemory};
@@ -232,7 +229,7 @@ impl MergeRowStream {
                 }
                 if !self.replay_hot {
                     self.resolver
-                        .mask_older_pks(self.overlay.masked_pks.iter().cloned())
+                        .mask_older_pks(self.overlay.iter().cloned())
                         .map_err(seen_key_limit_error)?;
                     self.resolver.checkpoint();
                 }
@@ -248,9 +245,9 @@ impl MergeRowStream {
                     .map(Some);
             }
 
-            let collect_profile = execution.is_some();
+            let profile_mode = execution_profile_mode(execution.as_deref());
             let Some((cold_rows, segment_profiles)) =
-                self.cold.next_batch(ColdReadPhase::Full, collect_profile)?
+                self.cold.next_batch(ColdReadPhase::Full, profile_mode)?
             else {
                 return Ok(None);
             };
@@ -267,12 +264,11 @@ impl MergeRowStream {
                 self.probe_overlay_for_cold_batch(&cold_rows, execution.as_deref_mut())?;
             }
 
-            let overlay_input = cold_rows.len();
-            let overlay_started = execution.as_ref().map(|_| Instant::now());
-            let cold_rows = filter_cold_rows_with_overlay(cold_rows, &self.overlay);
-            let overlay_removed = overlay_input.saturating_sub(cold_rows.len());
+            let overlay_started = execution_timer(execution.as_deref());
+            let mut cold_rows = cold_rows;
+            let overlay_removed = self.overlay.retain_unmasked(&mut cold_rows);
             let merge_input = cold_rows.len();
-            let merge_started = execution.as_ref().map(|_| Instant::now());
+            let merge_started = execution_timer(execution.as_deref());
             let winners = self
                 .resolver
                 .resolve_cold_batch(cold_rows)
@@ -328,8 +324,8 @@ impl MergeRowStream {
             koldstore_common::RowImage,
         > = std::collections::HashMap::new();
         loop {
-            let collect_profile = execution.is_some();
-            let Some((cold_rows, segment_profiles)) = self.cold.next_body_batch(collect_profile)?
+            let profile_mode = execution_profile_mode(execution.as_deref());
+            let Some((cold_rows, segment_profiles)) = self.cold.next_body_batch(profile_mode)?
             else {
                 break;
             };
@@ -434,9 +430,9 @@ impl MergeRowStream {
             ColdReadPhase::Full
         };
         loop {
-            let collect_profile = execution.is_some();
+            let profile_mode = execution_profile_mode(execution.as_deref());
             let Some((cold_rows, segment_profiles)) =
-                self.cold.next_batch(cold_phase, collect_profile)?
+                self.cold.next_batch(cold_phase, profile_mode)?
             else {
                 break;
             };
@@ -455,8 +451,8 @@ impl MergeRowStream {
                 self.probe_overlay_for_cold_batch(&cold_rows, execution.as_deref_mut())?;
             }
             let overlay_input = cold_rows.len();
-            let cold_rows = filter_cold_rows_with_overlay(cold_rows, &self.overlay);
-            let overlay_removed = overlay_input.saturating_sub(cold_rows.len());
+            let mut cold_rows = cold_rows;
+            let overlay_removed = self.overlay.retain_unmasked(&mut cold_rows);
             let winners = self
                 .resolver
                 .resolve_cold_batch(cold_rows)
@@ -509,27 +505,26 @@ impl MergeRowStream {
         };
         let mut unseen = Vec::new();
         for row in cold_rows {
-            if !self.overlay.masked_pks.contains(&row.pk) {
+            if !self.overlay.contains(&row.pk) {
                 unseen.push(row.pk.clone());
             }
         }
         if unseen.is_empty() {
             return Ok(());
         }
-        let started = execution.as_ref().map(|_| Instant::now());
+        let started = execution_timer(execution.as_deref());
         let batch = load_mirror_tombstones_for_pks(
             &deferred.mirror_relation,
             &deferred.primary_key_columns,
             &unseen,
         )?;
         if let Some(execution) = execution {
-            execution.mirror_rows = execution.mirror_rows.saturating_add(batch.tombstones);
+            execution.mirror_rows = execution.mirror_rows.saturating_add(batch.len());
             // Deferred PK probes are the ordered/unordered mirror scan phase.
             accumulate_ms(&mut execution.mirror_scan_ms, started);
         }
-        for pk in batch.masked_pks {
-            self.overlay.masked_pks.insert(pk);
-            self.overlay.tombstones = self.overlay.masked_pks.len();
+        for pk in batch.into_masked_pks() {
+            self.overlay.insert(pk);
         }
         Ok(())
     }
@@ -538,12 +533,12 @@ impl MergeRowStream {
         &mut self,
         execution: Option<&mut ScanExecutionProfile>,
     ) -> Result<(), String> {
-        let started = execution.as_ref().map(|_| Instant::now());
+        let started = execution_timer(execution.as_deref());
         let Some(rows) = self.hot.next_batch()? else {
             return Ok(());
         };
         let fetched = rows.len();
-        let merge_started = execution.as_ref().map(|_| Instant::now());
+        let merge_started = execution_timer(execution.as_deref());
         let winners = if self.replay_hot {
             rows.into_iter().map(hot_row_as_resolved).collect()
         } else {
@@ -610,7 +605,7 @@ unsafe fn materialize_owned_row(
     memory: &mut ScanMemory,
     execution: Option<&mut ScanExecutionProfile>,
 ) -> Result<MaterializedRow, String> {
-    let started = execution.as_ref().map(|_| Instant::now());
+    let started = execution_timer(execution.as_deref());
     let materialized =
         memory.switch(|| materialize_scan_row_from_image(&row.row_image, projection));
     if let Some(execution) = execution {
@@ -626,6 +621,20 @@ fn accumulate_ms(total: &mut Option<f64>, started: Option<Instant>) {
         return;
     };
     *total = Some(total.unwrap_or(0.0) + elapsed_ms(started));
+}
+
+#[inline]
+fn execution_profile_mode(execution: Option<&ScanExecutionProfile>) -> ProfileCollectionMode {
+    execution.map_or(ProfileCollectionMode::Disabled, |profile| {
+        profile.collection_mode()
+    })
+}
+
+#[inline]
+fn execution_timer(execution: Option<&ScanExecutionProfile>) -> Option<Instant> {
+    execution_profile_mode(execution)
+        .collects_timing()
+        .then(Instant::now)
 }
 
 /// Selects and executes the hot, cold, mirror, and winner-resolution paths.
@@ -657,16 +666,15 @@ unsafe fn execute_scan_sources_with_profile<P: ScanProfileSink>(
     // Full-PK probes run before Parquet opens. A hot winner makes every older
     // cold version irrelevant and keeps the common point-hit path hot-only.
     if let Some(rows) = probe_hot_point_hit(&inputs, &mut memory, profiler) {
-        return hot_buffer_execution(
-            rows,
-            ColdReadProfile::empty("(none)"),
-            &inputs,
-            memory,
-            profiler,
-        );
+        let cold_profile = if profiler.collection_mode().collects_counts() {
+            ColdReadProfile::empty("(none)")
+        } else {
+            ColdReadProfile::disabled()
+        };
+        return hot_buffer_execution(rows, cold_profile, &inputs, memory, profiler);
     }
 
-    let (mut cold_profile, cold_stream) = prepare_cold_stream(&inputs);
+    let (mut cold_profile, cold_stream) = prepare_cold_stream(&inputs, profiler.collection_mode());
     let has_no_cold_source = cold_stream.is_none();
     if has_no_cold_source {
         initialize_custom_plan_children(inputs.node, inputs.estate, inputs.eflags);
@@ -766,16 +774,20 @@ fn hot_buffer_execution<P: ScanProfileSink>(
 }
 
 #[inline(always)]
-fn prepare_cold_stream(inputs: &ScanSourceInputs<'_>) -> (ColdReadProfile, Option<ColdRowStream>) {
-    prepare_cold_row_stream(
-        inputs.table_oid,
-        inputs.scanrelid,
-        inputs.snapshot,
-        &inputs.catalog,
-        inputs.qual,
-        inputs.image_columns,
-        inputs.params,
-    )
+fn prepare_cold_stream(
+    inputs: &ScanSourceInputs<'_>,
+    profile_mode: ProfileCollectionMode,
+) -> (ColdReadProfile, Option<ColdRowStream>) {
+    prepare_cold_row_stream(ColdStreamPlanRequest {
+        table_oid: inputs.table_oid,
+        scanrelid: inputs.scanrelid,
+        snapshot: inputs.snapshot,
+        catalog: &inputs.catalog,
+        qual: inputs.qual,
+        projected_columns: inputs.image_columns,
+        params: inputs.params,
+        profile_mode,
+    })
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} cold stream setup failed: {error}"))
 }
 
@@ -825,8 +837,10 @@ fn prepare_merged_stream<P: ScanProfileSink>(
     )
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} hot reader setup failed: {error}"));
     let hot = HotMergeSource::SpiJson(hot);
-    if let Some(sql) = hot.first_page_sql() {
-        profiler.record_hot_spi_query(sql);
+    if profiler.collection_mode().collects_counts() {
+        if let Some(sql) = hot.first_page_sql() {
+            profiler.record_hot_spi_query(sql);
+        }
     }
     // Hot pages load during ExecCustomScan; EXPLAIN counters accumulate there.
     profiler.record_hot_buffer(0);
@@ -861,8 +875,10 @@ fn prepare_unordered_hot_first_stream<P: ScanProfileSink>(
             .unwrap_or_else(|error| {
                 pgrx::error!("{CUSTOM_PATH_NAME} unordered hot-first SPI fallback failed: {error}")
             });
-            if let Some(sql) = reader.first_page_sql() {
-                profiler.record_hot_spi_query(sql);
+            if profiler.collection_mode().collects_counts() {
+                if let Some(sql) = reader.first_page_sql() {
+                    profiler.record_hot_spi_query(sql);
+                }
             }
             HotMergeSource::SpiJson(reader)
         }
@@ -905,8 +921,10 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
             .unwrap_or_else(|error| {
                 pgrx::error!("{CUSTOM_PATH_NAME} ordered SPI fallback failed: {error}")
             });
-            if let Some(sql) = reader.first_page_sql() {
-                profiler.record_hot_spi_query(sql);
+            if profiler.collection_mode().collects_counts() {
+                if let Some(sql) = reader.first_page_sql() {
+                    profiler.record_hot_spi_query(sql);
+                }
             }
             HotMergeSource::SpiJson(reader)
         }
@@ -937,7 +955,9 @@ fn prepare_ordered_merged_stream<P: ScanProfileSink>(
         });
     if let Some(leading) = inputs.catalog.column_by_attnum(leading_column_id) {
         let leading_ref = koldstore_common::ColumnRef::new(leading.column_id, leading.name.clone());
-        if cold_stream.enable_late_materialization(&leading_ref) {
+        if cold_stream.enable_late_materialization(&leading_ref)
+            && profiler.collection_mode().collects_counts()
+        {
             cold_profile.compete_columns = cold_stream.compete_projection_names();
             cold_profile.body_columns = cold_stream.body_projection_names();
         }
@@ -1026,6 +1046,6 @@ fn load_overlay<P: ScanProfileSink>(
         inputs.pk_equality,
     )
     .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} mirror overlay failed: {error}"));
-    profiler.record_mirror_scan(overlay.tombstones, started);
+    profiler.record_mirror_scan(overlay.len(), started);
     overlay
 }

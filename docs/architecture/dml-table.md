@@ -16,14 +16,13 @@ accounting, scope enforcement, and how DML state flows into flush and scan.
 ## Clean-schema model
 
 User tables keep application columns only. Each managed table has a latest-state
-change-log mirror at `koldstore.{table}__cl`:
+change-log mirror at `koldstore.<schema>_<table>__cl`:
 
 | Column | Type | Meaning |
 |--------|------|---------|
 | `<pk columns>` | same as heap | Primary key |
 | `seq` | `bigint` | Snowflake-style effect id (ordering, flush cutoffs) |
 | `op` | `smallint` | `1 = INSERT`, `2 = UPDATE`, `3 = DELETE` |
-| `commit_lsn` | `pg_lsn` | WAL position sampled at capture (diagnostics only) |
 
 The mirror holds **at most one row per PK** — the latest hot-side state for that
 key. It is not a full event log. Tombstones (`op = 3`) stay until flush prunes
@@ -45,7 +44,7 @@ flowchart TD
   APPLY --> AKIND{"Operation"}
   AKIND -->|"INSERT / DELETE"| AUPSERT["INSERT ... ON CONFLICT"]
   AKIND -->|"UPDATE"| AUPDATE["UPDATE existing + upsert missing"]
-  AUPSERT --> MIR["koldstore.{table}__cl"]
+  AUPSERT --> MIR["koldstore.<schema>_<table>__cl"]
   AUPDATE --> MIR
   APPLY --> RC["Row counter deltas"]
   RC --> MAN["manifest counters"]
@@ -72,9 +71,9 @@ succeed because the guard raises only on `IS DISTINCT FROM`.
 
 Installed by `koldstore.manage_table` (see [manage-table.md](manage-table.md)):
 
-1. `CREATE TABLE koldstore.{name}__cl` with PK + metadata columns
+1. `CREATE TABLE koldstore.<schema>_<table>__cl` with PK + metadata columns
 2. B-tree on `seq`, plus partial tombstone index `(seq) WHERE op = 3`
-3. PK-guard function `koldstore.{name}__cl_pk_guard()`
+3. PK-guard function with a bounded, mirror-derived name in `koldstore`
 4. One `BEFORE UPDATE OF <pk...> FOR EACH ROW` guard trigger
 5. Counter refresh so manifest hot/mirror counts match live heaps before capture
    takes over
@@ -112,17 +111,22 @@ explicit consistency boundary:
 | UPDATE | Set-based `UPDATE ... FROM` for existing keys, then conflict-safe insert of only keys missing from the mirror |
 | DELETE | Set-based `INSERT ... ON CONFLICT DO UPDATE`, setting `op = 3`, so a missing mirror row still becomes a tombstone |
 
-Primary keys cross the pgoutput boundary as protocol text, are grouped in Rust,
-bound as parallel `text[]` arrays, and converted back to native PostgreSQL types
-inside one typed `unnest`. No per-row JSON recordset is built. Compatible batches
-contain at most 8,192 unique keys; a duplicate key, relation change, operation
-change, or capacity boundary flushes the current batch. Non-key source columns
-are not published or allocated. The mirror remains a metadata index; flush
-reads the current row image from the hot heap.
+Primary keys cross the pgoutput boundary as protocol text. The applier decodes
+each peeked message immediately (it does not retain a raw bytea batch). Segment
+order text is peeked before PK cells are taken, because taking replaces those
+tuple slots with NULL and `migration_order_by` is often the PK itself. Builtin
+int/bool keys parse once into native values. `seq` is an integer and `order_key`
+stays bytes. In-batch identity is typed:
+a single `bigint`/`int`/`smallint`/`bool` key is an inline HashSet key (no
+String, no NUL join). Text and composite keys still own their cells. Compatible
+batches contain at most 8,192 unique keys; a duplicate key, relation change,
+operation change, or capacity boundary flushes the current batch. Non-key source
+columns are not published or allocated. The mirror remains a metadata index;
+flush reads the current row image from the hot heap.
 
 The applier caches separate upsert and UPDATE plans for each relation.
-Pgoutput relation metadata changes invalidate both plans and the cached PK type
-names before another batch executes. UPDATE's direct write and insert-missing
+Pgoutput relation metadata changes invalidate cached SQL plans, PK type names,
+and PK column indexes/OIDs before another batch executes. UPDATE's direct write and insert-missing
 fallback are one data-modifying CTE, preserving atomicity while avoiding
 conflict arbitration for the normal existing-row path.
 
@@ -135,18 +139,22 @@ produce new mirror tombstones.
 When a configured row/time budget ends with WAL still pending, the database
 worker runs up to four more ticks immediately. The fifth pending result yields
 through the latch before a new burst, balancing catch-up latency with CPU and
-flush-scheduler fairness. Capture does not provide transparent read-your-writes;
-strong reads still use the fence. Full operational semantics are in
+flush-scheduler fairness. Capture does not provide transparent read-your-writes.
+The fence covers changes that committed before its WAL boundary; it cannot
+decode the caller's uncommitted writes. In `REPEATABLE READ` or `SERIALIZABLE`,
+a snapshot acquired before the fence also cannot see later-applied mirror state.
+Call the fence before opening the transaction/snapshot that requires those
+commits. Full operational semantics are in
 [mirror-capture.md](mirror-capture.md).
 
 ### Encoding at mirror boundary
 
 | Field | Source | Type |
 |-------|--------|------|
-| PK values | pgoutput text → typed unnest | Native PG column types |
+| PK values | pgoutput text → parse-once native arrays | Native PG column types |
 | `seq` | WAL applier snowflake allocation | `i64` above durable watermark |
+| `order_key` | pgoutput text → sort-key bytes | `bytea` when configured |
 | `op` | `MirrorOperation::code()` | `smallint` 1/2/3 |
-| `commit_lsn` | apply-path sample | `pg_lsn` (diagnostics) |
 
 ---
 
@@ -203,7 +211,8 @@ Used by flush stats resolution and operator diagnostics. Mid-transaction reads
 of `manifest.mirror_row_count` do not include pending backend deltas until
 pre-commit flush (pg_tests that assert counters call `flush_pending_deltas`
 explicitly). Flush selection folds `row_counter_cache::pending_deltas` into the
-O(1) mirror pending count so an in-transaction async fence cannot miss rows.
+O(1) mirror pending count. This counter accounting does not make uncommitted
+source changes visible to logical decoding or to `KoldMergeScan`.
 
 ---
 
@@ -246,8 +255,11 @@ Session scope is set with:
 SET koldstore.user_id = '<tenant_id>';
 ```
 
-`koldstore.user_id` is a GUC. Applications must set it before scoped DML and
-reads.
+`koldstore.user_id` is a user-settable GUC. Applications must set it before
+scoped DML and reads, but it is not proof of identity. A trusted connection
+layer must bind it to an authenticated principal. The generated policy is
+permissive; PostgreSQL OR-combines it with any other permissive policy on the
+table, so additional policies can broaden access.
 
 `hooks/executor.rs::enforce_dml_scope` is a pure helper used by unit/shell
 tests and planning code. It is **not** registered as a live executor hook;

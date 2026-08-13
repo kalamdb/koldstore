@@ -66,7 +66,7 @@ fn decodes_insert_update_delete_and_commit_messages() {
         panic!("expected insert");
     };
     assert_eq!(relation_id, 42);
-    assert_eq!(new.values[0], PgOutputValue::Text(b"7".to_vec()));
+    assert_eq!(new.values[0], PgOutputValue::Text("7".into()));
 
     let mut update = vec![b'U'];
     update.extend_from_slice(&42_u32.to_be_bytes());
@@ -77,8 +77,8 @@ fn decodes_insert_update_delete_and_commit_messages() {
     let PgOutputMessage::Update { old, new, .. } = decode_message(&update).unwrap() else {
         panic!("expected update");
     };
-    assert_eq!(old.unwrap().values[0], PgOutputValue::Text(b"7".to_vec()));
-    assert_eq!(new.values[1], PgOutputValue::Text(b"updated".to_vec()));
+    assert_eq!(old.unwrap().values[0], PgOutputValue::Text("7".into()));
+    assert_eq!(new.values[1], PgOutputValue::Text("updated".into()));
 
     let mut delete = vec![b'D'];
     delete.extend_from_slice(&42_u32.to_be_bytes());

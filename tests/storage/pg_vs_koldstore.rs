@@ -5,11 +5,12 @@
 //! fair merge-scan overhead). On PostgreSQL-only, **cold-id / hot+cold PK
 //! lookups also run before `VACUUM FULL`** so they are not compared against a
 //! freshly rewritten 10M heap. Managed sides flush older rows to zstd Parquet
-//! (timing + peak RSS), time **cold-only** and **hot+cold (50/50)** after flush
-//! (before hot-heap VACUUM), drain **`changes_since`** over the full latest-state
-//! set (paged cursor), then VACUUM for the maintenance metric and compare
-//! PostgreSQL heap/index sizes versus total hot+cold footprint. Flush report
-//! rows include write throughput (rows/s) and cold-Parquet bandwidth (MiB/s).
+//! (timing + peak RSS), time **still-hot PK**, **cold-only**, and **hot+cold
+//! (50/50)** after flush (before hot-heap VACUUM), drain **`changes_since`**
+//! over the full latest-state set (paged cursor), then VACUUM for the
+//! maintenance metric and compare PostgreSQL heap/index sizes versus total
+//! hot+cold footprint. Flush report rows include write throughput (rows/s)
+//! and cold-Parquet bandwidth (MiB/s).
 //!
 //! Timed INSERT always seeds into an empty table growing to `rows` on every
 //! side — `hot_row_limit` does **not** make managed INSERT faster (flush has
@@ -21,8 +22,11 @@
 //! Expect foreground insert ≈ identical or managed slightly slower once both
 //! sides start the timed seed from the same recycled WAL baseline and retain
 //! WAL the same way during seed (pg-only uses a temporary logical pin).
-//! Mirror apply remains a separate catch-up row on managed.
-//! Managed sizes always include `koldstore.<table>__cl` heap + indexes.
+//! Mirror apply remains a separate catch-up row on managed; during timed
+//! phases the sticky WAL applier is paused+terminated so query/DML samples
+//! are not contaminated by a respawned background apply process.
+//! Managed sizes always include the schema-qualified change-log mirror heap +
+//! indexes (`koldstore.<schema>_<table>__cl`, hash-bounded when needed).
 //!
 //! Published runs isolate each column via `KOLDSTORE_STORAGE_SIDE=pg|async`
 //! on a wiped + re-initdb pgrx data directory (see
@@ -149,6 +153,9 @@ struct SideMetrics {
     update: Timing,
     delete: Timing,
     query_hot_only: Timing,
+    /// After flush: repeated PK lookup of a still-hot id (newest / retained hot).
+    /// PostgreSQL-only times the same SQL on the full pre-VACUUM heap (no flush).
+    query_hot_after_flush: Timing,
     /// After flush: alternating hot PK + cold PK lookups (50/50).
     query_hot_cold: Timing,
     /// After flush: cold PK only (`id = 1`).
@@ -344,8 +351,8 @@ async fn pg_vs_koldstore_storage_and_speed_comparison() -> Result<()> {
             result
         }
         StorageSide::Combined => {
-            // Mirror tables are `koldstore.<unqualified>__cl`, so table names
-            // must be unique across schemas in the shared E2E database.
+            // Mirror names encode schema + relation; keep table names unique in
+            // the shared E2E database for readable artifacts.
             let baseline_table = format!("{}_baseline", db.schema);
             let managed_table = format!("{}_managed", db.schema);
             let baseline = format!("{}.{}", db.schema, baseline_table);
@@ -483,6 +490,13 @@ async fn run_pg_only_body(
         let _step = common::log_step_always("storage_cmp: time pg-only cold-id PK lookups");
         time_point_queries(&db.client, baseline, cold_id).await?
     };
+    // Same SQL as managed post-flush hot PK; no flush on this side so the full
+    // heap is still present (measured before VACUUM FULL like cold-id / mix).
+    let query_hot_after_flush = {
+        let _step =
+            common::log_step_always("storage_cmp: time pg-only hot PK (post-flush baseline)");
+        time_point_queries(&db.client, baseline, hot_id).await?
+    };
     let query_hot_cold = {
         let _step = common::log_step_always("storage_cmp: time pg-only mixed hot+cold PK lookups");
         time_mixed_hot_cold_queries(&db.client, baseline, hot_id, cold_id).await?
@@ -505,6 +519,7 @@ async fn run_pg_only_body(
         update,
         delete,
         query_hot_only,
+        query_hot_after_flush,
         query_hot_cold,
         query_cold_only,
         vacuum,
@@ -533,7 +548,7 @@ async fn run_pg_only_body(
 async fn run_managed_only_body(
     db: &common::TestDb,
     managed: &str,
-    managed_table: &str,
+    _managed_table: &str,
     rows: i64,
     hot_limit: i64,
     dml_sample: i64,
@@ -542,9 +557,10 @@ async fn run_managed_only_body(
     warmup_rows: i64,
 ) -> Result<()> {
     assert_async_worker_disabled_for_benchmark(&db.client).await?;
+    let managed_mirror = common::change_log_mirror_relation(managed);
     db.client
         .batch_execute(&format!(
-            "ALTER TABLE koldstore.{managed_table}__cl SET (autovacuum_enabled = false)"
+            "ALTER TABLE {managed_mirror} SET (autovacuum_enabled = false)"
         ))
         .await
         .context("disable autovacuum on benchmark mirror")?;
@@ -609,13 +625,13 @@ async fn run_managed_only_body(
         common::assert_managed_read_plan(&plan_pre_flush)?;
         anyhow::ensure!(
             !plan_pre_flush.contains("Custom Scan (KoldMergeScan)")
-                || plan_pre_flush.contains("Parquet Segments Opened: 0")
-                || plan_pre_flush.contains("Parquet Segments Planned: 0"),
-            "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
+                && plan_pre_flush.contains("Index Scan"),
+            "pre-flush hot PK must use native Index Scan (empty cold → no KoldMergeScan), got:\n{plan_pre_flush}"
         );
     }
     let query_hot_only = {
         let _step = common::log_step_always("storage_cmp: time managed hot PK lookups");
+        ensure_async_worker_stopped_for_benchmark(&db.client).await?;
         time_point_queries(&db.client, managed, hot_id).await?
     };
 
@@ -658,6 +674,18 @@ async fn run_managed_only_body(
     ));
 
     {
+        let _step = common::log_step_always("storage_cmp: post-flush hot-only PK lookups");
+        assert_post_flush_hot_pk_plan(&db.client, managed, hot_id).await?;
+    }
+    // Time hot-only / cold / hot+cold after flush but before hot-heap VACUUM so
+    // the PG baseline (full heap, pre-VACUUM) and managed paths are not mixed
+    // with a post-FULL-vacuum heap rewrite on the unmanaged side.
+    let query_hot_after_flush = {
+        let _step = common::log_step_always("storage_cmp: time managed hot PK after flush");
+        ensure_async_worker_stopped_for_benchmark(&db.client).await?;
+        time_point_queries(&db.client, managed, hot_id).await?
+    };
+    {
         let _step = common::log_step_always("storage_cmp: post-flush cold-only PK lookups");
         let plan_cold = common::explain(
             &db.client,
@@ -672,15 +700,14 @@ async fn run_managed_only_body(
             "cold-only PK lookup should open at least one Parquet segment, got:\n{plan_cold}"
         );
     }
-    // Time cold / hot+cold after flush but before hot-heap VACUUM so the PG
-    // baseline (full heap, pre-VACUUM) and managed Parquet path are not mixed
-    // with a post-FULL-vacuum heap rewrite on the unmanaged side.
     let query_cold_only = {
         let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
+        ensure_async_worker_stopped_for_benchmark(&db.client).await?;
         time_point_queries(&db.client, managed, cold_id).await?
     };
     let query_hot_cold = {
         let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
+        ensure_async_worker_stopped_for_benchmark(&db.client).await?;
         time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
     };
 
@@ -734,6 +761,7 @@ async fn run_managed_only_body(
         update,
         delete,
         query_hot_only,
+        query_hot_after_flush,
         query_hot_cold,
         query_cold_only,
         vacuum,
@@ -782,7 +810,7 @@ async fn run_storage_comparison_body(
     db: &common::TestDb,
     baseline: &str,
     managed: &str,
-    managed_table: &str,
+    _managed_table: &str,
     rows: i64,
     hot_limit: i64,
     dml_sample: i64,
@@ -793,9 +821,10 @@ async fn run_storage_comparison_body(
     // Apply the source tables' benchmark-only autovacuum control to the
     // generated mirror. Otherwise a long async catch-up can launch mirror
     // maintenance during the next timed phase.
+    let managed_mirror = common::change_log_mirror_relation(managed);
     db.client
         .batch_execute(&format!(
-            "ALTER TABLE koldstore.{managed_table}__cl SET (autovacuum_enabled = false)"
+            "ALTER TABLE {managed_mirror} SET (autovacuum_enabled = false)"
         ))
         .await
         .context("disable autovacuum on benchmark mirror")?;
@@ -878,9 +907,8 @@ async fn run_storage_comparison_body(
         common::assert_managed_read_plan(&plan_pre_flush)?;
         anyhow::ensure!(
             !plan_pre_flush.contains("Custom Scan (KoldMergeScan)")
-                || plan_pre_flush.contains("Parquet Segments Opened: 0")
-                || plan_pre_flush.contains("Parquet Segments Planned: 0"),
-            "pre-flush PK lookup must not open Parquet (no cold yet), got:\n{plan_pre_flush}"
+                && plan_pre_flush.contains("Index Scan"),
+            "pre-flush hot PK must use native Index Scan (empty cold → no KoldMergeScan), got:\n{plan_pre_flush}"
         );
         assert_point_row_matches(&db.client, baseline, managed, hot_id).await?;
         assert_point_row_matches(&db.client, baseline, managed, cold_id).await?;
@@ -892,6 +920,7 @@ async fn run_storage_comparison_body(
     };
     let managed_hot = {
         let _step = common::log_step_always("storage_cmp: time managed hot PK lookups");
+        ensure_async_worker_stopped_for_benchmark(&db.client).await?;
         time_point_queries(&db.client, managed, hot_id).await?
     };
 
@@ -955,14 +984,29 @@ async fn run_storage_comparison_body(
         assert_point_row_matches(&db.client, baseline, managed, mid_cold_id).await?;
     }
 
+    {
+        let _step = common::log_step_always("storage_cmp: post-flush hot-only PK lookups");
+        assert_post_flush_hot_pk_plan(&db.client, managed, hot_id).await?;
+    }
     // Baseline cold/hot+cold on the full heap before VACUUM FULL; managed on
     // Parquet after flush before hot-heap VACUUM — same contract as isolated sides.
+    let baseline_hot_after_flush = {
+        let _step =
+            common::log_step_always("storage_cmp: time baseline hot PK (post-flush baseline)");
+        time_point_queries(&db.client, baseline, hot_id).await?
+    };
+    let managed_hot_after_flush = {
+        let _step = common::log_step_always("storage_cmp: time managed hot PK after flush");
+        ensure_async_worker_stopped_for_benchmark(&db.client).await?;
+        time_point_queries(&db.client, managed, hot_id).await?
+    };
     let baseline_cold_only = {
         let _step = common::log_step_always("storage_cmp: time baseline cold-only PK lookups");
         time_point_queries(&db.client, baseline, cold_id).await?
     };
     let managed_cold_only = {
         let _step = common::log_step_always("storage_cmp: time managed cold-only PK lookups");
+        ensure_async_worker_stopped_for_benchmark(&db.client).await?;
         time_point_queries(&db.client, managed, cold_id).await?
     };
     let baseline_hot_cold = {
@@ -971,6 +1015,7 @@ async fn run_storage_comparison_body(
     };
     let managed_hot_cold = {
         let _step = common::log_step_always("storage_cmp: time managed mixed hot+cold PK lookups");
+        ensure_async_worker_stopped_for_benchmark(&db.client).await?;
         time_mixed_hot_cold_queries(&db.client, managed, hot_id, cold_id).await?
     };
 
@@ -1028,6 +1073,7 @@ async fn run_storage_comparison_body(
         update: baseline_update,
         delete: baseline_delete,
         query_hot_only: baseline_hot,
+        query_hot_after_flush: baseline_hot_after_flush,
         query_hot_cold: baseline_hot_cold,
         query_cold_only: baseline_cold_only,
         vacuum: baseline_vacuum,
@@ -1041,6 +1087,7 @@ async fn run_storage_comparison_body(
         update: managed_update,
         delete: managed_delete,
         query_hot_only: managed_hot,
+        query_hot_after_flush: managed_hot_after_flush,
         query_hot_cold: managed_hot_cold,
         query_cold_only: managed_cold_only,
         vacuum: managed_vacuum,
@@ -1182,9 +1229,10 @@ async fn warm_up_before_timed_seed(
             max_rows_per_flush,
         )
         .await?;
+        let warmup_mirror = common::change_log_mirror_relation(&warmup_relation);
         client
             .batch_execute(&format!(
-                "ALTER TABLE koldstore.{warmup_table}__cl SET (autovacuum_enabled = false)"
+                "ALTER TABLE {warmup_mirror} SET (autovacuum_enabled = false)"
             ))
             .await
             .context("disable autovacuum on warm-up mirror")?;
@@ -1215,10 +1263,7 @@ async fn warm_up_before_timed_seed(
 }
 
 fn mirror_relation(managed: &str) -> Option<String> {
-    managed
-        .rsplit('.')
-        .next()
-        .map(|table| format!("koldstore.{table}__cl"))
+    Some(common::change_log_mirror_relation(managed))
 }
 
 fn schema_sql_path() -> PathBuf {
@@ -1292,8 +1337,9 @@ async fn manage_with_hot_limit(
 }
 
 async fn async_catchup(client: &Client, expected_changes: i64) -> Result<Timing> {
-    // Stop a launcher-respawned applier so this fence owns the apply work.
-    let _ = terminate_async_workers_until_idle(client).await;
+    // Keep the sticky WAL service paused so this fence owns apply work and the
+    // following timed phase is not charged for a respawned applier.
+    ensure_async_worker_stopped_for_benchmark(client).await?;
     let started = Instant::now();
     let applied: i64 = client
         .query_one("SELECT koldstore.wait_for_async_mirror()", &[])
@@ -1311,6 +1357,7 @@ async fn async_catchup(client: &Client, expected_changes: i64) -> Result<Timing>
         acknowledged == 0,
         "async mirror acknowledgement replayed {acknowledged} changes"
     );
+    ensure_async_worker_stopped_for_benchmark(client).await?;
     Ok(Timing {
         elapsed: started.elapsed(),
         ops: expected_changes,
@@ -1320,7 +1367,7 @@ async fn async_catchup(client: &Client, expected_changes: i64) -> Result<Timing>
 
 /// Drain async mirror to idle without requiring an exact applied row count.
 async fn async_catchup_drain(client: &Client) -> Result<()> {
-    let _ = terminate_async_workers_until_idle(client).await;
+    ensure_async_worker_stopped_for_benchmark(client).await?;
     loop {
         let applied: i64 = client
             .query_one("SELECT koldstore.wait_for_async_mirror()", &[])
@@ -1330,6 +1377,7 @@ async fn async_catchup_drain(client: &Client) -> Result<()> {
             break;
         }
     }
+    ensure_async_worker_stopped_for_benchmark(client).await?;
     Ok(())
 }
 
@@ -1354,9 +1402,10 @@ async fn disable_async_retained_wal_health_threshold_for_benchmark(
 }
 
 async fn disable_async_worker_for_benchmark(client: &Client, dbname: &str) -> Result<bool> {
-    // Pin the database setting and the session. The shared-preload launcher
-    // connects to `postgres`, so it may still restart appliers; callers also
-    // terminate before each catch-up fence.
+    // Pin the database/session GUC off so client ensure paths stay dark, then
+    // pause supervisor dispatch and terminate the sticky WAL applier. GUC-off
+    // alone is not enough: a required WAL service stays resident and the
+    // supervisor restarts it unless `ensure_paused` is set.
     client
         .batch_execute(&format!(
             "ALTER DATABASE \"{dbname}\" SET koldstore.internal_async_mirror_worker = off"
@@ -1368,28 +1417,30 @@ async fn disable_async_worker_for_benchmark(client: &Client, dbname: &str) -> Re
         .await
         .context("disable async mirror worker GUC in benchmark session")?;
     disable_async_retained_wal_health_threshold_for_benchmark(client, dbname).await?;
-    terminate_async_workers_until_idle(client).await?;
+    ensure_async_worker_stopped_for_benchmark(client).await?;
     Ok(true)
 }
 
-async fn terminate_async_workers_until_idle(client: &Client) -> Result<()> {
-    let started = Instant::now();
-    loop {
-        let _ = common::terminate_async_worker(client).await?;
-        if !common::async_worker_running(client).await? {
-            return Ok(());
-        }
-        if started.elapsed() >= Duration::from_secs(2) {
-            common::log_always(
-                "storage_cmp: async worker still visible after terminate window; continuing with fence",
-            );
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+/// Pauses supervisor WAL/maintenance dispatch and terminates any live applier.
+///
+/// Timed storage phases must call this (not a best-effort terminate) so a
+/// required WAL service cannot respawn under the supervisor during DML/query
+/// measurement. Foreground `wait_for_async_mirror()` fences still apply WAL.
+async fn ensure_async_worker_stopped_for_benchmark(client: &Client) -> Result<()> {
+    common::force_stop_async_worker(client)
+        .await
+        .context("pause + stop persistent WAL applier for storage benchmark")?;
+    anyhow::ensure!(
+        !common::async_worker_running(client).await?,
+        "persistent WAL applier still running after force_stop; timed metrics would be contaminated"
+    );
+    Ok(())
 }
 
 async fn reset_async_worker_guc(client: &Client, dbname: &str) -> Result<()> {
+    // Release the benchmark pause before restoring GUCs so later sessions are
+    // not stuck with supervisor dispatch held off.
+    let _ = common::release_async_worker_stop_lock(client).await;
     client
         .batch_execute(&format!(
             "ALTER DATABASE \"{dbname}\" RESET koldstore.internal_async_mirror_worker; \
@@ -1419,8 +1470,7 @@ async fn assert_async_worker_disabled_for_benchmark(client: &Client) -> Result<(
         disabled,
         "async benchmark worker GUC did not remain disabled"
     );
-    // Best-effort: launcher may respawn briefly; catch-up paths terminate again.
-    let _ = terminate_async_workers_until_idle(client).await;
+    ensure_async_worker_stopped_for_benchmark(client).await?;
     Ok(())
 }
 
@@ -2450,6 +2500,40 @@ async fn time_point_queries(client: &Client, relation: &str, id: i64) -> Result<
     Ok(Timing::with_p99(elapsed, QUERY_LOOPS as i64, &samples))
 }
 
+/// Asserts a still-hot PK lookup after flush does not open Parquet.
+///
+/// Locked contract: prefer native Index Scan when cold bounds prove empty for
+/// the PK; otherwise `KoldMergeScan` with Index Planned Access and zero Parquet
+/// segments opened/planned.
+async fn assert_post_flush_hot_pk_plan(client: &Client, relation: &str, hot_id: i64) -> Result<()> {
+    let plan = common::explain(
+        client,
+        &format!("SELECT id, account_id, event_type FROM {relation} WHERE id = {hot_id}"),
+    )
+    .await?;
+    common::assert_managed_read_plan(&plan)?;
+    let native_hot = !plan.contains("Custom Scan (KoldMergeScan)") && plan.contains("Index Scan");
+    let merge_hot_no_parquet = plan.contains("Custom Scan (KoldMergeScan)")
+        && (plan.contains("Parquet Segments Opened: 0")
+            || plan.contains("Parquet Segments Planned: 0"))
+        && plan
+            .lines()
+            .any(|line| line.contains("Planned Access:") && line.contains("Index Scan"));
+    anyhow::ensure!(
+        native_hot || merge_hot_no_parquet,
+        "post-flush hot PK must be native Index Scan or KoldMergeScan with 0 Parquet segments, got:\n{plan}"
+    );
+    common::log_always(format!(
+        "storage_cmp: post-flush hot PK plan ({relation} id={hot_id}): {}",
+        if native_hot {
+            "native Index Scan"
+        } else {
+            "KoldMergeScan hot-only (0 Parquet)"
+        }
+    ));
+    Ok(())
+}
+
 /// After flush: alternate hot PK / cold PK lookups (50/50 of `QUERY_LOOPS`).
 async fn time_mixed_hot_cold_queries(
     client: &Client,
@@ -2625,9 +2709,19 @@ fn build_comparison_report(
             mg_p99(managed.map(|m| m.query_hot_only)),
         ),
         row(
+            "hot-after-flush-query p99 latency",
+            pg_p99(baseline.map(|m| m.query_hot_after_flush)),
+            mg_p99(managed.map(|m| m.query_hot_after_flush)),
+        ),
+        row(
             "cold-query p99 latency",
             pg_p99(baseline.map(|m| m.query_cold_only)),
             mg_p99(managed.map(|m| m.query_cold_only)),
+        ),
+        row(
+            "hot-only query throughput (after flush)",
+            pg_ops(baseline.map(|m| m.query_hot_after_flush)),
+            mg_ops(managed.map(|m| m.query_hot_after_flush)),
         ),
         row(
             "hot+cold query throughput",
@@ -2774,6 +2868,11 @@ fn build_comparison_report(
             mg_speed(managed.map(|m| m.query_hot_only)),
         ),
         row(
+            "query hot only (after flush)",
+            pg_speed(baseline.map(|m| m.query_hot_after_flush)),
+            mg_speed(managed.map(|m| m.query_hot_after_flush)),
+        ),
+        row(
             "query with hot+cold (after flush)",
             pg_speed(baseline.map(|m| m.query_hot_cold)),
             mg_speed(managed.map(|m| m.query_hot_cold)),
@@ -2902,10 +3001,12 @@ fn build_comparison_report(
     ));
     notes.push(
         "hot-only PK = newest id before flush (full heap both sides). \
-         PG cold-id / hot+cold also run on the full heap before VACUUM FULL. \
-         Managed cold-only / hot+cold run after flush (Parquet) before hot-heap VACUUM. \
-         Timed INSERT seeds an empty table to `rows` on every side — hot_row_limit \
-         does not shrink the insert working set."
+         query hot only (after flush) = same newest PK after policy flush on managed \
+         (still-hot row; must not open Parquet); PG times the same SQL on the full \
+         pre-VACUUM heap. PG cold-id / hot+cold also run on the full heap before \
+         VACUUM FULL. Managed cold-only / hot+cold run after flush (Parquet) before \
+         hot-heap VACUUM. Timed INSERT seeds an empty table to `rows` on every side — \
+         hot_row_limit does not shrink the insert working set."
             .to_string(),
     );
     if baseline.is_none() || managed.is_none() {

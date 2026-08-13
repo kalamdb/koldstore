@@ -1,49 +1,73 @@
 # Backup and Operations
 
-pg-koldstore stores authoritative hot rows in PostgreSQL and cold segment
-artifacts in object storage. Because those tiers have separate durability
-domains, a recoverable backup must include both tiers and preserve a consistent
-point between them.
+KoldStore has two durability domains: PostgreSQL owns the hot heap and local
+catalog state, while cold row images live in filesystem or object-store
+artifacts. The developer preview does not yet ship a coordinated backup,
+restore, or point-in-time-recovery protocol across those domains.
 
-## Base Backup and PITR
+## Current recovery boundary
 
-Use normal PostgreSQL base backups and WAL archiving for catalog state, heap
-rows, row events, jobs, and local manifest cache tables. Point-in-time recovery
-must restore PostgreSQL to a time that is consistent with the object-store
-backup generation selected for cold artifacts.
+A PostgreSQL base backup, WAL archive, or logical dump is not sufficient to
+recover a managed table after rows have been pruned from the heap. Copying an
+object prefix beside a PostgreSQL backup is also not, by itself, a consistent
+snapshot: catalog publication and object writes have to agree on the same
+manifest generation.
 
-## Object Backup
+Until a generation-pinning protocol is implemented, treat managed data as
+non-production data unless the application has an independent authoritative
+copy. Operators experimenting with manual snapshots must capture PostgreSQL
+and immutable cold prefixes, record the active manifest/catalog identities,
+retain every referenced object, and validate the pairing before cutover. That
+is an operator procedure, not a recovery guarantee provided by KoldStore.
 
-Back up the configured object-store prefixes for every registered
-`koldstore.storage` row. Cold artifacts are retained by default during
-demigration and DROP TABLE cleanup unless an operator explicitly enables
-deletion.
+## `pg_dump` and `COPY`
 
-## Validation and Recovery
+These commands do not all enter the planner in the same way:
 
-`koldstore.table_status` summarizes hot rows, cold segment counts, manifest
-state, pending jobs, storage binding, and the last recorded error.
-`koldstore.backup_manifest` exports the local manifest identity required to
-match a PostgreSQL backup to cold files. `koldstore.validate_cold_storage`
-checks manifest, Parquet, stats, PK hint, and catalog consistency surfaces.
-`koldstore.recover_segments` discovers orphan cold objects under the table
-prefix (and expires stale `pending` catalog rows), then quarantines or deletes
-them inline. It does **not** enqueue recovery jobs.
+- `pg_dump --data-only -t managed_table` reads the physical heap and therefore
+  omits rows that exist only in cold storage.
+- `COPY managed_table TO ...` likewise exports the heap relation and can omit
+  cold-only rows.
+- `COPY (SELECT ... FROM managed_table) TO ...` plans the query and can use
+  `KoldMergeScan`, so it includes cold rows for query shapes within the
+  supported scan contract.
+- `COPY FROM` writes the heap. It does not provide global hot+cold uniqueness or
+  conflict checking.
 
-## pg_dump, COPY, and Logical Replication
+Do not present a plain dump or direct table `COPY` as a logical backup of a
+managed relation. A KoldStore-aware backup/export workflow and explicit
+failure/diagnostics for unsafe dump paths are tracked separately from the
+planned operator APIs in
+[#103](https://github.com/kalamdb/koldstore/issues/103).
+The end-to-end backup, restore, PITR, and unsafe-dump contract is tracked in
+[#126](https://github.com/kalamdb/koldstore/issues/126).
 
-`pg_dump` and `COPY (SELECT ...) TO` export the logical merged view. `COPY FROM`
-is supported only for managed shared tables unless user-scope enforcement has
-an active `koldstore.user_id`. Physical cold artifacts are not represented in
-plain SQL dumps.
+## Object lifecycle
 
-Logical replication sees hot heap changes and SQL API effects. Consumers that
-need cold-only updates should read `koldstore.changes_since` using commit-order
-cursors and retention-gap handling.
+Current `DROP TABLE` cleanup deletes cold objects inline before the PostgreSQL
+DDL transaction commits. Because object storage does not roll back with
+PostgreSQL, aborting the transaction can leave restored catalog state pointing
+at missing objects. Durable, asynchronous post-commit garbage collection is
+tracked in [#100](https://github.com/kalamdb/koldstore/issues/100).
 
-## Export and Import
+The `drop_cold` argument to `unmanage_table` is currently planned by the SQL
+surface but is not executed. Do not use it as a retention guarantee.
 
-`koldstore_exec('EXPORT TABLE ...')` is the archive boundary for writing a
-kalamdb-compatible manifest and Parquet archive. `IMPORT TABLE` is intentionally
-rejected until ownership, conflict handling, and schema compatibility rules are
-implemented end to end.
+## Available diagnostics and planned APIs
+
+`koldstore.table_status` reports current table, manifest, segment, job, and
+async-mirror information. It is operational telemetry, not a backup manifest.
+
+The following interfaces are planned but are not shipped SQL functions:
+
+- `koldstore.backup_manifest`
+- `koldstore.validate_cold_storage`
+- packaged export/import
+
+`koldstore.recover_segments` is a maintenance surface for orphan/pending
+objects; it does not create a coordinated backup or reconstruct arbitrary
+missing cold data.
+
+Logical replication captures source-heap changes, not a portable snapshot of
+the cold object set. Downstream consumers must not infer that subscribing to
+the source publication reproduces a managed table's existing cold history.

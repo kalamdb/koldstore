@@ -168,7 +168,22 @@ fn flush_sql_requests_capture_table_scope_and_enqueue_metadata() {
     let pending = koldstore_flush::ops::plan_select_pending_flush_candidates().unwrap();
     assert!(pending.sql.contains("status = 'pending'"));
     assert!(pending.sql.contains("'force'"));
+    assert!(pending.sql.contains("available_at, updated_at, id"));
     assert!(pending.sql.contains("LIMIT $1"));
+
+    let pending_after = koldstore_flush::ops::plan_select_pending_flush_candidates_after().unwrap();
+    assert!(pending_after
+        .sql
+        .contains("(available_at, updated_at, id) > ($2, $3, $4)"));
+    assert_eq!(
+        pending_after.param_types,
+        vec![
+            koldstore_common::SqlParamType::BigInt,
+            koldstore_common::SqlParamType::TimestampWithTimeZone,
+            koldstore_common::SqlParamType::TimestampWithTimeZone,
+            koldstore_common::SqlParamType::Uuid,
+        ]
+    );
 
     let next_due = koldstore_flush::ops::plan_next_pending_flush_due_epoch_ms().unwrap();
     assert!(next_due.sql.contains("min(available_at)"));

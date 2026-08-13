@@ -7,6 +7,30 @@ SQL_DIR="$ROOT_DIR/benchmarks/sql"
 PGBENCH_DIR="$ROOT_DIR/benchmarks/pgbench"
 RESULTS_DIR="$ROOT_DIR/benchmarks/results"
 
+# Cold Parquet must be writable by the PostgreSQL OS user. pgrx backends run as
+# the invoking user (colocating under results/ is fine). Packaged Postgres runs
+# as `postgres` and cannot create paths under the workspace (Permission denied /
+# AppArmor), so external-server runs default to /tmp unless overridden.
+resolve_bench_storage_root() {
+  if [[ -n "${KOLDSTORE_BENCH_STORAGE_ROOT:-}" ]]; then
+    printf '%s\n' "$KOLDSTORE_BENCH_STORAGE_ROOT"
+  elif [[ "${KOLDSTORE_BENCH_START_PGRX:-1}" == "0" ]]; then
+    local tmp="${TMPDIR:-/tmp}"
+    printf '%s\n' "${tmp%/}/koldstore-bench-cold"
+  else
+    printf '%s\n' "$RESULTS_DIR/cold-storage"
+  fi
+}
+
+prepare_bench_storage_path() {
+  local path="${1:?}"
+  mkdir -p "$path"
+  # Best-effort DAC widen so a packaged `postgres` OS user can write Parquet
+  # when the path is still somewhere the backend is allowed to access.
+  chmod a+rwX "$(dirname "$path")" 2>/dev/null || true
+  chmod -R a+rwX "$path" 2>/dev/null || true
+}
+
 psql_in_mode() {
   # Extension modes rely on shared_preload_libraries=koldstore (set when the
   # pgrx server is started below). Baseline must not need the extension.
@@ -40,7 +64,7 @@ DROP EXTENSION IF EXISTS koldstore CASCADE;
 DROP SCHEMA IF EXISTS koldstore CASCADE;
 SQL
   rm -rf "$KOLDSTORE_BENCH_STORAGE_PATH"
-  mkdir -p "$KOLDSTORE_BENCH_STORAGE_PATH"
+  prepare_bench_storage_path "$KOLDSTORE_BENCH_STORAGE_PATH"
 }
 
 setup_mode() {
@@ -621,12 +645,15 @@ run_mode() {
 
   RAW_DIR="$RESULTS_DIR/raw/$MODE"
   PLAN_DIR="$RESULTS_DIR/plans/$MODE"
-  KOLDSTORE_BENCH_STORAGE_PATH="$RESULTS_DIR/cold-storage/$MODE"
+  BENCH_STORAGE_ROOT="$(resolve_bench_storage_root)"
+  KOLDSTORE_BENCH_STORAGE_PATH="$BENCH_STORAGE_ROOT/$MODE"
 
   export BENCH_SCHEMA
+  export KOLDSTORE_BENCH_STORAGE_ROOT="$BENCH_STORAGE_ROOT"
   export KOLDSTORE_BENCH_STORAGE_PATH
 
-  mkdir -p "$RAW_DIR" "$PLAN_DIR" "$KOLDSTORE_BENCH_STORAGE_PATH"
+  mkdir -p "$RAW_DIR" "$PLAN_DIR"
+  prepare_bench_storage_path "$KOLDSTORE_BENCH_STORAGE_PATH"
 
   ensure_postgres_ready "$MODE" || return 1
   setup_mode
@@ -822,9 +849,13 @@ export BENCH_MIXED_JOBS="${BENCH_MIXED_JOBS:-2}"
 export KOLDSTORE_BENCH_COMPRESSION="${KOLDSTORE_BENCH_COMPRESSION:-zstd}"
 export KOLDSTORE_BENCH_SKIP_CRITERION="${KOLDSTORE_BENCH_SKIP_CRITERION:-1}"
 
+BENCH_STORAGE_ROOT="$(resolve_bench_storage_root)"
+export KOLDSTORE_BENCH_STORAGE_ROOT="$BENCH_STORAGE_ROOT"
+
 echo "running pgKalam benchmark suite"
 echo "BENCH_PROFILE=$BENCH_PROFILE"
 echo "DATABASE_URL=$DATABASE_URL"
+echo "BENCH_STORAGE_ROOT=$BENCH_STORAGE_ROOT"
 echo "BENCH_ROWS=$BENCH_ROWS BENCH_HOT_LIMIT=$BENCH_HOT_LIMIT BENCH_SECONDS=$BENCH_SECONDS BENCH_MIXED_SECONDS=$BENCH_MIXED_SECONDS"
 echo "BENCH_CLIENTS=$BENCH_CLIENTS BENCH_JOBS=$BENCH_JOBS BENCH_MIXED_CLIENTS=$BENCH_MIXED_CLIENTS BENCH_MIXED_JOBS=$BENCH_MIXED_JOBS"
 
@@ -835,6 +866,7 @@ if [[ "${KOLDSTORE_BENCH_CLEAN_RESULTS:-1}" != "0" ]]; then
     "$RESULTS_DIR/raw" \
     "$RESULTS_DIR/plans" \
     "$RESULTS_DIR/cold-storage" \
+    "$BENCH_STORAGE_ROOT" \
     "$RESULTS_DIR/summary.json" \
     "$RESULTS_DIR/report.md" \
     "$RESULTS_DIR/report.html"

@@ -3,8 +3,9 @@ use koldstore_migrate::constraints::{
     MigrationValidationInput, UniqueConstraintShape,
 };
 use koldstore_migrate::manage_table::{
-    validate_manage_table, validate_manage_table_preflight, ManageTablePolicyInput,
-    ManageTableValidationContext, ScopeColumnInput, SegmentOrderColumnInput,
+    effective_segment_order_column, validate_manage_table, validate_manage_table_preflight,
+    ManageTablePolicyInput, ManageTableValidationContext, ScopeColumnInput,
+    SegmentOrderColumnInput,
 };
 
 fn valid_context() -> ManageTableValidationContext<'static> {
@@ -22,6 +23,9 @@ fn valid_context() -> ManageTableValidationContext<'static> {
             target_file_size_mb: None,
             min_max_rows_per_file: 1_000,
             auto_flush: true,
+            parquet_row_group_size: None,
+            parquet_data_page_row_count_limit: None,
+            parquet_bloom_filter_fpp: None,
         },
         pruning_columns: None,
         bloom_filter_columns: None,
@@ -59,6 +63,22 @@ fn segment_order_column_is_validated_and_persisted_by_attnum() {
 
     let validated = validate_manage_table(context).unwrap();
     assert_eq!(validated.options.segment_order_column_id, Some(4));
+}
+
+#[test]
+fn migration_order_column_becomes_the_default_segment_order_column() {
+    assert_eq!(
+        effective_segment_order_column(None, Some("created_at")),
+        Some("created_at")
+    );
+}
+
+#[test]
+fn explicit_segment_order_column_overrides_the_migration_order_column() {
+    assert_eq!(
+        effective_segment_order_column(Some("event_time"), Some("created_at")),
+        Some("event_time")
+    );
 }
 
 #[test]

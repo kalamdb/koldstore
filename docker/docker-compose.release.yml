@@ -1,0 +1,90 @@
+# Run the published pg-koldstore release image (not a source build).
+#
+#   docker pull jamals86/pg-koldstore:latest          # PostgreSQL 18
+#   docker pull jamals86/pg-koldstore:pg16            # PostgreSQL 16
+#   docker compose -f docker/docker-compose.release.yml up -d
+#   docker compose -f docker/docker-compose.release.yml exec postgres \
+#     psql -U postgres -d koldstoredb -c "SELECT koldstore_version();"
+#
+# Override image / ports:
+#   KOLDSTORE_IMAGE=jamals86/pg-koldstore:pg16 PG_PORT=5433 \
+#     docker compose -f docker/docker-compose.release.yml up -d
+#
+# Data persistence:
+#   - koldstore-pgdata  → PostgreSQL PGDATA (databases survive image recreate)
+#   - koldstore-cold    → local filesystem cold objects (when not using MinIO)
+#   - koldstore-minio   → MinIO object data
+#
+# PGDATA is major-version specific. Switching :latest from PG16 → PG18 needs a
+# fresh volume (or pg_upgrade); do not reuse a PG16 volume with a PG18 image.
+services:
+  postgres:
+    image: ${KOLDSTORE_IMAGE:-jamals86/pg-koldstore:latest}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-koldstoredb}
+      PGDATA: /var/lib/postgresql/data
+    # Multi-database managed farms need per-DB slots + background workers.
+    command:
+      - postgres
+      - -c
+      - max_replication_slots=40
+      - -c
+      - max_wal_senders=40
+      - -c
+      - max_worker_processes=80
+      - -c
+      - max_parallel_workers=16
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    volumes:
+      - koldstore-pgdata:/var/lib/postgresql/data
+      - koldstore-cold:/koldstore-data/cold
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB} && psql -U $${POSTGRES_USER} -d $${POSTGRES_DB} -tAc \"SELECT 1 FROM pg_extension WHERE extname = 'koldstore'\" | grep -q 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 36
+      start_period: 15s
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "${MINIO_PORT:-19000}:9000"
+      - "${MINIO_CONSOLE_PORT:-19001}:9001"
+    volumes:
+      - koldstore-minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do
+        sleep 1;
+      done;
+      mc mb --ignore-existing local/koldstore-test;
+      mc anonymous set none local/koldstore-test;
+      echo 'minio bucket koldstore-test is ready';
+      "
+    restart: "no"
+
+volumes:
+  koldstore-pgdata:
+  koldstore-cold:
+  koldstore-minio:

@@ -328,8 +328,8 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
-        read_clean_cold_rows_from_object_store_with_size, BloomPruneMode, ParquetSegmentWriter,
-        PgColumn, PgType, WriterOptions,
+        read_clean_cold_rows_from_object_store_with_size, BloomPruneMode, ParquetProfileMode,
+        ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
     };
     use koldstore_storage::{ObjectStoreClient, StorageClient};
 
@@ -379,7 +379,8 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         &["id".to_string()],
         &ParquetReadOptions::new()
             .with_columns(["id"])
-            .with_pk_values("id", ["4"]),
+            .with_pk_values("id", ["4"])
+            .with_profile_mode(ParquetProfileMode::Counts),
     )
     .unwrap();
 
@@ -405,7 +406,9 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         Some(file_size),
         &[PgColumn::new("id", PgType::Int8, false)],
         &["id".to_string()],
-        &ParquetReadOptions::new().with_columns(["id"]),
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_profile_mode(ParquetProfileMode::Counts),
     )
     .unwrap();
     assert!(!profile_full.footer_cache_hit);
@@ -416,7 +419,9 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         Some(file_size),
         &[PgColumn::new("id", PgType::Int8, false)],
         &["id".to_string()],
-        &ParquetReadOptions::new().with_columns(["id"]),
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_profile_mode(ParquetProfileMode::Counts),
     )
     .unwrap();
     assert!(
@@ -434,7 +439,8 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
         &ParquetReadOptions::new()
             .with_columns(["id"])
             .with_row_groups([0, 1, 2])
-            .with_pk_values("id", ["7"]),
+            .with_pk_values("id", ["7"])
+            .with_profile_mode(ParquetProfileMode::Counts),
     )
     .unwrap();
     assert!(missing_rows.is_empty());
@@ -445,6 +451,20 @@ fn object_store_read_profile_reports_footer_first_and_bloom_skip() {
     );
     assert_eq!(missing_profile.row_groups_skipped, 3);
     assert!(missing_profile.stats_pruned);
+
+    let (unprofiled_rows, unprofiled) = read_clean_cold_rows_from_object_store_with_size(
+        client.store(),
+        key,
+        Some(file_size),
+        &[PgColumn::new("id", PgType::Int8, false)],
+        &["id".to_string()],
+        &ParquetReadOptions::new()
+            .with_columns(["id"])
+            .with_profile_mode(ParquetProfileMode::Disabled),
+    )
+    .unwrap();
+    assert_eq!(unprofiled_rows.len(), 6);
+    assert_eq!(unprofiled, Default::default());
 }
 
 #[test]
@@ -454,8 +474,8 @@ fn object_store_pk_probe_applies_page_index_row_selection() {
     use arrow_array::{BooleanArray, Int16Array, Int64Array, RecordBatch, UInt32Array};
     use arrow_schema::{DataType, Field, Schema};
     use koldstore_parquet::{
-        read_clean_cold_rows_from_object_store_with_size, PageIndexPruneMode, ParquetSegmentWriter,
-        PgColumn, PgType, WriterOptions,
+        read_clean_cold_rows_from_object_store_with_size, PageIndexPruneMode, ParquetProfileMode,
+        ParquetSegmentWriter, PgColumn, PgType, WriterOptions,
     };
     use koldstore_storage::{ObjectStoreClient, StorageClient};
 
@@ -514,7 +534,8 @@ fn object_store_pk_probe_applies_page_index_row_selection() {
         &["id".to_string()],
         &ParquetReadOptions::new()
             .with_columns(["id"])
-            .with_pk_values("id", ["50"]),
+            .with_pk_values("id", ["50"])
+            .with_profile_mode(ParquetProfileMode::Counts),
     )
     .unwrap();
 

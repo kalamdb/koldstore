@@ -32,18 +32,21 @@ pub fn select_competitive_row_groups(
     row_group_mins: &[Option<Vec<u8>>],
     row_group_maxs: &[Option<Vec<u8>>],
 ) -> Vec<usize> {
-    let n = row_group_mins.len().min(row_group_maxs.len());
+    // Catalog arrays should have identical cardinality, but incomplete metadata
+    // must fail open. Iterating the larger side preserves an unmatched row group
+    // and treats its missing directional bound as unknown/competitive.
+    let n = row_group_mins.len().max(row_group_maxs.len());
     let Some(hot) = hot_key else {
         return (0..n).collect();
     };
     let mut selected = Vec::new();
     for idx in 0..n {
         let competes = match direction {
-            OrderDirection::Asc => match row_group_mins[idx].as_deref() {
+            OrderDirection::Asc => match row_group_mins.get(idx).and_then(Option::as_deref) {
                 None => true,
                 Some(min_bound) => min_bound <= hot,
             },
-            OrderDirection::Desc => match row_group_maxs[idx].as_deref() {
+            OrderDirection::Desc => match row_group_maxs.get(idx).and_then(Option::as_deref) {
                 None => true,
                 Some(max_bound) => max_bound >= hot,
             },
@@ -53,6 +56,24 @@ pub fn select_competitive_row_groups(
         }
     }
     selected
+}
+
+/// Intersects catalog-planned row groups with an ordered-frontier selection.
+///
+/// The planned order (and any duplicate entries) is preserved. Sorting the
+/// owned competitive set once avoids the quadratic repeated-membership scan in
+/// the PostgreSQL adapter without allocating a second lookup collection.
+#[must_use]
+pub fn intersect_row_group_selections(
+    planned: Vec<usize>,
+    mut competitive: Vec<usize>,
+) -> Vec<usize> {
+    competitive.sort_unstable();
+    competitive.dedup();
+    planned
+        .into_iter()
+        .filter(|row_group| competitive.binary_search(row_group).is_ok())
+        .collect()
 }
 
 #[cfg(test)]
@@ -112,6 +133,29 @@ mod tests {
         assert_eq!(
             select_competitive_row_groups(OrderDirection::Asc, Some(b"d"), &mins, &maxs),
             vec![0]
+        );
+    }
+
+    #[test]
+    fn mismatched_bound_arrays_keep_unmatched_row_groups_conservatively() {
+        let mins = [Some(b"a".to_vec())];
+        let maxs = [Some(b"c".to_vec()), Some(b"z".to_vec())];
+
+        assert_eq!(
+            select_competitive_row_groups(OrderDirection::Asc, Some(b"d"), &mins, &maxs),
+            vec![0, 1]
+        );
+        assert_eq!(
+            select_competitive_row_groups(OrderDirection::Desc, Some(b"d"), &mins, &maxs),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn row_group_intersection_preserves_planned_order() {
+        assert_eq!(
+            intersect_row_group_selections(vec![5, 2, 5, 9], vec![9, 3, 5]),
+            vec![5, 5, 9]
         );
     }
 }

@@ -22,6 +22,8 @@ pub fn writer_options_from_encode_input(input: &StreamEncodeInput) -> WriterOpti
     WriterOptions {
         compression: input.compression.clone(),
         row_group_size: input.row_group_size.max(1),
+        data_page_row_count_limit: input.data_page_row_count_limit,
+        bloom_filter_false_positive_rate: input.bloom_filter_false_positive_rate,
         ..WriterOptions::default()
     }
     .with_statistics_columns(
@@ -77,6 +79,10 @@ pub struct StreamEncodeInput {
     pub compression: String,
     /// Rows encoded per streaming row group.
     pub row_group_size: usize,
+    /// Optional row cap per Parquet data page.
+    pub data_page_row_count_limit: Option<usize>,
+    /// Optional false-positive probability for Parquet Bloom filters.
+    pub bloom_filter_false_positive_rate: Option<f64>,
     /// When set, mirror fetch is restricted to these operation codes.
     pub mirror_ops: Option<Vec<i16>>,
     /// Ask PostgreSQL to return rows ordered by mirror `order_key`, then PK, then seq.
@@ -382,6 +388,8 @@ mod tests {
             target_file_size_bytes,
             compression: "zstd".to_string(),
             row_group_size: 1,
+            data_page_row_count_limit: None,
+            bloom_filter_false_positive_rate: None,
             mirror_ops: None,
             sort_by_order_key: false,
             order_key_column: None,

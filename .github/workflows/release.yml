@@ -19,7 +19,12 @@ on:
         required: false
         default: true
       docker_push:
-        description: "Build, smoke-test, and push PostgreSQL 16 + koldstore Docker image to Docker Hub and GHCR (GitHub Packages)"
+        description: "Build/push Docker images: PG18 (amd64+arm64, latest) + PG16 (amd64). Optionally enable PG17 below."
+        type: boolean
+        required: false
+        default: false
+      docker_push_pg17:
+        description: "Also build/push PostgreSQL 17 Docker image (amd64 only). Requires docker_push."
         type: boolean
         required: false
         default: false
@@ -43,8 +48,9 @@ env:
   RUST_VERSION: "1.96.0"
   PGRX_VERSION: "0.19.1"
   CARGO_PROFILE: release-pg-dist
-  DOCKER_PG_MAJOR: "16"
   DOCKER_PG_DISTRO: "ubuntu24.04"
+  # Try-it image majors published when docker_push=true. `latest` tracks PG18.
+  DOCKER_LATEST_PG_MAJOR: "18"
 
 jobs:
   read_version:
@@ -86,6 +92,12 @@ jobs:
           cache-on-failure: true
 
       - run: cargo install cargo-nextest --locked
+      - run: cargo install cargo-about --version 0.8.4 --locked
+      - name: Verify third-party license notices
+        run: |
+          bash scripts/build/generate-third-party-notices.sh
+          git diff --exit-code -- THIRD_PARTY_NOTICES.html
+          bash scripts/tests/test_release_licenses.sh
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
       - run: cargo nextest run --workspace --no-default-features --exclude e2e --exclude examples --exclude storage-comparison --exclude pg-koldstore-benchmarks --exclude koldstore-memory-tests --exclude stress
@@ -200,6 +212,7 @@ jobs:
           - { pg: 15, arch: arm64, distro: ubuntu22.04, runner: ubuntu-22.04-arm }
           - { pg: 16, arch: amd64, distro: ubuntu24.04, runner: ubuntu-24.04 }
           - { pg: 16, arch: arm64, distro: ubuntu24.04, runner: ubuntu-24.04-arm }
+          - { pg: 17, arch: amd64, distro: ubuntu24.04, runner: ubuntu-24.04 }
           - { pg: 18, arch: amd64, distro: ubuntu24.04, runner: ubuntu-24.04 }
           - { pg: 18, arch: arm64, distro: ubuntu24.04, runner: ubuntu-24.04-arm }
     steps:
@@ -537,32 +550,99 @@ jobs:
             dist/${{ needs.read_version.outputs.version }}/SHA256SUMS
           fail_on_unmatched_files: true
 
-  # Publish PostgreSQL 16 + prebuilt koldstore + pg_cron to Docker Hub and GHCR.
-  # Per-arch images use the matching ubuntu24.04 package artifact (native .so);
-  # docker_pg_manifest then publishes a multi-arch :version / :latest index.
+  # Publish try-it images (prebuilt koldstore + pg_cron) to Docker Hub and GHCR.
+  # Default when docker_push=true:
+  #   PG18 → amd64 + arm64 (also :latest)
+  #   PG16 → amd64 only
+  # Optional docker_push_pg17=true:
+  #   PG17 → amd64 only
+  docker_matrix:
+    name: Plan Docker image matrix
+    runs-on: ubuntu-24.04
+    if: ${{ inputs.docker_push }}
+    outputs:
+      build: ${{ steps.set.outputs.build }}
+      promote: ${{ steps.set.outputs.promote }}
+    steps:
+      - name: Build matrix JSON
+        id: set
+        shell: bash
+        run: |
+          set -euo pipefail
+          INCLUDE_PG17="${{ inputs.docker_push_pg17 }}"
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          include_pg17 = os.environ.get("INCLUDE_PG17", "false").lower() == "true"
+
+          build = [
+              {
+                  "pg_major": 16,
+                  "arch": "amd64",
+                  "platform": "linux/amd64",
+                  "runner": "ubuntu-24.04",
+              },
+              {
+                  "pg_major": 18,
+                  "arch": "amd64",
+                  "platform": "linux/amd64",
+                  "runner": "ubuntu-24.04",
+              },
+              {
+                  "pg_major": 18,
+                  "arch": "arm64",
+                  "platform": "linux/arm64",
+                  "runner": "ubuntu-24.04-arm",
+              },
+          ]
+          promote = [
+              {"pg_major": 16, "promote_latest": False, "arches": "amd64"},
+              {"pg_major": 18, "promote_latest": True, "arches": "amd64 arm64"},
+          ]
+          if include_pg17:
+              build.append(
+                  {
+                      "pg_major": 17,
+                      "arch": "amd64",
+                      "platform": "linux/amd64",
+                      "runner": "ubuntu-24.04",
+                  }
+              )
+              promote.append(
+                  {"pg_major": 17, "promote_latest": False, "arches": "amd64"}
+              )
+
+          print(f"build={json.dumps(build, separators=(',', ':'))}")
+          print(f"promote={json.dumps(promote, separators=(',', ':'))}")
+          PY
+        env:
+          INCLUDE_PG17: ${{ inputs.docker_push_pg17 }}
+
   docker_pg:
-    name: "Build PG Docker · ${{ matrix.arch }}"
+    name: "Build PG${{ matrix.pg_major }} Docker · ${{ matrix.arch }}"
     runs-on: ${{ matrix.runner }}
     needs:
       - read_version
       - build_linux_ubuntu
+      - docker_matrix
     if: >-
       ${{
         inputs.docker_push &&
         always() &&
         !cancelled() &&
         !failure() &&
-        needs.build_linux_ubuntu.result == 'success'
+        needs.build_linux_ubuntu.result == 'success' &&
+        needs.docker_matrix.result == 'success'
       }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { arch: amd64, platform: linux/amd64, runner: ubuntu-24.04 }
-          - { arch: arm64, platform: linux/arm64, runner: ubuntu-24.04-arm }
+        include: ${{ fromJSON(needs.docker_matrix.outputs.build) }}
     env:
       DOCKER_REPO_INPUT: ${{ inputs.docker_repo }}
       GHCR_IMAGE_INPUT: ${{ inputs.ghcr_image }}
+      DOCKER_PG_MAJOR: ${{ matrix.pg_major }}
     steps:
       - uses: actions/checkout@v7
 
@@ -590,6 +670,7 @@ jobs:
           VERSION="${{ needs.read_version.outputs.version }}"
           SHORT_SHA="${GITHUB_SHA:0:7}"
           ARCH="${{ matrix.arch }}"
+          PG_MAJOR="${DOCKER_PG_MAJOR}"
           DOCKER_REPO="${DOCKER_REPO_INPUT:-jamals86/pg-koldstore}"
           GHCR_IMAGE="${GHCR_IMAGE_INPUT:-ghcr.io/kalamdb/pg-koldstore}"
           if [[ ! "${DOCKER_REPO}" =~ ^[A-Za-z0-9]+([._-][A-Za-z0-9]+)*\/[A-Za-z0-9]+([._-][A-Za-z0-9]+)*$ ]]; then
@@ -600,27 +681,27 @@ jobs:
             echo "::error::Invalid ghcr_image '${GHCR_IMAGE}'. Expected ghcr.io/owner/name." >&2
             exit 1
           fi
-          CANDIDATE_TAG="${VERSION}-pg${DOCKER_PG_MAJOR}-ci-${SHORT_SHA}"
+          CANDIDATE_TAG="${VERSION}-pg${PG_MAJOR}-ci-${SHORT_SHA}"
           # OCI image label + Docker Hub short description (≤100 chars).
           # Full Hub Overview is synced from docker/image-description.txt after promote.
-          DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly."
+          DESCRIPTION="PostgreSQL ${PG_MAJOR} with koldstore preinstalled for trying KoldStore quickly."
           {
             echo "docker_repo=${DOCKER_REPO}"
             echo "ghcr_image=${GHCR_IMAGE}"
             echo "candidate_tag=${CANDIDATE_TAG}"
             echo "candidate_arch_tag=${CANDIDATE_TAG}-${ARCH}"
-            echo "version_tag=${VERSION}-pg${DOCKER_PG_MAJOR}"
-            echo "latest_tag=latest"
+            echo "version_tag=${VERSION}-pg${PG_MAJOR}"
+            echo "pg_major_tag=pg${PG_MAJOR}"
             echo "description=${DESCRIPTION}"
           } >> "$GITHUB_OUTPUT"
           echo "Docker Hub repo: ${DOCKER_REPO}"
           echo "GHCR image: ${GHCR_IMAGE}"
           echo "Candidate arch tag: ${CANDIDATE_TAG}-${ARCH} (${{ matrix.platform }})"
 
-      - name: Download PG${{ env.DOCKER_PG_MAJOR }} ${{ matrix.arch }} package artifact
+      - name: Download PG${{ matrix.pg_major }} ${{ matrix.arch }} package artifact
         uses: actions/download-artifact@v8
         with:
-          name: pkg-pg${{ env.DOCKER_PG_MAJOR }}-${{ env.DOCKER_PG_DISTRO }}-${{ matrix.arch }}
+          name: pkg-pg${{ matrix.pg_major }}-${{ env.DOCKER_PG_DISTRO }}-${{ matrix.arch }}
           path: pkg-download/
 
       - name: Prepare docker-artifacts from release tarball
@@ -629,9 +710,10 @@ jobs:
           set -euo pipefail
           VERSION="${{ needs.read_version.outputs.version }}"
           ARCH="${{ matrix.arch }}"
-          TARBALL="$(find pkg-download -type f -name "pg_koldstore-v${VERSION}-pg${DOCKER_PG_MAJOR}-${DOCKER_PG_DISTRO}-${ARCH}.tar.gz" | head -n 1)"
+          PG_MAJOR="${DOCKER_PG_MAJOR}"
+          TARBALL="$(find pkg-download -type f -name "pg_koldstore-v${VERSION}-pg${PG_MAJOR}-${DOCKER_PG_DISTRO}-${ARCH}.tar.gz" | head -n 1)"
           if [[ -z "${TARBALL}" ]]; then
-            echo "::error::Expected tarball pg_koldstore-v${VERSION}-pg${DOCKER_PG_MAJOR}-${DOCKER_PG_DISTRO}-${ARCH}.tar.gz not found." >&2
+            echo "::error::Expected tarball pg_koldstore-v${VERSION}-pg${PG_MAJOR}-${DOCKER_PG_DISTRO}-${ARCH}.tar.gz not found." >&2
             find pkg-download -type f | sort >&2 || true
             exit 1
           fi
@@ -641,17 +723,23 @@ jobs:
 
           SO="$(find tarball-extract -type f -name 'koldstore.so' | head -n 1)"
           CONTROL="$(find tarball-extract -type f -name 'koldstore.control' | head -n 1)"
-          if [[ -z "${SO}" || -z "${CONTROL}" ]]; then
-            echo "::error::koldstore.so / koldstore.control missing from tarball." >&2
+          LICENSE_FILE="$(find tarball-extract -type f -name LICENSE | head -n 1)"
+          NOTICE_FILE="$(find tarball-extract -type f -name NOTICE | head -n 1)"
+          NOTICES="$(find tarball-extract -type f -name THIRD_PARTY_NOTICES.html | head -n 1)"
+          if [[ -z "${SO}" || -z "${CONTROL}" || -z "${LICENSE_FILE}" || -z "${NOTICE_FILE}" || -z "${NOTICES}" ]]; then
+            echo "::error::Release tarball is missing an extension artifact or required license notice." >&2
             find tarball-extract -type f | sort >&2 || true
             exit 1
           fi
 
           cp "${SO}" docker-artifacts/koldstore.so
           cp "${CONTROL}" docker-artifacts/koldstore.control
+          cp "${LICENSE_FILE}" docker-artifacts/LICENSE
+          cp "${NOTICE_FILE}" docker-artifacts/NOTICE
+          cp "${NOTICES}" docker-artifacts/THIRD_PARTY_NOTICES.html
           find "$(dirname "${CONTROL}")" -type f -name 'koldstore--*.sql' -exec cp {} docker-artifacts/ \;
 
-          echo "=== docker-artifacts (${ARCH}) ==="
+          echo "=== docker-artifacts (pg${PG_MAJOR}/${ARCH}) ==="
           ls -lh docker-artifacts/
           file docker-artifacts/koldstore.so || true
 
@@ -680,7 +768,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           provenance: false
           build-args: |
-            PG_MAJOR=${{ env.DOCKER_PG_MAJOR }}
+            PG_MAJOR=${{ matrix.pg_major }}
             OCI_IMAGE_DESCRIPTION=${{ steps.vars.outputs.description }}
           labels: |
             org.opencontainers.image.title=pg-koldstore
@@ -700,21 +788,22 @@ jobs:
           IMAGE="${{ steps.vars.outputs.docker_repo }}:${{ steps.vars.outputs.candidate_arch_tag }}"
           docker pull --platform "${{ matrix.platform }}" "${IMAGE}"
           chmod +x docker/test-release-image.sh
-          ./docker/test-release-image.sh "${IMAGE}" 2>&1 | tee "pg-docker-smoke-${{ matrix.arch }}.txt"
+          ./docker/test-release-image.sh "${IMAGE}" 2>&1 | tee "pg-docker-smoke-pg${{ matrix.pg_major }}-${{ matrix.arch }}.txt"
 
       - name: Upload Docker smoke-test log
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: pg-docker-smoke-${{ matrix.arch }}
-          path: pg-docker-smoke-${{ matrix.arch }}.txt
+          name: pg-docker-smoke-pg${{ matrix.pg_major }}-${{ matrix.arch }}
+          path: pg-docker-smoke-pg${{ matrix.pg_major }}-${{ matrix.arch }}.txt
           if-no-files-found: ignore
 
   docker_pg_manifest:
-    name: Promote multi-arch PG Docker image
+    name: "Promote PG${{ matrix.pg_major }} Docker image"
     runs-on: ubuntu-24.04
     needs:
       - read_version
+      - docker_matrix
       - docker_pg
     if: >-
       ${{
@@ -722,11 +811,17 @@ jobs:
         always() &&
         !cancelled() &&
         !failure() &&
+        needs.docker_matrix.result == 'success' &&
         needs.docker_pg.result == 'success'
       }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.docker_matrix.outputs.promote) }}
     env:
       DOCKER_REPO_INPUT: ${{ inputs.docker_repo }}
       GHCR_IMAGE_INPUT: ${{ inputs.ghcr_image }}
+      DOCKER_PG_MAJOR: ${{ matrix.pg_major }}
     steps:
       - uses: actions/checkout@v7
 
@@ -737,16 +832,20 @@ jobs:
           set -euo pipefail
           VERSION="${{ needs.read_version.outputs.version }}"
           SHORT_SHA="${GITHUB_SHA:0:7}"
+          PG_MAJOR="${DOCKER_PG_MAJOR}"
           DOCKER_REPO="${DOCKER_REPO_INPUT:-jamals86/pg-koldstore}"
           GHCR_IMAGE="${GHCR_IMAGE_INPUT:-ghcr.io/kalamdb/pg-koldstore}"
-          CANDIDATE_TAG="${VERSION}-pg${DOCKER_PG_MAJOR}-ci-${SHORT_SHA}"
-          DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly."
+          CANDIDATE_TAG="${VERSION}-pg${PG_MAJOR}-ci-${SHORT_SHA}"
+          DESCRIPTION="PostgreSQL ${PG_MAJOR} with koldstore preinstalled for trying KoldStore quickly."
           {
             echo "docker_repo=${DOCKER_REPO}"
             echo "ghcr_image=${GHCR_IMAGE}"
             echo "candidate_tag=${CANDIDATE_TAG}"
-            echo "version_tag=${VERSION}-pg${DOCKER_PG_MAJOR}"
+            echo "version_tag=${VERSION}-pg${PG_MAJOR}"
+            echo "pg_major_tag=pg${PG_MAJOR}"
             echo "latest_tag=latest"
+            echo "promote_latest=${{ matrix.promote_latest }}"
+            echo "arches=${{ matrix.arches }}"
             echo "description=${DESCRIPTION}"
           } >> "$GITHUB_OUTPUT"
 
@@ -766,7 +865,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Promote validated multi-arch tags
+      - name: Promote validated tags
         shell: bash
         run: |
           set -euo pipefail
@@ -774,28 +873,56 @@ jobs:
           GHCR_IMAGE="${{ steps.vars.outputs.ghcr_image }}"
           CANDIDATE="${{ steps.vars.outputs.candidate_tag }}"
           VERSION_TAG="${{ steps.vars.outputs.version_tag }}"
+          PG_MAJOR_TAG="${{ steps.vars.outputs.pg_major_tag }}"
           LATEST_TAG="${{ steps.vars.outputs.latest_tag }}"
+          PROMOTE_LATEST="${{ steps.vars.outputs.promote_latest }}"
+          ARCHES="${{ steps.vars.outputs.arches }}"
 
-          # Single-arch candidates from docker_pg → multi-arch indexes.
+          hub_tags=(
+            -t "${HUB_REPO}:${CANDIDATE}"
+            -t "${HUB_REPO}:${VERSION_TAG}"
+            -t "${HUB_REPO}:${PG_MAJOR_TAG}"
+          )
+          ghcr_tags=(
+            -t "${GHCR_IMAGE}:${CANDIDATE}"
+            -t "${GHCR_IMAGE}:${VERSION_TAG}"
+            -t "${GHCR_IMAGE}:${PG_MAJOR_TAG}"
+          )
+          if [[ "${PROMOTE_LATEST}" == "true" ]]; then
+            hub_tags+=(-t "${HUB_REPO}:${LATEST_TAG}")
+            ghcr_tags+=(-t "${GHCR_IMAGE}:${LATEST_TAG}")
+          fi
+
+          hub_sources=()
+          ghcr_sources=()
+          for arch in ${ARCHES}; do
+            hub_sources+=("${HUB_REPO}:${CANDIDATE}-${arch}")
+            ghcr_sources+=("${GHCR_IMAGE}:${CANDIDATE}-${arch}")
+          done
+
+          # Per-arch candidates from docker_pg → published indexes (1+ platforms).
           docker buildx imagetools create \
-            -t "${HUB_REPO}:${CANDIDATE}" \
-            -t "${HUB_REPO}:${VERSION_TAG}" \
-            -t "${HUB_REPO}:${LATEST_TAG}" \
-            "${HUB_REPO}:${CANDIDATE}-amd64" \
-            "${HUB_REPO}:${CANDIDATE}-arm64"
+            "${hub_tags[@]}" \
+            "${hub_sources[@]}"
 
           docker buildx imagetools create \
-            -t "${GHCR_IMAGE}:${CANDIDATE}" \
-            -t "${GHCR_IMAGE}:${VERSION_TAG}" \
-            -t "${GHCR_IMAGE}:${LATEST_TAG}" \
-            "${GHCR_IMAGE}:${CANDIDATE}-amd64" \
-            "${GHCR_IMAGE}:${CANDIDATE}-arm64"
+            "${ghcr_tags[@]}" \
+            "${ghcr_sources[@]}"
 
-          echo "::notice::Published multi-arch ${HUB_REPO}:{${CANDIDATE},${VERSION_TAG},${LATEST_TAG}}"
-          echo "::notice::Published multi-arch ${GHCR_IMAGE}:{${CANDIDATE},${VERSION_TAG},${LATEST_TAG}}"
-          docker buildx imagetools inspect "${HUB_REPO}:${LATEST_TAG}"
+          published="${CANDIDATE},${VERSION_TAG},${PG_MAJOR_TAG}"
+          if [[ "${PROMOTE_LATEST}" == "true" ]]; then
+            published+=",${LATEST_TAG}"
+          fi
+          echo "::notice::Published ${HUB_REPO}:{${published}} from arches [${ARCHES}]"
+          echo "::notice::Published ${GHCR_IMAGE}:{${published}} from arches [${ARCHES}]"
+          if [[ "${PROMOTE_LATEST}" == "true" ]]; then
+            docker buildx imagetools inspect "${HUB_REPO}:${LATEST_TAG}"
+          else
+            docker buildx imagetools inspect "${HUB_REPO}:${VERSION_TAG}"
+          fi
 
       - name: Update Docker Hub repository overview
+        if: matrix.promote_latest
         uses: peter-evans/dockerhub-description@v5
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}

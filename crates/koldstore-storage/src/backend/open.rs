@@ -8,7 +8,9 @@ use crate::client::{
 
 use super::azure::open_azure_client;
 use super::config::BackendConfig;
-use super::fs::{ensure_filesystem_base_prepared, parse_filesystem_root};
+use super::fs::{
+    ensure_filesystem_base_empty, ensure_filesystem_base_prepared, parse_filesystem_root,
+};
 use super::gcs::open_gcs_client;
 use super::kind::StorageBackendKind;
 use super::s3::open_s3_client;
@@ -115,14 +117,19 @@ pub fn open_filesystem_client(base_path: impl AsRef<str>) -> StorageResult<Objec
 /// Verifies a storage backend can open and complete a put/delete probe.
 ///
 /// Used by `register_storage` / `alter_storage_location` when `check => true`
-/// (default). For filesystem backends, creates `base_path` first. For every
-/// backend, writes then deletes [`STORAGE_WRITE_PROBE_KEY`] through the same
-/// `object_store` client path flush will use.
+/// (default). For filesystem backends, creates `base_path` when needed and
+/// fails when the directory is already non-empty. For every backend, writes
+/// then deletes [`STORAGE_WRITE_PROBE_KEY`] through the same `object_store`
+/// client path flush will use.
+///
+/// Pass `check => false` from SQL to skip both the emptiness requirement and
+/// the writability probe.
 ///
 /// # Errors
 ///
-/// Returns an error when the client cannot be constructed or the probe write /
-/// delete fails (permissions, credentials, network, missing bucket, …).
+/// Returns an error when the filesystem root is non-empty, the client cannot
+/// be constructed, or the probe write / delete fails (permissions, credentials,
+/// network, missing bucket, …).
 pub fn ensure_storage_backend_writable(
     storage_type: &str,
     base_path: &str,
@@ -133,6 +140,7 @@ pub fn ensure_storage_backend_writable(
         .map_err(|message| StorageClientError::InvalidPath { message })?;
     if kind == StorageBackendKind::Filesystem {
         ensure_filesystem_base_prepared(base_path)?;
+        ensure_filesystem_base_empty(base_path)?;
     }
 
     let client = open_client_from_catalog_fields(storage_type, base_path, credentials, config)
@@ -181,5 +189,24 @@ mod tests {
         .expect("writable");
         let client = open_filesystem_client(path.to_str().unwrap()).unwrap();
         assert!(client.head(STORAGE_WRITE_PROBE_KEY).is_err());
+    }
+
+    #[test]
+    fn ensure_storage_backend_writable_rejects_nonempty_filesystem_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cold");
+        std::fs::create_dir_all(&path).expect("mkdir");
+        std::fs::write(path.join("existing"), b"data").expect("write");
+        let err = ensure_storage_backend_writable(
+            "filesystem",
+            path.to_str().unwrap(),
+            &serde_json::json!({}),
+            &serde_json::json!({}),
+        )
+        .expect_err("non-empty filesystem root must fail check");
+        let message = err.to_string();
+        assert!(message.contains("is not empty"), "got: {message}");
+        assert!(message.contains("check => false"), "got: {message}");
+        assert!(message.contains("existing"), "got: {message}");
     }
 }

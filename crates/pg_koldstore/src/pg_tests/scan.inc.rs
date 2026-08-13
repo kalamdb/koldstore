@@ -390,7 +390,6 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         "Bytes Fetched",
         "Runtime Catalog Source",
         "Published Manifest Path",
-        "Cold Segments Query",
     ] {
         assert!(
             plan.contains(needle),
@@ -398,7 +397,10 @@ fn explain_analyze_shows_prune_summary_after_flush() {
         );
     }
     assert!(
-        !plan.contains("Timing:") && !plan.contains("Cold Read Time"),
+        !plan.contains("Timing:")
+            && !plan.contains("Cold Read Time")
+            && !plan.contains("Cold Segments Query:")
+            && !plan.contains("Parquet Segments:"),
         "TIMING OFF must suppress custom phase timing like native PostgreSQL nodes: {plan}"
     );
 }
@@ -446,6 +448,9 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
         "Metadata Time",
         "Hot Scan Time",
         "Cold Read Time",
+        "Parquet Open Time",
+        "Object Store Read Time",
+        "Parquet Scan Time",
         "Mirror Scan Time",
         "Merge Time",
         "Materialization Time",
@@ -479,6 +484,24 @@ fn explain_analyze_shows_scan_merge_flow_and_phase_timing() {
     assert!(
         !plan.contains("SPI JSON Keyset Scan") && !plan.contains("to_jsonb(proj)"),
         "Ordered Progressive must not use SPI JSON keyset hot paging: {plan}"
+    );
+    assert!(
+        !plan.contains("Cold Segments Query:")
+            && !plan.contains("Segment Index Query:")
+            && !plan.contains("Parquet Segments:")
+            && !plan.contains("Object:"),
+        "ordinary EXPLAIN must keep raw SQL and per-file diagnostics compact: {plan}"
+    );
+
+    let verbose = spi_get_explain(&format!(
+        "EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, SUMMARY OFF) \
+         SELECT body FROM {relation} ORDER BY id DESC LIMIT 5"
+    ));
+    assert!(
+        verbose.contains("Cold Segments Query:")
+            && verbose.contains("Parquet Segments:")
+            && verbose.contains("Object:"),
+        "EXPLAIN VERBOSE must retain raw catalog SQL and per-file diagnostics: {verbose}"
     );
 }
 
@@ -599,8 +622,8 @@ fn explain_analyze_counts_mirror_overlay_rows() {
     // this same transaction still conflicts in the heap's unique index. Seed
     // the post-flush mirror state directly to isolate EXPLAIN's overlay metrics.
     Spi::run(&format!(
-        "INSERT INTO {mirror} (id, seq, op) \
-         SELECT 2, last_flush_seq + 1, 3 \
+        "INSERT INTO {mirror} (id, order_key, seq, op) \
+         SELECT 2, koldstore.internal_encode_sort_key(2::bigint), last_flush_seq + 1, 3 \
          FROM koldstore.schemas \
          WHERE table_oid = '{relation}'::regclass AND active"
     ))
@@ -1198,6 +1221,51 @@ fn merge_scan_fails_closed_when_seen_key_limit_is_exceeded() {
         "#
     ))
     .expect("seen-key limit must fail closed with a clear error");
+    // Same backend must remain usable: portal ERROR skips EndCustomScan, so
+    // SCAN_STATES abort scrub must disown ScanMemory instead of double-freeing.
+    let still_alive = Spi::get_one::<i64>("SELECT 1").expect("spi").expect("row");
+    assert_eq!(still_alive, 1);
+    let recount = Spi::get_one::<i64>(&format!(
+        "SELECT count(*) FROM {relation} WHERE id = 1"
+    ))
+    .expect("point lookup after seen-key error")
+    .expect("row");
+    assert_eq!(recount, 1);
+    Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
+}
+
+#[pg_test]
+fn merge_scan_survives_followup_query_after_unbounded_count() {
+    let suffix = unique_suffix("seen_unlimited");
+    let schema = format!("pgtest_{suffix}");
+    let table = "messages";
+    let relation = format!("{schema}.{table}");
+    let storage = register_temp_storage(&suffix);
+
+    create_messages_table(&schema, table);
+    Spi::run(&format!(
+        "INSERT INTO {relation} (id, body)
+         SELECT gs, 'body-' || gs::text
+         FROM generate_series(1, 400) AS gs"
+    ))
+    .expect("insert");
+    manage_for_cold_flush(&relation, &storage);
+    let flushed = flush_table_rows(&relation, true);
+    assert!(flushed >= 300, "expected cold rows, rows_flushed={flushed}");
+
+    Spi::run("SET koldstore.max_merge_seen_keys = 0").expect("disable seen-key cap");
+    let total = Spi::get_one::<i64>(&format!("SELECT count(*) FROM {relation}"))
+        .expect("unbounded count")
+        .expect("row");
+    assert_eq!(total, 400);
+    // Regression: large merge-scan teardown used to double-free on the next
+    // statement in the same backend (signal 6 / glibc abort).
+    let followup = Spi::get_one::<i64>(&format!("SELECT id FROM {relation} WHERE id = 42"))
+        .expect("follow-up point lookup")
+        .expect("row");
+    assert_eq!(followup, 42);
+    let alive = Spi::get_one::<i64>("SELECT 1").expect("spi").expect("row");
+    assert_eq!(alive, 1);
     Spi::run("RESET koldstore.max_merge_seen_keys").expect("reset seen-key limit");
 }
 
@@ -1256,6 +1324,58 @@ fn ordered_pk_limit_uses_kold_merge_scan_without_external_sort() {
     assert!(
         !native_plan.contains("KoldMergeScan") && !native_plan.contains("Custom Scan"),
         "empty cold must keep native plans: {native_plan}"
+    );
+}
+
+#[pg_test]
+fn migration_order_defaults_to_segment_order_for_ordered_cold_reads() {
+    let suffix = unique_suffix("migration_order_segment_order");
+    let schema = format!("pgtest_{suffix}");
+    let relation = format!("{schema}.messages");
+    let storage = register_temp_storage(&suffix);
+
+    Spi::run(&format!(
+        "CREATE SCHEMA {schema}; \
+         CREATE TABLE {relation} (\
+           id bigint PRIMARY KEY, \
+           created_at timestamptz NOT NULL, \
+           body text NOT NULL\
+         ); \
+         CREATE INDEX messages_created_at_idx ON {relation} (created_at DESC); \
+         INSERT INTO {relation} (id, created_at, body) VALUES \
+           (1, '2026-01-01 00:00:00+00', 'old'), \
+           (2, '2026-01-02 00:00:00+00', 'new')"
+    ))
+    .expect("create and seed ordered fixture");
+    Spi::run(&format!(
+        "SELECT koldstore.manage_table(\
+           table_name => '{relation}'::regclass, \
+           storage => '{storage}', \
+           hot_row_limit => 1, \
+           min_flush_rows => 1, \
+           max_rows_per_file => 1000, \
+           migration_order_by => 'created_at'\
+         )"
+    ))
+    .expect("manage with migration order only");
+    assert!(flush_table_rows(&relation, true) >= 2);
+
+    assert_eq!(
+        spi_get_i64(&format!(
+            "SELECT (options->>'segment_order_column_id')::bigint \
+             FROM koldstore.schemas \
+             WHERE table_oid = '{relation}'::regclass AND active"
+        )),
+        2,
+        "migration order must persist as the cold segment order"
+    );
+    let plan = spi_get_explain(&format!(
+        "EXPLAIN (COSTS OFF) \
+         SELECT body FROM {relation} ORDER BY created_at DESC LIMIT 1"
+    ));
+    assert!(
+        plan.contains("Strategy: Ordered Progressive"),
+        "migration-order default must enable the ordered merge path: {plan}"
     );
 }
 
@@ -1608,4 +1728,3 @@ fn unordered_limit_uses_hot_first_and_defers_cold() {
         "hot-first LIMIT should return hot bodies before opening cold: {bodies}"
     );
 }
-

@@ -155,7 +155,8 @@ requirement so a surviving slot is never abandoned.
   there only after WAL apply has written `__cl`.
 - Call `wait_for_async_mirror()` before a read that requires an exact catch-up
   boundary. Background apply is normally latch-driven and sub-second; the fence
-  is the strong consistency API.
+  covers committed WAL through a captured boundary. It cannot observe the
+  caller's uncommitted changes or advance a snapshot acquired before the call.
 - Automatic flush is optional (`auto_flush`). Latency-sensitive change-feed
   consumers often manage tables with `auto_flush => false` and call
   `flush_table` deliberately so finalize windows are predictable. Auto-flush

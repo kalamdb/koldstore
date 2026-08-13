@@ -1,6 +1,6 @@
 //! Thin wrappers around shared e2e helpers used by the stress harness.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tokio_postgres::Client;
 
 use crate::e2e;
@@ -39,40 +39,74 @@ pub async fn wait_for_jobs(client: &Client, relation: &str) -> Result<()> {
 
 /// Force-flushes a managed table and returns rows_flushed from the job row.
 ///
+/// Retries when finalize loses the slot/apply lock race to the busy async
+/// applier (same contract as e2e `flush_table_with_force`).
+///
 /// # Errors
 ///
-/// Returns an error when enqueue/flush/job lookup fails or the job failed.
+/// Returns an error when enqueue/flush/job lookup fails or the job failed
+/// after slot-lock retries.
 pub async fn force_flush_table(client: &Client, relation: &str) -> Result<i64> {
     wait_for_jobs(client, relation).await?;
     e2e::fence_async_mirror(client).await?;
-    let job_id = e2e::flush_table_job_id(client, relation, true)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "flush_table returned NULL for {relation} (force=true); \
-                 expected force flush to enqueue work"
-            )
-        })?;
-    let flushed = e2e::wait_for_flush_job_terminal(client, &job_id).await?;
-    wait_for_jobs(client, relation).await?;
-    Ok(flushed)
+    let mut last_slot_busy: Option<anyhow::Error> = None;
+    for attempt in 1..=8 {
+        let job_id = e2e::flush_table_job_id(client, relation, true)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "flush_table returned NULL for {relation} (force=true); \
+                     expected force flush to enqueue work"
+                )
+            })?;
+        match e2e::wait_for_flush_job_terminal(client, &job_id).await {
+            Ok(flushed) => {
+                wait_for_jobs(client, relation).await?;
+                return Ok(flushed);
+            }
+            Err(error) if e2e::is_flush_slot_lock_contention(&error) => {
+                last_slot_busy = Some(error);
+                let _ = e2e::fence_async_mirror(client).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_slot_busy.expect("retry loop always records a slot-lock error")).context(format!(
+        "force flush still blocked by slot lock after retries for {relation}"
+    ))
 }
 
 /// Policy flush (non-force) returning rows_flushed.
 ///
 /// Returns `0` when policy has no due work (`flush_table` returns NULL).
+/// Retries when finalize loses the slot/apply lock race to the busy async
+/// applier under soak write load (same contract as e2e `flush_table_with_force`).
 ///
 /// # Errors
 ///
-/// Returns an error when flush or job lookup fails.
+/// Returns an error when flush or job lookup fails after slot-lock retries.
 pub async fn flush_table(client: &Client, relation: &str) -> Result<i64> {
-    // Policy flush decides from mirror pending counts; catch up WAL apply so
-    // recently committed DML is visible to the due check.
-    e2e::fence_async_mirror(client).await?;
-    let Some(job_id) = e2e::flush_table_job_id(client, relation, false).await? else {
-        return Ok(0);
-    };
-    e2e::wait_for_flush_job_terminal(client, &job_id).await
+    // Queue flush executors perform their own bounded catch-up. Do not run the
+    // strong foreground fence here: under continuous ingest it holds the
+    // database apply lock while draining a large backlog and starves finalize.
+    let mut last_slot_busy: Option<anyhow::Error> = None;
+    for attempt in 1..=8 {
+        let Some(job_id) = e2e::flush_table_job_id(client, relation, false).await? else {
+            return Ok(0);
+        };
+        match e2e::wait_for_flush_job_terminal(client, &job_id).await {
+            Ok(rows) => return Ok(rows),
+            Err(error) if e2e::is_flush_slot_lock_contention(&error) => {
+                last_slot_busy = Some(error);
+                tokio::time::sleep(std::time::Duration::from_millis(50 * attempt as u64)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_slot_busy.expect("retry loop always records a slot-lock error")).context(format!(
+        "flush_table still blocked by slot lock after retries for {relation}"
+    ))
 }
 
 /// Registers a user-scoped managed table with aggressive small-file flush policy.

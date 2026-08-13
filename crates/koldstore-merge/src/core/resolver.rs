@@ -23,7 +23,8 @@ pub struct ResolvedRow {
 }
 
 struct Candidate {
-    pk_json: Option<serde_json::Value>,
+    /// Retained only by streaming batches, then encoded for emitted winners.
+    pk: Option<LogicalPk>,
     source: RowSource,
     seq: SeqId,
     deleted: bool,
@@ -32,16 +33,13 @@ struct Candidate {
 
 impl Candidate {
     fn beats(&self, other: &Self) -> bool {
-        self.seq > other.seq
-            || (self.seq == other.seq
-                && self.source == RowSource::Hot
-                && other.source == RowSource::Cold)
+        candidate_beats(self.seq, self.source, other.seq, other.source)
     }
 
     fn into_resolved(mut self, pk_json: Option<serde_json::Value>) -> ResolvedRow {
         ResolvedRow {
             pk_json: pk_json
-                .or_else(|| self.pk_json.take())
+                .or_else(|| self.pk.take().map(|pk| pk.to_canonical_json()))
                 .expect("resolved candidates require canonical PK JSON"),
             source: self.source,
             seq: self.seq,
@@ -51,10 +49,76 @@ impl Candidate {
     }
 }
 
-/// Resolves hot and cold rows (borrowed inputs; clones row images).
+struct BorrowedCandidate<'a> {
+    source: RowSource,
+    seq: SeqId,
+    deleted: bool,
+    row_image: &'a RowImage,
+}
+
+impl BorrowedCandidate<'_> {
+    fn beats(&self, other: &Self) -> bool {
+        candidate_beats(self.seq, self.source, other.seq, other.source)
+    }
+
+    fn to_resolved(&self, pk: &LogicalPk) -> ResolvedRow {
+        ResolvedRow {
+            pk_json: pk.to_canonical_json(),
+            source: self.source,
+            seq: self.seq,
+            row_image: self.row_image.clone(),
+            deleted: self.deleted,
+        }
+    }
+}
+
+fn candidate_beats(
+    candidate_seq: SeqId,
+    candidate_source: RowSource,
+    current_seq: SeqId,
+    current_source: RowSource,
+) -> bool {
+    candidate_seq > current_seq
+        || (candidate_seq == current_seq
+            && candidate_source == RowSource::Hot
+            && current_source == RowSource::Cold)
+}
+
+/// Resolves borrowed hot and cold rows, cloning payloads only for final winners.
 #[must_use]
 pub fn resolve_rows(hot: &[HotRow], cold: &[ColdRow]) -> Vec<ResolvedRow> {
-    resolve_rows_owned(hot.to_vec(), cold.to_vec())
+    let mut winners: HashMap<&LogicalPk, BorrowedCandidate<'_>> =
+        HashMap::with_capacity(hot.len().max(cold.len()));
+    for row in cold {
+        insert_borrowed_candidate(
+            &mut winners,
+            &row.pk,
+            BorrowedCandidate {
+                source: RowSource::Cold,
+                seq: row.seq,
+                deleted: row.deleted,
+                row_image: &row.row_image,
+            },
+        );
+    }
+    for row in hot {
+        insert_borrowed_candidate(
+            &mut winners,
+            &row.pk,
+            BorrowedCandidate {
+                source: RowSource::Hot,
+                seq: row.seq,
+                deleted: row.deleted,
+                row_image: &row.row_image,
+            },
+        );
+    }
+
+    winners
+        .into_iter()
+        .filter(|(_, winner)| !winner.deleted)
+        .map(|(pk, winner)| winner.to_resolved(pk))
+        .collect()
 }
 
 /// Resolves hot and cold rows, taking ownership to avoid per-candidate image clones.
@@ -63,44 +127,33 @@ pub fn resolve_rows(hot: &[HotRow], cold: &[ColdRow]) -> Vec<ResolvedRow> {
 /// when winners leave the merge for the SQL/API boundary.
 #[must_use]
 pub fn resolve_rows_owned(hot: Vec<HotRow>, cold: Vec<ColdRow>) -> Vec<ResolvedRow> {
-    let mut winners: HashMap<LogicalPk, Candidate> = HashMap::new();
+    let mut winners: HashMap<LogicalPk, Candidate> =
+        HashMap::with_capacity(hot.len().max(cold.len()));
     for row in cold {
-        let candidate = Candidate {
-            pk_json: None,
-            source: RowSource::Cold,
-            seq: row.seq,
-            deleted: row.deleted,
-            row_image: row.row_image,
-        };
-        match winners.entry(row.pk) {
-            Entry::Vacant(slot) => {
-                slot.insert(candidate);
-            }
-            Entry::Occupied(mut slot) => {
-                if candidate.beats(slot.get()) {
-                    slot.insert(candidate);
-                }
-            }
-        }
+        insert_owned_candidate(
+            &mut winners,
+            row.pk,
+            Candidate {
+                pk: None,
+                source: RowSource::Cold,
+                seq: row.seq,
+                deleted: row.deleted,
+                row_image: row.row_image,
+            },
+        );
     }
     for row in hot {
-        let candidate = Candidate {
-            pk_json: None,
-            source: RowSource::Hot,
-            seq: row.seq,
-            deleted: row.deleted,
-            row_image: row.row_image,
-        };
-        match winners.entry(row.pk) {
-            Entry::Vacant(slot) => {
-                slot.insert(candidate);
-            }
-            Entry::Occupied(mut slot) => {
-                if candidate.beats(slot.get()) {
-                    slot.insert(candidate);
-                }
-            }
-        }
+        insert_owned_candidate(
+            &mut winners,
+            row.pk,
+            Candidate {
+                pk: None,
+                source: RowSource::Hot,
+                seq: row.seq,
+                deleted: row.deleted,
+                row_image: row.row_image,
+            },
+        );
     }
 
     winners
@@ -174,27 +227,9 @@ impl NewestFirstWinnerResolver {
         &mut self,
         rows: Vec<HotRow>,
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
-        let mut winners = HashMap::with_capacity(rows.len());
-        let mut order = Vec::with_capacity(rows.len());
-        for row in rows {
-            let identity = row.pk.clone().into_values();
-            let is_new = !winners.contains_key(&identity);
-            insert_candidate(
-                &mut winners,
-                row.pk,
-                Candidate {
-                    pk_json: None,
-                    source: RowSource::Hot,
-                    seq: row.seq,
-                    deleted: row.deleted,
-                    row_image: row.row_image,
-                },
-            );
-            if is_new {
-                order.push(identity);
-            }
-        }
-        self.take_unseen_ordered(winners, order)
+        self.resolve_batch(rows, RowSource::Hot, |row| {
+            (row.pk, row.seq, row.deleted, row.row_image)
+        })
     }
 
     /// Resolves one cold batch older than every previously supplied batch.
@@ -204,20 +239,31 @@ impl NewestFirstWinnerResolver {
         &mut self,
         rows: Vec<ColdRow>,
     ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
+        self.resolve_batch(rows, RowSource::Cold, |row| {
+            (row.pk, row.seq, row.deleted, row.row_image)
+        })
+    }
+
+    fn resolve_batch<R>(
+        &mut self,
+        rows: Vec<R>,
+        source: RowSource,
+        into_parts: impl Fn(R) -> (LogicalPk, SeqId, bool, RowImage),
+    ) -> Result<Vec<ResolvedRow>, SeenKeyLimitExceeded> {
         let mut winners = HashMap::with_capacity(rows.len());
         let mut order = Vec::with_capacity(rows.len());
         for row in rows {
-            let identity = row.pk.clone().into_values();
-            let is_new = !winners.contains_key(&identity);
-            insert_candidate(
+            let (pk, seq, deleted, row_image) = into_parts(row);
+            let identity = pk.clone().into_values();
+            let is_new = insert_candidate(
                 &mut winners,
-                row.pk,
+                identity.clone(),
                 Candidate {
-                    pk_json: None,
-                    source: RowSource::Cold,
-                    seq: row.seq,
-                    deleted: row.deleted,
-                    row_image: row.row_image,
+                    pk: Some(pk),
+                    source,
+                    seq,
+                    deleted,
+                    row_image,
                 },
             );
             if is_new {
@@ -300,13 +346,12 @@ impl NewestFirstWinnerResolver {
     }
 }
 
-fn insert_candidate(
-    winners: &mut HashMap<LogicalPkValues, Candidate>,
-    pk: LogicalPk,
-    mut candidate: Candidate,
+fn insert_borrowed_candidate<'a>(
+    winners: &mut HashMap<&'a LogicalPk, BorrowedCandidate<'a>>,
+    pk: &'a LogicalPk,
+    candidate: BorrowedCandidate<'a>,
 ) {
-    candidate.pk_json = Some(pk.to_canonical_json());
-    match winners.entry(pk.into_values()) {
+    match winners.entry(pk) {
         Entry::Vacant(slot) => {
             slot.insert(candidate);
         }
@@ -314,6 +359,42 @@ fn insert_candidate(
             if candidate.beats(slot.get()) {
                 slot.insert(candidate);
             }
+        }
+    }
+}
+
+fn insert_owned_candidate(
+    winners: &mut HashMap<LogicalPk, Candidate>,
+    pk: LogicalPk,
+    candidate: Candidate,
+) {
+    match winners.entry(pk) {
+        Entry::Vacant(slot) => {
+            slot.insert(candidate);
+        }
+        Entry::Occupied(mut slot) => {
+            if candidate.beats(slot.get()) {
+                slot.insert(candidate);
+            }
+        }
+    }
+}
+
+fn insert_candidate(
+    winners: &mut HashMap<LogicalPkValues, Candidate>,
+    identity: LogicalPkValues,
+    candidate: Candidate,
+) -> bool {
+    match winners.entry(identity) {
+        Entry::Vacant(slot) => {
+            slot.insert(candidate);
+            true
+        }
+        Entry::Occupied(mut slot) => {
+            if candidate.beats(slot.get()) {
+                slot.insert(candidate);
+            }
+            false
         }
     }
 }

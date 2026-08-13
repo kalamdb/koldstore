@@ -95,6 +95,11 @@ KOLDSTORE_BENCH_START_PGRX=0 ./benchmarks/scripts/run.sh
 That server must have `wal_level=logical` and `shared_preload_libraries` including
 `koldstore` (restart required after changing either).
 
+When `KOLDSTORE_BENCH_START_PGRX=0`, cold storage defaults to
+`${TMPDIR:-/tmp}/koldstore-bench-cold` so a packaged `postgres` OS user can write
+Parquet (workspace paths under `/home/runner/…` fail with permission denied).
+Override with `KOLDSTORE_BENCH_STORAGE_ROOT` if needed.
+
 ## Run Only Criterion
 
 ```bash

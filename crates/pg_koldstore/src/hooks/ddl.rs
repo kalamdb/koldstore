@@ -1,11 +1,12 @@
 //! DDL and ProcessUtility integration for KoldStore table options.
 //!
-//! DROP TABLE cleanup planning lives in `koldstore-migrate`; this module
+//! DROP cleanup planning lives in `koldstore-migrate`; this module
 //! re-exports those plans for the extension shell and installs the live
 //! ProcessUtility hook used for `ALTER TABLE … SET/RESET` KoldStore options
-//! and managed `DROP TABLE` teardown. Managed-table schema changes (including
-//! `RENAME COLUMN`) also refresh catalog metadata and rename-sensitive runtime
-//! artifacts so DML keeps working without waiting for the next flush.
+//! and managed `DROP TABLE` / `DROP SCHEMA … CASCADE` teardown. Managed-table
+//! schema changes (including `RENAME COLUMN`) also refresh catalog metadata and
+//! rename-sensitive runtime artifacts so DML keeps working without waiting for
+//! the next flush.
 
 pub use koldstore_migrate::drop_table::{
     plan_drop_table_cleanup, DropTableCleanupError, DropTableCleanupOutcome, DropTableCleanupPlan,
@@ -14,6 +15,7 @@ pub use koldstore_migrate::drop_table::{
 
 #[cfg(feature = "pg")]
 mod process_utility {
+    use std::cell::Cell;
     use std::collections::HashMap;
     use std::ffi::CStr;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +28,34 @@ mod process_utility {
 
     static REGISTERED: AtomicBool = AtomicBool::new(false);
     static mut PREVIOUS: pg_sys::ProcessUtility_hook_type = None;
+
+    // Nesting counter so demigrate/unmanage can TRUNCATE the heap while rebuilding
+    // it, without opening a hole for user-issued TRUNCATE on managed tables.
+    thread_local! {
+        static ALLOW_MANAGED_TRUNCATE: Cell<u32> = const { Cell::new(0) };
+    }
+
+    /// RAII guard that permits managed-table TRUNCATE for demigrate rehydrate.
+    pub(crate) struct AllowManagedTruncateGuard;
+
+    impl AllowManagedTruncateGuard {
+        /// Enters a demigrate/unmanage scope that may issue internal TRUNCATE.
+        #[must_use]
+        pub(crate) fn enter() -> Self {
+            ALLOW_MANAGED_TRUNCATE.with(|depth| depth.set(depth.get().saturating_add(1)));
+            Self
+        }
+    }
+
+    impl Drop for AllowManagedTruncateGuard {
+        fn drop(&mut self) {
+            ALLOW_MANAGED_TRUNCATE.with(|depth| depth.set(depth.get().saturating_sub(1)));
+        }
+    }
+
+    fn managed_truncate_allowed() -> bool {
+        ALLOW_MANAGED_TRUNCATE.with(|depth| depth.get() > 0)
+    }
 
     pub(super) fn register() {
         if REGISTERED.swap(true, Ordering::AcqRel) {
@@ -55,7 +85,9 @@ mod process_utility {
             let mut captured = None;
             let mut has_standard_actions = true;
             let mut drop_oids = Vec::new();
+            let mut truncate_oids = Vec::new();
             let mut refresh_oid = None;
+            let mut renamed_schema = None;
             let mut copy_from_oid = None;
             if !copied.is_null() && !(*copied).utilityStmt.is_null() {
                 match (*(*copied).utilityStmt).type_ {
@@ -69,6 +101,14 @@ mod process_utility {
                         // `ALTER TABLE … RENAME COLUMN` is RenameStmt, not AlterTableStmt.
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::RenameStmt>();
                         refresh_oid = rename_stmt_relation_oid(stmt);
+                        renamed_schema = rename_stmt_schema_name(stmt);
+                    }
+                    pg_sys::NodeTag::T_AlterObjectSchemaStmt => {
+                        // `ALTER TABLE … SET SCHEMA` is neither AlterTableStmt nor RenameStmt.
+                        let stmt = (*copied)
+                            .utilityStmt
+                            .cast::<pg_sys::AlterObjectSchemaStmt>();
+                        refresh_oid = alter_object_schema_relation_oid(stmt);
                     }
                     pg_sys::NodeTag::T_DropStmt => {
                         let stmt = (*copied).utilityStmt.cast::<pg_sys::DropStmt>();
@@ -80,14 +120,26 @@ mod process_utility {
                             copy_from_oid = relation_oid_from_range_var((*stmt).relation);
                         }
                     }
+                    pg_sys::NodeTag::T_TruncateStmt => {
+                        let stmt = (*copied).utilityStmt.cast::<pg_sys::TruncateStmt>();
+                        truncate_oids = truncate_table_oids(stmt);
+                    }
                     _ => {}
                 }
             }
+            if !managed_truncate_allowed()
+                && truncate_oids
+                    .into_iter()
+                    .any(crate::catalog::cache::is_managed_relation)
+            {
+                pgrx::error!(
+                    "TRUNCATE is not supported for KoldStore-managed tables; use DELETE so WAL capture preserves hot/cold consistency"
+                );
+            }
             let mut mirrors = Vec::new();
             if !drop_oids.is_empty() {
-                mirrors = cleanup_managed_tables_before_drop(&drop_oids).unwrap_or_else(|error| {
-                    pgrx::error!("KoldStore DROP TABLE cleanup failed: {error}")
-                });
+                mirrors = cleanup_managed_tables_before_drop(&drop_oids)
+                    .unwrap_or_else(|error| pgrx::error!("KoldStore DROP cleanup failed: {error}"));
             }
             if has_standard_actions {
                 delegate(copied, query, read_only, context, params, env, dest, qc);
@@ -126,6 +178,17 @@ mod process_utility {
                             "KoldStore schema refresh after ALTER TABLE deferred: {error}"
                         );
                     }
+                }
+            }
+            if let Some(schema_name) = renamed_schema {
+                if crate::catalog::cache::managed_catalog_ready() {
+                    pg_sys::CommandCounterIncrement();
+                    crate::sql::migrate::sync_active_mirror_relation_names_in_schema(&schema_name)
+                        .unwrap_or_else(|error| {
+                            pgrx::error!(
+                                "KoldStore schema rename could not rehome managed mirrors: {error}"
+                            )
+                        });
                 }
             }
         }
@@ -260,6 +323,26 @@ mod process_utility {
         }
     }
 
+    /// Resolves every explicitly targeted relation before TRUNCATE executes.
+    unsafe fn truncate_table_oids(stmt: *mut pg_sys::TruncateStmt) -> Vec<pg_sys::Oid> {
+        unsafe {
+            if stmt.is_null() || (*stmt).relations.is_null() {
+                return Vec::new();
+            }
+            let relations = (*stmt).relations;
+            let mut oids = Vec::with_capacity((*relations).length as usize);
+            for index in 0..(*relations).length as usize {
+                let relation = (*(*relations).elements.add(index))
+                    .ptr_value
+                    .cast::<pg_sys::RangeVar>();
+                if let Some(oid) = relation_oid_from_range_var(relation) {
+                    oids.push(oid);
+                }
+            }
+            oids
+        }
+    }
+
     /// Resolves the table OID for column/table renames that need schema sync.
     unsafe fn rename_stmt_relation_oid(stmt: *mut pg_sys::RenameStmt) -> Option<pg_sys::Oid> {
         unsafe {
@@ -272,6 +355,29 @@ mod process_utility {
                 }
                 _ => None,
             }
+        }
+    }
+
+    /// Resolves the table OID for `ALTER TABLE … SET SCHEMA`.
+    unsafe fn alter_object_schema_relation_oid(
+        stmt: *mut pg_sys::AlterObjectSchemaStmt,
+    ) -> Option<pg_sys::Oid> {
+        unsafe {
+            if stmt.is_null() || (*stmt).objectType != pg_sys::ObjectType::OBJECT_TABLE {
+                return None;
+            }
+            relation_oid_from_range_var((*stmt).relation)
+        }
+    }
+
+    /// Returns the new schema name for a schema rename statement.
+    unsafe fn rename_stmt_schema_name(stmt: *mut pg_sys::RenameStmt) -> Option<String> {
+        unsafe {
+            if stmt.is_null() || (*stmt).renameType != pg_sys::ObjectType::OBJECT_SCHEMA {
+                return None;
+            }
+            let new_name = (*stmt).newname;
+            (!new_name.is_null()).then(|| CStr::from_ptr(new_name).to_string_lossy().into_owned())
         }
     }
 
@@ -292,6 +398,10 @@ mod process_utility {
 pub(crate) fn register_process_utility_hook() {
     process_utility::register();
 }
+
+/// Allows demigrate/unmanage SPI to TRUNCATE a still-managed heap safely.
+#[cfg(feature = "pg")]
+pub(crate) use process_utility::AllowManagedTruncateGuard;
 
 #[cfg(feature = "pg")]
 fn option_value<'a>(
@@ -361,6 +471,9 @@ fn ensure_initial_management(
         min,
         file,
         true,
+        None,
+        None,
+        None,
         None,
         None,
         None,
@@ -466,6 +579,41 @@ fn apply_flush_policy_updates(
 }
 
 #[cfg(feature = "pg")]
+fn apply_parquet_layout_updates(
+    options: &mut koldstore_common::ManageTableOptions,
+    values: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    if let Some(value) = option_value(values, "koldstore_parquet_row_group_size") {
+        let row_count = value
+            .parse::<u64>()
+            .map_err(|_| "parquet_row_group_size must be a positive integer")?;
+        if row_count == 0 {
+            return Err("parquet_row_group_size must be greater than zero".into());
+        }
+        *options = options.clone().with_parquet_row_group_size(row_count);
+    }
+    if let Some(value) = option_value(values, "koldstore_parquet_data_page_row_count_limit") {
+        let row_count = value
+            .parse::<u64>()
+            .map_err(|_| "parquet_data_page_row_count_limit must be a positive integer")?;
+        if row_count == 0 {
+            return Err("parquet_data_page_row_count_limit must be greater than zero".into());
+        }
+        *options = options
+            .clone()
+            .with_parquet_data_page_row_count_limit(row_count);
+    }
+    if let Some(value) = option_value(values, "koldstore_parquet_bloom_filter_fpp") {
+        let fpp = value
+            .parse::<f64>()
+            .map_err(|_| "parquet_bloom_filter_fpp must be greater than 0 and less than 1")?;
+        let fpp = koldstore_common::ParquetBloomFilterFpp::new(fpp)?;
+        *options = options.clone().with_parquet_bloom_filter_fpp(fpp);
+    }
+    Ok(())
+}
+
+#[cfg(feature = "pg")]
 fn apply_management_options(
     table_oid: pgrx::pg_sys::Oid,
     values: &std::collections::HashMap<String, String>,
@@ -507,6 +655,7 @@ fn apply_management_options(
     let mut options = koldstore_common::ManageTableOptions::from_value(&current.0["options"]);
     let (min, file, max) = resolve_flush_batching(values, options.flush_policy().as_ref())?;
     apply_flush_policy_updates(&mut options, values, min, file, max)?;
+    apply_parquet_layout_updates(&mut options, values)?;
     let json = pgrx::JsonB(options.to_value());
     let update = koldstore_migrate::register::plan_update_schema_options()
         .map_err(|error| error.to_string())?;

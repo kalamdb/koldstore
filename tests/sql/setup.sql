@@ -6,6 +6,8 @@
 SET client_min_messages TO WARNING;
 
 DROP SCHEMA IF EXISTS sqlreg CASCADE;
+-- DROP SCHEMA CASCADE runs KoldStore managed-table cleanup (catalog deactivate,
+-- cold GC, mirror drop) before heaps disappear; do not leave active orphans.
 CREATE SCHEMA sqlreg;
 
 -- Catalog storage rows survive DROP SCHEMA; only register when missing so

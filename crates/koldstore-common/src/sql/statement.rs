@@ -40,6 +40,8 @@ pub enum SqlAccess {
 pub enum SqlParamType {
     BigInt,
     Integer,
+    /// PostgreSQL `timestamp with time zone`.
+    TimestampWithTimeZone,
     Text,
     Jsonb,
     Bytea,

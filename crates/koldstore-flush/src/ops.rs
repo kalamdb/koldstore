@@ -243,7 +243,7 @@ RETURNING id
     })
 }
 
-/// Plans a fair page of due pending flush jobs for one-shot executors.
+/// Plans the first fair page of due pending flush jobs for one-shot executors.
 ///
 /// Bind `$1` = page size (`LIMIT`). Does not lock jobs rows; session table
 /// ownership serializes the subsequent claim.
@@ -256,6 +256,7 @@ pub fn plan_select_pending_flush_candidates() -> Result<SqlStatement, OpsError> 
         "select pending flush candidates",
         r#"
 SELECT table_oid::oid, COALESCE((payload->>'force')::boolean, false)
+     , available_at, updated_at, id
 FROM koldstore.jobs
 WHERE job_type = 'flush'
   AND status = 'pending'
@@ -264,6 +265,40 @@ ORDER BY available_at, updated_at, id
 LIMIT $1
 "#,
         [SqlParamType::BigInt],
+    )
+    .map_err(|error| OpsError::Sql(error.to_string()))
+}
+
+/// Plans the next fair page of due pending flush jobs after a stable queue key.
+///
+/// Bind `$1` = page size and `$2..$4` = the last seen
+/// `(available_at, updated_at, id)` key. Keyset paging avoids both a permanently
+/// blocked first page and the skipped rows that offset paging can cause while
+/// other executors claim jobs concurrently.
+///
+/// # Errors
+///
+/// Returns an error when SPI statement metadata cannot be prepared.
+pub fn plan_select_pending_flush_candidates_after() -> Result<SqlStatement, OpsError> {
+    SqlStatement::read_with_params(
+        "select pending flush candidates after cursor",
+        r#"
+SELECT table_oid::oid, COALESCE((payload->>'force')::boolean, false)
+     , available_at, updated_at, id
+FROM koldstore.jobs
+WHERE job_type = 'flush'
+  AND status = 'pending'
+  AND available_at <= clock_timestamp()
+  AND (available_at, updated_at, id) > ($2, $3, $4)
+ORDER BY available_at, updated_at, id
+LIMIT $1
+"#,
+        [
+            SqlParamType::BigInt,
+            SqlParamType::TimestampWithTimeZone,
+            SqlParamType::TimestampWithTimeZone,
+            SqlParamType::Uuid,
+        ],
     )
     .map_err(|error| OpsError::Sql(error.to_string()))
 }
@@ -389,6 +424,7 @@ pub fn sql_param_cast(param_index: usize, param_type: SqlParamType) -> String {
     let cast = match param_type {
         SqlParamType::BigInt => "bigint",
         SqlParamType::Integer => "integer",
+        SqlParamType::TimestampWithTimeZone => "timestamp with time zone",
         SqlParamType::Text => "text",
         SqlParamType::Jsonb => "jsonb",
         SqlParamType::Bytea => "bytea",

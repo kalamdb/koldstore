@@ -36,8 +36,11 @@ async fn seed_async_table(db: &common::TestDb, table_name: &str, rows: i64) -> R
         )
         .await?;
     common::assert_system_columns_absent(&db.client, &relation).await?;
-    common::assert_change_log_mirror_exists(&db.client, &format!("koldstore.{table_name}__cl"))
-        .await?;
+    common::assert_change_log_mirror_exists(
+        &db.client,
+        &common::change_log_mirror_relation(&relation),
+    )
+    .await?;
     common::assert_catalog_has_active_schema(&db.client, &relation).await?;
     db.client
         .batch_execute(&format!(

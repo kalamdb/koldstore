@@ -612,7 +612,9 @@ pub async fn assert_post_soak(
 ) -> Result<()> {
     e2e::fence_async_mirror(client).await?;
     for relation in schema.managed_relations() {
-        e2e::assert_no_active_jobs(client, relation).await?;
+        // Auto-flush / late flush-rider jobs can still be draining after soak
+        // stop; wait instead of one-shot asserting an empty queue.
+        crate::support::wait_for_jobs(client, relation).await?;
     }
 
     let tenant = config.tenant_id(0);

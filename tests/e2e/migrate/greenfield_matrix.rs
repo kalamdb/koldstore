@@ -133,8 +133,7 @@ async fn run_greenfield_scenario(
             .await?;
     }
 
-    let source_table_name = relation.rsplit('.').next().unwrap_or(&relation);
-    let mirror_relation = format!("koldstore.{source_table_name}__cl");
+    let mirror_relation = common::change_log_mirror_relation(&relation);
     common::assert_system_columns_absent(client, &relation).await?;
     common::assert_change_log_mirror_exists(client, &mirror_relation).await?;
     common::assert_primary_key_columns_match(client, &relation, &mirror_relation).await?;

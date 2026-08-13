@@ -203,10 +203,12 @@ async fn setup_database(config: &BenchmarkConfig) -> Result<String> {
     Ok(version)
 }
 
-/// Pins the async apply worker off and terminates any persistent WAL applier.
+/// Pins the async apply worker off and force-stops any persistent WAL applier.
 ///
 /// Matches the storage-comparison measurement control: manage may start the
 /// service for activation, then foreground OLTP benches run without apply load.
+/// GUC-off alone is insufficient under the sticky supervisor — required WAL
+/// services respawn unless dispatch is paused.
 async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Client) -> Result<()> {
     let dbname: String = client
         .query_one("SELECT current_database()", &[])
@@ -224,6 +226,14 @@ async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Clie
         .batch_execute("SET koldstore.internal_async_mirror_worker = off")
         .await
         .context("disable async mirror worker GUC in benchmark session")?;
+
+    client
+        .query_one(
+            "SELECT koldstore.internal_set_async_mirror_ensure_paused(true)",
+            &[],
+        )
+        .await
+        .context("pause supervisor WAL/maintenance dispatch for foreground benches")?;
 
     for _ in 0..40 {
         let _ = client
@@ -256,7 +266,9 @@ async fn disable_async_worker_for_foreground_bench(client: &tokio_postgres::Clie
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    Ok(())
+    anyhow::bail!(
+        "persistent WAL applier still running after pause+terminate; foreground latency would be contaminated"
+    )
 }
 
 async fn run_pair(

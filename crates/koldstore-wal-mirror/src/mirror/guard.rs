@@ -7,6 +7,11 @@
 use koldstore_common::{quote_ident, PrimaryKeyColumnShape, QualifiedTableName, SqlStatement};
 use thiserror::Error;
 
+use super::shared::relation::{bounded_identifier, legacy_truncated_identifier};
+
+const PK_GUARD_FUNCTION_SUFFIX: &str = "_pk_guard";
+const PK_UPDATE_GUARD_TRIGGER_SUFFIX: &str = "_pk_update_guard";
+
 /// PK-guard planning result.
 pub type MirrorGuardResult<T> = Result<T, MirrorGuardError>;
 
@@ -58,10 +63,7 @@ pub fn plan_mirror_pk_guard(
         return Err(MirrorGuardError::MissingPrimaryKey);
     }
 
-    let guard_function_name = QualifiedTableName {
-        schema: Some("koldstore".to_string()),
-        name: format!("{}_pk_guard", mirror_table.name),
-    };
+    let guard_function_name = pk_guard_function_relation(&mirror_table.name);
     let source = source_table.quoted();
     let function = SqlStatement::write(
         "create change-log mirror primary-key guard function",
@@ -110,12 +112,13 @@ pub fn plan_mirror_source_teardown(
         schema: Some("koldstore".to_string()),
         name: format!("{}_capture", mirror_table.name),
     };
-    let guard_function_name = QualifiedTableName {
+    let guard_function_name = pk_guard_function_relation(&mirror_table.name);
+    let legacy_guard_function_name = QualifiedTableName {
         schema: Some("koldstore".to_string()),
-        name: format!("{}_pk_guard", mirror_table.name),
+        name: legacy_truncated_identifier(&mirror_table.name, PK_GUARD_FUNCTION_SUFFIX),
     };
     let source = source_table.quoted();
-    let mut statements = Vec::with_capacity(6);
+    let mut statements = Vec::with_capacity(8);
     for operation in MirrorOperation::ALL {
         let trigger_name = operation.capture_trigger_name(&mirror_table.name);
         statements.push(SqlStatement::write(
@@ -126,10 +129,19 @@ pub fn plan_mirror_source_teardown(
             &drop_trigger_if_present_sql(&trigger_name, &source),
         )?);
     }
+    let bounded_trigger = pk_guard_trigger_name(&mirror_table.name);
+    let legacy_trigger =
+        legacy_truncated_identifier(&mirror_table.name, PK_UPDATE_GUARD_TRIGGER_SUFFIX);
     statements.push(SqlStatement::write(
         "drop change-log mirror primary-key guard trigger",
-        &drop_trigger_if_present_sql(&pk_guard_trigger_name(&mirror_table.name), &source),
+        &drop_trigger_if_present_sql(&bounded_trigger, &source),
     )?);
+    if legacy_trigger != bounded_trigger {
+        statements.push(SqlStatement::write(
+            "drop legacy change-log mirror primary-key guard trigger",
+            &drop_trigger_if_present_sql(&legacy_trigger, &source),
+        )?);
+    }
     statements.push(SqlStatement::write(
         "drop change-log mirror capture function",
         &format!("DROP FUNCTION IF EXISTS {}()", function_name.quoted()),
@@ -138,11 +150,29 @@ pub fn plan_mirror_source_teardown(
         "drop change-log mirror primary-key guard function",
         &format!("DROP FUNCTION IF EXISTS {}()", guard_function_name.quoted()),
     )?);
+    if legacy_guard_function_name.name != guard_function_name.name {
+        statements.push(SqlStatement::write(
+            "drop legacy change-log mirror primary-key guard function",
+            &format!(
+                "DROP FUNCTION IF EXISTS {}()",
+                legacy_guard_function_name.quoted()
+            ),
+        )?);
+    }
     Ok(statements)
 }
 
-fn pk_guard_trigger_name(mirror_table_name: &str) -> String {
-    format!("{mirror_table_name}_pk_update_guard")
+/// Builds the PostgreSQL-safe PK-update guard trigger name for a mirror table.
+#[must_use]
+pub fn pk_guard_trigger_name(mirror_table_name: &str) -> String {
+    bounded_identifier(mirror_table_name, PK_UPDATE_GUARD_TRIGGER_SUFFIX)
+}
+
+fn pk_guard_function_relation(mirror_table_name: &str) -> QualifiedTableName {
+    QualifiedTableName {
+        schema: Some("koldstore".to_string()),
+        name: bounded_identifier(mirror_table_name, PK_GUARD_FUNCTION_SUFFIX),
+    }
 }
 
 /// Drops a trigger only when it already exists, without PostgreSQL's
@@ -176,7 +206,10 @@ fn pk_guard_function_sql(
         .collect::<Vec<_>>();
     if let Some(order_column) = order_column {
         let name = quote_ident(order_column);
-        distinct.push(format!("OLD.{name} IS DISTINCT FROM NEW.{name}"));
+        let predicate = format!("OLD.{name} IS DISTINCT FROM NEW.{name}");
+        if !distinct.contains(&predicate) {
+            distinct.push(predicate);
+        }
     }
     let distinct = distinct.join("\n       OR ");
 
@@ -215,7 +248,10 @@ fn plan_pk_guard_trigger(
         .map(|column| quote_ident(column.column().as_str()))
         .collect::<Vec<_>>();
     if let Some(order_column) = order_column {
-        of_columns.push(quote_ident(order_column));
+        let name = quote_ident(order_column);
+        if !of_columns.contains(&name) {
+            of_columns.push(name);
+        }
     }
     let of_list = of_columns.join(", ");
     let drop_sql = drop_trigger_if_present_sql(&trigger_name, source_table);
@@ -233,4 +269,63 @@ FOR EACH ROW EXECUTE FUNCTION {function_name}()
         ),
     )
     .map_err(|error| MirrorGuardError::Sql(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use koldstore_common::{
+        ColumnId, PgTypeName, PgTypeOid, PgTypmod, PkColumn, PkOrdinal, PrimaryKeyColumnShape,
+    };
+
+    fn pk_column(name: &str) -> PrimaryKeyColumnShape {
+        PrimaryKeyColumnShape::new(
+            ColumnId::from_attnum(1),
+            PkColumn::new(name).unwrap(),
+            PkOrdinal::new(1).unwrap(),
+            PgTypeOid::new(20).unwrap(),
+            PgTypeName::new("bigint").unwrap(),
+            PgTypmod::new(-1),
+            None,
+            None,
+            true,
+        )
+    }
+
+    #[test]
+    fn short_mirror_names_keep_readable_guard_suffixes() {
+        assert_eq!(
+            pk_guard_trigger_name("public_messages__cl"),
+            "public_messages__cl_pk_update_guard"
+        );
+        assert_eq!(
+            pk_guard_function_relation("public_messages__cl").name,
+            "public_messages__cl_pk_guard"
+        );
+    }
+
+    #[test]
+    fn long_mirror_names_keep_guard_identifiers_within_postgres_limit() {
+        let mirror = format!("{}__cl", "a".repeat(59));
+        assert_eq!(mirror.len(), 63);
+
+        let trigger = pk_guard_trigger_name(&mirror);
+        let function = pk_guard_function_relation(&mirror).name;
+        assert!(trigger.len() <= 63, "trigger={trigger}");
+        assert!(function.len() <= 63, "function={function}");
+        assert!(trigger.ends_with(PK_UPDATE_GUARD_TRIGGER_SUFFIX));
+        assert!(function.ends_with(PK_GUARD_FUNCTION_SUFFIX));
+        assert_ne!(trigger, mirror);
+
+        let source = QualifiedTableName::parse("public.messages").unwrap();
+        let mirror_table = QualifiedTableName::parse(&format!("koldstore.{mirror}")).unwrap();
+        let plan = plan_mirror_pk_guard(&source, &mirror_table, &[pk_column("id")], None).unwrap();
+        assert!(plan
+            .trigger
+            .sql
+            .contains(&format!("CREATE TRIGGER \"{trigger}\"")));
+        assert!(plan.function.sql.contains(&format!(
+            "CREATE OR REPLACE FUNCTION \"koldstore\".\"{function}\"()"
+        )));
+    }
 }

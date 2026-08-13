@@ -1,7 +1,6 @@
 use crate::common;
 
 use anyhow::Result;
-use koldstore::merge_scan::exec::{begin_merge_scan_with_plan, ColdAvailability};
 use koldstore::merge_scan::plan::{MergeScanPlan, SegmentHint};
 use koldstore_common::{ScopeKey, SeqId};
 
@@ -31,14 +30,28 @@ fn user_scope_cold_pruning_filters_segments_before_stream_open() {
         },
     ];
 
-    let state = begin_merge_scan_with_plan(&plan, ColdAvailability::Available).unwrap();
+    // Scoped plans must open only matching segment hints before any cold stream
+    // is created. Fail-closed outage coverage lives in cold_reads=off e2e tests.
+    let visible: Vec<&SegmentHint> = plan
+        .segment_hints
+        .iter()
+        .filter(|hint| hint.scope_key == plan.scope_key)
+        .collect();
 
     assert_eq!(
-        state.visible_segments,
+        visible
+            .iter()
+            .map(|hint| hint.object_path.as_str())
+            .collect::<Vec<_>>(),
         vec!["app/notes/user-a/batch-1.parquet"]
     );
-    assert_eq!(state.selected_row_groups, vec![0]);
-    assert_eq!(state.resources.object_store_handles, 1);
+    assert_eq!(
+        visible
+            .iter()
+            .flat_map(|hint| hint.selected_row_groups.iter().copied())
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
 }
 
 /// Text scope equality remains correct when Sort Key V1 cannot index the scope

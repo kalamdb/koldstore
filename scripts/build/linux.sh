@@ -130,9 +130,7 @@ EOF
   fi
   bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" update -y -qq
   bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" install -y --no-install-recommends ca-certificates curl gnupg
-  install -d /usr/share/keyrings
-  curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-    | gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+  bash "${ROOT_DIR}/scripts/ci/install-pgdg-key.sh" /usr/share/keyrings/postgresql.gpg
   echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
     > /etc/apt/sources.list.d/pgdg.list
   bash "${ROOT_DIR}/scripts/ci/apt-get-retry.sh" update -y -qq
@@ -161,6 +159,8 @@ install_rocky_deps() {
     "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-${rpm_arch}/pgdg-redhat-repo-latest.noarch.rpm"
   dnf -qy module disable postgresql || true
   dnf -y install --allowerasing \
+    clang \
+    clang-devel \
     curl \
     gcc \
     gcc-c++ \
@@ -173,6 +173,16 @@ install_rocky_deps() {
     rpm-build \
     "postgresql${pg}" \
     "postgresql${pg}-devel"
+
+  # pgrx bindgen needs libclang.so (clang-devel). Point clang-sys at %{_libdir}
+  # so the search does not depend on ldconfig in the container.
+  if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+    local libdir
+    libdir="$(rpm --eval '%{_libdir}')"
+    if compgen -G "${libdir}/libclang.so*" >/dev/null; then
+      export LIBCLANG_PATH="${libdir}"
+    fi
+  fi
 }
 
 install_linux_build_deps() {

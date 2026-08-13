@@ -405,7 +405,8 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
     }
 
     // Dropping the extension while leftover managed-table triggers/workers exist
-    // can crash the backend (shared_preload). Quiesce them first.
+    // can crash the backend (shared_preload). Quiesce them first and keep the
+    // supervisor from respawning the WAL applier into a DROP deadlock.
     let _ = client
         .batch_execute(
             r#"
@@ -413,7 +414,12 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
             "#,
         )
         .await;
-    let _ = super::async_mirror::terminate_async_worker(client).await;
+    if super::async_mirror::force_stop_async_worker(client)
+        .await
+        .is_err()
+    {
+        let _ = super::async_mirror::terminate_async_worker(client).await;
+    }
 
     match client
         .batch_execute(
@@ -424,8 +430,12 @@ async fn sync_koldstore_extension_sql(client: &Client) -> Result<()> {
         )
         .await
     {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            let _ = super::async_mirror::release_async_worker_stop_lock(client).await;
+            Ok(())
+        }
         Err(error) => {
+            let _ = super::async_mirror::release_async_worker_stop_lock(client).await;
             if error_chain_contains(&error, "connection closed")
                 || error_chain_contains(&error, "terminating connection")
                 || error_chain_contains(&error, "server closed the connection")

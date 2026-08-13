@@ -180,17 +180,20 @@ the Release workflow after setting `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`
 `docker/image-description.txt` after a successful push.
 
 ```bash
-docker pull ghcr.io/kalamdb/pg-koldstore:latest
+docker pull ghcr.io/kalamdb/pg-koldstore:latest   # PostgreSQL 18
 docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 ghcr.io/kalamdb/pg-koldstore:latest
 # or: docker pull jamals86/pg-koldstore:latest
-# psql postgres://postgres:postgres@127.0.0.1:5432/koldstore
+# PostgreSQL 16: jamals86/pg-koldstore:pg16  /  :<version>-pg16
+# psql postgres://postgres:postgres@127.0.0.1:5432/koldstoredb
 # koldstore is created on first boot; built-in auto-flush handles hot_row_limit
 # pg_cron is optional if you want to schedule manual flush_table yourself
 ```
 
 Local source builds still use `docker/run.sh` / `docker/Dockerfile` (compiles the
-extension). The release image uses `docker/Dockerfile.release` and
-`docker/test-release-image.sh`. Docker Hub overview content lives in
+extension). The release image uses `docker/Dockerfile.release` (default
+`PG_MAJOR=18`) and `docker/test-release-image.sh`. Release CI publishes PG18
+(amd64+arm64, `:latest`) and PG16 (amd64); PG17 (amd64) is opt-in via
+`docker_push_pg17`. Docker Hub overview content lives in
 `docker/image-description.txt` and is synced by the Release workflow — not from
 the project `README.md`.
 

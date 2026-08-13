@@ -4,8 +4,8 @@
 // `tests/e2e/dml/change_log_mirror.rs`. `#[pg_test]` cannot commit mid-body, so
 // WAL apply never sees fixture DML; those cases are ignored here.
 
-fn mirror_name(table: &str) -> String {
-    format!("koldstore.{table}__cl")
+fn mirror_name(relation: &str) -> String {
+    change_log_mirror_relation(relation)
 }
 
 fn reported_mirror_rows(relation: &str) -> i64 {
@@ -29,7 +29,7 @@ fn mirror_tracks_insert_update_delete_reinsert_and_rollback() {
     let schema = format!("pgtest_{suffix}");
     let table = "messages";
     let relation = format!("{schema}.{table}");
-    let mirror = mirror_name(table);
+    let mirror = mirror_name(&relation);
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);
@@ -127,7 +127,7 @@ fn mirror_bulk_update_and_delete_keep_latest_state() {
     let schema = format!("pgtest_{suffix}");
     let table = "messages";
     let relation = format!("{schema}.{table}");
-    let mirror = mirror_name(table);
+    let mirror = mirror_name(&relation);
     let storage = register_temp_storage(&suffix);
 
     create_messages_table(&schema, table);

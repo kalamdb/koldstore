@@ -871,7 +871,7 @@ fn relation(pg_version: u16) -> String {
 }
 
 fn mirror_relation(pg_version: u16) -> String {
-    format!("koldstore.full_lifecycle_wide_pg{pg_version}__cl")
+    common::change_log_mirror_relation(&relation(pg_version))
 }
 
 fn storage_name(pg_version: u16) -> String {

@@ -17,6 +17,14 @@ pub(super) fn unmanage_table_pg_impl(
     let table = koldstore_migrate::QualifiedTableName::parse(&relation)
         .map_err(|error| error.to_string())?;
     let mirror_table = crate::catalog::resolve::mirror_relation_by_table_oid(table_oid)?;
+    if let Some(mirror_table) = &mirror_table {
+        if crate::catalog::resolve::mirror_has_other_active_owner(table_oid, mirror_table)? {
+            return Err(format!(
+                "refusing to unmanage {relation}: mirror {} is still referenced by another active managed table",
+                mirror_table.quoted()
+            ));
+        }
+    }
     let context = demigration_context(
         table,
         koldstore_common::TableOid::from_raw(table_oid_u32),
@@ -65,6 +73,10 @@ fn execute_demigration_statements(
     table_oid: pgrx::pg_sys::Oid,
 ) -> Result<i64, String> {
     use pgrx::datum::DatumWithOid;
+
+    // Rehydrate issues `TRUNCATE TABLE ONLY <managed>` before catalog deactivation.
+    // The ProcessUtility TRUNCATE guard must allow that internal path only.
+    let _allow_truncate = crate::hooks::ddl::AllowManagedTruncateGuard::enter();
 
     let statement_count = plan.statements.len();
     let mut deactivated = 0_i64;

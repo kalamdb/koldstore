@@ -7,7 +7,22 @@ use koldstore_common::{
 
 use super::columns::MirrorColumn;
 use super::error::{MirrorError, MirrorResult};
-use super::relation::MirrorRelation;
+use super::relation::{bounded_identifier, legacy_truncated_identifier, MirrorRelation};
+
+const SEQ_INDEX_SUFFIX: &str = "_seq_idx";
+const TOMBSTONE_INDEX_SUFFIX: &str = "_tombstone_seq_idx";
+
+/// Builds the PostgreSQL-safe seq index name for a mirror relation.
+#[must_use]
+pub fn mirror_seq_index_name(mirror_relation: &str) -> String {
+    bounded_identifier(mirror_relation, SEQ_INDEX_SUFFIX)
+}
+
+/// Builds the PostgreSQL-safe tombstone seq index name for a mirror relation.
+#[must_use]
+pub fn mirror_tombstone_index_name(mirror_relation: &str) -> String {
+    bounded_identifier(mirror_relation, TOMBSTONE_INDEX_SUFFIX)
+}
 
 /// Primitive mirror table schema statements.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +87,45 @@ pub fn plan_mirror_pk_column_renames(
     Ok(statements)
 }
 
+/// Plans the DDL required to rename a mirror and its generated indexes.
+///
+/// The legacy index lookup keeps mirrors created before bounded index naming
+/// movable. PostgreSQL silently truncated those names at creation time.
+///
+/// # Errors
+///
+/// Returns an error when any generated statement metadata is invalid.
+pub fn plan_mirror_relation_rename(
+    old_mirror: &MirrorRelation,
+    new_mirror: &MirrorRelation,
+) -> MirrorResult<Vec<SqlStatement>> {
+    if old_mirror == new_mirror {
+        return Ok(Vec::new());
+    }
+
+    let old_relation = old_mirror.relation();
+    let new_relation = new_mirror.relation();
+    let mut statements = Vec::with_capacity(5);
+    statements.push(SqlStatement::write(
+        "rename change-log mirror table",
+        &format!(
+            "ALTER TABLE {} RENAME TO {}",
+            old_mirror.quoted(),
+            quote_ident(new_relation)
+        ),
+    )?);
+    for suffix in [SEQ_INDEX_SUFFIX, TOMBSTONE_INDEX_SUFFIX] {
+        let old_legacy_name = legacy_truncated_identifier(old_relation, suffix);
+        let old_bounded_name = bounded_identifier(old_relation, suffix);
+        let new_name = bounded_identifier(new_relation, suffix);
+        statements.push(rename_index_if_present(&old_legacy_name, &new_name)?);
+        if old_bounded_name != old_legacy_name {
+            statements.push(rename_index_if_present(&old_bounded_name, &new_name)?);
+        }
+    }
+    Ok(statements)
+}
+
 /// Plans primitive mirror table storage statements.
 ///
 /// # Errors
@@ -129,9 +183,8 @@ pub fn plan_mirror_schema_with_order_key(
         "CREATE TABLE IF NOT EXISTS {quoted_mirror} (\n    {}\n)",
         ddl_columns.join(",\n    ")
     );
-    let seq_index_name = quote_ident(&format!("{}_seq_idx", mirror_table.relation()));
-    let tombstone_index_name =
-        quote_ident(&format!("{}_tombstone_seq_idx", mirror_table.relation()));
+    let seq_index_name = quote_ident(&mirror_seq_index_name(mirror_table.relation()));
+    let tombstone_index_name = quote_ident(&mirror_tombstone_index_name(mirror_table.relation()));
 
     Ok(MirrorSchemaPlan {
         collision_probe: SqlStatement::read(
@@ -154,6 +207,18 @@ pub fn plan_mirror_schema_with_order_key(
         )?,
         drop_table: plan_drop_mirror_table(mirror_table)?,
     })
+}
+
+fn rename_index_if_present(old_name: &str, new_name: &str) -> MirrorResult<SqlStatement> {
+    Ok(SqlStatement::write(
+        "rename change-log mirror index",
+        &format!(
+            "ALTER INDEX IF EXISTS {}.{} RENAME TO {}",
+            quote_ident(super::relation::KOLDSTORE_SCHEMA),
+            quote_ident(old_name),
+            quote_ident(new_name)
+        ),
+    )?)
 }
 
 /// Plans idempotent mirror table drop.

@@ -39,7 +39,7 @@ for your hardware. See
 [Mirror capture](../architecture/mirror-capture.md).
 
 **Managed PostgreSQL sizes always include** the hot user heap **plus**
-`koldstore.<table>__cl` (latest-state change-log mirror) **and** that mirror’s
+`koldstore.<schema>_<table>__cl` (latest-state change-log mirror) **and** that mirror’s
 indexes (PK + `seq` + partial tombstone). Cold Parquet is listed separately and
 is outside the PostgreSQL data directory. Report **local PostgreSQL** and
 **total hot+cold** as separate rows — combining them into one “99% smaller”
@@ -53,10 +53,14 @@ by the harness (cluster RSS polled every 50ms during `flush_table`).
 
 - **Tradeoff** is relative to plain PostgreSQL on the same machine/run
   (slower / faster / smaller).
-- **Hot-only queries** are timed **before flush**, so both heaps still hold all
-  10M rows — that isolates `KoldMergeScan` overhead vs a plain index lookup,
-  not “smaller heap wins.” The timed SQL is a repeated point lookup of the
-  **newest** PK (`WHERE id = <rows>`), not a scan of the whole table.
+- **Hot-only queries (before flush)** are timed **before flush**, so both heaps
+  still hold all rows — that isolates planner/hook overhead vs a plain index
+  lookup, not “smaller heap wins.” The timed SQL is a repeated point lookup of
+  the **newest** PK (`WHERE id = <rows>`), not a scan of the whole table.
+- **Hot-only queries (after flush)** repeat that same newest PK **after** policy
+  flush on managed (row still hot). The plan must stay native Index Scan or
+  `KoldMergeScan` with **0 Parquet segments**. PostgreSQL-only times the same
+  SQL on the full pre-`VACUUM FULL` heap as the baseline.
 - **PostgreSQL-only cold-id / hot+cold** also run **before** `VACUUM FULL` on
   the full heap (same post-DML state as hot-only). Measuring them after a
   whole-table rewrite would compare a freshly compacted 10M heap to managed

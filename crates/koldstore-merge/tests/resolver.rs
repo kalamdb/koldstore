@@ -3,8 +3,8 @@ use koldstore_common::{
     ScopeKey, SeqId,
 };
 use koldstore_merge::{
-    changes_since, resolve_rows, tombstone_required, ChangeCursor, NewestFirstWinnerResolver,
-    TombstoneDecision,
+    changes_since, resolve_rows, resolve_rows_owned, tombstone_required, ChangeCursor,
+    MirrorOverlay, NewestFirstWinnerResolver, TombstoneDecision,
 };
 use serde_json::json;
 
@@ -73,6 +73,26 @@ fn resolver_selects_newest_row_per_pk_and_hot_wins_exact_tie() {
     assert_eq!(row2.source, koldstore_merge::RowSource::Hot);
     assert_eq!(row2.seq.get(), 5);
     assert_eq!(row2.row_image.to_json(), json!({"id": 2, "body": "hot-2"}));
+}
+
+#[test]
+fn borrowed_and_owned_resolution_produce_identical_winners() {
+    let hot_rows = vec![
+        hot(1, 20, false, "hot-winner"),
+        hot(2, 30, true, "hot-delete"),
+    ];
+    let cold_rows = vec![
+        cold(1, 10, false, "cold-loser"),
+        cold(2, 20, false, "masked-by-delete"),
+        cold(3, 15, false, "cold-winner"),
+    ];
+
+    let mut borrowed = resolve_rows(&hot_rows, &cold_rows);
+    let mut owned = resolve_rows_owned(hot_rows, cold_rows);
+    borrowed.sort_by_key(|row| row.pk_json.to_string());
+    owned.sort_by_key(|row| row.pk_json.to_string());
+
+    assert_eq!(borrowed, owned);
 }
 
 #[test]
@@ -175,6 +195,29 @@ fn streaming_resolver_mirror_mask_applies_after_live_hot_winners() {
     assert_eq!(hot_rows.len(), 1);
     assert_eq!(hot_rows[0].row_image["body"].as_str(), Some("live-hot"));
     assert!(cold_rows.is_empty());
+}
+
+#[test]
+fn mirror_overlay_masks_cold_rows_without_replacing_the_batch_allocation() {
+    let overlay = MirrorOverlay::new([pk(2)]);
+    let mut rows = Vec::with_capacity(8);
+    rows.extend([
+        cold(1, 10, false, "one"),
+        cold(2, 10, false, "masked"),
+        cold(3, 10, false, "three"),
+    ]);
+    let capacity = rows.capacity();
+
+    let removed = overlay.retain_unmasked(&mut rows);
+
+    assert_eq!(removed, 1);
+    assert_eq!(rows.capacity(), capacity);
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.row_image["id"].as_i64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![1, 3]
+    );
 }
 
 #[test]

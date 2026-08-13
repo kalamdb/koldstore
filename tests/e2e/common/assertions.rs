@@ -166,9 +166,8 @@ pub fn assert_kold_merge_scan_cold_reads(
 
 /// Asserts an analyzed merge scan reports executed cold catalog and parquet reads.
 ///
-/// Timing lines are intentionally omitted: e2e `explain_analyze` uses
-/// `EXPLAIN (ANALYZE, TIMING OFF)`, matching native PostgreSQL and the
-/// `#[pg_test]` contract that TIMING OFF suppresses custom phase clocks.
+/// Compact TEXT `EXPLAIN ANALYZE` (including `TIMING OFF`) exposes aggregate cold
+/// counters. Per-segment `Footer First` / `Bloom:` detail remains VERBOSE-only.
 pub fn assert_kold_merge_scan_executed_cold_reads(
     plan: &str,
     min_parquet_segments: usize,
@@ -177,7 +176,7 @@ pub fn assert_kold_merge_scan_executed_cold_reads(
     anyhow::ensure!(
         plan.lines().any(|line| {
             let trimmed = line.trim_start();
-            trimmed.starts_with("Status:") && trimmed.contains("executed")
+            trimmed == "Status: executed" || trimmed.starts_with("Status: executed ")
         }),
         "expected executed cold scan status in analyzed plan, got:\n{plan}"
     );
@@ -189,15 +188,19 @@ pub fn assert_kold_merge_scan_executed_cold_reads(
     );
     anyhow::ensure!(
         plan.lines()
-            .any(|line| line.contains("Footer First") && line.contains("true")),
-        "expected footer-first Parquet I/O details in analyzed plan, got:\n{plan}"
+            .any(|line| line.trim_start().starts_with("Bytes Fetched:")),
+        "expected Bytes Fetched aggregate in analyzed plan, got:\n{plan}"
     );
     anyhow::ensure!(
-        plan.lines().any(|line| line.contains("Row Groups Total")),
+        plan.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("Row Groups Total:") || trimmed.starts_with("Row Groups Read:")
+        }),
         "expected row-group prune details in analyzed plan, got:\n{plan}"
     );
     anyhow::ensure!(
-        plan.lines().any(|line| line.contains("Bloom:")),
+        plan.lines()
+            .any(|line| { line.contains("Segments Pruned by Bloom") || line.contains("Bloom:") }),
         "expected bloom prune details in analyzed plan, got:\n{plan}"
     );
     anyhow::ensure!(

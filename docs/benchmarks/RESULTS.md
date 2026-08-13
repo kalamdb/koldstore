@@ -16,7 +16,7 @@ this file. Each column is measured alone on a wiped + re-initdb pgrx PostgreSQL
 **Git:** `b220d79339ac` (`b220d79339ac08a20e3921125be2a7df8f7005a9`) — draft stamp (`KOLDSTORE_STORAGE_DRAFT_RESULTS=1`)
 **Run:** 10000000 rows · `hot_row_limit = 100000` · `max_rows_per_file = 1000000` · `--dml-sample 50000` · `insert_batch_rows = 100000` · `warmup_rows = 1000000` · zstd Parquet · **counterbalanced sequential** isolated wiped server per sample (not parallel) · sides measured: **pg + async** · **single sample per side** · `changes_since` drain skipped
 
-Managed PostgreSQL sizes include hot heap + `koldstore.<table>__cl` + mirror
+Managed PostgreSQL sizes include hot heap + `koldstore.<schema>_<table>__cl` + mirror
 indexes. Cold Parquet is outside the PostgreSQL data directory. Columns are
 **PostgreSQL only** and **PG + KoldStore** (WAL-only capture).
 

@@ -1,20 +1,32 @@
 # syntax=docker/dockerfile:1
 #
-# Release runtime — PostgreSQL 16 + prebuilt koldstore + pg_cron.
+# Release runtime — PostgreSQL + prebuilt koldstore + pg_cron.
 # Does not compile the extension; copy artifacts from the release tarball.
 #
 # Build context: repository root, with extracted extension files in
 # docker-artifacts/ (koldstore.so, koldstore.control, koldstore--*.sql).
 #
-#   docker build -f docker/Dockerfile.release -t pg-koldstore:16 .
+#   # PostgreSQL 18 (default / :latest)
+#   docker build -f docker/Dockerfile.release \
+#     --build-arg PG_MAJOR=18 \
+#     -t pg-koldstore:18 .
+#
+#   # PostgreSQL 16 (still published as :<version>-pg16)
+#   docker build -f docker/Dockerfile.release \
+#     --build-arg PG_MAJOR=16 \
+#     --build-arg OCI_IMAGE_DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly." \
+#     -t pg-koldstore:16 .
 #
 # Base is Ubuntu 24.04 + PGDG PostgreSQL so the prebuilt ubuntu24.04
-# package (amd64 or arm64) matches the runtime glibc (official
-# postgres:16-bookworm would not). Build each arch with its matching
-# docker-artifacts/koldstore.so; release CI publishes a multi-arch manifest.
+# package (amd64 or arm64) matches the runtime glibc. Build each arch with
+# its matching docker-artifacts/koldstore.so; release CI publishes multi-arch
+# manifests for both PG majors (`latest` tracks PG18).
 
-ARG PG_MAJOR=16
-ARG OCI_IMAGE_DESCRIPTION="PostgreSQL 16 with koldstore preinstalled for trying KoldStore quickly."
+ARG PG_MAJOR=18
+ARG OCI_IMAGE_DESCRIPTION="PostgreSQL 18 with koldstore preinstalled for trying KoldStore quickly."
+
+# Official entrypoint scripts (initdb, POSTGRES_* env, init hooks).
+FROM postgres:${PG_MAJOR}-bookworm AS official_postgres
 
 FROM ubuntu:24.04
 
@@ -33,6 +45,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANGUAGE=en_US:en \
     LC_ALL=en_US.UTF-8
 
+# Vendored PGDG signing key (avoids flaky www.postgresql.org fetches at build time).
+COPY scripts/ci/keys/ACCC4CF8.asc /tmp/ACCC4CF8.asc
+
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -46,8 +61,9 @@ RUN set -eux; \
       tzdata; \
     echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen; \
     locale-gen; \
-    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-      | gpg --batch --yes --dearmor -o /usr/share/keyrings/postgresql.gpg; \
+    install -d /usr/share/keyrings; \
+    gpg --batch --yes --dearmor -o /usr/share/keyrings/postgresql.gpg /tmp/ACCC4CF8.asc; \
+    rm -f /tmp/ACCC4CF8.asc; \
     echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
       > /etc/apt/sources.list.d/pgdg.list; \
     apt-get update; \
@@ -64,13 +80,13 @@ RUN set -eux; \
     chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql; \
     chmod 2777 /var/run/postgresql
 
-# Official entrypoint (handles initdb, POSTGRES_* env, init scripts).
-COPY --from=postgres:16-bookworm /usr/local/bin/docker-entrypoint.sh /usr/local/bin/
-COPY --from=postgres:16-bookworm /usr/local/bin/docker-ensure-initdb.sh /usr/local/bin/
+COPY --from=official_postgres /usr/local/bin/docker-entrypoint.sh /usr/local/bin/
+COPY --from=official_postgres /usr/local/bin/docker-ensure-initdb.sh /usr/local/bin/
 
 COPY docker-artifacts/koldstore.so /tmp/koldstore/koldstore.so
 COPY docker-artifacts/koldstore.control /tmp/koldstore/koldstore.control
 COPY docker-artifacts/koldstore--*.sql /tmp/koldstore/
+COPY docker-artifacts/LICENSE docker-artifacts/NOTICE docker-artifacts/THIRD_PARTY_NOTICES.html /tmp/koldstore/
 
 COPY docker/release-init/ /docker-entrypoint-initdb.d/
 COPY docker/release-entrypoint.sh /usr/local/bin/release-entrypoint.sh
@@ -82,6 +98,9 @@ RUN set -eux; \
     install -m 0644 /tmp/koldstore/koldstore.control "${EXTDIR}/"; \
     install -m 0644 /tmp/koldstore/koldstore--*.sql "${EXTDIR}/"; \
     install -m 0755 /tmp/koldstore/koldstore.so "${LIBDIR}/koldstore.so"; \
+    install -D -m 0644 /tmp/koldstore/LICENSE /usr/share/doc/koldstore/LICENSE; \
+    install -m 0644 /tmp/koldstore/NOTICE /usr/share/doc/koldstore/NOTICE; \
+    install -m 0644 /tmp/koldstore/THIRD_PARTY_NOTICES.html /usr/share/doc/koldstore/THIRD_PARTY_NOTICES.html; \
     rm -rf /tmp/koldstore; \
     chmod +x /usr/local/bin/release-entrypoint.sh; \
     # Common cold-storage roots for try-it / Windows mapped drives. Entrypoint

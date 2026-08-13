@@ -480,6 +480,32 @@ mod tests {
     }
 
     #[test]
+    fn async_managed_relation_rejects_incomplete_order_column() {
+        let value = serde_json::json!({
+            "table_oid": "42",
+            "mirror": "koldstore.items__cl",
+            "primary_key": ["id"],
+            "segment_order_column": "id",
+            "segment_order_type_oid": null
+        });
+        let err = super::async_managed_relation(&value).unwrap_err();
+        assert!(err.contains("incomplete segment_order_column"));
+    }
+
+    #[test]
+    fn async_managed_relation_allows_absent_order_column() {
+        let value = serde_json::json!({
+            "table_oid": "42",
+            "mirror": "koldstore.items__cl",
+            "primary_key": ["id"],
+            "segment_order_column": null,
+            "segment_order_type_oid": null
+        });
+        let meta = super::async_managed_relation(&value).unwrap();
+        assert!(meta.order_column.is_none());
+    }
+
+    #[test]
     fn flush_storage_context_requires_compression_codec() {
         let value = serde_json::json!({
             "base_path": "/tmp/koldstore",

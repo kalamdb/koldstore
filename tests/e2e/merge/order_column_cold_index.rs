@@ -4,6 +4,83 @@ use crate::common;
 
 use anyhow::Result;
 
+/// A migration order also supplies the cold segment order when no explicit
+/// segment order is configured. Exercise the existing-table initialization
+/// path so the mirror must populate its encoded order key before the flush.
+#[tokio::test]
+async fn migration_order_defaults_to_segment_order_for_existing_table() -> Result<()> {
+    common::require_pgrx_server().await?;
+    for target in common::scenario_pg_matrix() {
+        let db = common::TestDb::start(target, "migration_order_default").await?;
+        let relation = db.relation("events");
+        db.client
+            .batch_execute(&format!(
+                r#"
+                CREATE TABLE {relation} (
+                  id bigint PRIMARY KEY,
+                  event_time timestamptz NOT NULL,
+                  payload text NOT NULL
+                );
+                CREATE INDEX events_event_time_idx ON {relation} (event_time DESC);
+                INSERT INTO {relation} (id, event_time, payload) VALUES
+                  (1, timestamptz '2026-01-01 00:00:00+00', 'old'),
+                  (2, timestamptz '2026-01-02 00:00:00+00', 'new');
+                "#
+            ))
+            .await?;
+        db.client
+            .execute(
+                r#"
+                SELECT koldstore.manage_table(
+                  table_name => $1::text::regclass,
+                  storage => $2,
+                  hot_row_limit => 1,
+                  min_flush_rows => 1,
+                  max_rows_per_file => 1000,
+                  migration_order_by => 'event_time'
+                )
+                "#,
+                &[&relation, &db.storage_name],
+            )
+            .await?;
+
+        let flushed = force_flush(&db, &relation).await?;
+        anyhow::ensure!(
+            flushed >= 2,
+            "expected existing rows to flush, got {flushed}"
+        );
+
+        let order_column_id: Option<i64> = db
+            .client
+            .query_one(
+                r#"
+                SELECT (options->>'segment_order_column_id')::bigint
+                FROM koldstore.schemas
+                WHERE table_oid = $1::text::regclass::oid
+                  AND active
+                "#,
+                &[&relation],
+            )
+            .await?
+            .get(0);
+        anyhow::ensure!(
+            order_column_id == Some(2),
+            "migration order must persist as segment order column 2, got {order_column_id:?}"
+        );
+
+        let plan = common::explain_analyze(
+            &db.client,
+            &format!("SELECT payload FROM {relation} ORDER BY event_time DESC LIMIT 1"),
+        )
+        .await?;
+        anyhow::ensure!(
+            plan.contains("Strategy: Ordered Progressive"),
+            "migration-order default must use the ordered merge path:\n{plan}"
+        );
+    }
+    Ok(())
+}
+
 /// Flush two time-disjoint waves, then prove SQL segment-index pruning for
 /// lower-only, upper-only, and bounded predicates independently.
 #[tokio::test]
@@ -187,10 +264,7 @@ async fn async_order_column_retains_mirror_order_key() -> Result<()> {
             .await?;
         common::fence_async_mirror(&db.client).await?;
 
-        let mirror = format!(
-            "koldstore.{}__cl",
-            relation.rsplit('.').next().unwrap_or(relation.as_str())
-        );
+        let mirror = common::change_log_mirror_relation(&relation);
         let before: Vec<u8> = db
             .client
             .query_one(&format!("SELECT order_key FROM {mirror} WHERE id = 1"), &[])
@@ -440,10 +514,7 @@ async fn setup_order_table(db: &common::TestDb, table: &str) -> Result<String> {
                 AND column_name = 'order_key'
             )
             "#,
-            &[&format!(
-                "{}__cl",
-                relation.rsplit('.').next().unwrap_or(relation.as_str())
-            )],
+            &[&common::change_log_mirror_relation_name(&relation)],
         )
         .await?
         .get(0);

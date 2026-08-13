@@ -1,6 +1,6 @@
 //! KoldMergeScan PostgreSQL glue.
 
-pub use koldstore_merge::scan::{exec, path, plan};
+pub use koldstore_merge::scan::{path, plan};
 
 #[cfg(feature = "pg")]
 pub mod pg;

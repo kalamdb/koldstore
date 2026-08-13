@@ -72,12 +72,45 @@ pub fn plan_mirror_initialization_batch(
     ordering: MigrationOrdering,
     batch_size: MigrationBatchSize,
 ) -> MirrorInitializationResult<MirrorInitializationBatchPlan> {
+    plan_mirror_initialization_batch_with_segment_order(
+        table,
+        mirror_table,
+        primary_key,
+        ordering,
+        batch_size,
+        None,
+    )
+}
+
+/// Plans one bounded mirror-initialization batch with an optional cold order key.
+///
+/// When cold segments have an immutable order column, existing rows must carry
+/// the same encoded `order_key` as later WAL-applied rows. This keeps initial
+/// migration and post-manage writes interchangeable to the flush pipeline.
+///
+/// # Errors
+///
+/// Returns an error when the primary key or either configured order identifier
+/// is invalid, or when the generated SQL cannot be represented by SPI.
+pub fn plan_mirror_initialization_batch_with_segment_order(
+    table: &QualifiedTableName,
+    mirror_table: &QualifiedTableName,
+    primary_key: &[PrimaryKeyColumnShape],
+    ordering: MigrationOrdering,
+    batch_size: MigrationBatchSize,
+    segment_order_column: Option<&str>,
+) -> MirrorInitializationResult<MirrorInitializationBatchPlan> {
     if primary_key.is_empty() {
         return Err(MirrorInitializationError::MissingPrimaryKey);
     }
     if !is_safe_identifier(&ordering.column) {
         return Err(MirrorInitializationError::InvalidIdentifier(
             ordering.column,
+        ));
+    }
+    if let Some(column) = segment_order_column.filter(|column| !is_safe_identifier(column)) {
+        return Err(MirrorInitializationError::InvalidIdentifier(
+            column.to_string(),
         ));
     }
 
@@ -104,9 +137,18 @@ pub fn plan_mirror_initialization_batch(
     let order_column = quote_ident(&ordering.column);
     let order_column_ref = format!("hot.{order_column}");
     let mut insert_columns = pk_columns.clone();
+    if segment_order_column.is_some() {
+        insert_columns.push("\"order_key\"".to_string());
+    }
     insert_columns.extend(MirrorColumn::insert_quoted_names());
     let mut select_columns = pk_columns.clone();
+    if segment_order_column.is_some() {
+        select_columns.push("koldstore.internal_encode_sort_key(segment_order_value)".to_string());
+    }
     select_columns.extend([snowflake_id_call_expression().to_string(), "1".to_string()]);
+    let segment_order_projection = segment_order_column.map_or_else(String::new, |column| {
+        format!(", hot.{} AS segment_order_value", quote_ident(column))
+    });
     let order_direction = if ordering.ascending_oldest_first {
         "ASC"
     } else {
@@ -115,7 +157,7 @@ pub fn plan_mirror_initialization_batch(
     let sql = format!(
         r#"
 WITH candidate AS MATERIALIZED (
-    SELECT {hot_pk_columns}, {order_column_ref} AS migration_order_value, hot.ctid AS hot_ctid
+    SELECT {hot_pk_columns}, {order_column_ref} AS migration_order_value{segment_order_projection}, hot.ctid AS hot_ctid
     FROM ONLY {table} AS hot
     LEFT JOIN {mirror} AS mirror
       ON {join_predicate}
@@ -140,6 +182,8 @@ SELECT
         mirror = mirror_table.quoted(),
         join_predicate = join_predicate,
         mirror_missing_predicate = mirror_missing_predicate,
+        order_column_ref = order_column_ref,
+        segment_order_projection = segment_order_projection,
         insert_columns = insert_columns.join(", "),
         select_columns = select_columns.join(", "),
         conflict_columns = pk_columns.join(", "),

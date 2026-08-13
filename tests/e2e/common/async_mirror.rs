@@ -7,6 +7,198 @@ const WORKER_START_DEADLINE: Duration = Duration::from_secs(30);
 const BACKGROUND_APPLY_DEADLINE: Duration = Duration::from_secs(30);
 const WORKER_OBSERVE_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Fully observational WAL/flush state used by autonomous liveness tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PassiveKoldStoreState {
+    pub wal_pid: Option<i32>,
+    pub wal_required: bool,
+    pub wal_pending: bool,
+    pub wal_generation: i64,
+    pub wal_processed_generation: i64,
+    pub completed_jobs: i64,
+    pub active_jobs: i64,
+    pub error_jobs: i64,
+    pub last_error: Option<String>,
+    pub hot_rows: i64,
+}
+
+async fn passive_koldstore_state(
+    client: &tokio_postgres::Client,
+    relation: &str,
+) -> Result<PassiveKoldStoreState> {
+    let row = client
+        .query_one(
+            r#"
+            WITH worker AS (
+                SELECT koldstore.async_mirror_status() AS status
+            ),
+            jobs AS (
+                SELECT
+                    count(*) FILTER (WHERE status = 'completed')::bigint AS completed_jobs,
+                    count(*) FILTER (WHERE status IN ('pending', 'running'))::bigint AS active_jobs,
+                    count(*) FILTER (WHERE status = 'error')::bigint AS error_jobs,
+                    max(error_trace) FILTER (WHERE status = 'error') AS last_error
+                FROM koldstore.jobs
+                WHERE table_oid = $1::text::regclass::oid
+                  AND job_type = 'flush'
+                  AND created_at >= COALESCE(
+                      (
+                          SELECT created_at
+                          FROM koldstore.schemas
+                          WHERE table_oid = $1::text::regclass::oid AND active
+                      ),
+                      '-infinity'::timestamptz
+                  )
+            )
+            SELECT
+                (worker.status->'wal_applier'->>'pid')::integer,
+                COALESCE((worker.status->'wal_applier'->>'required')::boolean, false),
+                COALESCE((worker.status->'wal_applier'->>'pending')::boolean, false),
+                COALESCE((worker.status->'wal_applier'->>'wal_generation')::bigint, 0),
+                COALESCE((worker.status->'wal_applier'->>'wal_processed_generation')::bigint, 0),
+                jobs.completed_jobs,
+                jobs.active_jobs,
+                jobs.error_jobs,
+                jobs.last_error
+            FROM worker CROSS JOIN jobs
+            "#,
+            &[&relation],
+        )
+        .await?;
+
+    Ok(PassiveKoldStoreState {
+        wal_pid: row.get(0),
+        wal_required: row.get(1),
+        wal_pending: row.get(2),
+        wal_generation: row.get(3),
+        wal_processed_generation: row.get(4),
+        completed_jobs: row.get(5),
+        active_jobs: row.get(6),
+        error_jobs: row.get(7),
+        last_error: row.get(8),
+        hot_rows: super::sql::hot_row_count(client, relation).await?,
+    })
+}
+
+/// Passively waits for WAL acknowledgement and automatic flush convergence.
+///
+/// This oracle must remain observational: it intentionally does not ensure,
+/// fence, tick, flush, restart, or recover the subsystem under test.
+///
+/// # Errors
+///
+/// Returns an error when state probes fail or the deadline expires.
+pub async fn wait_for_passive_convergence(
+    client: &tokio_postgres::Client,
+    relation: &str,
+    target_lsn: &str,
+    minimum_completed_jobs: i64,
+    hot_row_limit: i64,
+    deadline: Duration,
+) -> Result<PassiveKoldStoreState> {
+    let started = Instant::now();
+    loop {
+        let state = passive_koldstore_state(client, relation).await?;
+        let progress = async_mirror_progress(client).await?;
+        let slot_reached_target: bool = client
+            .query_one(
+                "SELECT $1::text::pg_lsn >= $2::text::pg_lsn",
+                &[&progress.confirmed_flush_lsn, &target_lsn],
+            )
+            .await?
+            .get(0);
+        let wal_caught_up = state.wal_required
+            && state.wal_pid.is_some_and(|pid| pid > 0)
+            && !state.wal_pending
+            && state.wal_generation == state.wal_processed_generation
+            && slot_reached_target;
+        // Slot/apply-lock finalize races are retryable under concurrent WAL apply:
+        // a later completed job can still drain hot. Require no active work and
+        // hot under limit; do not demand a historically empty error column.
+        let flush_caught_up = state.completed_jobs >= minimum_completed_jobs
+            && state.active_jobs == 0
+            && state.hot_rows <= hot_row_limit
+            && error_jobs_are_acceptable(&state);
+        if wal_caught_up && flush_caught_up {
+            return Ok(state);
+        }
+        if let Some(reason) = non_retryable_flush_failure(&state, hot_row_limit) {
+            anyhow::bail!(
+                "passive convergence saw a non-retryable flush failure; relation={relation}, \
+                 target_lsn={target_lsn}, confirmed_flush_lsn={}, reason={reason}, state={state:?}",
+                progress.confirmed_flush_lsn
+            );
+        }
+        anyhow::ensure!(
+            started.elapsed() <= deadline,
+            "passive convergence timed out after {deadline:?}; relation={relation}, \
+             target_lsn={target_lsn}, confirmed_flush_lsn={}, state={state:?}",
+            progress.confirmed_flush_lsn
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Slot/apply-lock finalize failures are expected under concurrent apply and are
+/// retried by a later auto-flush job. Other terminal errors are not acceptable
+/// once the queue is idle and hot is still above the limit.
+fn error_jobs_are_acceptable(state: &PassiveKoldStoreState) -> bool {
+    if state.error_jobs == 0 {
+        return true;
+    }
+    match state.last_error.as_deref() {
+        Some(error) => is_retryable_flush_error(error),
+        None => false,
+    }
+}
+
+fn non_retryable_flush_failure(
+    state: &PassiveKoldStoreState,
+    hot_row_limit: i64,
+) -> Option<&'static str> {
+    if state.error_jobs == 0 || state.active_jobs != 0 || state.hot_rows <= hot_row_limit {
+        return None;
+    }
+    match state.last_error.as_deref() {
+        Some(error) if is_retryable_flush_error(error) => None,
+        Some(_) => Some("terminal flush error with hot still above limit"),
+        None => Some("error job without error_trace"),
+    }
+}
+
+fn is_retryable_flush_error(error: &str) -> bool {
+    error.contains("slot lock") || error.contains("apply lock")
+}
+
+/// Passively waits for the persistent WAL applier to appear.
+///
+/// # Errors
+///
+/// Returns an error when the status probe fails or the deadline expires.
+pub async fn wait_for_wal_applier_passively(
+    client: &tokio_postgres::Client,
+    deadline: Duration,
+) -> Result<i32> {
+    let started = Instant::now();
+    loop {
+        let pid: Option<i32> = client
+            .query_one(
+                "SELECT (koldstore.async_mirror_status()->'wal_applier'->>'pid')::integer",
+                &[],
+            )
+            .await?
+            .get(0);
+        if let Some(pid) = pid.filter(|pid| *pid > 0) {
+            return Ok(pid);
+        }
+        anyhow::ensure!(
+            started.elapsed() <= deadline,
+            "WAL applier did not appear passively within {deadline:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AsyncWorkerState {
     slot_present: bool,

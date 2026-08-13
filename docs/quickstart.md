@@ -114,6 +114,10 @@ work that must observe every source commit visible at the start of the call:
 SELECT koldstore.wait_for_async_mirror();
 ```
 
+The fence covers committed WAL only; it cannot expose the caller's uncommitted
+changes. In `REPEATABLE READ` or `SERIALIZABLE`, run it before beginning the
+transaction/snapshot that must include those commits.
+
 `flush_table` performs this catch-up automatically. To remove the logical slot
 and publication, first unmanage every managed table and then run:
 
@@ -145,16 +149,18 @@ LIMIT 3;
 
 ## 4. Latest-state mirror (optional inspection)
 
-Management also creates `koldstore.messages__cl`, a latest-state mirror with
+Management also creates `koldstore.app_messages__cl` (the source schema and
+table name joined with `_`), a latest-state mirror with
 one metadata row per primary key. It stores the key columns plus `seq` and
 `op`; it does not duplicate full application row payloads. The mirror follows
 committed WAL and may briefly lag; the worker and consistency fence close that
-gap before flush or any caller-selected strong boundary. Full semantics live
-in the [architecture docs](architecture.md).
+gap before flush or any caller-selected committed-change boundary. The fence
+does not expose uncommitted work. Full semantics live in the
+[architecture docs](architecture.md).
 
 ```sql
 SELECT id, seq, op
-FROM koldstore.messages__cl
+FROM koldstore.app_messages__cl
 ORDER BY id
 LIMIT 3;
 ```

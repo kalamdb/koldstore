@@ -33,7 +33,9 @@ fn clean_schema_enablement_plans_no_user_table_system_columns() {
     ]
     .join("\n");
 
-    assert!(planned_sql.contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"messages__cl\""));
+    assert!(
+        planned_sql.contains("CREATE TABLE IF NOT EXISTS \"koldstore\".\"public_messages__cl\"")
+    );
     assert!(planned_sql.contains("\"id\" bigint NOT NULL"));
     assert!(planned_sql.contains("\"seq\" bigint NOT NULL"));
     assert!(planned_sql.contains("\"op\" smallint NOT NULL"));

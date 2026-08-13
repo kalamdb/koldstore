@@ -30,7 +30,8 @@ Order of measurement (isolated `--side` / `--all-sides`):
 4. **Hot-only PK lookups before flush** (full heap still present)
 5. Flush older managed rows to zstd Parquet (duration, peak cluster RSS,
    rows/s, cold-Parquet MiB/s) — skipped for PostgreSQL-only
-6. **Cold-only** PK lookups (`id = 1`) + **hot+cold 50/50 mix**
+6. **Hot-only PK lookups after flush** (newest id still hot; must not open
+   Parquet) + **cold-only** PK lookups (`id = 1`) + **hot+cold 50/50 mix**
 7. **`changes_since` full drain** — page exclusive `seq` cursor from 0 in
    batches of 500 (override `KOLDSTORE_STORAGE_CHANGES_SINCE_BATCH`) until the
    feed is empty; report duration + rows/s for the full latest-state set
@@ -44,9 +45,13 @@ shared-buffer warm-up from a prior side, and leftover WAL/clog skewing insert
 timing. Each side’s JSON records `generated_at` and `git_commit`.
 
 Both source tables have autovacuum disabled by the schema, and the harness
-applies the same benchmark-only setting to the generated mirror. A long async
-catch-up therefore cannot launch maintenance during a following timed phase.
-The harness runs the documented explicit maintenance phase instead.
+applies the same benchmark-only setting to the generated mirror. After manage /
+warm-up, timed async phases **pause supervisor WAL dispatch and terminate the
+persistent WAL applier** (`force_stop`); GUC-off alone is not enough under the
+sticky supervisor. Catch-up is measured separately via foreground
+`wait_for_async_mirror()` fences. A long background apply therefore cannot run
+during a following timed DML/query phase. The harness runs the documented
+explicit maintenance phase instead.
 
 The harness prints a **Main comparison** headline table plus a **Detail**
 section. Columns are **PostgreSQL only** and **PG + KoldStore**. Flush rows

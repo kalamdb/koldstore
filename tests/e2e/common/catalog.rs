@@ -32,14 +32,46 @@ pub async fn assert_system_columns_absent(client: &Client, relation: &str) -> Re
     Ok(())
 }
 
-/// Returns the default `koldstore.<table>__cl` mirror relation for a source table.
+/// Returns the default schema-qualified mirror relation for a source table.
 #[must_use]
 pub fn change_log_mirror_relation(source_relation: &str) -> String {
-    let relation = source_relation
-        .split_once('.')
-        .map(|(_, name)| name)
-        .unwrap_or(source_relation);
-    format!("koldstore.{relation}__cl")
+    let source = koldstore_common::TableName::parse(source_relation)
+        .expect("e2e source relation must be a safe one- or two-part identifier");
+    koldstore_wal_mirror::mirror_relation_for_source(&source)
+        .expect("e2e source relation must produce a mirror")
+        .table_name()
+        .as_str()
+        .to_string()
+}
+
+/// Returns the unqualified mirror relation name for a source table.
+#[must_use]
+pub fn change_log_mirror_relation_name(source_relation: &str) -> String {
+    let mirror = change_log_mirror_relation(source_relation);
+    koldstore_common::TableName::parse(&mirror)
+        .expect("generated mirror relation must parse")
+        .relation()
+        .to_string()
+}
+
+/// Returns the PK-update guard trigger name installed on a managed source table.
+#[must_use]
+pub fn change_log_pk_guard_trigger_name(source_relation: &str) -> String {
+    koldstore_wal_mirror::pk_guard_trigger_name(&change_log_mirror_relation_name(source_relation))
+}
+
+/// Returns the mirror seq index name for a source table.
+#[must_use]
+pub fn change_log_mirror_seq_index_name(source_relation: &str) -> String {
+    koldstore_wal_mirror::mirror_seq_index_name(&change_log_mirror_relation_name(source_relation))
+}
+
+/// Returns the mirror tombstone seq index name for a source table.
+#[must_use]
+pub fn change_log_mirror_tombstone_index_name(source_relation: &str) -> String {
+    koldstore_wal_mirror::mirror_tombstone_index_name(&change_log_mirror_relation_name(
+        source_relation,
+    ))
 }
 
 /// Asserts that the table-specific change-log mirror relation exists.

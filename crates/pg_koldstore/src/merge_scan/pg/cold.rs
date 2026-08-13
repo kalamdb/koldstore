@@ -11,13 +11,14 @@ use koldstore_merge::scan::plan::{
     validate_prune_predicates_indexed, ColdPruneColumnPolicy, SegmentPrunePredicate,
     SegmentStatsHint,
 };
+use koldstore_merge::scan::ColdProjectionPlan;
 use koldstore_parquet::{
-    clean_cold_row_to_common, read_clean_cold_rows_from_object_store_with_size, ParquetReadOptions,
-    PgColumn,
+    clean_cold_row_to_common, read_clean_cold_rows_from_object_store_with_size, ParquetProfileMode,
+    ParquetReadOptions, PgColumn,
 };
 use pgrx::pg_sys;
 
-use super::profile::{elapsed_ms, ColdReadProfile, SegmentReadProfile};
+use super::profile::{elapsed_ms, ColdReadProfile, ProfileCollectionMode, SegmentReadProfile};
 use super::qual::segment_prune_predicates;
 use super::with_hook_disabled;
 
@@ -107,10 +108,8 @@ pub(super) struct ColdRowStream {
     segment_groups: Vec<Vec<SegmentStatsHint>>,
     next_group: usize,
     projection_columns: Vec<ColumnRef>,
-    /// When set, OrderedProgressive may compete with a narrow column set first.
-    compete_columns: Option<Vec<ColumnRef>>,
-    /// Full projection minus compete (empty when late materialization is off).
-    body_columns: Vec<ColumnRef>,
+    /// Ordered compete/body split; absent when one full open is cheaper.
+    late_projection: Option<ColdProjectionPlan>,
     /// Cached migration catalog (shared; avoid cloning column metadata).
     catalog: std::sync::Arc<koldstore_migrate::ExistingTableCatalog>,
     primary_key_columns: Vec<ColumnRef>,
@@ -135,65 +134,73 @@ type SegmentIndexCandidateSpiRow = (
     std::sync::Arc<crate::catalog::cache::CachedPackedRowGroupIndex>,
 );
 
+/// Borrowed PostgreSQL/catalog inputs for planning one lazy cold stream.
+pub(super) struct ColdStreamPlanRequest<'a> {
+    pub(super) table_oid: pg_sys::Oid,
+    pub(super) scanrelid: pg_sys::Index,
+    pub(super) snapshot: &'a koldstore_catalog::ManagedTableSnapshot,
+    pub(super) catalog: &'a std::sync::Arc<koldstore_migrate::ExistingTableCatalog>,
+    pub(super) qual: *mut pg_sys::List,
+    pub(super) projected_columns: &'a [&'a koldstore_migrate::order::CatalogColumn],
+    pub(super) params: pg_sys::ParamListInfo,
+    pub(super) profile_mode: ProfileCollectionMode,
+}
+
+/// Inputs for decoding one catalog-selected group of cold segments.
+struct ColdSegmentReadRequest<'a> {
+    client: &'a koldstore_storage::ObjectStoreClient,
+    segment_hints: &'a [SegmentStatsHint],
+    projected_columns: &'a [ColumnRef],
+    catalog_columns: &'a [koldstore_migrate::order::CatalogColumn],
+    primary_key_columns: &'a [ColumnRef],
+    current_schema_version: i32,
+    pk_probe: Option<&'a (ColumnRef, Vec<String>)>,
+    profile_mode: ProfileCollectionMode,
+}
+
 impl ColdRowStream {
     /// Enables compete-then-body opens for OrderedProgressive when beneficial.
     ///
     /// Returns `true` when late materialization is armed. Narrow projections
     /// (compete ≈ full) fail open to a single Full open.
     pub(super) fn enable_late_materialization(&mut self, leading_column: &ColumnRef) -> bool {
-        let mut compete = self.primary_key_columns.clone();
-        if !compete
-            .iter()
-            .any(|column| column.column_id == leading_column.column_id)
-        {
-            compete.push(leading_column.clone());
-        }
-        compete.sort_by_key(|column| column.column_id);
-        compete.dedup_by_key(|column| column.column_id);
-
-        let body: Vec<ColumnRef> = self
-            .projection_columns
-            .iter()
-            .filter(|column| {
-                !compete
-                    .iter()
-                    .any(|compete_column| compete_column.column_id == column.column_id)
-            })
-            .cloned()
-            .collect();
-        // Fail-open: no body left, or compete already includes everything useful.
-        if body.is_empty() || compete.len() >= self.projection_columns.len() {
-            self.compete_columns = None;
-            self.body_columns.clear();
-            return false;
-        }
-        self.compete_columns = Some(compete);
-        self.body_columns = body;
-        true
+        self.late_projection = ColdProjectionPlan::for_ordered(
+            &self.projection_columns,
+            &self.primary_key_columns,
+            leading_column,
+        );
+        self.late_projection.is_some()
     }
 
     /// True when OrderedProgressive should compete before hydrating body columns.
     #[must_use]
     pub(super) fn late_materialization_enabled(&self) -> bool {
-        self.compete_columns.is_some() && !self.body_columns.is_empty()
+        self.late_projection.is_some()
     }
 
     /// Application columns loaded during the compete phase (when armed).
     #[must_use]
     pub(super) fn compete_projection_names(&self) -> Vec<String> {
-        self.compete_columns
+        self.late_projection
             .as_ref()
-            .map(|columns| columns.iter().map(|column| column.name.clone()).collect())
+            .map(|plan| {
+                plan.compete()
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
     /// Application body columns hydrated after compete (when armed).
     #[must_use]
     pub(super) fn body_projection_names(&self) -> Vec<String> {
-        self.body_columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect()
+        self.late_projection.as_ref().map_or_else(Vec::new, |plan| {
+            plan.body()
+                .iter()
+                .map(|column| column.name.clone())
+                .collect()
+        })
     }
 
     /// Reads the next overlapping segment group and closes every reader before
@@ -201,25 +208,23 @@ impl ColdRowStream {
     pub(super) fn next_batch(
         &mut self,
         phase: ColdReadPhase,
-        collect_profile: bool,
+        profile_mode: ProfileCollectionMode,
     ) -> Result<Option<ColdBatch>, String> {
         let Some(group) = self.segment_groups.get(self.next_group) else {
             return Ok(None);
         };
         self.next_group += 1;
         let projected = self.columns_for_phase(phase);
-        let (rows, profiles) = cold_rows_from_segments(
-            &self.client,
-            group,
-            projected,
-            &self.catalog.columns,
-            &self.primary_key_columns,
-            self.schema_version,
-            &self.pk_probe,
-        )?;
-        if !collect_profile {
-            return Ok(Some((rows, Vec::new())));
-        }
+        let (rows, profiles) = cold_rows_from_segments(ColdSegmentReadRequest {
+            client: &self.client,
+            segment_hints: group,
+            projected_columns: projected,
+            catalog_columns: &self.catalog.columns,
+            primary_key_columns: &self.primary_key_columns,
+            current_schema_version: self.schema_version,
+            pk_probe: self.pk_probe.as_ref(),
+            profile_mode,
+        })?;
         Ok(Some((rows, profiles)))
     }
 
@@ -227,48 +232,40 @@ impl ColdRowStream {
         match phase {
             ColdReadPhase::Full => &self.projection_columns,
             ColdReadPhase::Compete => self
-                .compete_columns
-                .as_deref()
+                .late_projection
+                .as_ref()
+                .map(ColdProjectionPlan::compete)
                 .unwrap_or(&self.projection_columns),
         }
     }
 
     /// Columns for a body hydrate open: body ∪ primary key (for join).
     fn body_read_columns(&self) -> Vec<ColumnRef> {
-        let mut columns = self.body_columns.clone();
-        for pk in &self.primary_key_columns {
-            if !columns
-                .iter()
-                .any(|column| column.column_id == pk.column_id)
-            {
-                columns.push(pk.clone());
-            }
-        }
-        columns
+        self.late_projection.as_ref().map_or_else(Vec::new, |plan| {
+            plan.body_with_primary_key(&self.primary_key_columns)
+        })
     }
 
     /// Reads one body-hydrate group using body∪PK projection.
     pub(super) fn next_body_batch(
         &mut self,
-        collect_profile: bool,
+        profile_mode: ProfileCollectionMode,
     ) -> Result<Option<ColdBatch>, String> {
         let Some(group) = self.segment_groups.get(self.next_group) else {
             return Ok(None);
         };
         self.next_group += 1;
         let projected = self.body_read_columns();
-        let (rows, profiles) = cold_rows_from_segments(
-            &self.client,
-            group,
-            &projected,
-            &self.catalog.columns,
-            &self.primary_key_columns,
-            self.schema_version,
-            &self.pk_probe,
-        )?;
-        if !collect_profile {
-            return Ok(Some((rows, Vec::new())));
-        }
+        let (rows, profiles) = cold_rows_from_segments(ColdSegmentReadRequest {
+            client: &self.client,
+            segment_hints: group,
+            projected_columns: &projected,
+            catalog_columns: &self.catalog.columns,
+            primary_key_columns: &self.primary_key_columns,
+            current_schema_version: self.schema_version,
+            pk_probe: self.pk_probe.as_ref(),
+            profile_mode,
+        })?;
         Ok(Some((rows, profiles)))
     }
 
@@ -309,10 +306,9 @@ impl ColdRowStream {
                     continue;
                 };
                 hint.selected_row_groups = Some(match hint.selected_row_groups.take() {
-                    Some(existing) => existing
-                        .into_iter()
-                        .filter(|rg| selected.contains(rg))
-                        .collect(),
+                    Some(existing) => {
+                        koldstore_merge::scan::intersect_row_group_selections(existing, selected)
+                    }
                     None => selected,
                 });
             }
@@ -323,26 +319,18 @@ impl ColdRowStream {
 
 /// Prepares a cold stream without opening or decoding a Parquet file.
 pub(super) fn prepare_cold_row_stream(
-    table_oid: pg_sys::Oid,
-    scanrelid: pg_sys::Index,
-    snapshot: &koldstore_catalog::ManagedTableSnapshot,
-    catalog: &std::sync::Arc<koldstore_migrate::ExistingTableCatalog>,
-    qual: *mut pg_sys::List,
-    projected_columns: &[&koldstore_migrate::order::CatalogColumn],
-    params: pg_sys::ParamListInfo,
+    request: ColdStreamPlanRequest<'_>,
 ) -> Result<(ColdReadProfile, Option<ColdRowStream>), String> {
     with_hook_disabled(|| {
-        let Some(planned) = plan_cold_segments(
-            table_oid,
-            scanrelid,
-            snapshot,
-            catalog.as_ref(),
-            qual,
-            projected_columns,
-            params,
-        )?
-        else {
-            return Ok((ColdReadProfile::empty("(none)"), None));
+        let Some(planned) = plan_cold_segments(&request)? else {
+            return Ok((
+                if request.profile_mode.collects_counts() {
+                    ColdReadProfile::empty("(none)")
+                } else {
+                    ColdReadProfile::disabled()
+                },
+                None,
+            ));
         };
 
         let mut profile = planned.profile;
@@ -370,11 +358,10 @@ pub(super) fn prepare_cold_row_stream(
                 segment_groups,
                 next_group: 0,
                 projection_columns: planned.projection_columns,
-                compete_columns: None,
-                body_columns: Vec::new(),
-                catalog: std::sync::Arc::clone(catalog),
-                primary_key_columns: snapshot.primary_key_columns.clone(),
-                schema_version: snapshot.schema_version,
+                late_projection: None,
+                catalog: std::sync::Arc::clone(request.catalog),
+                primary_key_columns: request.snapshot.primary_key_columns.clone(),
+                schema_version: request.snapshot.schema_version,
                 pk_probe: planned.pk_probe,
             }),
         ))
@@ -391,18 +378,23 @@ struct PlannedColdSegments {
 }
 
 fn plan_cold_segments(
-    table_oid: pg_sys::Oid,
-    scanrelid: pg_sys::Index,
-    snapshot: &koldstore_catalog::ManagedTableSnapshot,
-    catalog: &koldstore_migrate::ExistingTableCatalog,
-    qual: *mut pg_sys::List,
-    projected_columns: &[&koldstore_migrate::order::CatalogColumn],
-    params: pg_sys::ParamListInfo,
+    request: &ColdStreamPlanRequest<'_>,
 ) -> Result<Option<PlannedColdSegments>, String> {
+    let ColdStreamPlanRequest {
+        table_oid,
+        scanrelid,
+        snapshot,
+        catalog,
+        qual,
+        projected_columns,
+        params,
+        profile_mode,
+    } = request;
+    let catalog = catalog.as_ref();
     let scope_column_id = snapshot.scope_column_id;
     let segment_order_column_id = snapshot.segment_order_column_id;
     let prune_predicates = retain_pre_merge_cold_prune_predicates(
-        unsafe { segment_prune_predicates(scanrelid, qual, catalog, params) },
+        unsafe { segment_prune_predicates(*scanrelid, *qual, catalog, *params) },
         |column_id| {
             let column = catalog.column_by_attnum(column_id)?;
             Some(cold_prune_column_policy(
@@ -421,13 +413,13 @@ fn plan_cold_segments(
     }));
     requested_columns.sort_by_key(|column| column.column_id);
     requested_columns.dedup_by_key(|column| column.column_id);
-    let manifest_started = Instant::now();
+    let manifest_started = profile_mode.collects_timing().then(Instant::now);
     let Some(manifest_stats) =
-        crate::catalog::cache::cached_manifest_scan_context(table_oid, &requested_columns)?
+        crate::catalog::cache::cached_manifest_scan_context(*table_oid, &requested_columns)?
     else {
         return Ok(None);
     };
-    let manifest_read_ms = elapsed_ms(manifest_started);
+    let manifest_read_ms = manifest_started.map(elapsed_ms);
     let mut indexed_filter_column_ids = catalog
         .primary_key
         .columns
@@ -446,13 +438,14 @@ fn plan_cold_segments(
     validate_prune_predicates_indexed(&prune_predicates, &indexed_filter_column_ids)
         .map_err(|error| error.to_string())?;
     let segments_considered = manifest_stats.segments.len();
-    let index_started = Instant::now();
+    let index_started = profile_mode.collects_timing().then(Instant::now);
     let resolved = resolve_segment_index_candidates(
-        table_oid,
+        *table_oid,
         manifest_stats.generation,
         catalog,
         segment_order_column_id,
         &prune_predicates,
+        profile_mode.collects_counts(),
     )?;
     let SegmentIndexCandidateResolution {
         candidates: indexed_candidates,
@@ -464,7 +457,8 @@ fn plan_cold_segments(
     } = resolved;
     let segment_index_lookup_ms = indexed_candidates
         .as_ref()
-        .map(|_| elapsed_ms(index_started));
+        .and(index_started)
+        .map(elapsed_ms);
     let segment_index_candidate_segments = indexed_candidates
         .as_ref()
         .map(|candidates| candidates.len());
@@ -472,39 +466,41 @@ fn plan_cold_segments(
         .map(|candidates| candidates.to_vec())
         .unwrap_or_else(|| manifest_stats.segments.clone());
     let segments_pruned_catalog_index = segments_considered.saturating_sub(segments.len());
-    let projection = projection_columns
-        .iter()
-        .map(|column| column.name.clone())
-        .collect::<Vec<_>>();
     let pk_probe = pk_equality_values(&prune_predicates, &snapshot.primary_key_columns);
-    let cold_segments_query = koldstore_catalog::queries::plan_in_sync_manifest_scan_context()
-        .ok()
-        .map(|statement| statement.sql);
-    let profile = ColdReadProfile {
-        manifest_path: manifest_stats.manifest_path(),
-        storage_type: manifest_stats.storage_type.clone(),
-        base_path: manifest_stats.base_path.clone(),
-        manifest_read_ms: Some(manifest_read_ms),
-        segments_considered,
-        segments_pruned_catalog_index,
-        segments_opened: segments.len(),
-        compete_opens: 0,
-        body_opens: 0,
-        compete_columns: Vec::new(),
-        body_columns: Vec::new(),
-        segment_index_order_column_id: index_column_id,
-        segment_index_order_column: index_column_name,
-        segment_index_lookup_shape: Some(segment_index_lookup_shape),
-        segment_index_plan,
-        segment_index_lookup_ms,
-        segment_index_candidate_segments,
-        cold_segments_query,
-        segment_index_query,
-        pk_probe: pk_probe
-            .as_ref()
-            .map(|(column, values)| (column.name.clone(), values.clone())),
-        projected_columns: projection,
-        segments: vec![],
+    let profile = if profile_mode.collects_counts() {
+        ColdReadProfile {
+            manifest_path: manifest_stats.manifest_path(),
+            storage_type: manifest_stats.storage_type.clone(),
+            base_path: manifest_stats.base_path.clone(),
+            manifest_read_ms,
+            segments_considered,
+            segments_pruned_catalog_index,
+            segments_opened: segments.len(),
+            compete_opens: 0,
+            body_opens: 0,
+            compete_columns: Vec::new(),
+            body_columns: Vec::new(),
+            segment_index_order_column_id: index_column_id,
+            segment_index_order_column: index_column_name,
+            segment_index_lookup_shape: Some(segment_index_lookup_shape),
+            segment_index_plan,
+            segment_index_lookup_ms,
+            segment_index_candidate_segments,
+            cold_segments_query: koldstore_catalog::queries::plan_in_sync_manifest_scan_context()
+                .ok()
+                .map(|statement| statement.sql),
+            segment_index_query,
+            pk_probe: pk_probe
+                .as_ref()
+                .map(|(column, values)| (column.name.clone(), values.clone())),
+            projected_columns: projection_columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect(),
+            segments: Vec::new(),
+        }
+    } else {
+        ColdReadProfile::disabled()
     };
     Ok(Some(PlannedColdSegments {
         profile,
@@ -563,6 +559,7 @@ fn resolve_segment_index_candidates(
     catalog: &koldstore_migrate::ExistingTableCatalog,
     segment_order_column_id: Option<ColumnId>,
     predicates: &[SegmentPrunePredicate],
+    collect_profile: bool,
 ) -> Result<SegmentIndexCandidateResolution, String> {
     let preferred = segment_order_column_id.and_then(|column_id| {
         catalog.column_by_id(column_id).filter(|column| {
@@ -583,27 +580,35 @@ fn resolve_segment_index_candidates(
         })
     });
     let Some(column) = column else {
-        let order_name = segment_order_column_id.and_then(|column_id| {
-            catalog
-                .column_by_id(column_id)
-                .map(|column| column.name.clone())
+        let order_name = collect_profile.then(|| {
+            segment_order_column_id.and_then(|column_id| {
+                catalog
+                    .column_by_id(column_id)
+                    .map(|column| column.name.clone())
+            })
         });
         return Ok(SegmentIndexCandidateResolution {
             candidates: None,
             shape: SegmentIndexLookupShape::AllActive,
             column_id: segment_order_column_id.map(ColumnId::get),
-            column_name: order_name,
+            column_name: order_name.flatten(),
             plan: None,
             query: None,
         });
     };
-    let loaded =
-        load_segment_index_candidates(table_oid, manifest_generation, catalog, column, predicates)?;
+    let loaded = load_segment_index_candidates(
+        table_oid,
+        manifest_generation,
+        catalog,
+        column,
+        predicates,
+        collect_profile,
+    )?;
     Ok(SegmentIndexCandidateResolution {
         candidates: loaded.candidates,
         shape: loaded.shape,
         column_id: Some(column.column_id.get()),
-        column_name: Some(column.name.clone()),
+        column_name: collect_profile.then(|| column.name.clone()),
         plan: loaded.plan,
         query: loaded.query,
     })
@@ -615,6 +620,7 @@ fn load_segment_index_candidates(
     catalog: &koldstore_migrate::ExistingTableCatalog,
     column: &koldstore_migrate::order::CatalogColumn,
     predicates: &[SegmentPrunePredicate],
+    collect_profile: bool,
 ) -> Result<SegmentIndexCandidateLoad, String> {
     use pgrx::datum::DatumWithOid;
 
@@ -646,8 +652,8 @@ fn load_segment_index_candidates(
         }
     };
     let statement = statement.map_err(|error| error.to_string())?;
-    let query = Some(statement.sql.clone());
-    let plan = Some(preferred_segment_index_access(shape).to_string());
+    let query = collect_profile.then(|| statement.sql.clone());
+    let plan = collect_profile.then(|| preferred_segment_index_access(shape).to_string());
 
     let cache_key = crate::catalog::cache::SegmentIndexCandidateCacheKey::new(
         table_oid.to_u32(),
@@ -1097,6 +1103,7 @@ pub(super) fn planned_cold_read_profile(table_oid: pg_sys::Oid) -> Result<ColdRe
                 .map(|segment| SegmentReadProfile {
                     object_path: segment.object_path.clone(),
                     row_count: 0,
+                    reader_pool_wait_ms: None,
                     read_ms: None,
                     byte_size: segment.byte_size,
                     parquet: None,
@@ -1160,14 +1167,18 @@ fn pk_equality_values(
 }
 
 fn cold_rows_from_segments(
-    client: &koldstore_storage::ObjectStoreClient,
-    segment_hints: &[SegmentStatsHint],
-    projected_columns: &[ColumnRef],
-    catalog_columns: &[koldstore_migrate::order::CatalogColumn],
-    primary_key_columns: &[ColumnRef],
-    current_schema_version: i32,
-    pk_probe: &Option<(ColumnRef, Vec<String>)>,
+    request: ColdSegmentReadRequest<'_>,
 ) -> Result<(Vec<ColdRow>, Vec<SegmentReadProfile>), String> {
+    let ColdSegmentReadRequest {
+        client,
+        segment_hints,
+        projected_columns,
+        catalog_columns,
+        primary_key_columns,
+        current_schema_version,
+        pk_probe,
+        profile_mode,
+    } = request;
     // One ObjectStore client for all segments (filesystem or S3). Parquet reads
     // are footer-first with range GETs — no full-object download. Known
     // `byte_size` enables bounded footer ranges (avoids suffix GETs on S3).
@@ -1181,7 +1192,11 @@ fn cold_rows_from_segments(
         .map(|column| column.name.clone())
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
-    let mut segments = Vec::with_capacity(segment_hints.len());
+    let mut segments = if profile_mode.collects_counts() {
+        Vec::with_capacity(segment_hints.len())
+    } else {
+        Vec::new()
+    };
     for hint in segment_hints {
         // Columns added after a segment was written have no physical field in
         // that schema version; omit them from the Parquet projection and fill
@@ -1233,7 +1248,12 @@ fn cold_rows_from_segments(
             .collect::<Result<Vec<_>, _>>()?;
         let mut options = ParquetReadOptions::new()
             .with_columns(columns.iter().map(|column| column.name.clone()))
-            .with_timeout(client.timeout());
+            .with_timeout(client.timeout())
+            .with_profile_mode(match profile_mode {
+                ProfileCollectionMode::Disabled => ParquetProfileMode::Disabled,
+                ProfileCollectionMode::Counts => ParquetProfileMode::Counts,
+                ProfileCollectionMode::CountsAndTiming => ParquetProfileMode::CountsAndTiming,
+            });
         if let Some(row_groups) = &hint.selected_row_groups {
             options = options.with_row_groups(row_groups.iter().copied());
         }
@@ -1247,10 +1267,12 @@ fn cold_rows_from_segments(
             })?;
             options = options.with_pk_values(physical_pk, values.iter().cloned());
         }
-        let started = Instant::now();
+        let started = profile_mode.collects_timing().then(Instant::now);
+        let permit_started = profile_mode.collects_timing().then(Instant::now);
         let _permit = crate::merge_scan::reader_pool::try_acquire_parquet_reader_permit(
             crate::guc::max_open_parquet_readers(),
         )?;
+        let reader_pool_wait_ms = permit_started.map(elapsed_ms);
         let (segment_rows, parquet_profile) = read_clean_cold_rows_from_object_store_with_size(
             std::sync::Arc::clone(&store),
             &hint.object_path,
@@ -1259,13 +1281,16 @@ fn cold_rows_from_segments(
             &physical_pk_names,
             &options,
         )?;
-        segments.push(SegmentReadProfile {
-            object_path: hint.object_path.clone(),
-            row_count: segment_rows.len(),
-            read_ms: Some(elapsed_ms(started)),
-            byte_size: hint.byte_size.or(parquet_profile.file_size),
-            parquet: Some(parquet_profile),
-        });
+        if profile_mode.collects_counts() {
+            segments.push(SegmentReadProfile {
+                object_path: hint.object_path.clone(),
+                row_count: segment_rows.len(),
+                reader_pool_wait_ms,
+                read_ms: started.map(elapsed_ms),
+                byte_size: hint.byte_size.or(parquet_profile.file_size),
+                parquet: Some(parquet_profile),
+            });
+        }
         for mut row in segment_rows {
             remap_json_to_logical_names(&mut row.pk_json, &physical_names);
             remap_row_to_logical_names(&mut row.row_image, &physical_names);

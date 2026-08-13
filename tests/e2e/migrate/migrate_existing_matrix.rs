@@ -131,7 +131,7 @@ async fn run_existing_table_scenario(
         .get::<_, i64>(0);
     assert_eq!(system_columns, 0);
 
-    let mirror_relation = format!("koldstore.{}_pg{}__cl", scenario.table_name, pg_version);
+    let mirror_relation = common::change_log_mirror_relation(&relation);
     let mirror_primary_key = client
         .query_one(
             r#"

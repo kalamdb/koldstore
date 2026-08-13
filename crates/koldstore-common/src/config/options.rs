@@ -64,6 +64,38 @@ pub enum ParquetCompression {
     Uncompressed,
 }
 
+/// Validated false-positive probability for Parquet Bloom filters.
+///
+/// The finite `0 < value < 1` invariant makes the wrapped floating-point
+/// value safe to compare and persist as managed-table configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ParquetBloomFilterFpp(f64);
+
+impl Eq for ParquetBloomFilterFpp {}
+
+impl ParquetBloomFilterFpp {
+    /// Creates a validated Parquet Bloom false-positive probability.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `value` is finite and strictly between zero and
+    /// one.
+    pub fn new(value: f64) -> Result<Self, String> {
+        if value.is_finite() && value > 0.0 && value < 1.0 {
+            Ok(Self(value))
+        } else {
+            Err("parquet_bloom_filter_fpp must be greater than 0 and less than 1".into())
+        }
+    }
+
+    /// Returns the probability expected by parquet-rs.
+    #[must_use]
+    pub const fn get(self) -> f64 {
+        self.0
+    }
+}
+
 impl ParquetCompression {
     /// Returns the persisted JSON string for this codec.
     #[must_use]
@@ -290,6 +322,15 @@ pub struct ManageTableOptions {
     /// Primary-key columns are always forced into the effective Bloom set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bloom_filter_columns: Option<Vec<String>>,
+    /// Optional Parquet row-group row limit for future flushes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parquet_row_group_size: Option<u64>,
+    /// Optional Parquet data-page row limit for future flushes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parquet_data_page_row_count_limit: Option<u64>,
+    /// Optional false-positive probability for Parquet Bloom filters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parquet_bloom_filter_fpp: Option<ParquetBloomFilterFpp>,
 }
 
 impl ManageTableOptions {
@@ -327,6 +368,14 @@ impl ManageTableOptions {
             "bloom_filter_columns",
             decoded.bloom_filter_columns.as_deref(),
         )?;
+        validate_positive_option("parquet_row_group_size", decoded.parquet_row_group_size)?;
+        validate_positive_option(
+            "parquet_data_page_row_count_limit",
+            decoded.parquet_data_page_row_count_limit,
+        )?;
+        if let Some(fpp) = decoded.parquet_bloom_filter_fpp {
+            ParquetBloomFilterFpp::new(fpp.get())?;
+        }
         Ok(decoded)
     }
 
@@ -501,6 +550,34 @@ impl ManageTableOptions {
         };
         self
     }
+
+    /// Sets the Parquet row-group row limit for future flushes.
+    #[must_use]
+    pub const fn with_parquet_row_group_size(mut self, row_count: u64) -> Self {
+        self.parquet_row_group_size = Some(row_count);
+        self
+    }
+
+    /// Sets the Parquet data-page row limit for future flushes.
+    #[must_use]
+    pub const fn with_parquet_data_page_row_count_limit(mut self, row_count: u64) -> Self {
+        self.parquet_data_page_row_count_limit = Some(row_count);
+        self
+    }
+
+    /// Sets the Parquet Bloom filter false-positive probability for future flushes.
+    #[must_use]
+    pub const fn with_parquet_bloom_filter_fpp(mut self, fpp: ParquetBloomFilterFpp) -> Self {
+        self.parquet_bloom_filter_fpp = Some(fpp);
+        self
+    }
+}
+
+fn validate_positive_option(field: &str, value: Option<u64>) -> Result<(), String> {
+    if value == Some(0) {
+        return Err(format!("{field} must be greater than zero"));
+    }
+    Ok(())
 }
 
 fn normalize_column_name_list<I, S>(columns: I) -> Vec<String>

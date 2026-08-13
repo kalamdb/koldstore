@@ -1,6 +1,6 @@
 # KoldStore
 
-> **An open research project exploring transparent tiered storage for PostgreSQL application tables.**
+> **An open research project exploring a tiered-storage overlay for PostgreSQL application tables.**
 
 Keep active rows in PostgreSQL. Move historical rows to compressed Parquet on filesystem or object storage. Continue querying supported hot and cold data through the original table.
 
@@ -102,7 +102,7 @@ KoldStore is organized around concrete research questions rather than only a fea
 | Manage existing PostgreSQL tables | ✅ Working |
 | Keep application-visible schemas clean | ✅ Working |
 | Query supported hot and cold rows through the original table | 🧪 Experimental |
-| Native PostgreSQL foreground writes | ✅ Working |
+| Native PostgreSQL foreground writes against hot rows | ✅ Working |
 | Committed-WAL latest-state mirror | ✅ Working, asynchronous |
 | Manual and automatic flushing | ✅ Working |
 | Row-limit and age-based lifecycle policies | ✅ Working |
@@ -112,7 +112,7 @@ KoldStore is organized around concrete research questions rather than only a fea
 | Segment and row-group pruning | 🧪 Working baseline |
 | Latest-state `changes_since` cursor | 🧪 Working baseline |
 | Durable migration and flush jobs | ✅ Working baseline |
-| PostgreSQL 15–18 | ✅ Supported |
+| PostgreSQL 15–18 build and experimental runtime matrix | 🧪 Tested |
 | Standard DML against cold-only rows | ❌ Not supported yet |
 | Global hot+cold `UNIQUE` and foreign keys | ❌ Not supported |
 | Compaction | 🚧 In development |
@@ -123,7 +123,7 @@ KoldStore is organized around concrete research questions rather than only a fea
 
 ## Try it
 
-The preview Docker image includes PostgreSQL 16 with KoldStore preloaded and logical WAL enabled.
+The preview Docker image includes PostgreSQL **18** with KoldStore preloaded and logical WAL enabled (`latest`, amd64 + arm64). PostgreSQL 16 stays available as `:pg16` / `:<version>-pg16` (**amd64 only**). PostgreSQL 17 images (`:pg17`) are published only when enabled on the Release workflow.
 
 ```bash
 docker pull jamals86/pg-koldstore:latest
@@ -133,6 +133,13 @@ docker run --rm \
   -e POSTGRES_PASSWORD=postgres \
   -p 5432:5432 \
   jamals86/pg-koldstore:latest
+```
+
+PostgreSQL 16:
+
+```bash
+docker pull jamals86/pg-koldstore:pg16
+docker run --rm -e POSTGRES_PASSWORD=postgres -p 5432:5432 jamals86/pg-koldstore:pg16
 ```
 
 Connect:
@@ -155,7 +162,7 @@ SELECT koldstore.register_storage(
 );
 ```
 
-Create a normal PostgreSQL table:
+Create an ordinary PostgreSQL heap table:
 
 ```sql
 CREATE TABLE messages (
@@ -281,7 +288,8 @@ Foreground `INSERT`, `UPDATE`, and `DELETE` operate on the PostgreSQL heap.
 
 Committed primary-key changes are then applied asynchronously to the latest-state mirror through logical WAL.
 
-Use the explicit consistency fence before work that must observe all committed source changes in the mirror:
+Use the explicit consistency fence before work that must observe source changes
+that committed before the fence captured its WAL boundary:
 
 ```sql
 SELECT koldstore.wait_for_async_mirror();
@@ -289,8 +297,13 @@ SELECT koldstore.wait_for_async_mirror();
 
 Important boundaries:
 
+- The fence does not expose the caller's uncommitted changes. In
+  `REPEATABLE READ` or `SERIALIZABLE`, call it before establishing the snapshot
+  that must include those commits.
 - Standard DML does not currently mutate a row that exists only in cold storage.
 - An unfenced update or delete can temporarily leave an older cold version visible.
+- PostgreSQL row locks, system columns, native uniqueness checks, and predicate
+  locking do not extend to cold Parquet rows.
 - The mirror stores the latest state per primary key; it is not an append-only event history.
 - Primary-key mutation is not supported for managed tables.
 - PostgreSQL-native indexes remain attached only to hot rows.
@@ -507,4 +520,4 @@ Links:
 ## License
 
 Apache License 2.0.
-Copyright 2026 KalamDB.
+Copyright 2026 KoldStore contributors.

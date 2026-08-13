@@ -43,7 +43,10 @@ use path_strategy::{
 };
 use profile::{ColdReadProfile, EmitPath, ScanExecutionProfile, ScanProfileSink, ScanProfiler};
 use qual::{physical_scan_projection, required_scan_projection, residual_filters};
-use tuple::{slot_attribute_count, store_materialized_row, MaterializedRow, ScanMemory};
+use tuple::{
+    clear_custom_scan_slots, clear_slot, slot_attribute_count, store_materialized_row,
+    MaterializedRow, ScanMemory,
+};
 
 use pg_list::{
     list_cstring_at, list_integer_at, list_len, list_nth_ptr, make_pg_string, order_descending_flag,
@@ -237,6 +240,8 @@ impl ScanExecutionState {
                 let memory = memory
                     .as_mut()
                     .ok_or_else(|| "stream scan memory is unavailable".to_string())?;
+                // Drop slot aliases before resetting the AllocSet that owns them.
+                clear_slot(slot);
                 memory.reset();
                 let Some(row) = stream.next_materialized(
                     projection,
@@ -291,6 +296,57 @@ pub fn register_custom_scan_hooks() {
         pg_sys::RegisterCustomScanMethods(&raw const SCAN_METHODS);
         PREVIOUS_SET_REL_PATHLIST_HOOK = pg_sys::set_rel_pathlist_hook;
         pg_sys::set_rel_pathlist_hook = Some(set_rel_pathlist);
+        pg_sys::RegisterXactCallback(Some(merge_scan_xact_callback), std::ptr::null_mut());
+        pg_sys::RegisterSubXactCallback(Some(merge_scan_subxact_callback), std::ptr::null_mut());
+    }
+}
+
+/// Abandon thread-local scan state when PostgreSQL skips `EndCustomScan` on ERROR.
+///
+/// Portal abort deletes the query AllocSet that [`ScanMemory`] wraps. Disowning
+/// prevents a second `MemoryContextDelete` when the next statement drops the
+/// stale [`SCAN_STATES`] entry (otherwise glibc aborts the backend).
+fn abandon_scan_states_after_abort() {
+    SCAN_STATES.with(|states| {
+        let Ok(mut states) = states.try_borrow_mut() else {
+            // A longjmp left a live RefMut; force-clearing would panic under
+            // panic=abort. Leave the map; the next successful EndCustomScan or
+            // a later abort with a free borrow still scrubs.
+            return;
+        };
+        for (_, mut scan) in states.drain() {
+            if let Some(memory) = scan.memory.as_mut() {
+                memory.disown();
+            }
+            // Drop remaining Rust/Arrow state normally.
+            drop(scan);
+        }
+    });
+    profile::abandon_completed_explain_states();
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn merge_scan_xact_callback(
+    event: pg_sys::XactEvent::Type,
+    _arg: *mut std::ffi::c_void,
+) {
+    match event {
+        pg_sys::XactEvent::XACT_EVENT_ABORT | pg_sys::XactEvent::XACT_EVENT_PARALLEL_ABORT => {
+            abandon_scan_states_after_abort();
+        }
+        _ => {}
+    }
+}
+
+#[pgrx::pg_guard]
+unsafe extern "C-unwind" fn merge_scan_subxact_callback(
+    event: pg_sys::SubXactEvent::Type,
+    _my_subid: pg_sys::SubTransactionId,
+    _parent_subid: pg_sys::SubTransactionId,
+    _arg: *mut std::ffi::c_void,
+) {
+    if event == pg_sys::SubXactEvent::SUBXACT_EVENT_ABORT_SUB {
+        abandon_scan_states_after_abort();
     }
 }
 
@@ -878,7 +934,11 @@ unsafe fn initialize_fallback_scan(
         memory,
     } = source_execution;
 
-    let hot_plan_label = hot_child_explain_label(node);
+    let hot_plan_label = if profiler.is_enabled() {
+        hot_child_explain_label(node)
+    } else {
+        String::new()
+    };
     cold_profile.segments_opened = cold_profile.segments.len();
     let execution = profiler.finish(hot_rows, scan_started);
 
@@ -1001,19 +1061,21 @@ unsafe extern "C-unwind" fn next_scan_tuple(
         return std::ptr::null_mut();
     }
 
-    let stored = SCAN_STATES.with(|states| {
+    // Resolve the Result outside the RefCell borrow so `pgrx::error!` (ereport /
+    // unwind) never longjmps while `SCAN_STATES` is borrowed.
+    let outcome = SCAN_STATES.with(|states| {
         let mut states = states.borrow_mut();
-        let scan = states.get_mut(&(node as usize))?;
-        Some(
-            scan.store_next_row(slot)
-                .unwrap_or_else(|error| pgrx::error!("{CUSTOM_PATH_NAME} stream failed: {error}")),
-        )
+        states
+            .get_mut(&(node as usize))
+            .map(|scan| scan.store_next_row(slot))
     });
 
-    if stored == Some(true) {
-        slot
-    } else {
-        std::ptr::null_mut()
+    match outcome {
+        Some(Ok(true)) => slot,
+        Some(Ok(false)) | None => std::ptr::null_mut(),
+        Some(Err(error)) => {
+            pgrx::error!("{CUSTOM_PATH_NAME} stream failed: {error}")
+        }
     }
 }
 
@@ -1033,6 +1095,9 @@ unsafe extern "C-unwind" fn end_custom_scan(node: *mut pg_sys::CustomScanState) 
             (*provider).hot_probe,
             HotProbeState::Pending | HotProbeState::Hit
         ) {
+            // Clear slots before deleting ScanMemory: nodeCustom.c calls
+            // ExecClearTuple *after* EndCustomScan.
+            clear_custom_scan_slots(node);
             SCAN_STATES.with(|states| {
                 if let Some(mut scan) = states.borrow_mut().remove(&(node as usize)) {
                     if let Some(mut execution) = scan.execution.take() {

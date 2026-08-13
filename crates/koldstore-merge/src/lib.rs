@@ -8,6 +8,8 @@ pub mod dml;
 pub mod events;
 #[path = "sql/managed_hook.rs"]
 pub mod managed_hook;
+#[path = "core/overlay.rs"]
+pub mod overlay;
 #[path = "planning/quals.rs"]
 pub mod quals;
 #[path = "core/resolver.rs"]
@@ -35,6 +37,7 @@ pub use managed_hook::{
     plan_managed_update_effect, simple_pk_delete_supported, ManagedDmlEffect, SimplePkPredicate,
     HOT_DML_MANIFEST_SYNC_STATE,
 };
+pub use overlay::MirrorOverlay;
 pub use quals::{build_pruning_plan, classify_predicates, ClassifiedPredicates, PruningPlan};
 pub use resolver::{
     resolve_rows, resolve_rows_owned, NewestFirstWinnerResolver, ResolvedRow, RowSource,
@@ -44,14 +47,13 @@ pub use rls::{
     enforce_or_fail_closed, plan_security_quals, unsupported_rls_error, SecurityQualPlan,
 };
 pub use scan::{
-    begin_merge_scan, begin_merge_scan_with_plan, build_path_portfolio, classify_path_strategy,
-    clear_partial_heap_paths, custom_scan_explain_label, execute_merge_scan,
-    execute_merge_scan_with_filters, group_segments_newest_first, group_segments_oldest_first,
+    build_path_portfolio, classify_path_strategy, clear_partial_heap_paths,
+    custom_scan_explain_label, group_segments_newest_first, group_segments_oldest_first,
     physical_name_for_segment_column, retain_pre_merge_cold_prune_predicates,
-    validate_prune_predicates_indexed, ColdAvailability, ColdPruneColumnPolicy, FilterPlan,
-    HotChildCandidate, KoldPathStrategy, MergeMetadataAttnums, MergeScanError, MergeScanPlan,
-    MergeScanResult, OrderColumnSupport, OrderedPathSpec, PathPortfolioDecision, PlannerPath,
-    PlannerPathKind, PortfolioPathEntry, ScanResourceCounters, ScanState, SegmentHint,
-    SegmentPrunePredicate, SegmentStatsHint, StrategyRequest, CUSTOM_PATH_NAME, HOT_SEQ_SENTINEL,
+    validate_prune_predicates_indexed, ColdProjectionPlan, ColdPruneColumnPolicy,
+    HotChildCandidate, KoldPathStrategy, MergeMetadataAttnums, MergeScanPlan, OrderColumnSupport,
+    OrderedPathSpec, PathPortfolioDecision, PlannerPath, PlannerPathKind, PortfolioPathEntry,
+    SegmentHint, SegmentPrunePredicate, SegmentStatsHint, StrategyRequest, CUSTOM_PATH_NAME,
+    HOT_SEQ_SENTINEL,
 };
 pub use tombstone::{tombstone_required, TombstoneDecision};

@@ -194,7 +194,7 @@ If `selection.stats.row_count == 0`:
 ```sql
 SELECT <app cols from hot/mirror join>,
        mirror."seq", mirror."op", (mirror."op" = 3) AS deleted
-FROM koldstore.{table}__cl AS mirror
+FROM koldstore.<schema>_<table>__cl AS mirror
 LEFT JOIN ONLY {schema}.{table} AS hot ON <pk join>
 WHERE mirror."seq" <= $1          -- max_seq cutoff
   AND mirror."seq" > $2           -- keyset lower bound
@@ -329,7 +329,7 @@ not JSON cleanup**. Runs only after pending segments are activated.
 
 ```sql
 WITH removed_mirror AS (
-  DELETE FROM koldstore.{table}__cl AS mirror
+  DELETE FROM koldstore.<schema>_<table>__cl AS mirror
   WHERE mirror."seq" <= $1 [AND mirror."op" = …]
   RETURNING <pk cols>, seq, op
 ),
