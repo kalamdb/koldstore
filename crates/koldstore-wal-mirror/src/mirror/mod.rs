@@ -17,10 +17,11 @@ pub use guard::{
     MirrorGuardResult, MirrorPkGuardPlan,
 };
 pub use r#async::{
-    decode_message, must_flush_before_push, parse_pk_bool, parse_pk_ints, pg_value_json,
-    pg_value_text, pk_identity, primary_key_json, BatchFlushReason, PgOutputColumn,
-    PgOutputDecodeError, PgOutputMessage, PgOutputRelation, PgOutputTuple, PgOutputValue,
-    APPLY_BATCH_ROWS,
+    decode_message, must_flush_before_push, order_column_text, parse_pk_bool, parse_pk_ints,
+    pg_value_text, pk_column_indexes, pk_identity, pk_type_oids, primary_key_cells,
+    take_pk_cells_and_order_text, BatchFlushReason, PgOutputColumn, PgOutputDecodeError,
+    PgOutputMessage, PgOutputRelation, PgOutputTuple, PgOutputValue, PkBindColumn, PkCell,
+    PkIdentity, APPLY_BATCH_ROWS, BOOLOID, INT2OID, INT4OID, INT8OID,
 };
 pub use shared::{
     mirror_relation_for_source, mirror_seq_index_name, mirror_tombstone_index_name,

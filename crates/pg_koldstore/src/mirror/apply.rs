@@ -27,11 +27,11 @@ use std::collections::{HashMap, HashSet};
 use koldstore_catalog::{async_managed_relation, queries::plan_async_managed_relation_by_oid};
 use koldstore_common::{format_pg_lsn, next_id_after, MirrorOperation};
 use koldstore_wal_mirror::{
-    budget_hit, decode_message, must_flush_before_push, parse_pk_bool, parse_pk_ints,
-    pg_value_text, pk_identity, plan_async_mirror_batch_delete_existing,
-    plan_async_mirror_batch_update, plan_async_mirror_batch_upsert, primary_key_json,
-    resolve_row_budget, resolve_time_budget, PgOutputMessage, PgOutputRelation, PgOutputTuple,
-    APPLY_BATCH_ROWS,
+    budget_hit, decode_message, must_flush_before_push, pk_column_indexes, pk_identity,
+    pk_type_oids, plan_async_mirror_batch_delete_existing, plan_async_mirror_batch_update,
+    plan_async_mirror_batch_upsert, resolve_row_budget, resolve_time_budget,
+    take_pk_cells_and_order_text, PgOutputMessage, PgOutputRelation, PgOutputTuple, PkBindColumn,
+    PkCell, PkIdentity, APPLY_BATCH_ROWS,
 };
 use pgrx::datum::DatumWithOid;
 use serde_json::Value;
@@ -63,6 +63,10 @@ struct ManagedRelation {
     order_column: Option<OrderColumnConfig>,
     /// Cached `format_type` spellings for each primary-key column.
     pk_type_names: Option<Vec<String>>,
+    /// Cached relation-tuple indexes for managed PK columns.
+    pk_indexes: Option<Vec<usize>>,
+    /// Cached PostgreSQL type OIDs for managed PK columns.
+    pk_type_oids: Option<Vec<u32>>,
     /// Cached upsert SQL for typed `unnest` binds (Insert when no order key,
     /// or Insert/Update with order key).
     upsert_sql: Option<String>,
@@ -75,6 +79,8 @@ struct ManagedRelation {
 impl ManagedRelation {
     fn invalidate_plans(&mut self) {
         self.pk_type_names = None;
+        self.pk_indexes = None;
+        self.pk_type_oids = None;
         self.upsert_sql = None;
         self.update_sql = None;
         self.delete_sql = None;
@@ -94,17 +100,53 @@ struct BatchKey {
 #[derive(Debug)]
 struct ApplyBatch {
     key: BatchKey,
-    rows: Vec<Value>,
-    seen: HashSet<String>,
+    pk_columns: Vec<PkBindColumn>,
+    seqs: Vec<i64>,
+    order_keys: Option<Vec<Vec<u8>>>,
+    seen: HashSet<PkIdentity>,
 }
 
 impl ApplyBatch {
-    fn new(key: BatchKey) -> Self {
+    fn new(key: BatchKey, type_oids: &[u32], include_order_key: bool) -> Self {
         Self {
             key,
-            rows: Vec::with_capacity(APPLY_BATCH_ROWS),
+            pk_columns: type_oids
+                .iter()
+                .map(|oid| PkBindColumn::with_capacity(*oid, APPLY_BATCH_ROWS))
+                .collect(),
+            seqs: Vec::with_capacity(APPLY_BATCH_ROWS),
+            order_keys: include_order_key.then(|| Vec::with_capacity(APPLY_BATCH_ROWS)),
             seen: HashSet::with_capacity(APPLY_BATCH_ROWS),
         }
+    }
+
+    fn len(&self) -> usize {
+        self.seqs.len()
+    }
+
+    fn push(
+        &mut self,
+        pk_cells: Vec<PkCell>,
+        seq: i64,
+        order_key: Option<Vec<u8>>,
+    ) -> Result<(), String> {
+        if pk_cells.len() != self.pk_columns.len() {
+            return Err(format!(
+                "async mirror PK width {} does not match batch width {}",
+                pk_cells.len(),
+                self.pk_columns.len()
+            ));
+        }
+        for (column, cell) in self.pk_columns.iter_mut().zip(pk_cells) {
+            column.push_cell(cell, "pk")?;
+        }
+        self.seqs.push(seq);
+        if let Some(order_keys) = self.order_keys.as_mut() {
+            order_keys.push(
+                order_key.ok_or_else(|| "async mirror batch row missing order_key".to_string())?,
+            );
+        }
+        Ok(())
     }
 }
 
@@ -198,11 +240,11 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
             if messages.is_empty() {
                 break;
             }
-            for data in messages {
+            for message in messages {
                 if stop_after_commit {
                     break;
                 }
-                match decode_message(&data).map_err(|error| error.to_string())? {
+                match message {
                     PgOutputMessage::Begin { final_lsn, .. } => {
                         flush_batch(&mut batch, &relations, &mut managed, &mut type_names)?;
                         transaction_lsn = Some(final_lsn);
@@ -265,7 +307,7 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
                             &mut type_names,
                             relation_id,
                             MirrorOperation::Insert,
-                            &new,
+                            new,
                             transaction_lsn,
                             &request,
                             &mut seq_watermark,
@@ -289,7 +331,7 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
                             &mut type_names,
                             relation_id,
                             MirrorOperation::Update,
-                            &new,
+                            new,
                             transaction_lsn,
                             &request,
                             &mut seq_watermark,
@@ -311,7 +353,7 @@ pub fn apply_bounded_locked(request: BoundedApplyRequest) -> Result<BoundedApply
                             &mut type_names,
                             relation_id,
                             MirrorOperation::Delete,
-                            &old,
+                            old,
                             transaction_lsn,
                             &request,
                             &mut seq_watermark,
@@ -427,22 +469,22 @@ fn drop_named_cursor(cursor_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn fetch_decode_messages(cursor_name: &str) -> Result<Vec<Vec<u8>>, String> {
-    pgrx::Spi::connect_mut(|client| -> Result<Vec<Vec<u8>>, String> {
+fn fetch_decode_messages(cursor_name: &str) -> Result<Vec<PgOutputMessage>, String> {
+    pgrx::Spi::connect_mut(|client| -> Result<Vec<PgOutputMessage>, String> {
         let mut cursor = client
             .find_cursor(cursor_name)
             .map_err(|error| error.to_string())?;
         let tuples = cursor
             .fetch(DECODE_FETCH_ROWS)
             .map_err(|error| error.to_string())?;
-        let messages = tuples
-            .into_iter()
-            .map(|row| {
-                row.get_by_name::<Vec<u8>, &str>("data")
-                    .map_err(|error| format!("read decoded cursor row: {error}"))?
-                    .ok_or_else(|| "logical decoding returned NULL data".to_string())
-            })
-            .collect::<Result<Vec<_>, String>>()?;
+        let mut messages = Vec::new();
+        for row in tuples {
+            let data = row
+                .get_by_name::<Vec<u8>, &str>("data")
+                .map_err(|error| format!("read decoded cursor row: {error}"))?
+                .ok_or_else(|| "logical decoding returned NULL data".to_string())?;
+            messages.push(decode_message(&data).map_err(|error| error.to_string())?);
+        }
         if messages.is_empty() {
             drop(cursor);
         } else {
@@ -601,7 +643,7 @@ fn push_change(
     type_names: &mut HashMap<(u32, i32), String>,
     relation_id: u32,
     operation: MirrorOperation,
-    tuple: &PgOutputTuple,
+    mut tuple: PgOutputTuple,
     transaction_lsn: Option<u64>,
     request: &BoundedApplyRequest,
     seq_watermark: &mut i64,
@@ -612,14 +654,68 @@ fn push_change(
     let relation = relations
         .get(&relation_id)
         .ok_or_else(|| format!("pgoutput row references unknown relation {relation_id}"))?;
-    let config = managed_relation(managed, relation_id)?;
-    let Some(config) = config else {
-        return Ok(());
-    };
-    let mut row = primary_key_json(relation, &config.primary_key, tuple)?;
-    if operation != MirrorOperation::Delete {
-        if let Some(order) = config.order_column.as_ref() {
-            let text = order_column_text(relation, order, tuple)?;
+    let (pk_cells, include_order_key, table_oid, type_oids, order_key, identity, key) = {
+        let config = managed_relation(managed, relation_id)?;
+        let Some(config) = config else {
+            return Ok(());
+        };
+        ensure_pk_layout(config, relation)?;
+        let key_columns = config.pk_indexes.as_ref().expect("pk indexes populated");
+        let pk_type_oids = config
+            .pk_type_oids
+            .as_ref()
+            .expect("pk type oids populated");
+        let include_order_key = config.include_order_key() && operation != MirrorOperation::Delete;
+        let order_column_name = if include_order_key {
+            Some(
+                config
+                    .order_column
+                    .as_ref()
+                    .ok_or_else(|| {
+                        "async mirror order column missing for order-key batch".to_string()
+                    })?
+                    .name
+                    .as_str(),
+            )
+        } else {
+            None
+        };
+        let (pk_cells, order_text) = take_pk_cells_and_order_text(
+            relation,
+            &config.primary_key,
+            key_columns,
+            pk_type_oids,
+            order_column_name,
+            &mut tuple,
+        )?;
+        let table_oid = config.table_oid.to_u32();
+        let identity = pk_identity(&pk_cells);
+        let key = BatchKey {
+            relation_id,
+            operation,
+        };
+        let needs_new_batch = match batch.as_ref() {
+            None => true,
+            Some(current) => must_flush_before_push(
+                Some(&current.key),
+                &key,
+                current.len(),
+                &current.seen,
+                &identity,
+                APPLY_BATCH_ROWS,
+            )
+            .is_some(),
+        };
+        // Clone type OIDs only when opening a batch, not on every unique-key row.
+        let type_oids = needs_new_batch.then(|| pk_type_oids.clone());
+        let mut order_key = None;
+        if include_order_key {
+            let order = config.order_column.as_ref().ok_or_else(|| {
+                "async mirror order column missing for order-key batch".to_string()
+            })?;
+            let text = order_text.ok_or_else(|| {
+                format!("async mirror order text missing for column {}", order.name)
+            })?;
             let ty =
                 koldstore_sortkey::SortKeyType::from_type_oid(order.type_oid).ok_or_else(|| {
                     format!(
@@ -629,46 +725,39 @@ fn push_change(
                 })?;
             let encoded = koldstore_sortkey::encode_sort_key_pg_text(ty, &text)
                 .map_err(|error| error.to_string())?;
-            row.insert(
-                "order_key".to_string(),
-                Value::Array(encoded.into_iter().map(Value::from).collect()),
-            );
+            order_key = Some(encoded);
         }
-    }
+        (
+            pk_cells,
+            include_order_key,
+            table_oid,
+            type_oids,
+            order_key,
+            identity,
+            key,
+        )
+    };
     // Allocate above the durable high-watermark (and prune floor when fencing).
     let mut floor = *seq_watermark;
     if let Some((target_oid, prune_floor)) = request.target_prune_floor {
-        if config.table_oid.to_u32() == target_oid {
+        if table_oid == target_oid {
             floor = floor.max(prune_floor.get());
         }
     }
     let seq = next_id_after(crate::sql::session::snowflake_worker_id(), floor)
         .map_err(|error| error.to_string())?;
     *seq_watermark = seq;
-    row.insert("seq".to_string(), Value::from(seq));
-    let identity = pk_identity(&row);
-    let key = BatchKey {
-        relation_id,
-        operation,
-    };
-    let needs_flush = match batch.as_ref() {
-        Some(current) => must_flush_before_push(
-            Some(&current.key),
-            &key,
-            current.rows.len(),
-            &current.seen,
-            &identity,
-            APPLY_BATCH_ROWS,
-        )
-        .is_some(),
-        None => false,
-    };
-    if needs_flush {
+    if type_oids.is_some() && batch.is_some() {
         flush_batch(batch, relations, managed, type_names)?;
     }
-    let current = batch.get_or_insert_with(|| ApplyBatch::new(key));
+    if let Some(type_oids) = type_oids {
+        *batch = Some(ApplyBatch::new(key, &type_oids, include_order_key));
+    }
+    let current = batch
+        .as_mut()
+        .expect("apply batch exists after optional open");
     current.seen.insert(identity);
-    current.rows.push(Value::Object(row));
+    current.push(pk_cells, seq, order_key)?;
     Ok(())
 }
 
@@ -681,7 +770,7 @@ fn flush_batch(
     let Some(batch) = batch.take() else {
         return Ok(());
     };
-    if batch.rows.is_empty() {
+    if batch.seqs.is_empty() {
         return Ok(());
     }
     let relation = relations
@@ -691,13 +780,7 @@ fn flush_batch(
         .get_mut(&batch.key.relation_id)
         .and_then(Option::as_mut)
         .ok_or_else(|| "managed relation disappeared while applying batch".to_string())?;
-    apply_batch(
-        config,
-        relation,
-        type_names,
-        batch.key.operation,
-        &batch.rows,
-    )?;
+    apply_batch(config, relation, type_names, batch)?;
     // After SPI mirror writes succeed but before applied_lsn is recorded.
     crate::failpoints::hit(ASYNC_MIRROR_APPLY_AFTER_BATCH_FAILPOINT)?;
     Ok(())
@@ -706,7 +789,7 @@ fn flush_batch(
 fn managed_relation(
     cache: &mut HashMap<u32, Option<ManagedRelation>>,
     relation_id: u32,
-) -> Result<Option<&ManagedRelation>, String> {
+) -> Result<Option<&mut ManagedRelation>, String> {
     if let std::collections::hash_map::Entry::Vacant(entry) = cache.entry(relation_id) {
         let statement = plan_async_managed_relation_by_oid().map_err(|error| error.to_string())?;
         let json = crate::spi::select_one::<String>(
@@ -717,7 +800,7 @@ fn managed_relation(
         let parsed = json.map(|json| parse_managed_relation(&json)).transpose()?;
         entry.insert(parsed);
     }
-    Ok(cache.get(&relation_id).and_then(Option::as_ref))
+    Ok(cache.get_mut(&relation_id).and_then(Option::as_mut))
 }
 
 fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
@@ -732,32 +815,26 @@ fn parse_managed_relation(json: &str) -> Result<ManagedRelation, String> {
             type_oid: order.type_oid,
         }),
         pk_type_names: None,
+        pk_indexes: None,
+        pk_type_oids: None,
         upsert_sql: None,
         update_sql: None,
         delete_sql: None,
     })
 }
 
-fn order_column_text(
+fn ensure_pk_layout(
+    config: &mut ManagedRelation,
     relation: &PgOutputRelation,
-    order: &OrderColumnConfig,
-    tuple: &PgOutputTuple,
-) -> Result<String, String> {
-    let relation_index = relation
-        .columns
-        .iter()
-        .position(|column| column.name == order.name)
-        .ok_or_else(|| {
-            format!(
-                "pgoutput relation {}.{} does not publish segment order column {}",
-                relation.namespace, relation.name, order.name
-            )
-        })?;
-    let value = tuple
-        .values
-        .get(relation_index)
-        .ok_or_else(|| format!("tuple omits segment order column {}", order.name))?;
-    pg_value_text(value, &order.name, "segment order")
+) -> Result<(), String> {
+    if config.pk_indexes.is_some() {
+        return Ok(());
+    }
+    let indexes = pk_column_indexes(relation, &config.primary_key)?;
+    let oids = pk_type_oids(relation, &indexes)?;
+    config.pk_indexes = Some(indexes);
+    config.pk_type_oids = Some(oids);
+    Ok(())
 }
 
 fn ensure_pk_type_names(
@@ -799,8 +876,7 @@ fn apply_batch(
     config: &mut ManagedRelation,
     relation: &PgOutputRelation,
     type_names: &mut HashMap<(u32, i32), String>,
-    operation: MirrorOperation,
-    rows: &[Value],
+    batch: ApplyBatch,
 ) -> Result<(), String> {
     ensure_pk_type_names(config, relation, type_names)?;
     let pk_refs = config
@@ -810,6 +886,7 @@ fn apply_batch(
         .collect::<Vec<_>>();
     let pk_types = config.pk_type_names.as_ref().expect("pk types populated");
     let include_order_key = config.include_order_key();
+    let operation = batch.key.operation;
     let sql = match operation {
         MirrorOperation::Update => {
             if config.update_sql.is_none() {
@@ -850,56 +927,21 @@ fn apply_batch(
         }
     };
 
-    let mut pk_columns: Vec<Vec<String>> = (0..config.primary_key.len())
-        .map(|_| Vec::with_capacity(rows.len()))
-        .collect();
-    let mut seqs = Vec::with_capacity(rows.len());
-    let need_order_keys = include_order_key && operation != MirrorOperation::Delete;
-    let mut order_keys = need_order_keys.then(|| Vec::<Vec<u8>>::with_capacity(rows.len()));
-    for row in rows {
-        let object = row
-            .as_object()
-            .ok_or_else(|| "async mirror batch row is not an object".to_string())?;
-        for (index, key) in config.primary_key.iter().enumerate() {
-            let cell = object
-                .get(key)
-                .ok_or_else(|| format!("async mirror batch row missing primary key {key}"))?;
-            let text = match cell {
-                Value::String(text) => text.clone(),
-                other => other.to_string(),
-            };
-            pk_columns[index].push(text);
-        }
-        let seq = object
-            .get("seq")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| "async mirror batch row missing seq".to_string())?;
-        seqs.push(seq);
-        if let Some(order_keys) = order_keys.as_mut() {
-            let encoded = object
-                .get("order_key")
-                .and_then(Value::as_array)
-                .ok_or_else(|| "async mirror batch row missing order_key".to_string())?
-                .iter()
-                .map(|cell| {
-                    cell.as_u64()
-                        .and_then(|n| u8::try_from(n).ok())
-                        .ok_or_else(|| "order_key byte is not u8".to_string())
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            order_keys.push(encoded);
-        }
-    }
-
+    let ApplyBatch {
+        pk_columns,
+        seqs,
+        order_keys,
+        ..
+    } = batch;
     let result = pgrx::Spi::connect(|client| -> Result<(i64, i64), String> {
         let mut args: Vec<DatumWithOid<'_>> = Vec::with_capacity(pk_columns.len() + 3);
         args.push(DatumWithOid::from(operation.code()));
-        for (index, column) in pk_columns.iter().enumerate() {
-            push_typed_pk_array_arg(&mut args, &pk_types[index], column)?;
+        for column in pk_columns {
+            push_typed_pk_array_arg(&mut args, column);
         }
-        args.push(DatumWithOid::from(seqs.clone()));
-        if let Some(order_keys) = order_keys.as_ref() {
-            args.push(DatumWithOid::from(order_keys.clone()));
+        args.push(DatumWithOid::from(seqs));
+        if let Some(order_keys) = order_keys {
+            args.push(DatumWithOid::from(order_keys));
         }
         let table = client
             .select(sql, None, &args)
@@ -938,43 +980,15 @@ fn apply_batch(
     Ok(())
 }
 
-/// Binds one primary-key column as a typed array when the SQL planner emitted
-/// `{type}[]`, otherwise as `text[]` for the cast fallback path.
-fn push_typed_pk_array_arg(
-    args: &mut Vec<DatumWithOid<'_>>,
-    type_name: &str,
-    cells: &[String],
-) -> Result<(), String> {
-    let normalized = type_name.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "bigint" | "int8" => {
-            let values = parse_pk_ints::<i64>(cells, type_name)?;
-            args.push(DatumWithOid::from(values));
-        }
-        "integer" | "int4" | "int" => {
-            let values = parse_pk_ints::<i32>(cells, type_name)?;
-            args.push(DatumWithOid::from(values));
-        }
-        "smallint" | "int2" => {
-            let values = parse_pk_ints::<i16>(cells, type_name)?;
-            args.push(DatumWithOid::from(values));
-        }
-        "boolean" | "bool" => {
-            let values = cells
-                .iter()
-                .map(|cell| parse_pk_bool(cell))
-                .collect::<Result<Vec<_>, _>>()?;
-            args.push(DatumWithOid::from(values));
-        }
-        "text" | "varchar" | "character varying" | "name" => {
-            args.push(DatumWithOid::from(cells.to_vec()));
-        }
-        _ => {
-            // uuid / float / domains / uncommon scalars: SQL casts from text[].
-            args.push(DatumWithOid::from(cells.to_vec()));
-        }
+/// Binds one already-parsed primary-key column as a native SPI array.
+fn push_typed_pk_array_arg(args: &mut Vec<DatumWithOid<'_>>, column: PkBindColumn) {
+    match column {
+        PkBindColumn::Int8(values) => args.push(DatumWithOid::from(values)),
+        PkBindColumn::Int4(values) => args.push(DatumWithOid::from(values)),
+        PkBindColumn::Int2(values) => args.push(DatumWithOid::from(values)),
+        PkBindColumn::Bool(values) => args.push(DatumWithOid::from(values)),
+        PkBindColumn::Text(values) => args.push(DatumWithOid::from(values)),
     }
-    Ok(())
 }
 
 /// Applies committed WAL available at the fence boundary and returns row changes.

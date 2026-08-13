@@ -41,8 +41,8 @@ pub enum PgOutputValue {
     Null,
     /// An unchanged toasted value omitted by PostgreSQL.
     UnchangedToast,
-    /// Text-format value.
-    Text(Vec<u8>),
+    /// Text-format value, already validated as UTF-8.
+    Text(String),
     /// Binary-format value.
     Binary(Vec<u8>),
 }
@@ -273,11 +273,14 @@ fn decode_tuple(reader: &mut Reader<'_>) -> Result<PgOutputTuple, PgOutputDecode
             b'u' => PgOutputValue::UnchangedToast,
             b't' | b'b' => {
                 let length = reader.u32("tuple value length")? as usize;
-                let bytes = reader.bytes(length, "tuple value")?.to_vec();
+                let bytes = reader.bytes(length, "tuple value")?;
                 if marker == b't' {
-                    PgOutputValue::Text(bytes)
+                    let text = std::str::from_utf8(bytes)
+                        .map_err(|_| PgOutputDecodeError::InvalidUtf8("tuple value"))?
+                        .to_string();
+                    PgOutputValue::Text(text)
                 } else {
-                    PgOutputValue::Binary(bytes)
+                    PgOutputValue::Binary(bytes.to_vec())
                 }
             }
             _ => {
@@ -438,5 +441,20 @@ mod tests {
                 Ok(PgOutputMessage::Ignored { tag })
             );
         }
+    }
+
+    #[test]
+    fn text_tuple_values_decode_as_utf8_strings() {
+        let mut message = vec![b'I'];
+        message.extend_from_slice(&42_u32.to_be_bytes());
+        message.push(b'N');
+        message.extend_from_slice(&1_u16.to_be_bytes());
+        message.push(b't');
+        message.extend_from_slice(&2_u32.to_be_bytes());
+        message.extend_from_slice(b"42");
+        let PgOutputMessage::Insert { new, .. } = decode_message(&message).unwrap() else {
+            panic!("expected insert");
+        };
+        assert_eq!(new.values[0], PgOutputValue::Text("42".into()));
     }
 }

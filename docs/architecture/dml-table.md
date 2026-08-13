@@ -111,17 +111,22 @@ explicit consistency boundary:
 | UPDATE | Set-based `UPDATE ... FROM` for existing keys, then conflict-safe insert of only keys missing from the mirror |
 | DELETE | Set-based `INSERT ... ON CONFLICT DO UPDATE`, setting `op = 3`, so a missing mirror row still becomes a tombstone |
 
-Primary keys cross the pgoutput boundary as protocol text, are grouped in Rust,
-bound as parallel `text[]` arrays, and converted back to native PostgreSQL types
-inside one typed `unnest`. No per-row JSON recordset is built. Compatible batches
-contain at most 8,192 unique keys; a duplicate key, relation change, operation
-change, or capacity boundary flushes the current batch. Non-key source columns
-are not published or allocated. The mirror remains a metadata index; flush
-reads the current row image from the hot heap.
+Primary keys cross the pgoutput boundary as protocol text. The applier decodes
+each peeked message immediately (it does not retain a raw bytea batch). Segment
+order text is peeked before PK cells are taken, because taking replaces those
+tuple slots with NULL and `migration_order_by` is often the PK itself. Builtin
+int/bool keys parse once into native values. `seq` is an integer and `order_key`
+stays bytes. In-batch identity is typed:
+a single `bigint`/`int`/`smallint`/`bool` key is an inline HashSet key (no
+String, no NUL join). Text and composite keys still own their cells. Compatible
+batches contain at most 8,192 unique keys; a duplicate key, relation change,
+operation change, or capacity boundary flushes the current batch. Non-key source
+columns are not published or allocated. The mirror remains a metadata index;
+flush reads the current row image from the hot heap.
 
 The applier caches separate upsert and UPDATE plans for each relation.
-Pgoutput relation metadata changes invalidate both plans and the cached PK type
-names before another batch executes. UPDATE's direct write and insert-missing
+Pgoutput relation metadata changes invalidate cached SQL plans, PK type names,
+and PK column indexes/OIDs before another batch executes. UPDATE's direct write and insert-missing
 fallback are one data-modifying CTE, preserving atomicity while avoiding
 conflict arbitration for the normal existing-row path.
 
@@ -146,8 +151,9 @@ commits. Full operational semantics are in
 
 | Field | Source | Type |
 |-------|--------|------|
-| PK values | pgoutput text → typed unnest | Native PG column types |
+| PK values | pgoutput text → parse-once native arrays | Native PG column types |
 | `seq` | WAL applier snowflake allocation | `i64` above durable watermark |
+| `order_key` | pgoutput text → sort-key bytes | `bytea` when configured |
 | `op` | `MirrorOperation::code()` | `smallint` 1/2/3 |
 
 ---
