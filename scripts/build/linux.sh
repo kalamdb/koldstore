@@ -159,6 +159,8 @@ install_rocky_deps() {
     "https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-${rpm_arch}/pgdg-redhat-repo-latest.noarch.rpm"
   dnf -qy module disable postgresql || true
   dnf -y install --allowerasing \
+    clang \
+    clang-devel \
     curl \
     gcc \
     gcc-c++ \
@@ -171,6 +173,16 @@ install_rocky_deps() {
     rpm-build \
     "postgresql${pg}" \
     "postgresql${pg}-devel"
+
+  # pgrx bindgen needs libclang.so (clang-devel). Point clang-sys at %{_libdir}
+  # so the search does not depend on ldconfig in the container.
+  if [[ -z "${LIBCLANG_PATH:-}" ]]; then
+    local libdir
+    libdir="$(rpm --eval '%{_libdir}')"
+    if compgen -G "${libdir}/libclang.so*" >/dev/null; then
+      export LIBCLANG_PATH="${libdir}"
+    fi
+  fi
 }
 
 install_linux_build_deps() {
